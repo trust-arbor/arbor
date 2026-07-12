@@ -9,7 +9,7 @@ defmodule Arbor.Commands.CodingBenchmark.LegacyAdapter do
   runtime configuration documented by `Arbor.Commands.CodingBenchmark.run/2`.
   """
 
-  alias Arbor.Agent.Orchestration.LegacyCodingTaskExecutor
+  alias Arbor.Agent
   alias Arbor.Commands.CodingBenchmark.Adapter
 
   @doc "Run one closed benchmark request through the legacy executor."
@@ -18,7 +18,7 @@ defmodule Arbor.Commands.CodingBenchmark.LegacyAdapter do
     Adapter.run(
       request,
       "legacy",
-      LegacyCodingTaskExecutor,
+      &Agent.run_legacy_coding_task/3,
       :coding_benchmark_legacy_executor_module
     )
   end
@@ -29,7 +29,7 @@ defmodule Arbor.Commands.CodingBenchmark.LegacyAdapter do
     Adapter.cancel(
       request,
       "legacy",
-      LegacyCodingTaskExecutor,
+      &Agent.run_legacy_coding_task/3,
       :coding_benchmark_legacy_executor_module,
       :unsupported
     )

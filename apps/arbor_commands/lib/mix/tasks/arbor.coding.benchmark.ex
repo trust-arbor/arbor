@@ -62,7 +62,7 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
 
   def execute(args, runtime_opts) when is_list(args) and is_list(runtime_opts) do
     with {:ok, cli} <- parse_args(args),
-         {:ok, root} <- trusted_root(Keyword.get(runtime_opts, :root, File.cwd!())),
+         {:ok, root} <- trusted_root(runtime_opts),
          {:ok, manifest_path} <- existing_json_path(cli.manifest, root, "manifest"),
          {:ok, manifest} <- read_manifest(manifest_path),
          {:ok, normalized_manifest} <- CodingBenchmark.validate_manifest(manifest),
@@ -70,6 +70,7 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
          :ok <- distinct_paths(manifest_path, output_path),
          :ok <-
            output_outside_fixtures(output_path, normalized_manifest, Path.dirname(manifest_path)),
+         :ok <- artifact_root_disjoint(normalized_manifest, Path.dirname(manifest_path)),
          {:ok, benchmark_opts} <-
            benchmark_opts(cli, runtime_opts, Path.dirname(manifest_path)),
          {:ok, report} <- CodingBenchmark.run(manifest, benchmark_opts),
@@ -126,16 +127,27 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
   defp valid_seed?(nil), do: true
   defp valid_seed?(value), do: is_integer(value) and value in 0..2_147_483_647
 
-  defp trusted_root(path) when is_binary(path) do
-    with {:ok, real} <- SafePath.resolve_real(Path.expand(path)),
-         true <- File.dir?(real) do
-      {:ok, real}
-    else
-      _other -> task_error("root", "directory_not_found")
+  defp trusted_root(runtime_opts) do
+    path = Keyword.get(runtime_opts, :root, configured_workspace_root())
+
+    case Runtime.validate_trusted_root(path) do
+      {:ok, real} ->
+        {:ok, real}
+
+      {:error, {:benchmark_setup_error, :broad_trusted_root}} ->
+        task_error("root", "broad_trusted_root")
+
+      {:error, {:benchmark_setup_error, _reason}} ->
+        task_error("root", "directory_not_found")
     end
   end
 
-  defp trusted_root(_path), do: task_error("root", "expected_path")
+  defp configured_workspace_root do
+    case Runtime.load() do
+      {:ok, runtime} -> runtime.workspace_root
+      {:error, _reason} -> nil
+    end
+  end
 
   defp existing_json_path(path, root, field) when is_binary(path) do
     with :ok <- safe_cli_path(path, field),
@@ -257,7 +269,6 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
           acp_agent: cli.acp_agent,
           adapters: configured_adapters,
           dry_run: cli.dry_run,
-          executor_selector: Keyword.get(runtime_opts, :executor_selector, default_selector()),
           fixture_root: fixture_root,
           measure: Keyword.get(runtime_opts, :measure, &default_measure/1),
           repetitions: cli.repetitions,
@@ -286,14 +297,6 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
     end
   end
 
-  defp default_selector do
-    %{
-      app: :arbor_agent,
-      key: :coding_executor_mode,
-      values: %{"legacy" => :legacy, "pipeline" => :pipeline}
-    }
-  end
-
   defp default_measure(fun) do
     {microseconds, result} = :timer.tc(fun)
     {div(microseconds + 999, 1_000), result}
@@ -301,6 +304,29 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
 
   defp maybe_put_seed(opts, nil), do: opts
   defp maybe_put_seed(opts, seed), do: Keyword.put(opts, :seed, seed)
+
+  defp artifact_root_disjoint(manifest, fixture_root) do
+    fixture_paths = Enum.map(manifest["fixtures"], & &1["fixture_path"])
+
+    with {:ok, runtime} <- Runtime.load(),
+         :ok <-
+           Runtime.ensure_artifact_root_disjoint(
+             runtime.artifact_root,
+             fixture_root,
+             fixture_paths
+           ) do
+      :ok
+    else
+      {:error, {:benchmark_setup_error, :artifact_root_overlaps_fixture}} ->
+        task_error("artifact_root", "overlaps_fixture")
+
+      {:error, {:benchmark_setup_error, reason}} ->
+        task_error("artifact_root", inspect(reason))
+
+      {:error, _reason} ->
+        task_error("artifact_root", "invalid_configuration")
+    end
+  end
 
   defp write_report(path, report) do
     encoded = [Jason.encode_to_iodata!(report, pretty: true), "\n"]

@@ -3,6 +3,7 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
 
   alias Arbor.Contracts.Coding.Plan
   alias Arbor.Orchestrator.CodingPlan.{Compilation, ExecutionManifest}
+  alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
 
@@ -91,6 +92,13 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
            }
 
     assert result["plan_map"] == Plan.to_map(plan)
+  end
+
+  test "coding execution and root configuration are exposed by the public facade" do
+    assert {:error, :invalid_agent_id} = Arbor.Orchestrator.run_coding_task("", %{}, %{})
+    assert Arbor.Orchestrator.coding_repo_roots() == Config.coding_repo_roots()
+    assert Arbor.Orchestrator.coding_worktree_roots() == Config.coding_worktree_roots()
+    assert Arbor.Orchestrator.coding_pipeline_logs_root() == Config.coding_pipeline_logs_root()
   end
 
   test "accepts keyword input supported by Plan.new/1" do

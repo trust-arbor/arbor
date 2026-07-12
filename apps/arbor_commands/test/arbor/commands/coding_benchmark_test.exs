@@ -16,6 +16,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
   )
 
   @runtime_env [
+    {:arbor_agent, :coding_executor_mode},
     {:arbor_commands, :coding_benchmark_workspace_root},
     {:arbor_commands, :coding_benchmark_artifact_root},
     {:arbor_commands, :coding_benchmark_execution_timeout_ms},
@@ -26,16 +27,9 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
   ]
 
   setup do
-    original = Application.fetch_env(:arbor_agent, :coding_executor_mode)
     runtime_originals = Map.new(@runtime_env, fn key -> {key, fetch_env(key)} end)
-    Application.put_env(:arbor_agent, :coding_executor_mode, :benchmark_test_sentinel)
 
     on_exit(fn ->
-      case original do
-        {:ok, value} -> Application.put_env(:arbor_agent, :coding_executor_mode, value)
-        :error -> Application.delete_env(:arbor_agent, :coding_executor_mode)
-      end
-
       Enum.each(runtime_originals, fn {key, value} -> restore_env(key, value) end)
     end)
 
@@ -82,7 +76,6 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
 
     assert pipeline["artifact_hash_verification"]["graph_hash_verified"] == true
     assert Enum.all?(pipeline["artifact_hash_verification"]["artifact_presence"], &elem(&1, 1))
-    assert Application.get_env(:arbor_agent, :coding_executor_mode) == :benchmark_test_sentinel
   end
 
   test "validation recovery retains validation and rework counters" do
@@ -151,7 +144,6 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
 
     failed_pair = Enum.find(report["pairs"], &(&1["fixture_id"] == "executor-failure"))
     assert failed_pair["comparison"]["status"] == "unavailable"
-    assert Application.get_env(:arbor_agent, :coding_executor_mode) == :benchmark_test_sentinel
   end
 
   test "cancellation distinguishes owned cleanup from reused worker preservation" do
@@ -263,6 +255,65 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
                fixture_root: scenario.root,
                workspace_root: outside
              )
+  end
+
+  test "trusted roots reject broad system-temp roots" do
+    scenario = scenario!(~w(happy))
+
+    assert {:error, %{"field" => "workspace_root", "reason" => "broad_trusted_root"}} =
+             CodingBenchmark.run(scenario.manifest,
+               dry_run: true,
+               fixture_root: scenario.root,
+               workspace_root: System.tmp_dir!()
+             )
+  end
+
+  test "artifact roots cannot overlap fixture repositories" do
+    scenario = scenario!(~w(happy))
+    artifact_root = Path.join(scenario.root, "fixtures/happy/artifacts")
+    File.mkdir_p!(artifact_root)
+    Application.put_env(:arbor_commands, :coding_benchmark_artifact_root, artifact_root)
+    Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, artifact_root)
+
+    assert {:error, %{"field" => "artifact_root", "reason" => "artifact_root_overlaps_fixture"}} =
+             CodingBenchmark.run(scenario.manifest,
+               dry_run: true,
+               fixture_root: scenario.root,
+               workspace_root: scenario.root
+             )
+  end
+
+  test "Mix boundary rejects artifact roots that overlap fixture repositories" do
+    scenario = scenario!(~w(happy))
+    artifact_root = Path.join(scenario.root, "fixtures/happy/artifacts")
+    File.mkdir_p!(artifact_root)
+    Application.put_env(:arbor_commands, :coding_benchmark_artifact_root, artifact_root)
+    Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, artifact_root)
+
+    assert {:error, %{"field" => "artifact_root", "reason" => "overlaps_fixture"}} =
+             BenchmarkTask.execute(
+               ["--manifest", "manifest.json", "--dry-run"],
+               root: scenario.root
+             )
+  end
+
+  test "legacy process-global executor selectors are rejected without mutation" do
+    scenario = scenario!(~w(happy))
+    Application.put_env(:arbor_agent, :coding_executor_mode, :unchanged)
+
+    assert {:error,
+            %{
+              "field" => "executor_selector",
+              "reason" => "process_global_mutation_unsupported"
+            }} =
+             CodingBenchmark.run(scenario.manifest,
+               dry_run: true,
+               executor_selector: %{app: :arbor_agent, key: :coding_executor_mode},
+               fixture_root: scenario.root,
+               workspace_root: scenario.root
+             )
+
+    assert Application.get_env(:arbor_agent, :coding_executor_mode) == :unchanged
   end
 
   test "Mix task writes JSON at its boundary with all supported execution options" do
@@ -379,15 +430,22 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
                root: scenario.root
              )
 
+    assert {:error, %{"field" => "root", "reason" => "broad_trusted_root"}} =
+             BenchmarkTask.execute(
+               ["--manifest", "manifest.json", "--dry-run"],
+               root: System.tmp_dir!()
+             )
+
     assert File.read!(outside) == "untouched"
   end
 
   defp scenario!(fixture_ids) do
     root =
-      Path.join(
-        System.tmp_dir!(),
+      Path.join([
+        File.cwd!(),
+        ".tmp/arbor-coding-benchmark-tests",
         "arbor-coding-benchmark-test-#{System.unique_integer([:positive, :monotonic])}"
-      )
+      ])
 
     scenario = Scenario.create!(root, fixture_ids)
     configure_benchmark_runtime!(root)

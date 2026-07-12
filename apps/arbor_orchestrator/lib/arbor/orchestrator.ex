@@ -432,6 +432,24 @@ defmodule Arbor.Orchestrator do
     CodingTaskExecutor.cancel_task(agent_id, context)
   end
 
+  @doc "Run the packaged coding pipeline through the public orchestrator facade."
+  @spec run_coding_task(String.t(), map(), map() | keyword()) :: term()
+  def run_coding_task(agent_id, task, context) do
+    CodingTaskExecutor.run(agent_id, task, context)
+  end
+
+  @doc "Return the configured trusted roots for structured coding repositories."
+  @spec coding_repo_roots() :: {:ok, [String.t()]} | {:error, term()}
+  def coding_repo_roots, do: Config.coding_repo_roots()
+
+  @doc "Return the configured trusted roots for structured coding worktrees."
+  @spec coding_worktree_roots() :: {:ok, [String.t()]} | {:error, term()}
+  def coding_worktree_roots, do: Config.coding_worktree_roots()
+
+  @doc "Return the configured root for coding pipeline logs and artifacts."
+  @spec coding_pipeline_logs_root() :: String.t()
+  def coding_pipeline_logs_root, do: Config.coding_pipeline_logs_root()
+
   @doc """
   Run typed validation passes on a compiled Graph.
 

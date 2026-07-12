@@ -16,9 +16,10 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   @id_pattern ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
   @max_counter 10_000
 
-  @spec run(map(), String.t(), module(), atom()) ::
+  @spec run(map(), String.t(), function(), atom()) ::
           {:ok, map()} | {:error, term()} | {:error, term(), map()}
-  def run(request, executor_path, default_executor, executor_config_key) do
+  def run(request, executor_path, default_runner, executor_config_key)
+      when is_function(default_runner, 3) do
     with {:ok, request} <- validate_request(request, executor_path),
          {:ok, runtime} <- Runtime.load(),
          :ok <- Runtime.preflight_production(runtime),
@@ -27,9 +28,9 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
          :ok <-
            matching_base(request["workdir"], request["base_commit_oid"], request["base_tree_oid"]),
          {:ok, principal_id} <- configured_principal_id(),
-         {:ok, executor} <- configured_executor(executor_config_key, default_executor),
+         {:ok, executor} <- configured_executor(executor_config_key, default_runner),
          {:ok, task, context} <- execution_inputs(request, scope, runtime.execution_timeout_ms),
-         returned <- executor.run(principal_id, task, context) do
+         returned <- invoke_executor(executor, default_runner, principal_id, task, context) do
       normalize_return(returned)
     end
   end
@@ -56,18 +57,19 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     end
   end
 
-  @spec cancel(map(), String.t(), module(), atom(), :unsupported | (String.t(), map() -> term())) ::
+  @spec cancel(map(), String.t(), function(), atom(), :unsupported | function()) ::
           :ok | {:ok, term()} | {:error, term()}
-  def cancel(request, executor_path, default_executor, executor_config_key, default_cancel) do
+  def cancel(request, executor_path, default_runner, executor_config_key, default_cancel)
+      when is_function(default_runner, 3) do
     with {:ok, request} <- validate_request(request, executor_path),
          {:ok, runtime} <- Runtime.load(),
          :ok <- Runtime.preflight_production(runtime),
          {:ok, scope} <- execution_scope(request, runtime),
          {:ok, principal_id} <- configured_principal_id(),
-         {:ok, executor} <- configured_executor(executor_config_key, default_executor) do
+         {:ok, executor} <- configured_executor(executor_config_key, default_runner) do
       invoke_cancel(
         executor,
-        default_executor,
+        default_runner,
         default_cancel,
         principal_id,
         %{"task_id" => scope.task_id}
@@ -192,14 +194,18 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     end
   end
 
-  defp configured_executor(config_key, default_executor) do
-    executor = Application.get_env(@app, config_key, default_executor)
+  defp configured_executor(config_key, default_runner) do
+    case Application.fetch_env(@app, config_key) do
+      :error ->
+        {:ok, {:default, default_runner}}
 
-    if is_atom(executor) and Code.ensure_loaded?(executor) and
-         function_exported?(executor, :run, 3) do
-      {:ok, executor}
-    else
-      {:error, {:invalid_benchmark_executor_module, config_key}}
+      {:ok, executor} when is_atom(executor) ->
+        if Code.ensure_loaded?(executor) and function_exported?(executor, :run, 3),
+          do: {:ok, {:module, executor}},
+          else: {:error, {:invalid_benchmark_executor_module, config_key}}
+
+      {:ok, _invalid} ->
+        {:error, {:invalid_benchmark_executor_module, config_key}}
     end
   end
 
@@ -251,14 +257,27 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     objective <> "\n\nAcceptance criteria:\n" <> Enum.map_join(criteria, "\n", &"- #{&1}")
   end
 
-  defp invoke_cancel(executor, default_executor, default_cancel, principal_id, context) do
+  defp invoke_executor({:default, runner}, _default_runner, principal_id, task, context),
+    do: runner.(principal_id, task, context)
+
+  defp invoke_executor({:module, executor}, _default_runner, principal_id, task, context),
+    do: executor.run(principal_id, task, context)
+
+  defp invoke_cancel({:default, _runner}, _default_runner, default_cancel, principal_id, context)
+       when is_function(default_cancel, 2),
+       do: default_cancel.(principal_id, context)
+
+  defp invoke_cancel(
+         {:default, _runner},
+         _default_runner,
+         _default_cancel,
+         _principal_id,
+         _context
+       ),
+       do: {:error, :cancellation_unsupported}
+
+  defp invoke_cancel({:module, executor}, _default_runner, _default_cancel, principal_id, context) do
     cond do
-      executor == default_executor and is_function(default_cancel, 2) ->
-        default_cancel.(principal_id, context)
-
-      executor == default_executor ->
-        {:error, :cancellation_unsupported}
-
       function_exported?(executor, :cancel_task, 2) ->
         executor.cancel_task(principal_id, context)
 

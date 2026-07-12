@@ -43,12 +43,6 @@ defmodule Arbor.Commands.CodingBenchmark do
   @id_pattern ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
   @acp_agent_pattern ~r/\A[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}\z/
 
-  @default_selector %{
-    app: :arbor_agent,
-    key: :coding_executor_mode,
-    values: %{"legacy" => :legacy, "pipeline" => :pipeline}
-  }
-
   @type json_map :: %{optional(String.t()) => term()}
   @type callback_ref :: module() | (map() -> term())
 
@@ -283,7 +277,7 @@ defmodule Arbor.Commands.CodingBenchmark do
          {:ok, acp_agent} <- acp_agent(Keyword.get(opts, :acp_agent)),
          {:ok, dry_run?} <- boolean_option(Keyword.get(opts, :dry_run, false), "dry_run"),
          {:ok, measure} <- measure_callback(Keyword.get(opts, :measure, &measure/1)),
-         {:ok, selector} <- selector(Keyword.get(opts, :executor_selector, @default_selector)),
+         :ok <- reject_process_global_selector(Keyword.get(opts, :executor_selector, false)),
          {:ok, workspace_root} <-
            benchmark_workspace_root(
              Keyword.get(opts, :workspace_root, benchmark.workspace_root),
@@ -291,6 +285,12 @@ defmodule Arbor.Commands.CodingBenchmark do
            ),
          {:ok, fixture_root} <-
            directory(Keyword.get(opts, :fixture_root, File.cwd!()), "fixture_root"),
+         :ok <-
+           fixture_artifact_disjoint(
+             benchmark.artifact_root,
+             fixture_root,
+             manifest["fixtures"]
+           ),
          {:ok, adapters} <- adapters(Keyword.get(opts, :adapters), dry_run?),
          :ok <- preflight_adapters(adapters, benchmark, dry_run?),
          {:ok, verifiers} <- verifiers(Keyword.get(opts, :verifiers), manifest, dry_run?) do
@@ -304,7 +304,6 @@ defmodule Arbor.Commands.CodingBenchmark do
          measure: measure,
          repetitions: repetitions,
          seed: seed,
-         selector: selector,
          verifiers: verifiers,
          workspace_root: workspace_root
        }}
@@ -457,18 +456,23 @@ defmodule Arbor.Commands.CodingBenchmark do
       else: runtime_error(field, "missing_named_verifier:#{Enum.join(missing, ",")}")
   end
 
-  defp selector(false), do: {:ok, false}
+  defp reject_process_global_selector(false), do: :ok
+  defp reject_process_global_selector(nil), do: :ok
 
-  defp selector(%{app: app, key: key, values: values})
-       when is_atom(app) and is_atom(key) and is_map(values) do
-    if Enum.all?(@executor_paths, &Map.has_key?(values, &1)) do
-      {:ok, %{app: app, key: key, values: Map.take(values, @executor_paths)}}
-    else
-      runtime_error("executor_selector", "missing_executor_value")
+  defp reject_process_global_selector(_selector),
+    do: runtime_error("executor_selector", "process_global_mutation_unsupported")
+
+  defp fixture_artifact_disjoint(artifact_root, fixture_root, fixtures) do
+    fixture_paths = Enum.map(fixtures, & &1["fixture_path"])
+
+    case Runtime.ensure_artifact_root_disjoint(artifact_root, fixture_root, fixture_paths) do
+      :ok ->
+        :ok
+
+      {:error, {:benchmark_setup_error, reason}} ->
+        runtime_error("artifact_root", reason_string(reason))
     end
   end
-
-  defp selector(_selector), do: runtime_error("executor_selector", "invalid_selector")
 
   defp execute_report(manifest, runtime) do
     case create_run_root(runtime.workspace_root) do
@@ -687,16 +691,14 @@ defmodule Arbor.Commands.CodingBenchmark do
     {div(microseconds + 999, 1_000), result}
   end
 
-  defp measure_execution(runtime, executor, callback, request) do
+  defp measure_execution(runtime, _executor, callback, request) do
     runtime.measure.(fn ->
-      with_selector(executor, runtime.selector, fn ->
-        invoke_with_timeout(
-          callback,
-          request,
-          runtime.benchmark.execution_timeout_ms,
-          runtime.benchmark.cancellation_timeout_ms
-        )
-      end)
+      invoke_with_timeout(
+        callback,
+        request,
+        runtime.benchmark.execution_timeout_ms,
+        runtime.benchmark.cancellation_timeout_ms
+      )
     end)
   end
 
@@ -730,22 +732,6 @@ defmodule Arbor.Commands.CodingBenchmark do
       nil ->
         _ = Task.shutdown(task, :brutal_kill)
         cancellation_hook_observations("cancel_hook_timeout", false, "timeout:#{timeout_ms}")
-    end
-  end
-
-  defp with_selector(_executor, false, fun), do: fun.()
-
-  defp with_selector(executor, selector, fun) do
-    original = Application.fetch_env(selector.app, selector.key)
-
-    try do
-      Application.put_env(selector.app, selector.key, selector.values[executor])
-      fun.()
-    after
-      case original do
-        {:ok, value} -> Application.put_env(selector.app, selector.key, value)
-        :error -> Application.delete_env(selector.app, selector.key)
-      end
     end
   end
 
@@ -818,7 +804,9 @@ defmodule Arbor.Commands.CodingBenchmark do
         objective_failure: "execution_timeout:#{timeout_ms}",
         observations: cancellation_observations,
         prepared: true,
-        wall_clock_ms: wall_clock_ms
+        wall_clock_ms: wall_clock_ms,
+        worker_ownership:
+          fetch_value(cancellation_observations, "worker_ownership", :worker_ownership, "unknown")
       )
 
     %{executor: executor, projection: nil, row: row}
@@ -869,11 +857,12 @@ defmodule Arbor.Commands.CodingBenchmark do
   end
 
   defp cancellation_observations_from_hook({:returned, :ok}) do
-    cancellation_hook_observations("cancel_hook_completed", true, nil)
+    cancellation_hook_observations("cancel_requested", false, "cancellation_not_confirmed")
   end
 
-  defp cancellation_observations_from_hook({:returned, {:ok, _result}}) do
-    cancellation_hook_observations("cancel_hook_completed", true, nil)
+  defp cancellation_observations_from_hook({:returned, {:ok, evidence}})
+       when is_map(evidence) do
+    cancellation_evidence(evidence)
   end
 
   defp cancellation_observations_from_hook({:returned, {:error, :cancellation_unsupported}}) do
@@ -893,6 +882,46 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp cancellation_observations_from_hook({:caught, reason}),
     do: cancellation_hook_failed({:caught, reason})
+
+  defp cancellation_evidence(evidence) do
+    worker_terminated =
+      Map.get(evidence, "worker_terminated", Map.get(evidence, :worker_terminated))
+
+    worker_ownership =
+      Map.get(evidence, "worker_ownership", Map.get(evidence, :worker_ownership))
+
+    cleanup = Map.get(evidence, "cleanup", Map.get(evidence, :cleanup))
+    resources_cleaned = fetch_value(cleanup, "resources_cleaned", :resources_cleaned, false)
+
+    if worker_terminated == true and resources_cleaned == true and
+         worker_ownership in ["owned", "reused", :owned, :reused] do
+      worker_ownership =
+        if is_atom(worker_ownership), do: Atom.to_string(worker_ownership), else: worker_ownership
+
+      %{
+        "cancellation" => %{
+          "cancelled" => true,
+          "cleanup_completed" => true,
+          "reason" => nil,
+          "requested" => true,
+          "status" => "cancel_confirmed",
+          "worker_terminated" => true
+        },
+        "cleanup" => %{
+          "completed" => true,
+          "resources_cleaned" => true,
+          "status" => "released",
+          "workspace_removed" =>
+            fetch_value(cleanup, "workspace_removed", :workspace_removed, nil),
+          "workspace_retained" =>
+            fetch_value(cleanup, "workspace_retained", :workspace_retained, nil)
+        },
+        "worker_ownership" => worker_ownership
+      }
+    else
+      cancellation_hook_observations("cancel_unconfirmed", false, "invalid_cancellation_evidence")
+    end
+  end
 
   defp cancellation_hook_failed(reason) do
     cancellation_hook_observations("cancel_hook_failed", false, reason_string(reason))
@@ -1163,7 +1192,8 @@ defmodule Arbor.Commands.CodingBenchmark do
            exact_canonical_worktree(
              path,
              verification.trusted_worktree_root,
-             expected_path
+             expected_path,
+             branch
            ) do
       {:ok, worktree}
     else
@@ -1251,14 +1281,16 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp exact_canonical_worktree(path, trusted_root, expected_path) do
+  defp exact_canonical_worktree(path, trusted_root, expected_path, expected_branch) do
     with {:ok, root} <- SafePath.resolve_real(trusted_root),
          true <- File.dir?(root),
          {:ok, ^expected_path} <- SafePath.resolve_within(expected_path, root),
          {:ok, %{type: :directory}} <- File.lstat(expected_path),
          {:ok, ^expected_path} <- SafePath.resolve_real(expected_path),
          {:ok, ^expected_path} <- SafePath.resolve_within(path, root),
-         {:ok, ^expected_path} <- git_output(expected_path, ["rev-parse", "--show-toplevel"]) do
+         {:ok, ^expected_path} <- git_output(expected_path, ["rev-parse", "--show-toplevel"]),
+         {:ok, ^expected_branch} <-
+           git_output(expected_path, ["symbolic-ref", "--quiet", "--short", "HEAD"]) do
       {:ok, expected_path}
     else
       _other -> {:error, "unexpected_returned_worktree"}

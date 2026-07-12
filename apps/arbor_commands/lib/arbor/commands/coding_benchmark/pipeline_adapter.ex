@@ -11,7 +11,6 @@ defmodule Arbor.Commands.CodingBenchmark.PipelineAdapter do
 
   alias Arbor.Commands.CodingBenchmark.Adapter
   alias Arbor.Orchestrator
-  alias Arbor.Orchestrator.CodingTaskExecutor
 
   @doc "Run one closed benchmark request through the pipeline executor."
   @spec run(map()) :: {:ok, map()} | {:error, term()} | {:error, term(), map()}
@@ -19,7 +18,7 @@ defmodule Arbor.Commands.CodingBenchmark.PipelineAdapter do
     Adapter.run(
       request,
       "pipeline",
-      CodingTaskExecutor,
+      &Orchestrator.run_coding_task/3,
       :coding_benchmark_pipeline_executor_module
     )
   end
@@ -30,7 +29,7 @@ defmodule Arbor.Commands.CodingBenchmark.PipelineAdapter do
     Adapter.cancel(
       request,
       "pipeline",
-      CodingTaskExecutor,
+      &Orchestrator.run_coding_task/3,
       :coding_benchmark_pipeline_executor_module,
       &Orchestrator.cancel_coding_task/2
     )

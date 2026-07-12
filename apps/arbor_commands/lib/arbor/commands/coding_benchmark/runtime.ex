@@ -2,7 +2,7 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   @moduledoc false
 
   alias Arbor.Common.SafePath
-  alias Arbor.Orchestrator.Config, as: OrchestratorConfig
+  alias Arbor.Orchestrator
 
   @app :arbor_commands
   @workspace_root_key :coding_benchmark_workspace_root
@@ -12,6 +12,7 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   @min_timeout_ms 10
   @max_timeout_ms 86_400_000
   @max_cancellation_timeout_ms 30_000
+  @broad_root_paths ["/", Path.expand("~")]
 
   @type config :: %{
           workspace_root: String.t(),
@@ -62,7 +63,7 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
              worktree_roots,
              :coding_worktree_roots
            ),
-         {:ok, logs_root} <- canonical_directory(OrchestratorConfig.coding_pipeline_logs_root()),
+         {:ok, logs_root} <- canonical_directory(Orchestrator.coding_pipeline_logs_root()),
          true <- logs_root == config.artifact_root do
       :ok
     else
@@ -72,10 +73,43 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     end
   end
 
+  @doc "Validate a caller-provided benchmark trust root at a command boundary."
+  @spec validate_trusted_root(term()) ::
+          {:ok, String.t()} | {:error, {:benchmark_setup_error, term()}}
+  def validate_trusted_root(path) do
+    with {:ok, canonical} <- canonical_directory(path),
+         :ok <- reject_broad_root(canonical) do
+      {:ok, canonical}
+    else
+      {:error, {:benchmark_setup_error, _reason}} = error -> error
+      {:error, reason} -> setup_error(reason)
+    end
+  end
+
+  @doc "Reject artifact roots that overlap any declared fixture repository."
+  @spec ensure_artifact_root_disjoint(String.t(), String.t(), [String.t()]) ::
+          :ok | {:error, {:benchmark_setup_error, term()}}
+  def ensure_artifact_root_disjoint(artifact_root, fixture_root, fixture_paths)
+      when is_binary(artifact_root) and is_binary(fixture_root) and is_list(fixture_paths) do
+    with {:ok, artifact} <- canonical_directory(artifact_root),
+         {:ok, fixtures} <- canonical_directory(fixture_root),
+         :ok <- reject_broad_root(artifact),
+         :ok <- reject_fixture_overlap(artifact, fixtures, fixture_paths) do
+      :ok
+    else
+      {:error, {:benchmark_setup_error, _reason}} = error -> error
+      {:error, reason} -> setup_error(reason)
+    end
+  end
+
+  def ensure_artifact_root_disjoint(_artifact_root, _fixture_root, _fixture_paths),
+    do: setup_error(:invalid_fixture_root)
+
   @spec ensure_workspace_directory(String.t(), config()) ::
           {:ok, String.t()} | {:error, {:benchmark_setup_error, term()}}
   def ensure_workspace_directory(path, config) do
     with {:ok, canonical} <- canonical_directory(path),
+         :ok <- reject_broad_root(canonical),
          :ok <- require_within(canonical, config.workspace_root, :workspace_outside_root) do
       {:ok, canonical}
     else
@@ -135,9 +169,16 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     case Application.fetch_env(@app, key) do
       {:ok, path} when is_binary(path) ->
         case canonical_directory(path) do
-          {:ok, "/"} -> setup_error({key, :root_not_allowed})
-          {:ok, canonical} -> {:ok, canonical}
-          {:error, reason} -> setup_error({key, reason})
+          {:ok, canonical} ->
+            with :ok <- reject_broad_root(canonical) do
+              {:ok, canonical}
+            else
+              {:error, {:benchmark_setup_error, reason}} ->
+                setup_error({key, reason})
+            end
+
+          {:error, reason} ->
+            setup_error({key, reason})
         end
 
       {:ok, _invalid} ->
@@ -163,14 +204,14 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   end
 
   defp orchestrator_roots(:repo) do
-    case OrchestratorConfig.coding_repo_roots() do
+    case Orchestrator.coding_repo_roots() do
       {:ok, roots} -> canonical_roots(roots, :coding_repo_roots)
       {:error, reason} -> setup_error({:coding_repo_roots_unavailable, reason})
     end
   end
 
   defp orchestrator_roots(:worktree) do
-    case OrchestratorConfig.coding_worktree_roots() do
+    case Orchestrator.coding_worktree_roots() do
       {:ok, roots} -> canonical_roots(roots, :coding_worktree_roots)
       {:error, reason} -> setup_error({:coding_worktree_roots_unavailable, reason})
     end
@@ -263,6 +304,33 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   end
 
   defp canonical_directory(_path), do: {:error, :expected_directory_path}
+
+  defp reject_broad_root(path) do
+    system_temp =
+      case SafePath.resolve_real(System.tmp_dir!()) do
+        {:ok, canonical} -> canonical
+        _other -> Path.expand(System.tmp_dir!())
+      end
+
+    if path in @broad_root_paths or path == system_temp or path == File.cwd!() do
+      setup_error(:broad_trusted_root)
+    else
+      :ok
+    end
+  end
+
+  defp reject_fixture_overlap(artifact, fixture_root, fixture_paths) do
+    Enum.reduce_while(fixture_paths, :ok, fn fixture_path, :ok ->
+      with {:ok, lexical} <- SafePath.safe_join(fixture_root, fixture_path),
+           {:ok, fixture} <- canonical_directory(lexical) do
+        if roots_overlap?(artifact, fixture),
+          do: {:halt, setup_error(:artifact_root_overlaps_fixture)},
+          else: {:cont, :ok}
+      else
+        _other -> {:halt, setup_error(:fixture_not_found)}
+      end
+    end)
+  end
 
   defp path_within?(path, root), do: path == root or String.starts_with?(path, root <> "/")
   defp roots_overlap?(left, right), do: path_within?(left, right) or path_within?(right, left)

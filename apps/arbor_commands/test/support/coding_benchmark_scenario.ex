@@ -89,14 +89,9 @@ defmodule Arbor.Commands.CodingBenchmarkScenario do
   end
 
   def run_adapter(executor, request) when executor in ["legacy", "pipeline"] do
-    expected_mode = if executor == "legacy", do: :legacy, else: :pipeline
-
     cond do
       request["executor_path"] != executor ->
         {:error, :executor_path_mismatch}
-
-      Application.get_env(:arbor_agent, :coding_executor_mode) != expected_mode ->
-        {:error, :executor_selector_mismatch}
 
       request["fixture_id"] == "executor-failure" and executor == "pipeline" ->
         {:error, :scripted_pipeline_failure,
