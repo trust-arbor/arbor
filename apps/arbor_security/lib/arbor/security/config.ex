@@ -44,6 +44,20 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
+  Grace period for an unclaimed or reclaimable signing-authority bootstrap.
+
+  Defaults to 60 seconds. Invalid configuration falls back to the secure
+  packaged default rather than creating a non-expiring slot.
+  """
+  @spec signing_authority_bootstrap_grace_ms() :: pos_integer()
+  def signing_authority_bootstrap_grace_ms do
+    case Application.get_env(@app, :signing_authority_bootstrap_grace_ms, 60_000) do
+      grace_ms when is_integer(grace_ms) and grace_ms > 0 -> grace_ms
+      _invalid -> 60_000
+    end
+  end
+
+  @doc """
   Whether capability signing is required for authorization.
 
   When `true` (default), all capabilities must have a valid issuer signature.

@@ -6,6 +6,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Contracts.Security.SigningAuthorityBootstrap
   alias Arbor.Security
   alias Arbor.Security.SigningAuthorityBroker
 
@@ -523,7 +524,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                  owner: "not-a-pid"
                )
 
-      assert {:error, :invalid_principal_id} =
+      assert {:ok, %SignedRequest{agent_id: "human_not_agent"}} =
                Security.build_signing_authority_acquisition_proof(
                  "human_not_agent",
                  ctx.private_key,
@@ -664,6 +665,323 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
   end
 
+  describe "signing-authority bootstrap security regressions" do
+    test "security regression: id-only bootstrap issuance is impossible", ctx do
+      assert {:error, :possession_proof_required} =
+               Security.issue_signing_authority_bootstrap(ctx.agent_id)
+
+      assert {:error, :possession_proof_required} =
+               Security.issue_signing_authority_bootstrap(ctx.agent_id, [])
+
+      assert {:error, :possession_proof_required} =
+               Security.open_ephemeral_signing_authority(ctx.agent_id, ctx.private_key)
+    end
+
+    test "security regression: replay and wrong-owner issuance fail closed", ctx do
+      assert {:ok, proof} = acquisition_proof(ctx, :restart_slot, self())
+
+      assert {:ok, %SigningAuthorityBootstrap{} = bootstrap} =
+               Security.issue_signing_authority_bootstrap(proof)
+
+      assert {:error, :replayed_nonce} =
+               Security.issue_signing_authority_bootstrap(proof)
+
+      assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
+
+      assert {:ok, foreign_proof} = acquisition_proof(ctx, :wrong_owner, self())
+      parent = self()
+
+      spawn(fn ->
+        send(parent, {:foreign_issue, Security.issue_signing_authority_bootstrap(foreign_proof)})
+      end)
+
+      assert_receive {:foreign_issue, {:error, :owner_mismatch}}, 1_000
+    end
+
+    test "security regression: tampered and partial bootstraps fail without broker crash", ctx do
+      assert {:ok, bootstrap} = issue_bootstrap(ctx, :tamper_test)
+      broker_pid = Process.whereis(SigningAuthorityBroker)
+
+      assert {:error, :purpose_mismatch} =
+               bootstrap
+               |> Map.put(:purpose, :tampered)
+               |> Security.claim_signing_authority()
+
+      assert {:error, :principal_mismatch} =
+               bootstrap
+               |> Map.put(:principal_id, "human_attacker")
+               |> Security.claim_signing_authority()
+
+      partial = %{__struct__: SigningAuthorityBootstrap}
+      assert {:error, _} = Security.claim_signing_authority(partial)
+      assert {:error, _} = Security.close_signing_authority_bootstrap(partial)
+
+      partial_proof = %{__struct__: SignedRequest}
+
+      assert {:error, :invalid_acquisition_proof} =
+               Security.issue_signing_authority_bootstrap(partial_proof)
+
+      {:ok, forged} =
+        SigningAuthorityBootstrap.new(
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: ctx.agent_id,
+          purpose: :tamper_test
+        )
+
+      assert {:error, :bootstrap_not_found} = Security.claim_signing_authority(forged)
+      assert Process.whereis(SigningAuthorityBroker) == broker_pid
+
+      assert {:ok, authority} = Security.claim_signing_authority(bootstrap)
+      assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, "still-live")
+      assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
+    end
+
+    test "security regression: concurrent claim permits exactly one live owner", ctx do
+      assert {:ok, bootstrap} = issue_bootstrap(ctx, :concurrent_claim)
+      parent = self()
+
+      claimers =
+        for id <- 1..2 do
+          spawn(fn ->
+            receive do
+              :claim ->
+                result = Security.claim_signing_authority(bootstrap)
+                send(parent, {:claim_result, id, self(), result})
+
+                if match?({:ok, _}, result) do
+                  receive do
+                    :stop -> :ok
+                  end
+                end
+            end
+          end)
+        end
+
+      Enum.each(claimers, &send(&1, :claim))
+
+      results =
+        for _ <- 1..2 do
+          assert_receive {:claim_result, id, pid, result}, 1_000
+          {id, pid, result}
+        end
+
+      assert [{_id, winner, {:ok, authority}}] =
+               Enum.filter(results, fn {_id, _pid, result} -> match?({:ok, _}, result) end)
+
+      assert [{_id, _loser, {:error, :authority_already_claimed}}] =
+               Enum.filter(results, fn {_id, _pid, result} -> match?({:error, _}, result) end)
+
+      assert {:ok, %SignedRequest{}} =
+               Security.sign_with_authority(authority, "engine-helper-bearer-use")
+
+      send(winner, :stop)
+
+      wait_until(fn ->
+        match?(
+          {:error, :authority_not_found},
+          Security.sign_with_authority(authority, "owner-gone")
+        )
+      end)
+
+      assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
+    end
+
+    test "security regression: owner death revokes and reclaim rotates authority token", ctx do
+      assert {:ok, bootstrap} = issue_bootstrap(ctx, :restart_reclaim)
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          send(parent, {:first_claim, Security.claim_signing_authority(bootstrap)})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:first_claim, {:ok, first_authority}}, 1_000
+      assert {:ok, _} = Security.sign_with_authority(first_authority, "before-owner-down")
+
+      Process.exit(owner, :kill)
+
+      wait_until(fn ->
+        match?(
+          {:error, :authority_not_found},
+          Security.sign_with_authority(first_authority, "after-owner-down")
+        )
+      end)
+
+      assert {:ok, second_authority} = Security.claim_signing_authority(bootstrap)
+      refute second_authority.token == first_authority.token
+      assert {:ok, _} = Security.sign_with_authority(second_authority, "after-reclaim")
+
+      assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
+
+      assert {:error, :authority_not_found} =
+               Security.sign_with_authority(second_authority, "closed-slot")
+    end
+
+    test "security regression: unclaimed and reclaimable bootstrap slots expire", ctx do
+      restart_broker_with_grace(25)
+      assert {:ok, unclaimed} = issue_bootstrap(ctx, :expiring_unclaimed)
+      assert {:ok, reclaimable} = issue_bootstrap(ctx, :expiring_reclaimable)
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          send(parent, {:expiring_claim, Security.claim_signing_authority(reclaimable)})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:expiring_claim, {:ok, authority}}, 1_000
+      Process.exit(owner, :kill)
+
+      wait_until(fn ->
+        match?(
+          {:error, :authority_not_found},
+          Security.sign_with_authority(authority, "reclaim-grace-started")
+        )
+      end)
+
+      Process.sleep(60)
+
+      for bootstrap <- [unclaimed, reclaimable] do
+        assert {:error, reason} = Security.claim_signing_authority(bootstrap)
+        assert reason in [:bootstrap_expired, :bootstrap_not_found]
+      end
+    end
+
+    test "human principals can issue and claim a persistent bootstrap" do
+      {:ok, identity} = Identity.generate(name: "human-signing-authority")
+      human_id = "human_" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+      public_identity = %{Identity.public_only(identity) | agent_id: human_id}
+
+      :ok = Security.register_identity(public_identity)
+      :ok = Security.store_signing_key(human_id, identity.private_key)
+
+      on_exit(fn ->
+        _ = Security.delete_signing_key(human_id)
+        _ = Security.deregister_identity(human_id)
+      end)
+
+      human_ctx = %{agent_id: human_id, private_key: identity.private_key}
+      assert {:ok, bootstrap} = issue_bootstrap(human_ctx, :human_session)
+      assert {:ok, authority} = Security.claim_signing_authority(bootstrap)
+      assert authority.principal_id == human_id
+
+      assert {:ok, %SignedRequest{agent_id: ^human_id}} =
+               Security.sign_with_authority(authority, "human-authority")
+    end
+  end
+
+  describe "ephemeral signing-authority security regressions" do
+    test "security regression: mismatched supplied private key is rejected" do
+      ephemeral = register_ephemeral_identity("ephemeral-mismatch")
+      {:ok, other} = Identity.generate(name: "other-ephemeral-key")
+
+      assert {:ok, proof} = acquisition_proof(ephemeral, :ephemeral, self())
+
+      assert {:error, :private_key_mismatch} =
+               Security.open_ephemeral_signing_authority(proof, other.private_key)
+
+      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+    end
+
+    test "security regression: ephemeral proof owner must be the caller" do
+      ephemeral = register_ephemeral_identity("ephemeral-owner-mismatch")
+      assert {:ok, proof} = acquisition_proof(ephemeral, :ephemeral_wrong_owner, self())
+      parent = self()
+
+      spawn(fn ->
+        result = Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
+        send(parent, {:ephemeral_wrong_owner, result})
+      end)
+
+      assert_receive {:ephemeral_wrong_owner, {:error, :owner_mismatch}}, 1_000
+      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+    end
+
+    test "security regression: ephemeral key is wrapped in memory and never persisted" do
+      ephemeral = register_ephemeral_identity("ephemeral-success")
+      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+      assert {:ok, proof} = acquisition_proof(ephemeral, :ephemeral, self())
+
+      assert {:ok, authority} =
+               Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
+
+      assert {:ok, %SignedRequest{agent_id: agent_id} = signed} =
+               Security.sign_with_authority(authority, "ephemeral-sign")
+
+      assert agent_id == ephemeral.agent_id
+      expected_id = ephemeral.agent_id
+      assert {:ok, ^expected_id} = Security.verify_request(signed)
+
+      assert {:ok, secret} =
+               Security.derive_secret_with_authority(authority, :ephemeral_session)
+
+      assert byte_size(secret) == 32
+      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+
+      snapshot = SigningAuthorityBroker.debug_state()
+      assert snapshot.wrapping_key_present?
+      assert Enum.any?(snapshot.entries, &(&1.key_source == :ephemeral))
+      refute contains_value?(snapshot, ephemeral.private_key)
+      refute contains_matching?(snapshot, &is_function/1)
+      refute contains_key?(snapshot, :proof)
+      refute contains_key?(snapshot, :signed_request)
+      refute contains_key?(snapshot, :private_key)
+    end
+
+    test "security regression: owner death removes ephemeral authority and wrapped data" do
+      ephemeral = register_ephemeral_identity("ephemeral-owner-down")
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          {:ok, proof} = acquisition_proof(ephemeral, :ephemeral_owner, self())
+          result = Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
+          send(parent, {:ephemeral_authority, result})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:ephemeral_authority, {:ok, authority}}, 1_000
+      assert {:ok, _} = Security.sign_with_authority(authority, "owner-live")
+
+      Process.exit(owner, :kill)
+
+      wait_until(fn ->
+        match?(
+          {:error, :authority_not_found},
+          Security.sign_with_authority(authority, "owner-dead")
+        )
+      end)
+
+      snapshot = SigningAuthorityBroker.debug_state()
+
+      refute Enum.any?(
+               snapshot.entries,
+               &(&1.principal_id == ephemeral.agent_id and &1.key_source == :ephemeral)
+             )
+    end
+
+    test "security regression: broker restart invalidates ephemeral authority", ctx do
+      ephemeral = register_ephemeral_identity("ephemeral-restart")
+      assert {:ok, proof} = acquisition_proof(ephemeral, :ephemeral_restart, self())
+
+      assert {:ok, authority} =
+               Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
+
+      assert {:ok, _} = Security.sign_with_authority(authority, "before-restart")
+      restart_broker()
+
+      assert {:error, :authority_not_found} =
+               Security.sign_with_authority(authority, "after-restart")
+
+      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
+
+      # Persistent acquisition remains available after restart.
+      assert {:ok, persistent} = open_authority(ctx, purpose: :persistent_after_restart)
+      assert {:ok, _} = Security.sign_with_authority(persistent, "persistent")
+    end
+  end
+
   describe "legacy make_signer compatibility" do
     test "make_signer still returns a working closure", ctx do
       signer = Security.make_signer(ctx.agent_id, ctx.private_key)
@@ -689,6 +1007,98 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       Security.open_signing_authority(proof)
     end
   end
+
+  defp acquisition_proof(ctx, purpose, owner) do
+    Security.build_signing_authority_acquisition_proof(
+      ctx.agent_id,
+      ctx.private_key,
+      purpose: purpose,
+      owner: owner
+    )
+  end
+
+  defp issue_bootstrap(ctx, purpose) do
+    with {:ok, proof} <- acquisition_proof(ctx, purpose, self()) do
+      Security.issue_signing_authority_bootstrap(proof)
+    end
+  end
+
+  defp register_ephemeral_identity(name) do
+    {:ok, identity} = Identity.generate(name: name)
+    :ok = Security.register_identity(Identity.public_only(identity))
+
+    on_exit(fn ->
+      _ = Security.delete_signing_key(identity.agent_id)
+      _ = Security.deregister_identity(identity.agent_id)
+    end)
+
+    %{
+      agent_id: identity.agent_id,
+      private_key: identity.private_key,
+      public_key: identity.public_key
+    }
+  end
+
+  defp restart_broker_with_grace(grace_ms) do
+    previous = Application.get_env(:arbor_security, :signing_authority_bootstrap_grace_ms)
+    Application.put_env(:arbor_security, :signing_authority_bootstrap_grace_ms, grace_ms)
+    restart_broker()
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:arbor_security, :signing_authority_bootstrap_grace_ms)
+      else
+        Application.put_env(:arbor_security, :signing_authority_bootstrap_grace_ms, previous)
+      end
+
+      restart_broker()
+    end)
+  end
+
+  defp restart_broker do
+    :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
+    {:ok, _pid} = Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
+    :ok
+  end
+
+  defp contains_value?(%{__struct__: _} = term, target), do: term == target
+
+  defp contains_value?(term, target) when is_map(term) do
+    Enum.any?(term, fn {key, value} ->
+      key == target or value == target or contains_value?(value, target)
+    end)
+  end
+
+  defp contains_value?(term, target) when is_list(term),
+    do: Enum.any?(term, &(&1 == target or contains_value?(&1, target)))
+
+  defp contains_value?(_term, _target), do: false
+
+  defp contains_matching?(%{__struct__: _} = term, predicate), do: predicate.(term)
+
+  defp contains_matching?(term, predicate) when is_map(term) do
+    predicate.(term) or
+      Enum.any?(term, fn {key, value} ->
+        predicate.(key) or predicate.(value) or contains_matching?(value, predicate)
+      end)
+  end
+
+  defp contains_matching?(term, predicate) when is_list(term) do
+    predicate.(term) or Enum.any?(term, &contains_matching?(&1, predicate))
+  end
+
+  defp contains_matching?(term, predicate), do: predicate.(term)
+
+  defp contains_key?(%{__struct__: _}, _target), do: false
+
+  defp contains_key?(term, target) when is_map(term) do
+    Map.has_key?(term, target) or Enum.any?(Map.values(term), &contains_key?(&1, target))
+  end
+
+  defp contains_key?(term, target) when is_list(term),
+    do: Enum.any?(term, &contains_key?(&1, target))
+
+  defp contains_key?(_term, _target), do: false
 
   defp ensure_broker_started do
     case Process.whereis(SigningAuthorityBroker) do

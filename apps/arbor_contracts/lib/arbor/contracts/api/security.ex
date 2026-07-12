@@ -17,6 +17,9 @@ defmodule Arbor.Contracts.API.Security do
   """
 
   alias Arbor.Types
+  alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Contracts.Security.SigningAuthorityBootstrap
 
   @type principal_id :: Types.agent_id()
   @type resource :: Types.resource_uri()
@@ -43,7 +46,8 @@ defmodule Arbor.Contracts.API.Security do
           | {:quota_exceeded, quota_type(), quota_context()}
           | term()
 
-  @type quota_type :: :per_agent_capability_limit | :global_capability_limit | :delegation_depth_limit
+  @type quota_type ::
+          :per_agent_capability_limit | :global_capability_limit | :delegation_depth_limit
   @type quota_context :: %{
           optional(:current) => non_neg_integer(),
           optional(:limit) => non_neg_integer(),
@@ -54,6 +58,43 @@ defmodule Arbor.Contracts.API.Security do
   @type constraint_type :: :time_window | :allowed_paths | :rate_limit | :requires_approval
 
   @type capability :: map()
+
+  @type signing_authority_acquisition_error ::
+          :invalid_acquisition_proof
+          | :invalid_acquisition_proof_args
+          | :possession_proof_required
+          | :invalid_purpose
+          | :invalid_owner
+          | :owner_mismatch
+          | :principal_mismatch
+          | :identity_not_active
+          | :identity_suspended
+          | :identity_revoked
+          | :identity_not_found
+          | :no_signing_key
+          | :signing_key_unavailable
+          | :invalid_private_key
+          | :private_key_mismatch
+          | :invalid_signature
+          | :replayed_nonce
+          | :expired_timestamp
+          | :unknown_agent
+          | :verification_failed
+          | :broker_unavailable
+
+  @type signing_authority_bootstrap_error ::
+          signing_authority_acquisition_error()
+          | :invalid_bootstrap
+          | :invalid_attrs
+          | :invalid_token
+          | :token_too_short
+          | :zero_token
+          | :invalid_principal_id
+          | :bootstrap_not_found
+          | :bootstrap_expired
+          | :authority_already_claimed
+          | :authority_not_found
+          | :purpose_mismatch
 
   @type authorize_opts :: [
           context: map(),
@@ -123,6 +164,43 @@ defmodule Arbor.Contracts.API.Security do
               {:ok, [capability()]} | {:error, term()}
 
   # ===========================================================================
+  # Signing Authority
+  # ===========================================================================
+
+  @doc """
+  Issue an expiring restart slot from an owner-bound possession proof.
+  """
+  @callback issue_signing_authority_bootstrap_from_owner_bound_possession_proof(
+              SignedRequest.t(),
+              keyword() | map()
+            ) ::
+              {:ok, SigningAuthorityBootstrap.t()}
+              | {:error, signing_authority_bootstrap_error()}
+
+  @doc """
+  Claim a bootstrap slot for the calling process as the recorded owner.
+  """
+  @callback claim_signing_authority_from_bootstrap_for_calling_process(
+              SigningAuthorityBootstrap.t()
+            ) ::
+              {:ok, SigningAuthority.t()} | {:error, signing_authority_bootstrap_error()}
+
+  @doc """
+  Close a bootstrap slot and any active authority claimed from it.
+  """
+  @callback close_signing_authority_bootstrap_and_active_authority(SigningAuthorityBootstrap.t()) ::
+              :ok | {:error, signing_authority_bootstrap_error()}
+
+  @doc """
+  Open a caller-owned ephemeral authority from proof and supplied private key.
+  """
+  @callback open_ephemeral_signing_authority_from_owner_bound_proof_and_private_key(
+              SignedRequest.t(),
+              binary()
+            ) ::
+              {:ok, SigningAuthority.t()} | {:error, signing_authority_acquisition_error()}
+
+  # ===========================================================================
   # Lifecycle
   # ===========================================================================
 
@@ -137,6 +215,10 @@ defmodule Arbor.Contracts.API.Security do
   @callback healthy?() :: boolean()
 
   @optional_callbacks [
-    delegate_capability_from_principal_to_principal: 3
+    delegate_capability_from_principal_to_principal: 3,
+    issue_signing_authority_bootstrap_from_owner_bound_possession_proof: 2,
+    claim_signing_authority_from_bootstrap_for_calling_process: 1,
+    close_signing_authority_bootstrap_and_active_authority: 1,
+    open_ephemeral_signing_authority_from_owner_bound_proof_and_private_key: 2
   ]
 end

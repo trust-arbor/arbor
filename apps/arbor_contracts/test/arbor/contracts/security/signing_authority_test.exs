@@ -54,11 +54,22 @@ defmodule Arbor.Contracts.Security.SigningAuthorityTest do
                )
     end
 
-    test "rejects non-agent principal_id" do
+    test "accepts human principals" do
+      assert {:ok, authority} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: "human_operator_123",
+                 purpose: :session
+               )
+
+      assert authority.principal_id == "human_operator_123"
+    end
+
+    test "rejects principals outside the agent and human namespaces" do
       assert {:error, :invalid_principal_id} =
                SigningAuthority.new(
                  token: @valid_token,
-                 principal_id: "human_abc",
+                 principal_id: "service_abc",
                  purpose: :session
                )
     end

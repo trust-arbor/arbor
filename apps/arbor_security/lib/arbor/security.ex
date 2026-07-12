@@ -48,6 +48,8 @@ defmodule Arbor.Security do
   alias Arbor.Contracts.Security.InvocationReceipt
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Contracts.Security.SigningAuthority.Validator, as: SigningAuthorityValidator
+  alias Arbor.Contracts.Security.SigningAuthorityBootstrap
   alias Arbor.Common.SafePath
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore
@@ -1063,7 +1065,7 @@ defmodule Arbor.Security do
 
   def build_signing_authority_acquisition_proof(agent_id, private_key, opts)
       when is_binary(agent_id) and (is_list(opts) or is_map(opts)) do
-    with :ok <- validate_principal_id_for_authority(agent_id),
+    with :ok <- SigningAuthorityValidator.validate_principal_id(agent_id),
          :ok <- validate_private_key_for_authority(private_key),
          {:ok, purpose} <- fetch_required_attr(opts, :purpose, :invalid_purpose),
          :ok <- validate_authority_purpose(purpose),
@@ -1076,6 +1078,117 @@ defmodule Arbor.Security do
 
   def build_signing_authority_acquisition_proof(_agent_id, _private_key, _opts) do
     {:error, :invalid_acquisition_proof_args}
+  end
+
+  @doc """
+  Issue an opaque restart slot from an owner-bound possession proof.
+
+  Issuance verifies the proof through the standard replay-protected verifier,
+  requires the caller to be the owner PID bound into the proof, and confirms
+  that the active principal has a persistent signing key. The returned value
+  is not itself a signing authority and expires if it remains unclaimed.
+
+  This API never accepts a principal id in place of a proof and never returns
+  or loads a private key for the caller.
+  """
+  @spec issue_signing_authority_bootstrap(SignedRequest.t(), keyword() | map()) ::
+          {:ok, SigningAuthorityBootstrap.t()} | {:error, term()}
+  def issue_signing_authority_bootstrap(proof, opts \\ []) do
+    issue_signing_authority_bootstrap_from_owner_bound_possession_proof(proof, opts)
+  end
+
+  @impl Arbor.Contracts.API.Security
+  def issue_signing_authority_bootstrap_from_owner_bound_possession_proof(
+        %SignedRequest{} = proof,
+        opts
+      )
+      when is_list(opts) or is_map(opts) do
+    SigningAuthorityBroker.issue_bootstrap(proof, opts)
+  end
+
+  def issue_signing_authority_bootstrap_from_owner_bound_possession_proof(
+        %SignedRequest{},
+        _opts
+      ) do
+    {:error, :invalid_acquisition_proof_args}
+  end
+
+  def issue_signing_authority_bootstrap_from_owner_bound_possession_proof(_proof, _opts) do
+    {:error, :possession_proof_required}
+  end
+
+  @doc """
+  Claim a bootstrap slot for the calling process.
+
+  The broker infers and monitors the owner from the GenServer caller. A slot
+  permits one live authority. After owner death a persistent-backed slot may
+  be reclaimed during its configured grace period, producing a new authority
+  bearer token.
+  """
+  @spec claim_signing_authority(SigningAuthorityBootstrap.t()) ::
+          {:ok, SigningAuthority.t()} | {:error, term()}
+  def claim_signing_authority(bootstrap) do
+    claim_signing_authority_from_bootstrap_for_calling_process(bootstrap)
+  end
+
+  @impl Arbor.Contracts.API.Security
+  def claim_signing_authority_from_bootstrap_for_calling_process(bootstrap) do
+    case SigningAuthorityBootstrap.canonicalize(bootstrap) do
+      {:ok, canonical} -> SigningAuthorityBroker.claim_bootstrap(canonical)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Close a bootstrap slot and any live authority claimed from it.
+  """
+  @spec close_signing_authority_bootstrap(SigningAuthorityBootstrap.t()) ::
+          :ok | {:error, term()}
+  def close_signing_authority_bootstrap(bootstrap) do
+    close_signing_authority_bootstrap_and_active_authority(bootstrap)
+  end
+
+  @impl Arbor.Contracts.API.Security
+  def close_signing_authority_bootstrap_and_active_authority(bootstrap) do
+    case SigningAuthorityBootstrap.canonicalize(bootstrap) do
+      {:ok, canonical} -> SigningAuthorityBroker.close_bootstrap(canonical)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Open a caller-owned ephemeral signing authority.
+
+  Requires an owner-bound possession proof and the matching private key. The
+  broker verifies the supplied key against the proof principal's registered
+  public identity, wraps it only in broker memory, and never writes it to the
+  persistent signing-key store. Broker or owner death invalidates the result.
+
+  Decryption is scoped to individual sign/derive calls; BEAM zeroization is
+  not claimed.
+  """
+  @spec open_ephemeral_signing_authority(SignedRequest.t(), binary()) ::
+          {:ok, SigningAuthority.t()} | {:error, term()}
+  def open_ephemeral_signing_authority(proof, private_key) do
+    open_ephemeral_signing_authority_from_owner_bound_proof_and_private_key(
+      proof,
+      private_key
+    )
+  end
+
+  @impl Arbor.Contracts.API.Security
+  def open_ephemeral_signing_authority_from_owner_bound_proof_and_private_key(
+        %SignedRequest{} = proof,
+        private_key
+      ) do
+    SigningAuthorityBroker.open_ephemeral(proof, private_key)
+  end
+
+  def open_ephemeral_signing_authority_from_owner_bound_proof_and_private_key(
+        _proof,
+        _private_key
+      ) do
+    {:error, :possession_proof_required}
   end
 
   @doc """
@@ -1227,12 +1340,6 @@ defmodule Arbor.Security do
 
   defp validate_owner_pid(pid) when is_pid(pid), do: :ok
   defp validate_owner_pid(_), do: {:error, :invalid_owner}
-
-  defp validate_principal_id_for_authority(id) when is_binary(id) and byte_size(id) > 0 do
-    if String.starts_with?(id, "agent_"), do: :ok, else: {:error, :invalid_principal_id}
-  end
-
-  defp validate_principal_id_for_authority(_), do: {:error, :invalid_principal_id}
 
   # Ed25519 accepts 32-byte seeds and 64-byte expanded private keys only.
   # Other sizes (and non-binaries) must fail closed as a typed error — never

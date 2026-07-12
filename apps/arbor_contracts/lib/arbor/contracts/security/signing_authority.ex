@@ -33,9 +33,8 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
 
   use TypedStruct
 
+  alias Arbor.Contracts.Security.SigningAuthority.Validator
   alias Arbor.Types
-
-  @token_min_bytes 16
 
   typedstruct enforce: true do
     @typedoc "Opaque signing-authority reference (broker bearer token + principal binding)"
@@ -64,13 +63,13 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
   """
   @spec new(keyword() | map()) :: {:ok, t()} | {:error, term()}
   def new(attrs) when is_list(attrs) or is_map(attrs) do
-    token = get_attr(attrs, :token)
-    principal_id = get_attr(attrs, :principal_id)
-    purpose = get_attr(attrs, :purpose)
+    token = Validator.get_attr(attrs, :token)
+    principal_id = Validator.get_attr(attrs, :principal_id)
+    purpose = Validator.get_attr(attrs, :purpose)
 
-    with :ok <- validate_token(token),
-         :ok <- validate_principal_id(principal_id),
-         :ok <- validate_purpose(purpose) do
+    with :ok <- Validator.validate_token(token),
+         :ok <- Validator.validate_principal_id(principal_id),
+         :ok <- Validator.validate_purpose(purpose) do
       {:ok,
        %__MODULE__{
          token: token,
@@ -109,48 +108,6 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
   @spec signing_authority?(term()) :: boolean()
   def signing_authority?(%__MODULE__{}), do: true
   def signing_authority?(_), do: false
-
-  # ---------------------------------------------------------------------------
-  # Private validation
-  # ---------------------------------------------------------------------------
-
-  defp get_attr(attrs, key) when is_list(attrs), do: Keyword.get(attrs, key)
-
-  defp get_attr(attrs, key) when is_map(attrs) do
-    Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key))
-  end
-
-  defp validate_token(token) when is_binary(token) and byte_size(token) >= @token_min_bytes do
-    if token == :binary.copy(<<0>>, byte_size(token)) do
-      {:error, :zero_token}
-    else
-      :ok
-    end
-  end
-
-  defp validate_token(token) when is_binary(token), do: {:error, :token_too_short}
-  defp validate_token(_), do: {:error, :invalid_token}
-
-  defp validate_principal_id(id) when is_binary(id) and byte_size(id) > 0 do
-    if String.starts_with?(id, "agent_"), do: :ok, else: {:error, :invalid_principal_id}
-  end
-
-  defp validate_principal_id(_), do: {:error, :invalid_principal_id}
-
-  # Booleans are atoms in Elixir — reject them before the generic atom clause.
-  defp validate_purpose(purpose) when is_boolean(purpose), do: {:error, :invalid_purpose}
-
-  defp validate_purpose(purpose) when is_atom(purpose) and not is_nil(purpose), do: :ok
-
-  defp validate_purpose(purpose) when is_binary(purpose) do
-    if String.trim(purpose) == "" do
-      {:error, :invalid_purpose}
-    else
-      :ok
-    end
-  end
-
-  defp validate_purpose(_), do: {:error, :invalid_purpose}
 end
 
 defimpl Inspect, for: Arbor.Contracts.Security.SigningAuthority do
