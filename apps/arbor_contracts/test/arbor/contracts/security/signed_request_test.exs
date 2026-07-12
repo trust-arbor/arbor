@@ -27,6 +27,24 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
 
       refute s1.nonce == s2.nonce
     end
+
+    test "supports human principals coherently", ctx do
+      human_id = "human_operator_123"
+      assert {:ok, signed} = SignedRequest.sign("human payload", human_id, ctx.private_key)
+      assert signed.agent_id == human_id
+
+      message = SignedRequest.signing_payload(signed)
+
+      assert :crypto.verify(:eddsa, :sha512, message, signed.signature, [
+               ctx.public_key,
+               :ed25519
+             ])
+    end
+
+    test "malformed 32/64-byte private key material returns a typed error" do
+      assert {:error, :invalid_private_key} =
+               SignedRequest.sign("payload", "agent_test", <<0::size(64 * 8)>>)
+    end
   end
 
   describe "signing_payload/1" do
@@ -76,6 +94,32 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
   end
 
   describe "new/1" do
+    test "accepts human principals", ctx do
+      assert {:ok, request} =
+               SignedRequest.new(
+                 payload: "data",
+                 agent_id: "human_operator_123",
+                 timestamp: DateTime.utc_now(),
+                 nonce: :crypto.strong_rand_bytes(16),
+                 signature: <<1, 2, 3>>
+               )
+
+      assert request.agent_id == "human_operator_123"
+      assert is_binary(ctx.agent_id)
+    end
+
+    test "rejects contradictory atom/string principal attributes", ctx do
+      assert {:error, :conflicting_attributes} =
+               SignedRequest.new(%{
+                 "agent_id" => "human_other",
+                 payload: "data",
+                 agent_id: ctx.agent_id,
+                 timestamp: DateTime.utc_now(),
+                 nonce: :crypto.strong_rand_bytes(16),
+                 signature: <<1, 2, 3>>
+               })
+    end
+
     test "rejects empty payload", ctx do
       assert {:error, :empty_payload} =
                SignedRequest.new(

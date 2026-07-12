@@ -16,12 +16,13 @@ defmodule Arbor.Contracts.API.Security do
       end
   """
 
-  alias Arbor.Types
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Contracts.Security.SigningAuthority.Validator
   alias Arbor.Contracts.Security.SigningAuthorityBootstrap
+  alias Arbor.Types
 
-  @type principal_id :: Types.agent_id()
+  @type principal_id :: Validator.principal_id()
   @type resource :: Types.resource_uri()
   @type action :: Types.operation()
 
@@ -65,6 +66,7 @@ defmodule Arbor.Contracts.API.Security do
           | :possession_proof_required
           | :invalid_purpose
           | :invalid_owner
+          | :owner_dead
           | :owner_mismatch
           | :principal_mismatch
           | :identity_not_active
@@ -73,14 +75,23 @@ defmodule Arbor.Contracts.API.Security do
           | :identity_not_found
           | :no_signing_key
           | :signing_key_unavailable
+          | :signing_key_invalid
+          | :signing_key_mismatch
           | :invalid_private_key
           | :private_key_mismatch
+          | :signing_failed
+          | :derivation_failed
+          | :key_handoff_unavailable
+          | :key_handoff_expired
+          | :key_wrapping_failed
+          | :key_decryption_failed
           | :invalid_signature
           | :replayed_nonce
           | :expired_timestamp
           | :unknown_agent
           | :verification_failed
           | :broker_unavailable
+          | :broker_timeout
 
   @type signing_authority_bootstrap_error ::
           signing_authority_acquisition_error()
@@ -90,6 +101,13 @@ defmodule Arbor.Contracts.API.Security do
           | :token_too_short
           | :zero_token
           | :invalid_principal_id
+          | :conflicting_attributes
+          | :unknown_attribute
+          | :invalid_options
+          | :unknown_option
+          | :duplicate_option
+          | :mixed_option_keys
+          | :invalid_grace_ms
           | :bootstrap_not_found
           | :bootstrap_expired
           | :authority_already_claimed
@@ -169,6 +187,10 @@ defmodule Arbor.Contracts.API.Security do
 
   @doc """
   Issue an expiring restart slot from an owner-bound possession proof.
+
+  The options surface accepts only an atom-keyed :grace_ms positive integer
+  within the implementation's timer-safe bound. Unknown, duplicate, string, or
+  mixed keys must fail closed before proof verification.
   """
   @callback issue_signing_authority_bootstrap_from_owner_bound_possession_proof(
               SignedRequest.t(),

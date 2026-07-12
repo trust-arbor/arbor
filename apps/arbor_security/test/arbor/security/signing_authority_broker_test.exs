@@ -8,6 +8,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Contracts.Security.SigningAuthorityBootstrap
   alias Arbor.Security
+  alias Arbor.Security.Config, as: SecurityConfig
   alias Arbor.Security.SigningAuthorityBroker
 
   setup do
@@ -332,6 +333,47 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                Security.derive_secret_with_authority(authority, :capability_mac)
     end
 
+    test "security regression: malformed stored key never signs, derives, issues, or crashes broker",
+         ctx do
+      {:ok, authority} = open_authority(ctx, purpose: :malformed_persistent_key)
+      broker_pid = Process.whereis(SigningAuthorityBroker)
+
+      # Correct length, structurally invalid Ed25519 material.
+      malformed_key = <<0::size(64 * 8)>>
+      assert :ok = Security.store_signing_key(ctx.agent_id, malformed_key)
+
+      assert {:error, :signing_key_invalid} =
+               Security.sign_with_authority(authority, "must-not-sign")
+
+      assert {:error, :signing_key_invalid} =
+               Security.derive_secret_with_authority(authority, :must_not_derive)
+
+      assert {:ok, proof} = acquisition_proof(ctx, :must_not_issue, self())
+
+      assert {:error, :signing_key_invalid} =
+               Security.issue_signing_authority_bootstrap(proof)
+
+      assert Process.whereis(SigningAuthorityBroker) == broker_pid
+      assert Process.alive?(broker_pid)
+
+      snapshot = SigningAuthorityBroker.debug_state()
+      refute Enum.any?(snapshot.bootstrap_entries, &(&1.purpose == :must_not_issue))
+
+      assert {:error, :signing_key_invalid} =
+               Security.sign_with_authority(authority, "still-must-not-sign")
+
+      {:ok, other_identity} = Identity.generate(name: "wrong-persistent-key")
+      assert :ok = Security.store_signing_key(ctx.agent_id, other_identity.private_key)
+
+      assert {:error, :signing_key_mismatch} =
+               Security.sign_with_authority(authority, "wrong-identity-key")
+
+      assert {:error, :signing_key_mismatch} =
+               Security.derive_secret_with_authority(authority, :wrong_identity_key)
+
+      assert Process.whereis(SigningAuthorityBroker) == broker_pid
+    end
+
     test "identity suspension and revocation fail closed", ctx do
       {:ok, authority} = open_authority(ctx, purpose: :session)
 
@@ -524,6 +566,17 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                  owner: "not-a-pid"
                )
 
+      assert {:error, :conflicting_attributes} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 %{
+                   "purpose" => :other_session,
+                   purpose: :session,
+                   owner: self()
+                 }
+               )
+
       assert {:ok, %SignedRequest{agent_id: "human_not_agent"}} =
                Security.build_signing_authority_acquisition_proof(
                  "human_not_agent",
@@ -696,6 +749,81 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       end)
 
       assert_receive {:foreign_issue, {:error, :owner_mismatch}}, 1_000
+
+      # Owner mismatch is rejected before Verifier consumes the nonce. The
+      # rightful owner can use the exact same proof afterward.
+      assert {:ok, recovered} = Security.issue_signing_authority_bootstrap(foreign_proof)
+      assert :ok = Security.close_signing_authority_bootstrap(recovered)
+    end
+
+    test "security regression: issuance options are strict, bounded, and do not consume proof on rejection",
+         ctx do
+      max_grace_ms = SecurityConfig.signing_authority_bootstrap_max_grace_ms()
+      assert {:ok, proof} = acquisition_proof(ctx, :strict_options, self())
+
+      assert {:error, :unknown_option} =
+               Security.issue_signing_authority_bootstrap(proof, unknown: true)
+
+      assert {:error, :duplicate_option} =
+               Security.issue_signing_authority_bootstrap(
+                 proof,
+                 grace_ms: 100,
+                 grace_ms: 200
+               )
+
+      assert {:error, :mixed_option_keys} =
+               Security.issue_signing_authority_bootstrap(proof, %{"grace_ms" => 100})
+
+      assert {:error, :invalid_grace_ms} =
+               Security.issue_signing_authority_bootstrap(proof, grace_ms: 0)
+
+      assert {:error, :invalid_grace_ms} =
+               Security.issue_signing_authority_bootstrap(
+                 proof,
+                 grace_ms: max_grace_ms + 1
+               )
+
+      assert {:ok, bootstrap} =
+               Security.issue_signing_authority_bootstrap(proof, grace_ms: max_grace_ms)
+
+      snapshot = SigningAuthorityBroker.debug_state()
+
+      assert Enum.any?(
+               snapshot.bootstrap_entries,
+               &(&1.principal_id == ctx.agent_id and &1.grace_ms == max_grace_ms)
+             )
+
+      assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
+
+      assert {:ok, minimum_proof} = acquisition_proof(ctx, :minimum_grace, self())
+
+      assert {:ok, _minimum_bootstrap} =
+               Security.issue_signing_authority_bootstrap(minimum_proof, grace_ms: 1)
+    end
+
+    test "configured grace is capped before being stored on a slot", ctx do
+      max_grace_ms = SecurityConfig.signing_authority_bootstrap_max_grace_ms()
+      previous = Application.get_env(:arbor_security, :signing_authority_bootstrap_grace_ms)
+
+      Application.put_env(
+        :arbor_security,
+        :signing_authority_bootstrap_grace_ms,
+        max_grace_ms + 10_000
+      )
+
+      on_exit(fn ->
+        restore_env(:signing_authority_bootstrap_grace_ms, previous)
+      end)
+
+      assert {:ok, bootstrap} = issue_bootstrap(ctx, :capped_config)
+      snapshot = SigningAuthorityBroker.debug_state()
+
+      assert Enum.any?(
+               snapshot.bootstrap_entries,
+               &(&1.principal_id == ctx.agent_id and &1.grace_ms == max_grace_ms)
+             )
+
+      assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
     end
 
     test "security regression: tampered and partial bootstraps fail without broker crash", ctx do
@@ -818,10 +946,35 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                Security.sign_with_authority(second_authority, "closed-slot")
     end
 
+    test "closing a claimed authority releases the slot; closing bootstrap is permanent", ctx do
+      assert {:ok, bootstrap} = issue_bootstrap(ctx, :explicit_close_reclaim, grace_ms: 1_000)
+      assert {:ok, first_authority} = Security.claim_signing_authority(bootstrap)
+
+      assert :ok = Security.close_signing_authority(first_authority)
+
+      assert {:error, :authority_not_found} =
+               Security.sign_with_authority(first_authority, "closed-claim")
+
+      assert {:ok, second_authority} = Security.claim_signing_authority(bootstrap)
+      refute second_authority.token == first_authority.token
+
+      assert :ok = Security.close_signing_authority_bootstrap(bootstrap)
+
+      assert {:error, :authority_not_found} =
+               Security.sign_with_authority(second_authority, "permanently-closed")
+
+      assert {:error, :bootstrap_not_found} = Security.claim_signing_authority(bootstrap)
+    end
+
     test "security regression: unclaimed and reclaimable bootstrap slots expire", ctx do
-      restart_broker_with_grace(25)
-      assert {:ok, unclaimed} = issue_bootstrap(ctx, :expiring_unclaimed)
-      assert {:ok, reclaimable} = issue_bootstrap(ctx, :expiring_reclaimable)
+      previous = Application.get_env(:arbor_security, :signing_authority_bootstrap_grace_ms)
+
+      on_exit(fn ->
+        restore_env(:signing_authority_bootstrap_grace_ms, previous)
+      end)
+
+      assert {:ok, unclaimed} = issue_bootstrap(ctx, :expiring_unclaimed, grace_ms: 25)
+      assert {:ok, reclaimable} = issue_bootstrap(ctx, :expiring_reclaimable, grace_ms: 25)
       parent = self()
 
       owner =
@@ -831,6 +984,9 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         end)
 
       assert_receive {:expiring_claim, {:ok, authority}}, 1_000
+
+      # Reclaim must use the slot's own grace, not mutable application config.
+      Application.put_env(:arbor_security, :signing_authority_bootstrap_grace_ms, 60_000)
       Process.exit(owner, :kill)
 
       wait_until(fn ->
@@ -927,6 +1083,125 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       refute contains_key?(snapshot, :proof)
       refute contains_key?(snapshot, :signed_request)
       refute contains_key?(snapshot, :private_key)
+
+      status = :sys.get_status(SigningAuthorityBroker)
+      refute contains_value?(status, ephemeral.private_key)
+      refute contains_value?(status, authority.token)
+    end
+
+    test "security regression: broker timeout carries no plaintext key and stale handoff cannot execute" do
+      ephemeral = register_ephemeral_identity("ephemeral-timeout")
+      broker_pid = Process.whereis(SigningAuthorityBroker)
+
+      previous_timeout =
+        Application.get_env(:arbor_security, :signing_authority_broker_call_timeout_ms)
+
+      Application.put_env(:arbor_security, :signing_authority_broker_call_timeout_ms, 25)
+      :ok = :sys.suspend(broker_pid)
+
+      on_exit(fn ->
+        safe_resume(broker_pid)
+        restore_env(:signing_authority_broker_call_timeout_ms, previous_timeout)
+        ensure_broker_started()
+      end)
+
+      parent = self()
+
+      task =
+        Task.async(fn ->
+          {:ok, proof} = acquisition_proof(ephemeral, :ephemeral_timeout, self())
+          send(parent, :ephemeral_timeout_calling)
+          Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
+        end)
+
+      assert_receive :ephemeral_timeout_calling, 1_000
+
+      wait_until(fn ->
+        {:messages, messages} = Process.info(broker_pid, :messages)
+
+        Enum.any?(messages, fn
+          {:"$gen_call", _from, {:open_ephemeral, %SignedRequest{}, holder_pid, transfer_ref}} ->
+            is_pid(holder_pid) and is_reference(transfer_ref)
+
+          _ ->
+            false
+        end)
+      end)
+
+      {:messages, messages} = Process.info(broker_pid, :messages)
+      refute contains_value?(messages, ephemeral.private_key)
+
+      assert {:error, :broker_timeout} = Task.await(task, 1_000)
+      safe_resume(broker_pid)
+
+      wait_until(fn ->
+        snapshot = SigningAuthorityBroker.debug_state()
+        not Enum.any?(snapshot.entries, &(&1.principal_id == ephemeral.agent_id))
+      end)
+
+      assert Process.whereis(SigningAuthorityBroker) == broker_pid
+    end
+
+    test "security regression: format_status redacts messages and all sensitive state" do
+      private_key = :crypto.strong_rand_bytes(32)
+      wrapping_key = :crypto.strong_rand_bytes(32)
+      bearer_token = :crypto.strong_rand_bytes(32)
+      ciphertext = :crypto.strong_rand_bytes(32)
+      iv = :crypto.strong_rand_bytes(12)
+      tag = :crypto.strong_rand_bytes(16)
+
+      status = %{
+        message: {:open_ephemeral, private_key},
+        reason: {:handler_failed, wrapping_key},
+        log: [{:previous_message, bearer_token, ciphertext}],
+        state: %{
+          wrapping_key: wrapping_key,
+          authorities: %{
+            bearer_token => %{
+              key_source: %{kind: :ephemeral, ciphertext: ciphertext, iv: iv, tag: tag}
+            }
+          },
+          bootstraps: %{bearer_token => %{token: bearer_token}},
+          monitors: %{}
+        }
+      }
+
+      redacted = SigningAuthorityBroker.format_status(status)
+      assert redacted.message == :redacted
+      assert redacted.reason == :redacted
+      assert redacted.log == :redacted
+
+      for secret <- [private_key, wrapping_key, bearer_token, ciphertext, iv, tag] do
+        refute contains_value?(redacted, secret)
+      end
+
+      holder_redacted =
+        Arbor.Security.SigningAuthorityBroker.KeyHolder.format_status(status)
+
+      refute contains_value?(holder_redacted, private_key)
+      assert holder_redacted.message == :redacted
+      assert holder_redacted.reason == :redacted
+      assert holder_redacted.log == :redacted
+    end
+
+    test "security regression: corrupted wrapping state returns typed errors without broker crash" do
+      ephemeral = register_ephemeral_identity("ephemeral-corrupt-wrapping")
+      assert {:ok, proof} = acquisition_proof(ephemeral, :ephemeral_corrupt, self())
+
+      assert {:ok, authority} =
+               Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
+
+      broker_pid = Process.whereis(SigningAuthorityBroker)
+      :sys.replace_state(broker_pid, &Map.put(&1, :wrapping_key, <<0>>))
+
+      assert {:error, :key_decryption_failed} =
+               Security.sign_with_authority(authority, "must-not-sign")
+
+      assert {:error, :key_decryption_failed} =
+               Security.derive_secret_with_authority(authority, :must_not_derive)
+
+      assert Process.whereis(SigningAuthorityBroker) == broker_pid
+      restart_broker()
     end
 
     test "security regression: owner death removes ephemeral authority and wrapped data" do
@@ -1017,9 +1292,9 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     )
   end
 
-  defp issue_bootstrap(ctx, purpose) do
+  defp issue_bootstrap(ctx, purpose, opts \\ []) do
     with {:ok, proof} <- acquisition_proof(ctx, purpose, self()) do
-      Security.issue_signing_authority_bootstrap(proof)
+      Security.issue_signing_authority_bootstrap(proof, opts)
     end
   end
 
@@ -1039,26 +1314,21 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     }
   end
 
-  defp restart_broker_with_grace(grace_ms) do
-    previous = Application.get_env(:arbor_security, :signing_authority_bootstrap_grace_ms)
-    Application.put_env(:arbor_security, :signing_authority_bootstrap_grace_ms, grace_ms)
-    restart_broker()
-
-    on_exit(fn ->
-      if is_nil(previous) do
-        Application.delete_env(:arbor_security, :signing_authority_bootstrap_grace_ms)
-      else
-        Application.put_env(:arbor_security, :signing_authority_bootstrap_grace_ms, previous)
-      end
-
-      restart_broker()
-    end)
-  end
-
   defp restart_broker do
     :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
     {:ok, _pid} = Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
     :ok
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_security, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_security, key, value)
+
+  defp safe_resume(pid) do
+    try do
+      :sys.resume(pid)
+    catch
+      :exit, _ -> :ok
+    end
   end
 
   defp contains_value?(%{__struct__: _} = term, target), do: term == target

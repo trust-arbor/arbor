@@ -3,19 +3,29 @@ defmodule Arbor.Contracts.Security.SigningAuthority.Validator do
 
   @token_min_bytes 16
 
-  @spec get_attr(keyword() | map(), atom()) :: term()
-  def get_attr(attrs, key) when is_list(attrs) do
-    case Enum.find(attrs, fn
-           {candidate, _value} -> candidate == key
-           _malformed -> false
-         end) do
-      {^key, value} -> value
-      _missing -> nil
-    end
-  end
+  @type principal_id :: String.t()
+  @type attribute_error :: :invalid_attrs | :unknown_attribute | :conflicting_attributes
 
-  def get_attr(attrs, key) when is_map(attrs) do
-    Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key))
+  @doc false
+  @spec extract_attributes(keyword() | map(), [atom()]) ::
+          {:ok, map()} | {:error, attribute_error()}
+  def extract_attributes(attrs, allowed_keys) when is_list(allowed_keys) do
+    with {:ok, pairs} <- attribute_pairs(attrs),
+         :ok <- validate_attribute_keys(pairs, allowed_keys) do
+      Enum.reduce_while(allowed_keys, {:ok, %{}}, fn key, {:ok, normalized} ->
+        values =
+          pairs
+          |> Enum.filter(fn {candidate, _value} -> attribute_key?(candidate, key) end)
+          |> Enum.map(&elem(&1, 1))
+          |> Enum.uniq()
+
+        case values do
+          [] -> {:cont, {:ok, normalized}}
+          [value] -> {:cont, {:ok, Map.put(normalized, key, value)}}
+          _contradictory -> {:halt, {:error, :conflicting_attributes}}
+        end
+      end)
+    end
   end
 
   @spec validate_token(term()) :: :ok | {:error, :invalid_token | :token_too_short | :zero_token}
@@ -50,4 +60,30 @@ defmodule Arbor.Contracts.Security.SigningAuthority.Validator do
   end
 
   def validate_purpose(_), do: {:error, :invalid_purpose}
+
+  defp attribute_pairs(attrs) when is_map(attrs), do: {:ok, Map.to_list(attrs)}
+
+  defp attribute_pairs(attrs) when is_list(attrs) do
+    if Enum.all?(attrs, &match?({_key, _value}, &1)) do
+      {:ok, attrs}
+    else
+      {:error, :invalid_attrs}
+    end
+  end
+
+  defp attribute_pairs(_), do: {:error, :invalid_attrs}
+
+  defp validate_attribute_keys(pairs, allowed_keys) do
+    if Enum.all?(pairs, fn {candidate, _value} ->
+         Enum.any?(allowed_keys, &attribute_key?(candidate, &1))
+       end) do
+      :ok
+    else
+      {:error, :unknown_attribute}
+    end
+  end
+
+  defp attribute_key?(candidate, key) do
+    candidate == key or candidate == Atom.to_string(key)
+  end
 end

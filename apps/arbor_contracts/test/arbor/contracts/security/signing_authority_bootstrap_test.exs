@@ -62,6 +62,32 @@ defmodule Arbor.Contracts.Security.SigningAuthorityBootstrapTest do
                  purpose: "  "
                )
     end
+
+    test "rejects contradictory atom/string duplicate attributes" do
+      assert {:error, :conflicting_attributes} =
+               SigningAuthorityBootstrap.new(%{
+                 "token" => :crypto.strong_rand_bytes(32),
+                 token: @token,
+                 principal_id: @principal,
+                 purpose: :session
+               })
+
+      assert {:error, :conflicting_attributes} =
+               SigningAuthorityBootstrap.new(
+                 token: @token,
+                 principal_id: @principal,
+                 principal_id: "human_other",
+                 purpose: :session
+               )
+
+      assert {:ok, _bootstrap} =
+               SigningAuthorityBootstrap.new(%{
+                 "token" => @token,
+                 token: @token,
+                 principal_id: @principal,
+                 purpose: :session
+               })
+    end
   end
 
   describe "canonicalize/1 and redaction" do

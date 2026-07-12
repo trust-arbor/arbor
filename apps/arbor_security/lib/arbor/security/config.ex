@@ -15,6 +15,10 @@ defmodule Arbor.Security.Config do
 
   @app :arbor_security
   @default_consensus_module Module.concat(["Arbor", "Consensus"])
+  @default_signing_authority_bootstrap_grace_ms 60_000
+  @max_signing_authority_bootstrap_grace_ms 3_600_000
+  @default_signing_authority_broker_call_timeout_ms 5_000
+  @max_signing_authority_broker_call_timeout_ms 30_000
 
   @doc """
   Whether identity verification is enabled for authorization checks.
@@ -47,13 +51,47 @@ defmodule Arbor.Security.Config do
   Grace period for an unclaimed or reclaimable signing-authority bootstrap.
 
   Defaults to 60 seconds. Invalid configuration falls back to the secure
-  packaged default rather than creating a non-expiring slot.
+  packaged default, and oversized values are capped at one hour rather than
+  creating an unsafe or timer-hostile slot.
   """
   @spec signing_authority_bootstrap_grace_ms() :: pos_integer()
   def signing_authority_bootstrap_grace_ms do
-    case Application.get_env(@app, :signing_authority_bootstrap_grace_ms, 60_000) do
-      grace_ms when is_integer(grace_ms) and grace_ms > 0 -> grace_ms
-      _invalid -> 60_000
+    case Application.get_env(
+           @app,
+           :signing_authority_bootstrap_grace_ms,
+           @default_signing_authority_bootstrap_grace_ms
+         ) do
+      grace_ms when is_integer(grace_ms) and grace_ms > 0 ->
+        min(grace_ms, @max_signing_authority_bootstrap_grace_ms)
+
+      _invalid ->
+        @default_signing_authority_bootstrap_grace_ms
+    end
+  end
+
+  @doc false
+  @spec signing_authority_bootstrap_max_grace_ms() :: pos_integer()
+  def signing_authority_bootstrap_max_grace_ms,
+    do: @max_signing_authority_bootstrap_grace_ms
+
+  @doc """
+  Timeout for calls into the signing-authority broker.
+
+  The value is bounded to keep one-shot key-holder lifetimes and caller waits
+  finite even under bad runtime configuration.
+  """
+  @spec signing_authority_broker_call_timeout_ms() :: pos_integer()
+  def signing_authority_broker_call_timeout_ms do
+    case Application.get_env(
+           @app,
+           :signing_authority_broker_call_timeout_ms,
+           @default_signing_authority_broker_call_timeout_ms
+         ) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
+        min(timeout_ms, @max_signing_authority_broker_call_timeout_ms)
+
+      _invalid ->
+        @default_signing_authority_broker_call_timeout_ms
     end
   end
 

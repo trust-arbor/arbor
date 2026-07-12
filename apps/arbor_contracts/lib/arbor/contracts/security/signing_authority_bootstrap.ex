@@ -6,18 +6,22 @@ defmodule Arbor.Contracts.Security.SigningAuthorityBootstrap do
   authority itself and contains no private key, owner process, callback, or
   executable reference. Bootstrap values deliberately have no Jason encoder
   so they cannot enter checkpoints or JSON logs accidentally.
+
+  Redaction applies to genuine bootstrap structs. A caller that forges an
+  ordinary map containing copied credential fields controls that map's
+  inspection behavior and must not log it. Security facade and broker
+  diagnostics never inspect raw credential arguments.
   """
 
   use TypedStruct
 
   alias Arbor.Contracts.Security.SigningAuthority.Validator
-  alias Arbor.Types
 
   typedstruct enforce: true, opaque: true do
     @typedoc "Opaque signing-authority restart slot"
 
     field(:token, binary())
-    field(:principal_id, Types.agent_id())
+    field(:principal_id, Validator.principal_id())
     field(:purpose, atom() | String.t())
   end
 
@@ -26,11 +30,12 @@ defmodule Arbor.Contracts.Security.SigningAuthorityBootstrap do
   """
   @spec new(keyword() | map()) :: {:ok, t()} | {:error, atom()}
   def new(attrs) when is_list(attrs) or is_map(attrs) do
-    token = Validator.get_attr(attrs, :token)
-    principal_id = Validator.get_attr(attrs, :principal_id)
-    purpose = Validator.get_attr(attrs, :purpose)
-
-    with :ok <- Validator.validate_token(token),
+    with {:ok, normalized} <-
+           Validator.extract_attributes(attrs, [:token, :principal_id, :purpose]),
+         token = Map.get(normalized, :token),
+         principal_id = Map.get(normalized, :principal_id),
+         purpose = Map.get(normalized, :purpose),
+         :ok <- Validator.validate_token(token),
          :ok <- Validator.validate_principal_id(principal_id),
          :ok <- Validator.validate_purpose(purpose) do
       {:ok,

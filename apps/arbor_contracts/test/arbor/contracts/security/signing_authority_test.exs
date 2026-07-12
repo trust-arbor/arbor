@@ -135,6 +135,44 @@ defmodule Arbor.Contracts.Security.SigningAuthorityTest do
                  purpose: "  "
                })
     end
+
+    test "rejects contradictory atom/string duplicate attributes" do
+      assert {:error, :conflicting_attributes} =
+               SigningAuthority.new(%{
+                 "token" => :crypto.strong_rand_bytes(32),
+                 token: @valid_token,
+                 principal_id: @valid_principal,
+                 purpose: :session
+               })
+
+      assert {:error, :conflicting_attributes} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 token: :crypto.strong_rand_bytes(32),
+                 principal_id: @valid_principal,
+                 purpose: :session
+               )
+
+      assert {:ok, _authority} =
+               SigningAuthority.new(%{
+                 "token" => @valid_token,
+                 token: @valid_token,
+                 principal_id: @valid_principal,
+                 purpose: :session
+               })
+    end
+
+    test "rejects unknown and malformed attributes" do
+      assert {:error, :unknown_attribute} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: @valid_principal,
+                 purpose: :session,
+                 private_key: :crypto.strong_rand_bytes(32)
+               )
+
+      assert {:error, :invalid_attrs} = SigningAuthority.new([:malformed])
+    end
   end
 
   describe "Inspect redaction" do

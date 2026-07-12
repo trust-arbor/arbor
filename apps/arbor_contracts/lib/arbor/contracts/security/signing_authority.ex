@@ -14,6 +14,11 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
   - **No Jason derive** — must not serialize into checkpoints or JSON logs
   - **Redacted Inspect** — normal inspection never prints the token
 
+  The redaction protocol applies to genuine `%SigningAuthority{}` values.
+  Callers that forge an ordinary map containing copied credential fields still
+  own that map's inspection behavior and must not log or inspect it. Security
+  facade and broker diagnostics never inspect raw credential arguments.
+
   ## Usage
 
   Acquisition requires a one-shot SignedRequest possession proof — knowing an
@@ -34,7 +39,6 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
   use TypedStruct
 
   alias Arbor.Contracts.Security.SigningAuthority.Validator
-  alias Arbor.Types
 
   typedstruct enforce: true do
     @typedoc "Opaque signing-authority reference (broker bearer token + principal binding)"
@@ -42,7 +46,7 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
     # Unguessable broker token. Treated as secret bearer authority.
     field(:token, binary())
     # Principal this authority was opened for. Broker re-checks on every use.
-    field(:principal_id, Types.agent_id())
+    field(:principal_id, Validator.principal_id())
     # Open-time purpose label (session, heartbeat, …). Not a derive domain.
     field(:purpose, atom() | String.t())
   end
@@ -57,17 +61,18 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
   ## Options
 
   - `:token` (required) — unguessable bearer token (≥ 16 bytes)
-  - `:principal_id` (required) — agent id the authority binds to
+  - `:principal_id` (required) — `agent_` or `human_` principal id
   - `:purpose` (required) — open-time purpose atom or non-blank string
     (booleans and blank/whitespace-only strings are rejected)
   """
   @spec new(keyword() | map()) :: {:ok, t()} | {:error, term()}
   def new(attrs) when is_list(attrs) or is_map(attrs) do
-    token = Validator.get_attr(attrs, :token)
-    principal_id = Validator.get_attr(attrs, :principal_id)
-    purpose = Validator.get_attr(attrs, :purpose)
-
-    with :ok <- Validator.validate_token(token),
+    with {:ok, normalized} <-
+           Validator.extract_attributes(attrs, [:token, :principal_id, :purpose]),
+         token = Map.get(normalized, :token),
+         principal_id = Map.get(normalized, :principal_id),
+         purpose = Map.get(normalized, :purpose),
+         :ok <- Validator.validate_token(token),
          :ok <- Validator.validate_principal_id(principal_id),
          :ok <- Validator.validate_purpose(purpose) do
       {:ok,
@@ -115,9 +120,9 @@ defimpl Inspect, for: Arbor.Contracts.Security.SigningAuthority do
     details =
       Inspect.Algebra.concat([
         "principal_id: ",
-        Inspect.Algebra.to_doc(authority.principal_id, opts),
+        Inspect.Algebra.to_doc(Map.get(authority, :principal_id), opts),
         ", purpose: ",
-        Inspect.Algebra.to_doc(authority.purpose, opts),
+        Inspect.Algebra.to_doc(Map.get(authority, :purpose), opts),
         ", token: [REDACTED]"
       ])
 

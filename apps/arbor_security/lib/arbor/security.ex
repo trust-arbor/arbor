@@ -43,6 +43,7 @@ defmodule Arbor.Security do
   @behaviour Arbor.Contracts.API.Security
   @behaviour Arbor.Contracts.API.Identity
 
+  alias Arbor.Contracts.API.Security, as: SecurityContract
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.InvocationReceipt
@@ -1067,9 +1068,11 @@ defmodule Arbor.Security do
       when is_binary(agent_id) and (is_list(opts) or is_map(opts)) do
     with :ok <- SigningAuthorityValidator.validate_principal_id(agent_id),
          :ok <- validate_private_key_for_authority(private_key),
-         {:ok, purpose} <- fetch_required_attr(opts, :purpose, :invalid_purpose),
+         {:ok, normalized_opts} <-
+           SigningAuthorityValidator.extract_attributes(opts, [:purpose, :owner]),
+         {:ok, purpose} <- fetch_acquisition_purpose(normalized_opts),
          :ok <- validate_authority_purpose(purpose),
-         {:ok, owner} <- fetch_owner_attr(opts),
+         owner = Map.get(normalized_opts, :owner, self()),
          :ok <- validate_owner_pid(owner) do
       payload = SigningAuthorityBroker.acquisition_payload(agent_id, purpose, owner)
       sign_acquisition_proof(payload, agent_id, private_key)
@@ -1090,9 +1093,18 @@ defmodule Arbor.Security do
 
   This API never accepts a principal id in place of a proof and never returns
   or loads a private key for the caller.
+
+  ## Options
+
+  - `:grace_ms` — positive slot grace in milliseconds. Defaults to Security
+    configuration and is capped at the broker's conservative timer maximum.
+
+  Unknown, duplicate, string-keyed, or mixed-key options fail closed before
+  the possession proof is verified, so they do not consume its nonce.
   """
   @spec issue_signing_authority_bootstrap(SignedRequest.t(), keyword() | map()) ::
-          {:ok, SigningAuthorityBootstrap.t()} | {:error, term()}
+          {:ok, SigningAuthorityBootstrap.t()}
+          | {:error, SecurityContract.signing_authority_bootstrap_error()}
   def issue_signing_authority_bootstrap(proof, opts \\ []) do
     issue_signing_authority_bootstrap_from_owner_bound_possession_proof(proof, opts)
   end
@@ -1110,7 +1122,7 @@ defmodule Arbor.Security do
         %SignedRequest{},
         _opts
       ) do
-    {:error, :invalid_acquisition_proof_args}
+    {:error, :invalid_options}
   end
 
   def issue_signing_authority_bootstrap_from_owner_bound_possession_proof(_proof, _opts) do
@@ -1126,7 +1138,8 @@ defmodule Arbor.Security do
   bearer token.
   """
   @spec claim_signing_authority(SigningAuthorityBootstrap.t()) ::
-          {:ok, SigningAuthority.t()} | {:error, term()}
+          {:ok, SigningAuthority.t()}
+          | {:error, SecurityContract.signing_authority_bootstrap_error()}
   def claim_signing_authority(bootstrap) do
     claim_signing_authority_from_bootstrap_for_calling_process(bootstrap)
   end
@@ -1143,7 +1156,7 @@ defmodule Arbor.Security do
   Close a bootstrap slot and any live authority claimed from it.
   """
   @spec close_signing_authority_bootstrap(SigningAuthorityBootstrap.t()) ::
-          :ok | {:error, term()}
+          :ok | {:error, SecurityContract.signing_authority_bootstrap_error()}
   def close_signing_authority_bootstrap(bootstrap) do
     close_signing_authority_bootstrap_and_active_authority(bootstrap)
   end
@@ -1168,7 +1181,8 @@ defmodule Arbor.Security do
   not claimed.
   """
   @spec open_ephemeral_signing_authority(SignedRequest.t(), binary()) ::
-          {:ok, SigningAuthority.t()} | {:error, term()}
+          {:ok, SigningAuthority.t()}
+          | {:error, SecurityContract.signing_authority_acquisition_error()}
   def open_ephemeral_signing_authority(proof, private_key) do
     open_ephemeral_signing_authority_from_owner_bound_proof_and_private_key(
       proof,
@@ -1218,7 +1232,8 @@ defmodule Arbor.Security do
       {:ok, signed} = Arbor.Security.sign_with_authority(authority, "arbor://fs/read")
   """
   @spec open_signing_authority(SignedRequest.t()) ::
-          {:ok, SigningAuthority.t()} | {:error, term()}
+          {:ok, SigningAuthority.t()}
+          | {:error, SecurityContract.signing_authority_acquisition_error()}
   def open_signing_authority(%SignedRequest{} = proof) do
     SigningAuthorityBroker.open(proof)
   end
@@ -1289,7 +1304,12 @@ defmodule Arbor.Security do
   end
 
   @doc """
-  Explicitly close (revoke) a signing authority.
+  Close a signing authority's live claim.
+
+  For a bootstrap-backed authority, this revokes the current authority token
+  and releases the slot into its bounded reclaim grace. It does not permanently
+  revoke the restart slot. Use `close_signing_authority_bootstrap/1` to remove
+  the slot and any active authority permanently.
 
   Partial/forged struct-tagged maps are canonicalized and fail closed without
   crashing the broker or exiting the caller.
@@ -1305,36 +1325,10 @@ defmodule Arbor.Security do
     end
   end
 
-  defp fetch_required_attr(opts, key, error_atom) when is_list(opts) do
-    case Keyword.fetch(opts, key) do
-      {:ok, value} when not is_nil(value) -> {:ok, value}
-      _ -> {:error, error_atom}
-    end
-  end
-
-  defp fetch_required_attr(opts, key, error_atom) when is_map(opts) do
-    value = Map.get(opts, key) || Map.get(opts, Atom.to_string(key))
-
-    if is_nil(value), do: {:error, error_atom}, else: {:ok, value}
-  end
-
-  defp fetch_owner_attr(opts) when is_list(opts) do
-    case Keyword.fetch(opts, :owner) do
-      {:ok, owner} -> {:ok, owner}
-      :error -> {:ok, self()}
-    end
-  end
-
-  defp fetch_owner_attr(opts) when is_map(opts) do
-    case Map.fetch(opts, :owner) do
-      {:ok, owner} ->
-        {:ok, owner}
-
-      :error ->
-        case Map.fetch(opts, "owner") do
-          {:ok, owner} -> {:ok, owner}
-          :error -> {:ok, self()}
-        end
+  defp fetch_acquisition_purpose(opts) do
+    case Map.fetch(opts, :purpose) do
+      {:ok, purpose} when not is_nil(purpose) -> {:ok, purpose}
+      _ -> {:error, :invalid_purpose}
     end
   end
 
