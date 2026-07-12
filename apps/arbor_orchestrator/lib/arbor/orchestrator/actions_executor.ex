@@ -232,10 +232,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp execute_authorized_action(agent_id, action_module, params, context, name) do
-    result =
-      with_engine_principal(context, agent_id, action_module, fn ->
-        Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context)
-      end)
+    result = Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context)
 
     case result do
       {:ok, :pending_approval, proposal_id} ->
@@ -398,21 +395,27 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   defp verify_caller_authority(action_module, params, _agent_id, caller_id, opts) do
     security = Arbor.Orchestrator.Config.security_module()
-    resource = Arbor.Actions.canonical_uri_for(action_module, params)
     scope_opts = scope_opts(opts)
-    resource_opts = maybe_put_file_path(scope_opts, resource, params)
 
-    with true <- function_exported?(security, :list_capabilities, 2),
-         true <- function_exported?(security, :capability_authorizes?, 3),
-         {:ok, effective_resource} <- effective_resource(security, resource, resource_opts),
-         {:ok, capabilities} <- security.list_capabilities(caller_id, scope_opts),
-         true <-
-           Enum.any?(capabilities, fn capability ->
-             security.capability_authorizes?(capability, effective_resource, scope_opts)
-           end) do
-      :ok
-    else
-      _ -> {:error, {:caller_authority_missing, resource}}
+    case action_authorization_resource(action_module, params) do
+      {:ok, resource} ->
+        resource_opts = maybe_put_file_path(scope_opts, resource, params)
+
+        with true <- function_exported?(security, :list_capabilities, 2),
+             true <- function_exported?(security, :capability_authorizes?, 3),
+             {:ok, effective_resource} <- effective_resource(security, resource, resource_opts),
+             {:ok, capabilities} <- security.list_capabilities(caller_id, scope_opts),
+             true <-
+               Enum.any?(capabilities, fn capability ->
+                 security.capability_authorizes?(capability, effective_resource, scope_opts)
+               end) do
+          :ok
+        else
+          _ -> {:error, {:caller_authority_missing, resource}}
+        end
+
+      {:error, reason} ->
+        {:error, {:caller_authority_resource_invalid, reason}}
     end
   end
 
@@ -638,7 +641,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     with :ok <- verify_retry_resolution(name, action_module),
          :ok <- verify_retry_binding(name, action_module, context),
          :ok <- verify_retry_caller_authority(action_module, params, agent_id, context),
-         resource = Arbor.Actions.canonical_uri_for(action_module, params),
+         {:ok, resource} <- action_authorization_resource(action_module, params),
          retry_context =
            Map.put(context, :approved_invocation, %{
              request_id: request_id,
@@ -650,9 +653,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          retry_context = resign_for_retry(retry_context, action_module, params),
          :ok <- verify_retry_workdir(retry_context) do
       result =
-        with_engine_principal(retry_context, agent_id, action_module, fn ->
-          Arbor.Actions.authorize_and_execute(agent_id, action_module, params, retry_context)
-        end)
+        Arbor.Actions.authorize_and_execute(agent_id, action_module, params, retry_context)
 
       case result do
         {:ok, result} ->
@@ -685,29 +686,6 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     if resolved == action_module,
       do: :ok,
       else: {:error, {:action_registry_drift, name}}
-  end
-
-  defp with_engine_principal(context, principal_id, action_module, fun) do
-    if authenticated_principal_required?(action_module) do
-      case Map.get(context, :run_authorization) do
-        %RunAuthorization{execution_principal: ^principal_id} = authority ->
-          case RunAuthorization.verify_runtime(authority) do
-            :ok -> Arbor.Actions.with_principal_authority(principal_id, fun)
-            {:error, _reason} = error -> error
-          end
-
-        _other ->
-          fun.()
-      end
-    else
-      fun.()
-    end
-  end
-
-  defp authenticated_principal_required?(action_module) do
-    Code.ensure_loaded?(action_module) and
-      function_exported?(action_module, :requires_authenticated_principal?, 0) and
-      action_module.requires_authenticated_principal?() == true
   end
 
   defp verify_retry_binding(name, action_module, context) do
@@ -814,18 +792,15 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp resign_for_retry(context, action_module, params) do
     case context[:auth_context] do
       %{signer: signer} when is_function(signer, 1) ->
-        resource = Arbor.Actions.canonical_uri_for(action_module, params)
+        with {:ok, resource} <- action_authorization_resource(action_module, params),
+             {:ok, fresh} <- signer.(resource) do
+          auth_context = %{context.auth_context | signed_request: fresh}
 
-        case signer.(resource) do
-          {:ok, fresh} ->
-            auth_context = %{context.auth_context | signed_request: fresh}
-
-            context
-            |> Map.put(:signed_request, fresh)
-            |> Map.put(:auth_context, auth_context)
-
-          _ ->
-            context
+          context
+          |> Map.put(:signed_request, fresh)
+          |> Map.put(:auth_context, auth_context)
+        else
+          _ -> context
         end
 
       _ ->
@@ -1087,20 +1062,37 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp sign_for_module(nil, _action_module, _params), do: nil
 
   defp sign_for_module(signer, action_module, params) when is_function(signer, 1) do
-    resource = Arbor.Actions.canonical_uri_for(action_module, params)
-
-    case signer.(resource) do
-      {:ok, signed_request} ->
-        Logger.debug("[ActionsExecutor] Signed for #{resource}")
-        signed_request
-
+    with {:ok, resource} <- action_authorization_resource(action_module, params),
+         {:ok, signed_request} <- signer.(resource) do
+      Logger.debug("[ActionsExecutor] Signed for #{resource}")
+      signed_request
+    else
       {:error, reason} ->
-        Logger.warning("[ActionsExecutor] Signing failed for #{resource}: #{inspect(reason)}")
+        Logger.warning(
+          "[ActionsExecutor] Signing failed for #{inspect(action_module)}: #{inspect(reason)}"
+        )
+
         nil
     end
   end
 
   defp sign_for_module(_, _, _), do: nil
+
+  defp action_authorization_resource(action_module, params) do
+    result =
+      if Code.ensure_loaded?(action_module) and
+           function_exported?(action_module, :authorization_resource, 1) do
+        action_module.authorization_resource(params)
+      else
+        {:ok, Arbor.Actions.canonical_uri_for(action_module, params)}
+      end
+
+    case result do
+      {:ok, "arbor://" <> _rest = resource} -> {:ok, resource}
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_action_authorization_resource}
+    end
+  end
 
   # Execute an action thunk. arbor_actions is a guaranteed compile dep, so the
   # module is always loaded — this no longer guards module availability. It

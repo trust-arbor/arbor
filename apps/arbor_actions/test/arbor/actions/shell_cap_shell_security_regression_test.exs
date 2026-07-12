@@ -46,6 +46,7 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     prev = %{
       reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
       signing: Application.get_env(:arbor_security, :capability_signing_required),
+      identity_verification: Application.get_env(:arbor_security, :identity_verification),
       identity: Application.get_env(:arbor_security, :strict_identity_mode),
       uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
       escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
@@ -56,6 +57,7 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
 
     Application.put_env(:arbor_security, :reflex_checking_enabled, false)
     Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_security, :identity_verification, false)
     Application.put_env(:arbor_security, :strict_identity_mode, false)
     Application.put_env(:arbor_security, :uri_registry_enforcement, false)
     Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
@@ -65,6 +67,7 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     on_exit(fn ->
       restore(:arbor_security, :reflex_checking_enabled, prev.reflex)
       restore(:arbor_security, :capability_signing_required, prev.signing)
+      restore(:arbor_security, :identity_verification, prev.identity_verification)
       restore(:arbor_security, :strict_identity_mode, prev.identity)
       restore(:arbor_security, :uri_registry_enforcement, prev.uri_registry)
       restore(:arbor_security, :consensus_escalation_enabled, prev.escalation)
@@ -76,7 +79,9 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
         else: Application.put_env(:arbor_shell, :compound_shell_enabled, prev.compound)
     end)
 
-    agent_id = "agent_actions_capshell_sec_#{System.unique_integer([:positive])}"
+    {:ok, identity} = Arbor.Security.generate_identity(name: "actions-capshell-test")
+    :ok = Arbor.Security.register_identity(identity)
+    agent_id = identity.agent_id
 
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
 
@@ -94,7 +99,19 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
 
     {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec/**")
 
-    {:ok, agent_id: agent_id}
+    on_exit(fn ->
+      if Process.whereis(Arbor.Security.CapabilityStore) do
+        Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      end
+
+      if Process.whereis(Arbor.Trust.Store), do: Arbor.Trust.Store.delete_profile(agent_id)
+
+      if Process.whereis(Arbor.Security.Identity.Registry) do
+        Arbor.Security.deregister_identity(agent_id)
+      end
+    end)
+
+    {:ok, agent_id: agent_id, private_key: identity.private_key}
   end
 
   test "security regression: Execute config true + sandbox:none returns exact unavailable and no delayed side effect",
@@ -322,24 +339,33 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     end
   end
 
-  test "ordinary single-command Execute still works", %{agent_id: agent_id} do
+  test "ordinary single-command Execute still works", %{
+    agent_id: agent_id,
+    private_key: private_key
+  } do
+    {:ok, signed_request} =
+      Arbor.Contracts.Security.SignedRequest.sign(
+        "arbor://shell/exec/echo",
+        agent_id,
+        private_key
+      )
+
     assert {:ok, result} =
-             Arbor.Actions.with_principal_authority(agent_id, fn ->
-               Arbor.Actions.authorize_and_execute(
-                 agent_id,
-                 Shell.Execute,
-                 %{command: "echo actions-single-ok", sandbox: :none},
-                 %{
-                   agent_id: agent_id,
-                   approved_invocation: %{
-                     request_id: "irq_single_ok",
-                     principal_id: agent_id,
-                     resource_uri: "arbor://shell/exec/echo",
-                     decision: :approved
-                   }
+             Arbor.Actions.authorize_and_execute(
+               agent_id,
+               Shell.Execute,
+               %{command: "echo actions-single-ok", sandbox: :none},
+               %{
+                 agent_id: agent_id,
+                 signed_request: signed_request,
+                 approved_invocation: %{
+                   request_id: "irq_single_ok",
+                   principal_id: agent_id,
+                   resource_uri: "arbor://shell/exec/echo",
+                   decision: :approved
                  }
-               )
-             end)
+               }
+             )
 
     assert result.exit_code == 0
     assert result.stdout =~ "actions-single-ok"

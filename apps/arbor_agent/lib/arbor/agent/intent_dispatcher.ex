@@ -55,10 +55,16 @@ defmodule Arbor.Agent.IntentDispatcher do
       negative outcome to feed back to the LLM.
   """
 
+  alias Arbor.Agent.Capabilities
   alias Arbor.Contracts.Memory.{Intent, Percept}
 
   @type opts :: keyword()
   @type result :: {:ok, Percept.t()} | {:error, term()}
+  @type prepared_intent :: %{
+          intent: Intent.t(),
+          module: module(),
+          resource: String.t()
+        }
 
   @doc """
   Dispatch an actionable intent.
@@ -72,11 +78,33 @@ defmodule Arbor.Agent.IntentDispatcher do
   """
   @spec dispatch(String.t(), Intent.t(), opts()) :: result()
   def dispatch(agent_id, %Intent{} = intent, opts \\ []) when is_binary(agent_id) do
+    with {:ok, prepared} <- prepare(intent) do
+      context = build_action_context(agent_id, prepared.intent, opts)
+      execute(agent_id, prepared, context)
+    end
+  end
+
+  @doc """
+  Resolve and normalize an intent before authorization.
+
+  Capability-shaped intents emitted by `CycleController` use the operation as
+  their action name. The canonical `shell/execute` shape is normalized to the
+  exact `shell_execute` action and `%{command: target}` parameters here, before
+  a signed request is bound to the action's exact authorization resource.
+  """
+  @spec prepare(Intent.t()) :: {:ok, prepared_intent()} | {:error, term()}
+  def prepare(%Intent{} = intent) do
     with :ok <- ensure_actionable(intent),
-         {:ok, module} <- resolve_action_module(intent),
-         :ok <- audit_capability_match(module, intent.params, intent.capability) do
-      context = build_action_context(agent_id, intent, opts)
-      execute(agent_id, module, intent, context)
+         {:ok, module, source} <- resolve_action(intent),
+         {:ok, normalized_intent} <- normalize_intent(intent, module, source),
+         :ok <- audit_prepared_capability(module, normalized_intent, source),
+         {:ok, resource} <- authorization_resource(module, normalized_intent.params) do
+      normalized_intent =
+        if source == :capability,
+          do: %{normalized_intent | capability: resource},
+          else: normalized_intent
+
+      {:ok, %{intent: normalized_intent, module: module, resource: resource}}
     end
   end
 
@@ -102,12 +130,83 @@ defmodule Arbor.Agent.IntentDispatcher do
   """
   @spec resolve_action_module(Intent.t()) ::
           {:ok, module()} | {:error, :intent_missing_action | {:unknown_action, atom()}}
-  def resolve_action_module(%Intent{action: nil}), do: {:error, :intent_missing_action}
+  def resolve_action_module(%Intent{} = intent) do
+    case resolve_action(intent) do
+      {:ok, module, _source} -> {:ok, module}
+      {:error, _reason} = error -> error
+    end
+  end
 
-  def resolve_action_module(%Intent{action: action_name}) when is_atom(action_name) do
+  defp resolve_action(%Intent{action: nil}), do: {:error, :intent_missing_action}
+
+  defp resolve_action(%Intent{action: action_name} = intent) when is_atom(action_name) do
     case Arbor.Actions.name_to_module(Atom.to_string(action_name)) do
-      {:ok, module} -> {:ok, module}
-      {:error, :unknown_action} -> {:error, {:unknown_action, action_name}}
+      {:ok, module} ->
+        {:ok, module, :named}
+
+      {:error, :unknown_action} ->
+        resolve_capability_action(intent)
+    end
+  end
+
+  defp resolve_capability_action(%Intent{
+         action: :execute,
+         capability: "shell",
+         op: :execute
+       }) do
+    case Capabilities.resolve_action("shell", :execute) do
+      {:ok, Arbor.Actions.Shell.Execute = module} -> {:ok, module, :capability}
+      _other -> {:error, {:unknown_action, :execute}}
+    end
+  end
+
+  defp resolve_capability_action(%Intent{action: action_name}),
+    do: {:error, {:unknown_action, action_name}}
+
+  defp normalize_intent(intent, _module, :named), do: {:ok, intent}
+
+  defp normalize_intent(%Intent{} = intent, Arbor.Actions.Shell.Execute, :capability) do
+    params = intent.params || %{}
+    target = intent.target || Map.get(params, :target) || Map.get(params, "target")
+    asserted_command = Map.get(params, :command) || Map.get(params, "command")
+
+    cond do
+      not is_binary(target) or String.trim(target) == "" ->
+        {:error, :shell_command_required}
+
+      not is_nil(asserted_command) and asserted_command != target ->
+        {:error, :shell_command_target_mismatch}
+
+      true ->
+        normalized_params =
+          params
+          |> Map.delete(:target)
+          |> Map.delete("target")
+          |> Map.delete("command")
+          |> Map.put(:command, target)
+
+        {:ok, %{intent | action: :shell_execute, params: normalized_params}}
+    end
+  end
+
+  defp audit_prepared_capability(_module, _intent, :capability), do: :ok
+
+  defp audit_prepared_capability(module, intent, :named) do
+    audit_capability_match(module, intent.params, intent.capability)
+  end
+
+  defp authorization_resource(module, params) do
+    result =
+      if Code.ensure_loaded?(module) and function_exported?(module, :authorization_resource, 1) do
+        module.authorization_resource(params)
+      else
+        {:ok, Arbor.Actions.canonical_uri_for(module, params)}
+      end
+
+    case result do
+      {:ok, "arbor://" <> _rest = resource} -> {:ok, resource}
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_action_authorization_resource}
     end
   end
 
@@ -136,7 +235,11 @@ defmodule Arbor.Agent.IntentDispatcher do
   def audit_capability_match(_module, _params, ""), do: :ok
 
   def audit_capability_match(module, params, expected_uri) when is_binary(expected_uri) do
-    actual_uri = Arbor.Actions.canonical_uri_for(module, params)
+    actual_uri =
+      case authorization_resource(module, params) do
+        {:ok, resource} -> resource
+        {:error, _reason} -> Arbor.Actions.canonical_uri_for(module, params)
+      end
 
     if capability_uri_matches?(actual_uri, expected_uri) do
       :ok
@@ -185,7 +288,7 @@ defmodule Arbor.Agent.IntentDispatcher do
 
   # ── Execution + Percept formatting ────────────────────────────────
 
-  defp execute(agent_id, module, %Intent{params: params} = intent, context) do
+  defp execute(agent_id, %{module: module, intent: %Intent{params: params} = intent}, context) do
     started_at = System.monotonic_time(:millisecond)
     result = Arbor.Actions.authorize_and_execute(agent_id, module, params, context)
     duration_ms = System.monotonic_time(:millisecond) - started_at

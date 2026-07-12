@@ -98,21 +98,8 @@ defmodule Arbor.Actions do
     resource_uri
   )
   @active_execution_binding_key {__MODULE__, :active_execution_binding}
-  @active_principal_lease_key {__MODULE__, :active_principal_lease}
   @active_action_authorization_key {__MODULE__, :active_action_authorization}
   @action_authorization_resource_key {__MODULE__, :action_authorization_resource}
-
-  defmodule PrincipalLease do
-    @moduledoc false
-    @enforce_keys [:principal_id, :owner, :ref]
-    defstruct @enforce_keys
-
-    @opaque t :: %__MODULE__{
-              principal_id: String.t(),
-              owner: pid(),
-              ref: reference()
-            }
-  end
 
   defmodule ActionAuthorization do
     @moduledoc false
@@ -257,60 +244,6 @@ defmodule Arbor.Actions do
     do: {:error, :invalid_authorization_principal}
 
   @doc false
-  @spec with_principal_authority(
-          String.t(),
-          (-> result) | (PrincipalLease.t() -> result)
-        ) :: result
-        when result: term()
-  def with_principal_authority(principal_id, fun)
-      when is_binary(principal_id) and (is_function(fun, 0) or is_function(fun, 1)) do
-    case validate_authorization_principal(principal_id) do
-      :ok ->
-        lease = %PrincipalLease{principal_id: principal_id, owner: self(), ref: make_ref()}
-
-        with_process_binding(@active_principal_lease_key, lease, fn ->
-          invoke_principal_callback(fun, lease)
-        end)
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  def with_principal_authority(_principal_id, _fun),
-    do: {:error, :invalid_authorization_principal}
-
-  @doc false
-  @spec execute_with_principal_authority(PrincipalLease.t(), module(), map(), map()) ::
-          {:ok, any()} | {:error, term()}
-  def execute_with_principal_authority(authority, action_module, params, context \\ %{})
-
-  def execute_with_principal_authority(authority, action_module, params, context)
-      when is_atom(action_module) and is_map(params) and is_map(context) do
-    case {authority, Process.get(@active_principal_lease_key)} do
-      {%PrincipalLease{principal_id: principal_id, owner: owner, ref: reference} = lease, lease}
-      when owner == self() and is_reference(reference) ->
-        with {:ok, bound_context} <- bind_authenticated_principal(context, principal_id) do
-          with_action_authorization(
-            principal_id,
-            action_module,
-            bound_context,
-            &execute_action(action_module, params, &1)
-          )
-        end
-
-      _other ->
-        {:error, :authenticated_principal_required}
-    end
-  end
-
-  def execute_with_principal_authority(_authority, _action_module, _params, _context),
-    do: {:error, :invalid_action_execution}
-
-  defp invoke_principal_callback(fun, _lease) when is_function(fun, 0), do: fun.()
-  defp invoke_principal_callback(fun, lease) when is_function(fun, 1), do: fun.(lease)
-
-  @doc false
   @spec authorized_principal(map(), module()) :: {:ok, String.t()} | {:error, term()}
   def authorized_principal(context, action_module)
       when is_map(context) and is_atom(action_module) do
@@ -344,16 +277,9 @@ defmodule Arbor.Actions do
 
   defp require_authenticated_principal(action_module, agent_id, context) do
     if authenticated_principal_required?(action_module) do
-      cond do
-        active_principal?(agent_id) ->
-          :ok
-
-        match?(%SignedRequest{agent_id: ^agent_id}, Map.get(context, :signed_request)) ->
-          :ok
-
-        true ->
-          {:error, :authenticated_principal_required}
-      end
+      if match?(%SignedRequest{agent_id: ^agent_id}, Map.get(context, :signed_request)),
+        do: :ok,
+        else: {:error, :authenticated_principal_required}
     else
       :ok
     end
@@ -384,14 +310,6 @@ defmodule Arbor.Actions do
     Code.ensure_loaded?(action_module) and
       function_exported?(action_module, :requires_authenticated_principal?, 0) and
       action_module.requires_authenticated_principal?() == true
-  end
-
-  defp active_principal?(principal_id) do
-    match?(
-      %PrincipalLease{principal_id: ^principal_id, owner: owner, ref: reference}
-      when owner == self() and is_reference(reference),
-      Process.get(@active_principal_lease_key)
-    )
   end
 
   defp with_action_authorization(principal_id, action_module, context, fun) do
@@ -1501,10 +1419,29 @@ defmodule Arbor.Actions do
   """
   @spec name_to_module(String.t()) :: {:ok, module()} | {:error, :unknown_action}
   def name_to_module(name) when is_binary(name) do
-    case Map.get(name_to_module_map(), name) ||
-           Map.get(name_to_module_map(), normalize_name(name)) do
-      nil -> {:error, :unknown_action}
-      module -> {:ok, module}
+    case registered_action_module(name) do
+      {:ok, module} ->
+        {:ok, module}
+
+      :error ->
+        case Map.get(name_to_module_map(), name) ||
+               Map.get(name_to_module_map(), normalize_name(name)) do
+          nil -> {:error, :unknown_action}
+          module -> {:ok, module}
+        end
+    end
+  end
+
+  defp registered_action_module(name) do
+    registry = Arbor.Common.ActionRegistry
+
+    if Process.whereis(registry) do
+      case registry.resolve(name) do
+        {:ok, module} -> {:ok, module}
+        {:error, _reason} -> :error
+      end
+    else
+      :error
     end
   end
 

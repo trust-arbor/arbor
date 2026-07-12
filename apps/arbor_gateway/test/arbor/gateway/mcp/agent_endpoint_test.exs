@@ -2,6 +2,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
+  alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Gateway.MCP.{ActionBridge, AgentEndpoint, EndpointRegistry}
 
   # ============================================================================
@@ -80,37 +81,38 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       start_supervised!({EndpointRegistry, []})
     end
 
-    # These tests verify MCP protocol behavior, not security.
-    # In umbrella context, the test agent IDs (`proto-agent-1` etc.)
-    # don't carry capabilities, so authorize_and_execute would deny
-    # every tool call. Force the AgentEndpoint into its registry-bound
-    # fallback path via a config seam — the earlier `GenServer.stop(
-    # CapabilityStore)` approach raced against OTP's permanent-restart
-    # of that GenServer and leaked failures (~60% of seeds) into the
-    # full-suite run.
+    ensure_security_started()
+
     prev_identity = Application.get_env(:arbor_security, :identity_verification)
     prev_signing = Application.get_env(:arbor_security, :capability_signing_required)
-
-    prev_require_security =
-      Application.get_env(:arbor_gateway, :mcp_endpoint_require_security)
+    prev_strict = Application.get_env(:arbor_security, :strict_identity_mode)
+    prev_uri = Application.get_env(:arbor_security, :uri_registry_enforcement)
+    prev_reflex = Application.get_env(:arbor_security, :reflex_checking_enabled)
+    prev_escalation = Application.get_env(:arbor_security, :consensus_escalation_enabled)
+    prev_security_approval = Application.get_env(:arbor_security, :approval_guard_enabled)
+    prev_trust_approval = Application.get_env(:arbor_trust, :approval_guard_enabled)
+    prev_trust_enforcer = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
 
     Application.put_env(:arbor_security, :identity_verification, false)
     Application.put_env(:arbor_security, :capability_signing_required, false)
-    Application.put_env(:arbor_gateway, :mcp_endpoint_require_security, false)
+    Application.put_env(:arbor_security, :strict_identity_mode, false)
+    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_security, :approval_guard_enabled, false)
+    Application.put_env(:arbor_trust, :approval_guard_enabled, false)
+    Application.put_env(:arbor_trust, :policy_enforcer_enabled, false)
 
     on_exit(fn ->
-      Application.put_env(:arbor_security, :identity_verification, prev_identity || true)
-
-      Application.put_env(
-        :arbor_security,
-        :capability_signing_required,
-        prev_signing || false
-      )
-
-      case prev_require_security do
-        nil -> Application.delete_env(:arbor_gateway, :mcp_endpoint_require_security)
-        val -> Application.put_env(:arbor_gateway, :mcp_endpoint_require_security, val)
-      end
+      restore_env(:arbor_security, :identity_verification, prev_identity)
+      restore_env(:arbor_security, :capability_signing_required, prev_signing)
+      restore_env(:arbor_security, :strict_identity_mode, prev_strict)
+      restore_env(:arbor_security, :uri_registry_enforcement, prev_uri)
+      restore_env(:arbor_security, :reflex_checking_enabled, prev_reflex)
+      restore_env(:arbor_security, :consensus_escalation_enabled, prev_escalation)
+      restore_env(:arbor_security, :approval_guard_enabled, prev_security_approval)
+      restore_env(:arbor_trust, :approval_guard_enabled, prev_trust_approval)
+      restore_env(:arbor_trust, :policy_enforcer_enabled, prev_trust_enforcer)
     end)
 
     :ok
@@ -230,10 +232,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
 
     test "client calls tool and gets result" do
-      agent_id = "proto-agent-2"
-
-      {:ok, endpoint} =
-        Arbor.Gateway.start_agent_endpoint(agent_id, actions: [EchoAction])
+      {agent_id, endpoint} = start_authorized_endpoint([EchoAction])
 
       {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
@@ -250,10 +249,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
 
     test "client calls tool with integer params" do
-      agent_id = "proto-agent-3"
-
-      {:ok, endpoint} =
-        Arbor.Gateway.start_agent_endpoint(agent_id, actions: [AddAction])
+      {agent_id, endpoint} = start_authorized_endpoint([AddAction])
 
       {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
@@ -286,11 +282,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
 
     test "client handles tool failure" do
-      {:ok, endpoint} =
-        AgentEndpoint.start_link(
-          agent_id: "proto-agent-5",
-          actions: [FailAction]
-        )
+      {agent_id, endpoint} = start_authorized_endpoint([FailAction])
 
       {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
@@ -300,7 +292,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       assert content =~ "test failure" or content =~ "Error"
 
       ExMCP.Client.stop(client)
-      GenServer.stop(endpoint)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
     end
   end
 
@@ -470,13 +462,10 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
   describe "agent-to-agent communication" do
     test "full agent-to-agent tool call lifecycle" do
       # Agent A starts an endpoint exposing its actions
-      {:ok, _endpoint} =
-        Arbor.Gateway.start_agent_endpoint("agent-a",
-          actions: [EchoAction, AddAction]
-        )
+      {agent_id, _endpoint} = start_authorized_endpoint([EchoAction, AddAction])
 
       # Agent B connects to Agent A
-      {:ok, client} = Arbor.Gateway.connect_to_agent("agent-a")
+      {:ok, client} = Arbor.Gateway.connect_to_agent(agent_id)
 
       # Agent B discovers Agent A's tools
       {:ok, %{tools: tools}} = ExMCP.Client.list_tools(client)
@@ -494,7 +483,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
       # Cleanup
       ExMCP.Client.stop(client)
-      Arbor.Gateway.stop_agent_endpoint("agent-a")
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
     end
 
     test "multiple clients can connect to same endpoint" do
@@ -519,13 +508,13 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
   end
 
   describe "security regression: endpoint principal authority" do
-    test "registered fallback endpoint executes childless Shell and drops authority after ownership removal" do
+    test "registered typed endpoint executes childless Shell and drops authority after ownership removal" do
       ensure_shell_started()
-      agent_id = unique_agent_id("fallback-shell")
 
-      {:ok, endpoint} =
-        Arbor.Gateway.start_agent_endpoint(agent_id,
-          actions: [Arbor.Actions.Shell.Execute]
+      {agent_id, endpoint} =
+        start_authorized_endpoint(
+          [Arbor.Actions.Shell.Execute],
+          ["arbor://shell/exec/echo"]
         )
 
       {:ok, client} = Arbor.Gateway.connect_to_agent(agent_id)
@@ -578,78 +567,66 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       EndpointRegistry.unregister(agent_id)
       GenServer.stop(endpoint)
     end
+
+    test "registered privileged scalar without typed endpoint proof cannot execute Shell" do
+      ensure_shell_started()
+      agent_id = unique_agent_id("scalar-only-shell")
+      authorize_agent(agent_id, ["arbor://shell/exec/echo"])
+
+      {:ok, _endpoint} =
+        Arbor.Gateway.start_agent_endpoint(agent_id,
+          actions: [Arbor.Actions.Shell.Execute]
+        )
+
+      {:ok, client} = Arbor.Gateway.connect_to_agent(agent_id)
+
+      {:ok, denied} =
+        ExMCP.Client.call_tool(client, "shell_execute", %{
+          "command" => "echo scalar-endpoint-impersonation"
+        })
+
+      denied_text = get_tool_result_text(denied)
+      assert denied_text =~ "endpoint_authentication_required"
+      refute denied_text =~ "scalar-endpoint-impersonation\n"
+
+      ExMCP.Client.stop(client)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
+      Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      Arbor.Trust.Store.delete_profile(agent_id)
+    end
+
+    test "typed endpoint proof cannot be rebound to a mismatched scalar principal" do
+      {signed_agent_id, signed_request} = authenticated_identity("proof-owner")
+      other_agent_id = unique_agent_id("proof-mismatch")
+      previous_trap_exit = Process.flag(:trap_exit, true)
+
+      try do
+        assert {:error, {:endpoint_authentication_failed, :endpoint_signed_request_mismatch}} =
+                 Arbor.Gateway.start_agent_endpoint(other_agent_id,
+                   actions: [EchoAction],
+                   signed_request: signed_request
+                 )
+      after
+        Process.flag(:trap_exit, previous_trap_exit)
+      end
+
+      refute signed_agent_id == other_agent_id
+      assert :error = EndpointRegistry.lookup(other_agent_id)
+    end
   end
 
   # ============================================================================
   # Security regression — capability gate on MCP tool execution
   # ============================================================================
   #
-  # Wave-2b fail-open fix: AgentEndpoint.execute_action/3 used to fall back to
-  # an UNAUTHENTICATED `action_module.run/2` whenever the security subsystem
-  # wasn't loaded/available. With arbor_actions now a hard dep and
-  # `:mcp_endpoint_require_security` defaulting to true, the gate MUST engage:
-  # tool calls route through `Arbor.Actions.authorize_and_execute/4` and an
-  # agent lacking the capability is DENIED — the action never runs.
-  #
-  # The other describe blocks above intentionally set
-  # `:mcp_endpoint_require_security = false` (security subsystem isn't running
-  # there) so they exercise MCP protocol behavior, NOT security. THIS block is
-  # the only gate-fires coverage: it starts the security subsystem so
-  # `Arbor.Security.healthy?()` is true and `CapabilityStore` is alive, then
-  # flips `:mcp_endpoint_require_security` back to true.
+  # Every endpoint tool call uses the same normal Actions authorization path.
+  # A typed endpoint proof authenticates identity, while Trust policy and the
+  # exact capability independently decide whether the action may execute.
   describe "security regression: MCP tool execution is capability-gated" do
     setup do
-      # Start all security processes needed for Security.healthy?() == true.
-      # Mirrors apps/arbor_consensus/test/arbor/consensus/authorization_e2e_test.exs.
-      # Order matters: Identity.Registry must precede SystemAuthority.
-      security_children = [
-        {Arbor.Security.Identity.Registry, []},
-        {Arbor.Security.Identity.NonceCache, []},
-        {Arbor.Security.Constraint.RateLimiter, []},
-        {Arbor.Security.SystemAuthority, []},
-        {Arbor.Security.CapabilityStore, []},
-        {Arbor.Security.Reflex.Registry, []}
-      ]
-
-      for {mod, opts} <- security_children do
-        unless Process.whereis(mod) do
-          case Supervisor.start_child(Arbor.Security.Supervisor, {mod, opts}) do
-            {:ok, _pid} -> :ok
-            {:error, {:already_started, _}} -> :ok
-            {:error, reason} -> raise "Failed to start #{inspect(mod)}: #{inspect(reason)}"
-          end
-        end
-      end
-
-      Process.sleep(20)
-
-      # Disable signing/identity checks — we're testing the capability gate,
-      # not signature verification.
-      prev_signing = Application.get_env(:arbor_security, :capability_signing_required)
-      prev_identity = Application.get_env(:arbor_security, :identity_verification)
-      prev_strict = Application.get_env(:arbor_security, :strict_identity_mode)
-
-      Application.put_env(:arbor_security, :capability_signing_required, false)
-      Application.put_env(:arbor_security, :identity_verification, false)
-      Application.put_env(:arbor_security, :strict_identity_mode, false)
-
-      # The outer `setup` set this to false; flip it back to true so the gate
-      # engages (process tree above makes the alive-check pass too).
-      prev_require_security =
-        Application.get_env(:arbor_gateway, :mcp_endpoint_require_security)
-
-      Application.put_env(:arbor_gateway, :mcp_endpoint_require_security, true)
-
       unless Arbor.Security.healthy?() do
         raise "Security.healthy?() returned false after starting security subsystem"
       end
-
-      on_exit(fn ->
-        restore_env(:arbor_security, :capability_signing_required, prev_signing)
-        restore_env(:arbor_security, :identity_verification, prev_identity)
-        restore_env(:arbor_security, :strict_identity_mode, prev_strict)
-        restore_env(:arbor_gateway, :mcp_endpoint_require_security, prev_require_security)
-      end)
 
       :ok
     end
@@ -663,10 +640,13 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       assert Arbor.Security.healthy?(),
              "Security must be healthy or authorize/4 runs in permissive mode"
 
-      agent_id = "agent_sec_regression_no_cap_#{System.unique_integer([:positive])}"
+      {agent_id, signed_request} = authenticated_identity("no-cap")
 
       {:ok, endpoint} =
-        Arbor.Gateway.start_agent_endpoint(agent_id, actions: [EchoAction])
+        Arbor.Gateway.start_agent_endpoint(agent_id,
+          actions: [EchoAction],
+          signed_request: signed_request
+        )
 
       {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
@@ -690,20 +670,19 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       assert Process.whereis(Arbor.Security.CapabilityStore) != nil
       assert Arbor.Security.healthy?()
 
-      agent_id = "agent_sec_regression_with_cap_#{System.unique_integer([:positive])}"
+      {agent_id, signed_request} = authenticated_identity("with-cap")
 
       # The test EchoAction is not in the canonical URI map, so it resolves to
       # the legacy fallback URI. Grant exactly that resource for :execute.
       resource = Arbor.Actions.canonical_uri_for(EchoAction, %{})
 
-      {:ok, _cap} =
-        Arbor.Security.grant(
-          principal: agent_id,
-          resource: resource
-        )
+      authorize_agent(agent_id, [resource])
 
       {:ok, endpoint} =
-        Arbor.Gateway.start_agent_endpoint(agent_id, actions: [EchoAction])
+        Arbor.Gateway.start_agent_endpoint(agent_id,
+          actions: [EchoAction],
+          signed_request: signed_request
+        )
 
       {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
@@ -724,12 +703,13 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
     test "registered normal endpoint authenticates direct Shell execution" do
       ensure_shell_started()
-      agent_id = unique_agent_id("normal-shell")
+      {agent_id, signed_request} = authenticated_identity("normal-shell")
       authorize_agent(agent_id, ["arbor://shell/exec/echo"])
 
       {:ok, _endpoint} =
         Arbor.Gateway.start_agent_endpoint(agent_id,
-          actions: [Arbor.Actions.Shell.Execute]
+          actions: [Arbor.Actions.Shell.Execute],
+          signed_request: signed_request
         )
 
       {:ok, client} = Arbor.Gateway.connect_to_agent(agent_id)
@@ -748,7 +728,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
     test "registered endpoint keeps principal scope through nested coding validation" do
       ensure_shell_started()
-      agent_id = unique_agent_id("nested-coding")
+      {agent_id, signed_request} = authenticated_identity("nested-coding")
 
       authorize_agent(agent_id, [
         Arbor.Actions.canonical_uri_for(NestedCodingValidationAction, %{}),
@@ -757,7 +737,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
       {:ok, _endpoint} =
         Arbor.Gateway.start_agent_endpoint(agent_id,
-          actions: [NestedCodingValidationAction]
+          actions: [NestedCodingValidationAction],
+          signed_request: signed_request
         )
 
       {:ok, client} = Arbor.Gateway.connect_to_agent(agent_id)
@@ -784,6 +765,70 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
   defp unique_agent_id(tag) do
     "agent_endpoint_#{tag}_#{System.unique_integer([:positive])}"
+  end
+
+  defp start_authorized_endpoint(actions, resources \\ nil) do
+    {agent_id, signed_request} = authenticated_identity("authorized")
+
+    resources =
+      resources || Enum.map(actions, &Arbor.Actions.canonical_uri_for(&1, %{}))
+
+    authorize_agent(agent_id, resources)
+
+    {:ok, endpoint} =
+      Arbor.Gateway.start_agent_endpoint(agent_id,
+        actions: actions,
+        signed_request: signed_request
+      )
+
+    {agent_id, endpoint}
+  end
+
+  defp authenticated_identity(tag) do
+    {:ok, identity} = Arbor.Security.generate_identity(name: "gateway-endpoint-#{tag}")
+    :ok = Arbor.Security.register_identity(identity)
+    payload = Arbor.Gateway.agent_endpoint_authentication_payload(identity.agent_id)
+    {:ok, signed_request} = SignedRequest.sign(payload, identity.agent_id, identity.private_key)
+
+    on_exit(fn ->
+      if Process.whereis(Arbor.Security.CapabilityStore) do
+        Arbor.Security.CapabilityStore.revoke_all(identity.agent_id)
+      end
+
+      if Process.whereis(Arbor.Trust.Store) do
+        Arbor.Trust.Store.delete_profile(identity.agent_id)
+      end
+
+      Arbor.Security.deregister_identity(identity.agent_id)
+    end)
+
+    {identity.agent_id, signed_request}
+  end
+
+  defp ensure_security_started do
+    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_trust)
+
+    security_children = [
+      {Arbor.Security.Identity.Registry, []},
+      {Arbor.Security.Identity.NonceCache, []},
+      {Arbor.Security.Constraint.RateLimiter, []},
+      {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.CapabilityStore, []},
+      {Arbor.Security.Reflex.Registry, []}
+    ]
+
+    for {module, opts} <- security_children do
+      unless Process.whereis(module) do
+        case Supervisor.start_child(Arbor.Security.Supervisor, {module, opts}) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, reason} -> raise "failed to start #{inspect(module)}: #{inspect(reason)}"
+        end
+      end
+    end
+
+    unless Process.whereis(Arbor.Trust.Store), do: start_supervised!(Arbor.Trust.Store)
   end
 
   defp ensure_shell_started do

@@ -27,7 +27,11 @@ defmodule Arbor.Agent.ActionCycleSupervisor do
   @spec start_server(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_server(agent_id, opts \\ []) do
     name = {:via, Registry, {@registry, agent_id}}
-    child_opts = Keyword.merge(opts, agent_id: agent_id, name: name)
+
+    child_opts =
+      opts
+      |> maybe_put_lifecycle_signer(agent_id)
+      |> Keyword.merge(agent_id: agent_id, name: name)
 
     case DynamicSupervisor.start_child(__MODULE__, {ActionCycleServer, child_opts}) do
       {:ok, pid} -> {:ok, pid}
@@ -69,6 +73,21 @@ defmodule Arbor.Agent.ActionCycleSupervisor do
     case Registry.lookup(@registry, agent_id) do
       [{pid, _}] -> {:ok, pid}
       [] -> :error
+    end
+  end
+
+  # The supervisor may acquire the existing lifecycle signer for the child, but
+  # never returns it or turns the scalar id into an Actions authority token.
+  # ActionCycleServer cryptographically challenges the signer before retaining
+  # it and every action still traverses the normal Trust/capability gate.
+  defp maybe_put_lifecycle_signer(opts, agent_id) do
+    if Keyword.has_key?(opts, :signer) do
+      opts
+    else
+      case Arbor.Agent.Lifecycle.build_signer(agent_id) do
+        {:ok, signer} -> Keyword.put(opts, :signer, signer)
+        {:error, _reason} -> opts
+      end
     end
   end
 end

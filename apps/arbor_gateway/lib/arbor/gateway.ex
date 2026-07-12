@@ -268,6 +268,9 @@ defmodule Arbor.Gateway do
   ## Options
 
   - `:actions` — list of action modules to expose (default: all available)
+  - `:signed_request` — typed proof signed over
+    `agent_endpoint_authentication_payload/1`; tool execution fails closed
+    without a verified proof
   """
   @spec start_agent_endpoint(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_agent_endpoint(agent_id, opts \\ []) do
@@ -282,6 +285,17 @@ defmodule Arbor.Gateway do
       error ->
         error
     end
+  end
+
+  @doc """
+  Return the exact payload an agent must sign to authenticate an MCP endpoint.
+
+  This function returns only the public challenge text. It does not load a key,
+  sign on behalf of a scalar agent id, or grant action authority.
+  """
+  @spec agent_endpoint_authentication_payload(String.t()) :: String.t()
+  def agent_endpoint_authentication_payload(agent_id) do
+    AgentEndpoint.authentication_payload(agent_id)
   end
 
   @doc """

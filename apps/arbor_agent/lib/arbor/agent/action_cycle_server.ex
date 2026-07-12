@@ -37,6 +37,7 @@ defmodule Arbor.Agent.ActionCycleServer do
   use GenServer
 
   alias Arbor.Agent.MindPrompt
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
 
   require Logger
 
@@ -114,19 +115,25 @@ defmodule Arbor.Agent.ActionCycleServer do
   def init(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
 
-    llm_fn = Keyword.get(opts, :llm_fn) || make_default_llm_fn(agent_id, opts)
+    with {:ok, authority_signer} <-
+           authenticate_cycle_signer(agent_id, Keyword.get(opts, :signer)) do
+      llm_fn = Keyword.get(opts, :llm_fn) || make_default_llm_fn(agent_id, opts)
 
-    state = %{
-      agent_id: agent_id,
-      queue: :queue.new(),
-      cycle_in_flight: false,
-      cycle_count: 0,
-      consecutive_cycles: 0,
-      config: build_config(opts),
-      llm_fn: llm_fn
-    }
+      state = %{
+        agent_id: agent_id,
+        authority_signer: authority_signer,
+        queue: :queue.new(),
+        cycle_in_flight: false,
+        cycle_count: 0,
+        consecutive_cycles: 0,
+        config: build_config(opts),
+        llm_fn: llm_fn
+      }
 
-    {:ok, state}
+      {:ok, state}
+    else
+      {:error, reason} -> {:stop, {:action_cycle_authentication_failed, reason}}
+    end
   end
 
   @impl true
@@ -223,6 +230,7 @@ defmodule Arbor.Agent.ActionCycleServer do
     agent_id = state.agent_id
     timeout = config_val(state, :cycle_timeout, @default_cycle_timeout)
     llm_fn = state.llm_fn
+    authority_signer = state.authority_signer
 
     emit_signal(agent_id, :action_cycle_started, %{
       agent_id: agent_id,
@@ -233,14 +241,14 @@ defmodule Arbor.Agent.ActionCycleServer do
     parent = self()
 
     Task.start(fn ->
-      result = run_cycle(agent_id, parent, percept, llm_fn, timeout)
+      result = run_cycle(agent_id, parent, percept, llm_fn, authority_signer, timeout)
       send(parent, {:cycle_result, result})
     end)
 
     %{state | queue: queue, cycle_in_flight: true}
   end
 
-  defp run_cycle(agent_id, owner_pid, percept, llm_fn, timeout) do
+  defp run_cycle(agent_id, owner_pid, percept, llm_fn, authority_signer, timeout) do
     controller = Arbor.Agent.CycleController
 
     if Code.ensure_loaded?(controller) and function_exported?(controller, :run, 2) do
@@ -250,7 +258,9 @@ defmodule Arbor.Agent.ActionCycleServer do
       try do
         case apply(controller, :run, [agent_id, opts]) do
           {:intent, intent, percepts} ->
-            exec_result = dispatch_physical_intent(agent_id, owner_pid, intent)
+            exec_result =
+              dispatch_physical_intent(agent_id, owner_pid, intent, authority_signer)
+
             {:completed, %{intent: intent, percepts: percepts, exec_result: exec_result}}
 
           {:wait, percepts} ->
@@ -312,7 +322,7 @@ defmodule Arbor.Agent.ActionCycleServer do
 
   # ── Physical Intent Dispatch ────────────────────────────────────
 
-  defp dispatch_physical_intent(agent_id, owner_pid, intent) do
+  defp dispatch_physical_intent(agent_id, owner_pid, intent, authority_signer) do
     normalized = normalize_intent(intent)
 
     emit_signal(agent_id, :intent_dispatched, %{
@@ -324,9 +334,15 @@ defmodule Arbor.Agent.ActionCycleServer do
 
     case Registry.lookup(Arbor.Agent.ActionCycleRegistry, agent_id) do
       [{^owner_pid, _value}] ->
-        Arbor.Actions.with_principal_authority(agent_id, fn ->
-          Arbor.Agent.IntentDispatcher.dispatch(agent_id, normalized, dispatcher_opts(agent_id))
-        end)
+        with {:ok, prepared} <- Arbor.Agent.IntentDispatcher.prepare(normalized),
+             {:ok, authority_context} <-
+               sign_action_context(agent_id, prepared.resource, authority_signer) do
+          Arbor.Agent.IntentDispatcher.dispatch(
+            agent_id,
+            prepared.intent,
+            dispatcher_opts(agent_id, authority_context)
+          )
+        end
 
       _other ->
         {:error, :action_cycle_principal_unbound}
@@ -343,11 +359,72 @@ defmodule Arbor.Agent.ActionCycleServer do
   # `context[:workspace]` into file actions when available, but a
   # missing/unavailable profile shouldn't block intent execution. The
   # action will run without workspace bounding in that case.
-  defp dispatcher_opts(agent_id) do
-    case workspace_for_agent(agent_id) do
-      nil -> []
-      ws -> [workspace: ws]
+  defp dispatcher_opts(agent_id, authority_context) do
+    [context: authority_context]
+    |> maybe_put_dispatcher_workspace(workspace_for_agent(agent_id))
+  end
+
+  defp maybe_put_dispatcher_workspace(opts, nil), do: opts
+
+  defp maybe_put_dispatcher_workspace(opts, workspace),
+    do: Keyword.put(opts, :workspace, workspace)
+
+  defp authenticate_cycle_signer(_agent_id, nil), do: {:ok, nil}
+
+  defp authenticate_cycle_signer(agent_id, signer)
+       when is_binary(agent_id) and is_function(signer, 1) do
+    payload = cycle_authentication_payload(agent_id)
+
+    with {:ok, %SignedRequest{} = signed_request} <- call_signer(signer, payload),
+         :ok <- validate_signed_request_binding(signed_request, agent_id, payload),
+         {:ok, ^agent_id} <- Arbor.Security.verify_request(signed_request) do
+      {:ok, signer}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_cycle_signer}
     end
+  end
+
+  defp authenticate_cycle_signer(_agent_id, _signer), do: {:error, :invalid_cycle_signer}
+
+  defp sign_action_context(_agent_id, _resource, nil),
+    do: {:error, :authenticated_principal_required}
+
+  defp sign_action_context(agent_id, resource, signer) when is_function(signer, 1) do
+    with {:ok, %SignedRequest{} = signed_request} <- call_signer(signer, resource),
+         :ok <- validate_signed_request_binding(signed_request, agent_id, resource),
+         {:ok, ^agent_id} <- Arbor.Security.verify_request(signed_request) do
+      auth_context =
+        AuthContext.new(agent_id, signed_request: signed_request)
+        |> AuthContext.mark_verified()
+
+      {:ok, %{agent_id: agent_id, signed_request: signed_request, auth_context: auth_context}}
+    else
+      {:error, reason} -> {:error, {:action_cycle_identity_verification_failed, reason}}
+      _other -> {:error, {:action_cycle_identity_verification_failed, :invalid_signed_request}}
+    end
+  end
+
+  defp call_signer(signer, payload) do
+    signer.(payload)
+  rescue
+    exception -> {:error, {:signer_exception, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:signer_failure, kind, reason}}
+  end
+
+  defp validate_signed_request_binding(
+         %SignedRequest{agent_id: agent_id, payload: payload},
+         agent_id,
+         payload
+       ),
+       do: :ok
+
+  defp validate_signed_request_binding(_signed_request, _agent_id, _payload),
+    do: {:error, :signed_request_binding_mismatch}
+
+  defp cycle_authentication_payload(agent_id) do
+    "arbor://agent/action-cycle/authenticate/#{agent_id}/#{inspect(self())}"
   end
 
   defp workspace_for_agent(agent_id) do

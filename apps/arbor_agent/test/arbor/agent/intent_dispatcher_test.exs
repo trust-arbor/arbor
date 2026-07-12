@@ -9,11 +9,24 @@ defmodule Arbor.Agent.IntentDispatcherTest do
   own logic.
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.Agent.IntentDispatcher
   alias Arbor.Contracts.Memory.Intent
+
+  setup_all do
+    {:ok, _} = Application.ensure_all_started(:arbor_shell)
+    :ok
+  end
+
+  setup do
+    unless Process.whereis(Arbor.Shell.ExecutablePolicy) do
+      start_supervised!({Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")})
+    end
+
+    :ok
+  end
 
   defp action_intent(action, opts \\ []) do
     Intent.new(:act,
@@ -60,6 +73,13 @@ defmodule Arbor.Agent.IntentDispatcherTest do
                IntentDispatcher.resolve_action_module(intent)
     end
 
+    test "resolves CycleController's canonical shell/execute intent" do
+      intent = Intent.capability_intent("shell", :execute, "echo mapped")
+
+      assert {:ok, Arbor.Actions.Shell.Execute} =
+               IntentDispatcher.resolve_action_module(intent)
+    end
+
     test "returns :intent_missing_action when :action is nil" do
       intent = Intent.new(:act, params: %{some: "params"})
 
@@ -72,6 +92,28 @@ defmodule Arbor.Agent.IntentDispatcherTest do
 
       assert {:error, {:unknown_action, :totally_nonexistent_action_xyz}} =
                IntentDispatcher.resolve_action_module(intent)
+    end
+  end
+
+  describe "prepare/1" do
+    test "maps shell/execute target to exact action, params, and resource" do
+      intent = Intent.capability_intent("shell", :execute, "echo mapped")
+
+      assert {:ok, prepared} = IntentDispatcher.prepare(intent)
+      assert prepared.module == Arbor.Actions.Shell.Execute
+      assert prepared.intent.action == :shell_execute
+      assert prepared.intent.params == %{command: "echo mapped"}
+      assert prepared.intent.capability == "arbor://shell/exec/echo"
+      assert prepared.resource == "arbor://shell/exec/echo"
+    end
+
+    test "rejects conflicting shell target and command" do
+      intent =
+        Intent.capability_intent("shell", :execute, "echo target",
+          params: %{command: "echo forged"}
+        )
+
+      assert {:error, :shell_command_target_mismatch} = IntentDispatcher.prepare(intent)
     end
   end
 

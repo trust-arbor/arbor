@@ -40,6 +40,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
   use GenServer
   require Logger
 
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Gateway.MCP.{ActionBridge, EndpointRegistry}
   alias ExMCP.Protocol.ResponseBuilder
 
@@ -74,31 +75,44 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
     GenServer.call(endpoint, :status)
   end
 
+  @doc false
+  @spec authentication_payload(String.t()) :: String.t()
+  def authentication_payload(agent_id) when is_binary(agent_id) do
+    "arbor://gateway/agent-endpoint/authenticate/#{agent_id}"
+  end
+
   # -- GenServer Callbacks --
 
   @impl true
   def init(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
-    action_modules = Keyword.get(opts, :actions) || discover_all_actions()
-    tools = ActionBridge.to_mcp_tools(action_modules)
 
-    # Build module lookup: tool_name -> action_module
-    tool_map =
-      Enum.zip(tools, action_modules)
-      |> Map.new(fn {tool, mod} -> {tool["name"], mod} end)
+    with {:ok, auth_context} <-
+           authenticate_endpoint(agent_id, Keyword.get(opts, :signed_request)) do
+      action_modules = Keyword.get(opts, :actions) || discover_all_actions()
+      tools = ActionBridge.to_mcp_tools(action_modules)
 
-    state = %{
-      agent_id: agent_id,
-      tools: tools,
-      tool_map: tool_map,
-      action_modules: action_modules,
-      client_pid: nil,
-      initialized: false
-    }
+      # Build module lookup: tool_name -> action_module
+      tool_map =
+        Enum.zip(tools, action_modules)
+        |> Map.new(fn {tool, mod} -> {tool["name"], mod} end)
 
-    Logger.debug("[AgentEndpoint] Started for #{agent_id} with #{length(tools)} tools")
+      state = %{
+        agent_id: agent_id,
+        auth_context: auth_context,
+        tools: tools,
+        tool_map: tool_map,
+        action_modules: action_modules,
+        client_pid: nil,
+        initialized: false
+      }
 
-    {:ok, state}
+      Logger.debug("[AgentEndpoint] Started for #{agent_id} with #{length(tools)} tools")
+
+      {:ok, state}
+    else
+      {:error, reason} -> {:stop, {:endpoint_authentication_failed, reason}}
+    end
   end
 
   @impl true
@@ -111,7 +125,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
       agent_id: state.agent_id,
       tool_count: length(state.tools),
       connected: state.client_pid != nil,
-      initialized: state.initialized
+      initialized: state.initialized,
+      authenticated: match?(%AuthContext{identity_verified: true}, state.auth_context)
     }
 
     {:reply, status, state}
@@ -244,19 +259,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
   # Execute action through authorize_and_execute — no unauthenticated fallback.
   # If auth fails, the error propagates to the MCP client.
   defp execute_action(action_module, params, %{agent_id: agent_id} = state) do
-    with :ok <- verify_endpoint_principal(state) do
-      Arbor.Actions.with_principal_authority(agent_id, fn authority ->
-        if authorized_execution_required?() do
-          Arbor.Actions.authorize_and_execute(agent_id, action_module, params, %{})
-        else
-          Arbor.Actions.execute_with_principal_authority(
-            authority,
-            action_module,
-            params,
-            %{}
-          )
-        end
-      end)
+    with {:ok, context} <- verify_endpoint_principal(state) do
+      Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context)
     end
   rescue
     e ->
@@ -268,12 +272,62 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
       {:error, {:execution_exit, reason}}
   end
 
-  defp verify_endpoint_principal(%{agent_id: agent_id}) do
-    case EndpointRegistry.lookup(agent_id) do
-      {:ok, endpoint_pid, _tools} when endpoint_pid == self() -> :ok
-      _other -> {:error, :endpoint_principal_unbound}
+  defp verify_endpoint_principal(%{agent_id: agent_id} = state) do
+    with {:ok, endpoint_pid, _tools} when endpoint_pid == self() <-
+           EndpointRegistry.lookup(agent_id),
+         {:ok, context} <- authenticated_action_context(state) do
+      {:ok, context}
+    else
+      {:ok, _other_pid, _tools} -> {:error, :endpoint_principal_unbound}
+      :error -> {:error, :endpoint_principal_unbound}
+      {:error, _reason} = error -> error
     end
   end
+
+  defp authenticated_action_context(%{
+         agent_id: agent_id,
+         auth_context:
+           %AuthContext{
+             principal_id: agent_id,
+             identity_verified: true,
+             signed_request: %SignedRequest{agent_id: agent_id} = signed_request
+           } = auth_context
+       }) do
+    {:ok, %{agent_id: agent_id, signed_request: signed_request, auth_context: auth_context}}
+  end
+
+  defp authenticated_action_context(_state), do: {:error, :endpoint_authentication_required}
+
+  defp authenticate_endpoint(_agent_id, nil), do: {:ok, nil}
+
+  defp authenticate_endpoint(agent_id, %SignedRequest{} = signed_request) do
+    expected_payload = authentication_payload(agent_id)
+
+    with :ok <- validate_endpoint_request(signed_request, agent_id, expected_payload),
+         {:ok, ^agent_id} <- Arbor.Security.verify_request(signed_request) do
+      auth_context =
+        AuthContext.new(agent_id, signed_request: signed_request)
+        |> AuthContext.mark_verified()
+
+      {:ok, auth_context}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_endpoint_signed_request}
+    end
+  end
+
+  defp authenticate_endpoint(_agent_id, _signed_request),
+    do: {:error, :invalid_endpoint_signed_request}
+
+  defp validate_endpoint_request(
+         %SignedRequest{agent_id: agent_id, payload: payload},
+         agent_id,
+         payload
+       ),
+       do: :ok
+
+  defp validate_endpoint_request(_signed_request, _agent_id, _payload),
+    do: {:error, :endpoint_signed_request_mismatch}
 
   # -- Helpers --
 
@@ -328,14 +382,5 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
     :exit, reason ->
       Logger.debug("[AgentEndpoint] discover_all_actions exited: #{inspect(reason)}")
       []
-  end
-
-  defp authorized_execution_required? do
-    # `:require_security` defaults to true — production routes every tool
-    # call through `Arbor.Actions.authorize_and_execute`. Setting it to
-    # `false` (test-only, see `agent_endpoint_test.exs` setup) forces
-    # the registry-bound fallback path. A production security-process outage
-    # remains on the authorization path and therefore fails closed.
-    Application.get_env(:arbor_gateway, :mcp_endpoint_require_security, true)
   end
 end

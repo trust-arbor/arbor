@@ -3,13 +3,21 @@ defmodule Arbor.Actions.ShellTest do
   @moduletag :fast
 
   alias Arbor.Actions.Shell
+  alias Arbor.Contracts.Security.SignedRequest
 
   defp run_execute(params, context) do
     agent_id = Map.get(context, :agent_id) || Map.get(context, "agent_id")
+    private_key = Map.fetch!(context, :test_private_key)
 
-    Arbor.Actions.with_principal_authority(agent_id, fn ->
+    with {:ok, resource} <- Shell.Execute.authorization_resource(params),
+         {:ok, signed_request} <- SignedRequest.sign(resource, agent_id, private_key) do
+      context =
+        context
+        |> Map.delete(:test_private_key)
+        |> Map.put(:signed_request, signed_request)
+
       Arbor.Actions.authorize_and_execute(agent_id, Shell.Execute, params, context)
-    end)
+    end
   end
 
   # Start shell system for tests
@@ -37,6 +45,7 @@ defmodule Arbor.Actions.ShellTest do
     previous = %{
       reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
       signing: Application.get_env(:arbor_security, :capability_signing_required),
+      identity_verification: Application.get_env(:arbor_security, :identity_verification),
       identity: Application.get_env(:arbor_security, :strict_identity_mode),
       uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
       escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
@@ -46,6 +55,7 @@ defmodule Arbor.Actions.ShellTest do
 
     Application.put_env(:arbor_security, :reflex_checking_enabled, false)
     Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_security, :identity_verification, false)
     Application.put_env(:arbor_security, :strict_identity_mode, false)
     Application.put_env(:arbor_security, :uri_registry_enforcement, false)
     Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
@@ -55,6 +65,7 @@ defmodule Arbor.Actions.ShellTest do
     on_exit(fn ->
       restore(:arbor_security, :reflex_checking_enabled, previous.reflex)
       restore(:arbor_security, :capability_signing_required, previous.signing)
+      restore(:arbor_security, :identity_verification, previous.identity_verification)
       restore(:arbor_security, :strict_identity_mode, previous.identity)
       restore(:arbor_security, :uri_registry_enforcement, previous.uri_registry)
       restore(:arbor_security, :consensus_escalation_enabled, previous.escalation)
@@ -62,7 +73,9 @@ defmodule Arbor.Actions.ShellTest do
       restore(:arbor_trust, :policy_enforcer_enabled, previous.trust_enforcer)
     end)
 
-    agent_id = "agent_shell_execute_#{System.unique_integer([:positive])}"
+    {:ok, identity} = Arbor.Security.generate_identity(name: "shell-action-test")
+    :ok = Arbor.Security.register_identity(identity)
+    agent_id = identity.agent_id
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
 
     :ok =
@@ -74,7 +87,19 @@ defmodule Arbor.Actions.ShellTest do
     {:ok, _capability} =
       Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec/**")
 
-    {:ok, agent_context: %{agent_id: agent_id}}
+    on_exit(fn ->
+      if Process.whereis(Arbor.Security.CapabilityStore) do
+        Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      end
+
+      if Process.whereis(Arbor.Trust.Store), do: Arbor.Trust.Store.delete_profile(agent_id)
+
+      if Process.whereis(Arbor.Security.Identity.Registry) do
+        Arbor.Security.deregister_identity(agent_id)
+      end
+    end)
+
+    {:ok, agent_context: %{agent_id: agent_id, test_private_key: identity.private_key}}
   end
 
   describe "Execute" do
@@ -264,7 +289,9 @@ defmodule Arbor.Actions.ShellTest do
         restore(:arbor_trust, :policy_enforcer_enabled, prev.trust_enforcer)
       end)
 
-      agent_id = "agent_shell_approval_#{System.unique_integer([:positive])}"
+      {:ok, identity} = Arbor.Security.generate_identity(name: "shell-approval-test")
+      :ok = Arbor.Security.register_identity(identity)
+      agent_id = identity.agent_id
       resource_uri = "arbor://shell/exec/grep"
 
       {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
@@ -272,7 +299,19 @@ defmodule Arbor.Actions.ShellTest do
       :ok = Arbor.Trust.Store.store_profile(%{profile | rules: rules})
       {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: resource_uri)
 
-      {:ok, agent_id: agent_id, resource_uri: resource_uri}
+      on_exit(fn ->
+        if Process.whereis(Arbor.Security.CapabilityStore) do
+          Arbor.Security.CapabilityStore.revoke_all(agent_id)
+        end
+
+        if Process.whereis(Arbor.Trust.Store), do: Arbor.Trust.Store.delete_profile(agent_id)
+
+        if Process.whereis(Arbor.Security.Identity.Registry) do
+          Arbor.Security.deregister_identity(agent_id)
+        end
+      end)
+
+      {:ok, agent_id: agent_id, resource_uri: resource_uri, private_key: identity.private_key}
     end
 
     test "forwards approved invocation context into trust authorization", %{
@@ -294,7 +333,8 @@ defmodule Arbor.Actions.ShellTest do
     end
 
     test "security regression: Execute does not re-auth after approved_invocation", %{
-      agent_id: agent_id
+      agent_id: agent_id,
+      private_key: private_key
     } do
       # Shell is always-locked: even an :auto trust rule + held capability still
       # requires a one-shot approved_invocation marker. Pre-fix, authorize_command
@@ -318,7 +358,10 @@ defmodule Arbor.Actions.ShellTest do
       # No marker → gated: either pending_approval (escalated IRQ) or unauthorized.
       # Must NOT auto-run, and must NOT return the old misleading "try again and
       # the user will be prompted" string for plain :unauthorized.
-      case run_execute(%{command: command, sandbox: :none}, %{agent_id: agent_id}) do
+      case run_execute(%{command: command, sandbox: :none}, %{
+             agent_id: agent_id,
+             test_private_key: private_key
+           }) do
         {:ok, :pending_approval, proposal_id} ->
           assert is_binary(proposal_id)
 
@@ -337,6 +380,7 @@ defmodule Arbor.Actions.ShellTest do
       assert {:ok, result} =
                run_execute(%{command: command, sandbox: :none}, %{
                  agent_id: agent_id,
+                 test_private_key: private_key,
                  approved_invocation: %{
                    request_id: "irq_shell_exec_regression",
                    principal_id: agent_id,
@@ -350,7 +394,8 @@ defmodule Arbor.Actions.ShellTest do
     end
 
     test "security regression: Execute with agent context rejects compounds as unavailable", %{
-      agent_id: agent_id
+      agent_id: agent_id,
+      private_key: private_key
     } do
       # Agent-authorized compounds always fail closed with the CapShell
       # unavailable error — independent of compound_shell_enabled.
@@ -387,6 +432,7 @@ defmodule Arbor.Actions.ShellTest do
                    %{command: "sleep 1; touch #{marker}", sandbox: :basic},
                    %{
                      agent_id: agent_id,
+                     test_private_key: private_key,
                      approved_invocation: %{
                        request_id: "irq_capshell_closed_regression",
                        principal_id: agent_id,
