@@ -8,14 +8,13 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
   alias Arbor.Scheduler.Test.WorkdirReplacingOrchestrator
   alias Arbor.Scheduler.Workers.PipelineRunner
   alias Arbor.Security.Crypto
-  alias Arbor.Security.Identity.Registry, as: IdentityRegistry
   alias Arbor.Security.IssuerRegistry
 
   defmodule OrchestratorStub do
-    def run_file_as(path, agent_id, signer, opts) do
+    def run_file_as(path, agent_id, authority, opts) do
       test_pid = Application.fetch_env!(:arbor_scheduler, :pipeline_runner_test_pid)
-      identity_registered? = match?({:ok, _}, Arbor.Security.Identity.Registry.lookup(agent_id))
-      send(test_pid, {:run_file_as, path, agent_id, signer, opts, identity_registered?})
+      identity_registered? = match?({:ok, _}, Arbor.Security.lookup_public_key(agent_id))
+      send(test_pid, {:run_file_as, path, agent_id, authority, opts, identity_registered?})
       {:ok, %{status: :completed}}
     end
   end
@@ -35,7 +34,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
     File.mkdir_p!(outside)
 
     {:ok, issuer} = Identity.generate()
-    :ok = IdentityRegistry.register(issuer)
+    :ok = Arbor.Security.register_identity(issuer)
 
     {:ok, envelope} =
       Capability.new(
@@ -74,10 +73,10 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert :ok = PipelineRunner.perform(job(dot, initial_args))
 
-      assert_receive {:run_file_as, canonical_dot, agent_id, signer, opts, true}
+      assert_receive {:run_file_as, canonical_dot, agent_id, authority, opts, true}
       assert {:ok, expected_dot} = Arbor.Common.SafePath.resolve_real(dot)
       assert canonical_dot == expected_dot
-      assert is_function(signer, 1)
+      assert %Arbor.Contracts.Security.SigningAuthority{} = authority
       assert opts[:graph_hash] == hash
       assert opts[:workdir] == workdir
       assert opts[:initial_values] == initial_args
@@ -85,10 +84,10 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
       refute Keyword.has_key?(opts, :signer)
       refute Map.has_key?(opts[:initial_values], "session.agent_id")
 
-      assert {:error, :not_found} = IdentityRegistry.lookup(agent_id)
+      assert {:error, :not_found} = Arbor.Security.lookup_public_key(agent_id)
     end
 
-    test "the real facade exposes path, principal, signer, opts in that order", %{root: root} do
+    test "the real facade exposes path, principal, authority, opts in that order", %{root: root} do
       path = Path.join(root, "facade_contract.dot")
       File.write!(path, dot_source("facade_contract"))
       facade = Arbor.Orchestrator
@@ -96,11 +95,8 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
       assert Code.ensure_loaded?(facade)
       assert function_exported?(facade, :run_file_as, 4)
 
-      assert {:error, :invalid_execution_principal} =
-               apply(facade, :run_file_as, [path, "", fn _ -> {:error, :unused} end, []])
-
-      assert {:error, :signer_required} =
-               apply(facade, :run_file_as, [path, "agent_contract_probe", :not_a_signer, []])
+      assert {:error, :invalid_run_credential} =
+               apply(facade, :run_file_as, [path, "agent_contract_probe", :not_an_authority, []])
     end
 
     test "clean fallback when only legacy run_file_as/3 is available", %{

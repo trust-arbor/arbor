@@ -2,74 +2,16 @@ defmodule Arbor.Scheduler.Identity do
   @moduledoc """
   Per-machine cryptographic identity for the scheduler.
 
-  Every Arbor node that runs `arbor_scheduler` provisions a scheduler
-  identity on first start: an Ed25519 keypair is generated, the
-  private key is stored encrypted-at-rest via
-  `Arbor.Security.SigningKeyStore` under the fixed storage key
-  `"system_scheduler"`, and the public key is registered with
-  `Arbor.Security.Identity.Registry`. Subsequent starts on the same
-  machine load the persisted keypair — the scheduler is a stable,
-  long-lived system actor.
+  The scheduler owns a reload-stable `Arbor.Contracts.Security.SigningAuthority`
+  for the lifetime of this GenServer. Private key material is used only during
+  startup to prove possession and open that authority; the GenServer state
+  retains only the principal id and opaque authority reference.
 
-  The identity is used by `Arbor.Scheduler.Workers.PipelineRunner`
-  to sign requests when invoking the orchestrator. This closes the
-  loop on the security model: every scheduled pipeline run is
-  unforgeably attributable to this node's scheduler agent_id (and
-  through that, to this specific Arbor node), satisfying both the
-  orchestrator's capability gate and the audit-provenance
-  requirement.
-
-  ## agent_id derivation
-
-  `agent_id` is `"agent_" <> hex(SHA-256(public_key))`, derived
-  cryptographically — the same shape every non-OIDC agent uses. We
-  do NOT override it with a canonical name like `"agent_scheduler"`:
-  `Arbor.Security.Identity.Registry` strictly validates that
-  `agent_id == Crypto.derive_agent_id(public_key)` for any non-OIDC
-  registration. Storage lookup uses the fixed key `"system_scheduler"`
-  instead, so the keypair is recoverable across restarts without
-  needing to know the agent_id in advance.
-
-  ## Why per-machine and not per-cluster
-
-  Each node holds its own keypair so:
-    - Identity rotation on one node doesn't ripple to others
-    - A compromised node's signing rights can be revoked without
-      affecting peers
-    - The audit chain naturally records which node ran which pipeline
-
-  ## Capability + Trust profile granted
-
-  Two policy artifacts are provisioned at first registration:
-
-    1. A blanket `arbor://orchestrator/execute/**` **capability grant**
-       (satisfies `CapabilityCheck` middleware).
-    2. A **trust profile** with `arbor://orchestrator/execute` set to
-       `:allow` (satisfies `AuthDecision.check_approval/3`, so scheduled
-       pipelines don't escalate to consensus on every run).
-
-  Both are scoped narrowly to `arbor://orchestrator/execute/*` — wide
-  enough to cover all current pipeline node types (shell, file_write,
-  etc.) but not so wide that the scheduler can act outside its lane.
-  The shell.execute approval ceiling that AuthDecision enforces for
-  human/agent flows is intentionally bypassed for the scheduler:
-  pipelines are operator-authored static .dot files registered ahead
-  of time, so the approval point is at registration, not per-run.
-  Per the priorities discussion: start blanket, tighten to
-  per-handler-type when a real pipeline forces the question.
-
-  ## Public surface
-
-    * `signer/0` — returns a signing function suitable to pass as the
-      orchestrator's `:signer` opt. Returns `nil` if the Identity
-      GenServer isn't running (e.g., in `:fast` tests with
-      `start_children: false`). Callers MUST propagate `nil` through,
-      not substitute a fallback — passing `nil` causes CapabilityCheck
-      to halt with `:missing_signed_request`, which is the correct
-      fail-closed behavior.
-    * `agent_id/0` — the live agent_id this node uses. Stable across
-      restarts on a given machine. Returns `nil` when the GenServer
-      isn't running.
+  The authority key is indexed by the same derived `agent_id` used by the
+  identity registry and the authority proof. The scheduler name is the normal
+  public locator, while `system_scheduler` is retained as an explicit durable
+  fallback for legacy identities; neither locator is used as the authority
+  principal.
   """
 
   use GenServer
@@ -77,37 +19,21 @@ defmodule Arbor.Scheduler.Identity do
   require Logger
 
   alias Arbor.Contracts.Security.Identity, as: IdentityStruct
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Security
-  alias Arbor.Security.Identity.Registry, as: IdentityRegistry
-  alias Arbor.Security.SigningKeyStore
-  alias Arbor.Trust.Authority, as: TrustAuthority
-  alias Arbor.Trust.Store, as: TrustStore
+  alias Arbor.Trust
 
-  # Fixed SigningKeyStore lookup key. NOT the agent_id — see moduledoc.
-  @signing_id "system_scheduler"
-
+  @identity_name "scheduler"
+  @signing_locator "system_scheduler"
   @blanket_capability "arbor://orchestrator/execute/**"
-  # Rule prefix used in the trust profile. `best_rule_prefix/1` in
-  # TrustStore would derive this from a full resource URI (e.g.
-  # arbor://orchestrator/execute/shell → arbor://orchestrator/execute),
-  # but we set it explicitly because the prefix is itself the
-  # authorization scope this identity owns.
   @trust_rule_prefix "arbor://orchestrator/execute"
-
-  # ── Public API ──
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @doc """
-  Returns the agent_id this node's scheduler uses, or `nil` if the
-  Identity GenServer isn't running.
-
-  Cryptographically derived from the public key — stable across
-  restarts on a given machine, distinct across machines.
-  """
+  @doc "Returns the stable scheduler principal id, or `nil` when not running."
   @spec agent_id() :: String.t() | nil
   def agent_id do
     case GenServer.call(__MODULE__, :get_agent_id, 5_000) do
@@ -118,106 +44,137 @@ defmodule Arbor.Scheduler.Identity do
     :exit, _ -> nil
   end
 
-  @doc """
-  Returns a signer function the orchestrator can use to mint signed
-  requests on behalf of this node's scheduler agent.
-
-  The function closure holds the agent_id and private signing key;
-  the orchestrator receives only the function, never the raw key.
-
-  Returns `nil` when the Identity GenServer isn't running. Callers
-  must propagate `nil` — passing `nil` as the orchestrator's `:signer`
-  causes the CapabilityCheck middleware to halt with
-  `{:error, :missing_signed_request}`, which is the correct
-  fail-closed shape.
-  """
-  @spec signer() :: (binary() -> {:ok, term()} | {:error, term()}) | nil
-  def signer do
-    case GenServer.call(__MODULE__, :get_signer, 5_000) do
-      {:ok, signer_fn} -> signer_fn
+  @doc "Returns the opaque authority owned by the scheduler Identity process."
+  @spec signing_authority() :: SigningAuthority.t() | nil
+  def signing_authority do
+    case GenServer.call(__MODULE__, :get_signing_authority, 5_000) do
+      {:ok, authority} -> authority
       _ -> nil
     end
   catch
     :exit, _ -> nil
   end
 
-  # ── GenServer ──
-
   @impl true
   def init(_opts) do
-    case load_or_create_identity() do
-      {:ok, identity, status} ->
-        Logger.info("[Scheduler.Identity] #{status} keypair for #{identity.agent_id}")
-
-        :ok = ensure_capability(identity.agent_id)
-        :ok = ensure_trust_profile(identity.agent_id)
-
-        signer_fn = Security.make_signer(identity.agent_id, identity.private_key)
-        {:ok, %{identity: identity, signer: signer_fn}}
-
-      {:error, reason} ->
+    with {:ok, identity, status} <- load_or_create_identity(),
+         :ok <- ensure_capability(identity.agent_id),
+         :ok <- ensure_trust_profile(identity.agent_id),
+         {:ok, proof} <-
+           Security.build_signing_authority_acquisition_proof(
+             identity.agent_id,
+             identity.private_key,
+             purpose: :scheduler,
+             owner: self()
+           ),
+         {:ok, authority} <- Security.open_signing_authority(proof) do
+      Logger.info("[Scheduler.Identity] #{status} keypair for #{identity.agent_id}")
+      {:ok, %{agent_id: identity.agent_id, signing_authority: authority}}
+    else
+      {:error, reason} = error ->
         Logger.error("[Scheduler.Identity] init failed: #{inspect(reason)}")
-        {:stop, reason}
+        {:stop, error}
     end
   end
 
   @impl true
-  def handle_call(:get_signer, _from, %{signer: signer_fn} = state) do
-    {:reply, {:ok, signer_fn}, state}
+  def handle_call(:get_signing_authority, _from, state) do
+    {:reply, {:ok, state.signing_authority}, state}
   end
 
-  def handle_call(:get_agent_id, _from, %{identity: identity} = state) do
-    {:reply, {:ok, identity.agent_id}, state}
+  def handle_call(:get_agent_id, _from, state) do
+    {:reply, {:ok, state.agent_id}, state}
   end
 
-  # ── Identity lifecycle ──
+  @impl true
+  def terminate(_reason, %{signing_authority: authority}) do
+    _ = Security.close_signing_authority(authority)
+    :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   defp load_or_create_identity do
-    case SigningKeyStore.get_keypair(@signing_id) do
-      {:ok, %{signing: signing_key}} ->
-        build_existing(signing_key)
+    case find_named_identity() do
+      {:ok, identity} -> {:ok, identity, :loaded}
+      :not_found -> load_from_durable_locator()
+    end
+  end
 
-      {:error, _} ->
+  defp find_named_identity do
+    case Security.lookup_identity_ids_by_display_name(@identity_name) do
+      {:ok, agent_ids} ->
+        Enum.find_value(agent_ids, :not_found, fn agent_id ->
+          case Security.load_signing_key(agent_id) do
+            {:ok, signing_key} ->
+              case identity_from_key(signing_key) do
+                {:ok, %{agent_id: ^agent_id} = identity} ->
+                  with :ok <- ensure_principal_key(identity), :ok <- register(identity) do
+                    {:ok, identity}
+                  else
+                    _ -> false
+                  end
+
+                _ ->
+                  false
+              end
+
+            _ ->
+              false
+          end
+        end)
+
+      {:error, :not_found} ->
+        :not_found
+
+      _ ->
+        :not_found
+    end
+  end
+
+  defp load_from_durable_locator do
+    case Security.load_signing_key(@signing_locator) do
+      {:ok, signing_key} ->
+        with {:ok, identity} <- identity_from_key(signing_key),
+             :ok <- ensure_principal_key(identity),
+             :ok <- register(identity) do
+          {:ok, identity, :loaded}
+        end
+
+      _ ->
         create_new()
     end
   end
 
-  defp build_existing(signing_key) do
-    # Re-derive the public key from the persisted private signing key
-    # — same pattern OIDC IdentityStore uses. Ed25519's `generate_key`
-    # is deterministic for a given seed.
-    {public_key, _} = :crypto.generate_key(:eddsa, :ed25519, signing_key)
+  defp ensure_principal_key(identity) do
+    case Security.load_signing_key(identity.agent_id) do
+      {:ok, _signing_key} ->
+        :ok
 
-    case IdentityStruct.new(public_key: public_key, private_key: signing_key) do
-      {:ok, identity} ->
-        # Use the hex-derived agent_id IdentityStruct.new produced; do
-        # NOT override. The Registry rejects mismatches.
-        case register(identity) do
-          :ok -> {:ok, identity, :loaded}
-          err -> err
-        end
+      {:error, :no_signing_key} ->
+        Security.store_signing_key(identity.agent_id, identity.private_key)
 
-      err ->
-        err
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   defp create_new do
-    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
-
-    with :ok <- SigningKeyStore.put_keypair(@signing_id, private_key),
-         {:ok, identity} <- IdentityStruct.new(public_key: public_key, private_key: private_key) do
-      case register(identity) do
-        :ok -> {:ok, identity, :generated}
-        err -> err
-      end
+    with {:ok, identity} <- Security.generate_identity(name: @identity_name),
+         :ok <- Security.store_signing_key(identity.agent_id, identity.private_key),
+         :ok <- Security.store_signing_key(@signing_locator, identity.private_key),
+         :ok <- register(identity) do
+      {:ok, identity, :generated}
     end
   end
 
-  defp register(%IdentityStruct{} = identity) do
-    public_only = IdentityStruct.public_only(identity)
+  defp identity_from_key(signing_key) do
+    {public_key, _} = :crypto.generate_key(:eddsa, :ed25519, signing_key)
+    IdentityStruct.new(public_key: public_key, private_key: signing_key)
+  end
 
-    case IdentityRegistry.register(public_only) do
+  defp register(%IdentityStruct{} = identity) do
+    case Security.register_identity(IdentityStruct.public_only(identity)) do
       :ok -> :ok
       {:error, {:already_registered, _}} -> :ok
       other -> other
@@ -225,11 +182,8 @@ defmodule Arbor.Scheduler.Identity do
   end
 
   defp ensure_capability(agent_id) do
-    # Idempotent: if the capability is already granted, the kernel
-    # returns an already-granted shape — treat any of those as success.
     case Security.grant(principal: agent_id, resource: @blanket_capability) do
-      {:ok, _cap} ->
-        Logger.info("[Scheduler.Identity] granted #{@blanket_capability} to #{agent_id}")
+      {:ok, _} ->
         :ok
 
       {:error, :already_granted} ->
@@ -248,29 +202,28 @@ defmodule Arbor.Scheduler.Identity do
   end
 
   defp ensure_trust_profile(agent_id) do
-    # Idempotent: if a profile exists, just patch the rule; otherwise
-    # mint a fresh untrusted-tier profile with the rule preset. Either
-    # path leaves the rule for @trust_rule_prefix at :allow, which is
-    # what AuthDecision.check_approval needs to skip escalation.
-    case ensure_profile_exists(agent_id) do
-      :ok ->
-        case TrustStore.update_profile(agent_id, fn profile ->
-               %{profile | rules: Map.put(profile.rules || %{}, @trust_rule_prefix, :allow)}
-             end) do
-          {:ok, _profile} ->
-            Logger.info(
-              "[Scheduler.Identity] trust rule #{@trust_rule_prefix} => :allow for #{agent_id}"
-            )
+    opts =
+      case Trust.get_trust_profile(agent_id) do
+        {:ok, profile} ->
+          [
+            baseline: profile.baseline,
+            rules: Map.put(profile.rules || %{}, @trust_rule_prefix, :allow)
+          ]
 
-            :ok
+        {:error, :not_found} ->
+          [baseline: :ask, rules: %{@trust_rule_prefix => :allow}]
 
-          {:error, reason} ->
-            Logger.warning(
-              "[Scheduler.Identity] trust rule update failed for #{agent_id}: #{inspect(reason)}"
-            )
+        {:error, reason} ->
+          Logger.warning(
+            "[Scheduler.Identity] could not read trust profile for #{agent_id}: #{inspect(reason)}"
+          )
 
-            :ok
-        end
+          [baseline: :ask, rules: %{@trust_rule_prefix => :allow}]
+      end
+
+    case Trust.ensure_trust_profile(agent_id, opts) do
+      {:ok, _profile} ->
+        :ok
 
       {:error, reason} ->
         Logger.warning(
@@ -279,18 +232,19 @@ defmodule Arbor.Scheduler.Identity do
 
         :ok
     end
-  end
-
-  defp ensure_profile_exists(agent_id) do
-    if TrustStore.profile_exists?(agent_id) do
-      :ok
-    else
-      profile = TrustAuthority.new_profile(agent_id)
-      TrustStore.store_profile(profile)
-    end
   rescue
-    e -> {:error, {:exception, Exception.message(e)}}
+    exception ->
+      Logger.warning(
+        "[Scheduler.Identity] trust profile setup failed for #{agent_id}: #{inspect(exception)}"
+      )
+
+      :ok
   catch
-    :exit, reason -> {:error, {:exit, reason}}
+    :exit, reason ->
+      Logger.warning(
+        "[Scheduler.Identity] trust profile setup exited for #{agent_id}: #{inspect(reason)}"
+      )
+
+      :ok
   end
 end

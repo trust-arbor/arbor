@@ -8,8 +8,9 @@ defmodule Arbor.Scheduler.RunIdentityTest do
   alias Arbor.Security
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Crypto
-  alias Arbor.Security.Identity.Registry, as: IdentityRegistry
   alias Arbor.Security.IssuerRegistry
+  alias Arbor.Security.SigningKeyStore
+  alias Arbor.Trust
 
   @envelope_uri "arbor://fs/write/reports/**"
   @lobby_uri "arbor://orchestrator/execute"
@@ -22,7 +23,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
   setup do
     {:ok, issuer} = Identity.generate()
-    :ok = IdentityRegistry.register(issuer)
+    :ok = Security.register_identity(issuer)
 
     envelopes =
       Enum.map(
@@ -50,7 +51,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     {:ok, issuer: issuer, tmp_dir: tmp_dir}
   end
 
-  test "mints only attested caps and returns the verified attestation", %{
+  test "mints only attested caps and returns an opaque authority handle", %{
     issuer: issuer,
     tmp_dir: tmp_dir
   } do
@@ -60,9 +61,11 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       ])
 
     assert {:ok, handle} = RunIdentity.mint(attestation)
-    assert handle.attestation == attestation
     assert String.starts_with?(handle.agent_id, "agent_")
-    assert is_function(handle.signer, 1)
+    assert Map.keys(handle) |> Enum.sort() == [:agent_id, :cap_ids, :signing_authority]
+    refute Enum.any?(Map.values(handle), &is_function/1)
+    refute Map.has_key?(handle, :private_key)
+    assert {:error, :no_signing_key} = SigningKeyStore.get(handle.agent_id)
 
     capabilities = Enum.map(handle.cap_ids, &fetch_cap!/1)
 
@@ -79,7 +82,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert declared.metadata.provenance.issuer_id == issuer.agent_id
     assert declared.metadata.provenance.graph_hash == attestation.graph_hash
 
-    assert {:ok, _public_key} = IdentityRegistry.lookup(handle.agent_id)
+    assert {:ok, _public_key} = Security.lookup_public_key(handle.agent_id)
     RunIdentity.revoke(handle)
   end
 
@@ -144,6 +147,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       ])
 
     {:ok, handle} = RunIdentity.mint(attestation)
+    authority = handle.signing_authority
     assert :ok = RunIdentity.revoke(handle)
 
     for cap_id <- handle.cap_ids do
@@ -153,7 +157,13 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       end
     end
 
-    assert {:error, :not_found} = IdentityRegistry.lookup(handle.agent_id)
+    assert {:error, :not_found} = Security.lookup_public_key(handle.agent_id)
+
+    if Process.whereis(Arbor.Trust.Manager) do
+      assert {:error, :not_found} = Trust.get_trust_profile(handle.agent_id)
+    end
+
+    assert {:error, :authority_not_found} = Security.sign_with_authority(authority, "closed")
   end
 
   test "cleanup is nil-safe and idempotent", %{issuer: issuer, tmp_dir: tmp_dir} do
@@ -207,7 +217,8 @@ defmodule Arbor.Scheduler.RunIdentityTest do
   end
 
   defp authorize_as(handle, resource) do
-    assert {:ok, signed_request} = handle.signer.(resource)
+    assert {:ok, signed_request} =
+             Security.sign_with_authority(handle.signing_authority, resource)
 
     Security.authorize(handle.agent_id, resource, :execute, signed_request: signed_request)
   end

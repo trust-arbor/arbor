@@ -39,6 +39,7 @@ for child <- [
       # checks). Mirror what arbor_security's own test_helper starts.
       {Arbor.Security.Identity.NonceCache, []},
       {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.SigningAuthorityBroker, []},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.CapabilityStore, []}
     ] do

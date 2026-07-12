@@ -168,7 +168,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
             apply(orchestrator, :run_file_as, [
               paths.path,
               handle.agent_id,
-              handle.signer,
+              handle.signing_authority,
               [
                 graph_hash: attestation.graph_hash,
                 workdir: canonical_workdir,

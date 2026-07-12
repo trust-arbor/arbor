@@ -8,10 +8,8 @@ defmodule Arbor.Scheduler.Application do
     children =
       if Application.get_env(:arbor_scheduler, :start_children, true) do
         [
-          # Identity must start BEFORE Oban so workers can call
-          # Arbor.Scheduler.Identity.signer/0 to sign orchestrator
-          # requests. Without a signer the orchestrator's mandatory
-          # CapabilityCheck halts every node with :missing_signed_request.
+          # Identity must start BEFORE Oban so the scheduler has its stable
+          # SigningAuthority before workers can dispatch pipelines.
           Arbor.Scheduler.Identity,
 
           # Oban — scheduling substrate. Repo lives in arbor_persistence.

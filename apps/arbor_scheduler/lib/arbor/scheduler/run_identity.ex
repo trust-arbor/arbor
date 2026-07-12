@@ -4,11 +4,11 @@ defmodule Arbor.Scheduler.RunIdentity do
 
   Phase 5 of the scheduler-privesc redesign. For each pipeline run that
   has a verified signed attestation, this module mints a fresh
-  Ed25519 keypair, registers it in `Identity.Registry`, grants the
-  declared capabilities to that ephemeral principal, and returns a
-  signer the orchestrator can use. After the run completes (success
-  or failure), the caller calls `revoke/1` to explicitly revoke each
-  granted cap and deregister the identity.
+  Ed25519 keypair, registers it through `Arbor.Security`, grants the
+  declared capabilities to that ephemeral principal, and returns an opaque
+  SigningAuthority the orchestrator can use. After the run completes (success
+  or failure), the caller calls `revoke/1` to close the authority, revoke each
+  granted cap, and deregister the identity.
 
   ## Why a per-run identity
 
@@ -41,7 +41,7 @@ defmodule Arbor.Scheduler.RunIdentity do
        │
        ▼
   RunIdentity.mint creates ephemeral identity E,
-       grants {Z₁, Z₂} to E, returns signer-for-E    (this module)
+       grants {Z₁, Z₂} to E, opens authority-for-E  (this module)
        │
        ▼
   Orchestrator runs the pipeline as E, action layer
@@ -51,15 +51,20 @@ defmodule Arbor.Scheduler.RunIdentity do
 
   Failure modes during mint return `{:error, reason}`; `revoke/1` is
   best-effort and never raises (it must run in an `after` clause).
+
+  `mint/1` opens the authority in its caller, without spawning a helper. The
+  caller therefore remains the monitored owner for the whole run and must keep
+  that process alive until `revoke/1` completes before handing the handle to a
+  different process.
   """
 
   require Logger
 
-  alias Arbor.Contracts.Security.Identity, as: IdentityStruct
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Scheduler.CapsFile
   alias Arbor.Scheduler.CapsFile.Attestation
   alias Arbor.Security
-  alias Arbor.Security.Identity.Registry, as: IdentityRegistry
+  alias Arbor.Trust
 
   # Every pipeline run needs the exact orchestrator/execute lobby capability to
   # enter the Engine. Descendant node operations are deliberately excluded:
@@ -68,9 +73,8 @@ defmodule Arbor.Scheduler.RunIdentity do
 
   @type run_handle :: %{
           agent_id: String.t(),
-          signer: (binary() -> {:ok, term()} | {:error, term()}),
-          cap_ids: [String.t()],
-          attestation: Attestation.t()
+          signing_authority: SigningAuthority.t(),
+          cap_ids: [String.t()]
         }
 
   @doc """
@@ -79,8 +83,8 @@ defmodule Arbor.Scheduler.RunIdentity do
 
   Verification chain (each step fails closed):
     1. Caller supplies the `CapsFile.Attestation` returned by `CapsFile.load/1`
-    2. `Identity.generate` produces a fresh Ed25519 keypair
-    3. `IdentityRegistry.register` enrolls the public key
+    2. `Security.generate_identity` produces a fresh Ed25519 keypair
+    3. `Security.register_identity` enrolls the public key
     4. `Security.grant` creates the orchestrator/execute lobby cap
     5. `Security.grant` creates each attested capability descriptor
 
@@ -113,8 +117,10 @@ defmodule Arbor.Scheduler.RunIdentity do
   @spec revoke(run_handle() | nil) :: :ok
   def revoke(nil), do: :ok
 
-  def revoke(%{agent_id: agent_id, cap_ids: cap_ids}) do
+  def revoke(%{agent_id: agent_id, signing_authority: authority, cap_ids: cap_ids}) do
+    safe_close_authority(authority)
     Enum.each(cap_ids, &safe_revoke_cap/1)
+    safe_delete_trust_profile(agent_id)
     safe_deregister(agent_id)
     :ok
   end
@@ -124,14 +130,11 @@ defmodule Arbor.Scheduler.RunIdentity do
   # ===========================================================================
 
   defp generate_identity do
-    IdentityStruct.generate()
+    Security.generate_identity(name: "scheduler-run")
   end
 
-  defp register_identity(%IdentityStruct{} = identity) do
-    case IdentityRegistry.register(identity) do
-      :ok -> :ok
-      {:error, _} = err -> err
-    end
+  defp register_identity(identity) do
+    Security.register_identity(Arbor.Contracts.Security.Identity.public_only(identity))
   end
 
   defp grant_orchestrator_execute(agent_id) do
@@ -144,7 +147,7 @@ defmodule Arbor.Scheduler.RunIdentity do
         mint_declared_caps(identity, attestation, lobby_cap)
 
       {:error, reason} ->
-        safe_deregister(identity.agent_id)
+        cleanup_registered(identity.agent_id, [])
         {:error, {:grant_failed, @orchestrator_execute_uri, reason}}
     end
   end
@@ -154,17 +157,35 @@ defmodule Arbor.Scheduler.RunIdentity do
       {:ok, run_caps} ->
         :ok = set_trust_profile_rules(identity.agent_id, attestation.capabilities)
 
-        {:ok,
-         %{
-           agent_id: identity.agent_id,
-           signer: Security.make_signer(identity.agent_id, identity.private_key),
-           cap_ids: [lobby_cap.id | Enum.map(run_caps, & &1.id)],
-           attestation: attestation
-         }}
+        case open_authority(identity) do
+          {:ok, authority} ->
+            {:ok,
+             %{
+               agent_id: identity.agent_id,
+               signing_authority: authority,
+               cap_ids: [lobby_cap.id | Enum.map(run_caps, & &1.id)]
+             }}
+
+          {:error, reason} ->
+            cleanup_registered(identity.agent_id, [lobby_cap | run_caps])
+            {:error, {:authority_open_failed, reason}}
+        end
 
       {:error, reason, granted_caps} ->
         cleanup_registered(identity.agent_id, [lobby_cap | granted_caps])
         {:error, reason}
+    end
+  end
+
+  defp open_authority(identity) do
+    with {:ok, proof} <-
+           Security.build_signing_authority_acquisition_proof(
+             identity.agent_id,
+             identity.private_key,
+             purpose: :pipeline_run,
+             owner: self()
+           ) do
+      Security.open_ephemeral_signing_authority(proof, identity.private_key)
     end
   end
 
@@ -230,62 +251,59 @@ defmodule Arbor.Scheduler.RunIdentity do
       # Lobby cap covers pipeline traversal — needed by every run.
       |> List.insert_at(0, "arbor://orchestrator/execute")
 
-    with :ok <- ensure_profile_exists(agent_id),
-         :ok <- apply_allow_rules(agent_id, prefixes) do
-      :ok
-    else
-      {:error, reason} ->
-        Logger.warning(
-          "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(reason)}"
-        )
+    opts =
+      case Trust.get_trust_profile(agent_id) do
+        {:ok, profile} ->
+          [
+            baseline: profile.baseline,
+            rules: Enum.reduce(prefixes, profile.rules || %{}, &Map.put(&2, &1, :allow))
+          ]
 
-        # Don't fail the mint — the cap chain may still allow the run
-        # depending on trust config. Logged for visibility.
-        :ok
-    end
-  end
+        {:error, :not_found} ->
+          [baseline: :ask, rules: Map.new(prefixes, &{&1, :allow})]
 
-  defp ensure_profile_exists(agent_id) do
-    if Arbor.Trust.Store.profile_exists?(agent_id) do
-      :ok
-    else
-      profile = Arbor.Trust.Authority.new_profile(agent_id)
+        {:error, reason} ->
+          Logger.warning(
+            "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(reason)}"
+          )
 
-      case Arbor.Trust.Store.store_profile(profile) do
-        {:ok, _} -> :ok
-        :ok -> :ok
-        {:error, reason} -> {:error, reason}
+          nil
       end
+
+    case opts do
+      nil ->
+        :ok
+
+      opts ->
+        case Trust.ensure_trust_profile(agent_id, opts) do
+          {:ok, _profile} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(reason)}"
+            )
+
+            :ok
+        end
     end
   rescue
-    e -> {:error, {:exception, Exception.message(e)}}
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
-  end
-
-  defp apply_allow_rules(agent_id, prefixes) do
-    result =
-      Arbor.Trust.Store.update_profile(
-        agent_id,
-        fn profile ->
-          rules = profile.rules || %{}
-          new_rules = Enum.reduce(prefixes, rules, fn p, acc -> Map.put(acc, p, :allow) end)
-          %{profile | rules: new_rules}
-        end
+    exception ->
+      Logger.warning(
+        "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(exception)}"
       )
 
-    case result do
-      {:ok, _} -> :ok
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  rescue
-    e -> {:error, {:exception, Exception.message(e)}}
+      :ok
   catch
-    :exit, reason -> {:error, {:exit, reason}}
+    :exit, reason ->
+      Logger.warning(
+        "[RunIdentity] trust profile setup exited for #{agent_id}: #{inspect(reason)}"
+      )
+
+      :ok
   end
 
-  # Mirrors `Arbor.Trust.Store.best_rule_prefix/1`. Extracts the
+  # Mirrors the trust policy operation prefix. Extracts the
   # `arbor://<domain>/<operation>` prefix from a fuller URI. Used to set
   # trust rules at the operation scope instead of per-path.
   defp trust_rule_prefix(uri) when is_binary(uri) do
@@ -298,7 +316,55 @@ defmodule Arbor.Scheduler.RunIdentity do
 
   defp cleanup_registered(agent_id, capabilities) do
     Enum.each(capabilities, &safe_revoke_cap(&1.id))
+    safe_delete_trust_profile(agent_id)
     safe_deregister(agent_id)
+  end
+
+  defp safe_delete_trust_profile(agent_id) do
+    case Trust.delete_trust_profile(agent_id) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[RunIdentity] failed to delete trust profile #{agent_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    exception ->
+      Logger.warning(
+        "[RunIdentity] exception deleting trust profile #{agent_id}: #{inspect(exception)}"
+      )
+
+      :ok
+  catch
+    :exit, reason ->
+      Logger.warning("[RunIdentity] trust profile deletion exited: #{inspect(reason)}")
+      :ok
+  end
+
+  defp safe_close_authority(authority) do
+    case Security.close_signing_authority(authority) do
+      :ok ->
+        :ok
+
+      {:error, :authority_not_found} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[RunIdentity] failed to close signing authority: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    exception ->
+      Logger.warning("[RunIdentity] exception closing signing authority: #{inspect(exception)}")
+      :ok
+  catch
+    :exit, reason ->
+      Logger.warning("[RunIdentity] authority close exited: #{inspect(reason)}")
+      :ok
   end
 
   defp safe_revoke_cap(cap_id) do
@@ -320,7 +386,7 @@ defmodule Arbor.Scheduler.RunIdentity do
   end
 
   defp safe_deregister(agent_id) do
-    case IdentityRegistry.deregister(agent_id) do
+    case Security.deregister_identity(agent_id) do
       :ok ->
         :ok
 
