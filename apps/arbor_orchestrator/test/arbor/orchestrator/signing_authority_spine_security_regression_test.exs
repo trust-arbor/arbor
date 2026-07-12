@@ -926,6 +926,8 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
   end
 
   defp ensure_broker_started do
+    ensure_child!(Arbor.Security.SigningAuthorityStateOwner, [])
+
     case Process.whereis(SigningAuthorityBroker) do
       pid when is_pid(pid) ->
         :ok

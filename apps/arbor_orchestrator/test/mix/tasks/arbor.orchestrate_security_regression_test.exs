@@ -91,6 +91,7 @@ defmodule Mix.Tasks.Arbor.OrchestrateSecurityRegressionTest do
     ensure_child!(Arbor.Security.Identity.Registry, [])
     ensure_child!(Arbor.Security.Identity.NonceCache, [])
     ensure_child!(Arbor.Security.SystemAuthority, [])
+    ensure_child!(Arbor.Security.SigningAuthorityStateOwner, [])
     ensure_child!(SigningAuthorityBroker, [])
   end
 
