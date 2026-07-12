@@ -858,6 +858,126 @@ defmodule Arbor.Agent.OrchestrationTest do
       refute_received {:authorize, _, _, _, _}
     end
 
+    test "security regression: facade cancellation uses direct store cleanup once with exact isolation" do
+      task_id = "task_cancel_e2e_#{System.unique_integer([:positive])}"
+      supervisor = :"cancel_cleanup_sup_#{System.unique_integer([:positive])}"
+      store = :"cancel_cleanup_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({Task.Supervisor, name: supervisor})
+
+      start_supervised!(
+        {Arbor.Agent.Orchestration.TaskStore,
+         name: store,
+         task_supervisor: supervisor,
+         approval_cleanup_consensus_module: SharedConsensus,
+         approval_cleanup_interaction_router: SharedInteractionRouter,
+         approval_cleanup_audit_module: SharedAudit}
+      )
+
+      token =
+        SharedApprovalState.install(self(),
+          consensus_pending: [
+            consensus_proposal(
+              "prop_cancel_match_" <> task_id,
+              "agent_1",
+              "arbor://fs/write/a.ex",
+              metadata: %{provenance: %{task_id: task_id}}
+            ),
+            consensus_proposal(
+              "prop_cancel_prefix_" <> task_id,
+              "agent_1",
+              "arbor://fs/write/b.ex",
+              metadata: %{provenance: %{task_id: task_id <> "0"}}
+            ),
+            consensus_proposal(
+              "prop_cancel_missing_" <> task_id,
+              "agent_1",
+              "arbor://fs/write/c.ex"
+            )
+          ],
+          interaction_pending: [
+            interaction_request(
+              "irq_cancel_match_" <> task_id,
+              "agent_1",
+              "human_1",
+              "arbor://shell/exec/git",
+              metadata: %{
+                principal_id: "agent_1",
+                approval_context: %{provenance: %{task_id: task_id}}
+              }
+            ),
+            interaction_request(
+              "irq_cancel_prefix_" <> task_id,
+              "agent_1",
+              "human_1",
+              "arbor://shell/exec/mix",
+              metadata: %{principal_id: "agent_1", task_id: task_id <> "0"}
+            ),
+            interaction_request(
+              "irq_cancel_missing_" <> task_id,
+              "agent_1",
+              "human_1",
+              "arbor://fs/write/repo",
+              metadata: %{principal_id: "agent_1"}
+            )
+          ]
+        )
+
+      on_exit(fn -> SharedApprovalState.uninstall(token) end)
+
+      opts = [
+        caller_id: "human_1",
+        task_id: task_id,
+        task_store: Arbor.Agent.Orchestration.TaskStore,
+        name: store,
+        test_pid: self(),
+        runner: ControlledTaskRunner,
+        security_module: FakeSecurity,
+        audit_module: SharedAudit,
+        authorize?: false,
+        trace_id: "trace_cancel_e2e"
+      ]
+
+      assert {:ok, ^task_id} = Orchestration.dispatch("agent_1", "cancel this", opts)
+      assert_receive {:runner_started, _runner_pid, "agent_1", "cancel this", _}
+
+      assert {:ok, %{state: :cancelled}} = Orchestration.cancel_task(task_id, opts)
+
+      assert_receive {:consensus_cancel, "prop_cancel_match_" <> ^task_id}
+      assert_receive {:interaction_respond, "irq_cancel_match_" <> ^task_id, :rejected, metadata}
+      assert metadata.task_id == task_id
+      assert metadata.decision == :task_cancelled
+
+      assert_receive {:audit_answered, "human_1", "prop_cancel_match_" <> ^task_id, :consensus,
+                      :task_cancelled, _},
+                     500
+
+      assert_receive {:audit_answered, "human_1", "irq_cancel_match_" <> ^task_id, :interaction,
+                      :task_cancelled, _},
+                     500
+
+      refute_received {:consensus_cancel, "prop_cancel_prefix_" <> ^task_id}
+      refute_received {:consensus_cancel, "prop_cancel_missing_" <> ^task_id}
+      refute_received {:interaction_respond, "irq_cancel_prefix_" <> ^task_id, _, _}
+      refute_received {:interaction_respond, "irq_cancel_missing_" <> ^task_id, _, _}
+
+      assert {:ok, remaining} =
+               Orchestration.list_pending_approvals(
+                 authorize?: false,
+                 consensus_module: SharedConsensus,
+                 interaction_router: SharedInteractionRouter
+               )
+
+      remaining_ids = MapSet.new(Enum.map(remaining, & &1.id))
+      assert MapSet.member?(remaining_ids, "prop_cancel_prefix_" <> task_id)
+      assert MapSet.member?(remaining_ids, "prop_cancel_missing_" <> task_id)
+      assert MapSet.member?(remaining_ids, "irq_cancel_prefix_" <> task_id)
+      assert MapSet.member?(remaining_ids, "irq_cancel_missing_" <> task_id)
+
+      refute_receive {:consensus_cancel, "prop_cancel_match_" <> ^task_id}, 200
+      refute_receive {:interaction_respond, "irq_cancel_match_" <> ^task_id, _, _}, 200
+    end
+
     test "failed task cancellation leaves every pending approval untouched" do
       Process.put({FakeTaskStore, :cancel_result}, {:error, :executor_refused})
 

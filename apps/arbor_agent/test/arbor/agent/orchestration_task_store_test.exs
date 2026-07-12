@@ -823,22 +823,44 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert result.payload.ok == true
   end
 
-  test "cancel does not schedule TaskStore lifecycle cleanup (facade owns that path)", %{
+  test "security regression: direct cancel schedules exact-task cleanup once", %{
     store: store
   } do
-    descriptor = cleanup_descriptor()
+    task_id = "task_cancel_1"
+    other_task_id = "task_cancel_10"
 
-    assert {:ok, task_id} =
+    assert {:ok, ^task_id} =
              TaskStore.dispatch("agent_1", "do work",
                name: store,
+               task_id: task_id,
                test_pid: self(),
                runner: ControlledRunner,
-               approval_cleanup_descriptor: descriptor
+               approval_cleanup_descriptor: cleanup_descriptor()
              )
 
     assert_receive {:runner_started, _runner_pid, "agent_1", "do work", _}
     assert {:ok, %{state: :cancelled}} = TaskStore.cancel(task_id, name: store)
+
+    assert_receive {:lifecycle_cleanup, ^task_id, opts}, 500
+    assert opts[:caller_id] == "dispatch_owner"
+    assert opts[:cleanup_reason] == :task_cancellation
+    assert opts[:trace_id] == "trace_cleanup"
+
+    assert {:error, {:not_running, :cancelled}} = TaskStore.cancel(task_id, name: store)
     refute_receive {:lifecycle_cleanup, ^task_id, _}, 200
+
+    assert {:ok, ^other_task_id} =
+             TaskStore.dispatch("agent_1", "other work",
+               name: store,
+               task_id: other_task_id,
+               test_pid: self(),
+               runner: ControlledRunner,
+               approval_cleanup_descriptor: cleanup_descriptor()
+             )
+
+    assert_receive {:runner_started, _runner_pid, "agent_1", "other work", _}
+    assert {:ok, %{state: :cancelled}} = TaskStore.cancel(other_task_id, name: store)
+    assert_receive {:lifecycle_cleanup, ^other_task_id, _}, 500
   end
 
   test "security regression: direct dispatch cannot select or retain cleanup MFA/backends", %{

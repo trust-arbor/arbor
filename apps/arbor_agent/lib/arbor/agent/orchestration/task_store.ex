@@ -139,6 +139,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     GenServer.call(store_name(opts), {:cancel, task_id})
   end
 
+  @doc false
+  @spec cancel_owns_approval_cleanup?() :: true
+  def cancel_owns_approval_cleanup?, do: true
+
   @doc """
   Persist and attempt delivery of a steering message for one task.
 
@@ -325,9 +329,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           Process.exit(record.pid, :kill)
         end
 
-        # Facade-owned approval cleanup for :cancelled; discard descriptor so a
-        # late :DOWN cannot double-schedule TaskStore lifecycle cleanup.
-        {record, _descriptor} = take_approval_cleanup_descriptor(record)
+        # Consume before scheduling so a late :DOWN cannot double-clean.
+        {record, descriptor} = take_approval_cleanup_descriptor(record)
 
         cancelled_record =
           record
@@ -346,6 +349,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           state
           |> put_in([:tasks, task_id], cancelled_record)
           |> remove_ref(record.ref)
+
+        next_state =
+          launch_approval_cleanup_job(
+            next_state,
+            cleanup_job(task_id, descriptor, :task_cancellation)
+          )
 
         {:reply, {:ok, status_view(cancelled_record)}, next_state}
 
@@ -433,7 +442,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             |> maybe_reconcile_terminal_controls()
             |> maybe_revoke_completed_task_capabilities()
 
-          {put_in(state.tasks[task_id], record), cleanup_job(task_id, descriptor)}
+          {put_in(state.tasks[task_id], record),
+           cleanup_job(task_id, descriptor, :task_termination)}
         end
 
       :error ->
@@ -467,7 +477,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
               |> reconcile_terminal_controls()
               |> revoke_task_capabilities()
 
-            {put_in(state.tasks[task_id], record), cleanup_job(task_id, descriptor)}
+            {put_in(state.tasks[task_id], record),
+             cleanup_job(task_id, descriptor, :task_termination)}
         end
 
       :error ->
@@ -475,17 +486,18 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
-  defp cleanup_job(_task_id, nil), do: nil
-  defp cleanup_job(task_id, descriptor) when is_map(descriptor), do: {task_id, descriptor}
-  defp cleanup_job(_task_id, _descriptor), do: nil
+  defp cleanup_job(task_id, descriptor, reason) when is_map(descriptor),
+    do: {task_id, descriptor, reason}
+
+  defp cleanup_job(_task_id, nil, _reason), do: nil
 
   defp launch_approval_cleanup_job(state, nil), do: state
 
-  defp launch_approval_cleanup_job(state, {task_id, descriptor}) do
+  defp launch_approval_cleanup_job(state, {task_id, descriptor, reason}) do
     # The terminal record is already present in `state`. This call only performs
     # a named external spawn; the potentially blocking supervisor call happens
     # in that launcher, never in TaskStore and never through a forgeable mailbox job.
-    launch_approval_cleanup(state, task_id, descriptor)
+    launch_approval_cleanup(state, task_id, descriptor, reason)
     state
   end
 
@@ -591,9 +603,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   # Best-effort lifecycle cleanup. Failures never affect terminal state.
   # Entrypoint + backends + supervisor are store-init only; descriptor is
   # closed scalar data (never code selection).
-  defp launch_approval_cleanup(_state, _task_id, nil), do: :ok
+  defp launch_approval_cleanup(_state, _task_id, nil, _reason), do: :ok
 
-  defp launch_approval_cleanup(state, task_id, descriptor) when is_map(descriptor) do
+  defp launch_approval_cleanup(state, task_id, descriptor, reason) when is_map(descriptor) do
     # Live code loading does not migrate an already-running GenServer map. Fall
     # back to production defaults so pre-feature TaskStore state terminalizes
     # safely without a process restart.
@@ -605,7 +617,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       )
 
     mfa = Map.get(state, :approval_cleanup_mfa, @default_approval_cleanup_mfa)
-    cleanup_opts = cleanup_opts_from_state(state, descriptor)
+    cleanup_opts = cleanup_opts_from_state(state, descriptor, reason)
 
     # Named external launcher (MFA spawn, no anonymous closure). Runs outside
     # the TaskStore process so Task.Supervisor.start_child/5 on an unresponsive
@@ -614,7 +626,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     :ok
   end
 
-  defp launch_approval_cleanup(_state, _task_id, _descriptor), do: :ok
+  defp launch_approval_cleanup(_state, _task_id, _descriptor, _reason), do: :ok
 
   @doc false
   def start_approval_cleanup_child(supervisor, {module, function, 2}, task_id, cleanup_opts)
@@ -647,7 +659,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           "approval_cleanup_mfa must be {module, function, 2}, got: #{inspect(invalid)}"
   end
 
-  defp cleanup_opts_from_state(state, descriptor) when is_map(descriptor) do
+  defp cleanup_opts_from_state(state, descriptor, reason) when is_map(descriptor) do
     [
       caller_id: Map.get(descriptor, :caller_id),
       consensus_module:
@@ -665,7 +677,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       audit_module:
         Map.get(state, :approval_cleanup_audit_module, @default_approval_cleanup_audit),
       trace_id: Map.get(descriptor, :trace_id),
-      cleanup_reason: :task_termination
+      cleanup_reason: reason
     ]
   end
 

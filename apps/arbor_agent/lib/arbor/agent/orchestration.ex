@@ -104,13 +104,16 @@ defmodule Arbor.Agent.Orchestration do
 
       case cancel_result do
         {:ok, _status} = success ->
-          cleanup_opts =
-            opts
-            |> normalize_keyword_opts()
-            |> Keyword.put(:caller_id, caller_id)
-            |> Keyword.put(:cleanup_reason, :task_cancellation)
+          unless task_store_owns_cancel_cleanup?(opts) do
+            cleanup_opts =
+              opts
+              |> normalize_keyword_opts()
+              |> Keyword.put(:caller_id, caller_id)
+              |> Keyword.put(:cleanup_reason, :task_cancellation)
 
-          _ = cleanup_approvals_for_task(task_id, cleanup_opts)
+            _ = cleanup_approvals_for_task(task_id, cleanup_opts)
+          end
+
           success
 
         error ->
@@ -1108,6 +1111,18 @@ defmodule Arbor.Agent.Orchestration do
 
   defp consensus_module(opts), do: opt(opts, :consensus_module, Arbor.Consensus)
   defp task_store_module(opts), do: opt(opts, :task_store, Arbor.Agent.Orchestration.TaskStore)
+
+  defp task_store_owns_cancel_cleanup?(opts) do
+    module = task_store_module(opts)
+
+    Code.ensure_loaded?(module) and
+      function_exported?(module, :cancel_owns_approval_cleanup?, 0) and
+      apply(module, :cancel_owns_approval_cleanup?, []) == true
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
 
   defp interaction_router(opts) do
     opt(opts, :interaction_router, Module.concat([:Arbor, :Comms, :InteractionRouter]))
