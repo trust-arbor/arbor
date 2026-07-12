@@ -25,7 +25,8 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   ## Lifecycle
 
-  Started by BranchSupervisor AFTER Session. Receives agent_id, signer,
+  Started by BranchSupervisor AFTER Session. Receives agent_id and a
+  restartable signing-authority bootstrap,
   and heartbeat config at init. Schedules the first heartbeat
   timer immediately. Each cycle:
 
@@ -100,8 +101,17 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   @impl true
   def init(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
-    signer = Keyword.get(opts, :signer)
+    legacy_signer = Keyword.get(opts, :signer)
 
+    with {:ok, signing_authority} <- claim_signing_authority(opts),
+         :ok <- reject_mixed_credentials(signing_authority, legacy_signer) do
+      init_with_authority(opts, agent_id, signing_authority, legacy_signer)
+    else
+      {:error, reason} -> {:stop, {:heartbeat_init_failed, reason}}
+    end
+  end
+
+  defp init_with_authority(opts, agent_id, signing_authority, legacy_signer) do
     heartbeat_config = Keyword.get(opts, :heartbeat_config, %{})
     interval = Map.get(heartbeat_config, :interval, @default_interval)
     graph_path = Map.get(heartbeat_config, :graph)
@@ -111,7 +121,8 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
     state = %{
       agent_id: agent_id,
-      signer: signer,
+      signer: if(signing_authority, do: nil, else: legacy_signer),
+      signing_authority: signing_authority,
       heartbeat_graph: graph,
       heartbeat_dot_path: dot_path,
       heartbeat_interval: interval,
@@ -131,6 +142,36 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
     {:ok, state}
   end
+
+  @authority_claim_attempts 3
+  @authority_claim_delay_ms 10
+
+  defp claim_signing_authority(opts) do
+    case Keyword.fetch(opts, :signing_authority_bootstrap) do
+      :error -> {:ok, nil}
+      {:ok, bootstrap} -> claim_signing_authority(bootstrap, @authority_claim_attempts)
+    end
+  end
+
+  defp claim_signing_authority(bootstrap, attempts_left) do
+    case Arbor.Security.claim_signing_authority(bootstrap) do
+      {:ok, authority} ->
+        {:ok, authority}
+
+      {:error, :authority_already_claimed} when attempts_left > 1 ->
+        Process.sleep(@authority_claim_delay_ms)
+        claim_signing_authority(bootstrap, attempts_left - 1)
+
+      {:error, reason} ->
+        {:error, {:signing_authority_claim_failed, reason}}
+    end
+  end
+
+  defp reject_mixed_credentials(nil, _legacy_signer), do: :ok
+  defp reject_mixed_credentials(_authority, nil), do: :ok
+
+  defp reject_mixed_credentials(_authority, _legacy_signer),
+    do: {:error, :mixed_signing_credentials}
 
   @impl true
   def handle_call(:get_state, _from, state) do
@@ -360,6 +401,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
         session_like = %{
           agent_id: state.agent_id,
           signer: state.signer,
+          signing_authority: state.signing_authority,
           session_id: "heartbeat:#{state.agent_id}",
           adapters: %{},
           config: %{"stream" => false},
@@ -383,6 +425,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
         session_like = %{
           agent_id: state.agent_id,
           signer: state.signer,
+          signing_authority: state.signing_authority,
           session_id: "heartbeat:#{state.agent_id}",
           adapters: %{},
           config: %{"stream" => false},
@@ -441,7 +484,10 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   # ===========================================================================
 
   defp authorize_orchestrator(state) do
-    Arbor.Orchestrator.Authorization.check_orchestrator_access(state.agent_id, state.signer)
+    Arbor.Orchestrator.Authorization.check_orchestrator_access(
+      state.agent_id,
+      state.signing_authority || state.signer
+    )
   end
 
   # ===========================================================================

@@ -37,7 +37,7 @@ defmodule Arbor.Agent.ActionCycleServer do
   use GenServer
 
   alias Arbor.Agent.MindPrompt
-  alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
 
   require Logger
 
@@ -109,19 +109,25 @@ defmodule Arbor.Agent.ActionCycleServer do
   @spec drain_queue(pid()) :: :ok
   def drain_queue(pid) when is_pid(pid), do: GenServer.call(pid, :drain_queue, 30_000)
 
+  @doc false
+  @spec close_bootstrap(pid()) :: :ok | {:error, term()}
+  def close_bootstrap(pid) when is_pid(pid), do: GenServer.call(pid, :close_bootstrap)
+
   # ── GenServer Callbacks ─────────────────────────────────────────
 
   @impl true
   def init(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
 
-    with {:ok, authority_signer} <-
-           authenticate_cycle_signer(agent_id, Keyword.get(opts, :signer)) do
+    with {:ok, {signing_authority, legacy_signer, bootstrap}} <-
+           authenticate_cycle_credential(agent_id, opts) do
       llm_fn = Keyword.get(opts, :llm_fn) || make_default_llm_fn(agent_id, opts)
 
       state = %{
         agent_id: agent_id,
-        authority_signer: authority_signer,
+        signing_authority: signing_authority,
+        signer: legacy_signer,
+        signing_authority_bootstrap: bootstrap,
         queue: :queue.new(),
         cycle_in_flight: false,
         cycle_count: 0,
@@ -133,6 +139,41 @@ defmodule Arbor.Agent.ActionCycleServer do
       {:ok, state}
     else
       {:error, reason} -> {:stop, {:action_cycle_authentication_failed, reason}}
+    end
+  end
+
+  defp authenticate_cycle_credential(agent_id, opts) do
+    case Keyword.fetch(opts, :signing_authority_bootstrap) do
+      {:ok, bootstrap} ->
+        with :ok <- reject_mixed_signer(Keyword.get(opts, :signer)),
+             {:ok, authority} <- claim_signing_authority(bootstrap) do
+          {:ok, {authority, nil, bootstrap}}
+        end
+
+      :error ->
+        with {:ok, signer} <- authenticate_cycle_signer(agent_id, Keyword.get(opts, :signer)) do
+          {:ok, {nil, signer, nil}}
+        end
+    end
+  end
+
+  defp reject_mixed_signer(nil), do: :ok
+  defp reject_mixed_signer(_), do: {:error, :mixed_signing_credentials}
+
+  @authority_claim_attempts 3
+  @authority_claim_delay_ms 10
+
+  defp claim_signing_authority(bootstrap, attempts_left \\ @authority_claim_attempts) do
+    case Arbor.Security.claim_signing_authority(bootstrap) do
+      {:ok, authority} ->
+        {:ok, authority}
+
+      {:error, :authority_already_claimed} when attempts_left > 1 ->
+        Process.sleep(@authority_claim_delay_ms)
+        claim_signing_authority(bootstrap, attempts_left - 1)
+
+      {:error, reason} ->
+        {:error, {:signing_authority_claim_failed, reason}}
     end
   end
 
@@ -148,6 +189,13 @@ defmodule Arbor.Agent.ActionCycleServer do
     }
 
     {:reply, stats, state}
+  end
+
+  def handle_call(:close_bootstrap, _from, state) do
+    case close_bootstrap_state(state) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call(:drain_queue, _from, state) do
@@ -180,6 +228,23 @@ defmodule Arbor.Agent.ActionCycleServer do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(reason, state) when reason in [:normal, :shutdown] do
+    _ = close_bootstrap_state(state)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  defp close_bootstrap_state(%{signing_authority_bootstrap: nil} = state), do: {:ok, state}
+
+  defp close_bootstrap_state(%{signing_authority_bootstrap: bootstrap} = state) do
+    case Arbor.Security.close_signing_authority_bootstrap(bootstrap) do
+      :ok -> {:ok, %{state | signing_authority_bootstrap: nil}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   # ── Queue Management ────────────────────────────────────────────
 
@@ -230,7 +295,7 @@ defmodule Arbor.Agent.ActionCycleServer do
     agent_id = state.agent_id
     timeout = config_val(state, :cycle_timeout, @default_cycle_timeout)
     llm_fn = state.llm_fn
-    authority_signer = state.authority_signer
+    signing_credential = state.signing_authority || state.signer
 
     emit_signal(agent_id, :action_cycle_started, %{
       agent_id: agent_id,
@@ -241,14 +306,14 @@ defmodule Arbor.Agent.ActionCycleServer do
     parent = self()
 
     Task.start(fn ->
-      result = run_cycle(agent_id, parent, percept, llm_fn, authority_signer, timeout)
+      result = run_cycle(agent_id, parent, percept, llm_fn, signing_credential, timeout)
       send(parent, {:cycle_result, result})
     end)
 
     %{state | queue: queue, cycle_in_flight: true}
   end
 
-  defp run_cycle(agent_id, owner_pid, percept, llm_fn, authority_signer, timeout) do
+  defp run_cycle(agent_id, owner_pid, percept, llm_fn, signing_credential, timeout) do
     controller = Arbor.Agent.CycleController
 
     if Code.ensure_loaded?(controller) and function_exported?(controller, :run, 2) do
@@ -259,7 +324,7 @@ defmodule Arbor.Agent.ActionCycleServer do
         case apply(controller, :run, [agent_id, opts]) do
           {:intent, intent, percepts} ->
             exec_result =
-              dispatch_physical_intent(agent_id, owner_pid, intent, authority_signer)
+              dispatch_physical_intent(agent_id, owner_pid, intent, signing_credential)
 
             {:completed, %{intent: intent, percepts: percepts, exec_result: exec_result}}
 
@@ -322,7 +387,7 @@ defmodule Arbor.Agent.ActionCycleServer do
 
   # ── Physical Intent Dispatch ────────────────────────────────────
 
-  defp dispatch_physical_intent(agent_id, owner_pid, intent, authority_signer) do
+  defp dispatch_physical_intent(agent_id, owner_pid, intent, signing_credential) do
     normalized = normalize_intent(intent)
 
     emit_signal(agent_id, :intent_dispatched, %{
@@ -336,7 +401,7 @@ defmodule Arbor.Agent.ActionCycleServer do
       [{^owner_pid, _value}] ->
         with {:ok, prepared} <- Arbor.Agent.IntentDispatcher.prepare(normalized),
              {:ok, authority_context} <-
-               sign_action_context(agent_id, prepared.resource, authority_signer) do
+               sign_action_context(agent_id, prepared.resource, signing_credential) do
           Arbor.Agent.IntentDispatcher.dispatch(
             agent_id,
             prepared.intent,
@@ -389,6 +454,22 @@ defmodule Arbor.Agent.ActionCycleServer do
 
   defp sign_action_context(_agent_id, _resource, nil),
     do: {:error, :authenticated_principal_required}
+
+  defp sign_action_context(agent_id, resource, %SigningAuthority{} = authority) do
+    with {:ok, %SignedRequest{} = signed_request} <-
+           Arbor.Security.sign_with_authority(authority, resource),
+         :ok <- validate_signed_request_binding(signed_request, agent_id, resource),
+         {:ok, ^agent_id} <- Arbor.Security.verify_request(signed_request) do
+      auth_context =
+        AuthContext.new(agent_id, signed_request: signed_request)
+        |> AuthContext.mark_verified()
+
+      {:ok, %{agent_id: agent_id, signed_request: signed_request, auth_context: auth_context}}
+    else
+      {:error, reason} -> {:error, {:action_cycle_authority_signing_failed, reason}}
+      _other -> {:error, {:action_cycle_authority_signing_failed, :invalid_signed_request}}
+    end
+  end
 
   defp sign_action_context(agent_id, resource, signer) when is_function(signer, 1) do
     with {:ok, %SignedRequest{} = signed_request} <- call_signer(signer, resource),

@@ -146,6 +146,75 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
     assert Keyword.fetch!(exec_opts, :pinned_action_bindings) == authority.pinned_action_bindings
   end
 
+  test "security regression: authority reaches ToolLoop executor without JSON signer fallback" do
+    node =
+      %Node{
+        id: "authority_tool_loop",
+        attrs: %{
+          "type" => "compute",
+          "simulate" => "false",
+          "prompt" => "Call the help tool once",
+          "use_tools" => "true",
+          "tools" => "tool_help",
+          "max_turns" => "2",
+          "llm_provider" => AuthorityAdapter.provider(),
+          "llm_model" => "test"
+        }
+      }
+
+    graph =
+      %Graph{
+        id: "authority_tool_loop_graph",
+        nodes: %{node.id => node},
+        edges: [],
+        attrs: %{"goal" => "prove signing authority forwarding"}
+      }
+      |> Arbor.Orchestrator.IR.Compiler.compile!()
+
+    node = Map.fetch!(graph.nodes, node.id)
+
+    {:ok, run_authorization} =
+      RunAuthorization.new(graph,
+        execution_principal: "agent_authority_executor",
+        caller_id: "human_authority_caller",
+        author_id: "agent_authority_author",
+        task_id: "task_authority",
+        session_id: "session_authority",
+        workdir: File.cwd!()
+      )
+
+    signing_authority = {:opaque_signing_authority, make_ref()}
+
+    context =
+      Context.new(%{
+        "session.llm_provider" => AuthorityAdapter.provider(),
+        "session.llm_model" => "test"
+      })
+      |> RunAuthorization.enforce_context(run_authorization)
+
+    client =
+      Client.new(default_provider: AuthorityAdapter.provider())
+      |> Client.register_adapter(AuthorityAdapter)
+
+    assert %{status: :success} =
+             LlmHandler.execute(node, context, graph,
+               authorization: true,
+               run_authorization: run_authorization,
+               signing_authority: signing_authority,
+               signer: fn _payload -> {:error, :must_not_be_called} end,
+               llm_client: client,
+               tool_executor: CapturingExecutor,
+               workdir: File.cwd!()
+             )
+
+    assert_receive {:tool_execution, "tool_help", _, _, exec_opts}
+    assert Keyword.fetch!(exec_opts, :signing_authority) === signing_authority
+    refute Keyword.has_key?(exec_opts, :signer)
+    refute Map.has_key?(context.values, "session.signing_authority")
+    refute Map.has_key?(context.values, "session.signer")
+    refute Map.has_key?(Map.from_struct(run_authorization), :signing_authority)
+  end
+
   test "security regression: authorized tool loop fails closed without RunAuthorization" do
     node =
       %Node{

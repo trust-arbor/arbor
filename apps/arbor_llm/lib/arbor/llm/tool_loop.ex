@@ -69,12 +69,15 @@ defmodule Arbor.LLM.ToolLoop do
 
   @spec run(Client.t(), Request.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(client, %Request{} = request, opts \\ []) do
-    with {:ok, identity} <- execution_identity(opts) do
+    with :ok <- validate_credential_exclusivity(opts),
+         {:ok, identity} <- execution_identity(opts) do
       max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
       workdir = Keyword.get(opts, :workdir, ".")
       on_tool_call = Keyword.get(opts, :on_tool_call)
       tool_executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
       signer = Keyword.get(opts, :signer)
+      signing_authority_present? = Keyword.has_key?(opts, :signing_authority)
+      signing_authority = Keyword.get(opts, :signing_authority)
 
       tools =
         case Keyword.fetch(opts, :tools) do
@@ -92,6 +95,8 @@ defmodule Arbor.LLM.ToolLoop do
         agent_id: identity.execution_principal,
         executor_opts: identity.executor_opts,
         signer: signer,
+        signing_authority: signing_authority,
+        signing_authority_present?: signing_authority_present?,
         prompt_sanitizer_nonce:
           Keyword.get_lazy(opts, :prompt_sanitizer_nonce, fn ->
             @prompt_sanitizer.generate_nonce()
@@ -110,6 +115,14 @@ defmodule Arbor.LLM.ToolLoop do
         # executing a tool that keeps failing so a broken/rate-limited tool can't loop forever.
         tool_failures: %{}
       })
+    end
+  end
+
+  defp validate_credential_exclusivity(opts) do
+    if Keyword.has_key?(opts, :signing_authority) and Keyword.has_key?(opts, :signer) do
+      {:error, :mixed_signing_credentials}
+    else
+      :ok
     end
   end
 
@@ -203,7 +216,8 @@ defmodule Arbor.LLM.ToolLoop do
         :execution_manifest,
         :execution_manifest_digest,
         :pinned_action_bindings,
-        :pinned_handler_bindings
+        :pinned_handler_bindings,
+        :signing_authority
       ],
       executor_opts,
       fn key, acc ->
@@ -521,7 +535,12 @@ defmodule Arbor.LLM.ToolLoop do
         # canonical URI (including params/agent_id scoping) after resolving the
         # action module. Pre-signing here used a different URI path that could
         # mismatch with what authorize_and_execute expects.
-        exec_opts = maybe_add_signer(state.executor_opts, state.signer)
+        exec_opts =
+          if state.signing_authority_present? do
+            Keyword.put(state.executor_opts, :signing_authority, state.signing_authority)
+          else
+            maybe_add_signer(state.executor_opts, state.signer)
+          end
 
         {result, duration_ms} =
           cond do
@@ -561,7 +580,9 @@ defmodule Arbor.LLM.ToolLoop do
           end
 
         Logger.info(
-          "[ToolLoop] tool=#{tc.name} signer=#{state.signer != nil} result=#{match?({:ok, _}, result)} duration=#{duration_ms}ms"
+          "[ToolLoop] tool=#{tc.name} signer=#{state.signer != nil} " <>
+            "authority=#{state.signing_authority_present?} " <>
+            "result=#{match?({:ok, _}, result)} duration=#{duration_ms}ms"
         )
 
         case result do

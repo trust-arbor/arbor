@@ -41,11 +41,28 @@ defmodule Arbor.Agent.ActionCycleServerTest do
   end
 
   describe "start_link/1" do
+    test "malformed bootstrap fails closed" do
+      Process.flag(:trap_exit, true)
+      on_exit(fn -> Process.flag(:trap_exit, false) end)
+
+      assert {:error,
+              {:action_cycle_authentication_failed,
+               {:signing_authority_claim_failed, :invalid_token}}} =
+               ActionCycleServer.start_link(
+                 agent_id: "agent_malformed_bootstrap",
+                 signing_authority_bootstrap: %{}
+               )
+    end
+
     test "starts with required agent_id", %{agent_id: agent_id} do
       name = {:via, Registry, {Arbor.Agent.ActionCycleRegistry, agent_id}}
 
       {:ok, pid} = ActionCycleServer.start_link(agent_id: agent_id, name: name)
       assert Process.alive?(pid)
+
+      state = :sys.get_state(pid)
+      assert state.signing_authority == nil
+      refute Map.has_key?(state, :authority_signer)
     end
   end
 

@@ -117,6 +117,19 @@ defmodule Arbor.Orchestrator.SessionTest do
     %{logs_root: logs_root}
   end
 
+  test "malformed signing-authority bootstrap fails closed during init" do
+    Process.flag(:trap_exit, true)
+    on_exit(fn -> Process.flag(:trap_exit, false) end)
+
+    assert {:error, {:session_init_failed, {:signing_authority_claim_failed, :invalid_token}}} =
+             Arbor.Orchestrator.Session.start_link(
+               session_id: "invalid-bootstrap",
+               agent_id: "agent_invalid_bootstrap",
+               turn_dot: @turn_dot_path,
+               signing_authority_bootstrap: %{}
+             )
+  end
+
   # ── Helpers ────────────────────────────────────────────────────
 
   defp read_dot!(path) do
@@ -1387,7 +1400,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert fake_from in state.steer_froms
     end
 
-    test "build_engine_opts wires a callable session.steer_check into the turn context" do
+    test "build_engine_opts keeps steering callback process-local" do
       {pid, tmp_dir} = start_session([])
 
       on_exit(fn ->
@@ -1398,8 +1411,8 @@ defmodule Arbor.Orchestrator.SessionTest do
       state = Arbor.Orchestrator.Session.get_state(pid)
       opts = Arbor.Orchestrator.Session.Builders.build_engine_opts(state, %{})
 
-      # The reader (LlmHandler) fetches Context.get(context, "session.steer_check") — same key.
-      assert is_function(get_in(opts, [:initial_values])["session.steer_check"], 0)
+      assert is_function(opts[:steer_check], 0)
+      refute Map.has_key?(get_in(opts, [:initial_values]), "session.steer_check")
     end
 
     test "engagement-tagged messages keep isolated transcripts (single-mind model)" do

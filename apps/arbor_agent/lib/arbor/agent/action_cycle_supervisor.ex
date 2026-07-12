@@ -28,26 +28,35 @@ defmodule Arbor.Agent.ActionCycleSupervisor do
   def start_server(agent_id, opts \\ []) do
     name = {:via, Registry, {@registry, agent_id}}
 
-    child_opts =
-      opts
-      |> maybe_put_lifecycle_signer(agent_id)
-      |> Keyword.merge(agent_id: agent_id, name: name)
+    with {:ok, child_opts, generated_bootstrap} <- prepare_child_opts(agent_id, opts) do
+      child_opts = Keyword.merge(child_opts, agent_id: agent_id, name: name)
 
-    case DynamicSupervisor.start_child(__MODULE__, {ActionCycleServer, child_opts}) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      error -> error
+      case DynamicSupervisor.start_child(__MODULE__, {ActionCycleServer, child_opts}) do
+        {:ok, pid} ->
+          {:ok, pid}
+
+        {:error, {:already_started, pid}} ->
+          if generated_bootstrap, do: close_bootstrap(child_opts)
+          {:ok, pid}
+
+        {:error, _reason} = error ->
+          if generated_bootstrap, do: close_bootstrap(child_opts)
+          error
+      end
     end
   end
 
   @doc """
   Stop the ActionCycleServer for an agent.
   """
-  @spec stop_server(String.t()) :: :ok | {:error, :not_found}
+  @spec stop_server(String.t()) :: :ok | {:error, term()}
   def stop_server(agent_id) do
     case lookup(agent_id) do
       {:ok, pid} ->
-        DynamicSupervisor.terminate_child(__MODULE__, pid)
+        case ActionCycleServer.close_bootstrap(pid) do
+          :ok -> DynamicSupervisor.terminate_child(__MODULE__, pid)
+          {:error, reason} -> {:error, {:bootstrap_close_failed, reason}}
+        end
 
       :error ->
         {:error, :not_found}
@@ -76,18 +85,31 @@ defmodule Arbor.Agent.ActionCycleSupervisor do
     end
   end
 
-  # The supervisor may acquire the existing lifecycle signer for the child, but
-  # never returns it or turns the scalar id into an Actions authority token.
-  # ActionCycleServer cryptographically challenges the signer before retaining
-  # it and every action still traverses the normal Trust/capability gate.
-  defp maybe_put_lifecycle_signer(opts, agent_id) do
-    if Keyword.has_key?(opts, :signer) do
-      opts
-    else
-      case Arbor.Agent.Lifecycle.build_signer(agent_id) do
-        {:ok, signer} -> Keyword.put(opts, :signer, signer)
-        {:error, _reason} -> opts
-      end
+  defp prepare_child_opts(agent_id, opts) do
+    cond do
+      Keyword.has_key?(opts, :signing_authority_bootstrap) ->
+        {:ok, opts, false}
+
+      Keyword.has_key?(opts, :signer) ->
+        # Explicit legacy compatibility for callers/tests that supply a
+        # signer. Production callers must use the bootstrap path.
+        {:ok, opts, false}
+
+      true ->
+        with {:ok, bootstrap} <-
+               Arbor.Agent.Lifecycle.issue_signing_authority_bootstrap(
+                 agent_id,
+                 :action_cycle
+               ) do
+          {:ok, Keyword.put(opts, :signing_authority_bootstrap, bootstrap), true}
+        end
+    end
+  end
+
+  defp close_bootstrap(opts) do
+    case Keyword.fetch(opts, :signing_authority_bootstrap) do
+      {:ok, bootstrap} -> _ = Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+      :error -> :ok
     end
   end
 end

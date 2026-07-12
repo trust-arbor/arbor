@@ -122,8 +122,10 @@ defmodule Arbor.Orchestrator.Session do
     # Monotonic start time of the in-flight turn (native units), for the
     # [:arbor, :session, :turn] telemetry event emitted on completion.
     turn_started_at: nil,
-    # Signer function for identity verification (fn resource -> {:ok, signed_request})
+    # Legacy signer compatibility only. Production Lifecycle wiring stores the
+    # reload-stable authority below and leaves this nil.
     signer: nil,
+    signing_authority: nil,
     # Progressive tool disclosure: tools discovered via find_tools during session
     discovered_tools: MapSet.new(),
     # Multi-user: identifies the acting principal (nil = single-user mode)
@@ -184,6 +186,8 @@ defmodule Arbor.Orchestrator.Session do
           goals: [map()],
           cognitive_mode: atom(),
           adapters: map(),
+          signer: (binary() -> {:ok, term()} | {:error, term()}) | nil,
+          signing_authority: Arbor.Contracts.Security.SigningAuthority.t() | nil,
           turn_in_flight: boolean(),
           turn_from: GenServer.from() | nil,
           turn_task_ref: reference() | nil,
@@ -459,13 +463,15 @@ defmodule Arbor.Orchestrator.Session do
     signal_topic = Keyword.get(opts, :signal_topic, "session:#{session_id}")
     trace_id = Keyword.get(opts, :trace_id)
     checkpoint = Keyword.get(opts, :checkpoint)
-    signer = Keyword.get(opts, :signer)
+    legacy_signer = Keyword.get(opts, :signer)
     tenant_context = Keyword.get(opts, :tenant_context)
 
     # Initialize compactor if configured (runtime bridge — module lives in arbor_agent)
     compactor = Builders.init_compactor(Keyword.get(opts, :compactor))
 
-    with {:ok, turn_graph} <- Builders.parse_dot_file(turn_dot_path) do
+    with {:ok, signing_authority} <- claim_signing_authority(opts),
+         :ok <- reject_mixed_credentials(signing_authority, legacy_signer),
+         {:ok, turn_graph} <- Builders.parse_dot_file(turn_dot_path) do
       # Build contract structs if available (runtime bridge)
       {session_config, session_state, behavior} =
         Builders.build_contract_structs(
@@ -493,7 +499,8 @@ defmodule Arbor.Orchestrator.Session do
         session_config: session_config,
         session_state: session_state,
         behavior: behavior,
-        signer: signer,
+        signer: if(signing_authority, do: nil, else: legacy_signer),
+        signing_authority: signing_authority,
         tenant_context: tenant_context,
         pid: self()
       }
@@ -525,7 +532,7 @@ defmodule Arbor.Orchestrator.Session do
 
       {:ok, state}
     else
-      {:error, reason} -> {:stop, {:bad_dot, reason}}
+      {:error, reason} -> {:stop, {:session_init_failed, reason}}
     end
   end
 
@@ -1301,8 +1308,41 @@ defmodule Arbor.Orchestrator.Session do
   # Authorization module which is fail-closed by default (see Config).
 
   defp authorize_orchestrator(state) do
-    Arbor.Orchestrator.Authorization.check_orchestrator_access(state.agent_id, state.signer)
+    Arbor.Orchestrator.Authorization.check_orchestrator_access(
+      state.agent_id,
+      state.signing_authority || state.signer
+    )
   end
+
+  @authority_claim_attempts 3
+  @authority_claim_delay_ms 10
+
+  defp claim_signing_authority(opts) do
+    case Keyword.fetch(opts, :signing_authority_bootstrap) do
+      :error -> {:ok, nil}
+      {:ok, bootstrap} -> claim_signing_authority(bootstrap, @authority_claim_attempts)
+    end
+  end
+
+  defp claim_signing_authority(bootstrap, attempts_left) do
+    case Arbor.Security.claim_signing_authority(bootstrap) do
+      {:ok, authority} ->
+        {:ok, authority}
+
+      {:error, :authority_already_claimed} when attempts_left > 1 ->
+        Process.sleep(@authority_claim_delay_ms)
+        claim_signing_authority(bootstrap, attempts_left - 1)
+
+      {:error, reason} ->
+        {:error, {:signing_authority_claim_failed, reason}}
+    end
+  end
+
+  defp reject_mixed_credentials(nil, _legacy_signer), do: :ok
+  defp reject_mixed_credentials(_authority, nil), do: :ok
+
+  defp reject_mixed_credentials(_authority, _legacy_signer),
+    do: {:error, :mixed_signing_credentials}
 
   # ── Contract-aware state mutation ───────────────────────────────────
 

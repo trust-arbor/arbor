@@ -76,10 +76,12 @@ defmodule Arbor.Agent.SessionConfig do
       heartbeat_dot: Keyword.get(opts, :heartbeat_dot, heartbeat_dot_path()),
       start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
       execution_mode: :session,
-      signer: Keyword.get(opts, :signer),
       config: llm_config,
       tenant_context: Keyword.get(opts, :tenant_context)
     ]
+
+    base = maybe_copy_option(base, opts, :signer)
+    base = maybe_copy_option(base, opts, :signing_authority_bootstrap)
 
     # Add compactor config if context management is enabled
     base =
@@ -233,4 +235,8 @@ defmodule Arbor.Agent.SessionConfig do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp maybe_copy_option(base, opts, key) do
+    if Keyword.has_key?(opts, key), do: Keyword.put(base, key, Keyword.get(opts, key)), else: base
+  end
 end

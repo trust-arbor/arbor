@@ -852,11 +852,22 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       # Annotate ask-mode tools with "(requires approval)" in description
       tool_defs = annotate_ask_mode_tools(tool_defs, agent_id)
 
-      # Extract signer from context — allows cryptographic identity verification
-      # for every tool call executed within the pipeline
+      # Authority presence is exclusive: malformed/nil authority values must
+      # fail closed in the executor rather than falling back to a signer from
+      # Engine opts or the JSON context.
       signer =
-        Keyword.get(opts, :signer) ||
-          Context.get(context, "session.signer")
+        if Keyword.has_key?(opts, :signing_authority) do
+          nil
+        else
+          Keyword.get(opts, :signer) || Context.get(context, "session.signer")
+        end
+
+      credential_opts =
+        if Keyword.has_key?(opts, :signing_authority) do
+          [signing_authority: Keyword.get(opts, :signing_authority)]
+        else
+          [signer: signer]
+        end
 
       tool_loop_opts =
         [
@@ -864,7 +875,6 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           max_turns: max_turns,
           tools: tool_defs,
           tool_executor: executor,
-          signer: signer,
           prompt_sanitizer_nonce: nonce,
           on_tool_call: build_tool_callback(opts, node.id),
           # Steering: a 0-arity closure (from the Session) that returns the next mid-turn user
@@ -873,6 +883,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           on_steer_check:
             Keyword.get(opts, :steer_check) || Context.get(context, "session.steer_check")
         ]
+        |> Keyword.merge(credential_opts)
         |> Keyword.merge(authority_opts)
         |> maybe_add_stream_callback(on_stream)
 
@@ -912,7 +923,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
            execution_manifest_digest: authority.execution_manifest_digest,
            pinned_action_bindings: authority.pinned_action_bindings,
            pinned_handler_bindings: authority.pinned_handler_bindings
-         ]}
+         ]
+         |> maybe_forward_signing_authority(opts)}
 
       {true, _missing_or_invalid} ->
         {:error, :missing_immutable_run_authorization_for_tool_loop}
@@ -924,6 +936,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
         legacy_scope = Keyword.take(opts, [:caller_id, :author_id, :task_id, :session_id])
         {:ok, [authorization: false, agent_id: agent_id] ++ legacy_scope}
+    end
+  end
+
+  defp maybe_forward_signing_authority(authority_opts, opts) do
+    case Keyword.fetch(opts, :signing_authority) do
+      {:ok, signing_authority} ->
+        Keyword.put(authority_opts, :signing_authority, signing_authority)
+
+      :error ->
+        authority_opts
     end
   end
 

@@ -119,30 +119,13 @@ defmodule Arbor.Orchestrator.Session.Builders do
       caller_id: agent_id,
       author_id: agent_id,
       session_id: session_id,
-      authorizer: build_authorizer(state),
       # Turn/heartbeat runs are in-process and never resumed (the Session owns
       # crash recovery at the session level, not mid-pipeline). Skip writing
       # per-node resume checkpoints — audit stays in the event stream + status.json.
       resumable: false
     ]
 
-    opts =
-      if state.signer do
-        Keyword.put(opts, :signer, state.signer)
-      else
-        opts
-      end
-
-    # Also inject signer into initial_values (pipeline context) so LlmHandler
-    # can access it via Context.get(context, "session.signer"). Engine opts
-    # get stripped by Placement.strip_function_opts for RPC safety, but
-    # context values survive.
-    initial_values =
-      if state.signer do
-        Map.put(initial_values, "session.signer", state.signer)
-      else
-        initial_values
-      end
+    opts = build_credential_opts(opts, state)
 
     # Steering (mirrors signer): a 0-arity closure the tool loop calls at iteration boundaries
     # to fold mid-turn user messages into the active turn. Put in the CONTEXT (opts get
@@ -152,8 +135,6 @@ defmodule Arbor.Orchestrator.Session.Builders do
     session_pid = self()
     steer_check = fn -> Arbor.Orchestrator.Session.take_steering(session_pid) end
     opts = Keyword.put(opts, :steer_check, steer_check)
-    initial_values = Map.put(initial_values, "session.steer_check", steer_check)
-
     opts = Keyword.put(opts, :initial_values, initial_values)
 
     # Wire streaming callback with source tag so the dashboard can
@@ -169,6 +150,17 @@ defmodule Arbor.Orchestrator.Session.Builders do
     else
       Keyword.put(opts, :on_stream, build_stream_callback(state, source))
     end
+  end
+
+  defp build_credential_opts(opts, %{signing_authority: authority})
+       when not is_nil(authority) do
+    Keyword.put(opts, :signing_authority, authority)
+  end
+
+  defp build_credential_opts(opts, state) do
+    opts = Keyword.put(opts, :authorizer, build_authorizer(state))
+
+    if state.signer, do: Keyword.put(opts, :signer, state.signer), else: opts
   end
 
   defp build_authorizer(state) do

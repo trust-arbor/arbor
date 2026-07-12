@@ -210,6 +210,26 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
+  @doc "Issue a restartable bootstrap for a non-branch agent consumer."
+  @spec issue_signing_authority_bootstrap(String.t(), atom()) ::
+          {:ok, Arbor.Contracts.Security.SigningAuthorityBootstrap.t()} | {:error, term()}
+  def issue_signing_authority_bootstrap(agent_id, purpose)
+      when is_binary(agent_id) and is_atom(purpose) do
+    with {:ok, private_key} <- Arbor.Security.load_signing_key(agent_id),
+         {:ok, proof} <-
+           Arbor.Security.build_signing_authority_acquisition_proof(
+             agent_id,
+             private_key,
+             purpose: purpose,
+             owner: self()
+           ) do
+      Arbor.Security.issue_signing_authority_bootstrap(proof)
+    end
+  end
+
+  def issue_signing_authority_bootstrap(_agent_id, _purpose),
+    do: {:error, :invalid_signing_authority_bootstrap_args}
+
   @doc """
   Restore an agent from a persisted profile.
   """
@@ -282,40 +302,121 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp do_start(profile, opts) do
     agent_id = profile.agent_id
+    start_session = Keyword.get(opts, :start_session, true)
 
     # Re-initialize memory + reload persisted goals/intents from Postgres
     init_memory(agent_id, reload_persisted: true)
 
-    # Build child opts for the BranchSupervisor
-    host_opts = build_host_opts(agent_id, profile, opts)
-    executor_opts = build_executor_opts(agent_id, profile, opts)
-    session_opts = build_branch_session_opts(agent_id, profile, opts)
-    heartbeat_opts = build_heartbeat_opts(agent_id, profile, opts, session_opts)
-    start_session = Keyword.get(opts, :start_session, true)
+    session_enabled = session_child_enabled?(start_session)
+    heartbeat_enabled = heartbeat_child_enabled?(profile, opts, session_enabled)
 
-    branch_opts = [
-      agent_id: agent_id,
-      host_opts: host_opts,
-      executor_opts: executor_opts,
-      session_opts: session_opts,
-      heartbeat_opts: heartbeat_opts,
-      start_session: start_session
-    ]
+    with {:ok, bootstraps} <-
+           issue_branch_authority_bootstraps(agent_id, session_enabled, heartbeat_enabled) do
+      # Build child opts for the BranchSupervisor. The private key is scoped to
+      # issue_branch_authority_bootstraps/1 and never crosses this boundary.
+      host_opts = build_host_opts(agent_id, profile, opts)
+      executor_opts = build_executor_opts(agent_id, profile, opts)
 
-    # Start the branch supervisor under the global DynamicSupervisor
-    case start_branch_supervised(agent_id, branch_opts, opts) do
-      {:ok, sup_pid} ->
-        # Register in Agent.Registry AFTER supervision is confirmed
-        register_in_agent_registry(agent_id, sup_pid, profile, opts)
-        dual_emit_lifecycle(:started, %{agent_id: agent_id})
-        {:ok, sup_pid}
+      session_opts =
+        build_branch_session_opts(agent_id, profile, opts, Map.get(bootstraps, :session))
 
-      {:error, {:already_started, sup_pid}} ->
-        {:ok, sup_pid}
+      heartbeat_opts =
+        build_heartbeat_opts(
+          agent_id,
+          profile,
+          opts,
+          session_opts,
+          Map.get(bootstraps, :heartbeat)
+        )
 
-      {:error, reason} ->
-        {:error, reason}
+      branch_opts = [
+        agent_id: agent_id,
+        host_opts: host_opts,
+        executor_opts: executor_opts,
+        session_opts: session_opts,
+        heartbeat_opts: heartbeat_opts,
+        authority_bootstraps: bootstraps,
+        start_session: start_session
+      ]
+
+      # Start the branch supervisor under the global DynamicSupervisor
+      case start_branch_supervised(agent_id, branch_opts, opts) do
+        {:ok, sup_pid} ->
+          # Register in Agent.Registry AFTER supervision is confirmed
+          register_in_agent_registry(agent_id, sup_pid, profile, opts)
+          dual_emit_lifecycle(:started, %{agent_id: agent_id})
+          {:ok, sup_pid}
+
+        {:error, {:already_started, sup_pid}} ->
+          {:ok, sup_pid}
+
+        {:error, reason} ->
+          close_branch_authority_bootstraps(bootstraps)
+          {:error, reason}
+      end
     end
+  end
+
+  # Lifecycle is the only production caller that handles a decrypted signing
+  # key. It converts that short-lived possession into two independent opaque
+  # restart slots before any branch child starts.
+  defp issue_branch_authority_bootstraps(_agent_id, false, false), do: {:ok, %{}}
+
+  defp issue_branch_authority_bootstraps(agent_id, session_enabled, heartbeat_enabled) do
+    with {:ok, private_key} <- Arbor.Security.load_signing_key(agent_id),
+         {:ok, session} <-
+           issue_optional_authority_bootstrap(agent_id, private_key, :session, session_enabled) do
+      case issue_optional_authority_bootstrap(
+             agent_id,
+             private_key,
+             :heartbeat,
+             heartbeat_enabled
+           ) do
+        {:ok, heartbeat} ->
+          {:ok, compact_bootstraps(%{session: session, heartbeat: heartbeat})}
+
+        {:error, _reason} = error ->
+          if session, do: close_branch_authority_bootstraps(%{session: session})
+          error
+      end
+    end
+  end
+
+  defp issue_optional_authority_bootstrap(_agent_id, _private_key, _purpose, false),
+    do: {:ok, nil}
+
+  defp issue_optional_authority_bootstrap(agent_id, private_key, purpose, true),
+    do: issue_authority_bootstrap(agent_id, private_key, purpose)
+
+  defp compact_bootstraps(bootstraps),
+    do: Enum.reject(bootstraps, fn {_purpose, bootstrap} -> is_nil(bootstrap) end) |> Map.new()
+
+  defp session_child_enabled?(start_session) do
+    start_session and
+      Application.get_env(:arbor_agent, :session_execution_mode, :session) in [:session, :graph]
+  end
+
+  defp heartbeat_child_enabled?(profile, opts, session_enabled) do
+    session_enabled and Keyword.get(opts, :start_heartbeat, true) and
+      Map.get(extract_heartbeat_config(profile, opts), :enabled, true)
+  end
+
+  defp issue_authority_bootstrap(agent_id, private_key, purpose) do
+    with {:ok, proof} <-
+           Arbor.Security.build_signing_authority_acquisition_proof(
+             agent_id,
+             private_key,
+             purpose: purpose,
+             owner: self()
+           ) do
+      Arbor.Security.issue_signing_authority_bootstrap(proof)
+    end
+  end
+
+  defp close_branch_authority_bootstraps(bootstraps) do
+    Enum.each(bootstraps, fn {_purpose, bootstrap} ->
+      _ = Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+    end)
   end
 
   # Start the BranchSupervisor under the appropriate DynamicSupervisor
@@ -588,7 +689,7 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   # Build session opts for the BranchSupervisor (or nil to skip session).
-  defp build_branch_session_opts(agent_id, profile, opts) do
+  defp build_branch_session_opts(agent_id, profile, opts, session_bootstrap) do
     mode = Application.get_env(:arbor_agent, :session_execution_mode, :session)
 
     if mode in [:session, :graph] do
@@ -601,18 +702,14 @@ defmodule Arbor.Agent.Lifecycle do
 
       template_meta = extract_template_metadata(profile)
 
-      signer =
-        case build_signer(agent_id) do
-          {:ok, signer_fn} -> signer_fn
-          {:error, _} -> nil
-        end
-
       session_opts =
-        Keyword.merge(opts,
+        opts
+        |> Keyword.delete(:signer)
+        |> Keyword.delete(:signing_authority)
+        |> Keyword.merge(
           tools: tools,
           system_prompt: system_prompt,
           start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
-          signer: signer,
           # Per-agent runtime flows to SessionConfig → state.config →
           # ContextBuilder → "session.llm_runtime" → LlmHandler. Without
           # this, heartbeats default to :arbor even for agents configured
@@ -629,6 +726,7 @@ defmodule Arbor.Agent.Lifecycle do
 
       # Single shared builder for session init opts
       SessionConfig.build(agent_id, session_opts)
+      |> Keyword.put(:signing_authority_bootstrap, session_bootstrap)
     else
       nil
     end
@@ -636,9 +734,10 @@ defmodule Arbor.Agent.Lifecycle do
 
   # Build opts for the HeartbeatService child (optional).
   # Returns nil if heartbeats are disabled or session_opts is nil.
-  defp build_heartbeat_opts(_agent_id, _profile, _opts, nil), do: nil
+  defp build_heartbeat_opts(_agent_id, _profile, _opts, nil, _heartbeat_bootstrap), do: nil
 
-  defp build_heartbeat_opts(agent_id, profile, opts, session_opts) when is_list(session_opts) do
+  defp build_heartbeat_opts(agent_id, profile, opts, session_opts, heartbeat_bootstrap)
+       when is_list(session_opts) do
     # Check if heartbeats should start (default: true, same as Session's start_heartbeat)
     start_heartbeat = Keyword.get(opts, :start_heartbeat, true)
 
@@ -647,16 +746,9 @@ defmodule Arbor.Agent.Lifecycle do
       heartbeat_config = extract_heartbeat_config(profile, opts)
 
       if Map.get(heartbeat_config, :enabled, true) do
-        # HeartbeatService receives the same agent_id and signer as Session
-        signer =
-          case build_signer(agent_id) do
-            {:ok, signer_fn} -> signer_fn
-            {:error, _} -> nil
-          end
-
         [
           agent_id: agent_id,
-          signer: signer,
+          signing_authority_bootstrap: heartbeat_bootstrap,
           heartbeat_config: heartbeat_config,
           heartbeat_dot: Keyword.get(session_opts, :heartbeat_dot)
         ]

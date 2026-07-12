@@ -141,6 +141,55 @@ defmodule Arbor.LLM.ToolLoopAuthorityTest do
     refute_received {:tool_execution, _, _, _, _}
   end
 
+  test "authority and signer key presence fails closed before execution" do
+    signing_authority = {:opaque_signing_authority, make_ref()}
+
+    assert {:error, :mixed_signing_credentials} =
+             ToolLoop.run(
+               client(),
+               request(),
+               authorization: true,
+               execution_principal: "agent_executor",
+               caller_id: "human_caller",
+               author_id: "agent_architect",
+               task_id: "task_scoped",
+               session_id: "session_scoped",
+               run_authorization: {:opaque_run_authorization, make_ref()},
+               signing_authority: signing_authority,
+               signer: fn _payload -> {:error, :must_not_be_called} end,
+               tool_executor: CapturingExecutor,
+               tools: tools(),
+               max_turns: 3
+             )
+
+    refute_received {:tool_execution, _, _, _, _}
+  end
+
+  test "present nil or malformed authority reaches executor without signer fallback" do
+    for authority <- [nil, :malformed_authority] do
+      assert {:ok, _result} =
+               ToolLoop.run(
+                 client(),
+                 request(),
+                 authorization: true,
+                 execution_principal: "agent_executor",
+                 caller_id: "human_caller",
+                 author_id: "agent_architect",
+                 task_id: "task_scoped",
+                 session_id: "session_scoped",
+                 run_authorization: {:opaque_run_authorization, make_ref()},
+                 signing_authority: authority,
+                 tool_executor: CapturingExecutor,
+                 tools: tools(),
+                 max_turns: 3
+               )
+
+      assert_receive {:tool_execution, "first_action", _, _, first_opts}
+      assert Keyword.fetch!(first_opts, :signing_authority) == authority
+      refute Keyword.has_key?(first_opts, :signer)
+    end
+  end
+
   test "authorized runs reject invalid UTF-8 and NUL identity bindings" do
     for {key, value} <- [caller_id: <<255>>, author_id: "author\0id", task_id: "\0"] do
       opts =

@@ -105,15 +105,21 @@ defmodule Arbor.Agent.BranchSupervisor do
     executor_opts = Keyword.get(opts, :executor_opts, [])
     session_opts = Keyword.get(opts, :session_opts)
     heartbeat_opts = Keyword.get(opts, :heartbeat_opts)
+    authority_bootstraps = Keyword.get(opts, :authority_bootstraps)
     start_session = Keyword.get(opts, :start_session, true)
 
     children =
       [
+        # Keep the cleanup worker before all restartable consumers. A
+        # rest_for_one child restart must leave the opaque slots intact; the
+        # worker only closes them when the whole branch is shutting down.
+        bootstrap_cleanup_child_spec(authority_bootstraps),
         # Child 1: APIAgent host — query interface
         host_child_spec(agent_id, host_opts),
         # Child 2: Executor — intent processing
         executor_child_spec(agent_id, executor_opts)
       ]
+      |> Enum.reject(&is_nil/1)
       |> maybe_add_session(agent_id, session_opts, start_session)
       # Child 4 (optional): HeartbeatService — autonomous heartbeat cycles.
       # MUST be AFTER Session in the child list. With rest_for_one:
@@ -127,6 +133,21 @@ defmodule Arbor.Agent.BranchSupervisor do
   end
 
   # ── Child specs ────────────────────────────────────────────────────
+
+  defp bootstrap_cleanup_child_spec(nil), do: nil
+
+  defp bootstrap_cleanup_child_spec(bootstraps)
+       when is_map(bootstraps) and map_size(bootstraps) == 0,
+       do: nil
+
+  defp bootstrap_cleanup_child_spec(bootstraps) when is_map(bootstraps) do
+    %{
+      id: :signing_authority_bootstrap_cleanup,
+      start: {BootstrapCleanup, :start_link, [[bootstraps: bootstraps]]},
+      restart: :permanent,
+      type: :worker
+    }
+  end
 
   defp host_child_spec(agent_id, host_opts) do
     # Ensure the host registers in ExecutorRegistry under {:host, agent_id}
@@ -209,4 +230,29 @@ defmodule Arbor.Agent.BranchSupervisor do
   defp via(agent_id) do
     {:via, Registry, {Arbor.Agent.ExecutorRegistry, {:branch, agent_id}}}
   end
+end
+
+defmodule Arbor.Agent.BranchSupervisor.BootstrapCleanup do
+  @moduledoc false
+
+  use GenServer
+
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @impl true
+  def init(opts) do
+    {:ok, %{bootstraps: Keyword.fetch!(opts, :bootstraps)}}
+  end
+
+  @impl true
+  def terminate(reason, %{bootstraps: bootstraps}) when reason in [:normal, :shutdown] do
+    Enum.each(bootstraps, fn {_purpose, bootstrap} ->
+      _ = Arbor.Security.close_signing_authority_bootstrap(bootstrap)
+    end)
+
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 end

@@ -1,7 +1,7 @@
 defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Agent.{ActionCycleServer, IntentDispatcher}
+  alias Arbor.Agent.{ActionCycleServer, ActionCycleSupervisor, IntentDispatcher}
   alias Arbor.Contracts.Memory.{Intent, Percept}
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
 
@@ -35,6 +35,7 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
 
     {:ok, identity} = Arbor.Security.generate_identity(name: "action-cycle-r4")
     :ok = Arbor.Security.register_identity(identity)
+    :ok = Arbor.Security.store_signing_key(identity.agent_id, identity.private_key)
     signer = Arbor.Security.make_signer(identity.agent_id, identity.private_key)
 
     marker =
@@ -59,6 +60,8 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
       if Process.whereis(Arbor.Security.Identity.Registry) do
         Arbor.Security.deregister_identity(identity.agent_id)
       end
+
+      _ = Arbor.Security.delete_signing_key(identity.agent_id)
 
       File.rm(marker)
     end)
@@ -190,6 +193,58 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     refute File.exists?(marker)
   end
 
+  test "security regression: ActionCycle normal stop closes its bootstrap slot", %{
+    identity: identity
+  } do
+    bootstrap = issue_action_cycle_bootstrap!(identity)
+
+    assert {:ok, server} =
+             ActionCycleSupervisor.start_server(identity.agent_id,
+               signing_authority_bootstrap: bootstrap
+             )
+
+    authority = :sys.get_state(server).signing_authority
+    assert %Arbor.Contracts.Security.SigningAuthority{} = authority
+
+    assert :ok = ActionCycleSupervisor.stop_server(identity.agent_id)
+    assert eventually(fn -> ActionCycleSupervisor.lookup(identity.agent_id) == :error end)
+
+    assert {:error, :authority_not_found} =
+             Arbor.Security.sign_with_authority(authority, "after-normal-stop")
+  end
+
+  test "security regression: ActionCycle crash restart reclaims and rotates authority", %{
+    identity: identity
+  } do
+    bootstrap = issue_action_cycle_bootstrap!(identity)
+
+    assert {:ok, first} =
+             ActionCycleSupervisor.start_server(identity.agent_id,
+               signing_authority_bootstrap: bootstrap
+             )
+
+    first_authority = :sys.get_state(first).signing_authority
+    ref = Process.monitor(first)
+    Process.exit(first, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^first, _}, 1_000
+
+    assert eventually(fn ->
+             case ActionCycleSupervisor.lookup(identity.agent_id) do
+               {:ok, pid} when pid != first -> Process.alive?(pid)
+               _ -> false
+             end
+           end)
+
+    {:ok, second} = ActionCycleSupervisor.lookup(identity.agent_id)
+    second_authority = :sys.get_state(second).signing_authority
+    refute first_authority.token == second_authority.token
+
+    assert {:error, :authority_not_found} =
+             Arbor.Security.sign_with_authority(first_authority, "after-crash")
+
+    assert :ok = ActionCycleSupervisor.stop_server(identity.agent_id)
+  end
+
   defp start_cycle_server(agent_id, signer, marker) do
     name = {:via, Registry, {Arbor.Agent.ActionCycleRegistry, agent_id}}
     calls = :atomics.new(1, signed: false)
@@ -228,6 +283,19 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     end)
 
     server
+  end
+
+  defp issue_action_cycle_bootstrap!(identity) do
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        identity.agent_id,
+        identity.private_key,
+        purpose: :action_cycle,
+        owner: self()
+      )
+
+    {:ok, bootstrap} = Arbor.Security.issue_signing_authority_bootstrap(proof)
+    bootstrap
   end
 
   defp shell_intent(command) do
@@ -289,11 +357,35 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     {:ok, _} = Application.ensure_all_started(:arbor_shell)
     {:ok, _} = Application.ensure_all_started(:arbor_agent)
 
+    security_backend =
+      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+
+    for {name, collection} <- [
+          {:arbor_security_capabilities, "capabilities"},
+          {:arbor_security_identities, "identities"},
+          {:arbor_security_signing_keys, "signing_keys"}
+        ] do
+      child =
+        Supervisor.child_spec(
+          {Arbor.Persistence.BufferedStore,
+           name: name, backend: security_backend, write_mode: :sync, collection: collection},
+          id: name
+        )
+
+      case Supervisor.start_child(Arbor.Security.Supervisor, child) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+        {:error, {:already_present, _id}} -> :ok
+        {:error, reason} -> raise "failed to start #{inspect(name)}: #{inspect(reason)}"
+      end
+    end
+
     security_children = [
       {Arbor.Security.Identity.Registry, []},
       {Arbor.Security.Identity.NonceCache, []},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.SigningAuthorityBroker, []},
       {Arbor.Security.CapabilityStore, []},
       {Arbor.Security.Reflex.Registry, []}
     ]
@@ -316,6 +408,10 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
 
     unless Process.whereis(Arbor.Agent.ActionCycleRegistry) do
       start_supervised!({Registry, keys: :unique, name: Arbor.Agent.ActionCycleRegistry})
+    end
+
+    unless Process.whereis(Arbor.Agent.ActionCycleSupervisor) do
+      start_supervised!(Arbor.Agent.ActionCycleSupervisor)
     end
 
     unless Process.whereis(Arbor.Shell.ExecutablePolicy) do

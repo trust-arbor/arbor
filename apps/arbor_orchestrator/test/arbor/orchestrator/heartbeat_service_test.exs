@@ -46,6 +46,18 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
   end
 
   describe "init/1" do
+    test "malformed bootstrap fails closed before scheduling a heartbeat" do
+      Process.flag(:trap_exit, true)
+      on_exit(fn -> Process.flag(:trap_exit, false) end)
+
+      assert {:error, {:heartbeat_init_failed, {:signing_authority_claim_failed, :invalid_token}}} =
+               HeartbeatService.start_link(
+                 agent_id: "agent_test_heartbeat",
+                 signing_authority_bootstrap: %{},
+                 heartbeat_config: %{enabled: true}
+               )
+    end
+
     test "starts with correct default config" do
       {:ok, pid} = start_test_service()
 
@@ -54,6 +66,8 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
       assert state.heartbeat_interval == 30_000
       assert state.heartbeat_in_flight == false
       assert state.heartbeat_ref != nil
+      assert state.signing_authority == nil
+      refute Map.has_key?(state, :authority_signer)
 
       GenServer.stop(pid)
     end
