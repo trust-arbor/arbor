@@ -44,18 +44,13 @@ defmodule Arbor.Persistence.Ecto.EventLogParentSecurityRegressionTest do
 
     stream_id = "parent-type-proof"
 
-    event = %EventStore.EventData{
-      event_type: "arbor.review.ordinary",
-      data: %{value: 1},
-      metadata: %{}
-    }
+    event = Event.new(stream_id, "arbor.review.ordinary", %{value: 1})
 
-    assert :ok = Store.append_to_stream(stream_id, :any_version, [event])
+    assert {:ok, [%Event{type: "arbor.review.ordinary", data: %{"value" => 1}}]} =
+             EventLog.append(stream_id, event)
 
-    assert {:ok, [%EventStore.RecordedEvent{event_type: "arbor.review.ordinary", data: data}]} =
-             Store.read_stream_forward(stream_id, 0, 1)
-
-    assert data == %{"value" => 1}
+    assert {:ok, [%Event{type: "arbor.review.ordinary", data: %{"value" => 1}}]} =
+             EventLog.read_stream(stream_id)
 
     refute_receive {:DOWN, ^monitor, :process, ^publisher, _reason}, 250
   end

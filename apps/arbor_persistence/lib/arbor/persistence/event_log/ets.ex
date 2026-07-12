@@ -30,13 +30,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
   alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.{Event, EventLog}
 
-  defmodule IncompleteIdentityHistoryError do
-    @moduledoc false
-    defexception message: "EventLog snapshot is missing trimmed event identity history"
-  end
-
   @default_max_events 1_000_000
   @default_max_read 10_000
+  @max_identity_replay_events 1_000
   @warning_threshold 0.8
 
   # Retention: events older than max_age_ms get trimmed by a periodic
@@ -177,10 +173,51 @@ defmodule Arbor.Persistence.EventLog.ETS do
             global_position: non_neg_integer()
           },
           keyword()
-        ) :: :ok
+        ) ::
+          {:ok, :identity_history_complete | {:identity_history_unavailable, map()}}
+          | {:error, :invalid_metadata_snapshot | :invalid_precondition | :backend_unavailable}
   def rehydrate_metadata(snapshot, opts) do
-    name = Keyword.fetch!(opts, :name)
-    GenServer.call(name, {:rehydrate_metadata, snapshot})
+    with {:ok, name} <- fetch_name_from_public_opts(opts),
+         {:ok, snapshot} <- validate_metadata_snapshot(snapshot) do
+      safe_control_call(name, {:rehydrate_metadata, snapshot})
+    end
+  end
+
+  @doc "Return whether the complete historical event-ID ledger is available."
+  @spec identity_history_status(keyword()) ::
+          {:ok, :identity_history_complete | {:identity_history_unavailable, map()}}
+          | {:error, :invalid_precondition | :backend_unavailable}
+  def identity_history_status(opts) do
+    with {:ok, name} <- fetch_name_from_public_opts(opts) do
+      safe_control_call(name, :identity_history_status)
+    end
+  end
+
+  @doc """
+  Replay one bounded page of positioned durable events into the identity ledger.
+
+  Pass `complete: true` on the final page. Completeness is accepted only when
+  the ledger contains one unique identity for every position through the
+  rehydrated global position.
+  """
+  @spec replay_identity_history([Event.t()], keyword()) ::
+          {:ok,
+           %{
+             accepted: non_neg_integer(),
+             remaining: non_neg_integer(),
+             status: :identity_history_complete | {:identity_history_unavailable, map()}
+           }}
+          | {:error,
+             :invalid_identity_replay
+             | :identity_replay_too_large
+             | :invalid_precondition
+             | :backend_unavailable}
+  def replay_identity_history(events, opts) do
+    with {:ok, name} <- fetch_name_from_public_opts(opts),
+         {:ok, complete?} <- fetch_replay_complete(opts),
+         {:ok, events} <- validate_identity_replay_page(events) do
+      safe_control_call(name, {:replay_identity_history, events, complete?})
+    end
   end
 
   # --- GenServer ---
@@ -209,6 +246,24 @@ defmodule Arbor.Persistence.EventLog.ETS do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     id_table = :ets.new(:"#{name}_ids", [:set, :protected, read_concurrency: true])
 
+    # Safe: name is module atom from internal start_link opts, not user input
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    identity_position_table =
+      :ets.new(:"#{name}_identity_positions", [
+        :ordered_set,
+        :protected,
+        read_concurrency: true
+      ])
+
+    # Safe: name is module atom from internal start_link opts, not user input
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    identity_stream_position_table =
+      :ets.new(:"#{name}_identity_stream_positions", [
+        :set,
+        :protected,
+        read_concurrency: true
+      ])
+
     max_age_ms = Keyword.get(opts, :max_age_ms, @default_max_age_ms)
     trim_interval_ms = Keyword.get(opts, :trim_interval_ms, @default_trim_interval_ms)
     append_candidate_hook = Keyword.get(opts, :append_candidate_hook)
@@ -217,6 +272,10 @@ defmodule Arbor.Persistence.EventLog.ETS do
       stream_table: stream_table,
       global_table: global_table,
       id_table: id_table,
+      identity_position_table: identity_position_table,
+      identity_stream_position_table: identity_stream_position_table,
+      identity_history: :complete,
+      identity_metadata_consistent: true,
       global_position: 0,
       max_events: max_events,
       warning_logged: false,
@@ -393,7 +452,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
       stream_versions: state.stream_versions,
       max_events: state.max_events,
       events: serialized,
-      identity_tombstones: identity_tombstones
+      identity_tombstones: identity_tombstones,
+      identity_history: serialize_identity_history(state)
     }
 
     {:reply, {:ok, snapshot}, state}
@@ -421,13 +481,56 @@ defmodule Arbor.Persistence.EventLog.ETS do
         Map.put(freshness, stream_id, :unknown)
       end)
 
-    {:reply, :ok,
-     %{
-       state
-       | stream_versions: merged_stream_versions,
-         global_position: new_global_position,
-         head_inserted_mono: head_inserted_mono
-     }}
+    candidate = %{
+      state
+      | stream_versions: merged_stream_versions,
+        global_position: new_global_position,
+        head_inserted_mono: head_inserted_mono,
+        identity_metadata_consistent:
+          metadata_sequence_consistent?(merged_stream_versions, new_global_position)
+    }
+
+    candidate =
+      if complete_identity_ledger?(candidate) do
+        %{candidate | identity_history: :complete}
+      else
+        %{candidate | identity_history: {:unavailable, incomplete_metadata_reason(candidate)}}
+      end
+
+    {:reply, {:ok, format_identity_history(candidate)}, candidate}
+  end
+
+  def handle_call(:identity_history_status, _from, state) do
+    {:reply, {:ok, format_identity_history(state)}, state}
+  end
+
+  def handle_call({:replay_identity_history, events, complete?}, _from, state) do
+    case prepare_identity_replay(events, state) do
+      {:ok, entries} ->
+        Enum.each(entries, fn {event_id, identity, global_position, stream_position} ->
+          :ets.insert(state.id_table, {event_id, identity})
+          :ets.insert(state.identity_position_table, {global_position, event_id})
+          :ets.insert(state.identity_stream_position_table, {stream_position, event_id})
+        end)
+
+        candidate =
+          if complete? and complete_identity_ledger?(state),
+            do: %{state | identity_history: :complete},
+            else: %{state | identity_history: {:unavailable, incomplete_metadata_reason(state)}}
+
+        remaining = identity_history_remaining(candidate)
+
+        {:reply,
+         {:ok,
+          %{
+            accepted: length(entries),
+            remaining: remaining,
+            status: format_identity_history(candidate)
+          }}, candidate}
+
+      {:error, :invalid_identity_replay} = error ->
+        {:reply, error, state}
+    end
   end
 
   def handle_call({:oldest_event_number, stream_id}, _from, state) do
@@ -639,10 +742,31 @@ defmodule Arbor.Persistence.EventLog.ETS do
         :ets.insert(state.stream_table, stream_entries)
         :ets.insert(state.global_table, global_entries)
         :ets.insert(state.id_table, id_entries)
+
+        identity_position_entries =
+          Enum.map(id_entries, fn {event_id, {_fingerprint, _stream_id, _event_number, position}} ->
+            {position, event_id}
+          end)
+
+        identity_stream_position_entries =
+          Enum.map(id_entries, fn {event_id, {_fingerprint, stream_id, event_number, _position}} ->
+            {{stream_id, event_number}, event_id}
+          end)
+
+        :ets.insert(state.identity_position_table, identity_position_entries)
+        :ets.insert(state.identity_stream_position_table, identity_stream_position_entries)
         committed_mono = System.monotonic_time(:millisecond)
 
         if committed_mono >= deadline_mono do
-          rollback_append_entries(state, stream_entries, global_entries, id_entries)
+          rollback_append_entries(
+            state,
+            stream_entries,
+            global_entries,
+            id_entries,
+            identity_position_entries,
+            identity_stream_position_entries
+          )
+
           {{:error, :operation_timeout}, state}
         else
           candidate = %{
@@ -695,6 +819,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
     cond do
       conflict? -> {:error, :event_identity_conflict}
       partial? -> EventLog.indeterminate(operation)
+      events == [] and identity_history_unavailable?(state) -> EventLog.indeterminate(operation)
       true -> EventLog.reconcile_events(operation, Enum.reverse(events))
     end
   end
@@ -732,10 +857,237 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end
   end
 
-  defp rollback_append_entries(state, stream_entries, global_entries, id_entries) do
+  defp fetch_name_from_public_opts(opts) do
+    with {:ok, normalized_opts} <- EventLog.normalize_opts(opts),
+         {:ok, name} <- fetch_name(normalized_opts) do
+      {:ok, name}
+    end
+  end
+
+  defp safe_control_call(name, request) do
+    GenServer.call(name, request)
+  rescue
+    _error -> {:error, :backend_unavailable}
+  catch
+    :exit, _reason -> {:error, :backend_unavailable}
+  end
+
+  defp fetch_replay_complete(opts) do
+    with {:ok, normalized_opts} <- EventLog.normalize_opts(opts) do
+      case Keyword.get(normalized_opts, :complete, false) do
+        complete? when is_boolean(complete?) -> {:ok, complete?}
+        _invalid -> {:error, :invalid_precondition}
+      end
+    end
+  end
+
+  defp validate_metadata_snapshot(%{
+         stream_versions: stream_versions,
+         global_position: global_position
+       })
+       when is_map(stream_versions) and map_size(stream_versions) <= @default_max_events and
+              is_integer(global_position) and global_position >= 0 and
+              global_position <= 2_147_483_647 do
+    valid? =
+      Enum.all?(stream_versions, fn {stream_id, version} ->
+        is_binary(stream_id) and byte_size(stream_id) > 0 and byte_size(stream_id) <= 255 and
+          String.valid?(stream_id) and is_integer(version) and version >= 0 and
+          version <= 2_147_483_647
+      end)
+
+    if valid?,
+      do: {:ok, %{stream_versions: stream_versions, global_position: global_position}},
+      else: {:error, :invalid_metadata_snapshot}
+  end
+
+  defp validate_metadata_snapshot(_invalid), do: {:error, :invalid_metadata_snapshot}
+
+  defp validate_identity_replay_page(events) do
+    validate_identity_replay_page(events, 0, [])
+  end
+
+  defp validate_identity_replay_page([], _count, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp validate_identity_replay_page(_remaining, @max_identity_replay_events, _acc),
+    do: {:error, :identity_replay_too_large}
+
+  defp validate_identity_replay_page([%Event{} = event | rest], count, acc),
+    do: validate_identity_replay_page(rest, count + 1, [event | acc])
+
+  defp validate_identity_replay_page(_improper_or_invalid, _count, _acc),
+    do: {:error, :invalid_identity_replay}
+
+  defp prepare_identity_replay(events, state) do
+    events
+    |> Enum.reduce_while(
+      {:ok, [], MapSet.new(), MapSet.new(), MapSet.new()},
+      fn event, {:ok, entries, page_ids, page_positions, page_stream_positions} ->
+        case identity_replay_entry(
+               event,
+               state,
+               page_ids,
+               page_positions,
+               page_stream_positions
+             ) do
+          {:ok, :existing, event_id, global_position, stream_position} ->
+            {:cont,
+             {:ok, entries, MapSet.put(page_ids, event_id),
+              MapSet.put(page_positions, global_position),
+              MapSet.put(page_stream_positions, stream_position)}}
+
+          {:ok, identity, event_id, global_position, stream_position} ->
+            {:cont,
+             {:ok, [{event_id, identity, global_position, stream_position} | entries],
+              MapSet.put(page_ids, event_id), MapSet.put(page_positions, global_position),
+              MapSet.put(page_stream_positions, stream_position)}}
+
+          {:error, :invalid_identity_replay} = error ->
+            {:halt, error}
+        end
+      end
+    )
+    |> case do
+      {:ok, entries, _ids, _positions, _stream_positions} -> {:ok, Enum.reverse(entries)}
+      {:error, :invalid_identity_replay} = error -> error
+    end
+  end
+
+  defp identity_replay_entry(
+         %Event{} = event,
+         state,
+         page_ids,
+         page_positions,
+         page_stream_positions
+       ) do
+    fingerprint = EventLog.event_fingerprint(event.stream_id, event)
+    stream_version = Map.get(state.stream_versions, event.stream_id, 0)
+
+    valid? =
+      is_binary(fingerprint) and is_integer(event.event_number) and event.event_number > 0 and
+        event.event_number <= stream_version and is_integer(event.global_position) and
+        event.global_position > 0 and event.global_position <= state.global_position and
+        not MapSet.member?(page_ids, event.id) and
+        not MapSet.member?(page_positions, event.global_position) and
+        not MapSet.member?(page_stream_positions, {event.stream_id, event.event_number})
+
+    identity =
+      {fingerprint, event.stream_id, event.event_number, event.global_position}
+
+    stream_position = {event.stream_id, event.event_number}
+
+    if valid? do
+      classify_replay_identity(
+        event.id,
+        identity,
+        event.global_position,
+        stream_position,
+        state
+      )
+    else
+      {:error, :invalid_identity_replay}
+    end
+  end
+
+  defp classify_replay_identity(event_id, identity, global_position, stream_position, state) do
+    id_entry = :ets.lookup(state.id_table, event_id)
+    position_entry = :ets.lookup(state.identity_position_table, global_position)
+
+    stream_position_entry =
+      :ets.lookup(state.identity_stream_position_table, stream_position)
+
+    case {id_entry, position_entry, stream_position_entry} do
+      {[], [], []} ->
+        {:ok, identity, event_id, global_position, stream_position}
+
+      {
+        [{^event_id, ^identity}],
+        [{^global_position, ^event_id}],
+        [{^stream_position, ^event_id}]
+      } ->
+        {:ok, :existing, event_id, global_position, stream_position}
+
+      _conflict ->
+        {:error, :invalid_identity_replay}
+    end
+  end
+
+  defp complete_identity_ledger?(state) do
+    state.identity_metadata_consistent and
+      :ets.info(state.id_table, :size) == state.global_position and
+      :ets.info(state.identity_position_table, :size) == state.global_position and
+      :ets.info(state.identity_stream_position_table, :size) == state.global_position
+  end
+
+  defp incomplete_metadata_reason(%{identity_metadata_consistent: false}),
+    do: :metadata_sequence_inconsistent
+
+  defp incomplete_metadata_reason(%{identity_history: {:unavailable, reason}}), do: reason
+  defp incomplete_metadata_reason(_state), do: :durable_metadata_only
+
+  defp metadata_sequence_consistent?(stream_versions, global_position) do
+    stream_versions
+    |> Enum.reduce_while(0, fn {_stream_id, version}, total ->
+      next_total = total + version
+
+      if next_total <= global_position,
+        do: {:cont, next_total},
+        else: {:halt, :inconsistent}
+    end)
+    |> case do
+      ^global_position -> true
+      _different -> false
+    end
+  end
+
+  defp identity_history_remaining(state) do
+    max(state.global_position - :ets.info(state.id_table, :size), 0)
+  end
+
+  defp identity_history_unavailable?(%{identity_history: :complete}), do: false
+  defp identity_history_unavailable?(_state), do: true
+
+  defp format_identity_history(%{identity_history: :complete}),
+    do: :identity_history_complete
+
+  defp format_identity_history(%{identity_history: {:unavailable, reason}} = state) do
+    {:identity_history_unavailable,
+     %{
+       reason: reason,
+       expected_events: state.global_position,
+       loaded_events: :ets.info(state.id_table, :size)
+     }}
+  end
+
+  defp serialize_identity_history(%{identity_history: :complete}),
+    do: %{"status" => "complete"}
+
+  defp serialize_identity_history(%{identity_history: {:unavailable, reason}} = state) do
+    %{
+      "status" => "unavailable",
+      "reason" => Atom.to_string(reason),
+      "expected_events" => state.global_position,
+      "loaded_events" => :ets.info(state.id_table, :size)
+    }
+  end
+
+  defp rollback_append_entries(
+         state,
+         stream_entries,
+         global_entries,
+         id_entries,
+         identity_position_entries,
+         identity_stream_position_entries
+       ) do
     Enum.each(stream_entries, &:ets.delete(state.stream_table, elem(&1, 0)))
     Enum.each(global_entries, &:ets.delete(state.global_table, elem(&1, 0)))
     Enum.each(id_entries, &:ets.delete(state.id_table, elem(&1, 0)))
+    Enum.each(identity_position_entries, &:ets.delete(state.identity_position_table, elem(&1, 0)))
+
+    Enum.each(
+      identity_stream_position_entries,
+      &:ets.delete(state.identity_stream_position_table, elem(&1, 0))
+    )
+
     :ok
   end
 
@@ -1077,16 +1429,13 @@ defmodule Arbor.Persistence.EventLog.ETS do
         state
     end
   rescue
-    error in IncompleteIdentityHistoryError ->
-      reraise(error, __STACKTRACE__)
-
     e ->
-      Logger.warning("EventLog.ETS: snapshot restore failed: #{inspect(e)}, starting fresh")
-      state
+      Logger.warning("EventLog.ETS: snapshot restore failed: #{inspect(e)}")
+      reset_failed_snapshot_restore(state, :snapshot_restore_failed)
   catch
     :exit, _ ->
-      Logger.debug("EventLog.ETS: snapshot store not available, starting fresh")
-      state
+      Logger.warning("EventLog.ETS: snapshot store not available")
+      reset_failed_snapshot_restore(state, :snapshot_store_unavailable)
   end
 
   defp do_restore_snapshot(state, store, store_opts, namespace, meta) do
@@ -1103,8 +1452,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
           import_snapshot(state, snapshot)
 
         _ ->
-          Logger.warning("EventLog.ETS: snapshot #{latest_id} not found, starting fresh")
-          state
+          Logger.warning("EventLog.ETS: snapshot #{latest_id} not found")
+          reset_failed_snapshot_restore(state, :snapshot_missing)
       end
     else
       state
@@ -1116,8 +1465,10 @@ defmodule Arbor.Persistence.EventLog.ETS do
     global_position = Map.get(snapshot, "global_position", 0)
     stream_versions = restore_stream_versions(Map.get(snapshot, "stream_versions", %{}))
     identity_tombstones = Map.get(snapshot, "identity_tombstones")
+    declared_identity_history = Map.get(snapshot, "identity_history")
 
-    ensure_snapshot_identity_history!(events, global_position, identity_tombstones)
+    {identity_entries, snapshot_identity_error} =
+      snapshot_identity_entries(events, identity_tombstones, global_position)
 
     Enum.each(events, fn event_map ->
       event = deserialize_event(event_map)
@@ -1128,22 +1479,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
       )
 
       :ets.insert(state.global_table, {event.global_position, event})
-
-      if is_nil(identity_tombstones) do
-        :ets.insert(
-          state.id_table,
-          {event.id,
-           {
-             EventLog.event_fingerprint(event.stream_id, event),
-             event.stream_id,
-             event.event_number,
-             event.global_position
-           }}
-        )
-      end
     end)
 
-    restore_identity_tombstones!(state.id_table, identity_tombstones)
+    Enum.each(identity_entries, fn {event_id, identity, global_position} ->
+      {_fingerprint, stream_id, event_number, ^global_position} = identity
+      :ets.insert(state.id_table, {event_id, identity})
+      :ets.insert(state.identity_position_table, {global_position, event_id})
+      :ets.insert(state.identity_stream_position_table, {{stream_id, event_number}, event_id})
+    end)
 
     event_count = length(events)
 
@@ -1154,12 +1497,24 @@ defmodule Arbor.Persistence.EventLog.ETS do
     head_inserted_mono =
       Map.new(stream_versions, fn {stream_id, _version} -> {stream_id, :unknown} end)
 
-    %{
+    restored = %{
       state
       | global_position: global_position,
         stream_versions: stream_versions,
-        head_inserted_mono: head_inserted_mono
+        head_inserted_mono: head_inserted_mono,
+        identity_metadata_consistent:
+          metadata_sequence_consistent?(stream_versions, global_position)
     }
+
+    identity_history =
+      restored_snapshot_identity_history(
+        restored,
+        events,
+        declared_identity_history,
+        snapshot_identity_error
+      )
+
+    %{restored | identity_history: identity_history}
   end
 
   # Stream version keys may be atoms or strings depending on serialization
@@ -1167,102 +1522,181 @@ defmodule Arbor.Persistence.EventLog.ETS do
     Map.new(versions, fn {k, v} -> {k, v} end)
   end
 
-  defp ensure_snapshot_identity_history!(events, global_position, nil)
-       when is_integer(global_position) and global_position > length(events),
-       do: raise(IncompleteIdentityHistoryError)
+  defp snapshot_identity_entries(events, nil, _global_position) do
+    entries =
+      Enum.map(events, fn event_map ->
+        event = deserialize_event(event_map)
+        fingerprint = EventLog.event_fingerprint(event.stream_id, event)
 
-  defp ensure_snapshot_identity_history!(_events, _global_position, nil), do: :ok
+        {event.id, {fingerprint, event.stream_id, event.event_number, event.global_position},
+         event.global_position}
+      end)
 
-  defp ensure_snapshot_identity_history!(events, global_position, tombstones)
-       when is_list(tombstones) and is_integer(global_position) and global_position >= 0 do
-    if complete_identity_history?(events, global_position, tombstones),
-      do: :ok,
-      else: raise(IncompleteIdentityHistoryError)
+    {entries, nil}
   end
 
-  defp ensure_snapshot_identity_history!(_events, _global_position, _invalid),
-    do: raise(IncompleteIdentityHistoryError)
+  defp snapshot_identity_entries(events, tombstones, global_position)
+       when is_list(tombstones) do
+    tombstones
+    |> Enum.reduce_while(
+      {:ok, [], MapSet.new(), MapSet.new(), MapSet.new()},
+      fn tombstone, {:ok, entries, ids, positions, stream_positions} ->
+        case snapshot_identity_entry(
+               tombstone,
+               global_position,
+               ids,
+               positions,
+               stream_positions
+             ) do
+          {:ok, event_id, identity, position} ->
+            {_fingerprint, stream_id, event_number, ^position} = identity
+            stream_position = {stream_id, event_number}
 
-  defp restore_identity_tombstones!(_id_table, nil), do: :ok
+            {:cont,
+             {:ok, [{event_id, identity, position} | entries], MapSet.put(ids, event_id),
+              MapSet.put(positions, position), MapSet.put(stream_positions, stream_position)}}
 
-  defp restore_identity_tombstones!(id_table, tombstones) do
-    Enum.each(tombstones, fn tombstone ->
-      with %{
-             "event_id" => event_id,
-             "fingerprint" => fingerprint,
-             "stream_id" => stream_id,
-             "event_number" => event_number,
-             "global_position" => global_position
-           } <- tombstone,
-           true <- is_binary(event_id),
-           {:ok, _fingerprint, _stream_id, _event_number, _global_position} <-
-             normalize_identity({fingerprint, stream_id, event_number, global_position}) do
-        :ets.insert(
-          id_table,
-          {event_id, {fingerprint, stream_id, event_number, global_position}}
-        )
-      else
-        _invalid -> raise IncompleteIdentityHistoryError
+          :error ->
+            {:halt, :error}
+        end
+      end
+    )
+    |> case do
+      {:ok, entries, _ids, _positions, _stream_positions} ->
+        {Enum.reverse(entries), nil}
+
+      :error ->
+        {snapshot_event_identity_entries(events), :invalid_snapshot_identity_history}
+    end
+  end
+
+  defp snapshot_identity_entries(events, _invalid, _global_position),
+    do: {snapshot_event_identity_entries(events), :invalid_snapshot_identity_history}
+
+  defp snapshot_event_identity_entries(events) do
+    Enum.map(events, fn event_map ->
+      event = deserialize_event(event_map)
+      fingerprint = EventLog.event_fingerprint(event.stream_id, event)
+
+      {event.id, {fingerprint, event.stream_id, event.event_number, event.global_position},
+       event.global_position}
+    end)
+  end
+
+  defp snapshot_identity_entry(tombstone, global_position, ids, positions, stream_positions) do
+    with %{
+           "event_id" => event_id,
+           "fingerprint" => fingerprint,
+           "stream_id" => stream_id,
+           "event_number" => event_number,
+           "global_position" => position
+         } <- tombstone,
+         true <- snapshot_identity_string?(event_id),
+         true <- valid_snapshot_fingerprint?(fingerprint),
+         true <- snapshot_identity_string?(stream_id),
+         true <- is_integer(event_number) and event_number > 0,
+         true <- is_integer(position) and position > 0 and position <= global_position,
+         false <- MapSet.member?(ids, event_id),
+         false <- MapSet.member?(positions, position),
+         false <- MapSet.member?(stream_positions, {stream_id, event_number}) do
+      {:ok, event_id, {fingerprint, stream_id, event_number, position}, position}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp restored_snapshot_identity_history(
+         state,
+         events,
+         declared,
+         snapshot_identity_error
+       ) do
+    complete? =
+      is_nil(snapshot_identity_error) and complete_identity_ledger?(state) and
+        active_snapshot_events_match?(events, state.id_table)
+
+    case {declared, complete?, snapshot_identity_error} do
+      {%{"status" => "complete"}, true, nil} ->
+        :complete
+
+      {%{"status" => "unavailable", "reason" => reason}, _complete, nil} ->
+        {:unavailable, snapshot_unavailable_reason(reason)}
+
+      {nil, true, nil} ->
+        :complete
+
+      {_declared, _complete, :invalid_snapshot_identity_history} ->
+        {:unavailable, :invalid_snapshot_identity_history}
+
+      _incomplete ->
+        {:unavailable, :legacy_snapshot_incomplete}
+    end
+  end
+
+  defp active_snapshot_events_match?(events, id_table) do
+    Enum.all?(events, fn event_map ->
+      event = deserialize_event(event_map)
+
+      case :ets.lookup(id_table, event.id) do
+        [
+          {_, {fingerprint, stream_id, event_number, global_position}}
+        ] ->
+          stream_id == event.stream_id and event_number == event.event_number and
+            global_position == event.global_position and
+            EventLog.event_fingerprint_matches?(stream_id, event, fingerprint)
+
+        _missing_or_invalid ->
+          false
       end
     end)
   end
 
-  defp complete_identity_history?(events, global_position, tombstones) do
-    {count, event_ids, positions, identities} =
-      Enum.reduce(tombstones, {0, MapSet.new(), MapSet.new(), %{}}, fn tombstone,
-                                                                       {count, ids, positions,
-                                                                        identities} ->
-        %{
-          "event_id" => event_id,
-          "fingerprint" => fingerprint,
-          "stream_id" => stream_id,
-          "event_number" => event_number,
-          "global_position" => position
-        } = tombstone
+  defp snapshot_unavailable_reason("durable_metadata_only"), do: :durable_metadata_only
+  defp snapshot_unavailable_reason("legacy_snapshot_incomplete"), do: :legacy_snapshot_incomplete
 
-        true = snapshot_identity_string?(event_id)
-        true = is_binary(fingerprint) and byte_size(fingerprint) == 64
-        true = snapshot_identity_string?(stream_id)
-        true = is_integer(event_number) and event_number > 0
-        true = is_integer(position) and position > 0 and position <= global_position
-        false = MapSet.member?(ids, event_id)
-        false = MapSet.member?(positions, position)
+  defp snapshot_unavailable_reason("invalid_snapshot_identity_history"),
+    do: :invalid_snapshot_identity_history
 
-        identity = {fingerprint, stream_id, event_number, position}
+  defp snapshot_unavailable_reason("snapshot_missing"), do: :snapshot_missing
+  defp snapshot_unavailable_reason("snapshot_restore_failed"), do: :snapshot_restore_failed
 
-        {
-          count + 1,
-          MapSet.put(ids, event_id),
-          MapSet.put(positions, position),
-          Map.put(identities, event_id, identity)
-        }
-      end)
+  defp snapshot_unavailable_reason("snapshot_store_unavailable"),
+    do: :snapshot_store_unavailable
 
-    count == global_position and MapSet.size(event_ids) == global_position and
-      MapSet.size(positions) == global_position and
-      Enum.all?(events, &active_snapshot_identity_matches?(&1, identities))
-  rescue
-    _invalid -> false
-  catch
-    _kind, _reason -> false
-  end
+  defp snapshot_unavailable_reason("metadata_sequence_inconsistent"),
+    do: :metadata_sequence_inconsistent
 
-  defp active_snapshot_identity_matches?(event_map, identities) do
-    event = deserialize_event(event_map)
+  defp snapshot_unavailable_reason(_unknown), do: :invalid_snapshot_identity_history
 
-    case Map.get(identities, event.id) do
-      {fingerprint, stream_id, event_number, global_position} ->
-        stream_id == event.stream_id and event_number == event.event_number and
-          global_position == event.global_position and
-          EventLog.event_fingerprint_matches?(stream_id, event, fingerprint)
-
-      nil ->
-        false
-    end
+  defp valid_snapshot_fingerprint?(fingerprint) do
+    is_binary(fingerprint) and byte_size(fingerprint) == 64 and String.valid?(fingerprint) and
+      fingerprint =~ ~r/\A[0-9a-f]{64}\z/
   end
 
   defp snapshot_identity_string?(value) do
     is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 255 and
       String.valid?(value)
+  end
+
+  defp reset_failed_snapshot_restore(state, reason) do
+    Enum.each(
+      [
+        state.stream_table,
+        state.global_table,
+        state.id_table,
+        state.identity_position_table,
+        state.identity_stream_position_table
+      ],
+      &:ets.delete_all_objects/1
+    )
+
+    %{
+      state
+      | global_position: 0,
+        stream_versions: %{},
+        head_inserted_mono: %{},
+        identity_metadata_consistent: false,
+        identity_history: {:unavailable, reason}
+    }
   end
 end

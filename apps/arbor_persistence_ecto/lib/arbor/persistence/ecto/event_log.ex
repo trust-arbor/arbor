@@ -369,12 +369,19 @@ defmodule Arbor.Persistence.Ecto.EventLog do
       {:error, {:constraint_missing_or_invalid, _name} = reason} ->
         {:error, {:event_log_schema_unavailable, reason}}
 
+      {:error, {tag, _name} = reason}
+      when tag in [:operation_column_invalid, :protocol_column_invalid] ->
+        {:error, {:event_log_schema_unavailable, reason}}
+
       {:error, reason}
       when reason in [
              :migration_missing,
              :operation_table_missing,
-             :operation_table_invalid,
-             :event_metadata_type_invalid
+             :protocol_table_missing,
+             :event_metadata_type_invalid,
+             :protocol_version_invalid,
+             :operation_index_invalid,
+             :operation_trigger_invalid
            ] ->
         {:error, {:event_log_schema_unavailable, reason}}
 

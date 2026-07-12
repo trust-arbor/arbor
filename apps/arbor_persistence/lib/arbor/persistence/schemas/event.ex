@@ -27,6 +27,8 @@ defmodule Arbor.Persistence.Schemas.Event do
     field(:correlation_id, :string)
     field(:event_timestamp, :utc_datetime_usec)
     field(:committed_at, :utc_datetime_usec, read_after_writes: true)
+    field(:operation_id, :string)
+    field(:operation_fingerprint, :string)
 
     timestamps(inserted_at: :created_at, updated_at: false)
   end
@@ -39,7 +41,9 @@ defmodule Arbor.Persistence.Schemas.Event do
     :agent_id,
     :causation_id,
     :correlation_id,
-    :event_timestamp
+    :event_timestamp,
+    :operation_id,
+    :operation_fingerprint
   ]
 
   @doc """

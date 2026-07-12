@@ -299,6 +299,214 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
              )
   end
 
+  test "security regression: database cutover rejects a late R1 writer after durable absence" do
+    conn = EventStore.Config.lookup(Store, :conn)
+    parent = self()
+    stream_id = "event-store-r1-late-writer"
+
+    event =
+      Event.new(stream_id, "arbor.review.ordinary", %{value: 1},
+        id: "evt_event_store_r1_late_writer"
+      )
+
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+    fingerprint = Map.fetch!(operation.fingerprints, event.id)
+
+    old_event = %EventStore.EventData{
+      event_id: deterministic_storage_id(event.id),
+      event_type: event.type,
+      data: event.data,
+      metadata: %{
+        "event_id" => event.id,
+        "arbor_agent_id" => event.agent_id,
+        "arbor_event_timestamp" => DateTime.to_iso8601(event.timestamp),
+        "arbor_append_operation_id" => operation.operation_id,
+        "arbor_append_fingerprint" => fingerprint,
+        "causation_id" => event.causation_id,
+        "correlation_id" => event.correlation_id
+      }
+    }
+
+    old_writer =
+      Task.async(fn ->
+        Postgrex.transaction(conn, fn transaction ->
+          send(parent, :event_store_r1_transaction_open)
+
+          receive do
+            :attempt_event_store_r1_insert ->
+              try do
+                Store.append_to_stream(stream_id, :any_version, [old_event], conn: transaction)
+              rescue
+                error -> {:raised, error}
+              end
+          after
+            3_000 -> raise "late R1 writer release timed out"
+          end
+        end)
+      end)
+
+    assert_receive :event_store_r1_transaction_open, 1_000
+    assert {:ok, :absent} = EventLog.reconcile_append(operation, [])
+
+    send(old_writer.pid, :attempt_event_store_r1_insert)
+    refute match?({:ok, :ok}, Task.await(old_writer, 2_000))
+
+    assert {:ok, 0} = EventLog.stream_version(stream_id)
+    assert {:ok, :absent} = EventLog.reconcile_append(operation, [])
+  end
+
+  test "schema verification rejects a removed operation timestamp default" do
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    Postgrex.query!(
+      conn,
+      "ALTER TABLE public.arbor_event_log_operations ALTER COLUMN inserted_at DROP DEFAULT"
+    )
+
+    on_exit(fn ->
+      Postgrex.query!(
+        conn,
+        "ALTER TABLE public.arbor_event_log_operations ALTER COLUMN inserted_at SET DEFAULT clock_timestamp()"
+      )
+    end)
+
+    assert {:error, {:operation_column_invalid, "inserted_at"}} =
+             Arbor.Persistence.Ecto.EventLogSchema.verify(conn, "public",
+               timeout: 1_000,
+               lock: :none
+             )
+
+    event = Event.new("missing-operation-default", "arbor.review.ordinary", %{value: 1})
+
+    assert {:error, {:event_log_schema_unavailable, {:operation_column_invalid, "inserted_at"}}} =
+             EventLog.append("missing-operation-default", event)
+  end
+
+  test "schema verification rejects a missing operation index and disabled protocol trigger" do
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    on_exit(fn ->
+      Postgrex.query!(
+        conn,
+        """
+        CREATE INDEX IF NOT EXISTS arbor_event_log_operations_status_inserted_at_idx
+        ON public.arbor_event_log_operations (status, inserted_at)
+        """
+      )
+
+      Postgrex.query!(
+        conn,
+        "ALTER TABLE public.events ENABLE TRIGGER arbor_event_log_operation_fence_insert"
+      )
+
+      Postgrex.query!(
+        conn,
+        "ALTER FUNCTION public.arbor_event_log_enforce_operation_fence() SECURITY INVOKER"
+      )
+    end)
+
+    Postgrex.query!(
+      conn,
+      "DROP INDEX public.arbor_event_log_operations_status_inserted_at_idx"
+    )
+
+    assert {:error, :operation_index_invalid} =
+             Arbor.Persistence.Ecto.EventLogSchema.verify(conn, "public",
+               timeout: 1_000,
+               lock: :none
+             )
+
+    Postgrex.query!(
+      conn,
+      """
+      CREATE INDEX arbor_event_log_operations_status_inserted_at_idx
+      ON public.arbor_event_log_operations (status, inserted_at)
+      WHERE status = 'aborted'
+      """
+    )
+
+    assert {:error, :operation_index_invalid} =
+             Arbor.Persistence.Ecto.EventLogSchema.verify(conn, "public",
+               timeout: 1_000,
+               lock: :none
+             )
+
+    Postgrex.query!(
+      conn,
+      "DROP INDEX public.arbor_event_log_operations_status_inserted_at_idx"
+    )
+
+    Postgrex.query!(
+      conn,
+      """
+      CREATE INDEX arbor_event_log_operations_status_inserted_at_idx
+      ON public.arbor_event_log_operations (status, inserted_at)
+      """
+    )
+
+    Postgrex.query!(
+      conn,
+      "ALTER TABLE public.events DISABLE TRIGGER arbor_event_log_operation_fence_insert"
+    )
+
+    assert {:error, :operation_trigger_invalid} =
+             Arbor.Persistence.Ecto.EventLogSchema.verify(conn, "public",
+               timeout: 1_000,
+               lock: :none
+             )
+
+    Postgrex.query!(
+      conn,
+      "ALTER TABLE public.events ENABLE TRIGGER arbor_event_log_operation_fence_insert"
+    )
+
+    Postgrex.query!(
+      conn,
+      "ALTER FUNCTION public.arbor_event_log_enforce_operation_fence() SECURITY DEFINER"
+    )
+
+    assert {:error, :operation_trigger_invalid} =
+             Arbor.Persistence.Ecto.EventLogSchema.verify(conn, "public",
+               timeout: 1_000,
+               lock: :none
+             )
+  end
+
+  test "schema verification rejects a mismatched protocol epoch" do
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    Postgrex.query!(
+      conn,
+      "ALTER TABLE public.arbor_event_log_protocol DROP CONSTRAINT arbor_event_log_protocol_version"
+    )
+
+    Postgrex.query!(
+      conn,
+      "UPDATE public.arbor_event_log_protocol SET protocol_version = 2"
+    )
+
+    on_exit(fn ->
+      Postgrex.query!(
+        conn,
+        "UPDATE public.arbor_event_log_protocol SET protocol_version = 3"
+      )
+
+      Postgrex.query!(
+        conn,
+        """
+        ALTER TABLE public.arbor_event_log_protocol
+        ADD CONSTRAINT arbor_event_log_protocol_version CHECK (protocol_version = 3)
+        """
+      )
+    end)
+
+    assert {:error, :protocol_version_invalid} =
+             Arbor.Persistence.Ecto.EventLogSchema.verify(conn, "public",
+               timeout: 1_000,
+               lock: :none
+             )
+  end
+
   test "security regression: reconciliation cannot prove absence while append is uncommitted" do
     conn = EventStore.Config.lookup(Store, :conn)
     parent = self()
@@ -655,6 +863,9 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
                """,
                [
                  [
+                   "arbor_event_log_protocol_pkey",
+                   "arbor_event_log_protocol_singleton_true",
+                   "arbor_event_log_protocol_version",
                    "arbor_event_log_operations_identity_shape",
                    "arbor_event_log_operations_pkey",
                    "arbor_event_log_operations_terminal_status",
@@ -678,6 +889,21 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
              [
                "arbor_event_log_operations_terminal_status",
                "CHECK ((status = ANY (ARRAY['committed'::text, 'aborted'::text, 'conflict'::text])))",
+               true
+             ],
+             [
+               "arbor_event_log_protocol_pkey",
+               "PRIMARY KEY (singleton)",
+               true
+             ],
+             [
+               "arbor_event_log_protocol_singleton_true",
+               "CHECK (singleton)",
+               true
+             ],
+             [
+               "arbor_event_log_protocol_version",
+               "CHECK ((protocol_version = 3))",
                true
              ],
              [

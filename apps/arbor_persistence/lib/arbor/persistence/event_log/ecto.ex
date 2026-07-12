@@ -398,7 +398,17 @@ defmodule Arbor.Persistence.EventLog.Ecto do
         }
 
         fingerprint = Map.fetch!(operation.fingerprints, event.id)
-        {insert_event(repo, positioned_event, fingerprint, deadline_mono), next_position}
+
+        {
+          insert_event(
+            repo,
+            positioned_event,
+            operation.operation_id,
+            fingerprint,
+            deadline_mono
+          ),
+          next_position
+        }
       end)
 
     persisted
@@ -876,7 +886,8 @@ defmodule Arbor.Persistence.EventLog.Ecto do
           {:ok,
            %{
              stream_versions: %{String.t() => non_neg_integer()},
-             global_position: non_neg_integer()
+             global_position: non_neg_integer(),
+             identity_history: {:unavailable, :metadata_only}
            }}
           | {:error, term()}
   def metadata_snapshot(opts \\ []) do
@@ -897,7 +908,12 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
     global_position = repo.one(global_position_query) || 0
 
-    {:ok, %{stream_versions: stream_versions, global_position: global_position}}
+    {:ok,
+     %{
+       stream_versions: stream_versions,
+       global_position: global_position,
+       identity_history: {:unavailable, :metadata_only}
+     }}
   rescue
     e ->
       {:error, {:metadata_snapshot_failed, e}}
@@ -1537,8 +1553,12 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     repo_one(query, repo, deadline_mono) || 0
   end
 
-  defp insert_event(repo, %Event{} = event, _fingerprint, deadline_mono) do
-    attrs = EventSchema.from_event(event)
+  defp insert_event(repo, %Event{} = event, operation_id, fingerprint, deadline_mono) do
+    attrs =
+      event
+      |> EventSchema.from_event()
+      |> Map.put(:operation_id, operation_id)
+      |> Map.put(:operation_fingerprint, fingerprint)
 
     inserted =
       %EventSchema{}

@@ -48,6 +48,15 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
     end
   end
 
+  defmodule ReconcileDispatchSpy do
+    @moduledoc false
+
+    def reconcile_append(_operation, opts) do
+      send(Keyword.fetch!(opts, :test_pid), :reconcile_backend_dispatched)
+      {:ok, :absent}
+    end
+  end
+
   setup do
     name = :"event_log_public_deadline_#{System.unique_integer([:positive])}"
     ets_name = :"event_log_public_ets_deadline_#{System.unique_integer([:positive])}"
@@ -134,6 +143,28 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
              Persistence.append(name, AgentEventLog, "bounded", oversized_type)
 
     assert {:ok, 0} = AgentEventLog.stream_version("bounded", name: name)
+  end
+
+  test "security regression: malformed fingerprints fail before backend dispatch" do
+    event = Event.new("fingerprint-boundary", "arbor.review.ordinary", %{value: 1})
+
+    assert {:ok, operation} =
+             Arbor.Persistence.EventLog.build_operation("fingerprint-boundary", [event])
+
+    forged = %{
+      operation
+      | fingerprints: %{event.id => String.duplicate("z", 64)}
+    }
+
+    assert {:error, :invalid_append_operation} =
+             Persistence.reconcile_append(
+               :fingerprint_dispatch_spy,
+               ReconcileDispatchSpy,
+               forged,
+               test_pid: self()
+             )
+
+    refute_receive :reconcile_backend_dispatched
   end
 
   test "malformed facade names are rejected without interpolation or backend dispatch" do

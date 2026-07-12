@@ -354,7 +354,9 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
 
       assert {:ok, [%Event{event_number: 1}]} = ETS.append(stream_id, event, name: name)
 
-      assert :ok =
+      assert {:ok,
+              {:identity_history_unavailable,
+               %{expected_events: 2, loaded_events: 1, reason: :durable_metadata_only}}} =
                ETS.rehydrate_metadata(
                  %{stream_versions: %{stream_id => 2}, global_position: 2},
                  name: name
@@ -365,7 +367,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
 
       assert {:error, :head_unavailable} = ETS.read_stream_head(stream_id, name: name)
 
-      assert {:error, :deadline_exceeded} =
+      assert {:error, {:append_indeterminate, _operation}} =
                ETS.append(stream_id, Event.new(stream_id, "must-not-commit", %{}),
                  name: name,
                  expected_version: 2,
@@ -811,7 +813,10 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
         global_position: 150
       }
 
-      assert :ok = ETS.rehydrate_metadata(snapshot, name: name)
+      assert {:ok,
+              {:identity_history_unavailable,
+               %{expected_events: 150, loaded_events: 0, reason: :durable_metadata_only}}} =
+               ETS.rehydrate_metadata(snapshot, name: name)
 
       assert {:ok, 100} = ETS.stream_version("s1", name: name)
       assert {:ok, 50} = ETS.stream_version("s2", name: name)
@@ -822,24 +827,27 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert {:error, :head_unavailable} = ETS.read_stream_head("s1", name: name)
     end
 
-    test "next append after rehydrate uses the rehydrated counter", %{name: name} do
+    test "next append waits for identity replay instead of assuming an ID is absent", %{
+      name: name
+    } do
       snapshot = %{stream_versions: %{"s1" => 100}, global_position: 100}
-      :ok = ETS.rehydrate_metadata(snapshot, name: name)
 
-      # Next append should be event_number 101, global_position 101
-      assert {:ok, [persisted]} =
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.rehydrate_metadata(snapshot, name: name)
+
+      assert {:error, {:append_indeterminate, _operation}} =
                ETS.append("s1", Event.new("s1", "next", %{}), name: name)
-
-      assert persisted.event_number == 101
-      assert persisted.global_position == 101
     end
 
     test "idempotent — merges via max for streams, max for global_position", %{name: name} do
       first = %{stream_versions: %{"s1" => 100, "s2" => 200}, global_position: 200}
       second = %{stream_versions: %{"s1" => 50, "s3" => 300}, global_position: 100}
 
-      :ok = ETS.rehydrate_metadata(first, name: name)
-      :ok = ETS.rehydrate_metadata(second, name: name)
+      assert {:ok, {:identity_history_unavailable, %{reason: :metadata_sequence_inconsistent}}} =
+               ETS.rehydrate_metadata(first, name: name)
+
+      assert {:ok, {:identity_history_unavailable, %{reason: :metadata_sequence_inconsistent}}} =
+               ETS.rehydrate_metadata(second, name: name)
 
       # s1: max(100, 50) = 100
       assert {:ok, 100} = ETS.stream_version("s1", name: name)
@@ -856,11 +864,234 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       {:ok, [_]} = ETS.append("s1", Event.new("s1", "live", %{}), name: name)
       # Now rehydrate with a SMALLER counter (e.g., stale snapshot)
       snapshot = %{stream_versions: %{"s1" => 0}, global_position: 0}
-      :ok = ETS.rehydrate_metadata(snapshot, name: name)
+
+      assert {:ok, :identity_history_complete} =
+               ETS.rehydrate_metadata(snapshot, name: name)
 
       # The real event's counter should win
       assert {:ok, 1} = ETS.stream_version("s1", name: name)
       assert {:ok, 1} = ETS.event_count(name: name)
+    end
+
+    test "security regression: a v2 snapshot with unavailable durable identity history restarts" do
+      suffix = System.unique_integer([:positive])
+      name = :"el_metadata_snapshot_#{suffix}"
+      store_name = :"el_metadata_snapshot_store_#{suffix}"
+      snapshotter_name = :"el_metadata_snapshotter_#{suffix}"
+      namespace = "metadata_snapshot_#{suffix}"
+
+      start_supervised!({SnapshotStore, name: store_name}, id: store_name)
+      start_supervised!({ETS, name: name}, id: name)
+
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{"durable" => 2}, global_position: 2},
+                 name: name
+               )
+
+      start_supervised!(
+        {Snapshotter,
+         name: snapshotter_name,
+         event_log_name: name,
+         store: SnapshotStore,
+         store_opts: [name: store_name],
+         namespace: namespace,
+         interval_ms: 60_000},
+        id: snapshotter_name
+      )
+
+      assert :ok = Snapshotter.snapshot_now(snapshotter_name)
+      stop_supervised(snapshotter_name)
+      stop_supervised(name)
+
+      start_supervised!(
+        {ETS,
+         name: name,
+         snapshot_store: SnapshotStore,
+         snapshot_store_opts: [name: store_name],
+         snapshot_namespace: namespace},
+        id: name
+      )
+
+      assert {:ok,
+              {:identity_history_unavailable,
+               %{expected_events: 2, loaded_events: 0, reason: :durable_metadata_only}}} =
+               apply(ETS, :identity_history_status, [[name: name]])
+    end
+
+    test "security regression: an incomplete R2 snapshot restarts with explicit remediation" do
+      suffix = System.unique_integer([:positive])
+      name = :"el_legacy_incomplete_snapshot_#{suffix}"
+      store_name = :"el_legacy_incomplete_store_#{suffix}"
+      namespace = "legacy_incomplete_#{suffix}"
+
+      start_supervised!({SnapshotStore, name: store_name}, id: store_name)
+
+      assert :ok =
+               SnapshotStore.put(
+                 "#{namespace}:meta",
+                 %{"latest_id" => "1"},
+                 name: store_name
+               )
+
+      assert :ok =
+               SnapshotStore.put(
+                 "#{namespace}:snapshot:1",
+                 %{
+                   "snapshot_version" => 2,
+                   "global_position" => 2,
+                   "stream_versions" => %{"legacy" => 2},
+                   "events" => [],
+                   "identity_tombstones" => []
+                 },
+                 name: store_name
+               )
+
+      start_supervised!(
+        {ETS,
+         name: name,
+         snapshot_store: SnapshotStore,
+         snapshot_store_opts: [name: store_name],
+         snapshot_namespace: namespace},
+        id: name
+      )
+
+      assert {:ok,
+              {:identity_history_unavailable,
+               %{expected_events: 2, loaded_events: 0, reason: :legacy_snapshot_incomplete}}} =
+               apply(ETS, :identity_history_status, [[name: name]])
+    end
+
+    test "malformed durable snapshot restarts fail closed and can be replay-remediated" do
+      suffix = System.unique_integer([:positive])
+      name = :"el_malformed_snapshot_#{suffix}"
+      store_name = :"el_malformed_store_#{suffix}"
+      namespace = "malformed_snapshot_#{suffix}"
+
+      start_supervised!({SnapshotStore, name: store_name}, id: store_name)
+
+      assert :ok =
+               SnapshotStore.put(
+                 "#{namespace}:meta",
+                 %{"latest_id" => "1"},
+                 name: store_name
+               )
+
+      assert :ok =
+               SnapshotStore.put(
+                 "#{namespace}:snapshot:1",
+                 %{
+                   "snapshot_version" => 2,
+                   "global_position" => 1,
+                   "stream_versions" => %{"recovered" => 1},
+                   "events" => :not_a_list,
+                   "identity_tombstones" => []
+                 },
+                 name: store_name
+               )
+
+      start_supervised!(
+        {ETS,
+         name: name,
+         snapshot_store: SnapshotStore,
+         snapshot_store_opts: [name: store_name],
+         snapshot_namespace: namespace},
+        id: name
+      )
+
+      assert {:ok,
+              {:identity_history_unavailable,
+               %{expected_events: 0, loaded_events: 0, reason: :snapshot_restore_failed}}} =
+               apply(ETS, :identity_history_status, [[name: name]])
+
+      recovered =
+        %Event{
+          Event.new("recovered", "arbor.review.ordinary", %{value: 1}, id: "evt_recovered")
+          | event_number: 1,
+            global_position: 1
+        }
+
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{"recovered" => 1}, global_position: 1},
+                 name: name
+               )
+
+      assert {:ok, %{remaining: 0, status: :identity_history_complete}} =
+               apply(ETS, :replay_identity_history, [
+                 [recovered],
+                 [name: name, complete: true]
+               ])
+    end
+
+    test "security regression: unavailable identity history has a bounded replay path", %{
+      name: name
+    } do
+      first =
+        %Event{
+          Event.new("replayed", "arbor.review.ordinary", %{value: 1}, id: "evt_replay_1")
+          | event_number: 1,
+            global_position: 1
+        }
+
+      second =
+        %Event{
+          Event.new("replayed", "arbor.review.ordinary", %{value: 2}, id: "evt_replay_2")
+          | event_number: 2,
+            global_position: 2
+        }
+
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{"replayed" => 2}, global_position: 2},
+                 name: name
+               )
+
+      assert {:ok, %{accepted: 1, remaining: 1, status: {:identity_history_unavailable, _}}} =
+               apply(ETS, :replay_identity_history, [[first], [name: name]])
+
+      assert {:ok, %{accepted: 1, remaining: 0, status: :identity_history_complete}} =
+               apply(ETS, :replay_identity_history, [
+                 [second],
+                 [name: name, complete: true]
+               ])
+
+      assert {:ok, [%Event{event_number: 3, global_position: 3}]} =
+               ETS.append(
+                 "replayed",
+                 Event.new("replayed", "arbor.review.ordinary", %{value: 3}),
+                 name: name
+               )
+    end
+
+    test "identity replay rejects duplicate stream positions atomically", %{name: name} do
+      first =
+        %Event{
+          Event.new("replayed", "arbor.review.ordinary", %{value: 1}, id: "evt_replay_a")
+          | event_number: 1,
+            global_position: 1
+        }
+
+      conflicting =
+        %Event{
+          Event.new("replayed", "arbor.review.ordinary", %{value: 2}, id: "evt_replay_b")
+          | event_number: 1,
+            global_position: 2
+        }
+
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{"replayed" => 2}, global_position: 2},
+                 name: name
+               )
+
+      assert {:error, :invalid_identity_replay} =
+               apply(ETS, :replay_identity_history, [[first, conflicting], [name: name]])
+
+      assert {:ok,
+              {:identity_history_unavailable,
+               %{expected_events: 2, loaded_events: 0, reason: :durable_metadata_only}}} =
+               apply(ETS, :identity_history_status, [[name: name]])
     end
   end
 

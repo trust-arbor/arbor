@@ -6,6 +6,7 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
 
   @moduletag capture_log: true
   @moduletag :integration
+  @moduletag :sqlite
 
   Code.require_file(
     Path.expand(
@@ -14,6 +15,15 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     )
   )
 
+  @protocol_migration_file Path.expand(
+                             "../../../../priv/repo/migrations/20260712000004_enforce_event_log_protocol.exs",
+                             __DIR__
+                           )
+
+  if File.exists?(@protocol_migration_file) do
+    Code.require_file(@protocol_migration_file)
+  end
+
   defmodule SQLitePoolRepo do
     use Ecto.Repo,
       otp_app: :arbor_persistence,
@@ -21,6 +31,12 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
   end
 
   defmodule MigrationRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.SQLite3
+  end
+
+  defmodule ProtocolMigrationRepo do
     use Ecto.Repo,
       otp_app: :arbor_persistence,
       adapter: Ecto.Adapters.SQLite3
@@ -39,6 +55,12 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
         "arbor-event-log-migration-#{System.unique_integer([:positive])}.sqlite3"
       )
 
+    protocol_migration_database =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-event-log-protocol-migration-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
     start_supervised!(
       {SQLitePoolRepo,
        database: database,
@@ -53,6 +75,11 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     start_supervised!(
       {MigrationRepo,
        database: migration_database, pool: DBConnection.ConnectionPool, pool_size: 1}
+    )
+
+    start_supervised!(
+      {ProtocolMigrationRepo,
+       database: protocol_migration_database, pool: DBConnection.ConnectionPool, pool_size: 2}
     )
 
     MigrationRepo.query!("""
@@ -83,6 +110,8 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
       created_at TEXT NOT NULL
     )
     """)
+
+    create_protocol_legacy_tables!(ProtocolMigrationRepo)
 
     SQLitePoolRepo.query!("""
     CREATE UNIQUE INDEX events_stream_id_event_number_index
@@ -117,11 +146,30 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     END
     """)
 
+    if File.exists?(@protocol_migration_file) do
+      assert :ok =
+               Ecto.Migrator.up(
+                 SQLitePoolRepo,
+                 20_260_712_000_004,
+                 Arbor.Persistence.Repo.Migrations.EnforceEventLogProtocol,
+                 log: false
+               )
+    end
+
     on_exit(fn ->
       Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
 
       Enum.each(
         [migration_database, migration_database <> "-shm", migration_database <> "-wal"],
+        &File.rm/1
+      )
+
+      Enum.each(
+        [
+          protocol_migration_database,
+          protocol_migration_database <> "-shm",
+          protocol_migration_database <> "-wal"
+        ],
         &File.rm/1
       )
     end)
@@ -310,20 +358,53 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     assert Exception.message(error) =~ "UNIQUE constraint failed: events.global_position"
   end
 
-  test "rolling legacy writer cannot create a duplicate global position" do
-    insert_legacy_row!("rolling-a", "stream-a", 1, 1)
-
+  test "post-cutover legacy writer without operation identity fails closed" do
     assert {:error, error} =
              SQLitePoolRepo.query(
                legacy_insert_sql(),
-               ["rolling-b", "stream-b", 1, 1]
+               ["rolling-a", "stream-a", 1, 1]
              )
 
-    assert Exception.message(error) =~ "UNIQUE constraint failed: events.global_position"
+    assert Exception.message(error) =~ "EventLog protocol identity is required"
   end
 
-  defp insert_legacy_row!(id, stream_id, event_number, global_position) do
-    SQLitePoolRepo.query!(legacy_insert_sql(), [id, stream_id, event_number, global_position])
+  test "protocol migration rejects malformed legacy positions and sequences transactionally" do
+    cases = [
+      {"overflow-event", [{"a", "a", 2_147_483_648, 1}], ~r/invalid positions/},
+      {"overflow-global", [{"a", "a", 1, 2_147_483_648}], ~r/invalid positions/},
+      {"nonpositive-event", [{"a", "a", 0, 1}], ~r/invalid positions/},
+      {"nonpositive-global", [{"a", "a", 1, 0}], ~r/invalid positions/},
+      {"null-event", [{"a", "a", nil, 1}], ~r/invalid positions/},
+      {"null-global", [{"a", "a", 1, nil}], ~r/invalid positions/},
+      {"duplicate-global", [{"a", "a", 1, 1}, {"b", "b", 1, 1}], ~r/occurs/},
+      {"duplicate-stream", [{"a", "a", 1, 1}, {"b", "a", 1, 2}], ~r/occurs/},
+      {"global-gap", [{"a", "a", 1, 1}, {"b", "b", 1, 3}], ~r/global sequence is inconsistent/},
+      {"stream-gap", [{"a", "a", 1, 1}, {"b", "a", 3, 2}], ~r/sequence is inconsistent/}
+    ]
+
+    Enum.each(cases, fn {_label, rows, expected_error} ->
+      ProtocolMigrationRepo.query!("DELETE FROM events")
+
+      Enum.each(rows, fn {id, stream_id, event_number, global_position} ->
+        ProtocolMigrationRepo.query!(
+          """
+          INSERT INTO events (
+            id, stream_id, event_number, global_position, type, data, metadata, created_at
+          ) VALUES (?, ?, ?, ?, 'legacy', '{}', '{}', STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+          """,
+          [id, stream_id, event_number, global_position]
+        )
+      end)
+
+      assert_raise RuntimeError, expected_error, fn ->
+        run_latest_protocol_migration!(ProtocolMigrationRepo)
+      end
+
+      assert %{rows: []} =
+               ProtocolMigrationRepo.query!(
+                 "SELECT name FROM pragma_table_info('events') WHERE name = 'operation_id'"
+               )
+    end)
   end
 
   defp legacy_insert_sql do
@@ -332,5 +413,55 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
       id, stream_id, event_number, global_position, type, data, metadata, created_at
     ) VALUES (?, ?, ?, ?, 'legacy', '{}', '{}', STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
     """
+  end
+
+  defp run_latest_protocol_migration!(repo) do
+    if File.exists?(@protocol_migration_file) do
+      Ecto.Migrator.up(
+        repo,
+        20_260_712_000_004,
+        Arbor.Persistence.Repo.Migrations.EnforceEventLogProtocol,
+        log: false
+      )
+    else
+      Ecto.Migrator.up(
+        repo,
+        20_260_711_000_002,
+        Arbor.Persistence.Repo.Migrations.EnforceUniqueEventGlobalPosition,
+        log: false
+      )
+    end
+  end
+
+  defp create_protocol_legacy_tables!(repo) do
+    repo.query!("""
+    CREATE TABLE events (
+      id TEXT PRIMARY KEY,
+      stream_id TEXT NOT NULL,
+      event_number INTEGER,
+      global_position INTEGER,
+      type TEXT NOT NULL,
+      data TEXT DEFAULT '{}',
+      metadata TEXT DEFAULT '{}',
+      agent_id TEXT,
+      causation_id TEXT,
+      correlation_id TEXT,
+      event_timestamp TEXT,
+      committed_at TEXT,
+      created_at TEXT NOT NULL
+    )
+    """)
+
+    repo.query!("""
+    CREATE TABLE event_log_operations (
+      operation_id TEXT PRIMARY KEY,
+      stream_id TEXT NOT NULL,
+      identity TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reason TEXT,
+      inserted_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    """)
   end
 end

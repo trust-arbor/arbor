@@ -158,6 +158,7 @@ defmodule Arbor.Persistence.EventLog.Snapshotter do
           "stream_versions" => exported.stream_versions,
           "events" => exported.events,
           "identity_tombstones" => exported.identity_tombstones,
+          "identity_history" => exported.identity_history,
           "captured_at" => DateTime.to_iso8601(DateTime.utc_now())
         }
 

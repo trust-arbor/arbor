@@ -444,10 +444,16 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
         global_position: global_position
       )
 
+    {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+
+    attrs =
+      event
+      |> Arbor.Persistence.Schemas.Event.from_event()
+      |> Map.put(:operation_id, operation.operation_id)
+      |> Map.put(:operation_fingerprint, Map.fetch!(operation.fingerprints, event.id))
+
     %Arbor.Persistence.Schemas.Event{}
-    |> Arbor.Persistence.Schemas.Event.changeset(
-      Arbor.Persistence.Schemas.Event.from_event(event)
-    )
+    |> Arbor.Persistence.Schemas.Event.changeset(attrs)
     |> Repo.insert!()
   end
 end

@@ -144,7 +144,7 @@ defmodule Arbor.PersistenceTest do
       name: name,
       backend: backend
     } do
-      assert :ok =
+      assert {:ok, {:identity_history_unavailable, _details}} =
                EventLog.ETS.rehydrate_metadata(
                  %{stream_versions: %{"durable-only" => 4}, global_position: 4},
                  name: name

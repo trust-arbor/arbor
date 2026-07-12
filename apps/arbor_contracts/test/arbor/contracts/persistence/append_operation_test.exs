@@ -36,6 +36,22 @@ defmodule Arbor.Contracts.Persistence.AppendOperationTest do
              )
   end
 
+  test "security regression: fingerprints are lowercase 64-character hexadecimal strings" do
+    for invalid <- [
+          String.duplicate("g", 64),
+          String.duplicate("A", 64),
+          String.duplicate("0", 63) <> <<255>>
+        ] do
+      assert {:error, :invalid_append_operation} =
+               AppendOperation.new(
+                 operation_id: "append_123",
+                 stream_id: "stream-1",
+                 event_ids: ["evt_1"],
+                 fingerprints: %{"evt_1" => invalid}
+               )
+    end
+  end
+
   test "accepts exactly the maximum bounded event set" do
     event_ids = Enum.map(1..1_000, &"evt_#{&1}")
     fingerprints = Map.new(event_ids, &{&1, @fingerprint})

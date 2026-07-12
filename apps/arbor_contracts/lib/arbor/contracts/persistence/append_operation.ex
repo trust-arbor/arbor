@@ -127,7 +127,7 @@ defmodule Arbor.Contracts.Persistence.AppendOperation do
        when is_map(fingerprints) and map_size(fingerprints) == event_count do
     Enum.all?(event_ids, fn event_id ->
       case Map.fetch(fingerprints, event_id) do
-        {:ok, fingerprint} when is_binary(fingerprint) -> byte_size(fingerprint) == 64
+        {:ok, fingerprint} when is_binary(fingerprint) -> valid_fingerprint?(fingerprint)
         _missing_or_invalid -> false
       end
     end)
@@ -138,6 +138,11 @@ defmodule Arbor.Contracts.Persistence.AppendOperation do
   defp bounded_binary?(value) do
     is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 255 and
       String.valid?(value)
+  end
+
+  defp valid_fingerprint?(fingerprint) do
+    byte_size(fingerprint) == 64 and String.valid?(fingerprint) and
+      fingerprint =~ ~r/\A[0-9a-f]{64}\z/
   end
 
   defp invalid, do: {:error, :invalid_append_operation}

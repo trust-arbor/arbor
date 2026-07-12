@@ -78,13 +78,31 @@ defmodule Arbor.Historian.Application do
       try do
         case Arbor.Persistence.EventLog.Ecto.metadata_snapshot(repo: repo) do
           {:ok, snapshot} ->
-            Arbor.Persistence.EventLog.ETS.rehydrate_metadata(snapshot, name: @event_log_name)
+            rehydrate_result =
+              Arbor.Persistence.EventLog.ETS.rehydrate_metadata(
+                snapshot,
+                name: @event_log_name
+              )
+
             stream_count = map_size(snapshot.stream_versions)
 
             if stream_count > 0 or snapshot.global_position > 0 do
               Logger.info(
                 "[Historian] Rehydrated metadata: #{stream_count} streams, global_position=#{snapshot.global_position}"
               )
+            end
+
+            case rehydrate_result do
+              {:ok, :identity_history_complete} ->
+                :ok
+
+              {:ok, {:identity_history_unavailable, details}} ->
+                Logger.warning(
+                  "[Historian] Event identity history requires bounded replay: #{inspect(details)}"
+                )
+
+              {:error, reason} ->
+                Logger.warning("[Historian] Metadata rehydrate rejected: #{inspect(reason)}")
             end
 
           {:error, reason} ->
