@@ -2,7 +2,6 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Agent, as: ELAgent
 
@@ -176,7 +175,7 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
     } do
       event = Event.new("forged", "created", %{value: 1})
 
-      assert {:ok, %AppendOperation{} = operation} =
+      assert {:ok, operation} =
                Arbor.Persistence.EventLog.build_operation("forged", [event])
 
       Enum.each(forged_operations(operation), fn forged ->
@@ -206,6 +205,35 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
       assert {:ok, 1} = ELAgent.stream_version("idempotent", name: name)
     end
 
+    test "append, retry, and read return one canonical JSON representation", %{name: name} do
+      event =
+        Event.new("canonical", "arbor.review.ordinary", %{outer: %{value: 1}},
+          metadata: %{source: "agent"}
+        )
+
+      expected_data = %{"outer" => %{"value" => 1}}
+      expected_metadata = %{"source" => "agent"}
+
+      assert {:ok, [first]} = ELAgent.append("canonical", event, name: name)
+      assert first.data == expected_data
+      assert first.metadata == expected_metadata
+
+      assert {:ok, [retried]} = ELAgent.append("canonical", event, name: name)
+      assert retried == first
+
+      assert {:ok, [read]} = ELAgent.read_stream("canonical", name: name)
+      assert read == first
+    end
+
+    test "malformed public names are rejected without raising" do
+      event = Event.new("invalid-name", "event", %{})
+
+      for invalid_name <- [%{not: :a_server}, nil] do
+        assert {:error, :invalid_precondition} =
+                 ELAgent.append("invalid-name", event, name: invalid_name)
+      end
+    end
+
     test "position exhaustion returns controlled errors before mutation", %{name: name} do
       :sys.replace_state(name, fn state ->
         %{state | versions: %{"full-stream" => 2_147_483_647}}
@@ -215,7 +243,7 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
                ELAgent.append("full-stream", Event.new("full-stream", "event", %{}), name: name)
 
       :sys.replace_state(name, fn state ->
-        %{state | versions: %{}, global_position: 9_223_372_036_854_775_807}
+        %{state | versions: %{}, global_position: 2_147_483_647}
       end)
 
       assert {:error, :global_position_exhausted} =
@@ -223,13 +251,18 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
     end
   end
 
-  defp forged_operations(%AppendOperation{} = operation) do
+  defp forged_operations(operation) do
     oversized_ids = Enum.map(1..1_001, &"evt_forged_#{&1}")
 
     [
-      %AppendOperation{operation | event_ids: ["evt_forged" | :improper]},
-      %AppendOperation{operation | event_ids: oversized_ids, fingerprints: %{}}
+      rebuild_operation(operation, event_ids: ["evt_forged" | :improper]),
+      rebuild_operation(operation, event_ids: oversized_ids, fingerprints: %{})
     ]
+  end
+
+  defp rebuild_operation(operation, attrs) do
+    operation.__struct__
+    |> struct(Map.merge(Map.from_struct(operation), Map.new(attrs)))
   end
 
   describe "read_stream/2" do

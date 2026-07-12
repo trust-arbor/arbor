@@ -60,6 +60,10 @@ defmodule Arbor.Persistence.Ecto.EventLog do
   @event_id_key "event_id"
   @agent_id_key "arbor_agent_id"
   @timestamp_key "arbor_event_timestamp"
+  @stream_capacity_constraint "arbor_eventlog_stream_position_capacity"
+  @global_capacity_constraint "arbor_eventlog_global_position_capacity"
+  @capacity_lock "arbor.persistence.event_log.position_capacity"
+  @max_position 2_147_483_647
   @reserved_metadata_keys [
     @event_id_key,
     @agent_id_key,
@@ -86,17 +90,28 @@ defmodule Arbor.Persistence.Ecto.EventLog do
 
   @impl Arbor.Persistence.EventLog
   def append(stream_id, events, opts \\ []) do
-    with {:ok, events, preconditions, _initial_operation, deadline_mono} <-
-           EventLog.prepare_append(stream_id, events, opts),
-         events = Enum.map(events, &sanitize_submitted_event/1),
-         {:ok, operation} <- EventLog.build_operation(stream_id, events),
-         :ok <- reject_freshness(preconditions.max_current_age_ms) do
-      run_bounded(
-        fn -> append_prepared(stream_id, events, preconditions, operation, deadline_mono) end,
-        operation,
-        deadline_mono
-      )
-    end
+    EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
+      with {:ok, events, preconditions, _initial_operation, ^deadline_mono} <-
+             EventLog.prepare_append(stream_id, events, normalized_opts),
+           events = Enum.map(events, &sanitize_submitted_event/1),
+           {:ok, operation} <- EventLog.build_operation(stream_id, events),
+           :ok <- reject_freshness(preconditions.max_current_age_ms),
+           :ok <- ensure_event_serializer() do
+        result =
+          run_bounded(
+            fn -> append_prepared(stream_id, events, preconditions, operation, deadline_mono) end,
+            operation,
+            deadline_mono
+          )
+
+        EventLog.accept_completion(
+          result,
+          operation,
+          deadline_mono,
+          System.monotonic_time(:millisecond)
+        )
+      end
+    end)
   end
 
   defp append_prepared(stream_id, events, preconditions, operation, deadline_mono) do
@@ -114,56 +129,74 @@ defmodule Arbor.Persistence.Ecto.EventLog do
 
   @impl Arbor.Persistence.EventLog
   def reconcile_append(operation, opts) do
-    with {:ok, operation, _normalized_opts, deadline_mono} <-
-           EventLog.prepare_reconcile(operation, opts) do
-      run_bounded(
-        fn -> reconcile_operation(operation, deadline_mono) end,
-        operation,
-        deadline_mono
-      )
-    end
+    EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
+      with {:ok, operation, _normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_reconcile(operation, normalized_opts),
+           :ok <- ensure_event_serializer() do
+        run_bounded(
+          fn -> reconcile_operation(operation, deadline_mono) end,
+          operation,
+          deadline_mono
+        )
+      end
+    end)
   end
 
   @impl Arbor.Persistence.EventLog
   def read_stream(stream_id, opts \\ []) do
-    start_version = Keyword.get(opts, :from, 0)
-    count = Keyword.get(opts, :limit, 1000)
+    with {:ok, opts} <- EventLog.normalize_opts(opts),
+         :ok <- ensure_event_serializer() do
+      start_version = Keyword.get(opts, :from, 0)
+      count = Keyword.get(opts, :limit, 1000)
 
-    case Store.read_stream_forward(stream_id, start_version, count) do
-      {:ok, recorded_events} ->
-        from_stream_recordings(recorded_events)
+      case Store.read_stream_forward(stream_id, start_version, count) do
+        {:ok, recorded_events} ->
+          from_stream_recordings(recorded_events)
 
-      {:error, :stream_not_found} ->
-        {:ok, []}
+        {:error, :stream_not_found} ->
+          {:ok, []}
 
-      {:error, reason} = error ->
-        Logger.error("Failed to read stream #{stream_id}: #{inspect(reason)}")
-        error
+        {:error, reason} = error ->
+          Logger.error("Failed to read stream #{stream_id}: #{inspect(reason)}")
+          error
+      end
     end
+  rescue
+    error -> {:error, {:read_failed, error}}
+  catch
+    :exit, reason -> {:error, {:read_failed, reason}}
   end
 
   @impl Arbor.Persistence.EventLog
   def read_stream_head(stream_id, opts \\ []) do
     with {:ok, max_current_age_ms} <- EventLog.validate_head_read(stream_id, opts),
-         :ok <- reject_freshness(max_current_age_ms) do
+         :ok <- reject_freshness(max_current_age_ms),
+         :ok <- ensure_event_serializer() do
       read_atomic_stream_head(stream_id)
     end
   end
 
   @impl Arbor.Persistence.EventLog
   def read_all(opts \\ []) do
-    start_position = Keyword.get(opts, :from, 0)
-    count = Keyword.get(opts, :limit, 1000)
+    with {:ok, opts} <- EventLog.normalize_opts(opts),
+         :ok <- ensure_event_serializer() do
+      start_position = Keyword.get(opts, :from, 0)
+      count = Keyword.get(opts, :limit, 1000)
 
-    case Store.read_all_streams_forward(start_position, count) do
-      {:ok, recorded_events} ->
-        events = Enum.map(recorded_events, &from_recorded_event(&1, &1.event_number))
-        {:ok, events}
+      case Store.read_all_streams_forward(start_position, count) do
+        {:ok, recorded_events} ->
+          events = Enum.map(recorded_events, &from_recorded_event(&1, &1.event_number))
+          {:ok, events}
 
-      {:error, reason} = error ->
-        Logger.error("Failed to read all streams: #{inspect(reason)}")
-        error
+        {:error, reason} = error ->
+          Logger.error("Failed to read all streams: #{inspect(reason)}")
+          error
+      end
     end
+  rescue
+    error -> {:error, {:read_failed, error}}
+  catch
+    :exit, reason -> {:error, {:read_failed, reason}}
   end
 
   @impl Arbor.Persistence.EventLog
@@ -185,38 +218,43 @@ defmodule Arbor.Persistence.Ecto.EventLog do
 
   @impl Arbor.Persistence.EventLog
   def subscribe(stream_id_or_all, pid, opts \\ []) do
-    subscription_name = Keyword.get(opts, :name, "subscription_#{:erlang.unique_integer()}")
+    with {:ok, opts} <- EventLog.normalize_opts(opts),
+         :ok <- ensure_event_serializer() do
+      subscription_name = Keyword.get(opts, :name, "subscription_#{:erlang.unique_integer()}")
 
-    result =
-      case stream_id_or_all do
-        :all ->
-          Store.subscribe_to_all_streams(
-            subscription_name,
-            subscriber_with_pid(pid),
-            subscription_opts(opts)
-          )
+      result =
+        case stream_id_or_all do
+          :all ->
+            Store.subscribe_to_all_streams(
+              subscription_name,
+              subscriber_with_pid(pid),
+              subscription_opts(opts)
+            )
 
-        stream_id ->
-          Store.subscribe_to_stream(
-            stream_id,
-            subscription_name,
-            subscriber_with_pid(pid),
-            subscription_opts(opts)
-          )
+          stream_id ->
+            Store.subscribe_to_stream(
+              stream_id,
+              subscription_name,
+              subscriber_with_pid(pid),
+              subscription_opts(opts)
+            )
+        end
+
+      case result do
+        {:ok, subscription} ->
+          ref = make_ref()
+          Process.put({:eventstore_subscription, ref}, subscription)
+          {:ok, ref}
+
+        {:error, reason} = error ->
+          Logger.error("Failed to subscribe: #{inspect(reason)}")
+          error
       end
-
-    case result do
-      {:ok, subscription} ->
-        # Return a reference that wraps the subscription
-        ref = make_ref()
-        # Store mapping for potential unsubscribe
-        Process.put({:eventstore_subscription, ref}, subscription)
-        {:ok, ref}
-
-      {:error, reason} = error ->
-        Logger.error("Failed to subscribe: #{inspect(reason)}")
-        error
     end
+  rescue
+    error -> {:error, {:subscription_failed, error}}
+  catch
+    :exit, reason -> {:error, {:subscription_failed, reason}}
   end
 
   @impl Arbor.Persistence.EventLog
@@ -249,14 +287,11 @@ defmodule Arbor.Persistence.Ecto.EventLog do
   defp run_bounded(fun, operation, deadline_mono) do
     case EventLog.remaining_timeout(deadline_mono) do
       {:ok, timeout} ->
-        task = Task.async(fun)
+        task = Task.async(fn -> EventLog.stamp_completion(fun.()) end)
 
         case Task.yield(task, timeout) do
-          {:ok, result} ->
-            case EventLog.remaining_timeout(deadline_mono) do
-              {:ok, _remaining} -> result
-              {:error, :operation_timeout} -> EventLog.indeterminate(operation)
-            end
+          {:ok, completion} ->
+            EventLog.accept_completion(completion, operation, deadline_mono)
 
           {:exit, _reason} ->
             EventLog.indeterminate(operation)
@@ -274,7 +309,8 @@ defmodule Arbor.Persistence.Ecto.EventLog do
   defp append_absent_operation(events, preconditions, operation, deadline_mono) do
     expected_version = preconditions.expected_version || :any_version
 
-    with :ok <-
+    with :ok <- ensure_event_store_position_constraints(deadline_mono),
+         :ok <-
            ensure_event_store_capacity(operation.stream_id, length(events), deadline_mono),
          {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
       event_data =
@@ -326,6 +362,108 @@ defmodule Arbor.Persistence.Ecto.EventLog do
     end
   end
 
+  defp ensure_event_store_position_constraints(deadline_mono) do
+    with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono),
+         {:ok, conn, schema} <- event_store_connection() do
+      cache_key = capacity_cache_key(conn, schema)
+
+      if :persistent_term.get(cache_key, false) do
+        :ok
+      else
+        install_result =
+          Postgrex.transaction(
+            conn,
+            fn transaction_conn ->
+              install_position_constraints(transaction_conn, schema, deadline_mono)
+            end,
+            timeout: timeout
+          )
+
+        case install_result do
+          {:ok, :ok} ->
+            :persistent_term.put(cache_key, true)
+            :ok
+
+          {:error, reason} ->
+            {:error, {:position_capacity_unavailable, reason}}
+        end
+      end
+    end
+  rescue
+    error -> {:error, {:position_capacity_unavailable, error}}
+  catch
+    :exit, reason -> {:error, {:position_capacity_unavailable, reason}}
+  end
+
+  defp install_position_constraints(conn, schema, deadline_mono) do
+    query_with_deadline!(
+      conn,
+      "SELECT pg_advisory_xact_lock(hashtext($1))",
+      [@capacity_lock],
+      deadline_mono
+    )
+
+    existing =
+      query_with_deadline!(
+        conn,
+        """
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = '#{schema}.streams'::regclass
+          AND conname = ANY($1::text[])
+        """,
+        [[@stream_capacity_constraint, @global_capacity_constraint]],
+        deadline_mono
+      )
+      |> Map.fetch!(:rows)
+      |> Enum.map(&List.first/1)
+      |> MapSet.new()
+
+    unless MapSet.member?(existing, @stream_capacity_constraint) do
+      query_with_deadline!(
+        conn,
+        """
+        ALTER TABLE #{schema}.streams
+        ADD CONSTRAINT #{@stream_capacity_constraint}
+        CHECK (stream_id = 0 OR (stream_version >= 0 AND stream_version <= #{@max_position}))
+        """,
+        [],
+        deadline_mono
+      )
+    end
+
+    unless MapSet.member?(existing, @global_capacity_constraint) do
+      query_with_deadline!(
+        conn,
+        """
+        ALTER TABLE #{schema}.streams
+        ADD CONSTRAINT #{@global_capacity_constraint}
+        CHECK (stream_id <> 0 OR (stream_version >= 0 AND stream_version <= #{@max_position}))
+        """,
+        [],
+        deadline_mono
+      )
+    end
+
+    :ok
+  end
+
+  defp query_with_deadline!(conn, sql, params, deadline_mono) do
+    {:ok, timeout} = EventLog.remaining_timeout(deadline_mono)
+    Postgrex.query!(conn, sql, params, timeout: timeout)
+  end
+
+  defp capacity_cache_key(conn, schema) do
+    connection_identity =
+      if is_atom(conn) do
+        Process.whereis(conn) || conn
+      else
+        conn
+      end
+
+    {__MODULE__, :position_capacity_constraints, connection_identity, schema}
+  end
+
   defp resolve_append_result(:ok, submitted, operation, deadline_mono) do
     case reconcile_operation(operation, deadline_mono) do
       {:ok, {:committed, persisted}} ->
@@ -370,6 +508,18 @@ defmodule Arbor.Persistence.Ecto.EventLog do
 
       _not_proven ->
         EventLog.indeterminate(operation)
+    end
+  end
+
+  defp resolve_append_result({:error, :check_violation}, _submitted, operation, deadline_mono) do
+    case ensure_event_store_capacity(
+           operation.stream_id,
+           length(operation.event_ids),
+           deadline_mono
+         ) do
+      {:error, :stream_position_exhausted} = error -> error
+      {:error, :global_position_exhausted} = error -> error
+      _other_constraint -> {:error, :database_constraint_violation}
     end
   end
 
@@ -457,7 +607,7 @@ defmodule Arbor.Persistence.Ecto.EventLog do
       sql = operation_lookup_sql(schema)
       storage_ids = Map.keys(storage_to_event_id)
 
-      case Postgrex.query(conn, sql, [operation.stream_id, storage_ids], timeout: timeout) do
+      case Postgrex.query(conn, sql, [storage_ids], timeout: timeout) do
         {:ok, %{rows: []}} ->
           {:ok, :absent}
 
@@ -488,15 +638,15 @@ defmodule Arbor.Persistence.Ecto.EventLog do
            events.data,
            events.metadata,
            events.created_at
-    FROM #{schema}.stream_events AS source
+    FROM #{schema}.events AS events
+    INNER JOIN #{schema}.stream_events AS source
+      ON source.event_id = events.event_id
+     AND source.stream_id = source.original_stream_id
     INNER JOIN #{schema}.streams AS streams
       ON streams.stream_id = source.stream_id
     INNER JOIN #{schema}.stream_events AS all_events
       ON all_events.event_id = source.event_id AND all_events.stream_id = 0
-    INNER JOIN #{schema}.events AS events
-      ON events.event_id = source.event_id
-    WHERE streams.stream_uuid = $1
-      AND source.event_id::text = ANY($2::text[])
+    WHERE events.event_id::text = ANY($1::text[])
     """
   end
 
@@ -602,15 +752,13 @@ defmodule Arbor.Persistence.Ecto.EventLog do
       created_at: normalize_created_at(created_at)
     }
 
-    recorded = EventStore.RecordedEvent.deserialize(raw_recorded, serializer)
-
-    content_recorded = %EventStore.RecordedEvent{
-      recorded
+    recorded = %EventStore.RecordedEvent{
+      raw_recorded
       | data: serializer.deserialize(data, []),
         metadata: serializer.deserialize(metadata, [])
     }
 
-    content_event = from_recorded_event(content_recorded, global_position)
+    content_event = from_recorded_event(recorded, global_position)
 
     {storage_id, recorded, content_event, global_position}
   end
@@ -650,6 +798,20 @@ defmodule Arbor.Persistence.Ecto.EventLog do
     conn = Keyword.fetch!(config, :conn)
     schema = config |> Keyword.fetch!(:schema) |> quote_identifier()
     {:ok, conn, schema}
+  rescue
+    _error -> {:error, :backend_unavailable}
+  end
+
+  defp ensure_event_serializer do
+    serializer = EventStore.Config.lookup(Store, :serializer)
+
+    if is_atom(serializer) and Code.ensure_loaded?(serializer) and
+         function_exported?(serializer, :arbor_event_log_serializer?, 0) and
+         serializer.arbor_event_log_serializer?() do
+      :ok
+    else
+      {:error, :incompatible_event_serializer}
+    end
   rescue
     _error -> {:error, :backend_unavailable}
   end

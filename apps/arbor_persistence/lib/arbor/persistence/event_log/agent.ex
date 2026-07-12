@@ -24,29 +24,33 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   @impl Arbor.Persistence.EventLog
   def append(stream_id, events, opts) do
-    with {:ok, events, preconditions, operation, deadline_mono} <-
-           EventLog.prepare_append(stream_id, events, opts),
-         {:ok, name} <- fetch_name(opts) do
-      safe_get_and_update(name, deadline_mono, operation, fn state ->
-        append_before_deadline(
-          state,
-          stream_id,
-          events,
-          preconditions,
-          operation,
-          deadline_mono
-        )
-      end)
-    end
+    EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
+      with {:ok, events, preconditions, operation, ^deadline_mono} <-
+             EventLog.prepare_append(stream_id, events, normalized_opts),
+           {:ok, name} <- fetch_name(normalized_opts) do
+        safe_get_and_update(name, deadline_mono, operation, fn state ->
+          append_before_deadline(
+            state,
+            stream_id,
+            events,
+            preconditions,
+            operation,
+            deadline_mono
+          )
+        end)
+      end
+    end)
   end
 
   @impl Arbor.Persistence.EventLog
   def reconcile_append(operation, opts) do
-    with {:ok, operation, normalized_opts, deadline_mono} <-
-           EventLog.prepare_reconcile(operation, opts),
-         {:ok, name} <- fetch_name(normalized_opts) do
-      reconcile_from_agent(name, operation, deadline_mono)
-    end
+    EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
+      with {:ok, operation, normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_reconcile(operation, normalized_opts),
+           {:ok, name} <- fetch_name(normalized_opts) do
+        reconcile_from_agent(name, operation, deadline_mono)
+      end
+    end)
   end
 
   @impl Arbor.Persistence.EventLog
@@ -298,8 +302,22 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   defp safe_get_and_update(name, deadline_mono, operation, fun) do
     with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
-      Agent.get_and_update(name, fun, timeout)
+      reply =
+        Agent.get_and_update(
+          name,
+          fn state ->
+            {result, state} = fun.(state)
+            {EventLog.stamp_completion(result), state}
+          end,
+          timeout
+        )
+
+      EventLog.accept_completion(reply, operation, deadline_mono)
+    else
+      {:error, :operation_timeout} -> EventLog.indeterminate(operation)
     end
+  rescue
+    _error -> {:error, :backend_unavailable}
   catch
     :exit, reason ->
       if exit_reason_contains?(reason, :timeout),
@@ -309,7 +327,14 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   defp reconcile_from_agent(name, operation, deadline_mono) do
     with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
-      Agent.get(name, &reconcile_state(operation, &1), timeout)
+      reply =
+        Agent.get(
+          name,
+          fn state -> EventLog.stamp_completion(reconcile_state(operation, state)) end,
+          timeout
+        )
+
+      EventLog.accept_completion(reply, operation, deadline_mono)
     else
       {:error, :operation_timeout} -> EventLog.indeterminate(operation)
     end
@@ -319,8 +344,8 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   defp fetch_name(opts) do
     case Keyword.fetch(opts, :name) do
-      {:ok, name} -> {:ok, name}
-      :error -> {:error, :invalid_precondition}
+      {:ok, name} when is_atom(name) and not is_nil(name) -> {:ok, name}
+      _missing_or_invalid -> {:error, :invalid_precondition}
     end
   end
 

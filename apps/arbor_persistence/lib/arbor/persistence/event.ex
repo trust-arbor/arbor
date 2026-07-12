@@ -6,7 +6,10 @@ defmodule Arbor.Persistence.Event do
   and ordered by event_number within the stream. Global ordering is
   tracked via global_position.
 
-  Supports causation and correlation IDs for distributed tracing.
+  Supports causation and correlation IDs for distributed tracing. EventLog
+  admission canonicalizes `data` and `metadata` through JSON, so persisted and
+  returned events use string map keys at every depth even when callers construct
+  an event with atom keys.
   """
 
   use TypedStruct
@@ -14,17 +17,17 @@ defmodule Arbor.Persistence.Event do
   typedstruct do
     @typedoc "An immutable event log entry"
 
-    field :id, String.t(), enforce: true
-    field :stream_id, String.t(), enforce: true
-    field :event_number, non_neg_integer(), enforce: true
-    field :global_position, non_neg_integer()
-    field :type, String.t(), enforce: true
-    field :data, map(), default: %{}
-    field :metadata, map(), default: %{}
-    field :agent_id, String.t()
-    field :causation_id, String.t()
-    field :correlation_id, String.t()
-    field :timestamp, DateTime.t()
+    field(:id, String.t(), enforce: true)
+    field(:stream_id, String.t(), enforce: true)
+    field(:event_number, non_neg_integer(), enforce: true)
+    field(:global_position, non_neg_integer())
+    field(:type, String.t(), enforce: true)
+    field(:data, map(), default: %{})
+    field(:metadata, map(), default: %{})
+    field(:agent_id, String.t())
+    field(:causation_id, String.t())
+    field(:correlation_id, String.t())
+    field(:timestamp, DateTime.t())
   end
 
   @doc """

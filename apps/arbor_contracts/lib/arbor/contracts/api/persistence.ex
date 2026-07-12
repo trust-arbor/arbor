@@ -51,7 +51,7 @@ defmodule Arbor.Contracts.API.Persistence do
   @typedoc "A structured record returned by QueryableStore operations."
   @type record_t :: map()
 
-  @typedoc "An immutable event log entry."
+  @typedoc "An immutable event log entry whose data and metadata are canonical string-key JSON maps."
   @type event :: map()
 
   @typedoc "Stable exact-ID identity for reconciling an EventLog append."
@@ -184,8 +184,10 @@ defmodule Arbor.Contracts.API.Persistence do
   @doc """
   Append one or more events to a stream using the specified backend.
 
-  Events are immutable and ordered within their stream. Returns the
-  persisted events with assigned event numbers and global positions.
+  Events are immutable and ordered within their stream. Event types are bounded
+  domain strings, not Elixir module names. Returns the persisted events with
+  assigned event numbers and global positions; data and metadata use canonical
+  string-key JSON maps consistently for append, retry, reconciliation, and read.
   """
   @callback append_events_to_stream_using_backend(
               store_name(),

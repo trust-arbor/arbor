@@ -11,7 +11,7 @@ defmodule Arbor.Persistence.Ecto.EventStore do
   Configure in your application's config:
 
       config :arbor_persistence_ecto, Arbor.Persistence.Ecto.EventStore,
-        serializer: EventStore.JsonSerializer,
+        serializer: Arbor.Persistence.Ecto.EventSerializer,
         schema_prefix: "trust_arbor",
         column_data_type: "jsonb",
         username: "postgres",
@@ -44,4 +44,8 @@ defmodule Arbor.Persistence.Ecto.EventStore do
   """
 
   use EventStore, otp_app: :arbor_persistence_ecto
+
+  def init(config) do
+    {:ok, Keyword.put(config, :serializer, Arbor.Persistence.Ecto.EventSerializer)}
+  end
 end

@@ -4,7 +4,7 @@ import Config
 # Override in dev.exs, test.exs, or runtime.exs as needed
 
 config :arbor_persistence_ecto, Arbor.Persistence.Ecto.EventStore,
-  serializer: EventStore.JsonSerializer,
+  serializer: Arbor.Persistence.Ecto.EventSerializer,
   schema_prefix: "trust_arbor",
   column_data_type: "jsonb",
   pool_size: 10

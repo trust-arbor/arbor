@@ -91,28 +91,38 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   @sqlite_busy_slice_ms 5
   @sqlite_pragma_timeout_ms 25
   @global_append_lock_sql "SELECT pg_try_advisory_xact_lock(hashtext('arbor.persistence.event_log.global_append'))"
+  @append_repo_callbacks [transaction: 1, rollback: 1, one: 1, insert!: 1]
 
   def append(stream_id, events, opts \\ []) do
-    with {:ok, events, preconditions, operation, append_deadline_mono} <-
-           EventLog.prepare_append(stream_id, events, opts) do
-      repo = Keyword.get(opts, :repo, Repo)
+    EventLog.with_operation_deadline(opts, fn normalized_opts, append_deadline_mono ->
+      with {:ok, events, preconditions, operation, ^append_deadline_mono} <-
+             EventLog.prepare_append(stream_id, events, normalized_opts),
+           {:ok, repo} <- fetch_repo(normalized_opts) do
+        append_fun = fn ->
+          append_prepared(
+            repo,
+            stream_id,
+            events,
+            preconditions,
+            operation,
+            normalized_opts,
+            append_deadline_mono
+          )
+        end
 
-      append_fun = fn ->
-        append_prepared(
-          repo,
-          stream_id,
-          events,
-          preconditions,
+        result =
+          if database_repo?(repo),
+            do: run_bounded(append_fun, operation, append_deadline_mono),
+            else: append_fun.()
+
+        EventLog.accept_completion(
+          result,
           operation,
-          opts,
-          append_deadline_mono
+          append_deadline_mono,
+          System.monotonic_time(:millisecond)
         )
       end
-
-      if database_repo?(repo),
-        do: run_bounded(append_fun, operation, append_deadline_mono),
-        else: append_fun.()
-    end
+    end)
   end
 
   defp append_prepared(
@@ -148,14 +158,11 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   defp run_bounded(fun, operation, deadline_mono) do
     case EventLog.remaining_timeout(deadline_mono) do
       {:ok, timeout} ->
-        task = Task.async(fun)
+        task = Task.async(fn -> EventLog.stamp_completion(fun.()) end)
 
         case Task.yield(task, timeout) do
-          {:ok, result} ->
-            case EventLog.remaining_timeout(deadline_mono) do
-              {:ok, _remaining} -> result
-              {:error, :operation_timeout} -> EventLog.indeterminate(operation)
-            end
+          {:ok, completion} ->
+            EventLog.accept_completion(completion, operation, deadline_mono)
 
           {:exit, _reason} ->
             EventLog.indeterminate(operation)
@@ -172,16 +179,17 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   @impl Arbor.Persistence.EventLog
   def reconcile_append(operation, opts) do
-    with {:ok, operation, normalized_opts, deadline_mono} <-
-           EventLog.prepare_reconcile(operation, opts) do
-      repo = Keyword.get(normalized_opts, :repo, Repo)
-
-      run_bounded(
-        fn -> reconcile_operation(repo, operation, deadline_mono) end,
-        operation,
-        deadline_mono
-      )
-    end
+    EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
+      with {:ok, operation, normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_reconcile(operation, normalized_opts),
+           {:ok, repo} <- fetch_repo(normalized_opts) do
+        run_bounded(
+          fn -> reconcile_operation(repo, operation, deadline_mono) end,
+          operation,
+          deadline_mono
+        )
+      end
+    end)
   end
 
   # Concurrent appends to the SAME stream race on event_number assignment: the
@@ -478,6 +486,24 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   end
 
   defp context_repo(context), do: Keyword.get(context.opts, :repo, Repo)
+
+  defp fetch_repo(opts) do
+    case Keyword.get(opts, :repo, Repo) do
+      repo when is_atom(repo) and not is_nil(repo) ->
+        if Code.ensure_loaded?(repo) and valid_append_repo?(repo),
+          do: {:ok, repo},
+          else: {:error, :invalid_precondition}
+
+      _invalid ->
+        {:error, :invalid_precondition}
+    end
+  end
+
+  defp valid_append_repo?(repo) do
+    Enum.all?(@append_repo_callbacks, fn {function, arity} ->
+      function_exported?(repo, function, arity)
+    end)
+  end
 
   defp write_started?(context), do: Process.get(context.phase_key) == :write_started
 

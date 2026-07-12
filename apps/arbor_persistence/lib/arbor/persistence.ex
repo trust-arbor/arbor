@@ -60,18 +60,16 @@ defmodule Arbor.Persistence do
           | {:ok, :pending_approval, String.t()}
           | {:error, {:unauthorized, term()} | term()}
   def authorize_write(agent_id, name, backend, key, value, opts \\ []) do
-    resource = "arbor://persistence/write/#{name}"
-    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+    with {:ok, opts} <- normalize_authorization_opts(opts),
+         :ok <- validate_store_name(name) do
+      resource = "arbor://persistence/write/#{name}"
+      {trace_id, opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :write, trace_id: trace_id) do
-      {:ok, :authorized} ->
-        put(name, backend, key, value, opts)
-
-      {:ok, :pending_approval, proposal_id} ->
-        {:ok, :pending_approval, proposal_id}
-
-      {:error, reason} ->
-        {:error, {:unauthorized, reason}}
+      case Arbor.Security.authorize(agent_id, resource, :write, trace_id: trace_id) do
+        {:ok, :authorized} -> put(name, backend, key, value, opts)
+        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+        {:error, reason} -> {:error, {:unauthorized, reason}}
+      end
     end
   end
 
@@ -103,18 +101,16 @@ defmodule Arbor.Persistence do
           | {:ok, :pending_approval, String.t()}
           | {:error, {:unauthorized, term()} | :not_found | term()}
   def authorize_read(agent_id, name, backend, key, opts \\ []) do
-    resource = "arbor://persistence/read/#{name}"
-    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+    with {:ok, opts} <- normalize_authorization_opts(opts),
+         :ok <- validate_store_name(name) do
+      resource = "arbor://persistence/read/#{name}"
+      {trace_id, opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :read, trace_id: trace_id) do
-      {:ok, :authorized} ->
-        get(name, backend, key, opts)
-
-      {:ok, :pending_approval, proposal_id} ->
-        {:ok, :pending_approval, proposal_id}
-
-      {:error, reason} ->
-        {:error, {:unauthorized, reason}}
+      case Arbor.Security.authorize(agent_id, resource, :read, trace_id: trace_id) do
+        {:ok, :authorized} -> get(name, backend, key, opts)
+        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+        {:error, reason} -> {:error, {:unauthorized, reason}}
+      end
     end
   end
 
@@ -152,18 +148,23 @@ defmodule Arbor.Persistence do
           | {:ok, :pending_approval, String.t()}
           | {:error, {:unauthorized, term()} | term()}
   def authorize_append(agent_id, name, backend, stream_id, events, opts \\ []) do
-    resource = "arbor://persistence/write/#{name}"
-    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+    result =
+      EventLog.with_operation_deadline(opts, fn normalized_opts, _deadline_mono ->
+        with :ok <- validate_store_name(name) do
+          resource = "arbor://persistence/write/#{name}"
+          {trace_id, append_opts} = Keyword.pop(normalized_opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :write, trace_id: trace_id) do
-      {:ok, :authorized} ->
-        append(name, backend, stream_id, events, opts)
+          case Arbor.Security.authorize(agent_id, resource, :write, trace_id: trace_id) do
+            {:ok, :authorized} -> append(name, backend, stream_id, events, append_opts)
+            {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+            {:error, reason} -> {:error, {:unauthorized, reason}}
+          end
+        end
+      end)
 
-      {:ok, :pending_approval, proposal_id} ->
-        {:ok, :pending_approval, proposal_id}
-
-      {:error, reason} ->
-        {:error, {:unauthorized, reason}}
+    case result do
+      {:error, :invalid_precondition} -> {:error, :invalid_options}
+      other -> other
     end
   end
 
@@ -193,18 +194,16 @@ defmodule Arbor.Persistence do
           | {:ok, :pending_approval, String.t()}
           | {:error, {:unauthorized, term()} | term()}
   def authorize_read_stream(agent_id, name, backend, stream_id, opts \\ []) do
-    resource = "arbor://persistence/read/#{name}"
-    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+    with {:ok, opts} <- normalize_authorization_opts(opts),
+         :ok <- validate_store_name(name) do
+      resource = "arbor://persistence/read/#{name}"
+      {trace_id, opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :read, trace_id: trace_id) do
-      {:ok, :authorized} ->
-        read_stream(name, backend, stream_id, opts)
-
-      {:ok, :pending_approval, proposal_id} ->
-        {:ok, :pending_approval, proposal_id}
-
-      {:error, reason} ->
-        {:error, {:unauthorized, reason}}
+      case Arbor.Security.authorize(agent_id, resource, :read, trace_id: trace_id) do
+        {:ok, :authorized} -> read_stream(name, backend, stream_id, opts)
+        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+        {:error, reason} -> {:error, {:unauthorized, reason}}
+      end
     end
   end
 
@@ -516,26 +515,46 @@ defmodule Arbor.Persistence do
   @spec append(atom(), module(), String.t(), [Event.t()] | Event.t(), keyword()) ::
           EventLog.append_result()
   def append(name, backend, stream_id, events, opts \\ []) do
-    with {:ok, normalized_opts} <- EventLog.normalize_opts(opts),
-         backend_opts = Keyword.put(normalized_opts, :name, name),
-         {:ok, events, _preconditions} <-
-           EventLog.validate_append(stream_id, events, backend_opts) do
-      backend.append(stream_id, events, backend_opts)
-    end
+    EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
+      with :ok <- validate_store_name(name),
+           :ok <- validate_backend(backend, :append, 3),
+           backend_opts = Keyword.put(normalized_opts, :name, name),
+           {:ok, events, _preconditions, operation, ^deadline_mono} <-
+             EventLog.prepare_append(stream_id, events, backend_opts),
+           {:ok, result} <-
+             safe_backend_call(fn -> backend.append(stream_id, events, backend_opts) end) do
+        EventLog.accept_completion(
+          result,
+          operation,
+          deadline_mono,
+          System.monotonic_time(:millisecond)
+        )
+      end
+    end)
   end
 
   @doc "Reconcile an indeterminate append by exact event identity."
   @spec reconcile_append(atom(), module(), AppendOperation.t(), keyword()) ::
           EventLog.append_reconciliation()
   def reconcile_append(name, backend, operation, opts \\ []) do
-    with {:ok, operation} <- EventLog.validate_operation(operation),
-         {:ok, normalized_opts} <- EventLog.normalize_opts(opts) do
-      if function_exported?(backend, :reconcile_append, 2) do
-        backend.reconcile_append(operation, Keyword.put(normalized_opts, :name, name))
+    EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
+      with :ok <- validate_store_name(name),
+           {:ok, operation} <- EventLog.validate_operation(operation),
+           true <- is_atom(backend) and function_exported?(backend, :reconcile_append, 2),
+           backend_opts = Keyword.put(normalized_opts, :name, name),
+           {:ok, result} <-
+             safe_backend_call(fn -> backend.reconcile_append(operation, backend_opts) end) do
+        EventLog.accept_completion(
+          result,
+          operation,
+          deadline_mono,
+          System.monotonic_time(:millisecond)
+        )
       else
-        {:error, :reconciliation_not_supported}
+        false -> {:error, :reconciliation_not_supported}
+        {:error, _reason} = error -> error
       end
-    end
+    end)
   end
 
   @doc "Read events from a stream."
@@ -674,4 +693,31 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def get_event_count_using_backend(name, backend, opts),
     do: event_count(name, backend, opts)
+
+  defp normalize_authorization_opts(opts) do
+    case EventLog.normalize_opts(opts) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, _reason} -> {:error, :invalid_options}
+    end
+  end
+
+  defp validate_store_name(name) when is_atom(name) and not is_nil(name), do: :ok
+  defp validate_store_name(_name), do: {:error, :invalid_precondition}
+
+  defp validate_backend(backend, function, arity) when is_atom(backend) do
+    if Code.ensure_loaded?(backend) and function_exported?(backend, function, arity),
+      do: :ok,
+      else: {:error, :backend_unavailable}
+  end
+
+  defp validate_backend(_backend, _function, _arity), do: {:error, :backend_unavailable}
+
+  defp safe_backend_call(fun) do
+    {:ok, fun.()}
+  rescue
+    _error -> {:error, :backend_unavailable}
+  catch
+    :exit, _reason -> {:error, :backend_unavailable}
+    _kind, _reason -> {:error, :backend_unavailable}
+  end
 end

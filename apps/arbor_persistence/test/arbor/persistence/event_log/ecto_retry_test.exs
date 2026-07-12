@@ -145,4 +145,13 @@ defmodule Arbor.Persistence.EventLog.EctoRetryTest do
     assert {:error, :invalid_precondition} =
              EventLog.reconcile_append(operation, [{:repo, OtherConflictRepo} | :improper])
   end
+
+  test "malformed repo options are rejected without dispatch" do
+    event = Event.new("invalid-repo", "event", %{})
+
+    for invalid_repo <- [%{not: :a_repo}, String, nil] do
+      assert {:error, :invalid_precondition} =
+               EventLog.append("invalid-repo", event, repo: invalid_repo)
+    end
+  end
 end

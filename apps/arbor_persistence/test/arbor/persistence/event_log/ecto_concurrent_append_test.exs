@@ -38,6 +38,10 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
   @moduletag :integration
   @moduletag :database
 
+  if Repo.__adapter__() != Ecto.Adapters.Postgres do
+    @moduletag skip: "concurrent append coverage requires PostgreSQL"
+  end
+
   defmodule SingleConnectionRepo do
     use Ecto.Repo,
       otp_app: :arbor_persistence,
@@ -56,40 +60,36 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
   # serializes writes anyway) rather than producing a misleading green/red.
   setup_all do
     case Repo.start_link() do
-      {:ok, pid} -> on_postgres_or_skip(pid)
-      {:error, {:already_started, pid}} -> on_postgres_or_skip(pid)
-      {:error, reason} -> {:skip, "Database not available: #{inspect(reason)}"}
+      {:ok, pid} -> configure_postgres_repos(pid)
+      {:error, {:already_started, pid}} -> configure_postgres_repos(pid)
+      {:error, reason} -> raise "database not available: #{inspect(reason)}"
     end
   end
 
-  defp on_postgres_or_skip(pid) do
-    if apply(Repo, :__adapter__, []) == Ecto.Adapters.Postgres do
-      single_connection_config =
-        Repo.config()
-        |> Keyword.drop([:adapter, :name, :otp_app, :repo])
-        |> Keyword.put(:pool, DBConnection.ConnectionPool)
-        |> Keyword.put(:pool_size, 1)
+  defp configure_postgres_repos(pid) do
+    single_connection_config =
+      Repo.config()
+      |> Keyword.drop([:adapter, :name, :otp_app, :repo])
+      |> Keyword.put(:pool, DBConnection.ConnectionPool)
+      |> Keyword.put(:pool_size, 1)
 
-      start_supervised!({SingleConnectionRepo, single_connection_config})
+    start_supervised!({SingleConnectionRepo, single_connection_config})
 
-      proxy =
-        start_supervised!(
-          {PostgresDelayProxy,
-           upstream_host: Keyword.get(Repo.config(), :hostname, "localhost"),
-           upstream_port: Keyword.get(Repo.config(), :port, 5432)}
-        )
+    proxy =
+      start_supervised!(
+        {PostgresDelayProxy,
+         upstream_host: Keyword.get(Repo.config(), :hostname, "localhost"),
+         upstream_port: Keyword.get(Repo.config(), :port, 5432)}
+      )
 
-      delayed_repo_config =
-        single_connection_config
-        |> Keyword.drop([:socket, :socket_dir])
-        |> Keyword.put(:hostname, "127.0.0.1")
-        |> Keyword.put(:port, PostgresDelayProxy.port(proxy))
+    delayed_repo_config =
+      single_connection_config
+      |> Keyword.drop([:socket, :socket_dir])
+      |> Keyword.put(:hostname, "127.0.0.1")
+      |> Keyword.put(:port, PostgresDelayProxy.port(proxy))
 
-      start_supervised!({DelayedCommitRepo, delayed_repo_config})
-      {:ok, repo_pid: pid, commit_proxy: proxy}
-    else
-      {:skip, "concurrent-append race is Postgres-only (advisory lock + real pool)"}
-    end
+    start_supervised!({DelayedCommitRepo, delayed_repo_config})
+    {:ok, repo_pid: pid, commit_proxy: proxy}
   end
 
   setup do

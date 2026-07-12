@@ -61,7 +61,7 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
       assert persisted.event_number == 1
       assert persisted.global_position == 1
       assert persisted.type == "test.event"
-      assert persisted.data == %{key: "value"}
+      assert persisted.data == %{"key" => "value"}
     end
 
     test "appends multiple events with incrementing numbers" do
@@ -208,6 +208,26 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
       assert {:ok, 1} = EventLog.stream_version("idempotent", repo: Repo)
     end
 
+    test "append, retry, and read share canonical JSON maps" do
+      event =
+        Event.new("canonical", "arbor.review.ordinary", %{outer: %{value: 1}},
+          metadata: %{source: "ecto"}
+        )
+
+      expected_data = %{"outer" => %{"value" => 1}}
+      expected_metadata = %{"source" => "ecto"}
+
+      assert {:ok, [first]} = EventLog.append("canonical", event, repo: Repo)
+      assert first.data == expected_data
+      assert first.metadata == expected_metadata
+
+      assert {:ok, [retried]} = EventLog.append("canonical", event, repo: Repo)
+      assert retried == first
+
+      assert {:ok, [read]} = EventLog.read_stream("canonical", repo: Repo)
+      assert read == first
+    end
+
     test "stream and global position exhaustion are controlled before encoding" do
       insert_positioned_event!("stream-full", 2_147_483_647, 1)
 
@@ -219,7 +239,7 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
                )
 
       Repo.delete_all(Arbor.Persistence.Schemas.Event)
-      insert_positioned_event!("global-seed", 1, 9_223_372_036_854_775_807)
+      insert_positioned_event!("global-seed", 1, 2_147_483_647)
 
       assert {:error, :global_position_exhausted} =
                EventLog.append(

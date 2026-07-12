@@ -49,25 +49,29 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   @impl Arbor.Persistence.EventLog
   def append(stream_id, events, opts) do
-    with {:ok, events, preconditions, operation, deadline_mono} <-
-           EventLog.prepare_append(stream_id, events, opts),
-         {:ok, name} <- fetch_name(opts) do
-      safe_append_call(
-        name,
-        {:append, stream_id, events, preconditions, operation, deadline_mono},
-        deadline_mono,
-        operation
-      )
-    end
+    EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
+      with {:ok, events, preconditions, operation, ^deadline_mono} <-
+             EventLog.prepare_append(stream_id, events, normalized_opts),
+           {:ok, name} <- fetch_name(normalized_opts) do
+        safe_append_call(
+          name,
+          {:append, stream_id, events, preconditions, operation, deadline_mono},
+          deadline_mono,
+          operation
+        )
+      end
+    end)
   end
 
   @impl Arbor.Persistence.EventLog
   def reconcile_append(operation, opts) do
-    with {:ok, operation, normalized_opts, deadline_mono} <-
-           EventLog.prepare_reconcile(operation, opts),
-         {:ok, name} <- fetch_name(normalized_opts) do
-      reconcile_from_server(name, operation, deadline_mono)
-    end
+    EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
+      with {:ok, operation, normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_reconcile(operation, normalized_opts),
+           {:ok, name} <- fetch_name(normalized_opts) do
+        reconcile_from_server(name, operation, deadline_mono)
+      end
+    end)
   end
 
   @impl Arbor.Persistence.EventLog
@@ -202,6 +206,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
     max_age_ms = Keyword.get(opts, :max_age_ms, @default_max_age_ms)
     trim_interval_ms = Keyword.get(opts, :trim_interval_ms, @default_trim_interval_ms)
+    append_candidate_hook = Keyword.get(opts, :append_candidate_hook)
 
     base_state = %{
       stream_table: stream_table,
@@ -215,7 +220,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
       subscribers: %{},
       monitors: %{},
       max_age_ms: max_age_ms,
-      trim_interval_ms: trim_interval_ms
+      trim_interval_ms: trim_interval_ms,
+      append_candidate_hook: append_candidate_hook
     }
 
     # Attempt to restore from snapshot if configured
@@ -244,32 +250,40 @@ defmodule Arbor.Persistence.EventLog.ETS do
       ) do
     now = System.monotonic_time(:millisecond)
 
-    if now >= deadline_mono do
-      {:reply, {:error, :operation_timeout}, state}
-    else
-      case reconcile_operation(operation, state) do
-        {:ok, {:committed, persisted}} ->
-          {:reply, {:ok, persisted}, state}
+    {result, state} =
+      if now >= deadline_mono do
+        {{:error, :operation_timeout}, state}
+      else
+        case reconcile_operation(operation, state) do
+          {:ok, {:committed, persisted}} ->
+            {{:ok, persisted}, state}
 
-        {:ok, :absent} ->
-          append_absent_operation(
-            stream_id,
-            events,
-            preconditions,
-            operation,
-            deadline_mono,
-            now,
-            state
-          )
+          {:ok, :absent} ->
+            append_absent_operation(
+              stream_id,
+              events,
+              preconditions,
+              operation,
+              deadline_mono,
+              now,
+              state
+            )
 
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
+          {:error, reason} ->
+            {{:error, reason}, state}
+        end
       end
-    end
+
+    {:reply, EventLog.stamp_completion(result), state}
   end
 
-  def handle_call({:reconcile_append, operation}, _from, state) do
-    {:reply, reconcile_operation(operation, state), state}
+  def handle_call({:reconcile_append, operation, deadline_mono}, _from, state) do
+    result =
+      if System.monotonic_time(:millisecond) < deadline_mono,
+        do: reconcile_operation(operation, state),
+        else: {:error, :operation_timeout}
+
+    {:reply, EventLog.stamp_completion(result), state}
   end
 
   def handle_call({:read_stream, stream_id, opts}, _from, state) do
@@ -539,7 +553,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
   defp decrement_limit(nil), do: nil
   defp decrement_limit(n), do: n - 1
 
-  defp do_append(stream_id, events, operation, inserted_mono, state) do
+  defp build_append(stream_id, events, operation, state) do
     current_version = Map.get(state.stream_versions, stream_id, 0)
 
     {persisted, final_version, final_global} =
@@ -571,18 +585,13 @@ defmodule Arbor.Persistence.EventLog.ETS do
         {event.id, {Map.fetch!(operation.fingerprints, event.id), event.global_position}}
       end)
 
-    :ets.insert(state.stream_table, stream_entries)
-    :ets.insert(state.global_table, global_entries)
-    :ets.insert(state.id_table, id_entries)
-
-    state = %{
+    candidate = %{
       state
       | global_position: final_global,
-        stream_versions: Map.put(state.stream_versions, stream_id, final_version),
-        head_inserted_mono: Map.put(state.head_inserted_mono, stream_id, inserted_mono)
+        stream_versions: Map.put(state.stream_versions, stream_id, final_version)
     }
 
-    {persisted, state}
+    {persisted, stream_entries, global_entries, id_entries, candidate}
   end
 
   defp append_absent_operation(
@@ -605,12 +614,35 @@ defmodule Arbor.Persistence.EventLog.ETS do
              length(events)
            ),
          {:ok, _remaining} <- EventLog.remaining_timeout(deadline_mono) do
-      {persisted, state} = do_append(stream_id, events, operation, now, state)
-      notify_subscribers(stream_id, persisted, state)
-      state = maybe_warn_event_capacity(state)
-      {:reply, {:ok, persisted}, state}
+      {persisted, stream_entries, global_entries, id_entries, candidate} =
+        build_append(stream_id, events, operation, state)
+
+      run_candidate_hook(state)
+
+      if System.monotonic_time(:millisecond) >= deadline_mono do
+        {{:error, :operation_timeout}, state}
+      else
+        :ets.insert(state.stream_table, stream_entries)
+        :ets.insert(state.global_table, global_entries)
+        :ets.insert(state.id_table, id_entries)
+        committed_mono = System.monotonic_time(:millisecond)
+
+        if committed_mono >= deadline_mono do
+          rollback_append_entries(state, stream_entries, global_entries, id_entries)
+          {{:error, :operation_timeout}, state}
+        else
+          candidate = %{
+            candidate
+            | head_inserted_mono: Map.put(candidate.head_inserted_mono, stream_id, committed_mono)
+          }
+
+          notify_subscribers(stream_id, persisted, candidate)
+          candidate = maybe_warn_event_capacity(candidate)
+          {{:ok, persisted}, candidate}
+        end
+      end
     else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason} -> {{:error, reason}, state}
     end
   end
 
@@ -646,8 +678,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   defp safe_append_call(name, request, deadline_mono, operation) do
     with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
-      GenServer.call(name, request, timeout)
+      name
+      |> GenServer.call(request, timeout)
+      |> EventLog.accept_completion(operation, deadline_mono)
+    else
+      {:error, :operation_timeout} -> EventLog.indeterminate(operation)
     end
+  rescue
+    _error -> {:error, :backend_unavailable}
   catch
     :exit, reason ->
       if exit_reason_contains?(reason, :timeout),
@@ -657,7 +695,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   defp reconcile_from_server(name, operation, deadline_mono) do
     with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
-      GenServer.call(name, {:reconcile_append, operation}, timeout)
+      name
+      |> GenServer.call({:reconcile_append, operation, deadline_mono}, timeout)
+      |> EventLog.accept_completion(operation, deadline_mono)
     else
       {:error, :operation_timeout} -> EventLog.indeterminate(operation)
     end
@@ -667,10 +707,20 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   defp fetch_name(opts) do
     case Keyword.fetch(opts, :name) do
-      {:ok, name} -> {:ok, name}
-      :error -> {:error, :invalid_precondition}
+      {:ok, name} when is_atom(name) and not is_nil(name) -> {:ok, name}
+      _missing_or_invalid -> {:error, :invalid_precondition}
     end
   end
+
+  defp rollback_append_entries(state, stream_entries, global_entries, id_entries) do
+    Enum.each(stream_entries, &:ets.delete(state.stream_table, elem(&1, 0)))
+    Enum.each(global_entries, &:ets.delete(state.global_table, elem(&1, 0)))
+    Enum.each(id_entries, &:ets.delete(state.id_table, elem(&1, 0)))
+    :ok
+  end
+
+  defp run_candidate_hook(%{append_candidate_hook: hook}) when is_function(hook, 0), do: hook.()
+  defp run_candidate_hook(_state), do: :ok
 
   defp exit_reason_contains?(reason, expected) when reason == expected, do: true
 

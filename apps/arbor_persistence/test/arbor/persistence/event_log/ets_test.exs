@@ -2,7 +2,6 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.ETS
 
@@ -182,7 +181,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
     } do
       event = Event.new("forged", "created", %{value: 1})
 
-      assert {:ok, %AppendOperation{} = operation} =
+      assert {:ok, operation} =
                Arbor.Persistence.EventLog.build_operation("forged", [event])
 
       Enum.each(forged_operations(operation), fn forged ->
@@ -208,6 +207,62 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert {:ok, 1} = ETS.stream_version("idempotent", name: name)
     end
 
+    test "append, retry, and read return one canonical JSON representation", %{name: name} do
+      event =
+        Event.new("canonical", "arbor.review.ordinary", %{outer: %{value: 1}},
+          metadata: %{source: "ets"}
+        )
+
+      expected_data = %{"outer" => %{"value" => 1}}
+      expected_metadata = %{"source" => "ets"}
+
+      assert {:ok, [first]} = ETS.append("canonical", event, name: name)
+      assert first.data == expected_data
+      assert first.metadata == expected_metadata
+
+      assert {:ok, [retried]} = ETS.append("canonical", event, name: name)
+      assert retried == first
+
+      assert {:ok, [read]} = ETS.read_stream("canonical", name: name)
+      assert read == first
+    end
+
+    test "security regression: an expired ETS candidate cannot commit" do
+      parent = self()
+      name = :"el_ets_delayed_candidate_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {ETS,
+         name: name,
+         append_candidate_hook: fn ->
+           send(parent, :ets_candidate_built)
+           Process.sleep(35)
+         end},
+        id: name
+      )
+
+      event = Event.new("ets-post-decision-timeout", "must-not-commit", %{})
+
+      assert {:error, {:append_indeterminate, _operation}} =
+               ETS.append("ets-post-decision-timeout", event,
+                 name: name,
+                 append_timeout_ms: 10
+               )
+
+      assert_receive :ets_candidate_built
+      assert {:ok, 0} = ETS.stream_version("ets-post-decision-timeout", name: name)
+      refute ETS.stream_exists?("ets-post-decision-timeout", name: name)
+    end
+
+    test "malformed public names are rejected without raising" do
+      event = Event.new("invalid-name", "event", %{})
+
+      for invalid_name <- [%{not: :a_server}, nil] do
+        assert {:error, :invalid_precondition} =
+                 ETS.append("invalid-name", event, name: invalid_name)
+      end
+    end
+
     test "position exhaustion returns controlled errors before mutation", %{name: name} do
       :sys.replace_state(name, fn state ->
         %{state | stream_versions: %{"full-stream" => 2_147_483_647}}
@@ -220,8 +275,8 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
         %{
           state
           | stream_versions: %{},
-            global_position: 9_223_372_036_854_775_807,
-            max_events: 9_223_372_036_854_775_808
+            global_position: 2_147_483_647,
+            max_events: 2_147_483_648
         }
       end)
 
@@ -230,13 +285,18 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
     end
   end
 
-  defp forged_operations(%AppendOperation{} = operation) do
+  defp forged_operations(operation) do
     oversized_ids = Enum.map(1..1_001, &"evt_forged_#{&1}")
 
     [
-      %AppendOperation{operation | event_ids: ["evt_forged" | :improper]},
-      %AppendOperation{operation | event_ids: oversized_ids, fingerprints: %{}}
+      rebuild_operation(operation, event_ids: ["evt_forged" | :improper]),
+      rebuild_operation(operation, event_ids: oversized_ids, fingerprints: %{})
     ]
+  end
+
+  defp rebuild_operation(operation, attrs) do
+    operation.__struct__
+    |> struct(Map.merge(Map.from_struct(operation), Map.new(attrs)))
   end
 
   describe "freshness after restore" do
@@ -557,7 +617,10 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
 
       assert length(events) == 2
 
-      assert [%Event{type: "first", data: %{v: 1}}, %Event{type: "second", data: %{v: 2}}] =
+      assert [
+               %Event{type: "first", data: %{"v" => 1}},
+               %Event{type: "second", data: %{"v" => 2}}
+             ] =
                events
     end
   end

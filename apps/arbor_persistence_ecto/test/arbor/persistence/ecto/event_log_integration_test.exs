@@ -1,7 +1,6 @@
 defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.Ecto.EventLog
   alias Arbor.Persistence.Ecto.EventStore, as: Store
   alias Arbor.Persistence.Event
@@ -9,11 +8,6 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
 
   @moduletag :database
   @moduletag :integration
-
-  defmodule OrdinaryEvent do
-    @moduledoc false
-    defstruct [:value]
-  end
 
   setup_all do
     previous_config = Application.get_env(:arbor_persistence_ecto, Store)
@@ -56,8 +50,11 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
   end
 
   test "ordinary append uses EventStore's no-precondition sentinel" do
+    assert EventStore.Config.lookup(Store, :serializer) ==
+             Arbor.Persistence.Ecto.EventSerializer
+
     stream_id = "ordinary-append-#{System.unique_integer([:positive])}"
-    event_type = Atom.to_string(OrdinaryEvent)
+    event_type = "arbor.review.ordinary"
     event = Event.new(stream_id, event_type, %{value: 1})
 
     assert {:ok, [%Event{} = persisted]} = EventLog.append(stream_id, event)
@@ -69,7 +66,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
               %Event{
                 id: id,
                 type: ^event_type,
-                data: %OrdinaryEvent{value: 1},
+                data: %{"value" => 1},
                 event_number: 1
               }
             ]} =
@@ -78,9 +75,24 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
     assert id == event.id
   end
 
+  test "ordinary type strings do not crash EventStore's notification publisher" do
+    publisher_name = Module.concat([Store, EventStore.Notifications.Publisher])
+    publisher = Process.whereis(publisher_name)
+    assert is_pid(publisher)
+    monitor = Process.monitor(publisher)
+
+    stream_id = "ordinary-publisher-#{System.unique_integer([:positive])}"
+    event = Event.new(stream_id, "arbor.review.ordinary", %{value: 1})
+
+    assert {:ok, [%Event{type: "arbor.review.ordinary", data: %{"value" => 1}}]} =
+             EventLog.append(stream_id, event)
+
+    refute_receive {:DOWN, ^monitor, :process, ^publisher, _reason}, 250
+  end
+
   test "ordinary append reads back event 1001 by its submitted identity" do
     stream_id = "ordinary-1001"
-    event_type = Atom.to_string(OrdinaryEvent)
+    event_type = "arbor.review.ordinary"
 
     first_thousand =
       for value <- 1..1_000 do
@@ -97,7 +109,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
               %Event{
                 id: submitted_id,
                 event_number: 1_001,
-                data: %{value: 1_001}
+                data: %{"value" => 1_001}
               }
             ]} = EventLog.append(stream_id, submitted)
 
@@ -112,7 +124,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
   test "concurrent ordinary writers each receive their own persisted event" do
     writer_count = 24
     stream_id = "ordinary-concurrent"
-    event_type = Atom.to_string(OrdinaryEvent)
+    event_type = "arbor.review.ordinary"
 
     results =
       1..writer_count
@@ -129,7 +141,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
 
     assert Enum.all?(results, fn
              {:ok, {%Event{} = submitted, {:ok, [%Event{} = persisted]}}} ->
-               persisted.id == submitted.id and persisted.data == submitted.data
+               persisted.id == submitted.id and persisted.data == canonical_data(submitted.data)
 
              _other ->
                false
@@ -151,7 +163,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
   test "concurrent exact-version appends have exactly one winner" do
     writer_count = 20
     stream_id = "event-store-cas"
-    event_type = Atom.to_string(OrdinaryEvent)
+    event_type = "arbor.review.ordinary"
 
     results =
       1..writer_count
@@ -173,7 +185,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
   end
 
   test "stream reads resolve exact global positions across two streams" do
-    event_type = Atom.to_string(OrdinaryEvent)
+    event_type = "arbor.review.ordinary"
 
     assert {:ok, [%Event{global_position: 1}]} =
              EventLog.append("global-a", Event.new("global-a", event_type, %{value: 1}))
@@ -191,7 +203,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
 
   test "security regression: forged append markers cannot substitute for persisted content" do
     stream_id = "forged-operation"
-    event_type = Atom.to_string(OrdinaryEvent)
+    event_type = "arbor.review.ordinary"
 
     expected =
       Event.new(stream_id, event_type, %{value: 1},
@@ -223,16 +235,16 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
   end
 
   test "forged reconciliation operations are rejected before EventStore queries" do
-    event = Event.new("forged-boundary", Atom.to_string(OrdinaryEvent), %{value: 1})
+    event = Event.new("forged-boundary", "arbor.review.ordinary", %{value: 1})
 
-    assert {:ok, %AppendOperation{} = operation} =
+    assert {:ok, operation} =
              Arbor.Persistence.EventLog.build_operation("forged-boundary", [event])
 
     oversized_ids = Enum.map(1..1_001, &"evt_forged_#{&1}")
 
     for forged <- [
-          %AppendOperation{operation | event_ids: [event.id | :improper]},
-          %AppendOperation{operation | event_ids: oversized_ids, fingerprints: %{}}
+          rebuild_operation(operation, event_ids: [event.id | :improper]),
+          rebuild_operation(operation, event_ids: oversized_ids, fingerprints: %{})
         ] do
       assert {:error, :invalid_append_operation} = EventLog.reconcile_append(forged, [])
     end
@@ -244,9 +256,29 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
              )
   end
 
+  test "exact reconciliation detects an event ID committed to another stream" do
+    event_id = "evt_global_identity_conflict"
+
+    original =
+      Event.new("identity-owner", "arbor.review.ordinary", %{value: 1}, id: event_id)
+
+    assert {:ok, [_]} = EventLog.append("identity-owner", original)
+
+    conflicting =
+      Event.new("identity-claimant", "arbor.review.ordinary", %{value: 1},
+        id: event_id,
+        timestamp: original.timestamp
+      )
+
+    assert {:ok, operation} =
+             Arbor.Persistence.EventLog.build_operation("identity-claimant", [conflicting])
+
+    assert {:error, :event_identity_conflict} = EventLog.reconcile_append(operation, [])
+  end
+
   test "agent identity round-trips and caller metadata cannot override reserved fields" do
     stream_id = "agent-round-trip"
-    event_type = Atom.to_string(OrdinaryEvent)
+    event_type = "arbor.review.ordinary"
 
     event =
       Event.new(stream_id, event_type, %{value: 7},
@@ -303,7 +335,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
       assert_receive {:event_store_pool_slot_held, ^holder}, 1_000
     end
 
-    event = Event.new("event-store-checkout-timeout", Atom.to_string(OrdinaryEvent), %{value: 1})
+    event = Event.new("event-store-checkout-timeout", "arbor.review.ordinary", %{value: 1})
 
     assert {:ok, operation} =
              Arbor.Persistence.EventLog.build_operation("event-store-checkout-timeout", [event])
@@ -325,7 +357,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
 
   test "delayed EventStore COMMIT acknowledgement is reconcilable", %{commit_proxy: proxy} do
     stream_id = "event-store-delayed-commit"
-    event = Event.new(stream_id, Atom.to_string(OrdinaryEvent), %{value: 11})
+    event = Event.new(stream_id, "arbor.review.ordinary", %{value: 11})
 
     :ok =
       PostgresDelayProxy.delay_next_match(
@@ -358,7 +390,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
   end
 
   test "stream and global position exhaustion fail before EventStore encoding" do
-    event_type = Atom.to_string(OrdinaryEvent)
+    event_type = "arbor.review.ordinary"
     assert {:ok, [_]} = EventLog.append("full-stream", Event.new("full-stream", event_type, %{}))
     conn = EventStore.Config.lookup(Store, :conn)
 
@@ -372,16 +404,87 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
              EventLog.append("full-stream", Event.new("full-stream", event_type, %{}))
 
     Postgrex.query!(conn, "UPDATE public.streams SET stream_version = $1 WHERE stream_id = 0", [
-      9_223_372_036_854_775_807
+      2_147_483_647
     ])
 
     assert {:error, :global_position_exhausted} =
              EventLog.append("global-full", Event.new("global-full", event_type, %{}))
   end
 
+  test "concurrent appends cannot cross the global position capacity" do
+    event_type = "arbor.review.ordinary"
+
+    assert {:ok, [_]} =
+             EventLog.append(
+               "global-capacity-seed",
+               Event.new("global-capacity-seed", event_type, %{})
+             )
+
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    Postgrex.query!(conn, "UPDATE public.streams SET stream_version = $1 WHERE stream_id = 0", [
+      2_147_483_646
+    ])
+
+    results =
+      ["global-capacity-a", "global-capacity-b"]
+      |> Task.async_stream(
+        fn stream_id -> EventLog.append(stream_id, Event.new(stream_id, event_type, %{})) end,
+        max_concurrency: 2,
+        ordered: false,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &match?({:ok, [%Event{global_position: 2_147_483_647}]}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :global_position_exhausted})) == 1
+
+    assert %{rows: [[2_147_483_647]]} =
+             Postgrex.query!(
+               conn,
+               "SELECT stream_version FROM public.streams WHERE stream_id = 0",
+               []
+             )
+  end
+
+  test "concurrent appends cannot cross one stream's position capacity" do
+    stream_id = "stream-capacity-race"
+    event_type = "arbor.review.ordinary"
+    assert {:ok, [_]} = EventLog.append(stream_id, Event.new(stream_id, event_type, %{}))
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    Postgrex.query!(
+      conn,
+      "UPDATE public.streams SET stream_version = $1 WHERE stream_uuid = $2",
+      [2_147_483_646, stream_id]
+    )
+
+    results =
+      1..2
+      |> Task.async_stream(
+        fn value ->
+          EventLog.append(stream_id, Event.new(stream_id, event_type, %{value: value}))
+        end,
+        max_concurrency: 2,
+        ordered: false,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &match?({:ok, [%Event{event_number: 2_147_483_647}]}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :stream_position_exhausted})) == 1
+
+    assert %{rows: [[2_147_483_647]]} =
+             Postgrex.query!(
+               conn,
+               "SELECT stream_version FROM public.streams WHERE stream_uuid = $1",
+               [stream_id]
+             )
+  end
+
   test "stream head is reconstructed from one current database snapshot" do
     stream_id = "atomic-head"
-    event_type = Atom.to_string(OrdinaryEvent)
+    event_type = "arbor.review.ordinary"
 
     assert {:ok, [_first, second]} =
              EventLog.append(stream_id, [
@@ -428,6 +531,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
 
   defp event_store_config do
     [
+      # EventStore.init/1 must override stale struct-oriented configuration.
       serializer: EventStore.JsonSerializer,
       username: System.get_env("POSTGRES_USER", "arbor_dev"),
       password: System.get_env("POSTGRES_PASSWORD", ""),
@@ -478,5 +582,10 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
     value
     |> Jason.encode!()
     |> Jason.decode!()
+  end
+
+  defp rebuild_operation(operation, attrs) do
+    operation.__struct__
+    |> struct(Map.merge(Map.from_struct(operation), Map.new(attrs)))
   end
 end

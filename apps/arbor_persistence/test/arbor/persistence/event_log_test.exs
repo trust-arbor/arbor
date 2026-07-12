@@ -36,6 +36,17 @@ defmodule Arbor.Persistence.EventLogTest do
     end)
   end
 
+  test "admission canonicalizes nested JSON objects to string keys" do
+    event =
+      Event.new("json", "arbor.review.ordinary", %{outer: %{value: 1}},
+        metadata: %{source: "public"}
+      )
+
+    assert {:ok, [canonical], _preconditions} = EventLog.validate_append("json", event, [])
+    assert canonical.data == %{"outer" => %{"value" => 1}}
+    assert canonical.metadata == %{"source" => "public"}
+  end
+
   test "build and reconciliation helpers are total and bounded" do
     event = Event.new("bounded", "created", %{value: 1})
 

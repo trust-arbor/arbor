@@ -21,7 +21,7 @@ defmodule Arbor.Persistence.Ecto do
   1. Add configuration:
 
       config :arbor_persistence_ecto, Arbor.Persistence.Ecto.EventStore,
-        serializer: EventStore.JsonSerializer,
+        serializer: Arbor.Persistence.Ecto.EventSerializer,
         schema_prefix: "trust_arbor",
         column_data_type: "jsonb",
         username: "postgres",

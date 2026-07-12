@@ -33,7 +33,8 @@ defmodule Arbor.Persistence.EventLog do
   @default_append_timeout_ms 5_000
   @max_append_timeout_ms 60_000
   @max_stream_position 2_147_483_647
-  @max_global_position 9_223_372_036_854_775_807
+  @max_global_position 2_147_483_647
+  @deadline_context_key {__MODULE__, :operation_deadline}
 
   @type stream_id :: String.t()
   @type opts :: keyword()
@@ -72,10 +73,13 @@ defmodule Arbor.Persistence.EventLog do
   bounded to 1,024 bytes, options to 64 entries, an append to 1,000 events and
   4 MiB total, and each event term to 1 MiB before backend work begins.
 
-  Event `data` and `metadata` must serialize as JSON objects. Timestamps must be
-  valid UTC `DateTime` values; agent, causation, and correlation IDs must be nil
-  or bounded nonempty strings. These rules make one event fingerprint stable
-  across the in-memory, Ecto, and EventStore adapters.
+  Event `data` and `metadata` must serialize as JSON objects. Persisted and
+  returned events use the canonical JSON representation produced by a JSON
+  round-trip, including string map keys at every depth. Timestamps must be valid
+  UTC `DateTime` values; agent, causation, and correlation IDs must be nil or
+  bounded nonempty strings. These rules make one event fingerprint and one
+  returned representation stable across the in-memory, Ecto, and EventStore
+  adapters.
 
   `:append_timeout_ms` sets one absolute `1..60_000` millisecond deadline for
   validation, queueing, mutation, commit, and reply (default `5_000`). If the
@@ -175,17 +179,58 @@ defmodule Arbor.Persistence.EventLog do
   ]
 
   @doc false
+  @spec with_operation_deadline(term(), (keyword(), integer() -> result)) ::
+          result | {:error, :invalid_precondition}
+        when result: term()
+  def with_operation_deadline(opts, fun) when is_function(fun, 2) do
+    started_mono = System.monotonic_time(:millisecond)
+
+    with {:ok, normalized_opts} <- normalize_opts(opts),
+         {:ok, timeout_ms} <- append_timeout(normalized_opts) do
+      requested_deadline = started_mono + timeout_ms
+
+      case active_deadline() do
+        {:ok, inherited_deadline} ->
+          effective_deadline = min(inherited_deadline, requested_deadline)
+          previous = Process.get(@deadline_context_key)
+          Process.put(@deadline_context_key, %{previous | deadline_mono: effective_deadline})
+
+          try do
+            fun.(normalized_opts, effective_deadline)
+          after
+            Process.put(@deadline_context_key, previous)
+          end
+
+        :none ->
+          boundary = %{
+            owner: self(),
+            token: make_ref(),
+            deadline_mono: requested_deadline
+          }
+
+          previous = Process.put(@deadline_context_key, boundary)
+
+          try do
+            fun.(normalized_opts, requested_deadline)
+          after
+            restore_deadline_context(previous)
+          end
+      end
+    end
+  end
+
+  def with_operation_deadline(_opts, _fun), do: {:error, :invalid_precondition}
+
+  @doc false
   @spec prepare_append(stream_id(), [Event.t()] | Event.t(), opts()) ::
           {:ok, [Event.t()], append_preconditions(), AppendOperation.t(), integer()}
           | {:error, term()}
   def prepare_append(stream_id, events, opts) do
-    started_mono = System.monotonic_time(:millisecond)
-
-    with {:ok, events, normalized_opts, preconditions} <-
+    with {:ok, deadline_mono} <- require_active_deadline(),
+         {:ok, events, _normalized_opts, preconditions} <-
            validate_append_input(stream_id, events, opts),
-         {:ok, timeout_ms} <- append_timeout(normalized_opts),
          {:ok, operation} <- build_validated_operation(stream_id, events) do
-      {:ok, events, preconditions, operation, started_mono + timeout_ms}
+      {:ok, events, preconditions, operation, deadline_mono}
     end
   end
 
@@ -194,12 +239,10 @@ defmodule Arbor.Persistence.EventLog do
           {:ok, AppendOperation.t(), keyword(), integer()}
           | {:error, :invalid_append_operation | :invalid_precondition}
   def prepare_reconcile(operation, opts) do
-    started_mono = System.monotonic_time(:millisecond)
-
-    with {:ok, operation} <- validate_operation(operation),
-         {:ok, normalized_opts} <- normalize_opts(opts),
-         {:ok, timeout_ms} <- append_timeout(normalized_opts) do
-      {:ok, operation, normalized_opts, started_mono + timeout_ms}
+    with {:ok, deadline_mono} <- require_active_deadline(),
+         {:ok, operation} <- validate_operation(operation),
+         {:ok, normalized_opts} <- normalize_opts(opts) do
+      {:ok, operation, normalized_opts, deadline_mono}
     end
   end
 
@@ -224,7 +267,8 @@ defmodule Arbor.Persistence.EventLog do
   def build_operation(stream_id, events) do
     with :ok <- validate_stream_id(stream_id),
          {:ok, events} <- event_list(events),
-         :ok <- validate_event_list(events, false, true) do
+         :ok <- validate_event_list(events, false, true),
+         {:ok, events} <- canonicalize_events(events) do
       build_validated_operation(stream_id, events)
     else
       _invalid -> {:error, :invalid_append_operation}
@@ -248,7 +292,8 @@ defmodule Arbor.Persistence.EventLog do
   def reconcile_events(operation, events) do
     with {:ok, operation} <- validate_operation(operation),
          {:ok, events} <- event_list(events),
-         :ok <- validate_event_list(events, true, false) do
+         :ok <- validate_event_list(events, true, false),
+         {:ok, events} <- canonicalize_events(events) do
       do_reconcile_events(operation, events)
     else
       {:error, :invalid_append_operation} = error -> error
@@ -277,6 +322,47 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   def remaining_timeout(_deadline), do: {:error, :operation_timeout}
+
+  @doc false
+  @spec stamp_completion(term()) :: {:event_log_completion, integer(), term()}
+  def stamp_completion(result) do
+    {:event_log_completion, System.monotonic_time(:millisecond), result}
+  end
+
+  @doc false
+  @spec accept_completion(term(), AppendOperation.t(), integer()) :: append_result()
+  def accept_completion(
+        {:event_log_completion, completed_mono, result},
+        operation,
+        deadline_mono
+      ) do
+    accept_completion(result, operation, deadline_mono, completed_mono)
+  end
+
+  def accept_completion(_invalid_reply, operation, _deadline_mono),
+    do: indeterminate(operation)
+
+  @doc false
+  @spec accept_completion(term(), AppendOperation.t(), integer(), integer()) :: append_result()
+  def accept_completion(
+        {:error, {:append_indeterminate, %AppendOperation{}}} = result,
+        _operation,
+        _deadline_mono,
+        _completed_mono
+      ),
+      do: result
+
+  def accept_completion(result, operation, deadline_mono, completed_mono)
+      when is_integer(deadline_mono) and is_integer(completed_mono) do
+    received_mono = System.monotonic_time(:millisecond)
+
+    if completed_mono < deadline_mono and received_mono < deadline_mono,
+      do: result,
+      else: indeterminate(operation)
+  end
+
+  def accept_completion(_result, operation, _deadline_mono, _completed_mono),
+    do: indeterminate(operation)
 
   @doc false
   @spec operation_deadline(term()) :: {:ok, integer()} | {:error, :invalid_precondition}
@@ -392,6 +478,7 @@ defmodule Arbor.Persistence.EventLog do
          {:ok, normalized_opts} <- normalize_opts(opts),
          {:ok, events} <- append_event_list(events),
          :ok <- validate_event_list(events, false, true),
+         {:ok, events} <- canonicalize_events(events),
          {:ok, preconditions} <- validate_preconditions(normalized_opts) do
       {:ok, events, normalized_opts, preconditions}
     end
@@ -503,7 +590,8 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   defp bounded_binary?(value) do
-    is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_stream_id_bytes
+    is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_stream_id_bytes and
+      String.valid?(value)
   end
 
   defp bounded_optional_binary?(nil), do: true
@@ -585,4 +673,42 @@ defmodule Arbor.Persistence.EventLog do
   catch
     _kind, _reason -> :error
   end
+
+  defp canonicalize_events(events) do
+    Enum.reduce_while(events, {:ok, []}, fn %Event{} = event, {:ok, acc} ->
+      with {:ok, data} <- canonical_json(event.data),
+           true <- is_map(data),
+           {:ok, metadata} <- canonical_json(event.metadata),
+           true <- is_map(metadata) do
+        {:cont, {:ok, [%Event{event | data: data, metadata: metadata} | acc]}}
+      else
+        _invalid -> {:halt, {:error, :invalid_events}}
+      end
+    end)
+    |> case do
+      {:ok, canonical} -> {:ok, Enum.reverse(canonical)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp active_deadline do
+    case Process.get(@deadline_context_key) do
+      %{owner: owner, token: token, deadline_mono: deadline_mono}
+      when owner == self() and is_reference(token) and is_integer(deadline_mono) ->
+        {:ok, deadline_mono}
+
+      _missing_or_invalid ->
+        :none
+    end
+  end
+
+  defp require_active_deadline do
+    case active_deadline() do
+      {:ok, deadline_mono} -> {:ok, deadline_mono}
+      :none -> {:error, :invalid_precondition}
+    end
+  end
+
+  defp restore_deadline_context(nil), do: Process.delete(@deadline_context_key)
+  defp restore_deadline_context(previous), do: Process.put(@deadline_context_key, previous)
 end
