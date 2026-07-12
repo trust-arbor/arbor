@@ -589,6 +589,31 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     )
   end
 
+  defp managed_close_owner_loop(parent, worker_session_id, registry) do
+    receive do
+      {:close, timeout} ->
+        result =
+          AI.acp_managed_close_session(worker_session_id,
+            server: registry,
+            timeout: timeout
+          )
+
+        send(parent, {:managed_owner_close, result})
+        managed_close_owner_loop(parent, worker_session_id, registry)
+
+      :resolve ->
+        send(
+          parent,
+          {:managed_owner_resolve, SessionRegistry.resolve(worker_session_id, server: registry)}
+        )
+
+        managed_close_owner_loop(parent, worker_session_id, registry)
+
+      :stop ->
+        :ok
+    end
+  end
+
   # -- Tests ----------------------------------------------------------------
 
   describe "public handle metadata" do
@@ -973,25 +998,97 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
 
   describe "idempotent close" do
     @tag timeout: 2_000
+    test "security regression: expired queued close cannot orphan a managed session", ctx do
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          {:ok, meta} = start_managed([], ctx)
+          {:ok, resolved} = SessionRegistry.resolve(meta.worker_session_id, server: ctx.registry)
+          send(parent, {:managed_owner_ready, meta, resolved.session_pid})
+          managed_close_owner_loop(parent, meta.worker_session_id, ctx.registry)
+        end)
+
+      on_exit(fn ->
+        if Process.alive?(owner), do: Process.exit(owner, :kill)
+      end)
+
+      assert_receive {:managed_owner_ready, _meta, session_pid}, 1_000
+
+      :ok = :sys.suspend(ctx.registry)
+
+      try do
+        send(owner, {:close, 25})
+
+        assert_eventually(fn ->
+          registry_pid = Process.whereis(ctx.registry)
+          assert {:message_queue_len, queued} = Process.info(registry_pid, :message_queue_len)
+          assert queued > 0
+        end)
+
+        assert_receive {:managed_owner_close, {:error, :timeout}}, 250
+      after
+        :ok = :sys.resume(ctx.registry)
+      end
+
+      send(owner, :resolve)
+      assert_receive {:managed_owner_resolve, {:ok, after_close}}, 500
+
+      assert after_close.session_pid == session_pid
+      assert Process.alive?(session_pid)
+
+      send(owner, {:close, 500})
+      assert_receive {:managed_owner_close, {:ok, %{status: "closed"}}}, 1_000
+      send(owner, :stop)
+    end
+
+    @tag timeout: 2_000
     test "security regression: managed close kills a non-returning close operation", ctx do
-      assert {:ok, meta} = start_managed([close_mode: :stall], ctx)
+      task_id = "task_stalled_close_#{System.unique_integer([:positive])}"
+      principal_id = "agent_stalled_close_#{System.unique_integer([:positive])}"
+
+      assert {:ok, meta} =
+               start_managed(
+                 [close_mode: :stall, task_id: task_id, principal_id: principal_id],
+                 ctx
+               )
+
       {:ok, resolved} = SessionRegistry.resolve(meta.worker_session_id, server: ctx.registry)
       session_pid = resolved.session_pid
       session_ref = Process.monitor(session_pid)
 
-      assert {:error, :timeout} =
-               AI.acp_managed_close_session(meta.worker_session_id,
-                 server: ctx.registry,
-                 timeout: 40
-               )
+      credentials = [
+        server: ctx.registry,
+        task_id: task_id,
+        principal_id: principal_id
+      ]
+
+      close_task =
+        Task.async(fn ->
+          AI.acp_managed_close_session(
+            meta.worker_session_id,
+            Keyword.put(credentials, :timeout, 80)
+          )
+        end)
 
       assert_receive {:fake_close_stalled, ^session_pid}, 200
+
+      assert {:ok, reconciling} =
+               AI.acp_managed_close_session(
+                 meta.worker_session_id,
+                 Keyword.put(credentials, :timeout, 20)
+               )
+
+      assert reconciling.status == "closing"
+      assert {:error, :timeout} = Task.await(close_task, 300)
       assert_receive {:DOWN, ^session_ref, :process, ^session_pid, :killed}, 300
 
-      assert {:ok, second} =
-               AI.acp_managed_close_session(meta.worker_session_id, server: ctx.registry)
+      assert_eventually(fn ->
+        assert {:ok, terminal} =
+                 AI.acp_managed_close_session(meta.worker_session_id, credentials)
 
-      assert second.status == "already_closed"
+        assert terminal.status == "already_closed"
+      end)
     end
 
     test "second close returns already_closed", ctx do

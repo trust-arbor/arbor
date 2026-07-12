@@ -135,21 +135,14 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     return_to_pool_override = return_to_pool_override(opts)
 
     with {:ok, server_opts, _remaining} <- normalized_call_opts(server_opts),
-         {:ok, result, entry} <-
-           call_normalized(
-             {:take_for_close, worker_session_id, caller, return_to_pool_override},
-             server_opts
-           ) do
-      case entry do
-        nil ->
-          {:ok, result}
-
-        entry ->
-          case release_session_owned(entry, :close, server_opts) do
-            :ok -> {:ok, result}
-            {:error, reason} -> {:error, reason}
-          end
-      end
+         {:ok, deadline} <- Arbor.AI.Timeout.deadline(server_opts) do
+      close_until(
+        worker_session_id,
+        caller,
+        return_to_pool_override,
+        server_opts,
+        deadline
+      )
     end
   end
 
@@ -173,7 +166,7 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
   @impl true
   def init(_opts) do
-    {:ok, %{sessions: %{}, by_ref: %{}}}
+    {:ok, %{sessions: %{}, by_ref: %{}, closures: %{}}}
   end
 
   @impl true
@@ -240,24 +233,32 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   end
 
   def handle_call(
-        {:take_for_close, worker_session_id, caller, return_to_pool_override},
+        {:close, worker_session_id, request},
         {from_pid, _tag},
         state
       ) do
-    caller = %{caller | owner_pid: from_pid}
+    if deadline_active?(request.deadline_ms) do
+      caller = %{request.caller | owner_pid: from_pid}
+      handle_close_request(state, worker_session_id, caller, request)
+    else
+      {:reply, {:error, :timeout}, state}
+    end
+  end
 
-    case Map.fetch(state.sessions, worker_session_id) do
-      :error ->
-        {:reply, {:ok, already_closed_view(worker_session_id), nil}, state}
+  def handle_info(
+        {:close_cleanup_complete, worker_session_id, operation_ref, result},
+        state
+      ) do
+    case Map.get(state.closures, worker_session_id) do
+      %{operation_ref: ^operation_ref} = closure ->
+        state = finish_closure(state, closure)
 
-      {:ok, entry} ->
-        if authorized?(entry, caller) do
-          entry = apply_return_to_pool_override(entry, return_to_pool_override)
-          {result, state} = take_for_close(state, entry)
-          {:reply, {:ok, result, entry}, state}
-        else
-          {:reply, {:error, :not_authorized}, state}
-        end
+        safe_send_alias(closure.reply_alias, {operation_ref, :close_cleanup, result})
+
+        {:noreply, state}
+
+      _missing_or_stale ->
+        {:noreply, state}
     end
   end
 
@@ -275,6 +276,11 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
       {{:session, worker_session_id}, by_ref} ->
         state = %{state | by_ref: by_ref}
         state = handle_session_down(state, worker_session_id, pid, reason)
+        {:noreply, state}
+
+      {{:close_cleanup, worker_session_id, operation_ref}, by_ref} ->
+        state = %{state | by_ref: by_ref}
+        state = handle_cleanup_down(state, worker_session_id, operation_ref, ref, reason)
         {:noreply, state}
     end
   end
@@ -319,6 +325,54 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
         {:error, {:registry_call_failed, Arbor.LLM.sanitize_external_reason(reason)}}
     end
   end
+
+  defp close_until(worker_session_id, caller, return_to_pool_override, opts, deadline) do
+    reply_alias = :erlang.alias()
+    operation_ref = make_ref()
+
+    request = %{
+      caller: caller,
+      return_to_pool_override: return_to_pool_override,
+      deadline_ms: deadline,
+      cleanup_opts: Keyword.delete(opts, :server),
+      operation_ref: operation_ref,
+      reply_alias: reply_alias
+    }
+
+    try do
+      case call_normalized({:close, worker_session_id, request}, opts) do
+        {:ok, result, :committed} ->
+          await_close_cleanup(operation_ref, result, opts)
+
+        {:ok, result, :reconciled} ->
+          {:ok, result}
+
+        {:error, _reason} = error ->
+          error
+      end
+    after
+      :erlang.unalias(reply_alias)
+    end
+  end
+
+  defp await_close_cleanup(operation_ref, result, opts) do
+    with {:ok, _opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      receive do
+        {^operation_ref, :close_cleanup, cleanup_result} ->
+          with :ok <- Arbor.AI.Timeout.ensure_active(opts) do
+            normalize_close_cleanup_result(cleanup_result, result)
+          end
+      after
+        remaining -> {:error, :timeout}
+      end
+    end
+  end
+
+  defp normalize_close_cleanup_result(:ok, result), do: {:ok, result}
+  defp normalize_close_cleanup_result({:error, reason}, _result), do: {:error, reason}
+
+  defp normalize_close_cleanup_result(other, _result),
+    do: {:error, {:invalid_close_cleanup_result, Arbor.LLM.sanitize_external_reason(other)}}
 
   defp normalized_call_opts(opts) do
     with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 5_000),
@@ -565,8 +619,71 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
   defp non_empty_id?(id), do: is_binary(id) and id != ""
 
-  defp take_for_close(state, entry) do
-    state = drop_entry(state, entry)
+  defp handle_close_request(state, worker_session_id, caller, request) do
+    case Map.fetch(state.closures, worker_session_id) do
+      {:ok, closure} ->
+        if authorized?(closure.entry, caller) do
+          {:reply, {:ok, closing_view(closure.entry), :reconciled}, state}
+        else
+          {:reply, {:error, :not_authorized}, state}
+        end
+
+      :error ->
+        handle_open_close_request(state, worker_session_id, caller, request)
+    end
+  end
+
+  defp handle_open_close_request(state, worker_session_id, caller, request) do
+    case Map.fetch(state.sessions, worker_session_id) do
+      :error ->
+        {:reply, {:ok, already_closed_view(worker_session_id), :reconciled}, state}
+
+      {:ok, entry} ->
+        cond do
+          not authorized?(entry, caller) ->
+            {:reply, {:error, :not_authorized}, state}
+
+          not deadline_active?(request.deadline_ms) ->
+            {:reply, {:error, :timeout}, state}
+
+          true ->
+            entry = apply_return_to_pool_override(entry, request.return_to_pool_override)
+            {result, state} = commit_close(state, entry, request)
+            {:reply, {:ok, result, :committed}, state}
+        end
+    end
+  end
+
+  defp commit_close(state, entry, request) do
+    registry = self()
+    worker_session_id = entry.worker_session_id
+
+    # Cleanup ownership is established before the handle is removed. The
+    # caller may time out or die after this point without orphaning the session.
+    {cleanup_pid, cleanup_ref} =
+      spawn_monitor(fn ->
+        result = release_session_owned(entry, :close, request.cleanup_opts)
+
+        send(
+          registry,
+          {:close_cleanup_complete, worker_session_id, request.operation_ref, result}
+        )
+      end)
+
+    closure = %{
+      worker_session_id: worker_session_id,
+      operation_ref: request.operation_ref,
+      reply_alias: request.reply_alias,
+      cleanup_pid: cleanup_pid,
+      cleanup_ref: cleanup_ref,
+      entry: entry
+    }
+
+    state =
+      state
+      |> drop_entry(entry)
+      |> put_closure(closure)
+      |> put_ref(cleanup_ref, {:close_cleanup, worker_session_id, request.operation_ref})
 
     result =
       entry
@@ -576,6 +693,65 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
     {result, state}
   end
+
+  defp closing_view(entry) do
+    entry
+    |> public_view()
+    |> Map.put(:status, "closing")
+    |> Map.put(:active, false)
+  end
+
+  defp finish_closure(state, closure) do
+    safe_demonitor(closure.cleanup_ref)
+
+    %{
+      state
+      | closures: Map.delete(state.closures, closure.worker_session_id),
+        by_ref: Map.delete(state.by_ref, closure.cleanup_ref)
+    }
+  end
+
+  defp handle_cleanup_down(
+         state,
+         worker_session_id,
+         operation_ref,
+         cleanup_ref,
+         reason
+       ) do
+    case Map.get(state.closures, worker_session_id) do
+      %{operation_ref: ^operation_ref, cleanup_ref: ^cleanup_ref} = closure ->
+        force_terminate(closure.entry.session_pid)
+
+        cleanup_error =
+          {:error, {:close_cleanup_worker_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+
+        safe_send_alias(
+          closure.reply_alias,
+          {operation_ref, :close_cleanup, cleanup_error}
+        )
+
+        Logger.debug(
+          "AcpManaged: close cleanup owner exited for #{worker_session_id}: " <>
+            Arbor.LLM.inspect_external_reason(reason)
+        )
+
+        %{state | closures: Map.delete(state.closures, worker_session_id)}
+
+      _missing_or_stale ->
+        state
+    end
+  end
+
+  defp safe_send_alias(reply_alias, message) when is_reference(reply_alias) do
+    send(reply_alias, message)
+    :ok
+  rescue
+    _exception -> :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  defp safe_send_alias(_reply_alias, _message), do: :ok
 
   defp handle_owner_down(state, worker_session_id, _pid, reason) do
     case Map.pop(state.sessions, worker_session_id) do
@@ -706,6 +882,10 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
   defp put_entry(state, entry) do
     %{state | sessions: Map.put(state.sessions, entry.worker_session_id, entry)}
+  end
+
+  defp put_closure(state, closure) do
+    %{state | closures: Map.put(state.closures, closure.worker_session_id, closure)}
   end
 
   defp put_ref(state, ref, tag) do
