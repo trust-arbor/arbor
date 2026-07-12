@@ -1,5 +1,11 @@
 # credo:disable-for-this-file Credo.Check.Refactor.Apply
 # apply/3 needed to start ETS backend without compile-time dependency on arbor_persistence
+defmodule Arbor.Security.EventsAtomKeyReaderFixture do
+  def read_stream(_name, _backend, _stream_id, _opts) do
+    {:ok, [%{type: "authorization_granted", data: %{principal_id: "legacy_agent"}}]}
+  end
+end
+
 defmodule Arbor.Security.EventsTest do
   use ExUnit.Case, async: false
   @moduletag :fast
@@ -36,8 +42,8 @@ defmodule Arbor.Security.EventsTest do
 
       event = List.last(events)
       assert event.type == "authorization_granted"
-      assert event.data.principal_id == "agent_001"
-      assert event.data.resource_uri == "arbor://fs/read/docs"
+      assert event.data["principal_id"] == "agent_001"
+      assert event.data["resource_uri"] == "arbor://fs/read/docs"
     end
 
     test "records authorization_denied with reason" do
@@ -45,8 +51,8 @@ defmodule Arbor.Security.EventsTest do
         Events.record_authorization_denied("agent_002", "arbor://shell/exec/rm", :no_capability)
 
       {:ok, [event]} = Events.get_by_type(:authorization_denied)
-      assert event.data.principal_id == "agent_002"
-      assert event.data.reason == ":no_capability"
+      assert event.data["principal_id"] == "agent_002"
+      assert event.data["reason"] == ":no_capability"
     end
 
     test "records authorization_pending with proposal_id" do
@@ -58,7 +64,7 @@ defmodule Arbor.Security.EventsTest do
         )
 
       {:ok, [event]} = Events.get_by_type(:authorization_pending)
-      assert event.data.proposal_id == "prop_123"
+      assert event.data["proposal_id"] == "prop_123"
     end
 
     test "records approval_answered with answer metadata" do
@@ -75,12 +81,12 @@ defmodule Arbor.Security.EventsTest do
         )
 
       {:ok, [event]} = Events.get_by_type(:approval_answered)
-      assert event.data.actor_id == "human_1"
-      assert event.data.approval_id == "irq_123"
-      assert event.data.source == :interaction
-      assert event.data.decision == :approve
-      assert event.data.resource_uri == "arbor://shell/exec/git"
-      assert event.data.note == "bounded command"
+      assert event.data["actor_id"] == "human_1"
+      assert event.data["approval_id"] == "irq_123"
+      assert event.data["source"] == "interaction"
+      assert event.data["decision"] == "approve"
+      assert event.data["resource_uri"] == "arbor://shell/exec/git"
+      assert event.data["note"] == "bounded command"
     end
 
     test "records orchestration_task_dispatched with task metadata" do
@@ -95,12 +101,12 @@ defmodule Arbor.Security.EventsTest do
         )
 
       {:ok, [event]} = Events.get_by_type(:orchestration_task_dispatched)
-      assert event.data.actor_id == "human_1"
-      assert event.data.task_id == "task_123"
-      assert event.data.agent_id == "agent_1"
-      assert event.data.task_preview == "write a patch"
-      assert event.data.metadata == %{ticket: "A-1"}
-      assert event.data.trace_id == "trace_abc"
+      assert event.data["actor_id"] == "human_1"
+      assert event.data["task_id"] == "task_123"
+      assert event.data["agent_id"] == "agent_1"
+      assert event.data["task_preview"] == "write a patch"
+      assert event.data["metadata"] == %{"ticket" => "A-1"}
+      assert event.data["trace_id"] == "trace_abc"
     end
 
     test "includes trace_id when provided" do
@@ -111,7 +117,7 @@ defmodule Arbor.Security.EventsTest do
 
       {:ok, events} = Events.get_by_type(:authorization_granted)
       event = List.last(events)
-      assert event.data.trace_id == "trace_abc"
+      assert event.data["trace_id"] == "trace_abc"
     end
   end
 
@@ -121,15 +127,15 @@ defmodule Arbor.Security.EventsTest do
       :ok = Events.record_capability_granted(cap)
 
       {:ok, [event]} = Events.get_by_type(:capability_granted)
-      assert event.data.capability_id == "cap_001"
-      assert event.data.principal_id == "agent_001"
+      assert event.data["capability_id"] == "cap_001"
+      assert event.data["principal_id"] == "agent_001"
     end
 
     test "records capability_revoked" do
       :ok = Events.record_capability_revoked("cap_002")
 
       {:ok, [event]} = Events.get_by_type(:capability_revoked)
-      assert event.data.capability_id == "cap_002"
+      assert event.data["capability_id"] == "cap_002"
     end
   end
 
@@ -138,22 +144,22 @@ defmodule Arbor.Security.EventsTest do
       :ok = Events.record_identity_registered("agent_new")
 
       {:ok, [event]} = Events.get_by_type(:identity_registered)
-      assert event.data.agent_id == "agent_new"
+      assert event.data["agent_id"] == "agent_new"
     end
 
     test "records identity_verification_succeeded" do
       :ok = Events.record_identity_verification_succeeded("agent_verified")
 
       {:ok, [event]} = Events.get_by_type(:identity_verification_succeeded)
-      assert event.data.agent_id == "agent_verified"
+      assert event.data["agent_id"] == "agent_verified"
     end
 
     test "records identity_verification_failed" do
       :ok = Events.record_identity_verification_failed("agent_bad", :invalid_signature)
 
       {:ok, [event]} = Events.get_by_type(:identity_verification_failed)
-      assert event.data.agent_id == "agent_bad"
-      assert event.data.reason == ":invalid_signature"
+      assert event.data["agent_id"] == "agent_bad"
+      assert event.data["reason"] == ":invalid_signature"
     end
   end
 
@@ -164,7 +170,7 @@ defmodule Arbor.Security.EventsTest do
       :ok = Events.record_authorization_granted("agent_A", "arbor://fs/write")
 
       {:ok, events} = Events.get_for_principal("agent_A")
-      assert Enum.all?(events, fn e -> e.data.principal_id == "agent_A" end)
+      assert Enum.all?(events, fn e -> e.data["principal_id"] == "agent_A" end)
       assert events != []
     end
 
@@ -173,6 +179,27 @@ defmodule Arbor.Security.EventsTest do
 
       {:ok, events} = Events.get_for_principal("agent_C")
       assert events != []
+    end
+
+    test "get_for_principal also matches legacy atom-key fixtures" do
+      previous_reader = Application.get_env(:arbor_security, :event_log_reader)
+
+      Application.put_env(
+        :arbor_security,
+        :event_log_reader,
+        Arbor.Security.EventsAtomKeyReaderFixture
+      )
+
+      on_exit(fn ->
+        if previous_reader do
+          Application.put_env(:arbor_security, :event_log_reader, previous_reader)
+        else
+          Application.delete_env(:arbor_security, :event_log_reader)
+        end
+      end)
+
+      assert {:ok, [%{data: %{principal_id: "legacy_agent"}}]} =
+               Events.get_for_principal("legacy_agent")
     end
 
     test "get_recent returns events" do

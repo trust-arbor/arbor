@@ -341,8 +341,8 @@ defmodule Arbor.Security.Events do
           Enum.filter(events, fn event ->
             data = Map.get(event, :data, %{})
 
-            Map.get(data, :principal_id) == principal_id or
-              Map.get(data, :agent_id) == principal_id
+            event_data_value(data, "principal_id") == principal_id or
+              event_data_value(data, "agent_id") == principal_id
           end)
 
         {:ok, filtered}
@@ -419,4 +419,12 @@ defmodule Arbor.Security.Events do
   defp event_module do
     Application.get_env(:arbor_security, :event_module, @default_event_module)
   end
+
+  # EventLog data is canonical JSON and therefore uses string keys. Keep the
+  # atom fallback for callers that inject legacy in-memory event fixtures.
+  defp event_data_value(data, "principal_id"),
+    do: Map.get(data, "principal_id") || Map.get(data, :principal_id)
+
+  defp event_data_value(data, "agent_id"),
+    do: Map.get(data, "agent_id") || Map.get(data, :agent_id)
 end

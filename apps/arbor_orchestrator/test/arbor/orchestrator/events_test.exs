@@ -66,10 +66,10 @@ defmodule Arbor.Orchestrator.EventsTest do
 
       persisted = List.last(events)
       assert persisted.type == "pipeline_started"
-      assert persisted.data[:graph_id] == "TestGraph"
-      assert persisted.data[:run_id] == run_id
+      assert persisted.data["graph_id"] == "TestGraph"
+      assert persisted.data["run_id"] == run_id
       assert is_map(persisted.metadata)
-      assert Map.has_key?(persisted.metadata, :source_node)
+      assert Map.has_key?(persisted.metadata, "source_node")
     end
 
     test "persists stage_started event" do
@@ -80,7 +80,7 @@ defmodule Arbor.Orchestrator.EventsTest do
 
       {:ok, events} = Events.read_run_events(run_id)
       assert length(events) == 1
-      assert hd(events).data[:node_id] == "build_prompt"
+      assert hd(events).data["node_id"] == "build_prompt"
     end
 
     test "persists pipeline_completed event" do
@@ -96,7 +96,7 @@ defmodule Arbor.Orchestrator.EventsTest do
 
       {:ok, events} = Events.read_run_events(run_id)
       assert length(events) == 1
-      assert hd(events).data[:duration_ms] == 1234
+      assert hd(events).data["duration_ms"] == 1234
     end
 
     test "includes source_node in metadata" do
@@ -106,7 +106,7 @@ defmodule Arbor.Orchestrator.EventsTest do
       Events.dual_emit(event, run_id: run_id)
 
       {:ok, [persisted]} = Events.read_run_events(run_id)
-      assert persisted.metadata[:source_node] == node()
+      assert persisted.metadata["source_node"] == to_string(node())
     end
 
     test "includes agent_id in data when provided" do
@@ -117,7 +117,7 @@ defmodule Arbor.Orchestrator.EventsTest do
 
       {:ok, [persisted]} = Events.read_run_events(run_id)
       # durable_emit stores agent_id in the event data (sanitized from event map)
-      assert persisted.data[:agent_id] == "agent_abc123"
+      assert persisted.data["agent_id"] == "agent_abc123"
     end
 
     test "multiple events form a complete run timeline" do
