@@ -3,9 +3,11 @@ defmodule Arbor.Persistence.Repo.Migrations.HardenEventLogProtocolEpoch do
   Hardens the epoch-3 EventLog cutover for already-migrated databases.
 
   The PostgreSQL lock drains inserts using the R3 trigger before replacing it.
-  Both adapters then reject event inserts unless exactly one epoch-3 row is
-  present. PostgreSQL constraints prevent the valid singleton from drifting;
-  the trigger remains the database-boundary defense for old and raw writers.
+  It acquires protocol protection before event-table protection, matching the
+  runtime transaction order. Both adapters then reject event inserts unless
+  exactly one epoch-3 row is present. PostgreSQL constraints prevent the valid
+  singleton from drifting; the trigger remains the database-boundary defense
+  for old and raw writers.
 
   Legacy events with a NULL operation fingerprint are intentionally not
   backfilled from their current payload. PostgreSQL records that remediation
@@ -22,8 +24,7 @@ defmodule Arbor.Persistence.Repo.Migrations.HardenEventLogProtocolEpoch do
   @max_position 2_147_483_647
 
   def up do
-    lock_r3_writers!()
-    flush()
+    lock_runtime_writers_in_protocol_order!()
     verify_protocol_epoch!()
 
     if postgres?() do
@@ -36,6 +37,8 @@ defmodule Arbor.Persistence.Repo.Migrations.HardenEventLogProtocolEpoch do
   end
 
   def down do
+    lock_runtime_writers_in_protocol_order!()
+
     if postgres?() do
       restore_postgres_r3_fence_trigger!()
 
@@ -58,13 +61,20 @@ defmodule Arbor.Persistence.Repo.Migrations.HardenEventLogProtocolEpoch do
     end
   end
 
-  defp lock_r3_writers! do
+  defp lock_runtime_writers_in_protocol_order! do
     if postgres?() do
+      execute("LOCK TABLE #{postgres_table_name("event_log_protocol")} IN ACCESS EXCLUSIVE MODE")
+
+      # Flush separately: PostgreSQL retains this lock through migration commit,
+      # so no runtime transaction can enter before the later DDL locks are taken.
+      flush()
+
       execute(
-        "LOCK TABLE #{postgres_table_name("events")}, " <>
-          "#{postgres_table_name("event_log_operations")}, " <>
-          "#{postgres_table_name("event_log_protocol")} IN ACCESS EXCLUSIVE MODE"
+        "LOCK TABLE #{postgres_table_name("event_log_operations")}, " <>
+          "#{postgres_table_name("events")} IN ACCESS EXCLUSIVE MODE"
       )
+
+      flush()
     end
   end
 

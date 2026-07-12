@@ -195,6 +195,26 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
     end)
   end
 
+  @tag timeout: 15_000
+  test "security regression: migration up waits behind a runtime append protocol lock", %{
+    admin: admin
+  } do
+    fixture = start_lock_order_fixture!(admin, apply_r4?: false)
+
+    assert_migration_follows_runtime_lock_order!(fixture, :up, :share, :commit)
+    assert r4_migration_applied?(admin, fixture.schema)
+  end
+
+  @tag timeout: 15_000
+  test "security regression: migration down waits behind runtime reconciliation", %{
+    admin: admin
+  } do
+    fixture = start_lock_order_fixture!(admin, apply_r4?: true)
+
+    assert_migration_follows_runtime_lock_order!(fixture, :down, :access_share, :rollback)
+    refute r4_migration_applied?(admin, fixture.schema)
+  end
+
   test "security regression: append and reconciliation require one exact protocol epoch" do
     drop_r4_protocol_constraints!()
 
@@ -318,6 +338,213 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
         log: false
       )
     end
+  end
+
+  defp start_lock_order_fixture!(admin, opts) do
+    schema = "event_log_lock_order_#{System.unique_integer([:positive])}"
+    Postgrex.query!(admin, "CREATE SCHEMA #{quote_identifier(schema)}")
+    create_legacy_tables!(admin, schema, indexes?: true)
+
+    {:ok, probe} =
+      MigrationProbeRepo.start_link(
+        Keyword.merge(postgres_opts(),
+          pool_size: 2,
+          after_connect: fn conn ->
+            Postgrex.query!(conn, "SET search_path TO #{quote_identifier(schema)}", [])
+          end
+        )
+      )
+
+    {:ok, runtime_conn} = Postgrex.start_link(postgres_opts())
+    Process.unlink(probe)
+    Process.unlink(runtime_conn)
+    migrate_protocol_if_available!(MigrationProbeRepo, schema)
+
+    if Keyword.fetch!(opts, :apply_r4?) do
+      migrate_r4_protocol_if_available!(MigrationProbeRepo, schema)
+    end
+
+    on_exit(fn ->
+      if Process.alive?(runtime_conn), do: GenServer.stop(runtime_conn)
+      if Process.alive?(probe), do: GenServer.stop(probe)
+      Postgrex.query!(admin, "DROP SCHEMA IF EXISTS #{quote_identifier(schema)} CASCADE")
+    end)
+
+    %{
+      admin: admin,
+      runtime_conn: runtime_conn,
+      schema: schema,
+      task_supervisor: start_supervised!(Task.Supervisor)
+    }
+  end
+
+  defp assert_migration_follows_runtime_lock_order!(fixture, direction, protocol_mode, outcome) do
+    parent = self()
+    ref = make_ref()
+
+    runtime_task =
+      Task.Supervisor.async_nolink(fixture.task_supervisor, fn ->
+        capture_call(fn ->
+          Postgrex.transaction(fixture.runtime_conn, fn conn ->
+            Postgrex.query!(
+              conn,
+              "LOCK TABLE #{qualified_table(fixture.schema, "event_log_protocol")} " <>
+                "IN #{sql_lock_mode(protocol_mode)} MODE"
+            )
+
+            send(parent, {ref, :runtime_protocol_locked})
+
+            receive do
+              {^ref, :continue_runtime} -> :ok
+            after
+              5_000 -> raise "migration lock-order runtime release timed out"
+            end
+
+            Postgrex.query!(
+              conn,
+              "LOCK TABLE #{qualified_table(fixture.schema, "event_log_operations")}, " <>
+                "#{qualified_table(fixture.schema, "events")} " <>
+                "IN #{runtime_table_lock_mode(outcome)} MODE"
+            )
+
+            case outcome do
+              :commit -> :runtime_committed
+              :rollback -> Postgrex.rollback(conn, :runtime_rolled_back)
+            end
+          end)
+        end)
+      end)
+
+    assert_receive {^ref, :runtime_protocol_locked}, 1_000
+
+    migration_task =
+      Task.Supervisor.async_nolink(fixture.task_supervisor, fn ->
+        capture_call(fn -> run_r4_migration!(direction, fixture.schema) end)
+      end)
+
+    try do
+      migration_backend_pid =
+        wait_for_pending_protocol_lock!(fixture.admin, fixture.schema, 5_000)
+
+      early_event_locks =
+        granted_migration_event_locks(
+          fixture.admin,
+          migration_backend_pid,
+          fixture.schema
+        )
+
+      send(runtime_task.pid, {ref, :continue_runtime})
+
+      runtime_result = Task.await(runtime_task, 7_000)
+      migration_result = Task.await(migration_task, 7_000)
+
+      expected_runtime =
+        case outcome do
+          :commit -> {:returned, {:ok, :runtime_committed}}
+          :rollback -> {:returned, {:error, :runtime_rolled_back}}
+        end
+
+      assert {expected_runtime, {:returned, :ok}, []} ==
+               {runtime_result, migration_result, early_event_locks}
+    after
+      send(runtime_task.pid, {ref, :continue_runtime})
+      shutdown_if_alive(runtime_task)
+      shutdown_if_alive(migration_task)
+    end
+  end
+
+  defp run_r4_migration!(direction, schema) do
+    Code.require_file(r4_protocol_migration_file())
+
+    apply(Ecto.Migrator, direction, [
+      MigrationProbeRepo,
+      @r4_protocol_migration,
+      Arbor.Persistence.Repo.Migrations.HardenEventLogProtocolEpoch,
+      [prefix: schema, log: false]
+    ])
+  end
+
+  defp wait_for_pending_protocol_lock!(conn, schema, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_for_pending_protocol_lock!(conn, schema, deadline)
+  end
+
+  defp do_wait_for_pending_protocol_lock!(conn, schema, deadline) do
+    result =
+      Postgrex.query!(
+        conn,
+        """
+        SELECT locks.pid
+        FROM pg_locks AS locks
+        JOIN pg_class AS relations ON relations.oid = locks.relation
+        JOIN pg_namespace AS namespaces ON namespaces.oid = relations.relnamespace
+        WHERE namespaces.nspname = $1
+          AND relations.relname = 'event_log_protocol'
+          AND locks.mode = 'AccessExclusiveLock'
+          AND locks.granted IS FALSE
+        """,
+        [schema]
+      )
+
+    case result.rows do
+      [[backend_pid]] ->
+        backend_pid
+
+      _ ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(10)
+          do_wait_for_pending_protocol_lock!(conn, schema, deadline)
+        else
+          flunk("migration did not wait for event_log_protocol protection")
+        end
+    end
+  end
+
+  defp granted_migration_event_locks(conn, backend_pid, schema) do
+    Postgrex.query!(
+      conn,
+      """
+      SELECT relations.relname, locks.mode
+      FROM pg_locks AS locks
+      JOIN pg_class AS relations ON relations.oid = locks.relation
+      JOIN pg_namespace AS namespaces ON namespaces.oid = relations.relnamespace
+      WHERE locks.pid = $1
+        AND namespaces.nspname = $2
+        AND relations.relname IN ('events', 'event_log_operations')
+        AND locks.granted IS TRUE
+      ORDER BY relations.relname, locks.mode
+      """,
+      [backend_pid, schema]
+    ).rows
+  end
+
+  defp r4_migration_applied?(conn, schema) do
+    Postgrex.query!(
+      conn,
+      "SELECT version FROM #{qualified_table(schema, "schema_migrations")} WHERE version = $1",
+      [@r4_protocol_migration]
+    ).num_rows == 1
+  end
+
+  defp capture_call(fun) do
+    {:returned, fun.()}
+  rescue
+    error -> {:raised, error}
+  catch
+    kind, reason -> {kind, reason}
+  end
+
+  defp shutdown_if_alive(task) do
+    if Process.alive?(task.pid), do: Task.shutdown(task, :brutal_kill)
+  end
+
+  defp sql_lock_mode(:share), do: "SHARE"
+  defp sql_lock_mode(:access_share), do: "ACCESS SHARE"
+  defp runtime_table_lock_mode(:commit), do: "ROW EXCLUSIVE"
+  defp runtime_table_lock_mode(:rollback), do: "ACCESS SHARE"
+
+  defp qualified_table(schema, table) do
+    quote_identifier(schema) <> "." <> quote_identifier(table)
   end
 
   defp run_latest_available_migration!(repo, schema) do
