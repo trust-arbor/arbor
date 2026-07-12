@@ -363,7 +363,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       else
         {:ok,
          %SigningAuthority{
-           token: :crypto.hash(:sha256, {agent_id, self()}),
+           token: :crypto.hash(:sha256, :erlang.term_to_binary({agent_id, self()})),
            principal_id: agent_id,
            purpose: :coding_task_executor
          }}
@@ -1216,6 +1216,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert_receive {:reloaded_authority, authority, derived}
       assert is_binary(derived)
+
       assert {:error, :authority_not_found} =
                Security.sign_with_authority(authority, "after-coding-task-close")
     end
@@ -1450,7 +1451,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
 
       Process.delete(:coding_executor_closed_authorities)
-      Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, {:error, :runner_failed})
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_runner_reply,
+        {:error, :runner_failed}
+      )
 
       assert {:error, :runner_failed} =
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
@@ -1555,7 +1561,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute inspect(iv) =~ fake_key
 
       for path <-
-            Map.take(result["artifacts"], ~w(coding_plan_path coding_pipeline_path compile_manifest_path))
+            Map.take(
+              result["artifacts"],
+              ~w(coding_plan_path coding_pipeline_path compile_manifest_path)
+            )
             |> Map.values() do
         refute File.read!(path) =~ fake_key
       end
