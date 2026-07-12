@@ -12,6 +12,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   timing, and independently observed Git and artifact evidence.
   """
 
+  alias Arbor.Commands.CodingBenchmark.{LegacyAdapter, PipelineAdapter}
   alias Arbor.Commands.CodingParity
   alias Arbor.Common.SafePath
 
@@ -19,6 +20,12 @@ defmodule Arbor.Commands.CodingBenchmark do
   @report_schema "arbor.coding_benchmark.report.v1"
   @request_schema "arbor.coding_benchmark.adapter_request.v1"
   @executor_paths ["legacy", "pipeline"]
+  @production_adapters [LegacyAdapter, PipelineAdapter]
+  @pipeline_artifact_path_keys [
+    {"coding_plan_path", :coding_plan_path},
+    {"coding_pipeline_path", :coding_pipeline_path},
+    {"compile_manifest_path", :compile_manifest_path}
+  ]
   @max_fixtures 100
   @max_repetitions 100
   @max_seed 2_147_483_647
@@ -560,12 +567,25 @@ defmodule Arbor.Commands.CodingBenchmark do
 
     callback = runtime.adapters[executor]
 
+    verification = %{
+      require_returned_worktree?: callback in @production_adapters,
+      trusted_root: workdir
+    }
+
     measurement = safely(fn -> measure_execution(runtime, executor, callback, request) end)
 
     case measurement do
       {:returned, {wall_clock_ms, outcome}}
       when is_integer(wall_clock_ms) and wall_clock_ms >= 0 ->
-        build_execution(executor, pair, request, outcome, wall_clock_ms, runtime)
+        build_execution(
+          executor,
+          pair,
+          request,
+          outcome,
+          wall_clock_ms,
+          runtime,
+          verification
+        )
 
       {:returned, _invalid} ->
         execution_failure(executor, pair, "measurement_failed", "invalid_measurement")
@@ -620,15 +640,32 @@ defmodule Arbor.Commands.CodingBenchmark do
     kind, reason -> {:caught, "#{kind}:#{inspect(reason, limit: 20, printable_limit: 500)}"}
   end
 
-  defp build_execution(executor, pair, request, {:returned, returned}, wall_clock_ms, runtime) do
+  defp build_execution(
+         executor,
+         pair,
+         request,
+         {:returned, returned},
+         wall_clock_ms,
+         runtime,
+         verification
+       ) do
     case normalize_adapter_return(returned) do
       {:ok, envelope} ->
-        project_execution(executor, pair, request, envelope, wall_clock_ms, runtime)
+        project_execution(
+          executor,
+          pair,
+          request,
+          envelope,
+          wall_clock_ms,
+          runtime,
+          verification
+        )
 
       {:error, reason, envelope} ->
         row =
           failure_row(executor, pair, "executor_failed", reason,
             counters: envelope.counters,
+            observations: envelope.observations,
             prepared: true,
             wall_clock_ms: wall_clock_ms,
             worker_ownership: envelope.worker_ownership
@@ -638,7 +675,15 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp build_execution(executor, pair, _request, {:raised, reason}, wall_clock_ms, _runtime) do
+  defp build_execution(
+         executor,
+         pair,
+         _request,
+         {:raised, reason},
+         wall_clock_ms,
+         _runtime,
+         _verification
+       ) do
     row =
       failure_row(executor, pair, "executor_raised", reason,
         prepared: true,
@@ -648,7 +693,15 @@ defmodule Arbor.Commands.CodingBenchmark do
     %{executor: executor, projection: nil, row: row}
   end
 
-  defp build_execution(executor, pair, _request, {:caught, reason}, wall_clock_ms, _runtime) do
+  defp build_execution(
+         executor,
+         pair,
+         _request,
+         {:caught, reason},
+         wall_clock_ms,
+         _runtime,
+         _verification
+       ) do
     row =
       failure_row(executor, pair, "executor_threw", reason,
         prepared: true,
@@ -786,17 +839,73 @@ defmodule Arbor.Commands.CodingBenchmark do
     }
   end
 
-  defp project_execution(executor, pair, request, envelope, wall_clock_ms, runtime) do
-    case CodingParity.project(envelope.result, envelope.observations) do
+  defp project_execution(
+         executor,
+         pair,
+         request,
+         envelope,
+         wall_clock_ms,
+         runtime,
+         verification
+       ) do
+    case observed_worktree(envelope.result, request, verification) do
+      {:ok, worktree} ->
+        project_observed_execution(
+          executor,
+          pair,
+          request,
+          envelope,
+          wall_clock_ms,
+          runtime,
+          worktree
+        )
+
+      {:error, reason} ->
+        row =
+          failure_row(executor, pair, "worktree_verification_failed", reason,
+            artifact_failed: true,
+            counters: envelope.counters,
+            objective_failure: reason,
+            observations: envelope.observations,
+            prepared: true,
+            wall_clock_ms: wall_clock_ms,
+            worker_ownership: envelope.worker_ownership
+          )
+
+        %{executor: executor, projection: nil, row: row}
+    end
+  end
+
+  defp project_observed_execution(
+         executor,
+         pair,
+         request,
+         envelope,
+         wall_clock_ms,
+         runtime,
+         worktree
+       ) do
+    observations = observed_tree(envelope.observations, worktree)
+
+    case CodingParity.project(envelope.result, observations) do
       {:ok, projection} ->
         semantic = projection["semantic"]
         status = semantic["terminal_status"]
-        verifier = objective_verification(status, request, envelope.result, pair.fixture, runtime)
+
+        verifier =
+          objective_verification(
+            status,
+            request,
+            envelope.result,
+            pair.fixture,
+            runtime,
+            worktree
+          )
 
         row = %{
           "approval_observations" => approval_observations(semantic["approval"]),
           "artifact_hash_verification" =>
-            artifact_verification(executor, request, envelope.result, projection),
+            artifact_verification(executor, request, envelope.result, projection, worktree),
           "base_tree_oid" => pair.fixture["base_tree_oid"],
           "cancellation_observations" =>
             cancellation_observations(
@@ -823,6 +932,7 @@ defmodule Arbor.Commands.CodingBenchmark do
         row =
           failure_row(executor, pair, "invalid_coding_result", reason_string(reason),
             counters: envelope.counters,
+            observations: envelope.observations,
             prepared: true,
             wall_clock_ms: wall_clock_ms,
             worker_ownership: envelope.worker_ownership
@@ -832,12 +942,74 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp objective_verification(status, _request, _result, _fixture, _runtime)
+  defp observed_worktree(result, request, verification) do
+    case result_worktree_path(result) do
+      {:ok, path} ->
+        canonical_worktree(path, verification.trusted_root)
+
+      :missing when not verification.require_returned_worktree? ->
+        canonical_worktree(request["workdir"], verification.trusted_root)
+
+      :missing ->
+        {:error, "missing_returned_worktree"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp result_worktree_path(result) do
+    case fetch_value(result, "payload", :payload, nil) do
+      payload when is_map(payload) ->
+        cond do
+          Map.has_key?(payload, "worktree_path") -> worktree_path(payload["worktree_path"])
+          Map.has_key?(payload, :worktree_path) -> worktree_path(payload[:worktree_path])
+          true -> :missing
+        end
+
+      _other ->
+        :missing
+    end
+  end
+
+  defp worktree_path(path) when is_binary(path) do
+    if String.valid?(path) and String.trim(path) != "" and not String.contains?(path, <<0>>),
+      do: {:ok, path},
+      else: {:error, "invalid_returned_worktree"}
+  end
+
+  defp worktree_path(_path), do: {:error, "invalid_returned_worktree"}
+
+  defp canonical_worktree(path, trusted_root) do
+    with {:ok, root} <- SafePath.resolve_real(trusted_root),
+         true <- File.dir?(root),
+         {:ok, lexical} <- SafePath.resolve_within(path, root),
+         {:ok, real} <- SafePath.resolve_real(lexical),
+         {:ok, ^real} <- SafePath.resolve_within(real, root),
+         true <- File.dir?(real),
+         {:ok, ^real} <- git_output(real, ["rev-parse", "--show-toplevel"]) do
+      {:ok, real}
+    else
+      _other -> {:error, "unsafe_or_missing_returned_worktree"}
+    end
+  end
+
+  defp observed_tree(observations, worktree) do
+    has_tree? =
+      Map.has_key?(observations, "tree_oid") or Map.has_key?(observations, :tree_oid)
+
+    case {has_tree?, git_output(worktree, ["rev-parse", "--verify", "HEAD^{tree}"])} do
+      {false, {:ok, tree_oid}} -> Map.put(observations, "tree_oid", tree_oid)
+      _other -> observations
+    end
+  end
+
+  defp objective_verification(status, _request, _result, _fixture, _runtime, _worktree)
        when status in ~w(cancelled declined) do
     objective_result("not_run", "terminal_status:#{status}")
   end
 
-  defp objective_verification(_status, request, result, fixture, runtime) do
+  defp objective_verification(_status, request, result, fixture, runtime, worktree) do
     verifier = runtime.verifiers[fixture["verifier_id"]]
 
     verifier_request = %{
@@ -845,7 +1017,7 @@ defmodule Arbor.Commands.CodingBenchmark do
       "fixture_id" => fixture["fixture_id"],
       "normalized_input" => fixture["input"],
       "result" => result,
-      "workdir" => request["workdir"]
+      "workdir" => worktree
     }
 
     case safely(fn -> invoke(verifier, verifier_request) end) do
@@ -871,23 +1043,32 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp objective_result(status, reason), do: %{"reason" => reason, "status" => status}
 
-  defp artifact_verification(executor, request, result, projection) do
+  defp artifact_verification(executor, request, result, projection, workdir) do
     semantic = projection["semantic"]
     quality = projection["artifact_quality"]
-    workdir = request["workdir"]
 
     actual_tree = git_output(workdir, ["rev-parse", "--verify", "HEAD^{tree}"])
+
+    actual_base_tree =
+      git_output(workdir, [
+        "rev-parse",
+        "--verify",
+        "#{request["base_commit_oid"]}^{tree}"
+      ])
+
     actual_paths = changed_paths(workdir, request["base_commit_oid"])
     expected_tree = semantic["tree_oid"]
     expected_paths = semantic["changed_files"]
+    expected_base_tree = request["base_tree_oid"]
 
+    base_verified = match?({:ok, ^expected_base_tree}, actual_base_tree)
     tree_verified = match?({:ok, ^expected_tree}, actual_tree)
     paths_verified = match?({:ok, ^expected_paths}, actual_paths)
     input_verified = hash_json(request["normalized_input"]) == request["normalized_input_hash"]
     graph_hash_verified = graph_hash_verified(executor, result, workdir)
 
     status =
-      if tree_verified and paths_verified and input_verified and
+      if base_verified and tree_verified and paths_verified and input_verified and
            artifact_expectations_met?(executor, quality, graph_hash_verified) do
         "passed"
       else
@@ -896,7 +1077,7 @@ defmodule Arbor.Commands.CodingBenchmark do
 
     %{
       "artifact_presence" => artifact_presence(quality),
-      "base_tree_verified" => true,
+      "base_tree_verified" => base_verified,
       "changed_paths_verified" => paths_verified,
       "graph_hash_verified" => graph_hash_verified,
       "normalized_input_hash_verified" => input_verified,
@@ -917,6 +1098,7 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp graph_hash_verified("pipeline", result, workdir) do
     with {:ok, artifacts} <- result_artifacts(result),
+         :ok <- contained_artifact_paths(artifacts, workdir),
          hash when is_binary(hash) <- fetch_value(artifacts, "graph_hash", :graph_hash, nil),
          true <- Regex.match?(@hash_pattern, String.downcase(hash)),
          path when is_binary(path) <-
@@ -927,6 +1109,21 @@ defmodule Arbor.Commands.CodingBenchmark do
     else
       _other -> false
     end
+  end
+
+  defp contained_artifact_paths(artifacts, workdir) do
+    Enum.reduce_while(@pipeline_artifact_path_keys, :ok, fn {key, atom_key}, :ok ->
+      case fetch_value(artifacts, key, atom_key, nil) do
+        path when is_binary(path) ->
+          case contained_existing_file(path, workdir) do
+            {:ok, _real} -> {:cont, :ok}
+            {:error, _reason} -> {:halt, {:error, :unsafe_artifact_path}}
+          end
+
+        _other ->
+          {:halt, {:error, :missing_artifact_path}}
+      end
+    end)
   end
 
   defp result_artifacts(result) do
@@ -1030,20 +1227,35 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp failure_row(executor, pair, status, reason, opts \\ []) do
     ownership = Keyword.get(opts, :worker_ownership, "unknown")
+    observations = Keyword.get(opts, :observations, %{})
+    approval = fetch_value(observations, "approval", :approval, %{})
+    cancellation = fetch_value(observations, "cancellation", :cancellation, %{})
+    cleanup = fetch_value(observations, "cleanup", :cleanup, %{})
+
+    artifact_verification =
+      opts
+      |> Keyword.get(:prepared, false)
+      |> empty_artifact_verification()
+      |> maybe_fail_artifact_verification(Keyword.get(opts, :artifact_failed, false))
+
+    objective_verification =
+      case Keyword.get(opts, :objective_failure) do
+        nil -> objective_result("not_run", status)
+        objective_reason -> objective_result("failed", reason_string(objective_reason))
+      end
 
     %{
-      "approval_observations" => approval_observations(%{}),
-      "artifact_hash_verification" =>
-        empty_artifact_verification(Keyword.get(opts, :prepared, false)),
+      "approval_observations" => approval_observations(approval),
+      "artifact_hash_verification" => artifact_verification,
       "base_tree_oid" => pair.fixture["base_tree_oid"],
-      "cancellation_observations" => cancellation_observations(%{}, %{}, ownership),
+      "cancellation_observations" => cancellation_observations(cancellation, cleanup, ownership),
       "changed_paths" => [],
       "counters" =>
         Keyword.get(opts, :counters, %{"rework_cycles" => 0, "validation_cycles" => 0}),
       "executor_path" => executor,
       "fixture_id" => pair.fixture["fixture_id"],
       "normalized_input_hash" => pair.fixture["normalized_input_hash"],
-      "objective_verifier" => objective_result("not_run", status),
+      "objective_verifier" => objective_verification,
       "repetition" => pair.repetition,
       "review_outcome" => review_outcome(%{}),
       "terminal_reason" => reason_string(reason),
@@ -1063,6 +1275,17 @@ defmodule Arbor.Commands.CodingBenchmark do
       "status" => "not_run"
     }
   end
+
+  defp maybe_fail_artifact_verification(verification, true) do
+    Map.merge(verification, %{
+      "base_tree_verified" => false,
+      "changed_paths_verified" => false,
+      "result_tree_verified" => false,
+      "status" => "failed"
+    })
+  end
+
+  defp maybe_fail_artifact_verification(verification, false), do: verification
 
   defp valid_wall_clock(value) when is_integer(value) and value >= 0, do: value
   defp valid_wall_clock(_value), do: 0
