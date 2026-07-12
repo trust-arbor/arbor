@@ -36,6 +36,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
     end)
 
     start_supervised!(Store)
+    migrate_event_log_schema!()
     {:ok, commit_proxy: proxy}
   end
 
@@ -180,7 +181,10 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
       |> Enum.map(fn {:ok, result} -> result end)
 
     assert Enum.count(results, &match?({:ok, [_]}, &1)) == 1
-    assert Enum.count(results, &(&1 == {:error, :version_conflict})) == writer_count - 1
+
+    assert Enum.count(results, &(&1 == {:error, :version_conflict})) == writer_count - 1,
+           "unexpected CAS outcomes: #{inspect(results)}"
+
     assert {:ok, 1} = EventLog.stream_version(stream_id)
   end
 
@@ -276,6 +280,99 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
     assert {:error, :event_identity_conflict} = EventLog.reconcile_append(operation, [])
   end
 
+  test "security regression: an absent reconciliation permanently fences the operation" do
+    stream_id = "event-store-absent-fence"
+    event = Event.new(stream_id, "arbor.review.ordinary", %{value: 1})
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+
+    assert {:ok, :absent} = EventLog.reconcile_append(operation, [])
+    assert {:error, :operation_aborted} = EventLog.append(stream_id, event)
+    assert {:ok, 0} = EventLog.stream_version(stream_id)
+
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    assert %{rows: [["aborted"]]} =
+             Postgrex.query!(
+               conn,
+               "SELECT status FROM public.arbor_event_log_operations WHERE operation_id = $1",
+               [operation.operation_id]
+             )
+  end
+
+  test "security regression: reconciliation cannot prove absence while append is uncommitted" do
+    conn = EventStore.Config.lookup(Store, :conn)
+    parent = self()
+    stream_id = "event-store-uncommitted-fence"
+    event = Event.new(stream_id, "arbor.review.ordinary", %{value: 1})
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+
+    locker =
+      Task.async(fn ->
+        Postgrex.transaction(
+          conn,
+          fn transaction ->
+            Postgrex.query!(
+              transaction,
+              "SELECT stream_id FROM public.streams WHERE stream_id = 0 FOR UPDATE",
+              []
+            )
+
+            send(parent, :event_store_global_row_locked)
+
+            receive do
+              :release_event_store_global_row -> :ok
+            after
+              3_000 -> raise "global row lock release timed out"
+            end
+          end,
+          timeout: 4_000
+        )
+      end)
+
+    assert_receive :event_store_global_row_locked, 1_000
+
+    append_task =
+      Task.async(fn -> EventLog.append(stream_id, event, append_timeout_ms: 2_000) end)
+
+    wait_for_blocked_append!(conn)
+
+    assert {:error, {:append_indeterminate, ^operation}} =
+             EventLog.reconcile_append(operation, append_timeout_ms: 75)
+
+    send(locker.pid, :release_event_store_global_row)
+    assert {:ok, :ok} = Task.await(locker, 1_000)
+    assert {:ok, [%Event{id: committed_id}]} = Task.await(append_task, 2_000)
+    assert committed_id == event.id
+
+    assert {:ok, {:committed, [%Event{id: ^committed_id}]}} =
+             EventLog.reconcile_append(operation, append_timeout_ms: 1_000)
+  end
+
+  test "concurrent duplicate operations commit exactly one event and reconcile identically" do
+    stream_id = "event-store-duplicate-operation"
+
+    event =
+      Event.new(stream_id, "arbor.review.ordinary", %{value: 1},
+        id: "evt_event_store_duplicate_operation"
+      )
+
+    results =
+      1..16
+      |> Task.async_stream(
+        fn _writer -> EventLog.append(stream_id, event, append_timeout_ms: 3_000) end,
+        max_concurrency: 16,
+        ordered: false,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(results, &match?({:ok, [%Event{event_number: 1}]}, &1))
+    assert {:ok, 1} = EventLog.stream_version(stream_id)
+
+    assert {:ok, [%Event{id: "evt_event_store_duplicate_operation"}]} =
+             EventLog.read_stream(stream_id)
+  end
+
   test "agent identity round-trips and caller metadata cannot override reserved fields" do
     stream_id = "agent-round-trip"
     event_type = "arbor.review.ordinary"
@@ -305,6 +402,50 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
 
     changed_agent = %Event{event | agent_id: "agent_other"}
     assert {:error, :event_identity_conflict} = EventLog.append(stream_id, changed_agent)
+  end
+
+  test "legacy zero-precision rows lazily upgrade to a committed operation fence" do
+    stream_id = "legacy-timestamp-upgrade"
+    timestamp = DateTime.from_naive!(~N[2026-07-11 01:02:03], "Etc/UTC")
+
+    event =
+      Event.new(stream_id, "arbor.review.ordinary", %{value: 1},
+        id: "evt_legacy_timestamp_upgrade",
+        timestamp: timestamp
+      )
+
+    {legacy_operation_id, legacy_fingerprint} = append_identity(stream_id, event)
+
+    stored = %EventStore.EventData{
+      event_id: deterministic_storage_id(event.id),
+      event_type: event.type,
+      data: event.data,
+      metadata: %{
+        "event_id" => event.id,
+        "arbor_agent_id" => nil,
+        "causation_id" => nil,
+        "correlation_id" => nil,
+        "arbor_event_timestamp" => DateTime.to_iso8601(timestamp),
+        "arbor_append_operation_id" => legacy_operation_id,
+        "arbor_append_fingerprint" => legacy_fingerprint
+      }
+    }
+
+    assert :ok = Store.append_to_stream(stream_id, :any_version, [stored])
+
+    assert {:ok, [%Event{id: event_id, event_number: 1, global_position: 1}]} =
+             EventLog.append(stream_id, event)
+
+    assert event_id == event.id
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    assert %{rows: [["committed"]]} =
+             Postgrex.query!(
+               conn,
+               "SELECT status FROM public.arbor_event_log_operations WHERE operation_id = $1",
+               [operation.operation_id]
+             )
   end
 
   test "append timeout bounds pool checkout and reconciles the undispatched operation as absent" do
@@ -355,7 +496,9 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
     assert {:ok, :absent} = EventLog.reconcile_append(operation, append_timeout_ms: 1_000)
   end
 
-  test "delayed EventStore COMMIT acknowledgement is reconcilable", %{commit_proxy: proxy} do
+  test "delayed EventStore append acknowledgement rolls back to a terminal absence", %{
+    commit_proxy: proxy
+  } do
     stream_id = "event-store-delayed-commit"
     event = Event.new(stream_id, "arbor.review.ordinary", %{value: 11})
 
@@ -377,16 +520,11 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
     assert System.monotonic_time(:millisecond) - started_at < 250
     assert_receive :postgres_proxy_delaying_event_store_commit_reply, 1_000
 
-    assert {:ok, {:committed, [%Event{id: committed_id, data: %{"value" => 11}}]}} =
+    assert {:ok, :absent} =
              EventLog.reconcile_append(operation, append_timeout_ms: 1_000)
 
-    assert committed_id == event.id
-
-    assert {:ok, [%Event{id: retried_id, global_position: 1}]} =
-             EventLog.append(stream_id, event)
-
-    assert retried_id == event.id
-    assert {:ok, 1} = EventLog.stream_version(stream_id)
+    assert {:error, :operation_aborted} = EventLog.append(stream_id, event)
+    assert {:ok, 0} = EventLog.stream_version(stream_id)
   end
 
   test "stream and global position exhaustion fail before EventStore encoding" do
@@ -482,6 +620,133 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
              )
   end
 
+  test "security regression: append never installs missing constraints at runtime" do
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    Postgrex.query!(
+      conn,
+      "ALTER TABLE public.streams DROP CONSTRAINT arbor_eventlog_stream_position_capacity"
+    )
+
+    on_exit(fn -> restore_stream_capacity_constraint!(conn) end)
+
+    event = Event.new("runtime-ddl-forbidden", "arbor.review.ordinary", %{value: 1})
+
+    assert {:error,
+            {:event_log_schema_unavailable,
+             {:constraint_missing_or_invalid, "arbor_eventlog_stream_position_capacity"}}} =
+             EventLog.append("runtime-ddl-forbidden", event)
+
+    refute constraint_exists?(conn, "arbor_eventlog_stream_position_capacity")
+    assert {:ok, 0} = EventLog.stream_version("runtime-ddl-forbidden")
+  end
+
+  test "explicit migration leaves exact validated capacity and terminal-state constraints" do
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    assert %{rows: rows} =
+             Postgrex.query!(
+               conn,
+               """
+               SELECT conname, pg_get_constraintdef(oid, false), convalidated
+               FROM pg_constraint
+               WHERE conname = ANY($1::text[])
+               ORDER BY conname
+               """,
+               [
+                 [
+                   "arbor_event_log_operations_identity_shape",
+                   "arbor_event_log_operations_pkey",
+                   "arbor_event_log_operations_terminal_status",
+                   "arbor_eventlog_global_position_capacity",
+                   "arbor_eventlog_stream_position_capacity"
+                 ]
+               ]
+             )
+
+    assert rows == [
+             [
+               "arbor_event_log_operations_identity_shape",
+               "CHECK (((cardinality(event_ids) > 0) AND (cardinality(event_ids) = cardinality(fingerprints)) AND (array_position(event_ids, NULL::text) IS NULL) AND (array_position(fingerprints, NULL::text) IS NULL)))",
+               true
+             ],
+             [
+               "arbor_event_log_operations_pkey",
+               "PRIMARY KEY (operation_id)",
+               true
+             ],
+             [
+               "arbor_event_log_operations_terminal_status",
+               "CHECK ((status = ANY (ARRAY['committed'::text, 'aborted'::text, 'conflict'::text])))",
+               true
+             ],
+             [
+               "arbor_eventlog_global_position_capacity",
+               "CHECK (((stream_id <> 0) OR ((stream_version >= 0) AND (stream_version <= 2147483647))))",
+               true
+             ],
+             [
+               "arbor_eventlog_stream_position_capacity",
+               "CHECK (((stream_id = 0) OR ((stream_version >= 0) AND (stream_version <= 2147483647))))",
+               true
+             ]
+           ]
+  end
+
+  test "explicit migration rejects existing over-limit positions and rolls back" do
+    conn = EventStore.Config.lookup(Store, :conn)
+    schema_module = Arbor.Persistence.Ecto.EventLogSchema
+
+    on_exit(fn ->
+      Postgrex.query!(conn, "UPDATE public.streams SET stream_version = 0 WHERE stream_id = 0")
+      apply(schema_module, :migrate!, [conn, "public"])
+      Postgrex.query!(conn, "ALTER TABLE public.streams ENABLE TRIGGER event_notification")
+    end)
+
+    Postgrex.query!(conn, "ALTER TABLE public.streams DISABLE TRIGGER event_notification")
+
+    Postgrex.query!(
+      conn,
+      """
+      ALTER TABLE public.streams
+        DROP CONSTRAINT arbor_eventlog_stream_position_capacity,
+        DROP CONSTRAINT arbor_eventlog_global_position_capacity
+      """
+    )
+
+    Postgrex.query!(conn, "DROP TABLE public.arbor_event_log_operations")
+
+    Postgrex.query!(
+      conn,
+      "DELETE FROM public.arbor_event_log_schema_migrations WHERE version = $1",
+      [20_260_711_000_001]
+    )
+
+    Postgrex.query!(
+      conn,
+      "UPDATE public.streams SET stream_version = 2147483648 WHERE stream_id = 0"
+    )
+
+    assert_raise Postgrex.Error, ~r/outside Arbor EventLog capacity/, fn ->
+      apply(schema_module, :migrate!, [conn, "public"])
+    end
+
+    assert Postgrex.query!(
+             conn,
+             "SELECT to_regclass('public.arbor_event_log_operations')"
+           ).rows == [[nil]]
+
+    assert Postgrex.query!(
+             conn,
+             "SELECT count(*) FROM public.arbor_event_log_schema_migrations WHERE version = $1",
+             [20_260_711_000_001]
+           ).rows == [[0]]
+
+    Postgrex.query!(conn, "UPDATE public.streams SET stream_version = 0 WHERE stream_id = 0")
+    assert :ok = apply(schema_module, :migrate!, [conn, "public"])
+    Postgrex.query!(conn, "ALTER TABLE public.streams ENABLE TRIGGER event_notification")
+  end
+
   test "stream head is reconstructed from one current database snapshot" do
     stream_id = "atomic-head"
     event_type = "arbor.review.ordinary"
@@ -510,6 +775,7 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
       conn,
       """
       TRUNCATE TABLE
+        public.arbor_event_log_operations,
         public.stream_events,
         public.events,
         public.subscriptions,
@@ -527,6 +793,70 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
       [],
       timeout: 10_000
     )
+  end
+
+  defp migrate_event_log_schema! do
+    module = Arbor.Persistence.Ecto.EventLogSchema
+
+    if Code.ensure_loaded?(module) do
+      conn = EventStore.Config.lookup(Store, :conn)
+      schema = EventStore.Config.lookup(Store, :schema)
+      :ok = apply(module, :migrate!, [conn, schema])
+    end
+  end
+
+  defp wait_for_blocked_append!(conn, attempts \\ 100)
+
+  defp wait_for_blocked_append!(_conn, 0), do: flunk("append did not block on the global row")
+
+  defp wait_for_blocked_append!(conn, attempts) do
+    result =
+      Postgrex.query!(
+        conn,
+        """
+        SELECT EXISTS (
+          SELECT 1
+          FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND state = 'active'
+            AND wait_event_type = 'Lock'
+            AND (
+              query LIKE '%new_events_indexes%'
+              OR query LIKE '%WHERE stream_id = 0%FOR UPDATE%'
+            )
+        )
+        """
+      )
+
+    case result.rows do
+      [[true]] ->
+        :ok
+
+      [[false]] ->
+        Process.sleep(10)
+        wait_for_blocked_append!(conn, attempts - 1)
+    end
+  end
+
+  defp constraint_exists?(conn, name) do
+    Postgrex.query!(
+      conn,
+      "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = $1)",
+      [name]
+    ).rows == [[true]]
+  end
+
+  defp restore_stream_capacity_constraint!(conn) do
+    unless constraint_exists?(conn, "arbor_eventlog_stream_position_capacity") do
+      Postgrex.query!(
+        conn,
+        """
+        ALTER TABLE public.streams
+        ADD CONSTRAINT arbor_eventlog_stream_position_capacity
+        CHECK (stream_id = 0 OR (stream_version >= 0 AND stream_version <= 2147483647))
+        """
+      )
+    end
   end
 
   defp event_store_config do

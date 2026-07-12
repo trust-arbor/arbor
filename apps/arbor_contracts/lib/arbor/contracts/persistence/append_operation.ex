@@ -136,7 +136,8 @@ defmodule Arbor.Contracts.Persistence.AppendOperation do
   defp valid_fingerprints?(_fingerprints, _event_ids, _event_count), do: false
 
   defp bounded_binary?(value) do
-    is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 1_024
+    is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 255 and
+      String.valid?(value)
   end
 
   defp invalid, do: {:error, :invalid_append_operation}

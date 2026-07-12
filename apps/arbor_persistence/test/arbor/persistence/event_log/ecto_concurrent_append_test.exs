@@ -99,12 +99,14 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
     # would mask the race the lock is meant to fix.) Clean the table by hand
     # before and after since :auto mode doesn't roll back.
     :ok = Sandbox.mode(Repo, :auto)
+    Repo.delete_all(Arbor.Persistence.Schemas.EventLogOperation)
     Repo.delete_all(Arbor.Persistence.Schemas.Event)
 
     on_exit(fn ->
       # Re-checkout under :auto for the cleanup query, then restore :manual so
       # later modules in this BEAM aren't left in :auto.
       Sandbox.mode(Repo, :auto)
+      Repo.delete_all(Arbor.Persistence.Schemas.EventLogOperation)
       Repo.delete_all(Arbor.Persistence.Schemas.Event)
       Sandbox.mode(Repo, :manual)
     end)

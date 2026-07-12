@@ -520,15 +520,19 @@ defmodule Arbor.Persistence do
            :ok <- validate_backend(backend, :append, 3),
            backend_opts = Keyword.put(normalized_opts, :name, name),
            {:ok, events, _preconditions, operation, ^deadline_mono} <-
-             EventLog.prepare_append(stream_id, events, backend_opts),
-           {:ok, result} <-
-             safe_backend_call(fn -> backend.append(stream_id, events, backend_opts) end) do
-        EventLog.accept_completion(
-          result,
-          operation,
-          deadline_mono,
-          System.monotonic_time(:millisecond)
-        )
+             EventLog.prepare_append(stream_id, events, backend_opts) do
+        case dispatch_backend(fn -> backend.append(stream_id, events, backend_opts) end) do
+          {:ok, result} ->
+            EventLog.accept_completion(
+              result,
+              operation,
+              deadline_mono,
+              System.monotonic_time(:millisecond)
+            )
+
+          {:error, :dispatch_uncertain} ->
+            EventLog.indeterminate(operation)
+        end
       end
     end)
   end
@@ -540,18 +544,22 @@ defmodule Arbor.Persistence do
     EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->
       with :ok <- validate_store_name(name),
            {:ok, operation} <- EventLog.validate_operation(operation),
-           true <- is_atom(backend) and function_exported?(backend, :reconcile_append, 2),
-           backend_opts = Keyword.put(normalized_opts, :name, name),
-           {:ok, result} <-
-             safe_backend_call(fn -> backend.reconcile_append(operation, backend_opts) end) do
-        EventLog.accept_completion(
-          result,
-          operation,
-          deadline_mono,
-          System.monotonic_time(:millisecond)
-        )
+           :ok <- validate_backend(backend, :reconcile_append, 2),
+           backend_opts = Keyword.put(normalized_opts, :name, name) do
+        case dispatch_backend(fn -> backend.reconcile_append(operation, backend_opts) end) do
+          {:ok, result} ->
+            EventLog.accept_completion(
+              result,
+              operation,
+              deadline_mono,
+              System.monotonic_time(:millisecond)
+            )
+
+          {:error, :dispatch_uncertain} ->
+            EventLog.indeterminate(operation)
+        end
       else
-        false -> {:error, :reconciliation_not_supported}
+        {:error, :backend_unavailable} -> {:error, :reconciliation_not_supported}
         {:error, _reason} = error -> error
       end
     end)
@@ -712,12 +720,11 @@ defmodule Arbor.Persistence do
 
   defp validate_backend(_backend, _function, _arity), do: {:error, :backend_unavailable}
 
-  defp safe_backend_call(fun) do
+  defp dispatch_backend(fun) do
     {:ok, fun.()}
   rescue
-    _error -> {:error, :backend_unavailable}
+    _error -> {:error, :dispatch_uncertain}
   catch
-    :exit, _reason -> {:error, :backend_unavailable}
-    _kind, _reason -> {:error, :backend_unavailable}
+    _kind, _reason -> {:error, :dispatch_uncertain}
   end
 end

@@ -24,7 +24,7 @@ defmodule Arbor.Persistence.EventLog do
   alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.Event
 
-  @max_stream_id_bytes 1_024
+  @max_string_bytes 255
   @max_options 64
   @max_append_events 1_000
   @max_event_bytes 1_048_576
@@ -70,9 +70,11 @@ defmodule Arbor.Persistence.EventLog do
   `{:error, :deadline_exceeded}`.
 
   Both precondition integers are bounded to `0..2_147_483_647`. Stream IDs are
-  bounded to 1,024 bytes, options to 64 entries, an append to 1,000 events and
+  bounded to 255 bytes, options to 64 entries, an append to 1,000 events and
   4 MiB total, and each event term to 1 MiB before backend work begins.
 
+  Stream IDs, event IDs, event types, and optional identity fields are valid
+  UTF-8 strings bounded to 255 bytes, matching the narrowest durable schema.
   Event `data` and `metadata` must serialize as JSON objects. Persisted and
   returned events use the canonical JSON representation produced by a JSON
   round-trip, including string map keys at every depth. Timestamps must be valid
@@ -288,6 +290,23 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   @doc false
+  @spec event_fingerprint_matches?(stream_id(), term(), term()) :: boolean()
+  def event_fingerprint_matches?(stream_id, %Event{} = event, expected)
+      when is_binary(expected) do
+    case event_fingerprint(stream_id, event) do
+      ^expected ->
+        true
+
+      _canonical_mismatch ->
+        Enum.any?(legacy_timestamp_precisions(event.timestamp), fn timestamp ->
+          legacy_event_fingerprint(stream_id, %Event{event | timestamp: timestamp}) == expected
+        end)
+    end
+  end
+
+  def event_fingerprint_matches?(_stream_id, _event, _expected), do: false
+
+  @doc false
   @spec reconcile_events(term(), term()) :: append_reconciliation()
   def reconcile_events(operation, events) do
     with {:ok, operation} <- validate_operation(operation),
@@ -397,12 +416,20 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   defp do_event_fingerprint(stream_id, %Event{} = event) do
+    event_fingerprint_with_timestamp(stream_id, event, canonical_timestamp(event.timestamp))
+  end
+
+  defp legacy_event_fingerprint(stream_id, %Event{} = event) do
+    event_fingerprint_with_timestamp(stream_id, event, event.timestamp)
+  end
+
+  defp event_fingerprint_with_timestamp(stream_id, %Event{} = event, timestamp) do
     {:ok, canonical_data} = canonical_json(event.data)
     {:ok, canonical_metadata} = canonical_json(event.metadata)
 
     payload =
       {1, stream_id, event.id, event.type, canonical_data, canonical_metadata, event.agent_id,
-       event.causation_id, event.correlation_id, DateTime.to_iso8601(event.timestamp)}
+       event.causation_id, event.correlation_id, DateTime.to_iso8601(timestamp)}
 
     payload
     |> :erlang.term_to_binary([:deterministic])
@@ -486,8 +513,9 @@ defmodule Arbor.Persistence.EventLog do
 
   defp validate_stream_id(stream_id)
        when is_binary(stream_id) and byte_size(stream_id) > 0 and
-              byte_size(stream_id) <= @max_stream_id_bytes,
-       do: :ok
+              byte_size(stream_id) <= @max_string_bytes do
+    if String.valid?(stream_id), do: :ok, else: {:error, :invalid_stream_id}
+  end
 
   defp validate_stream_id(_stream_id), do: {:error, :invalid_stream_id}
 
@@ -590,14 +618,16 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   defp bounded_binary?(value) do
-    is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_stream_id_bytes and
+    is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_string_bytes and
       String.valid?(value)
   end
 
   defp bounded_optional_binary?(nil), do: true
   defp bounded_optional_binary?(value), do: bounded_binary?(value)
 
-  defp valid_timestamp?(%DateTime{utc_offset: 0, std_offset: 0} = timestamp) do
+  defp valid_timestamp?(
+         %DateTime{utc_offset: 0, std_offset: 0, calendar: Calendar.ISO} = timestamp
+       ) do
     timestamp
     |> DateTime.to_iso8601()
     |> is_binary()
@@ -649,7 +679,7 @@ defmodule Arbor.Persistence.EventLog do
     expected = Map.get(operation.fingerprints, event.id)
 
     is_nil(expected) or event.stream_id != operation.stream_id or
-      event_fingerprint(operation.stream_id, event) != expected
+      not event_fingerprint_matches?(operation.stream_id, event, expected)
   end
 
   defp json_object?(value) when is_map(value) do
@@ -680,7 +710,14 @@ defmodule Arbor.Persistence.EventLog do
            true <- is_map(data),
            {:ok, metadata} <- canonical_json(event.metadata),
            true <- is_map(metadata) do
-        {:cont, {:ok, [%Event{event | data: data, metadata: metadata} | acc]}}
+        canonical = %Event{
+          event
+          | data: data,
+            metadata: metadata,
+            timestamp: canonical_timestamp(event.timestamp)
+        }
+
+        {:cont, {:ok, [canonical | acc]}}
       else
         _invalid -> {:halt, {:error, :invalid_events}}
       end
@@ -690,6 +727,20 @@ defmodule Arbor.Persistence.EventLog do
       {:error, _reason} = error -> error
     end
   end
+
+  defp canonical_timestamp(%DateTime{microsecond: {microsecond, _precision}} = timestamp),
+    do: %DateTime{timestamp | microsecond: {microsecond, 6}}
+
+  defp legacy_timestamp_precisions(%DateTime{microsecond: {microsecond, _precision}} = timestamp) do
+    0..5
+    |> Enum.filter(fn precision ->
+      divisor = Integer.pow(10, 6 - precision)
+      rem(microsecond, divisor) == 0
+    end)
+    |> Enum.map(fn precision -> %DateTime{timestamp | microsecond: {microsecond, precision}} end)
+  end
+
+  defp legacy_timestamp_precisions(_timestamp), do: []
 
   defp active_deadline do
     case Process.get(@deadline_context_key) do

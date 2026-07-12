@@ -35,6 +35,19 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
     end
   end
 
+  defmodule CommitThenRaiseBackend do
+    @moduledoc false
+
+    def append(stream_id, events, opts) do
+      {:ok, _persisted} = AgentEventLog.append(stream_id, events, opts)
+      raise "simulated reply-path failure after commit"
+    end
+
+    def reconcile_append(operation, opts) do
+      AgentEventLog.reconcile_append(operation, opts)
+    end
+  end
+
   setup do
     name = :"event_log_public_deadline_#{System.unique_integer([:positive])}"
     ets_name = :"event_log_public_ets_deadline_#{System.unique_integer([:positive])}"
@@ -84,6 +97,43 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
                event,
                [{:trace_id, "trace"} | :improper]
              )
+  end
+
+  test "security regression: a backend exception after commit remains reconcilable", %{
+    name: name
+  } do
+    stream_id = "facade-commit-then-raise"
+    event = Event.new(stream_id, "arbor.review.ordinary", %{value: 1})
+
+    assert {:error, {:append_indeterminate, operation}} =
+             Persistence.append(name, CommitThenRaiseBackend, stream_id, event)
+
+    assert {:ok, 1} = AgentEventLog.stream_version(stream_id, name: name)
+
+    assert {:ok, {:committed, [%Event{id: committed_id}]}} =
+             Persistence.reconcile_append(name, CommitThenRaiseBackend, operation)
+
+    assert committed_id == event.id
+  end
+
+  test "security regression: public strings are valid UTF-8 and fit every backend schema", %{
+    name: name,
+    ets_name: ets_name
+  } do
+    event = Event.new("bounded", "arbor.review.ordinary", %{value: 1})
+
+    for {backend, backend_name} <- [{AgentEventLog, name}, {ETS, ets_name}],
+        invalid_stream <- [String.duplicate("s", 256), <<255>>] do
+      assert {:error, :invalid_stream_id} =
+               Persistence.append(backend_name, backend, invalid_stream, event)
+    end
+
+    oversized_type = %Event{event | type: String.duplicate("t", 256)}
+
+    assert {:error, :invalid_events} =
+             Persistence.append(name, AgentEventLog, "bounded", oversized_type)
+
+    assert {:ok, 0} = AgentEventLog.stream_version("bounded", name: name)
   end
 
   test "malformed facade names are rejected without interpolation or backend dispatch" do

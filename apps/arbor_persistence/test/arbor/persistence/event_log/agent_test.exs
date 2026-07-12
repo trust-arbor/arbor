@@ -143,10 +143,12 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
 
       Process.unlink(pid)
       :ok = :sys.suspend(pid)
+      event = Event.new("killed", "event", %{})
+      assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation("killed", [event])
 
       task =
         Task.async(fn ->
-          ELAgent.append("killed", Event.new("killed", "event", %{}),
+          ELAgent.append("killed", event,
             name: name,
             call_timeout_ms: 1_000
           )
@@ -155,7 +157,7 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
       wait_for_queued_call(pid)
       Process.exit(pid, :kill)
 
-      assert {:error, :backend_unavailable} = Task.await(task, 1_000)
+      assert {:error, {:append_indeterminate, ^operation}} = Task.await(task, 1_000)
     end
 
     test "returns stable errors for unavailable agents and invalid call deadlines" do

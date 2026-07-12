@@ -152,10 +152,12 @@ defmodule Arbor.Persistence.EventLog.Snapshotter do
         new_id = (state.last_snapshot_id || 0) + 1
 
         envelope = %{
+          "snapshot_version" => exported.snapshot_version,
           "snapshot_id" => new_id,
           "global_position" => exported.global_position,
           "stream_versions" => exported.stream_versions,
           "events" => exported.events,
+          "identity_tombstones" => exported.identity_tombstones,
           "captured_at" => DateTime.to_iso8601(DateTime.utc_now())
         }
 

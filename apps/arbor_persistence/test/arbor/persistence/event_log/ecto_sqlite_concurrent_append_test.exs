@@ -95,6 +95,18 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     """)
 
     SQLitePoolRepo.query!("""
+    CREATE TABLE event_log_operations (
+      operation_id TEXT PRIMARY KEY,
+      stream_id TEXT NOT NULL,
+      identity TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reason TEXT,
+      inserted_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    """)
+
+    SQLitePoolRepo.query!("""
     CREATE TRIGGER events_set_committed_at_after_insert
     AFTER INSERT ON events
     FOR EACH ROW
@@ -118,6 +130,7 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
   end
 
   setup do
+    SQLitePoolRepo.delete_all(Arbor.Persistence.Schemas.EventLogOperation)
     SQLitePoolRepo.delete_all(Arbor.Persistence.Schemas.Event)
     :ok
   end

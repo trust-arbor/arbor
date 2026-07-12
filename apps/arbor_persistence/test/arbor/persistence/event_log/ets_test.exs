@@ -4,6 +4,30 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
 
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.ETS
+  alias Arbor.Persistence.EventLog.Snapshotter
+
+  defmodule SnapshotStore do
+    @moduledoc false
+
+    use Agent
+
+    def start_link(opts), do: Agent.start_link(fn -> %{} end, name: Keyword.fetch!(opts, :name))
+
+    def put(key, value, opts) do
+      Agent.update(Keyword.fetch!(opts, :name), &Map.put(&1, key, value))
+    end
+
+    def get(key, opts) do
+      case Agent.get(Keyword.fetch!(opts, :name), &Map.fetch(&1, key)) do
+        {:ok, value} -> {:ok, value}
+        :error -> {:error, :not_found}
+      end
+    end
+
+    def delete(key, opts) do
+      Agent.update(Keyword.fetch!(opts, :name), &Map.delete(&1, key))
+    end
+  end
 
   defmodule RestoreStore do
     @moduledoc false
@@ -680,11 +704,78 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
 
       assert {:ok, []} = ETS.read_stream("trimmed-id", name: name)
 
-      assert {:error, {:append_indeterminate, _operation}} =
+      assert {:ok, [%Event{event_number: 1, global_position: 1}]} =
                ETS.append("trimmed-id", event, name: name)
 
       assert {:ok, 1} = ETS.stream_version("trimmed-id", name: name)
       assert {:ok, []} = ETS.read_stream("trimmed-id", name: name)
+    end
+
+    test "security regression: snapshot recovery preserves trimmed identity tombstones" do
+      suffix = System.unique_integer([:positive])
+      name = :"el_trim_snapshot_#{suffix}"
+      store_name = :"el_trim_snapshot_store_#{suffix}"
+      snapshotter_name = :"el_trim_snapshotter_#{suffix}"
+      namespace = "trimmed_identity_#{suffix}"
+
+      start_supervised!({SnapshotStore, name: store_name}, id: store_name)
+
+      start_supervised!(
+        {ETS, name: name, max_age_ms: 60_000, trim_interval_ms: :disabled},
+        id: name
+      )
+
+      start_supervised!(
+        {Snapshotter,
+         name: snapshotter_name,
+         event_log_name: name,
+         store: SnapshotStore,
+         store_opts: [name: store_name],
+         namespace: namespace,
+         interval_ms: 60_000},
+        id: snapshotter_name
+      )
+
+      old = DateTime.utc_now() |> DateTime.add(-2 * 60 * 60, :second)
+
+      event =
+        Event.new("snapshot-trimmed-id", "old_event", %{value: 1},
+          id: "evt_snapshot_trimmed_identity",
+          timestamp: old
+        )
+
+      assert {:ok, [%Event{event_number: 1, global_position: 1}]} =
+               ETS.append("snapshot-trimmed-id", event, name: name)
+
+      send(Process.whereis(name), :trim_old_events)
+      _ = :sys.get_state(name)
+      assert {:ok, []} = ETS.read_stream("snapshot-trimmed-id", name: name)
+      assert :ok = Snapshotter.snapshot_now(snapshotter_name)
+
+      stop_supervised(snapshotter_name)
+      stop_supervised(name)
+
+      start_supervised!(
+        {ETS,
+         name: name,
+         max_age_ms: 60_000,
+         trim_interval_ms: :disabled,
+         snapshot_store: SnapshotStore,
+         snapshot_store_opts: [name: store_name],
+         snapshot_namespace: namespace},
+        id: name
+      )
+
+      assert {:ok, [%Event{event_number: 1, global_position: 1}]} =
+               ETS.append("snapshot-trimmed-id", event, name: name)
+
+      conflicting = %Event{event | data: %{value: 2}}
+
+      assert {:error, :event_identity_conflict} =
+               ETS.append("snapshot-trimmed-id", conflicting, name: name)
+
+      assert {:ok, 1} = ETS.stream_version("snapshot-trimmed-id", name: name)
+      assert {:ok, []} = ETS.read_stream("snapshot-trimmed-id", name: name)
     end
 
     test "max_age_ms: :infinity disables trim" do

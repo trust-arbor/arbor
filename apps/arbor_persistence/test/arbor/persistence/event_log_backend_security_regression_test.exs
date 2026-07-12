@@ -37,6 +37,7 @@ defmodule Arbor.Persistence.EventLogBackendSecurityRegressionTest do
         )
       end)
 
+    wait_for_queued_call(Process.whereis(name))
     Process.sleep(35)
     :ok = :sys.resume(name)
 
@@ -57,6 +58,7 @@ defmodule Arbor.Persistence.EventLogBackendSecurityRegressionTest do
         )
       end)
 
+    wait_for_queued_call(Process.whereis(name))
     Process.sleep(35)
     :ok = :sys.resume(name)
 
@@ -66,4 +68,19 @@ defmodule Arbor.Persistence.EventLogBackendSecurityRegressionTest do
 
   defp unique_name(prefix),
     do: :"#{prefix}_#{System.unique_integer([:positive])}"
+
+  defp wait_for_queued_call(pid, attempts \\ 100)
+
+  defp wait_for_queued_call(_pid, 0), do: flunk("append call was not queued")
+
+  defp wait_for_queued_call(pid, attempts) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, count} when count > 0 ->
+        :ok
+
+      _not_queued ->
+        Process.sleep(1)
+        wait_for_queued_call(pid, attempts - 1)
+    end
+  end
 end

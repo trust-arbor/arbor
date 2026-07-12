@@ -48,6 +48,7 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
 
   setup do
     # Clean up events table before each test
+    Repo.delete_all(Arbor.Persistence.Schemas.EventLogOperation)
     Repo.delete_all(Arbor.Persistence.Schemas.Event)
     :ok
   end
@@ -206,6 +207,43 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
                EventLog.append("idempotent", changed, repo: Repo)
 
       assert {:ok, 1} = EventLog.stream_version("idempotent", repo: Repo)
+    end
+
+    test "zero-precision timestamps remain idempotent after utc_datetime_usec round-trip" do
+      timestamp = DateTime.from_naive!(~N[2026-07-11 12:34:56], "Etc/UTC")
+
+      event =
+        Event.new("timestamp-precision", "arbor.review.ordinary", %{value: 1},
+          id: "evt_timestamp_precision",
+          timestamp: timestamp
+        )
+
+      assert {:ok, [first]} = EventLog.append("timestamp-precision", event, repo: Repo)
+      assert first.timestamp.microsecond == {0, 6}
+
+      assert {:ok, [retried]} = EventLog.append("timestamp-precision", event, repo: Repo)
+      assert retried.id == first.id
+      assert retried.global_position == first.global_position
+
+      assert {:ok, [read]} = EventLog.read_stream("timestamp-precision", repo: Repo)
+      assert read.timestamp.microsecond == {0, 6}
+    end
+
+    test "security regression: an absent reconciliation durably aborts the operation" do
+      stream_id = "reconciled-absent-fence"
+      event = Event.new(stream_id, "arbor.review.ordinary", %{value: 1})
+      assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+
+      assert {:ok, :absent} = EventLog.reconcile_append(operation, repo: Repo)
+      assert {:error, :operation_aborted} = EventLog.append(stream_id, event, repo: Repo)
+      assert {:ok, 0} = EventLog.stream_version(stream_id, repo: Repo)
+
+      assert %Arbor.Persistence.Schemas.EventLogOperation{
+               status: "aborted",
+               operation_id: operation_id
+             } = Repo.get(Arbor.Persistence.Schemas.EventLogOperation, operation.operation_id)
+
+      assert operation_id == operation.operation_id
     end
 
     test "append, retry, and read share canonical JSON maps" do

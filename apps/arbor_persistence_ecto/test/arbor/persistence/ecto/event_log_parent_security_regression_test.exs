@@ -26,6 +26,7 @@ defmodule Arbor.Persistence.Ecto.EventLogParentSecurityRegressionTest do
     end)
 
     start_supervised!(Store)
+    migrate_event_log_schema_if_available!()
     :ok
   end
 
@@ -60,8 +61,10 @@ defmodule Arbor.Persistence.Ecto.EventLogParentSecurityRegressionTest do
   end
 
   test "security regression: concurrent EventStore appends cannot exceed global capacity" do
-    drop_position_capacity_constraints!()
-    clear_position_capacity_cache!()
+    unless Code.ensure_loaded?(Arbor.Persistence.Ecto.EventLogSchema) do
+      drop_position_capacity_constraints!()
+      clear_position_capacity_cache!()
+    end
 
     event_type = Atom.to_string(CompatibleEvent)
     seed = Event.new("parent-capacity-seed", event_type, %{value: 0})
@@ -121,8 +124,84 @@ defmodule Arbor.Persistence.Ecto.EventLogParentSecurityRegressionTest do
     assert {:error, :event_identity_conflict} = EventLog.reconcile_append(operation, [])
   end
 
+  test "security regression: reconciliation cannot prove absence while append is uncommitted" do
+    conn = EventStore.Config.lookup(Store, :conn)
+    parent = self()
+    stream_id = "parent-uncommitted-operation-fence"
+    event = Event.new(stream_id, "arbor.review.ordinary", %{value: 1})
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+
+    locker =
+      Task.async(fn ->
+        Postgrex.transaction(
+          conn,
+          fn transaction ->
+            Postgrex.query!(
+              transaction,
+              "SELECT stream_id FROM public.streams WHERE stream_id = 0 FOR UPDATE",
+              []
+            )
+
+            send(parent, :parent_global_row_locked)
+
+            receive do
+              :release_parent_global_row -> :ok
+            after
+              3_000 -> raise "global row lock release timed out"
+            end
+          end,
+          timeout: 4_000
+        )
+      end)
+
+    assert_receive :parent_global_row_locked, 1_000
+
+    append_task =
+      Task.async(fn -> EventLog.append(stream_id, event, append_timeout_ms: 2_000) end)
+
+    wait_for_blocked_append!(conn)
+
+    reconciliation = EventLog.reconcile_append(operation, append_timeout_ms: 75)
+    refute reconciliation == {:ok, :absent}
+    assert match?({:error, {:append_indeterminate, ^operation}}, reconciliation)
+
+    send(locker.pid, :release_parent_global_row)
+    assert {:ok, :ok} = Task.await(locker, 1_000)
+    assert {:ok, [%Event{id: committed_id}]} = Task.await(append_task, 2_000)
+
+    assert {:ok, {:committed, [%Event{id: ^committed_id}]}} =
+             EventLog.reconcile_append(operation, append_timeout_ms: 1_000)
+  end
+
+  test "security regression: append runtime never repairs missing schema constraints" do
+    conn = EventStore.Config.lookup(Store, :conn)
+
+    Postgrex.query!(
+      conn,
+      "ALTER TABLE public.streams DROP CONSTRAINT arbor_eventlog_stream_position_capacity"
+    )
+
+    on_exit(fn -> restore_stream_capacity_constraint!(conn) end)
+
+    event = Event.new("parent-runtime-ddl-forbidden", "arbor.review.ordinary", %{value: 1})
+
+    assert {:error,
+            {:event_log_schema_unavailable,
+             {:constraint_missing_or_invalid, "arbor_eventlog_stream_position_capacity"}}} =
+             EventLog.append("parent-runtime-ddl-forbidden", event)
+
+    refute constraint_exists?(conn, "arbor_eventlog_stream_position_capacity")
+    assert {:ok, 0} = EventLog.stream_version("parent-runtime-ddl-forbidden")
+  end
+
   defp clean_event_store! do
     conn = EventStore.Config.lookup(Store, :conn)
+
+    if Postgrex.query!(conn, "SELECT to_regclass('public.arbor_event_log_operations')").rows != [
+         [nil]
+       ] do
+      Postgrex.query!(conn, "TRUNCATE TABLE public.arbor_event_log_operations")
+    end
 
     Postgrex.query!(
       conn,
@@ -145,6 +224,70 @@ defmodule Arbor.Persistence.Ecto.EventLogParentSecurityRegressionTest do
       [],
       timeout: 10_000
     )
+  end
+
+  defp migrate_event_log_schema_if_available! do
+    module = Arbor.Persistence.Ecto.EventLogSchema
+
+    if Code.ensure_loaded?(module) do
+      conn = EventStore.Config.lookup(Store, :conn)
+      schema = EventStore.Config.lookup(Store, :schema)
+      :ok = apply(module, :migrate!, [conn, schema])
+    end
+  end
+
+  defp wait_for_blocked_append!(conn, attempts \\ 100)
+
+  defp wait_for_blocked_append!(_conn, 0), do: flunk("append did not block on the global row")
+
+  defp wait_for_blocked_append!(conn, attempts) do
+    result =
+      Postgrex.query!(
+        conn,
+        """
+        SELECT EXISTS (
+          SELECT 1
+          FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND state = 'active'
+            AND wait_event_type = 'Lock'
+            AND (
+              query LIKE '%new_events_indexes%'
+              OR query LIKE '%WHERE stream_id = 0%FOR UPDATE%'
+            )
+        )
+        """
+      )
+
+    case result.rows do
+      [[true]] ->
+        :ok
+
+      [[false]] ->
+        Process.sleep(10)
+        wait_for_blocked_append!(conn, attempts - 1)
+    end
+  end
+
+  defp constraint_exists?(conn, name) do
+    Postgrex.query!(
+      conn,
+      "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = $1)",
+      [name]
+    ).rows == [[true]]
+  end
+
+  defp restore_stream_capacity_constraint!(conn) do
+    unless constraint_exists?(conn, "arbor_eventlog_stream_position_capacity") do
+      Postgrex.query!(
+        conn,
+        """
+        ALTER TABLE public.streams
+        ADD CONSTRAINT arbor_eventlog_stream_position_capacity
+        CHECK (stream_id = 0 OR (stream_version >= 0 AND stream_version <= 2147483647))
+        """
+      )
+    end
   end
 
   defp drop_position_capacity_constraints! do

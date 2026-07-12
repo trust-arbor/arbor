@@ -301,7 +301,8 @@ defmodule Arbor.Persistence.EventLog.Agent do
   end
 
   defp safe_get_and_update(name, deadline_mono, operation, fun) do
-    with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
+    with true <- is_pid(Process.whereis(name)),
+         {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
       reply =
         Agent.get_and_update(
           name,
@@ -314,15 +315,13 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
       EventLog.accept_completion(reply, operation, deadline_mono)
     else
+      false -> {:error, :backend_unavailable}
       {:error, :operation_timeout} -> EventLog.indeterminate(operation)
     end
   rescue
-    _error -> {:error, :backend_unavailable}
+    _error -> EventLog.indeterminate(operation)
   catch
-    :exit, reason ->
-      if exit_reason_contains?(reason, :timeout),
-        do: EventLog.indeterminate(operation),
-        else: {:error, :backend_unavailable}
+    :exit, _reason -> EventLog.indeterminate(operation)
   end
 
   defp reconcile_from_agent(name, operation, deadline_mono) do
@@ -368,18 +367,4 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   defp run_candidate_hook(%{append_candidate_hook: hook}) when is_function(hook, 0), do: hook.()
   defp run_candidate_hook(_state), do: :ok
-
-  defp exit_reason_contains?(reason, expected) when reason == expected, do: true
-
-  defp exit_reason_contains?(reason, expected) when is_tuple(reason) do
-    reason
-    |> Tuple.to_list()
-    |> Enum.any?(&exit_reason_contains?(&1, expected))
-  end
-
-  defp exit_reason_contains?(reason, expected) when is_list(reason) do
-    Enum.any?(reason, &exit_reason_contains?(&1, expected))
-  end
-
-  defp exit_reason_contains?(_reason, _expected), do: false
 end

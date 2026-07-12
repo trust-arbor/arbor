@@ -54,6 +54,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   alias Arbor.Persistence.{Event, EventLog}
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Event, as: EventSchema
+  alias Arbor.Persistence.Schemas.EventLogOperation, as: OperationSchema
   alias Ecto.{Adapter, Adapters.SQL}
 
   require Logger
@@ -91,6 +92,8 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   @sqlite_busy_slice_ms 5
   @sqlite_pragma_timeout_ms 25
   @global_append_lock_sql "SELECT pg_try_advisory_xact_lock(hashtext('arbor.persistence.event_log.global_append'))"
+  @operation_append_lock_sql "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 1))"
+  @operation_reconcile_lock_sql "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))"
   @append_repo_callbacks [transaction: 1, rollback: 1, one: 1, insert!: 1]
 
   def append(stream_id, events, opts \\ []) do
@@ -134,24 +137,28 @@ defmodule Arbor.Persistence.EventLog.Ecto do
          opts,
          append_deadline_mono
        ) do
-    case reconcile_operation(repo, operation, append_deadline_mono) do
-      {:ok, {:committed, persisted}} ->
-        {:ok, persisted}
-
-      {:ok, :absent} ->
-        do_append(
-          stream_id,
-          events,
-          preconditions,
-          operation,
-          opts,
-          1,
-          append_deadline_mono,
-          0
-        )
-
-      {:error, _reason} = error ->
-        error
+    if database_repo?(repo) do
+      do_append(
+        stream_id,
+        events,
+        preconditions,
+        operation,
+        opts,
+        1,
+        append_deadline_mono,
+        0
+      )
+    else
+      do_append(
+        stream_id,
+        events,
+        preconditions,
+        operation,
+        opts,
+        1,
+        append_deadline_mono,
+        0
+      )
     end
   end
 
@@ -262,50 +269,107 @@ defmodule Arbor.Persistence.EventLog.Ecto do
          phase_key,
          deadline_mono
        ) do
+    case acquire_operation_append_lock(repo, operation.operation_id, deadline_mono) do
+      :ok -> :ok
+      {:error, reason} -> repo.rollback(reason)
+    end
+
     case acquire_global_append_lock(repo, deadline_mono) do
       :ok -> :ok
       {:error, reason} -> repo.rollback(reason)
     end
 
+    operation_status =
+      if database_repo?(repo),
+        do: operation_state(repo, operation, deadline_mono),
+        else: :absent
+
+    case operation_status do
+      {:committed, persisted} ->
+        persisted
+
+      {:aborted, reason} ->
+        {:fenced, {:aborted, reason}}
+
+      :conflict ->
+        {:fenced, :conflict}
+
+      :absent ->
+        append_new_operation(
+          repo,
+          stream_id,
+          events,
+          preconditions,
+          operation,
+          phase_key,
+          deadline_mono
+        )
+    end
+  end
+
+  defp append_new_operation(
+         repo,
+         stream_id,
+         events,
+         preconditions,
+         operation,
+         phase_key,
+         deadline_mono
+       ) do
     current_version = get_current_version(repo, stream_id, deadline_mono)
     global_position = get_max_global_position(repo, deadline_mono)
 
-    enforce_expected_version(repo, preconditions.expected_version, current_version)
-    enforce_fresh_head(repo, stream_id, preconditions.max_current_age_ms, deadline_mono)
+    with :ok <- enforce_expected_version(preconditions.expected_version, current_version),
+         :ok <-
+           enforce_fresh_head(
+             repo,
+             stream_id,
+             preconditions.max_current_age_ms,
+             deadline_mono
+           ),
+         :ok <-
+           EventLog.ensure_position_capacity(current_version, global_position, length(events)) do
+      persisted =
+        persist_events(
+          repo,
+          stream_id,
+          events,
+          operation,
+          current_version,
+          global_position,
+          phase_key,
+          deadline_mono
+        )
 
-    case EventLog.ensure_position_capacity(current_version, global_position, length(events)) do
-      :ok -> :ok
-      {:error, reason} -> repo.rollback(reason)
+      maybe_insert_operation_fence!(repo, operation, "committed", nil, deadline_mono)
+      ensure_before_deadline(repo, deadline_mono)
+      persisted
+    else
+      {:error, reason} ->
+        maybe_insert_operation_fence!(
+          repo,
+          operation,
+          "aborted",
+          Atom.to_string(reason),
+          deadline_mono
+        )
+
+        {:fenced_error, reason}
     end
-
-    persisted =
-      persist_events(
-        repo,
-        stream_id,
-        events,
-        operation,
-        current_version,
-        global_position,
-        phase_key,
-        deadline_mono
-      )
-
-    ensure_before_deadline(repo, deadline_mono)
-    persisted
   end
 
-  defp enforce_expected_version(_repo, nil, _current_version), do: :ok
+  defp enforce_expected_version(nil, _current_version), do: :ok
 
-  defp enforce_expected_version(repo, expected_version, current_version) do
+  defp enforce_expected_version(expected_version, current_version) do
     if expected_version == current_version,
       do: :ok,
-      else: repo.rollback(:version_conflict)
+      else: {:error, :version_conflict}
   end
 
   defp enforce_fresh_head(repo, stream_id, max_current_age_ms, deadline_mono) do
     if head_fresh?(repo, stream_id, max_current_age_ms, deadline_mono),
       do: :ok,
-      else: repo.rollback(:deadline_exceeded)
+      else: {:error, :deadline_exceeded}
   end
 
   defp persist_events(
@@ -366,6 +430,14 @@ defmodule Arbor.Persistence.EventLog.Ecto do
       else: {:error, :database_busy}
   end
 
+  defp handle_append_result({:ok, {:fenced, {:aborted, reason}}}, _context),
+    do: {:error, aborted_append_reason(reason)}
+
+  defp handle_append_result({:ok, {:fenced, :conflict}}, _context),
+    do: {:error, :event_identity_conflict}
+
+  defp handle_append_result({:ok, {:fenced_error, reason}}, _context), do: {:error, reason}
+
   defp handle_append_result({:ok, events}, _context), do: {:ok, events}
 
   defp handle_append_result({:error, reason}, context) do
@@ -398,7 +470,14 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   end
 
   defp handle_constraint_conflict(error, context, stacktrace) do
-    case reconcile_operation(context_repo(context), context.operation, context.deadline_mono) do
+    repo = context_repo(context)
+
+    reconciliation =
+      if database_repo?(repo),
+        do: lookup_operation(repo, context.operation, context.deadline_mono),
+        else: {:ok, :absent}
+
+    case reconciliation do
       {:ok, {:committed, persisted}} ->
         {:ok, persisted}
 
@@ -828,6 +907,183 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   # Private Helpers
   # ===========================================================================
 
+  defp acquire_operation_append_lock(repo, operation_id, deadline_mono) do
+    if postgres_repo?(repo) do
+      case repo.query(
+             @operation_append_lock_sql,
+             [operation_id],
+             deadline_query_opts(repo, deadline_mono)
+           ) do
+        {:ok, %{rows: [[true]]}} -> :ok
+        {:ok, %{rows: [[false]]}} -> {:error, :append_lock_busy}
+        {:error, error} -> raise error
+      end
+    else
+      :ok
+    end
+  end
+
+  defp acquire_operation_reconcile_lock(repo, operation_id, deadline_mono) do
+    if postgres_repo?(repo) do
+      case repo.query(
+             @operation_reconcile_lock_sql,
+             [operation_id],
+             deadline_query_opts(repo, deadline_mono)
+           ) do
+        {:ok, %{rows: [[_lock_result]]}} -> :ok
+        {:error, error} -> raise error
+      end
+    else
+      :ok
+    end
+  end
+
+  defp operation_state(repo, operation, deadline_mono) do
+    case operation_fence(repo, operation.operation_id, deadline_mono) do
+      nil -> terminalize_existing_events(repo, operation, deadline_mono)
+      fence -> classify_operation_fence(repo, fence, operation, deadline_mono)
+    end
+  end
+
+  defp terminalize_existing_events(repo, operation, deadline_mono) do
+    case reconcile_event_rows(repo, operation, deadline_mono) do
+      {:ok, {:committed, events}} ->
+        insert_operation_fence!(repo, operation, "committed", nil, deadline_mono)
+        {:committed, events}
+
+      {:ok, :absent} ->
+        :absent
+
+      {:error, _conflict_or_partial} ->
+        insert_operation_fence!(
+          repo,
+          operation,
+          "conflict",
+          "event_identity_conflict",
+          deadline_mono
+        )
+
+        :conflict
+    end
+  end
+
+  defp classify_operation_fence(repo, fence, operation, deadline_mono) do
+    if operation_fence_matches?(fence, operation) do
+      case fence.status do
+        "committed" ->
+          case reconcile_event_rows(repo, operation, deadline_mono) do
+            {:ok, {:committed, events}} -> {:committed, events}
+            _missing_or_corrupt_commit -> :conflict
+          end
+
+        "aborted" ->
+          {:aborted, fence.reason}
+
+        "conflict" ->
+          :conflict
+
+        _invalid_status ->
+          :conflict
+      end
+    else
+      :conflict
+    end
+  end
+
+  defp operation_fence(repo, operation_id, deadline_mono) do
+    query =
+      from(operation in OperationSchema,
+        where: operation.operation_id == ^operation_id,
+        limit: 1
+      )
+
+    repo_one(query, repo, deadline_mono)
+  end
+
+  defp operation_fence_matches?(%OperationSchema{} = fence, operation) do
+    fence.stream_id == operation.stream_id and fence.identity == operation_identity(operation)
+  end
+
+  defp operation_identity(operation) do
+    %{
+      "event_ids" => operation.event_ids,
+      "fingerprints" => operation.fingerprints
+    }
+  end
+
+  defp insert_operation_fence!(repo, operation, status, reason, deadline_mono) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    attrs = %{
+      operation_id: operation.operation_id,
+      stream_id: operation.stream_id,
+      identity: operation_identity(operation),
+      status: status,
+      reason: reason,
+      inserted_at: now,
+      updated_at: now
+    }
+
+    opts =
+      [on_conflict: :nothing, conflict_target: :operation_id]
+      |> Keyword.merge(deadline_query_opts(repo, deadline_mono))
+
+    case repo.insert_all(OperationSchema, [attrs], opts) do
+      {1, _rows} -> :ok
+      {0, _rows} -> verify_existing_operation_fence!(repo, operation, status, deadline_mono)
+    end
+  end
+
+  defp maybe_insert_operation_fence!(repo, operation, status, reason, deadline_mono) do
+    if database_repo?(repo),
+      do: insert_operation_fence!(repo, operation, status, reason, deadline_mono),
+      else: :ok
+  end
+
+  defp aborted_append_reason("version_conflict"), do: :version_conflict
+  defp aborted_append_reason("deadline_exceeded"), do: :deadline_exceeded
+  defp aborted_append_reason("stream_position_exhausted"), do: :stream_position_exhausted
+  defp aborted_append_reason("global_position_exhausted"), do: :global_position_exhausted
+  defp aborted_append_reason(_reason), do: :operation_aborted
+
+  defp verify_existing_operation_fence!(repo, operation, status, deadline_mono) do
+    case operation_fence(repo, operation.operation_id, deadline_mono) do
+      %OperationSchema{} = fence ->
+        unless operation_fence_matches?(fence, operation) and fence.status == status do
+          repo.rollback(:event_identity_conflict)
+        end
+
+        :ok
+
+      nil ->
+        repo.rollback(:operation_fence_unavailable)
+    end
+  end
+
+  defp reconcile_event_rows(repo, operation, deadline_mono) do
+    query =
+      from(event in EventSchema,
+        where: event.id in ^operation.event_ids
+      )
+
+    query
+    |> repo_all(repo, deadline_mono)
+    |> Enum.map(&EventSchema.to_event/1)
+    |> then(&EventLog.reconcile_events(operation, &1))
+  end
+
+  defp lookup_operation(repo, operation, deadline_mono) do
+    case reconcile_event_rows(repo, operation, deadline_mono) do
+      {:ok, {:committed, persisted}} -> {:ok, {:committed, persisted}}
+      {:ok, :absent} -> {:ok, :absent}
+      {:error, _reason} = error -> error
+    end
+  rescue
+    _error -> EventLog.indeterminate(operation)
+  catch
+    :exit, _reason -> EventLog.indeterminate(operation)
+  end
+
   defp acquire_global_append_lock(repo, deadline_mono) do
     if postgres_repo?(repo) do
       case repo.query(@global_append_lock_sql, [], deadline_query_opts(repo, deadline_mono)) do
@@ -1201,15 +1457,11 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   defp reconcile_operation(repo, %AppendOperation{} = operation, deadline_mono) do
     if database_repo?(repo) do
-      query =
-        from(e in EventSchema,
-          where: e.id in ^operation.event_ids
-        )
-
-      query
-      |> repo_all(repo, deadline_mono)
-      |> Enum.map(&EventSchema.to_event/1)
-      |> then(&EventLog.reconcile_events(operation, &1))
+      transaction(repo, deadline_mono, fn ->
+        :ok = acquire_operation_reconcile_lock(repo, operation.operation_id, deadline_mono)
+        reconcile_and_terminalize(repo, operation, deadline_mono)
+      end)
+      |> handle_reconcile_transaction(operation)
     else
       {:ok, :absent}
     end
@@ -1218,6 +1470,53 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   catch
     :exit, _reason -> EventLog.indeterminate(operation)
   end
+
+  defp reconcile_and_terminalize(repo, operation, deadline_mono) do
+    case operation_fence(repo, operation.operation_id, deadline_mono) do
+      %OperationSchema{} = fence ->
+        case classify_operation_fence(repo, fence, operation, deadline_mono) do
+          {:committed, events} -> {:ok, {:committed, events}}
+          {:aborted, _reason} -> {:ok, :absent}
+          :conflict -> {:error, :event_identity_conflict}
+        end
+
+      nil ->
+        case reconcile_event_rows(repo, operation, deadline_mono) do
+          {:ok, {:committed, events}} ->
+            insert_operation_fence!(repo, operation, "committed", nil, deadline_mono)
+            {:ok, {:committed, events}}
+
+          {:ok, :absent} ->
+            insert_operation_fence!(
+              repo,
+              operation,
+              "aborted",
+              "reconciled_absent",
+              deadline_mono
+            )
+
+            {:ok, :absent}
+
+          {:error, _conflict_or_partial} ->
+            insert_operation_fence!(
+              repo,
+              operation,
+              "conflict",
+              "event_identity_conflict",
+              deadline_mono
+            )
+
+            {:error, :event_identity_conflict}
+        end
+    end
+  end
+
+  defp handle_reconcile_transaction({:ok, result}, _operation), do: result
+
+  defp handle_reconcile_transaction({:error, _reason}, operation),
+    do: EventLog.indeterminate(operation)
+
+  defp handle_reconcile_transaction(_other, operation), do: EventLog.indeterminate(operation)
 
   defp get_current_version(repo, stream_id) do
     get_current_version(repo, stream_id, nil)

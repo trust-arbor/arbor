@@ -47,8 +47,15 @@ defmodule Arbor.Persistence.Ecto.MixProject do
   defp aliases do
     [
       setup: ["deps.get", "event_store.setup"],
-      "event_store.setup": ["event_store.create", "event_store.init"],
-      "event_store.reset": ["event_store.drop", "event_store.setup"]
+      "event_store.setup": [
+        "event_store.create -e Arbor.Persistence.Ecto.EventStore",
+        "event_store.init -e Arbor.Persistence.Ecto.EventStore",
+        "arbor.event_log.migrate"
+      ],
+      "event_store.reset": [
+        "event_store.drop -e Arbor.Persistence.Ecto.EventStore",
+        "event_store.setup"
+      ]
     ]
   end
 end

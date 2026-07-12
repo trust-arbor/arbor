@@ -30,6 +30,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
   alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.{Event, EventLog}
 
+  defmodule IncompleteIdentityHistoryError do
+    @moduledoc false
+    defexception message: "EventLog snapshot is missing trimmed event identity history"
+  end
+
   @default_max_events 1_000_000
   @default_max_read 10_000
   @warning_threshold 0.8
@@ -254,7 +259,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
       if now >= deadline_mono do
         {{:error, :operation_timeout}, state}
       else
-        case reconcile_operation(operation, state) do
+        case reconcile_operation(operation, events, state) do
           {:ok, {:committed, persisted}} ->
             {{:ok, persisted}, state}
 
@@ -380,12 +385,15 @@ defmodule Arbor.Persistence.EventLog.ETS do
   def handle_call(:export_state, _from, state) do
     events = do_read_all(state.global_table, 0, nil)
     serialized = Enum.map(events, &serialize_event/1)
+    identity_tombstones = export_identity_tombstones(state.id_table)
 
     snapshot = %{
+      snapshot_version: 2,
       global_position: state.global_position,
       stream_versions: state.stream_versions,
       max_events: state.max_events,
-      events: serialized
+      events: serialized,
+      identity_tombstones: identity_tombstones
     }
 
     {:reply, {:ok, snapshot}, state}
@@ -582,7 +590,13 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
     id_entries =
       Enum.map(persisted, fn event ->
-        {event.id, {Map.fetch!(operation.fingerprints, event.id), event.global_position}}
+        {event.id,
+         {
+           Map.fetch!(operation.fingerprints, event.id),
+           event.stream_id,
+           event.event_number,
+           event.global_position
+         }}
       end)
 
     candidate = %{
@@ -647,21 +661,30 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   defp reconcile_operation(%AppendOperation{} = operation, state) do
+    reconcile_operation(operation, nil, state)
+  end
+
+  defp reconcile_operation(%AppendOperation{} = operation, submitted_events, state) do
+    submitted_by_id =
+      if is_list(submitted_events), do: Map.new(submitted_events, &{&1.id, &1}), else: %{}
+
     {events, conflict?, partial?} =
       Enum.reduce(operation.event_ids, {[], false, false}, fn event_id,
                                                               {events, conflict?, partial?} ->
         case :ets.lookup(state.id_table, event_id) do
-          [{^event_id, {fingerprint, global_position}}] ->
-            if fingerprint == Map.get(operation.fingerprints, event_id) do
-              case :ets.lookup(state.global_table, global_position) do
-                [{^global_position, %Event{} = event}] ->
-                  {[event | events], conflict?, partial?}
+          [{^event_id, identity}] ->
+            submitted_event = Map.get(submitted_by_id, event_id)
 
-                [] ->
-                  {events, conflict?, true}
-              end
-            else
-              {events, true, partial?}
+            case reconcile_identity_entry(
+                   identity,
+                   operation,
+                   event_id,
+                   submitted_event,
+                   state
+                 ) do
+              {:event, event} -> {[event | events], conflict?, partial?}
+              :partial -> {events, conflict?, true}
+              :conflict -> {events, true, partial?}
             end
 
           [] ->
@@ -685,12 +708,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
       {:error, :operation_timeout} -> EventLog.indeterminate(operation)
     end
   rescue
-    _error -> {:error, :backend_unavailable}
+    _error -> EventLog.indeterminate(operation)
   catch
-    :exit, reason ->
-      if exit_reason_contains?(reason, :timeout),
-        do: EventLog.indeterminate(operation),
-        else: {:error, :backend_unavailable}
+    :exit, _reason -> EventLog.indeterminate(operation)
   end
 
   defp reconcile_from_server(name, operation, deadline_mono) do
@@ -719,18 +739,100 @@ defmodule Arbor.Persistence.EventLog.ETS do
     :ok
   end
 
+  defp normalize_identity({fingerprint, stream_id, event_number, global_position})
+       when is_binary(fingerprint) and is_binary(stream_id) and is_integer(event_number) and
+              event_number > 0 and is_integer(global_position) and global_position > 0,
+       do: {:ok, fingerprint, stream_id, event_number, global_position}
+
+  defp normalize_identity({fingerprint, global_position})
+       when is_binary(fingerprint) and is_integer(global_position) and global_position > 0,
+       do: {:ok, fingerprint, nil, nil, global_position}
+
+  defp normalize_identity(_identity), do: {:error, :invalid_identity}
+
+  defp reconcile_identity_entry(identity, operation, event_id, submitted_event, state) do
+    with {:ok, fingerprint, stream_id, event_number, global_position} <-
+           normalize_identity(identity),
+         true <-
+           compatible_identity?(
+             operation,
+             event_id,
+             fingerprint,
+             stream_id,
+             submitted_event
+           ) do
+      case :ets.lookup(state.global_table, global_position) do
+        [{^global_position, %Event{} = event}] ->
+          {:event, event}
+
+        [] ->
+          rebuild_tombstoned_event(
+            submitted_event,
+            stream_id,
+            event_number,
+            global_position
+          )
+      end
+    else
+      _invalid_or_conflicting -> :conflict
+    end
+  end
+
+  defp rebuild_tombstoned_event(
+         %Event{} = submitted_event,
+         stream_id,
+         event_number,
+         global_position
+       )
+       when is_binary(stream_id) and is_integer(event_number) do
+    {:event,
+     %Event{
+       submitted_event
+       | stream_id: stream_id,
+         event_number: event_number,
+         global_position: global_position
+     }}
+  end
+
+  defp rebuild_tombstoned_event(_submitted_event, _stream_id, _event_number, _global_position),
+    do: :partial
+
+  defp compatible_identity?(operation, event_id, fingerprint, stream_id, submitted_event) do
+    stream_matches? = is_nil(stream_id) or stream_id == operation.stream_id
+    expected = Map.get(operation.fingerprints, event_id)
+
+    stream_matches? and
+      (fingerprint == expected or
+         (is_struct(submitted_event, Event) and
+            EventLog.event_fingerprint_matches?(
+              operation.stream_id,
+              submitted_event,
+              fingerprint
+            )))
+  end
+
+  defp export_identity_tombstones(id_table) do
+    id_table
+    |> :ets.tab2list()
+    |> Enum.map(fn {event_id, identity} ->
+      case normalize_identity(identity) do
+        {:ok, fingerprint, stream_id, event_number, global_position} ->
+          %{
+            "event_id" => event_id,
+            "fingerprint" => fingerprint,
+            "stream_id" => stream_id,
+            "event_number" => event_number,
+            "global_position" => global_position
+          }
+
+        {:error, :invalid_identity} ->
+          raise "invalid EventLog identity ledger entry for #{inspect(event_id)}"
+      end
+    end)
+  end
+
   defp run_candidate_hook(%{append_candidate_hook: hook}) when is_function(hook, 0), do: hook.()
   defp run_candidate_hook(_state), do: :ok
-
-  defp exit_reason_contains?(reason, expected) when reason == expected, do: true
-
-  defp exit_reason_contains?(reason, expected) when is_tuple(reason),
-    do: reason |> Tuple.to_list() |> Enum.any?(&exit_reason_contains?(&1, expected))
-
-  defp exit_reason_contains?(reason, expected) when is_list(reason),
-    do: Enum.any?(reason, &exit_reason_contains?(&1, expected))
-
-  defp exit_reason_contains?(_reason, _expected), do: false
 
   defp check_preconditions(stream_id, preconditions, now, state) do
     current_version = Map.get(state.stream_versions, stream_id, 0)
@@ -975,6 +1077,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
         state
     end
   rescue
+    error in IncompleteIdentityHistoryError ->
+      reraise(error, __STACKTRACE__)
+
     e ->
       Logger.warning("EventLog.ETS: snapshot restore failed: #{inspect(e)}, starting fresh")
       state
@@ -1010,6 +1115,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
     events = Map.get(snapshot, "events", [])
     global_position = Map.get(snapshot, "global_position", 0)
     stream_versions = restore_stream_versions(Map.get(snapshot, "stream_versions", %{}))
+    identity_tombstones = Map.get(snapshot, "identity_tombstones")
+
+    ensure_snapshot_identity_history!(events, global_position, identity_tombstones)
 
     Enum.each(events, fn event_map ->
       event = deserialize_event(event_map)
@@ -1021,11 +1129,21 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
       :ets.insert(state.global_table, {event.global_position, event})
 
-      :ets.insert(
-        state.id_table,
-        {event.id, {EventLog.event_fingerprint(event.stream_id, event), event.global_position}}
-      )
+      if is_nil(identity_tombstones) do
+        :ets.insert(
+          state.id_table,
+          {event.id,
+           {
+             EventLog.event_fingerprint(event.stream_id, event),
+             event.stream_id,
+             event.event_number,
+             event.global_position
+           }}
+        )
+      end
     end)
+
+    restore_identity_tombstones!(state.id_table, identity_tombstones)
 
     event_count = length(events)
 
@@ -1047,5 +1165,104 @@ defmodule Arbor.Persistence.EventLog.ETS do
   # Stream version keys may be atoms or strings depending on serialization
   defp restore_stream_versions(versions) when is_map(versions) do
     Map.new(versions, fn {k, v} -> {k, v} end)
+  end
+
+  defp ensure_snapshot_identity_history!(events, global_position, nil)
+       when is_integer(global_position) and global_position > length(events),
+       do: raise(IncompleteIdentityHistoryError)
+
+  defp ensure_snapshot_identity_history!(_events, _global_position, nil), do: :ok
+
+  defp ensure_snapshot_identity_history!(events, global_position, tombstones)
+       when is_list(tombstones) and is_integer(global_position) and global_position >= 0 do
+    if complete_identity_history?(events, global_position, tombstones),
+      do: :ok,
+      else: raise(IncompleteIdentityHistoryError)
+  end
+
+  defp ensure_snapshot_identity_history!(_events, _global_position, _invalid),
+    do: raise(IncompleteIdentityHistoryError)
+
+  defp restore_identity_tombstones!(_id_table, nil), do: :ok
+
+  defp restore_identity_tombstones!(id_table, tombstones) do
+    Enum.each(tombstones, fn tombstone ->
+      with %{
+             "event_id" => event_id,
+             "fingerprint" => fingerprint,
+             "stream_id" => stream_id,
+             "event_number" => event_number,
+             "global_position" => global_position
+           } <- tombstone,
+           true <- is_binary(event_id),
+           {:ok, _fingerprint, _stream_id, _event_number, _global_position} <-
+             normalize_identity({fingerprint, stream_id, event_number, global_position}) do
+        :ets.insert(
+          id_table,
+          {event_id, {fingerprint, stream_id, event_number, global_position}}
+        )
+      else
+        _invalid -> raise IncompleteIdentityHistoryError
+      end
+    end)
+  end
+
+  defp complete_identity_history?(events, global_position, tombstones) do
+    {count, event_ids, positions, identities} =
+      Enum.reduce(tombstones, {0, MapSet.new(), MapSet.new(), %{}}, fn tombstone,
+                                                                       {count, ids, positions,
+                                                                        identities} ->
+        %{
+          "event_id" => event_id,
+          "fingerprint" => fingerprint,
+          "stream_id" => stream_id,
+          "event_number" => event_number,
+          "global_position" => position
+        } = tombstone
+
+        true = snapshot_identity_string?(event_id)
+        true = is_binary(fingerprint) and byte_size(fingerprint) == 64
+        true = snapshot_identity_string?(stream_id)
+        true = is_integer(event_number) and event_number > 0
+        true = is_integer(position) and position > 0 and position <= global_position
+        false = MapSet.member?(ids, event_id)
+        false = MapSet.member?(positions, position)
+
+        identity = {fingerprint, stream_id, event_number, position}
+
+        {
+          count + 1,
+          MapSet.put(ids, event_id),
+          MapSet.put(positions, position),
+          Map.put(identities, event_id, identity)
+        }
+      end)
+
+    count == global_position and MapSet.size(event_ids) == global_position and
+      MapSet.size(positions) == global_position and
+      Enum.all?(events, &active_snapshot_identity_matches?(&1, identities))
+  rescue
+    _invalid -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp active_snapshot_identity_matches?(event_map, identities) do
+    event = deserialize_event(event_map)
+
+    case Map.get(identities, event.id) do
+      {fingerprint, stream_id, event_number, global_position} ->
+        stream_id == event.stream_id and event_number == event.event_number and
+          global_position == event.global_position and
+          EventLog.event_fingerprint_matches?(stream_id, event, fingerprint)
+
+      nil ->
+        false
+    end
+  end
+
+  defp snapshot_identity_string?(value) do
+    is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 255 and
+      String.valid?(value)
   end
 end
