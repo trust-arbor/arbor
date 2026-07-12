@@ -23,7 +23,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPromptFenceSecurityRegressionTes
         nil ->
           system = Enum.find(request.messages, &(&1.role == :system))
           user = Enum.find(request.messages, &(&1.role == :user))
-          send(self(), {:initial_fences, system.content, user.content})
+          test_pid = Application.fetch_env!(:arbor_orchestrator, :prompt_fence_test_pid)
+          send(test_pid, {:initial_fences, system.content, user.content})
 
           {:ok,
            %Response{
@@ -31,14 +32,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPromptFenceSecurityRegressionTes
              finish_reason: :tool_calls,
              content_parts: [
                ContentPart.tool_call("fence_call", "tool_help", %{
-                 "outcome" => Process.get(:fence_tool_outcome, "ok")
+                 "outcome" =>
+                   Application.get_env(:arbor_orchestrator, :prompt_fence_tool_outcome, "ok")
                })
              ],
              raw: %{}
            }}
 
         tool_result ->
-          send(self(), {:tool_fence, tool_result.content})
+          test_pid = Application.fetch_env!(:arbor_orchestrator, :prompt_fence_test_pid)
+          send(test_pid, {:tool_fence, tool_result.content})
           {:ok, %Response{text: "review complete", finish_reason: :stop, raw: %{}}}
       end
     end
@@ -53,6 +56,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPromptFenceSecurityRegressionTes
   end
 
   setup do
+    previous_test_pid = Application.get_env(:arbor_orchestrator, :prompt_fence_test_pid)
+    previous_outcome = Application.get_env(:arbor_orchestrator, :prompt_fence_tool_outcome)
+    Application.put_env(:arbor_orchestrator, :prompt_fence_test_pid, self())
+
+    on_exit(fn ->
+      restore_env(:prompt_fence_test_pid, previous_test_pid)
+      restore_env(:prompt_fence_tool_outcome, previous_outcome)
+    end)
+
     unless Process.whereis(ActionRegistry), do: start_supervised!({ActionRegistry, []})
 
     case ActionRegistry.register_action(Arbor.Actions.Tool.Help) do
@@ -65,7 +77,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPromptFenceSecurityRegressionTes
 
   test "security regression: review prompt and tool results share the system nonce" do
     for outcome <- ~w(ok error) do
-      Process.put(:fence_tool_outcome, outcome)
+      Application.put_env(:arbor_orchestrator, :prompt_fence_tool_outcome, outcome)
 
       node =
         %Node{
@@ -125,4 +137,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPromptFenceSecurityRegressionTes
       refute tool_content =~ ~r/<data_(?!#{nonce})[0-9a-f]{16}>/
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_orchestrator, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_orchestrator, key, value)
 end

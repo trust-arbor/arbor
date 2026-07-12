@@ -131,10 +131,10 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
       persisted = Enum.find(events, &(&1.type == "stage_completed"))
 
       assert persisted, "the enriched stage_completed event was persisted + queryable"
-      thing = persisted.data[:context_updates]["session.thing"]
+      thing = persisted.data["context_updates"]["session.thing"]
       assert is_map(thing), "the struct was sanitized to a plain map for durable audit"
-      assert thing[:note] == "audit me"
-      assert persisted.data[:notes] == "completed"
+      assert thing["note"] == "audit me"
+      assert persisted.data["notes"] == "completed"
     end
   end
 
