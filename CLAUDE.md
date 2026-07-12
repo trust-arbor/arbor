@@ -291,3 +291,26 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 **Trust-policy rules match by URI PREFIX, not glob — never write `/**` in a trust rule.** A bare `arbor://fs/read` already covers the whole subtree (`ApprovalGuard` longest-prefix match); a literal `arbor://fs/read/**` is a prefix of nothing real, so the rule *silently never fires* and the request falls to the baseline. `/**` is correct for **capabilities** (path scope) but dead in **trust rules** — the two forms look identical, which is the footgun. Failure mode is config-dependent: fail-**closed** under a `block` baseline (the Test Agent selected `file_read` but every read returned `{:error, :policy_denied}` despite the trust profile literally showing `"arbor://fs/read/**" => :allow`; 2026-07-06), but fail-**OPEN** for a `/** block` rule under an `allow` baseline. Diagnose by reproducing the exact `Security.authorize(agent, "arbor://fs/read", :execute, file_path: …)` the action makes, and inspect the profile with `Arbor.Trust.Store.get_profile/1`. (Same day, unrelated: `./bin/mix` served a **stale beam** for an edited *mix task* until an explicit `mix compile` — a first "Unknown provider"/old-behavior right after editing a `Mix.Tasks.*` module is un-recompiled code, not a wrong edit; force the compile before concluding.)
 
 **Search every direct wire-shape match when centralizing a response contract.** Fixing the primary adapter does not cover eval-only or provider-specific HTTP paths that decode the same response independently. Search for structural patterns such as `%{"data" => ...}` and route every caller through one lower-level facade helper. For embeddings, assert indexed ordering before cosine or another symmetric reduction; a reversed pair produces the same cosine score and can hide a silent A/B swap (found 2026-07-11 in the direct embedding-similarity eval HTTP path).
+
+**A timed-out `GenServer.call/3` does not cancel the queued call.** Security-sensitive
+acquisition/finalization protocols need request IDs plus ordered acknowledge/cancel
+messages whose late processing cannot commit after the caller has returned an error.
+Testing only a delayed initial reply misses the equally dangerous delayed-finalize race.
+
+**Opaque authority must stay outside every action-visible context, including nested option maps.**
+Removing a top-level `:signing_authority` key is insufficient if `nested_engine_opts` is
+passed through `Arbor.Actions.authorize_and_execute/4`. Keep the bearer token at the
+orchestrator boundary, project only a fresh exact-resource `SignedRequest` into the
+action, and retain a process-local resign path for post-approval retries.
+
+**A cleanup lease needs stable identity, restart semantics, and retryable effects.** A PID-only
+temporary lease can die while its owner remains alive, after which treating `:noproc` as
+success permanently detaches live authority from revocation. Address leases by a stable
+registry key, restart them with recoverable cleanup state, and stop only after authority,
+capability, trust, and identity cleanup has succeeded or reached an explicit terminal policy.
+
+**When a supervised child gains a prerequisite, update every manual test stack in dependency order.**
+`SigningAuthorityBroker` now depends on `SigningAuthorityStateOwner`; app supervision starts
+them correctly, but Orchestrator and Agent tests that manually started only the broker failed
+far from setup with `:broker_unavailable`. Search all `start_child` helpers whenever a child
+spec gains a sibling prerequisite, and keep isolated test files independent of suite order.
