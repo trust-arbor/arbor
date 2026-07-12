@@ -123,6 +123,32 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
     assert MapSet.disjoint?(all_keys(result), MapSet.new(authority_fields))
   end
 
+  test "public provenance verification uses packaged compilation and rejects changed DOT bytes" do
+    Application.delete_env(:arbor_orchestrator, :coding_pipeline_path)
+    Application.delete_env(:arbor_orchestrator, :coding_plan_compiler)
+
+    assert {:ok, compilation} = Arbor.Orchestrator.compile_coding_plan(valid_attrs())
+
+    assert {:ok, identity} =
+             Arbor.Orchestrator.verify_coding_provenance(
+               compilation["plan_map"],
+               compilation["dot_source"],
+               compilation["manifest"]
+             )
+
+    assert identity == %{
+             "compiler_version" => compilation["compiler_version"],
+             "graph_hash" => compilation["graph_hash"]
+           }
+
+    assert {:error, {:invalid_coding_provenance, :archived_compilation_mismatch}} =
+             Arbor.Orchestrator.verify_coding_provenance(
+               compilation["plan_map"],
+               compilation["dot_source"] <> "\n// changed after compilation\n",
+               compilation["manifest"]
+             )
+  end
+
   test "fails closed when the configured template is unavailable", %{tmp_dir: tmp_dir} do
     missing = Path.join(tmp_dir, "missing.dot")
     Application.put_env(:arbor_orchestrator, :coding_pipeline_path, missing)

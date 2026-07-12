@@ -34,6 +34,7 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
   use Mix.Task
 
   alias Arbor.Commands.CodingBenchmark
+  alias Arbor.Commands.CodingBenchmark.Runtime
   alias Arbor.Common.SafePath
 
   @default_output "coding-benchmark-report.json"
@@ -69,7 +70,8 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
          :ok <- distinct_paths(manifest_path, output_path),
          :ok <-
            output_outside_fixtures(output_path, normalized_manifest, Path.dirname(manifest_path)),
-         benchmark_opts <- benchmark_opts(cli, runtime_opts, Path.dirname(manifest_path)),
+         {:ok, benchmark_opts} <-
+           benchmark_opts(cli, runtime_opts, Path.dirname(manifest_path)),
          {:ok, report} <- CodingBenchmark.run(manifest, benchmark_opts),
          :ok <- write_report(output_path, report) do
       {:ok, %{output_path: output_path, report: report}}
@@ -249,18 +251,39 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
         Application.get_env(:arbor_commands, :coding_benchmark_verifiers)
       end)
 
-    [
-      acp_agent: cli.acp_agent,
-      adapters: configured_adapters,
-      dry_run: cli.dry_run,
-      executor_selector: Keyword.get(runtime_opts, :executor_selector, default_selector()),
-      fixture_root: fixture_root,
-      measure: Keyword.get(runtime_opts, :measure, &default_measure/1),
-      repetitions: cli.repetitions,
-      verifiers: configured_verifiers,
-      workspace_root: Keyword.get(runtime_opts, :workspace_root, System.tmp_dir!())
-    ]
-    |> maybe_put_seed(cli.seed)
+    with {:ok, workspace_root} <- benchmark_workspace_root(runtime_opts) do
+      opts =
+        [
+          acp_agent: cli.acp_agent,
+          adapters: configured_adapters,
+          dry_run: cli.dry_run,
+          executor_selector: Keyword.get(runtime_opts, :executor_selector, default_selector()),
+          fixture_root: fixture_root,
+          measure: Keyword.get(runtime_opts, :measure, &default_measure/1),
+          repetitions: cli.repetitions,
+          verifiers: configured_verifiers,
+          workspace_root: workspace_root
+        ]
+        |> maybe_put_seed(cli.seed)
+
+      {:ok, opts}
+    end
+  end
+
+  defp benchmark_workspace_root(runtime_opts) do
+    case Keyword.fetch(runtime_opts, :workspace_root) do
+      {:ok, workspace_root} ->
+        {:ok, workspace_root}
+
+      :error ->
+        case Runtime.load() do
+          {:ok, runtime} ->
+            {:ok, runtime.workspace_root}
+
+          {:error, {:benchmark_setup_error, reason}} ->
+            task_error("benchmark_setup", inspect(reason))
+        end
+    end
   end
 
   defp default_selector do

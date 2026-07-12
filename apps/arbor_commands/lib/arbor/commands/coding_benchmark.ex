@@ -15,7 +15,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   alias Arbor.Commands.CodingBenchmark.{Adapter, LegacyAdapter, PipelineAdapter, Runtime}
   alias Arbor.Commands.CodingParity
   alias Arbor.Common.SafePath
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Orchestrator
 
   @manifest_schema "arbor.coding_benchmark.manifest.v1"
   @report_schema "arbor.coding_benchmark.report.v1"
@@ -27,15 +27,6 @@ defmodule Arbor.Commands.CodingBenchmark do
     {"coding_pipeline_path", :coding_pipeline_path},
     {"compile_manifest_path", :compile_manifest_path}
   ]
-  @compile_manifest_keys MapSet.new(~w(
-    action_catalog_digest action_names compiler_version execution_manifest
-    execution_manifest_digest graph_hash handler_types overlays plan_fingerprint plan_version
-    review_profile task_class template_version validation_profile
-  ))
-  @execution_manifest_v2_keys MapSet.new(~w(
-    actions capability_uris compiled_graph_hash egress graph_hash handlers nodes version
-  ))
-  @execution_manifest_v3_keys MapSet.put(@execution_manifest_v2_keys, "nested_graphs")
   @artifact_filenames %{
     "coding_pipeline_path" => "coding-pipeline.dot",
     "coding_plan_path" => "coding-plan.json",
@@ -99,8 +90,9 @@ defmodule Arbor.Commands.CodingBenchmark do
   `worker_ownership`.
 
   Every run requires trusted `:arbor_commands` Application configuration for
-  `:coding_benchmark_workspace_root`, `:coding_benchmark_artifact_root`, and
-  `:coding_benchmark_execution_timeout_ms`. The artifact root must be a
+  `:coding_benchmark_workspace_root`, `:coding_benchmark_artifact_root`,
+  `:coding_benchmark_execution_timeout_ms`, and
+  `:coding_benchmark_cancellation_timeout_ms`. The artifact root must be a
   distinct existing child of the workspace root. Production adapters also
   require the orchestrator repo/worktree roots to admit that workspace and its
   pipeline logs root to equal the configured benchmark artifact root.
@@ -671,6 +663,7 @@ defmodule Arbor.Commands.CodingBenchmark do
       if callback in @production_adapters do
         {:ok,
          %{
+           expected_branch: scope.branch_name,
            require_returned_worktree?: true,
            strict_provenance?: request["executor_path"] == "pipeline",
            trusted_artifact_root: scope.artifact_root,
@@ -679,6 +672,7 @@ defmodule Arbor.Commands.CodingBenchmark do
       else
         {:ok,
          %{
+           expected_branch: nil,
            require_returned_worktree?: false,
            strict_provenance?: false,
            trusted_artifact_root: scope.workdir,
@@ -696,12 +690,17 @@ defmodule Arbor.Commands.CodingBenchmark do
   defp measure_execution(runtime, executor, callback, request) do
     runtime.measure.(fn ->
       with_selector(executor, runtime.selector, fn ->
-        invoke_with_timeout(callback, request, runtime.benchmark.execution_timeout_ms)
+        invoke_with_timeout(
+          callback,
+          request,
+          runtime.benchmark.execution_timeout_ms,
+          runtime.benchmark.cancellation_timeout_ms
+        )
       end)
     end)
   end
 
-  defp invoke_with_timeout(callback, request, timeout_ms) do
+  defp invoke_with_timeout(callback, request, timeout_ms, cancellation_timeout_ms) do
     task = Task.async(fn -> safely(fn -> invoke(callback, request) end) end)
 
     case Task.yield(task, timeout_ms) do
@@ -713,7 +712,24 @@ defmodule Arbor.Commands.CodingBenchmark do
 
       nil ->
         _ = Task.shutdown(task, :brutal_kill)
-        {:timed_out, timeout_ms}
+        cancellation = cancel_with_timeout(callback, request, cancellation_timeout_ms)
+        {:timed_out, timeout_ms, cancellation}
+    end
+  end
+
+  defp cancel_with_timeout(callback, request, timeout_ms) do
+    task = Task.async(fn -> safely(fn -> invoke_cancel(callback, request) end) end)
+
+    case Task.yield(task, timeout_ms) do
+      {:ok, outcome} ->
+        cancellation_observations_from_hook(outcome)
+
+      {:exit, reason} ->
+        cancellation_hook_failed({:exit, reason})
+
+      nil ->
+        _ = Task.shutdown(task, :brutal_kill)
+        cancellation_hook_observations("cancel_hook_timeout", false, "timeout:#{timeout_ms}")
     end
   end
 
@@ -735,6 +751,14 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp invoke(callback, request) when is_function(callback, 1), do: callback.(request)
   defp invoke(module, request) when is_atom(module), do: module.run(request)
+
+  defp invoke_cancel(module, request) when is_atom(module) do
+    if function_exported?(module, :cancel, 1),
+      do: module.cancel(request),
+      else: {:error, :cancellation_unsupported}
+  end
+
+  defp invoke_cancel(_callback, _request), do: {:error, :cancellation_unsupported}
 
   defp safely(fun) do
     {:returned, fun.()}
@@ -783,7 +807,7 @@ defmodule Arbor.Commands.CodingBenchmark do
          executor,
          pair,
          _request,
-         {:timed_out, timeout_ms},
+         {:timed_out, timeout_ms, cancellation_observations},
          wall_clock_ms,
          _runtime,
          _verification
@@ -792,6 +816,7 @@ defmodule Arbor.Commands.CodingBenchmark do
       failure_row(executor, pair, "executor_timeout", "execution_timeout:#{timeout_ms}",
         artifact_failed: true,
         objective_failure: "execution_timeout:#{timeout_ms}",
+        observations: cancellation_observations,
         prepared: true,
         wall_clock_ms: wall_clock_ms
       )
@@ -840,6 +865,56 @@ defmodule Arbor.Commands.CodingBenchmark do
       executor: executor,
       projection: nil,
       row: failure_row(executor, pair, status, reason, prepared: true)
+    }
+  end
+
+  defp cancellation_observations_from_hook({:returned, :ok}) do
+    cancellation_hook_observations("cancel_hook_completed", true, nil)
+  end
+
+  defp cancellation_observations_from_hook({:returned, {:ok, _result}}) do
+    cancellation_hook_observations("cancel_hook_completed", true, nil)
+  end
+
+  defp cancellation_observations_from_hook({:returned, {:error, :cancellation_unsupported}}) do
+    cancellation_hook_observations("unsupported", false, "cancellation_unsupported")
+  end
+
+  defp cancellation_observations_from_hook({:returned, {:error, reason}}) do
+    cancellation_hook_failed(reason)
+  end
+
+  defp cancellation_observations_from_hook({:returned, other}) do
+    cancellation_hook_failed({:invalid_return, other})
+  end
+
+  defp cancellation_observations_from_hook({:raised, reason}),
+    do: cancellation_hook_failed({:raised, reason})
+
+  defp cancellation_observations_from_hook({:caught, reason}),
+    do: cancellation_hook_failed({:caught, reason})
+
+  defp cancellation_hook_failed(reason) do
+    cancellation_hook_observations("cancel_hook_failed", false, reason_string(reason))
+  end
+
+  defp cancellation_hook_observations(status, cancelled, reason) do
+    %{
+      "cancellation" => %{
+        "cancelled" => cancelled,
+        "cleanup_completed" => nil,
+        "reason" => reason,
+        "requested" => true,
+        "status" => status,
+        "worker_terminated" => nil
+      },
+      "cleanup" => %{
+        "completed" => nil,
+        "resources_cleaned" => nil,
+        "status" => "unverified",
+        "workspace_removed" => nil,
+        "workspace_retained" => nil
+      }
     }
   end
 
@@ -1075,6 +1150,32 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
+  defp observed_worktree(result, _request, %{require_returned_worktree?: true} = verification) do
+    with {:ok, path} <- result_worktree_path(result),
+         {:ok, branch} <- result_branch(result),
+         true <- branch == verification.expected_branch,
+         {:ok, expected_path} <-
+           Orchestrator.expected_coding_worktree_path(
+             verification.trusted_worktree_root,
+             branch
+           ),
+         {:ok, worktree} <-
+           exact_canonical_worktree(
+             path,
+             verification.trusted_worktree_root,
+             expected_path
+           ) do
+      {:ok, worktree}
+    else
+      :missing -> {:error, "missing_returned_worktree"}
+      {:error, "missing_returned_branch"} = error -> error
+      {:error, "invalid_returned_branch"} = error -> error
+      false -> {:error, "returned_branch_mismatch"}
+      {:error, :invalid_coding_worktree_input} -> {:error, "invalid_expected_worktree"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp observed_worktree(result, request, verification) do
     case result_worktree_path(result) do
       {:ok, path} ->
@@ -1113,6 +1214,29 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp worktree_path(_path), do: {:error, "invalid_returned_worktree"}
 
+  defp result_branch(result) do
+    case fetch_value(result, "payload", :payload, nil) do
+      payload when is_map(payload) ->
+        payload
+        |> fetch_value("branch", :branch, nil)
+        |> returned_branch()
+
+      _other ->
+        {:error, "missing_returned_branch"}
+    end
+  end
+
+  defp returned_branch(nil), do: {:error, "missing_returned_branch"}
+
+  defp returned_branch(branch) when is_binary(branch) do
+    if String.valid?(branch) and String.trim(branch) != "" and
+         not String.contains?(branch, <<0>>),
+       do: {:ok, branch},
+       else: {:error, "invalid_returned_branch"}
+  end
+
+  defp returned_branch(_branch), do: {:error, "invalid_returned_branch"}
+
   defp canonical_worktree(path, trusted_root) do
     with {:ok, root} <- SafePath.resolve_real(trusted_root),
          true <- File.dir?(root),
@@ -1124,6 +1248,20 @@ defmodule Arbor.Commands.CodingBenchmark do
       {:ok, real}
     else
       _other -> {:error, "unsafe_or_missing_returned_worktree"}
+    end
+  end
+
+  defp exact_canonical_worktree(path, trusted_root, expected_path) do
+    with {:ok, root} <- SafePath.resolve_real(trusted_root),
+         true <- File.dir?(root),
+         {:ok, ^expected_path} <- SafePath.resolve_within(expected_path, root),
+         {:ok, %{type: :directory}} <- File.lstat(expected_path),
+         {:ok, ^expected_path} <- SafePath.resolve_real(expected_path),
+         {:ok, ^expected_path} <- SafePath.resolve_within(path, root),
+         {:ok, ^expected_path} <- git_output(expected_path, ["rev-parse", "--show-toplevel"]) do
+      {:ok, expected_path}
+    else
+      _other -> {:error, "unexpected_returned_worktree"}
     end
   end
 
@@ -1260,16 +1398,13 @@ defmodule Arbor.Commands.CodingBenchmark do
          {:ok, manifest_json} <-
            read_bounded(paths["compile_manifest_path"], @max_json_artifact_bytes),
          {:ok, plan_map} <- decode_json_object(plan_json),
-         {:ok, plan} <- Plan.new(plan_map),
-         true <- Plan.to_map(plan) == plan_map,
          {:ok, manifest} <- decode_json_object(manifest_json),
-         :ok <-
-           validate_provenance_identity(
-             artifacts,
-             dot,
-             plan_map,
-             manifest
-           ) do
+         {:ok, identity} <- Orchestrator.verify_coding_provenance(plan_map, dot, manifest),
+         true <-
+           fetch_value(artifacts, "graph_hash", :graph_hash, nil) == identity["graph_hash"],
+         true <-
+           fetch_value(artifacts, "compiler_version", :compiler_version, nil) ==
+             identity["compiler_version"] do
       true
     else
       _other -> false
@@ -1347,101 +1482,6 @@ defmodule Arbor.Commands.CodingBenchmark do
       _other -> {:error, :invalid_json_object}
     end
   end
-
-  defp validate_provenance_identity(artifacts, dot, plan, manifest) do
-    descriptor_hash = fetch_value(artifacts, "graph_hash", :graph_hash, nil)
-    descriptor_version = fetch_value(artifacts, "compiler_version", :compiler_version, nil)
-    graph_hash = sha256(dot)
-
-    with true <- is_binary(descriptor_hash) and Regex.match?(@hash_pattern, descriptor_hash),
-         true <- descriptor_hash == graph_hash,
-         true <- is_binary(descriptor_version) and String.trim(descriptor_version) != "",
-         :ok <- exact_string_keys(manifest, @compile_manifest_keys),
-         true <- manifest["graph_hash"] == graph_hash,
-         true <- manifest["compiler_version"] == descriptor_version,
-         true <- nonblank_string?(manifest["template_version"]),
-         :ok <- digest_field(manifest, "plan_fingerprint"),
-         true <- manifest["plan_fingerprint"] == hash_json(plan),
-         :ok <- digest_field(manifest, "action_catalog_digest"),
-         :ok <- digest_field(manifest, "execution_manifest_digest"),
-         true <- manifest["plan_version"] == plan["version"],
-         true <- manifest["task_class"] == plan["task_class"],
-         true <- manifest["validation_profile"] == plan["validation_profile"],
-         true <- manifest["review_profile"] == plan["review_profile"],
-         true <- manifest["overlays"] == plan["overlays"],
-         :ok <- string_list(manifest["action_names"]),
-         :ok <- string_list(manifest["handler_types"]),
-         :ok <-
-           validate_execution_manifest(
-             manifest["execution_manifest"],
-             manifest["execution_manifest_digest"],
-             graph_hash
-           ) do
-      :ok
-    else
-      _other -> {:error, :provenance_identity_mismatch}
-    end
-  end
-
-  defp validate_execution_manifest(execution_manifest, expected_digest, graph_hash)
-       when is_map(execution_manifest) and not is_struct(execution_manifest) do
-    expected_keys =
-      case execution_manifest["version"] do
-        2 -> @execution_manifest_v2_keys
-        3 -> @execution_manifest_v3_keys
-        _other -> MapSet.new()
-      end
-
-    with :ok <- exact_string_keys(execution_manifest, expected_keys),
-         true <- execution_manifest["graph_hash"] == graph_hash,
-         :ok <- digest_value(execution_manifest["compiled_graph_hash"]),
-         true <- is_list(execution_manifest["actions"]),
-         true <- is_list(execution_manifest["handlers"]),
-         true <- is_list(execution_manifest["nodes"]),
-         true <- is_list(execution_manifest["capability_uris"]),
-         true <- is_list(execution_manifest["egress"]),
-         true <-
-           execution_manifest["version"] != 3 or is_list(execution_manifest["nested_graphs"]),
-         true <- hash_json(execution_manifest) == expected_digest do
-      :ok
-    else
-      _other -> {:error, :invalid_execution_manifest}
-    end
-  end
-
-  defp validate_execution_manifest(_manifest, _digest, _graph_hash),
-    do: {:error, :invalid_execution_manifest}
-
-  defp exact_string_keys(map, expected) when is_map(map) do
-    keys = Map.keys(map)
-
-    if Enum.all?(keys, &is_binary/1) and MapSet.new(keys) == expected,
-      do: :ok,
-      else: {:error, :invalid_schema_keys}
-  end
-
-  defp exact_string_keys(_map, _expected), do: {:error, :invalid_schema_keys}
-
-  defp digest_field(map, key), do: digest_value(map[key])
-
-  defp digest_value(value) when is_binary(value) do
-    if Regex.match?(@hash_pattern, value), do: :ok, else: {:error, :invalid_digest}
-  end
-
-  defp digest_value(_value), do: {:error, :invalid_digest}
-
-  defp nonblank_string?(value) do
-    is_binary(value) and String.valid?(value) and String.trim(value) != "" and
-      not String.contains?(value, <<0>>)
-  end
-
-  defp string_list(values) when is_list(values) do
-    if Enum.all?(values, &nonblank_string?/1) and values == Enum.sort(Enum.uniq(values)),
-      do: :ok,
-      else: {:error, :invalid_string_list}
-  end
-
-  defp string_list(_values), do: {:error, :invalid_string_list}
 
   defp contained_artifact_paths(artifacts, workdir) do
     Enum.reduce_while(@pipeline_artifact_path_keys, :ok, fn {key, atom_key}, :ok ->

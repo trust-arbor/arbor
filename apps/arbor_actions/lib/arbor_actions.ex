@@ -73,10 +73,11 @@ defmodule Arbor.Actions do
   See individual action modules for detailed documentation.
   """
 
+  alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Egress
-  alias Arbor.Common.{SafePath, SensitiveData}
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
+  alias Arbor.Common.{SafePath, SensitiveData}
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
@@ -148,6 +149,25 @@ defmodule Arbor.Actions do
   end
 
   def reviewed_pipeline(_id), do: {:error, :invalid_reviewed_pipeline_id}
+
+  @doc "Return the deterministic worktree path used by coding workspace leases."
+  @spec coding_worktree_path(String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, :invalid_coding_worktree_input}
+  def coding_worktree_path(base_dir, branch_name)
+      when is_binary(base_dir) and is_binary(branch_name) do
+    with :ok <- SafePath.validate(base_dir),
+         true <- SafePath.absolute?(base_dir),
+         true <- String.valid?(branch_name),
+         true <- String.trim(branch_name) != "",
+         false <- String.contains?(branch_name, <<0>>) do
+      {:ok, Path.join(base_dir, Workspace.worktree_dir_name(branch_name))}
+    else
+      _other -> {:error, :invalid_coding_worktree_input}
+    end
+  end
+
+  def coding_worktree_path(_base_dir, _branch_name),
+    do: {:error, :invalid_coding_worktree_input}
 
   @approval_payload_keys [
     :content,

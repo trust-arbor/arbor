@@ -8,13 +8,16 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   @workspace_root_key :coding_benchmark_workspace_root
   @artifact_root_key :coding_benchmark_artifact_root
   @timeout_key :coding_benchmark_execution_timeout_ms
+  @cancellation_timeout_key :coding_benchmark_cancellation_timeout_ms
   @min_timeout_ms 10
   @max_timeout_ms 86_400_000
+  @max_cancellation_timeout_ms 30_000
 
   @type config :: %{
           workspace_root: String.t(),
           artifact_root: String.t(),
-          execution_timeout_ms: pos_integer()
+          execution_timeout_ms: pos_integer(),
+          cancellation_timeout_ms: pos_integer()
         }
 
   @type topology :: %{
@@ -29,10 +32,18 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     with {:ok, workspace_root} <- configured_directory(@workspace_root_key),
          {:ok, artifact_root} <- configured_directory(@artifact_root_key),
          :ok <- require_distinct_child(artifact_root, workspace_root),
-         {:ok, timeout} <- configured_timeout() do
+         {:ok, timeout} <-
+           configured_timeout(@timeout_key, @min_timeout_ms, @max_timeout_ms),
+         {:ok, cancellation_timeout} <-
+           configured_timeout(
+             @cancellation_timeout_key,
+             @min_timeout_ms,
+             @max_cancellation_timeout_ms
+           ) do
       {:ok,
        %{
          artifact_root: artifact_root,
+         cancellation_timeout_ms: cancellation_timeout,
          execution_timeout_ms: timeout,
          workspace_root: workspace_root
        }}
@@ -137,18 +148,17 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     end
   end
 
-  defp configured_timeout do
-    case Application.fetch_env(@app, @timeout_key) do
+  defp configured_timeout(key, min, max) do
+    case Application.fetch_env(@app, key) do
       {:ok, timeout}
-      when is_integer(timeout) and timeout >= @min_timeout_ms and
-             timeout <= @max_timeout_ms ->
+      when is_integer(timeout) and timeout >= min and timeout <= max ->
         {:ok, timeout}
 
       {:ok, _invalid} ->
-        setup_error({@timeout_key, :out_of_bounds})
+        setup_error({key, :out_of_bounds})
 
       :error ->
-        setup_error({@timeout_key, :not_configured})
+        setup_error({key, :not_configured})
     end
   end
 

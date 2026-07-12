@@ -10,6 +10,7 @@ defmodule Arbor.Commands.CodingBenchmark.PipelineAdapter do
   """
 
   alias Arbor.Commands.CodingBenchmark.Adapter
+  alias Arbor.Orchestrator
   alias Arbor.Orchestrator.CodingTaskExecutor
 
   @doc "Run one closed benchmark request through the pipeline executor."
@@ -20,6 +21,18 @@ defmodule Arbor.Commands.CodingBenchmark.PipelineAdapter do
       "pipeline",
       CodingTaskExecutor,
       :coding_benchmark_pipeline_executor_module
+    )
+  end
+
+  @doc "Cancel the configured pipeline execution through its trusted task id."
+  @spec cancel(map()) :: :ok | {:ok, term()} | {:error, term()}
+  def cancel(request) do
+    Adapter.cancel(
+      request,
+      "pipeline",
+      CodingTaskExecutor,
+      :coding_benchmark_pipeline_executor_module,
+      &Orchestrator.cancel_coding_task/2
     )
   end
 end

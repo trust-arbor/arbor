@@ -35,18 +35,44 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   end
 
   @spec execution_scope(map(), Runtime.config()) ::
-          {:ok, Runtime.topology()} | {:error, {:benchmark_setup_error, term()}}
+          {:ok, map()} | {:error, {:benchmark_setup_error, term()}}
   def execution_scope(request, runtime) when is_map(request) do
     digest = execution_digest(request)
     task_id = task_id(request, digest)
 
-    Runtime.prepare_execution(
-      request["workdir"],
-      request["executor_path"],
-      digest,
-      task_id,
-      runtime
-    )
+    with {:ok, topology} <-
+           Runtime.prepare_execution(
+             request["workdir"],
+             request["executor_path"],
+             digest,
+             task_id,
+             runtime
+           ) do
+      {:ok,
+       Map.merge(topology, %{
+         branch_name: branch_name(request, digest),
+         task_id: task_id
+       })}
+    end
+  end
+
+  @spec cancel(map(), String.t(), module(), atom(), :unsupported | (String.t(), map() -> term())) ::
+          :ok | {:ok, term()} | {:error, term()}
+  def cancel(request, executor_path, default_executor, executor_config_key, default_cancel) do
+    with {:ok, request} <- validate_request(request, executor_path),
+         {:ok, runtime} <- Runtime.load(),
+         :ok <- Runtime.preflight_production(runtime),
+         {:ok, scope} <- execution_scope(request, runtime),
+         {:ok, principal_id} <- configured_principal_id(),
+         {:ok, executor} <- configured_executor(executor_config_key, default_executor) do
+      invoke_cancel(
+        executor,
+        default_executor,
+        default_cancel,
+        principal_id,
+        %{"task_id" => scope.task_id}
+      )
+    end
   end
 
   defp validate_request(request, executor_path)
@@ -178,13 +204,12 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   end
 
   defp execution_inputs(request, scope, execution_timeout_ms) do
-    digest = execution_digest(request)
     workdir = request["workdir"]
 
     task = %{
       "acp_agent" => request["acp_agent"],
       "base_ref" => request["base_commit_oid"],
-      "branch_name" => branch_name(request, digest),
+      "branch_name" => scope.branch_name,
       "kind" => "coding_change",
       "open_pr" => false,
       "repo_path" => workdir,
@@ -194,7 +219,7 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     }
 
     context = %{
-      "task_id" => task_id(request, digest),
+      "task_id" => scope.task_id,
       "timeout" => execution_timeout_ms
     }
 
@@ -224,6 +249,22 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
 
   defp task_text(%{"objective" => objective, "acceptance_criteria" => criteria}) do
     objective <> "\n\nAcceptance criteria:\n" <> Enum.map_join(criteria, "\n", &"- #{&1}")
+  end
+
+  defp invoke_cancel(executor, default_executor, default_cancel, principal_id, context) do
+    cond do
+      executor == default_executor and is_function(default_cancel, 2) ->
+        default_cancel.(principal_id, context)
+
+      executor == default_executor ->
+        {:error, :cancellation_unsupported}
+
+      function_exported?(executor, :cancel_task, 2) ->
+        executor.cancel_task(principal_id, context)
+
+      true ->
+        {:error, :cancellation_unsupported}
+    end
   end
 
   defp normalize_return({:ok, :pending_approval, approval_id}) when is_binary(approval_id) do

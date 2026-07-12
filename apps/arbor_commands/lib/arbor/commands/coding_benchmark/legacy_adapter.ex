@@ -22,4 +22,16 @@ defmodule Arbor.Commands.CodingBenchmark.LegacyAdapter do
       :coding_benchmark_legacy_executor_module
     )
   end
+
+  @doc "Report or invoke the configured legacy executor's explicit cancellation support."
+  @spec cancel(map()) :: :ok | {:ok, term()} | {:error, term()}
+  def cancel(request) do
+    Adapter.cancel(
+      request,
+      "legacy",
+      LegacyCodingTaskExecutor,
+      :coding_benchmark_legacy_executor_module,
+      :unsupported
+    )
+  end
 end

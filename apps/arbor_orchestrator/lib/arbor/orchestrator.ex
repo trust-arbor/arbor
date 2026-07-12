@@ -47,7 +47,12 @@ defmodule Arbor.Orchestrator do
 
   alias Arbor.Contracts.Coding.Plan
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Orchestrator.CodingPlan.ActionCatalog
   alias Arbor.Orchestrator.CodingPlan.Compilation
+  alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
+  alias Arbor.Orchestrator.CodingPlan.Profiles
+  alias Arbor.Orchestrator.CodingPlan.SemanticPreflight
+  alias Arbor.Orchestrator.CodingTaskExecutor
   alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Conformance
   alias Arbor.Orchestrator.Dot.Parser
@@ -359,6 +364,75 @@ defmodule Arbor.Orchestrator do
   end
 
   @doc """
+  Verify archived coding-plan provenance against the production compiler and runtime inventory.
+
+  The archived plan, exact DOT bytes, and compile manifest must match a fresh
+  trusted compilation. The archived DOT is then parsed and IR-compiled before
+  its execution manifest is verified against the live action and handler
+  inventory. No archived authority or module selector is accepted.
+  """
+  @spec verify_coding_provenance(map(), binary(), map()) ::
+          {:ok, map()} | {:error, {:invalid_coding_provenance, term()}}
+  def verify_coding_provenance(plan_map, dot_source, manifest)
+      when is_map(plan_map) and not is_struct(plan_map) and is_binary(dot_source) and
+             is_map(manifest) and not is_struct(manifest) do
+    with {:ok, plan} <- exact_coding_plan(plan_map),
+         {:ok, compilation} <- compile_coding_plan(plan),
+         :ok <- require_archived_compilation(compilation, plan_map, dot_source, manifest),
+         {:ok, graph} <- parse_coding_provenance_dot(dot_source),
+         {:ok, compiled_graph} <- IR.Compiler.compile(graph),
+         {:ok, profile} <- Profiles.fetch_executable(plan.validation_profile),
+         :ok <- Profiles.validate_requirements(profile, compiled_graph),
+         :ok <-
+           SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
+             review_profile: plan.review_profile,
+             worker_use_pool: plan.worker["use_pool"],
+             worker_resume_session_id: plan.worker["resume_session_id"]
+           ),
+         {:ok, live_catalog} <- ActionCatalog.snapshot(),
+         {:ok, _action_bindings} <-
+           ExecutionManifest.verify(
+             manifest["execution_manifest"],
+             manifest["execution_manifest_digest"],
+             compiled_graph,
+             live_catalog,
+             manifest["graph_hash"]
+           ),
+         {:ok, _handler_bindings} <-
+           ExecutionManifest.handler_binding_index(manifest["execution_manifest"]) do
+      {:ok,
+       %{
+         "compiler_version" => manifest["compiler_version"],
+         "graph_hash" => manifest["graph_hash"]
+       }}
+    else
+      {:error, {:invalid_coding_provenance, _reason}} = error -> error
+      {:error, reason} -> {:error, {:invalid_coding_provenance, reason}}
+      _other -> {:error, {:invalid_coding_provenance, :identity_mismatch}}
+    end
+  rescue
+    _exception -> {:error, {:invalid_coding_provenance, :verification_failed}}
+  catch
+    _kind, _reason -> {:error, {:invalid_coding_provenance, :verification_failed}}
+  end
+
+  def verify_coding_provenance(_plan_map, _dot_source, _manifest),
+    do: {:error, {:invalid_coding_provenance, :invalid_input}}
+
+  @doc "Return the exact worktree path production coding leases derive for a branch."
+  @spec expected_coding_worktree_path(String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def expected_coding_worktree_path(worktree_base_dir, branch_name) do
+    Arbor.Actions.coding_worktree_path(worktree_base_dir, branch_name)
+  end
+
+  @doc "Cancel a production coding pipeline by its trusted execution context."
+  @spec cancel_coding_task(String.t(), map() | keyword()) :: :ok | {:error, term()}
+  def cancel_coding_task(agent_id, context) do
+    CodingTaskExecutor.cancel_task(agent_id, context)
+  end
+
+  @doc """
   Run typed validation passes on a compiled Graph.
 
   Returns diagnostics from schema validation, capability analysis,
@@ -523,6 +597,33 @@ defmodule Arbor.Orchestrator do
 
   defp normalize_coding_plan(%Plan{} = plan), do: {:ok, plan}
   defp normalize_coding_plan(attrs), do: Plan.new(attrs)
+
+  defp exact_coding_plan(plan_map) do
+    with {:ok, plan} <- Plan.new(plan_map),
+         true <- Plan.to_map(plan) == plan_map do
+      {:ok, plan}
+    else
+      {:error, reason} -> {:error, {:invalid_coding_provenance, {:invalid_plan, reason}}}
+      false -> {:error, {:invalid_coding_provenance, :noncanonical_plan}}
+    end
+  end
+
+  defp require_archived_compilation(compilation, plan_map, dot_source, manifest) do
+    if compilation["plan_map"] == plan_map and compilation["dot_source"] == dot_source and
+         compilation["manifest"] == manifest do
+      :ok
+    else
+      {:error, {:invalid_coding_provenance, :archived_compilation_mismatch}}
+    end
+  end
+
+  defp parse_coding_provenance_dot(dot_source) do
+    case Parser.parse(dot_source) do
+      {:ok, graph} -> {:ok, graph}
+      {:ok, _graph, errors} -> {:error, {:dot_parse_failed, errors}}
+      {:error, reason} -> {:error, {:dot_parse_failed, reason}}
+    end
+  end
 
   defp validate_planner_review_profile(%Plan{review_profile: "none"}),
     do: {:error, {:coding_plan_review_profile_not_allowed, "none"}}

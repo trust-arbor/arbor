@@ -17,13 +17,17 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     {:arbor_commands, :coding_benchmark_workspace_root},
     {:arbor_commands, :coding_benchmark_artifact_root},
     {:arbor_commands, :coding_benchmark_execution_timeout_ms},
+    {:arbor_commands, :coding_benchmark_cancellation_timeout_ms},
     {:arbor_commands, :coding_benchmark_test_observer},
+    {:arbor_commands, :coding_benchmark_test_resource_registry},
+    {:arbor_commands, :coding_benchmark_test_resource_root},
     {:arbor_commands, :coding_benchmark_test_mode},
     {:arbor_commands, :coding_benchmark_legacy_test_reply},
     {:arbor_commands, :coding_benchmark_pipeline_test_reply},
     {:arbor_orchestrator, :coding_repo_roots},
     {:arbor_orchestrator, :coding_worktree_roots},
-    {:arbor_orchestrator, :coding_pipeline_logs_root}
+    {:arbor_orchestrator, :coding_pipeline_logs_root},
+    {:arbor_orchestrator, :pipeline_status_module}
   ]
 
   defmodule CapturingLegacyExecutor do
@@ -65,6 +69,43 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
       send(observer, {:hanging_executor_started, self(), principal_id, task, context})
       Process.sleep(:infinity)
+    end
+  end
+
+  defmodule ResourcePipelineExecutor do
+    @moduledoc false
+    alias Arbor.Commands.CodingBenchmarkAdapterTest, as: TestSupport
+
+    def run(principal_id, task, context),
+      do: TestSupport.allocate_resource_and_hang(principal_id, task, context)
+
+    def cancel_task(principal_id, context),
+      do: TestSupport.cancel_allocated_resource(principal_id, context)
+  end
+
+  defmodule HangingCancelPipelineExecutor do
+    @moduledoc false
+
+    def run(principal_id, task, context) do
+      observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+      send(observer, {:hanging_pipeline_started, self(), principal_id, task, context})
+      Process.sleep(:infinity)
+    end
+
+    def cancel_task(principal_id, context) do
+      observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+      send(observer, {:hanging_cancel_started, self(), principal_id, context})
+      Process.sleep(:infinity)
+    end
+  end
+
+  defmodule CapturingPipelineStatus do
+    @moduledoc false
+
+    def mark_abandoned(task_id) do
+      observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+      send(observer, {:pipeline_mark_abandoned, task_id})
+      :ok
     end
   end
 
@@ -216,6 +257,25 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
            }
   end
 
+  test "production adapter cancellation uses pipeline cancel_task and reports legacy unsupported" do
+    requests = benchmark_requests!()
+    Application.delete_env(:arbor_commands, :coding_benchmark_legacy_executor_module)
+    Application.delete_env(:arbor_commands, :coding_benchmark_pipeline_executor_module)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :pipeline_status_module,
+      CapturingPipelineStatus
+    )
+
+    assert {:error, :cancellation_unsupported} = LegacyAdapter.cancel(requests.legacy)
+    assert :ok = PipelineAdapter.cancel(requests.pipeline)
+
+    digest = execution_digest(requests.pipeline)
+    expected_task_id = "coding-benchmark-pipeline-#{digest}"
+    assert_receive {:pipeline_mark_abandoned, ^expected_task_id}
+  end
+
   test "production harness observes sibling worktrees and separate provenance roots" do
     scenario = production_scenario!()
     install_leased_executors()
@@ -238,7 +298,13 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       assert Path.dirname(task["worktree_base_dir"]) |> Path.dirname() ==
                Path.join(pair_root, "worktrees")
 
-      assert String.starts_with?(returned_worktree, task["worktree_base_dir"] <> "/")
+      assert {:ok, expected_worktree} =
+               Arbor.Orchestrator.expected_coding_worktree_path(
+                 task["worktree_base_dir"],
+                 task["branch_name"]
+               )
+
+      assert returned_worktree == expected_worktree
       refute String.starts_with?(returned_worktree, task["repo_path"] <> "/")
 
       if executor == "pipeline" do
@@ -252,7 +318,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     assert hd(report["pairs"])["comparison"]["status"] == "equivalent"
   end
 
-  test "missing and symlink-escaped returned worktrees fail closed" do
+  test "missing, escaped, and non-deterministic returned worktrees fail closed" do
     scenario = production_scenario!()
     install_leased_executors()
 
@@ -278,12 +344,20 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
 
     for result <- symlink_report["rows"] do
       assert result["terminal_status"] == "worktree_verification_failed"
-      assert result["terminal_reason"] == "unsafe_or_missing_returned_worktree"
+      assert result["terminal_reason"] == "unexpected_returned_worktree"
       assert result["objective_verifier"]["status"] == "failed"
+    end
+
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :wrong_worktree)
+    assert {:ok, wrong_path_report} = run_production_scenario(scenario)
+
+    for result <- wrong_path_report["rows"] do
+      assert result["terminal_status"] == "worktree_verification_failed"
+      assert result["terminal_reason"] == "unexpected_returned_worktree"
     end
   end
 
-  test "provenance symlink escapes and malformed manifests fail identity verification" do
+  test "provenance symlinks, malformed manifests, and changed DOT bytes fail verification" do
     scenario = production_scenario!()
     install_leased_executors()
 
@@ -301,10 +375,19 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :invalid_manifest)
     assert {:ok, invalid_report} = run_production_scenario(invalid_scenario)
     assert row(invalid_report, "pipeline")["artifact_hash_verification"]["status"] == "failed"
+
+    tampered_scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :tampered_dot)
+    assert {:ok, tampered_report} = run_production_scenario(tampered_scenario)
+
+    tampered = row(tampered_report, "pipeline")["artifact_hash_verification"]
+    assert tampered["graph_hash_verified"] == false
+    assert tampered["status"] == "failed"
   end
 
   test "hanging executor is killed and cannot block pair-root cleanup" do
-    scenario = production_scenario!(50)
+    scenario = production_scenario!(1_000)
 
     Application.put_env(
       :arbor_commands,
@@ -322,15 +405,95 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
 
     assert {:ok, report} = run_production_scenario(scenario)
 
-    assert_receive {:hanging_executor_started, pid, "agent_benchmark", task, %{"timeout" => 50}}
+    assert_receive {:hanging_executor_started, pid, "agent_benchmark", task,
+                    %{"timeout" => 1_000}}
 
     refute Process.alive?(pid)
     refute File.exists?(Path.dirname(task["repo_path"]))
 
     timed_out = row(report, "legacy")
     assert timed_out["terminal_status"] == "executor_timeout"
-    assert timed_out["terminal_reason"] == "execution_timeout:50"
+    assert timed_out["terminal_reason"] == "execution_timeout:1000"
     assert timed_out["objective_verifier"]["status"] == "failed"
+
+    assert timed_out["cancellation_observations"]["status"] == "unsupported"
+    assert timed_out["cancellation_observations"]["cancelled"] == false
+    assert timed_out["cancellation_observations"]["cleanup"]["status"] == "unverified"
+    assert timed_out["cancellation_observations"]["cleanup"]["resources_cleaned"] == nil
+  end
+
+  test "pipeline timeout cancel hook removes external process and filesystem resources" do
+    scenario = production_scenario!(1_000)
+    resource_root = Path.join(scenario.root, "external-executor-resources")
+    File.mkdir!(resource_root)
+    {:ok, registry} = Agent.start_link(fn -> %{} end)
+
+    Application.put_env(:arbor_commands, :coding_benchmark_test_resource_registry, registry)
+    Application.put_env(:arbor_commands, :coding_benchmark_test_resource_root, resource_root)
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_executor_module,
+      LeasedLegacyExecutor
+    )
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_pipeline_executor_module,
+      ResourcePipelineExecutor
+    )
+
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, report} = run_production_scenario(scenario)
+
+    assert_receive {:external_resource_allocated, resource_pid, resource_path, task_id}
+    assert_receive {:external_resource_cancelled, ^resource_pid, ^resource_path, ^task_id}
+    refute Process.alive?(resource_pid)
+    refute File.exists?(resource_path)
+
+    timed_out = row(report, "pipeline")
+    assert timed_out["terminal_status"] == "executor_timeout"
+    assert timed_out["cancellation_observations"]["status"] == "cancel_hook_completed"
+    assert timed_out["cancellation_observations"]["cancelled"] == true
+    assert timed_out["cancellation_observations"]["cleanup"]["status"] == "unverified"
+    assert timed_out["cancellation_observations"]["cleanup"]["resources_cleaned"] == nil
+  end
+
+  test "hanging pipeline cancel hook is bounded before pair-root cleanup" do
+    scenario = production_scenario!(100, 50)
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_executor_module,
+      LeasedLegacyExecutor
+    )
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_pipeline_executor_module,
+      HangingCancelPipelineExecutor
+    )
+
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, report} = run_production_scenario(scenario)
+
+    assert_receive {:hanging_pipeline_started, run_pid, "agent_benchmark", task,
+                    %{"timeout" => 100}}
+
+    assert_receive {:hanging_cancel_started, cancel_pid, "agent_benchmark",
+                    %{"task_id" => task_id}}
+
+    assert String.starts_with?(task_id, "coding-benchmark-pipeline-")
+    refute Process.alive?(run_pid)
+    refute Process.alive?(cancel_pid)
+    refute File.exists?(Path.dirname(task["repo_path"]))
+
+    timed_out = row(report, "pipeline")
+    assert timed_out["terminal_status"] == "executor_timeout"
+    assert timed_out["cancellation_observations"]["status"] == "cancel_hook_timeout"
+    assert timed_out["cancellation_observations"]["cancelled"] == false
   end
 
   @doc false
@@ -354,11 +517,72 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       :invalid_manifest ->
         leased_result(executor, principal_id, task, context, :invalid_manifest)
 
+      :tampered_dot ->
+        leased_result(executor, principal_id, task, context, :tampered_dot)
+
       :missing_worktree ->
         production_result(executor, principal_id, task, context, nil, %{}, nil)
 
+      :wrong_worktree ->
+        wrong_worktree_result(executor, principal_id, task, context)
+
       {:symlink_worktree, outside} ->
         symlink_worktree_result(executor, principal_id, task, context, outside)
+    end
+  end
+
+  @doc false
+  def allocate_resource_and_hang(principal_id, _task, %{"task_id" => task_id}) do
+    observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+    registry = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_resource_registry)
+    resource_root = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_resource_root)
+    resource_path = Path.join(resource_root, sha256(task_id))
+    File.mkdir!(resource_path)
+    File.write!(Path.join(resource_path, "lease"), task_id)
+    resource_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+    Agent.update(registry, fn resources ->
+      Map.put(resources, task_id, %{
+        path: resource_path,
+        pid: resource_pid,
+        principal_id: principal_id
+      })
+    end)
+
+    send(observer, {:external_resource_allocated, resource_pid, resource_path, task_id})
+    Process.sleep(:infinity)
+  end
+
+  @doc false
+  def cancel_allocated_resource(principal_id, %{"task_id" => task_id}) do
+    observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+    registry = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_resource_registry)
+
+    resource =
+      Agent.get_and_update(registry, fn resources ->
+        Map.pop(resources, task_id)
+      end)
+
+    case resource do
+      %{path: path, pid: pid, principal_id: ^principal_id} ->
+        monitor = Process.monitor(pid)
+        Process.exit(pid, :kill)
+
+        receive do
+          {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+        after
+          250 -> raise "external resource process did not terminate"
+        end
+
+        File.rm_rf!(path)
+        send(observer, {:external_resource_cancelled, pid, path, task_id})
+        :ok
+
+      nil ->
+        {:error, :resource_not_found}
+
+      _resource ->
+        {:error, :resource_principal_mismatch}
     end
   end
 
@@ -426,14 +650,14 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     %{legacy: request.("legacy"), pair_root: pair_root, pipeline: request.("pipeline")}
   end
 
-  defp production_scenario!(timeout_ms \\ 5_000) do
+  defp production_scenario!(timeout_ms \\ 5_000, cancellation_timeout_ms \\ 500) do
     root = temp_directory!("coding-benchmark-production")
     scenario = Scenario.create!(root, ["happy"])
-    artifact_root = configure_runtime!(root, timeout_ms)
+    artifact_root = configure_runtime!(root, timeout_ms, cancellation_timeout_ms)
     Map.put(scenario, :artifact_root, artifact_root)
   end
 
-  defp configure_runtime!(root, timeout_ms) do
+  defp configure_runtime!(root, timeout_ms, cancellation_timeout_ms \\ 500) do
     {:ok, workspace_root} = SafePath.resolve_real(root)
     artifact_root = Path.join(workspace_root, "production-artifacts")
     File.mkdir_p!(artifact_root)
@@ -442,6 +666,13 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     Application.put_env(:arbor_commands, :coding_benchmark_workspace_root, workspace_root)
     Application.put_env(:arbor_commands, :coding_benchmark_artifact_root, artifact_root)
     Application.put_env(:arbor_commands, :coding_benchmark_execution_timeout_ms, timeout_ms)
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_cancellation_timeout_ms,
+      cancellation_timeout_ms
+    )
+
     Application.put_env(:arbor_orchestrator, :coding_repo_roots, [workspace_root])
     Application.put_env(:arbor_orchestrator, :coding_worktree_roots, [workspace_root])
     Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, artifact_root)
@@ -489,7 +720,11 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
   end
 
   defp leased_result(executor, principal_id, task, context, artifact_mode) do
-    worktree = Path.join(task["worktree_base_dir"], "leased-worktree")
+    {:ok, worktree} =
+      Arbor.Orchestrator.expected_coding_worktree_path(
+        task["worktree_base_dir"],
+        task["branch_name"]
+      )
 
     git!(task["repo_path"], [
       "worktree",
@@ -514,8 +749,29 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
   end
 
   defp symlink_worktree_result(executor, principal_id, task, context, outside) do
-    worktree = Path.join(task["worktree_base_dir"], "leased-worktree")
+    {:ok, worktree} =
+      Arbor.Orchestrator.expected_coding_worktree_path(
+        task["worktree_base_dir"],
+        task["branch_name"]
+      )
+
     File.ln_s!(outside, worktree)
+    production_result(executor, principal_id, task, context, worktree, %{}, nil)
+  end
+
+  defp wrong_worktree_result(executor, principal_id, task, context) do
+    worktree = Path.join(task["worktree_base_dir"], "unexpected-descendant")
+
+    git!(task["repo_path"], [
+      "worktree",
+      "add",
+      "--quiet",
+      "-b",
+      task["branch_name"],
+      worktree,
+      task["base_ref"]
+    ])
+
     production_result(executor, principal_id, task, context, worktree, %{}, nil)
   end
 
@@ -575,12 +831,17 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     dot_path = Path.join(root, "coding-pipeline.dot")
     plan_path = Path.join(root, "coding-plan.json")
     manifest_path = Path.join(root, "coding-compile-manifest.json")
-    dot = "digraph benchmark {}\n"
-    graph_hash = sha256(dot)
     plan = production_plan!(task)
-    manifest = production_manifest(plan, graph_hash)
+    assert {:ok, compilation} = Arbor.Orchestrator.compile_coding_plan(plan)
+    dot = compilation["dot_source"]
+    manifest = compilation["manifest"]
+    assert manifest["action_names"] != []
+    assert manifest["handler_types"] != []
+    assert manifest["execution_manifest"]["actions"] != []
+    assert manifest["execution_manifest"]["nodes"] != []
 
-    File.write!(dot_path, dot)
+    archived_dot = if mode == :tampered_dot, do: dot <> "\n// post-compile tamper\n", else: dot
+    File.write!(dot_path, archived_dot)
 
     case mode do
       :symlink -> File.ln_s!(Path.join(task["repo_path"], "README.md"), plan_path)
@@ -596,8 +857,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
        "coding_pipeline_path" => dot_path,
        "coding_plan_path" => plan_path,
        "compile_manifest_path" => manifest_path,
-       "compiler_version" => "coding-plan-1",
-       "graph_hash" => graph_hash
+       "compiler_version" => compilation["compiler_version"],
+       "graph_hash" => compilation["graph_hash"]
      }, root}
   end
 
@@ -616,36 +877,6 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
              })
 
     Plan.to_map(plan)
-  end
-
-  defp production_manifest(plan, graph_hash) do
-    execution_manifest = %{
-      "actions" => [],
-      "capability_uris" => [],
-      "compiled_graph_hash" => sha256("compiled:" <> graph_hash),
-      "egress" => [],
-      "graph_hash" => graph_hash,
-      "handlers" => [],
-      "nodes" => [],
-      "version" => 2
-    }
-
-    %{
-      "action_catalog_digest" => sha256("action-catalog"),
-      "action_names" => [],
-      "compiler_version" => "coding-plan-1",
-      "execution_manifest" => execution_manifest,
-      "execution_manifest_digest" => hash_json(execution_manifest),
-      "graph_hash" => graph_hash,
-      "handler_types" => [],
-      "overlays" => plan["overlays"],
-      "plan_fingerprint" => hash_json(plan),
-      "plan_version" => plan["version"],
-      "review_profile" => plan["review_profile"],
-      "task_class" => plan["task_class"],
-      "template_version" => "coding-change-v1",
-      "validation_profile" => plan["validation_profile"]
-    }
   end
 
   defp normalized_input_hash!(input, base_tree_oid) do

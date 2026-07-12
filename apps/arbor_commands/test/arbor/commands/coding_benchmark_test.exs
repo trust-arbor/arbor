@@ -19,6 +19,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
     {:arbor_commands, :coding_benchmark_workspace_root},
     {:arbor_commands, :coding_benchmark_artifact_root},
     {:arbor_commands, :coding_benchmark_execution_timeout_ms},
+    {:arbor_commands, :coding_benchmark_cancellation_timeout_ms},
     {:arbor_orchestrator, :coding_repo_roots},
     {:arbor_orchestrator, :coding_worktree_roots},
     {:arbor_orchestrator, :coding_pipeline_logs_root}
@@ -284,8 +285,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
                adapters: Scenario.adapters(),
                measure: &Scenario.deterministic_measure/1,
                root: scenario.root,
-               verifiers: Scenario.verifiers(),
-               workspace_root: scenario.root
+               verifiers: Scenario.verifiers()
              )
 
     assert {:ok, real_root} = SafePath.resolve_real(scenario.root)
@@ -404,6 +404,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
     Application.put_env(:arbor_commands, :coding_benchmark_workspace_root, workspace_root)
     Application.put_env(:arbor_commands, :coding_benchmark_artifact_root, artifact_root)
     Application.put_env(:arbor_commands, :coding_benchmark_execution_timeout_ms, 5_000)
+    Application.put_env(:arbor_commands, :coding_benchmark_cancellation_timeout_ms, 500)
     Application.put_env(:arbor_orchestrator, :coding_repo_roots, [workspace_root])
     Application.put_env(:arbor_orchestrator, :coding_worktree_roots, [workspace_root])
     Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, artifact_root)
