@@ -900,27 +900,37 @@ defmodule Arbor.LLM.Client do
     with :ok <- ensure_not_aborted(opts) do
       retry_opts = Keyword.get(opts, :retry, [])
 
+      # Retry only provider generation. Tool calls run after this boundary and
+      # must not be repeated as part of a provider retry.
       complete_result =
-        Retry.execute(
-          fn -> complete_with_step_timeout(client, request, opts) end,
-          Keyword.merge(
-            [
-              on_retry: fn reason, meta ->
-                emit_step(on_step, %{
-                  type: :llm_retrying,
-                  reason: reason,
-                  attempt: meta.attempt,
-                  delay_ms: meta.delay_ms
-                })
+        with {:ok, receipt} <- Deadline.receipt(opts) do
+          Deadline.run(
+            fn ->
+              Retry.execute(
+                fn -> complete_with_step_timeout(client, request, opts) end,
+                Keyword.merge(
+                  [
+                    on_retry: fn reason, meta ->
+                      emit_step(on_step, %{
+                        type: :llm_retrying,
+                        reason: reason,
+                        attempt: meta.attempt,
+                        delay_ms: meta.delay_ms
+                      })
 
-                # Emit structured retry signal for observability
-                emit_retry_signal(reason, meta, request)
-              end,
-              sleep_fn: Keyword.get(opts, :sleep_fn, fn ms -> Process.sleep(ms) end)
-            ],
-            retry_opts
+                      # Emit structured retry signal for observability
+                      emit_retry_signal(reason, meta, request)
+                    end,
+                    sleep_fn: Keyword.get(opts, :sleep_fn, fn ms -> Process.sleep(ms) end)
+                  ],
+                  retry_opts
+                )
+              )
+            end,
+            receipt,
+            RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
           )
-        )
+        end
 
       case complete_result do
         {:ok, %Response{} = response} ->

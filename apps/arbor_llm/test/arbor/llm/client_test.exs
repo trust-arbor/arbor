@@ -49,7 +49,49 @@ defmodule Arbor.LLM.ClientTest do
     end
   end
 
+  defmodule RetryAdapter do
+    def provider, do: "retry"
+
+    def complete(_request, opts) do
+      send(Keyword.fetch!(opts, :observer), :retry_adapter_called)
+
+      case Process.get(:retry_adapter_calls, 0) do
+        0 ->
+          Process.put(:retry_adapter_calls, 1)
+
+          {:error,
+           Arbor.LLM.ProviderError.exception(
+             message: "transient",
+             provider: "retry",
+             retryable: true
+           )}
+
+        _ ->
+          {:ok, %Arbor.LLM.Response{text: "recovered"}}
+      end
+    end
+  end
+
   describe "public adapter boundary" do
+    test "generation retry stays inside one deadline worker" do
+      Process.delete(:retry_adapter_calls)
+      parent = self()
+
+      client = Client.new(adapters: %{"retry" => RetryAdapter}, default_provider: "retry")
+      request = %Request{provider: "retry", model: "demo", messages: []}
+
+      assert {:ok, %Response{text: "recovered"}} =
+               Client.generate_with_tools(client, request, [],
+                 retry: [max_retries: 1, initial_delay_ms: 1],
+                 sleep_fn: fn delay_ms -> send(parent, {:retry_sleep, delay_ms}) end,
+                 observer: self()
+               )
+
+      assert_receive :retry_adapter_called
+      assert_receive {:retry_sleep, 1}
+      assert_receive :retry_adapter_called
+    end
+
     test "security regression: injected adapters and middleware cannot bypass response ceilings" do
       client =
         Client.new(adapters: %{"boundary" => BoundaryAdapter}, default_provider: "boundary")
