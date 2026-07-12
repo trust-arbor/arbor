@@ -144,38 +144,21 @@ defmodule Arbor.Shell do
   end
 
   @doc """
-  Execute a generic agent-authored command through the closed direct-argv path.
+  Legacy agent execution entry retained as an explicit fail-closed boundary.
 
-  This function enforces execution shape but does **not** grant authority. It is
-  for adapters that have already performed their own principal-specific
-  authorization (for example the Trust-backed action and DOT handlers). Callers
-  that need both checks should use `authorize_and_execute/3`.
-
-  `sandbox: :none` is accepted for compatibility but cannot widen this path;
-  execution always uses the closed direct policy. Non-empty `:env` is rejected.
-  Trusted system callers retain `execute/2` and `execute_direct/3` unchanged.
+  Shape validation alone is not authority, so this function never launches a
+  process. Agent-facing adapters must authorize at a higher Trust-aware layer
+  and then use the trusted-system direct API internally, or configure the
+  injected authorizer used by `authorize_and_execute/3`.
   """
-  @spec execute_agent_command(term(), term()) :: {:ok, map()} | {:error, term()}
-  def execute_agent_command(command, opts \\ []) do
-    with {:ok, prepared} <- prepare_agent_command(command, opts) do
-      execute_bound_agent_command(command, prepared, opts)
-    end
-  end
+  @spec execute_agent_command(term(), term()) :: {:error, :agent_authority_required}
+  def execute_agent_command(_command, _opts \\ []), do: {:error, :agent_authority_required}
 
   @doc false
-  @spec execute_bound_agent_command(String.t(), map(), keyword()) ::
-          {:ok, map()} | {:error, term()}
-  def execute_bound_agent_command(
-        command,
-        %{executable_identity: %Arbor.Shell.ExecutablePolicy.Executable{}, args: args} = prepared,
-        opts
-      )
-      when is_binary(command) and is_list(args) and is_list(opts) do
-    execute_prepared_agent_command(command, prepared, opts)
-  end
-
+  @spec execute_bound_agent_command(term(), term(), term()) ::
+          {:error, :agent_authority_required}
   def execute_bound_agent_command(_command, _prepared, _opts),
-    do: {:error, :invalid_prepared_agent_command}
+    do: {:error, :agent_authority_required}
 
   @doc """
   Fail-closed compound-shell entry (public facade over `Arbor.Shell.CapShell`).
@@ -208,9 +191,11 @@ defmodule Arbor.Shell do
   @doc """
   Execute a shell command with authorization check.
 
-  First binds the command to the closed direct-executable policy, then verifies
-  the agent has the matching `arbor://shell/exec/{command_name}` capability.
-  A broad capability does not admit an interpreter or dispatch wrapper.
+  First binds the command to the closed direct-executable policy, then delegates
+  the exact principal, command, and prepared identity to the operator-configured
+  `:arbor_shell, :agent_authorizer`. There is no low-level capability-only
+  default because that would bypass higher Trust policy. Missing or invalid
+  authorizer configuration fails closed.
 
   ## Parameters
 
@@ -266,10 +251,10 @@ defmodule Arbor.Shell do
   @doc """
   Authorize a shell command for an agent WITHOUT executing it.
 
-  Runs the same capability + reflex policy check as `authorize_and_execute/3`
-  but returns the decision instead of dispatching execution. This is for
-  adapters that authorize separately before routing the same command through
-  `execute_agent_command/2` — notably the DOT `shell` node handler.
+  Runs the same injected authority check as `authorize_and_execute/3` but
+  returns the decision instead of dispatching execution. Trust-aware higher
+  layers may instead authorize through their own facade and route the already
+  prepared command through the trusted-system direct API.
 
   **Compound commands, interpreters/wrappers, noncanonical executable paths,
   and non-empty environments are rejected** before capability lookup or
@@ -344,6 +329,10 @@ defmodule Arbor.Shell do
 
   @doc """
   Execute a command with pre-parsed executable and arguments.
+
+  **Trusted system API only.** This function performs no principal or Trust
+  authorization. Agent-facing higher layers may call it only after binding and
+  authorizing the same executable and argv.
 
   Bypasses shell string parsing — use when you already have structured
   `{cmd, args}` and want to avoid the serialize-then-parse round-trip.
@@ -728,16 +717,56 @@ defmodule Arbor.Shell do
   end
 
   defp authorize_prepared_agent_command(agent_id, command, prepared, opts) do
-    resource = "arbor://shell/exec/#{prepared.command_name}"
+    with true <- valid_agent_principal?(agent_id),
+         {:ok, authorizer} <- configured_agent_authorizer() do
+      auth_opts =
+        opts
+        |> Keyword.drop([:agent_authorizer])
+        |> Keyword.put(:prepared_command, prepared)
 
-    # Skip identity verification — facade auth is a policy check only; the
-    # caller (or the action layer above it) owns request-signature checks.
-    auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
+      case authorizer.(agent_id, command, auth_opts) do
+        {:ok, :authorized} -> {:ok, :authorized}
+        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+        {:error, reason} -> {:error, reason}
+        _other -> {:error, :unauthorized}
+      end
+    else
+      false -> {:error, :invalid_agent_principal}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    _error -> {:error, :agent_authorizer_unavailable}
+  catch
+    _kind, _reason -> {:error, :agent_authorizer_unavailable}
+  end
 
-    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
-      {:ok, :authorized} -> {:ok, :authorized}
-      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
-      {:error, _reason} -> {:error, :unauthorized}
+  defp valid_agent_principal?(agent_id) when is_binary(agent_id),
+    do: String.trim(agent_id) != ""
+
+  defp valid_agent_principal?(_agent_id), do: false
+
+  defp configured_agent_authorizer do
+    case Application.get_env(:arbor_shell, :agent_authorizer) do
+      fun when is_function(fun, 3) ->
+        {:ok, fun}
+
+      module when is_atom(module) ->
+        if function_exported?(module, :authorize_command, 3),
+          do: {:ok, &module.authorize_command/3},
+          else: {:error, :agent_authorizer_unavailable}
+
+      {module, function} when is_atom(module) and is_atom(function) ->
+        if function_exported?(module, function, 3) do
+          {:ok,
+           fn agent_id, command, opts ->
+             apply(module, function, [agent_id, command, opts])
+           end}
+        else
+          {:error, :agent_authorizer_unavailable}
+        end
+
+      _other ->
+        {:error, :agent_authorizer_unavailable}
     end
   end
 
@@ -793,7 +822,7 @@ defmodule Arbor.Shell do
 
     case DynamicSupervisor.start_child(
            Arbor.Shell.PortSessionSupervisor,
-           {ExecutionWorker, {execution_id, opts, runner, start_ref}}
+           {ExecutionWorker, {execution_id, opts, runner, start_ref, self()}}
          ) do
       {:ok, owner_pid} -> {:ok, owner_pid, start_ref}
       {:error, reason} -> {:error, reason}

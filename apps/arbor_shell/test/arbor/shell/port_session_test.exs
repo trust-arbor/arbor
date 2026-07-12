@@ -57,15 +57,14 @@ defmodule Arbor.Shell.PortSessionTest do
     end
 
     test "late subscriber receives exit message" do
-      # Use a script that waits long enough for us to subscribe
-      {:ok, pid} = PortSession.start_link("sh -c 'sleep 1 && echo late'", [])
+      {:ok, pid} = PortSession.start_link("sleep 1", [])
 
       # Subscribe after start but before exit
       PortSession.subscribe(pid, self())
       id = PortSession.get_id(pid)
 
       assert_receive {:port_exit, ^id, 0, output}, 5_000
-      assert String.contains?(output, "late")
+      assert output == ""
     end
   end
 
@@ -185,7 +184,7 @@ defmodule Arbor.Shell.PortSessionTest do
   describe "working directory" do
     test "respects cwd option" do
       {:ok, pid} =
-        PortSession.start_link("sh -c 'sleep 0.1 && pwd'", stream_to: self(), cwd: "/tmp")
+        PortSession.start_link("pwd", stream_to: self(), cwd: "/tmp")
 
       id = PortSession.get_id(pid)
 

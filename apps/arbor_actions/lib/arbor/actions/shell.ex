@@ -31,13 +31,14 @@ defmodule Arbor.Actions.Shell do
   ## Examples
 
       # Simple command
-      {:ok, result} = Arbor.Actions.Shell.Execute.run(%{command: "echo hello"}, %{})
+      context = %{agent_id: "agent_authenticated"}
+      {:ok, result} = Arbor.Actions.Shell.Execute.run(%{command: "echo hello"}, context)
       result.stdout  # => "hello\\n"
 
       # With sandbox
       {:ok, result} = Arbor.Actions.Shell.Execute.run(
         %{command: "ls", sandbox: :strict},
-        %{}
+        context
       )
   """
 
@@ -50,31 +51,85 @@ defmodule Arbor.Actions.Shell do
           | {:error, :unauthorized | term()}
           | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   def authorize_command(agent_id, command, opts \\ [])
-      when is_binary(agent_id) and is_binary(command) do
-    # Bind the exact direct executable before Trust/Security or approval work.
-    # A broad capability cannot authorize an interpreter/dispatch wrapper, and
-    # sandbox:none/env cannot widen the child process after approval.
-    with {:ok, prepared} <- Shell.prepare_agent_command(command, opts) do
-      resource = "arbor://shell/exec/#{prepared.command_name}"
 
-      auth_opts =
-        [
-          command: command,
-          path: Keyword.get(opts, :cwd) || Keyword.get(opts, :path),
-          verify_identity: false
-        ]
-        |> maybe_add_opt(:approved_invocation, Keyword.get(opts, :approved_invocation))
-        |> maybe_add_opt(:approval_context, Keyword.get(opts, :approval_context))
-        |> maybe_add_opt(:task_id, Keyword.get(opts, :task_id))
-        |> maybe_add_opt(:session_id, Keyword.get(opts, :session_id))
-        |> maybe_add_opt(:params, Keyword.get(opts, :params) || %{command: command})
+  def authorize_command(agent_id, command, opts)
+      when is_binary(command) and is_list(opts) do
+    with :ok <- validate_agent_principal(agent_id),
+         {:ok, prepared} <- Shell.prepare_agent_command(command, opts) do
+      authorize_prepared(agent_id, command, prepared, opts)
+    end
+  end
 
-      case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
-        {:ok, :authorized} -> {:ok, :authorized}
+  def authorize_command(_agent_id, _command, _opts), do: {:error, :invalid_agent_principal}
+
+  @doc false
+  @spec authorize_and_execute_command(String.t(), String.t(), keyword()) ::
+          {:ok, map()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, term()}
+  def authorize_and_execute_command(agent_id, command, opts \\ [])
+
+  def authorize_and_execute_command(agent_id, command, opts)
+      when is_binary(command) and is_list(opts) do
+    with :ok <- validate_agent_principal(agent_id),
+         {:ok, prepared} <- Shell.prepare_agent_command(command, opts) do
+      case authorize_prepared(agent_id, command, prepared, opts) do
+        {:ok, :authorized} -> execute_prepared(prepared, opts)
         {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
-        {:error, _reason} -> {:error, :unauthorized}
+        {:error, reason} -> {:error, reason}
       end
     end
+  end
+
+  def authorize_and_execute_command(_agent_id, _command, _opts),
+    do: {:error, :invalid_agent_principal}
+
+  defp validate_agent_principal(agent_id) when is_binary(agent_id) do
+    if String.trim(agent_id) == "", do: {:error, :invalid_agent_principal}, else: :ok
+  end
+
+  defp validate_agent_principal(_agent_id), do: {:error, :invalid_agent_principal}
+
+  defp authorize_prepared(agent_id, command, prepared, opts) do
+    resource = "arbor://shell/exec/#{prepared.command_name}"
+
+    auth_opts =
+      [
+        command: command,
+        path: Keyword.get(opts, :cwd) || Keyword.get(opts, :path),
+        verify_identity: false
+      ]
+      |> maybe_add_opt(:approved_invocation, Keyword.get(opts, :approved_invocation))
+      |> maybe_add_opt(:approval_context, Keyword.get(opts, :approval_context))
+      |> maybe_add_opt(:task_id, Keyword.get(opts, :task_id))
+      |> maybe_add_opt(:session_id, Keyword.get(opts, :session_id))
+      |> maybe_add_opt(:params, Keyword.get(opts, :params) || %{command: command})
+
+    case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
+      {:ok, :authorized} -> {:ok, :authorized}
+      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+      {:error, _reason} -> {:error, :unauthorized}
+      _other -> {:error, :unauthorized}
+    end
+  end
+
+  defp execute_prepared(%{executable: executable, args: args}, opts) do
+    execution_opts =
+      opts
+      |> Keyword.drop([
+        :env,
+        :allowlist,
+        :gate_command,
+        :approved_invocation,
+        :approval_context,
+        :task_id,
+        :session_id,
+        :params,
+        :path
+      ])
+      |> Keyword.put(:sandbox, :basic)
+
+    Shell.execute_direct(executable, args, execution_opts)
   end
 
   defp maybe_add_opt(opts, _key, nil), do: opts
@@ -199,45 +254,45 @@ defmodule Arbor.Actions.Shell do
         )
         |> maybe_add_context_opts(context)
 
-      # Closed executable/env/compound admission happens before action signals,
-      # Trust authorization, approval creation, registry, or process work.
-      case Arbor.Shell.prepare_agent_command(command, opts) do
-        {:ok, _prepared} ->
-          Actions.emit_started(__MODULE__, params)
+      # Closed executable admission and authority both happen before action
+      # signals, approval creation, registry, or process work.
+      with {:ok, _prepared} <- Arbor.Shell.prepare_agent_command(command, opts),
+           {:ok, agent_id} <- exact_principal(context) do
+        Actions.emit_started(__MODULE__, params)
 
-          case call_shell(command, opts, context) do
-            {:ok, result} when is_map(result) ->
-              Actions.emit_completed(__MODULE__, result)
+        case call_shell(agent_id, command, opts, context) do
+          {:ok, result} when is_map(result) ->
+            Actions.emit_completed(__MODULE__, result)
 
-              {:ok,
-               %{
-                 exit_code: result.exit_code,
-                 stdout: result.stdout,
-                 stderr: result.stderr,
-                 duration_ms: result.duration_ms,
-                 timed_out: Map.get(result, :timed_out, false),
-                 killed: Map.get(result, :killed, false),
-                 output_limit_exceeded: Map.get(result, :output_limit_exceeded, false),
-                 output_truncated: Map.get(result, :output_truncated, false)
-               }}
+            {:ok,
+             %{
+               exit_code: result.exit_code,
+               stdout: result.stdout,
+               stderr: result.stderr,
+               duration_ms: result.duration_ms,
+               timed_out: Map.get(result, :timed_out, false),
+               killed: Map.get(result, :killed, false),
+               output_limit_exceeded: Map.get(result, :output_limit_exceeded, false),
+               output_truncated: Map.get(result, :output_truncated, false)
+             }}
 
-            {:ok, :pending_approval, proposal_id} ->
-              # Preserve the proposal id for owner-side await/retry (coding validation,
-              # ActionsExecutor). Do not convert this into a generic error string.
-              {:ok, :pending_approval, proposal_id}
+          {:ok, :pending_approval, proposal_id} ->
+            # Preserve the proposal id for owner-side await/retry (coding validation,
+            # ActionsExecutor). Do not convert this into a generic error string.
+            {:ok, :pending_approval, proposal_id}
 
-            {:error, :unauthorized} ->
-              Actions.emit_failed(__MODULE__, :unauthorized)
+          {:error, :unauthorized} ->
+            Actions.emit_failed(__MODULE__, :unauthorized)
 
-              {:error,
-               "Shell execution unauthorized (missing capability or policy denied). " <>
-                 "If an approval was expected, the request was not escalated — check trust rules and grants."}
+            {:error,
+             "Shell execution unauthorized (missing capability or policy denied). " <>
+               "If an approval was expected, the request was not escalated — check trust rules and grants."}
 
-            {:error, reason} ->
-              Actions.emit_failed(__MODULE__, reason)
-              {:error, format_error(reason)}
-          end
-
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, format_error(reason)}
+        end
+      else
         {:error, reason} ->
           {:error, format_error(reason)}
       end
@@ -251,35 +306,22 @@ defmodule Arbor.Actions.Shell do
     # Defense in depth: compounds are also rejected here if run/2's gate is
     # bypassed. Missing agent_id never falls through to system execute for
     # compounds.
-    defp call_shell(command, opts, context) do
-      with {:ok, _prepared} <- Arbor.Shell.prepare_agent_command(command, opts) do
-        case context[:agent_id] do
-          agent_id when is_binary(agent_id) and agent_id != "" ->
-            auth_opts = shell_auth_opts(opts, context)
-
-            case Arbor.Actions.Shell.authorize_command(agent_id, command, auth_opts) do
-              {:ok, :authorized} ->
-                execute_authorized_shell(command, opts)
-
-              {:ok, :pending_approval, proposal_id} ->
-                {:ok, :pending_approval, proposal_id}
-
-              {:error, reason} ->
-                {:error, reason}
-            end
-
-          _ ->
-            # Empty-context calls remain for controlled action harnesses, but
-            # they use the same closed direct policy and never gain implicit
-            # trusted-system shell semantics.
-            Arbor.Shell.execute_agent_command(command, opts)
-        end
-      end
+    defp call_shell(agent_id, command, opts, context) do
+      auth_opts = shell_auth_opts(opts, context)
+      Arbor.Actions.Shell.authorize_and_execute_command(agent_id, command, auth_opts)
     end
 
     defp shell_auth_opts(opts, context) do
       opts
-      |> Keyword.take([:cwd, :path, :approved_invocation, :gate_command, :timeout, :sandbox])
+      |> Keyword.take([
+        :cwd,
+        :path,
+        :approved_invocation,
+        :gate_command,
+        :timeout,
+        :sandbox,
+        :max_output_bytes
+      ])
       |> maybe_add_opt(:cwd, Keyword.get(opts, :cwd) || context[:cwd])
       |> maybe_add_opt(:approved_invocation, context[:approved_invocation])
       |> maybe_add_opt(:approval_context, shell_approval_context(opts, context))
@@ -308,10 +350,28 @@ defmodule Arbor.Actions.Shell do
       end
     end
 
-    # Execute after Trust already authorized a prepared direct command.
-    # Call only public Arbor.Shell APIs — never Sandbox or CapShell internals.
-    defp execute_authorized_shell(command, opts) do
-      Arbor.Shell.execute_agent_command(command, opts)
+    defp exact_principal(context) when is_map(context) do
+      case {Map.fetch(context, :agent_id), Map.fetch(context, "agent_id")} do
+        {{:ok, agent_id}, :error} when is_binary(agent_id) ->
+          validate_exact_principal(agent_id)
+
+        {:error, {:ok, agent_id}} when is_binary(agent_id) ->
+          validate_exact_principal(agent_id)
+
+        {{:ok, _atom_id}, {:ok, _string_id}} ->
+          {:error, :ambiguous_shell_principal}
+
+        _other ->
+          {:error, :missing_shell_principal}
+      end
+    end
+
+    defp exact_principal(_context), do: {:error, :missing_shell_principal}
+
+    defp validate_exact_principal(agent_id) do
+      if String.trim(agent_id) == "",
+        do: {:error, :missing_shell_principal},
+        else: {:ok, agent_id}
     end
 
     # LLM-facing boundary: floor tiny/zero timeouts (0, 1, …) to the default.
@@ -363,6 +423,15 @@ defmodule Arbor.Actions.Shell do
 
     defp format_error({:agent_shell_gate_mismatch, gate, command}),
       do: "Shell authorization target #{gate} does not match executable #{command}."
+
+    defp format_error(:missing_shell_principal),
+      do: "Shell execution requires one authenticated principal in context."
+
+    defp format_error(:ambiguous_shell_principal),
+      do: "Shell execution rejected ambiguous principal identity in context."
+
+    defp format_error(:invalid_agent_principal),
+      do: "Shell execution rejected an invalid authenticated principal."
 
     defp format_error(:eacces), do: "Shell execution failed: permission denied."
 

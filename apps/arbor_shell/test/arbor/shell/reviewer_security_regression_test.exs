@@ -2,9 +2,11 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Shell
+  alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutionRegistry
 
   @moduletag :fast
+  @moduletag :security_regression
 
   test "security regression: runtime PATH cannot substitute an executable identity" do
     root = fixture_root("path")
@@ -26,7 +28,7 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
     end
   end
 
-  test "security regression: timeout contains a delayed descendant before returning" do
+  test "security regression: Darwin denies forking commands instead of claiming timeout cleanup" do
     root = fixture_root("tree")
     marker = Path.join(root, "delayed-child")
     File.mkdir_p!(root)
@@ -37,12 +39,134 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
       assert {:ok, result} =
                Shell.execute_direct("sh", ["-c", script], sandbox: :none, timeout: 100)
 
-      assert result.timed_out
+      if match?({:unix, :darwin}, :os.type()) do
+        refute result.timed_out
+        refute result.killed
+        assert result.exit_code != 0
+      else
+        assert result.timed_out
+        assert result.killed
+      end
+
       Process.sleep(700)
       refute File.exists?(marker)
     after
       File.rm_rf!(root)
     end
+  end
+
+  test "security regression: double-fork setsid descendant cannot escape containment" do
+    root = fixture_root("double-fork")
+    marker = Path.join(root, "escaped")
+    File.mkdir_p!(root)
+
+    script = """
+    import os
+    import time
+
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            time.sleep(0.4)
+            open(#{inspect(marker)}, "w").close()
+            os._exit(0)
+        os._exit(0)
+    os._exit(0)
+    """
+
+    try do
+      assert {:ok, result} =
+               Shell.execute_direct("python3", ["-c", script],
+                 sandbox: :none,
+                 timeout: 2_000
+               )
+
+      Process.sleep(700)
+      refute File.exists?(marker)
+      assert result.exit_code != 0 or result.killed
+    after
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: writable startup search directory cannot supply an executable" do
+    root = fixture_root("writable-path")
+    command = "arbor-attacker-tool"
+    executable = Path.join(root, command)
+    marker = Path.join(root, "executed")
+    startup_path = System.get_env("PATH", "")
+    File.mkdir_p!(root)
+    File.write!(executable, "#!/bin/sh\ntouch '#{marker}'\n")
+    File.chmod!(executable, 0o755)
+
+    replace_executable_policy!(root <> ":/usr/bin:/bin")
+
+    try do
+      assert {:error, {:executable_not_found, ^command}} =
+               Shell.execute_direct(command, [], sandbox: :none)
+
+      refute File.exists?(marker)
+    after
+      replace_executable_policy!(startup_path)
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: direct agent facade requires an injected policy authorizer" do
+    previous = Application.get_env(:arbor_shell, :agent_authorizer)
+    Application.delete_env(:arbor_shell, :agent_authorizer)
+
+    try do
+      assert {:error, :agent_authorizer_unavailable} =
+               Shell.authorize("agent_direct_facade", "echo denied", sandbox: :none)
+
+      assert {:error, :agent_authorizer_unavailable} =
+               Shell.authorize_and_execute(
+                 "agent_direct_facade",
+                 "echo denied",
+                 sandbox: :none
+               )
+    after
+      restore(:arbor_shell, :agent_authorizer, previous)
+    end
+  end
+
+  test "security regression: async work is cancelled when its initiating caller dies" do
+    parent = self()
+
+    caller =
+      spawn(fn ->
+        send(parent, {:async_started, Shell.execute_async("sleep 5", sandbox: :none)})
+      end)
+
+    ref = Process.monitor(caller)
+    assert_receive {:async_started, {:ok, execution_id}}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^caller, _reason}, 2_000
+
+    assert eventually?(fn ->
+             match?(
+               {:ok, status} when status in [:killed, :failed],
+               Shell.get_status(execution_id)
+             )
+           end)
+  end
+
+  test "security regression: streaming work is cancelled when every consumer dies" do
+    consumer = spawn(fn -> Process.sleep(:infinity) end)
+
+    assert {:ok, session_id} =
+             Shell.execute_streaming("sleep 5",
+               stream_to: consumer,
+               sandbox: :none,
+               timeout: 5_000
+             )
+
+    on_exit(fn -> _ = Shell.stop_session(session_id) end)
+    Process.exit(consumer, :kill)
+
+    assert eventually?(fn ->
+             match?({:ok, status} when status in [:killed, :failed], Shell.get_status(session_id))
+           end)
   end
 
   test "security regression: raw legacy status mutation cannot forge terminal success" do
@@ -83,4 +207,48 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
       1_000 -> :no_reply
     end
   end
+
+  defp replace_executable_policy!(startup_path) do
+    supervisor = Arbor.Shell.Supervisor
+
+    case Supervisor.terminate_child(supervisor, ExecutablePolicy) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+    end
+
+    case Supervisor.delete_child(supervisor, ExecutablePolicy) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+    end
+
+    case Supervisor.start_child(
+           supervisor,
+           {ExecutablePolicy, startup_path: startup_path}
+         ) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
+  end
+
+  defp eventually?(fun) do
+    deadline = System.monotonic_time(:millisecond) + 2_000
+    do_eventually(fun, deadline)
+  end
+
+  defp do_eventually(fun, deadline) do
+    cond do
+      fun.() ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(20)
+        do_eventually(fun, deadline)
+    end
+  end
+
+  defp restore(app, key, nil), do: Application.delete_env(app, key)
+  defp restore(app, key, value), do: Application.put_env(app, key, value)
 end

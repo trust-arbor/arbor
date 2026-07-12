@@ -342,10 +342,9 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
       File.chmod!(executable_path, 0o755)
 
       try do
-        assert {:error, {:launcher_error, reason}} =
+        assert {:error, :executable_not_pinned} =
                  Arbor.Shell.Executor.run_bound(executable, [], timeout: 1_000)
 
-        assert reason =~ "executable identity changed"
         refute File.exists?(marker)
       after
         File.rm_rf!(root)

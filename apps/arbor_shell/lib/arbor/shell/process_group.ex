@@ -75,6 +75,7 @@ defmodule Arbor.Shell.ProcessGroup do
 
     with :ok <- validate_args(args),
          :ok <- validate_cwd(Keyword.get(opts, :cwd)),
+         :ok <- ExecutablePolicy.verify_pinned(executable),
          {:ok, child_path} <- ExecutablePolicy.child_path(),
          {:ok, launcher} <- launcher_path(),
          remaining when remaining > 0 <- remaining_ms(deadline),

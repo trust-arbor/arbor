@@ -18,49 +18,108 @@ defmodule Arbor.Actions.ShellTest do
     :ok
   end
 
+  setup do
+    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_trust)
+
+    if Process.whereis(Arbor.Trust.Store) == nil do
+      start_supervised!(Arbor.Trust.Store)
+    end
+
+    previous = %{
+      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
+      signing: Application.get_env(:arbor_security, :capability_signing_required),
+      identity: Application.get_env(:arbor_security, :strict_identity_mode),
+      uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
+      escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
+      trust_guard: Application.get_env(:arbor_trust, :approval_guard_enabled),
+      trust_enforcer: Application.get_env(:arbor_trust, :policy_enforcer_enabled)
+    }
+
+    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_security, :strict_identity_mode, false)
+    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+    Application.put_env(:arbor_trust, :approval_guard_enabled, false)
+    Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+
+    on_exit(fn ->
+      restore(:arbor_security, :reflex_checking_enabled, previous.reflex)
+      restore(:arbor_security, :capability_signing_required, previous.signing)
+      restore(:arbor_security, :strict_identity_mode, previous.identity)
+      restore(:arbor_security, :uri_registry_enforcement, previous.uri_registry)
+      restore(:arbor_security, :consensus_escalation_enabled, previous.escalation)
+      restore(:arbor_trust, :approval_guard_enabled, previous.trust_guard)
+      restore(:arbor_trust, :policy_enforcer_enabled, previous.trust_enforcer)
+    end)
+
+    agent_id = "agent_shell_execute_#{System.unique_integer([:positive])}"
+    {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
+
+    :ok =
+      Arbor.Trust.Store.store_profile(%{
+        profile
+        | rules: Map.put(profile.rules, "arbor://shell/exec/**", :auto)
+      })
+
+    {:ok, _capability} =
+      Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec/**")
+
+    {:ok, agent_context: %{agent_id: agent_id}}
+  end
+
   describe "Execute" do
-    test "runs a simple command" do
-      assert {:ok, result} = Shell.Execute.run(%{command: "echo hello"}, %{})
+    test "runs a simple command", %{agent_context: context} do
+      assert {:ok, result} = Shell.Execute.run(%{command: "echo hello"}, context)
       assert result.exit_code == 0
       assert String.contains?(result.stdout, "hello")
       refute result.timed_out
     end
 
-    test "security regression: timeout 0 falls back instead of exit 137" do
+    test "security regression: timeout 0 falls back instead of exit 137", %{
+      agent_context: context
+    } do
       # Same class of bug as ACP create_session: optional tool args filled with
       # 0 must not become an immediate Port kill.
       assert {:ok, result} =
-               Shell.Execute.run(%{command: "echo not-killed", timeout: 0}, %{})
+               Shell.Execute.run(%{command: "echo not-killed", timeout: 0}, context)
 
       assert result.exit_code == 0
       refute result.timed_out
       assert result.stdout =~ "not-killed"
     end
 
-    test "captures stderr" do
-      assert {:ok, result} = Shell.Execute.run(%{command: "ls /nonexistent_path_12345"}, %{})
+    test "captures stderr", %{agent_context: context} do
+      assert {:ok, result} =
+               Shell.Execute.run(%{command: "ls /nonexistent_path_12345"}, context)
+
       assert result.exit_code != 0
       assert result.stderr != "" or String.contains?(result.stdout, "No such file")
     end
 
-    test "respects timeout" do
+    test "respects timeout", %{agent_context: context} do
       # Action boundary floors sub-second timeouts; use >= 1000ms here.
-      assert {:ok, result} = Shell.Execute.run(%{command: "sleep 5", timeout: 1000}, %{})
+      assert {:ok, result} =
+               Shell.Execute.run(%{command: "sleep 5", timeout: 1000}, context)
+
       assert result.timed_out
     end
 
-    test "uses working directory" do
-      assert {:ok, result} = Shell.Execute.run(%{command: "pwd", cwd: "/tmp"}, %{})
+    test "uses working directory", %{agent_context: context} do
+      assert {:ok, result} = Shell.Execute.run(%{command: "pwd", cwd: "/tmp"}, context)
 
       assert String.contains?(result.stdout, "/tmp") or
                String.contains?(result.stdout, "/private/tmp")
     end
 
-    test "rejects environment overrides at the generic agent boundary" do
+    test "rejects environment overrides at the generic agent boundary", %{
+      agent_context: context
+    } do
       assert {:error, message} =
                Shell.Execute.run(
                  %{command: "printenv TEST_VAR", env: %{"TEST_VAR" => "test_value"}},
-                 %{}
+                 context
                )
 
       assert message =~ "environment overrides are unavailable"
@@ -80,21 +139,23 @@ defmodule Arbor.Actions.ShellTest do
       assert is_map(tool[:parameters_schema])
     end
 
-    test "context can override options" do
-      context = %{cwd: "/tmp"}
+    test "context can override options", %{agent_context: agent_context} do
+      context = Map.put(agent_context, :cwd, "/tmp")
       assert {:ok, result} = Shell.Execute.run(%{command: "pwd"}, context)
       assert String.contains?(result.stdout, "tmp")
     end
 
-    test "schema declares max_output_bytes and forwards a tight ceiling" do
+    test "schema declares max_output_bytes and forwards a tight ceiling", %{
+      agent_context: context
+    } do
       tool = Shell.Execute.to_tool()
       schema = tool[:parameters_schema] || tool["parameters_schema"] || %{}
       props = schema[:properties] || schema["properties"] || %{}
 
       assert Map.has_key?(props, :max_output_bytes) or Map.has_key?(props, "max_output_bytes")
 
-      # Finite producer without shell metacharacters (Execute rejects compounds
-      # even with empty context). 200 bytes crosses the 128-byte ceiling.
+      # Finite producer without shell metacharacters. 200 bytes crosses the
+      # 128-byte ceiling.
       burst = String.duplicate("x", 200)
 
       assert {:ok, result} =
@@ -105,7 +166,7 @@ defmodule Arbor.Actions.ShellTest do
                    sandbox: :none,
                    timeout: 5_000
                  },
-                 %{}
+                 context
                )
 
       assert result.killed == true
@@ -119,7 +180,9 @@ defmodule Arbor.Actions.ShellTest do
       assert result.stderr == ""
     end
 
-    test "security regression: adapter clamps max_output_bytes via Arbor.Shell facade" do
+    test "security regression: adapter clamps max_output_bytes via Arbor.Shell facade", %{
+      agent_context: context
+    } do
       # Oversized positive ceiling must be accepted and clamped (not rejected)
       # through the public Shell facade — not a duplicated L6 hard-max constant.
       hard_max = Arbor.Shell.max_output_bytes_limit()
@@ -134,7 +197,7 @@ defmodule Arbor.Actions.ShellTest do
                    sandbox: :none,
                    timeout: 5_000
                  },
-                 %{}
+                 context
                )
 
       assert result.exit_code == 0
@@ -144,8 +207,11 @@ defmodule Arbor.Actions.ShellTest do
       assert result.killed == false
     end
 
-    test "returns additive killed/output-limit metadata on normal completion" do
-      assert {:ok, result} = Shell.Execute.run(%{command: "echo meta", sandbox: :none}, %{})
+    test "returns additive killed/output-limit metadata on normal completion", %{
+      agent_context: context
+    } do
+      assert {:ok, result} =
+               Shell.Execute.run(%{command: "echo meta", sandbox: :none}, context)
 
       assert result.exit_code == 0
       assert result.timed_out == false
@@ -381,14 +447,16 @@ defmodule Arbor.Actions.ShellTest do
   end
 
   describe "Execute sandbox" do
-    test "blocks dangerous commands" do
-      assert {:error, message} = Shell.Execute.run(%{command: "rm -rf /", sandbox: :basic}, %{})
+    test "blocks dangerous commands", %{agent_context: context} do
+      assert {:error, message} =
+               Shell.Execute.run(%{command: "rm -rf /", sandbox: :basic}, context)
+
       assert message =~ "not allowed"
     end
 
-    test "strict sandbox restricts to allowlist" do
+    test "strict sandbox restricts to allowlist", %{agent_context: context} do
       assert {:error, message} =
-               Shell.Execute.run(%{command: "curl http://example.com", sandbox: :strict}, %{})
+               Shell.Execute.run(%{command: "curl http://example.com", sandbox: :strict}, context)
 
       assert message =~ "not allowed"
     end

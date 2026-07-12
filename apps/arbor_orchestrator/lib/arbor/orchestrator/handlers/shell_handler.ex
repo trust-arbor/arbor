@@ -164,9 +164,18 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
 
   defp run_command(command, prepared, opts), do: run_via_arbor_shell(command, prepared, opts)
 
-  defp run_via_arbor_shell(command, prepared, opts) do
+  defp run_via_arbor_shell(_command, prepared, opts) do
     try do
-      case Arbor.Shell.execute_bound_agent_command(command, prepared, opts) do
+      execution_opts =
+        opts
+        |> Keyword.drop([:env, :allowlist, :gate_command])
+        |> Keyword.put(:sandbox, :basic)
+
+      case Arbor.Shell.execute_direct(
+             prepared.executable,
+             prepared.args,
+             execution_opts
+           ) do
         {:ok, %{timed_out: true}} ->
           {:error, :timeout}
 

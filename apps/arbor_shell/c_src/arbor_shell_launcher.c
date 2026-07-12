@@ -49,6 +49,11 @@ extern char **environ;
 #define MAX_CONTROL_PACKET (16U * 1024U * 1024U)
 #define GROUP_KILL_GRACE_MS 1500
 
+#ifdef __APPLE__
+#define DARWIN_SANDBOX_EXEC "/usr/bin/sandbox-exec"
+#define DARWIN_NO_FORK_PROFILE "(version 1) (allow default) (deny process-fork)"
+#endif
+
 typedef struct {
   uint32_t state[8];
   uint64_t bit_length;
@@ -315,6 +320,56 @@ static int verify_identity(int fd, const struct stat *expected, const char *sha2
   return strcmp(digest, sha256) == 0 ? 0 : -9;
 }
 
+#ifdef __APPLE__
+static int trusted_system_executable(const char *path) {
+  struct stat path_stat;
+  struct stat fd_stat;
+
+  if (lstat(path, &path_stat) != 0 || !S_ISREG(path_stat.st_mode) ||
+      path_stat.st_uid != 0 || (path_stat.st_mode & 0022) != 0) {
+    return -1;
+  }
+
+  int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return -1;
+
+  int result = fstat(fd, &fd_stat);
+  close(fd);
+  if (result != 0 || fd_stat.st_dev != path_stat.st_dev ||
+      fd_stat.st_ino != path_stat.st_ino || fd_stat.st_uid != 0 ||
+      (fd_stat.st_mode & 0022) != 0) {
+    return -1;
+  }
+
+  return 0;
+}
+
+static void darwin_exec_no_fork(const char *path, char **target_argv) {
+  if (trusted_system_executable(DARWIN_SANDBOX_EXEC) != 0) _exit(126);
+
+  size_t target_count = 0;
+  while (target_argv[target_count] != NULL) target_count++;
+
+  char **sandbox_argv = calloc(target_count + 5U, sizeof(char *));
+  if (sandbox_argv == NULL) _exit(126);
+
+  sandbox_argv[0] = (char *)DARWIN_SANDBOX_EXEC;
+  sandbox_argv[1] = "-p";
+  sandbox_argv[2] = (char *)DARWIN_NO_FORK_PROFILE;
+  sandbox_argv[3] = "--";
+  sandbox_argv[4] = (char *)path;
+
+  for (size_t i = 1; i < target_count; i++) {
+    sandbox_argv[i + 4U] = target_argv[i];
+  }
+
+  sandbox_argv[target_count + 4U] = NULL;
+  execve(DARWIN_SANDBOX_EXEC, sandbox_argv, environ);
+  free(sandbox_argv);
+  _exit(127);
+}
+#endif
+
 static int wait_for_fd(int fd, short events, int64_t deadline) {
   struct pollfd poll_fd = {.fd = fd, .events = events, .revents = 0};
   for (;;) {
@@ -517,6 +572,23 @@ static int tracked_processes_live(const pid_tracker *tracker) {
   return live;
 }
 
+static int tracked_descendants_live(const pid_tracker *tracker, pid_t root) {
+  process_info *snapshot = NULL;
+  size_t count = 0;
+  if (process_snapshot(&snapshot, &count) != 0) return -1;
+
+  int live = 0;
+  for (size_t i = 0; i < count; i++) {
+    if (!snapshot[i].zombie && snapshot[i].pid != root &&
+        tracker_contains(tracker, snapshot[i].pid)) {
+      live++;
+    }
+  }
+
+  free(snapshot);
+  return live;
+}
+
 /* Darwin can return EPERM for killpg while a short-lived group leader is in
    its exit transition. Enumerate the kernel's pgrp view and signal each member
    in that case; never translate the ambiguous EPERM into containment success. */
@@ -671,12 +743,19 @@ static void child_exec(int target_fd, const char *path, char **target_argv,
   int flags = fcntl(target_fd, F_GETFD);
   if (flags >= 0) (void)fcntl(target_fd, F_SETFD, flags & ~FD_CLOEXEC);
   fexecve(target_fd, target_argv, environ);
-#else
-  (void)target_fd;
+#elif defined(__APPLE__)
   int check_fd = open(path, O_RDONLY | O_NOFOLLOW);
   if (check_fd < 0 || verify_identity(check_fd, expected, sha256) != 0) _exit(126);
   close(check_fd);
-  execve(path, target_argv, environ);
+  close(target_fd);
+  darwin_exec_no_fork(path, target_argv);
+#else
+  (void)target_fd;
+  (void)path;
+  (void)target_argv;
+  (void)expected;
+  (void)sha256;
+  _exit(126);
 #endif
 
   dprintf(STDERR_FILENO, "arbor_shell_launcher: exec failed: %s\n", strerror(errno));
@@ -898,6 +977,10 @@ static int run_exec(int argc, char **argv) {
   }
 
   close(input_pipe[1]);
+  int teardown_discovery = discover_descendants(&tracker, child);
+  int live_descendants =
+      teardown_discovery < 0 ? -1 : tracked_descendants_live(&tracker, child);
+  if (live_descendants < 0) reason = REASON_CONTAINMENT_FAILURE;
   int contained = contain_group(child, child, &status, &tracker);
 
   int flags = fcntl(output_pipe[0], F_GETFL);
@@ -917,6 +1000,8 @@ static int run_exec(int argc, char **argv) {
 
   if (contained != 0) {
     send_terminal(REASON_CONTAINMENT_FAILURE, 137);
+  } else if (reason == REASON_NORMAL && live_descendants > 0) {
+    send_terminal(REASON_CANCELLED, 137);
   } else if (reason == REASON_NORMAL) {
     send_terminal(REASON_NORMAL, child_exit_code(status));
   } else {

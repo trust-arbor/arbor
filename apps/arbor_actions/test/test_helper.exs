@@ -67,4 +67,10 @@ for child <- [
   end
 end
 
-ExUnit.start(exclude: [:llm, :llm_local])
+excluded_tags =
+  case Arbor.Shell.ExecutablePolicy.resolve("mix") do
+    {:ok, _executable} -> [:llm, :llm_local]
+    {:error, _reason} -> [:llm, :llm_local, :requires_pinned_mix]
+  end
+
+ExUnit.start(exclude: excluded_tags)

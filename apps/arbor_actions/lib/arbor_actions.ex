@@ -216,10 +216,25 @@ defmodule Arbor.Actions do
           {:ok, any()}
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | {:taint_blocked, atom(), atom(), atom()} | term()}
-  def authorize_and_execute(agent_id, action_module, params, context \\ %{}) do
-    with_execution_binding(action_module, context, fn ->
-      do_authorize_and_execute(agent_id, action_module, params, context)
-    end)
+  def authorize_and_execute(agent_id, action_module, params, context \\ %{})
+
+  def authorize_and_execute(agent_id, action_module, params, context)
+      when is_binary(agent_id) and is_map(context) do
+    with :ok <- validate_authorization_principal(agent_id),
+         {:ok, bound_context} <- bind_authenticated_principal(context, agent_id) do
+      with_execution_binding(action_module, bound_context, fn ->
+        do_authorize_and_execute(agent_id, action_module, params, bound_context)
+      end)
+    end
+  end
+
+  def authorize_and_execute(_agent_id, _action_module, _params, _context),
+    do: {:error, :invalid_authorization_principal}
+
+  defp validate_authorization_principal(agent_id) do
+    if String.trim(agent_id) == "",
+      do: {:error, :invalid_authorization_principal},
+      else: :ok
   end
 
   defp do_authorize_and_execute(agent_id, action_module, params, context) do
@@ -257,11 +272,6 @@ defmodule Arbor.Actions do
     # so facade-level auth (e.g., File.authorize_file_op) can also use it.
     signed_request = Map.get(context, :signed_request)
     clean_context = context
-
-    # Ensure agent_id is available in context for actions that need it.
-    # Actions use agent_id to decide whether to enforce facade-level auth
-    # (authorized agent calls) or pass through (system-level calls).
-    clean_context = Map.put_new(clean_context, :agent_id, agent_id)
 
     # P0-1: Inject default taint policy from config if not already set in context.
     # Ensures taint enforcement is active even when callers don't explicitly set policy.
@@ -417,6 +427,32 @@ defmodule Arbor.Actions do
 
       {:error, _reason} ->
         {:error, :unauthorized}
+    end
+  end
+
+  defp bind_authenticated_principal(context, agent_id) do
+    atom_id = Map.fetch(context, :agent_id)
+    string_id = Map.fetch(context, "agent_id")
+
+    case {atom_id, string_id} do
+      {:error, :error} ->
+        {:ok, Map.put(context, :agent_id, agent_id)}
+
+      {{:ok, ^agent_id}, :error} ->
+        {:ok, context}
+
+      {:error, {:ok, ^agent_id}} ->
+        {:ok, context |> Map.delete("agent_id") |> Map.put(:agent_id, agent_id)}
+
+      _other ->
+        asserted =
+          [atom_id, string_id]
+          |> Enum.flat_map(fn
+            {:ok, value} -> [value]
+            :error -> []
+          end)
+
+        {:error, {:principal_context_mismatch, agent_id, asserted}}
     end
   end
 

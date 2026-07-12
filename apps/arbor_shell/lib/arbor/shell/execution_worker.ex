@@ -5,12 +5,12 @@ defmodule Arbor.Shell.ExecutionWorker do
 
   alias Arbor.Shell.ExecutionRegistry
 
-  defstruct [:execution_id, :runner, :opts, :start_ref]
+  defstruct [:execution_id, :runner, :opts, :start_ref, :controller_pid, :controller_ref]
 
-  @spec start_link({String.t(), keyword(), (keyword() -> term()), reference()}) ::
+  @spec start_link({String.t(), keyword(), (keyword() -> term()), reference(), pid()}) ::
           GenServer.on_start()
-  def start_link({execution_id, opts, runner, start_ref}) do
-    GenServer.start_link(__MODULE__, {execution_id, opts, runner, start_ref})
+  def start_link({execution_id, opts, runner, start_ref, controller_pid}) do
+    GenServer.start_link(__MODULE__, {execution_id, opts, runner, start_ref, controller_pid})
   end
 
   def child_spec(args) do
@@ -23,13 +23,15 @@ defmodule Arbor.Shell.ExecutionWorker do
   end
 
   @impl true
-  def init({execution_id, opts, runner, start_ref}) do
+  def init({execution_id, opts, runner, start_ref, controller_pid}) do
     {:ok,
      %__MODULE__{
        execution_id: execution_id,
        opts: opts,
        runner: runner,
-       start_ref: start_ref
+       start_ref: start_ref,
+       controller_pid: controller_pid,
+       controller_ref: Process.monitor(controller_pid)
      }}
   end
 
@@ -54,6 +56,13 @@ defmodule Arbor.Shell.ExecutionWorker do
   def handle_info({:cancel_shell_execution, execution_id}, %{execution_id: execution_id} = state) do
     result = cancellation_result()
     _ = ExecutionRegistry.finish(execution_id, result)
+    {:stop, :normal, state}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, controller_pid, _reason},
+        %{controller_ref: ref, controller_pid: controller_pid} = state
+      ) do
     {:stop, :normal, state}
   end
 

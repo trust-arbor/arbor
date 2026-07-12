@@ -4,7 +4,8 @@ defmodule Arbor.Shell.ExecutionRegistry do
 
   PID, Port, monitor, and cancellation authority never appear in `get/1` or
   `list/1`. Lifecycle mutations are accepted only from the process currently
-  owned by the entry; async handoff is accepted only from the original owner.
+  owned by the entry; async handoff is accepted only from the original
+  controller.
   Callers cannot assert an owner PID or copy a mutation token.
   """
 
@@ -92,11 +93,11 @@ defmodule Arbor.Shell.ExecutionRegistry do
   end
 
   @impl true
-  def handle_call({:register, command, opts}, {owner_pid, _tag}, state)
+  def handle_call({:register, command, opts}, {controller_pid, _tag}, state)
       when is_binary(command) and is_list(opts) do
     id_prefix = if Keyword.get(opts, :id_prefix) == "port_", do: "port_", else: "exec_"
     id = Identifiers.generate_id(id_prefix)
-    owner_ref = Process.monitor(owner_pid)
+    controller_ref = Process.monitor(controller_pid)
 
     execution = %{
       id: id,
@@ -107,9 +108,10 @@ defmodule Arbor.Shell.ExecutionRegistry do
       result: nil,
       sandbox: Keyword.get(opts, :sandbox, :basic),
       cwd: Keyword.get(opts, :cwd),
-      owner_pid: owner_pid,
-      owner_ref: owner_ref,
-      controller_pid: owner_pid
+      owner_pid: controller_pid,
+      owner_ref: controller_ref,
+      controller_pid: controller_pid,
+      controller_ref: controller_ref
     }
 
     {:reply, {:ok, id}, put_in(state, [:executions, id], execution)}
@@ -125,7 +127,6 @@ defmodule Arbor.Shell.ExecutionRegistry do
          true <- execution.owner_pid == caller and execution.controller_pid == caller,
          true <- execution.status == :pending,
          true <- Process.alive?(new_owner) do
-      Process.demonitor(execution.owner_ref, [:flush])
       owner_ref = Process.monitor(new_owner)
 
       updated = %{execution | owner_pid: new_owner, owner_ref: owner_ref, status: :running}
@@ -237,20 +238,40 @@ defmodule Arbor.Shell.ExecutionRegistry do
   def handle_info({:DOWN, ref, :process, owner_pid, reason}, state) do
     executions =
       Map.new(state.executions, fn {id, execution} ->
-        if execution.owner_ref == ref and execution.owner_pid == owner_pid and
-             execution.status not in @terminal_statuses do
-          status = if execution.status == :cancelling, do: :killed, else: :failed
+        owner_down? = execution.owner_ref == ref and execution.owner_pid == owner_pid
 
-          result =
-            if status == :killed do
-              cancellation_result(execution)
-            else
-              %{error: {:execution_owner_down, bounded_reason(reason)}}
-            end
+        controller_down? =
+          execution.controller_ref == ref and execution.controller_pid == owner_pid
 
-          {id, apply_terminal(execution, status, result)}
-        else
-          {id, execution}
+        cond do
+          execution.status in @terminal_statuses ->
+            {id, execution}
+
+          owner_down? ->
+            status = if execution.status == :cancelling, do: :killed, else: :failed
+
+            result =
+              if status == :killed do
+                cancellation_result(execution)
+              else
+                %{error: {:execution_owner_down, bounded_reason(reason)}}
+              end
+
+            {id, apply_terminal(execution, status, result)}
+
+          controller_down? ->
+            send(execution.owner_pid, {:cancel_shell_execution, id})
+
+            {id,
+             %{
+               execution
+               | status: :cancelling,
+                 controller_pid: nil,
+                 controller_ref: nil
+             }}
+
+          true ->
+            {id, execution}
         end
       end)
 
@@ -300,12 +321,20 @@ defmodule Arbor.Shell.ExecutionRegistry do
   end
 
   defp apply_terminal(execution, status, result) do
-    Process.demonitor(execution.owner_ref, [:flush])
+    execution
+    |> monitor_refs()
+    |> Enum.each(&Process.demonitor(&1, [:flush]))
 
     execution
     |> Map.put(:status, status)
     |> Map.put(:result, result)
     |> Map.put(:completed_at, DateTime.utc_now())
+  end
+
+  defp monitor_refs(execution) do
+    [execution.owner_ref, execution.controller_ref]
+    |> Enum.filter(&is_reference/1)
+    |> Enum.uniq()
   end
 
   defp terminal_status(result) do

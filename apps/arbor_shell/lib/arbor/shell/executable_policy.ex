@@ -39,7 +39,8 @@ defmodule Arbor.Shell.ExecutablePolicy do
   @type state :: %{
           search_paths: [String.t()],
           child_path: String.t(),
-          owner_uids: MapSet.t(non_neg_integer())
+          executables_by_name: %{String.t() => Executable.t()},
+          executables_by_path: %{String.t() => Executable.t()}
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -53,6 +54,13 @@ defmodule Arbor.Shell.ExecutablePolicy do
   end
 
   def resolve(_command), do: {:error, :executable_not_found}
+
+  @spec verify_pinned(Executable.t()) :: :ok | {:error, :executable_not_pinned}
+  def verify_pinned(%Executable{} = executable) do
+    call({:verify_pinned, executable})
+  end
+
+  def verify_pinned(_executable), do: {:error, :executable_not_pinned}
 
   @spec resolve_agent(String.t(), String.t()) ::
           {:ok, Executable.t()} | {:error, term()}
@@ -90,8 +98,7 @@ defmodule Arbor.Shell.ExecutablePolicy do
 
   @spec same_identity?(Executable.t(), Executable.t()) :: boolean()
   def same_identity?(%Executable{} = left, %Executable{} = right) do
-    Map.take(left, [:device, :inode, :size, :mtime, :ctime, :mode, :sha256]) ==
-      Map.take(right, [:device, :inode, :size, :mtime, :ctime, :mode, :sha256])
+    identity(left) == identity(right)
   end
 
   @impl true
@@ -109,23 +116,27 @@ defmodule Arbor.Shell.ExecutablePolicy do
         _ -> String.split(startup_path, ":", trim: true)
       end
 
-    owner_uids = trusted_owner_uids()
-
     search_paths =
       requested_paths
       |> Enum.filter(&is_binary/1)
-      |> Enum.map(&Path.expand/1)
+      |> Enum.map(&trusted_directory/1)
+      |> Enum.flat_map(fn
+        {:ok, path} -> [path]
+        {:error, _reason} -> []
+      end)
       |> Enum.uniq()
-      |> Enum.filter(&trusted_directory?(&1, owner_uids))
 
     if search_paths == [] do
       {:stop, :no_trusted_executable_paths}
     else
+      {executables_by_name, executables_by_path} = pin_executables(search_paths)
+
       {:ok,
        %{
          search_paths: search_paths,
          child_path: Enum.join(search_paths, ":"),
-         owner_uids: owner_uids
+         executables_by_name: executables_by_name,
+         executables_by_path: executables_by_path
        }}
     end
   end
@@ -137,6 +148,19 @@ defmodule Arbor.Shell.ExecutablePolicy do
 
   def handle_call({:resolve, command}, _from, state) do
     {:reply, do_resolve(command, state), state}
+  end
+
+  def handle_call({:verify_pinned, %Executable{} = executable}, _from, state) do
+    result =
+      case Map.get(state.executables_by_path, executable.path) do
+        %Executable{} = pinned ->
+          if same_identity?(pinned, executable), do: :ok, else: {:error, :executable_not_pinned}
+
+        nil ->
+          {:error, :executable_not_pinned}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call(_request, _from, state) do
@@ -164,46 +188,63 @@ defmodule Arbor.Shell.ExecutablePolicy do
         {:error, :executable_not_found}
 
       true ->
-        Enum.find_value(state.search_paths, {:error, :executable_not_found}, fn directory ->
-          candidate = Path.join(directory, command)
-
-          case executable_identity(candidate, command, state.owner_uids) do
-            {:ok, executable} -> {:ok, executable}
-            {:error, _reason} -> false
-          end
-        end)
-    end
-  end
-
-  defp resolve_absolute(command, state) do
-    expanded = Path.expand(command)
-    basename = Path.basename(expanded)
-
-    direct_allowed? =
-      Enum.any?(state.search_paths, fn directory -> Path.dirname(expanded) == directory end)
-
-    cond do
-      direct_allowed? ->
-        executable_identity(expanded, basename, state.owner_uids)
-
-      true ->
-        with {:ok, pinned} <- do_resolve(basename, state),
-             {:ok, candidate} <- executable_identity(expanded, basename, state.owner_uids),
-             true <- same_identity?(candidate, pinned) do
-          {:ok, pinned}
-        else
-          _ -> {:error, :executable_not_found}
+        case Map.get(state.executables_by_name, command) do
+          %Executable{} = executable -> {:ok, executable}
+          nil -> {:error, :executable_not_found}
         end
     end
   end
 
-  defp executable_identity(candidate, name, owner_uids) do
+  defp resolve_absolute(command, state) do
+    with {:ok, canonical} <- canonical_path(command) do
+      case Map.get(state.executables_by_path, canonical) do
+        %Executable{} = executable ->
+          {:ok, executable}
+
+        nil ->
+          basename = Path.basename(canonical)
+
+          case Map.get(state.executables_by_name, basename) do
+            %Executable{path: ^canonical} = executable -> {:ok, executable}
+            _other -> {:error, :executable_not_found}
+          end
+      end
+    else
+      _ -> {:error, :executable_not_found}
+    end
+  end
+
+  defp pin_executables(search_paths) do
+    Enum.reduce(search_paths, {%{}, %{}}, fn directory, {by_name, by_path} ->
+      directory
+      |> File.ls()
+      |> case do
+        {:ok, entries} -> Enum.sort(entries)
+        {:error, _reason} -> []
+      end
+      |> Enum.reduce({by_name, by_path}, fn name, {names, paths} ->
+        case executable_identity(Path.join(directory, name), name) do
+          {:ok, executable} ->
+            {
+              Map.put_new(names, name, executable),
+              Map.put_new(paths, executable.path, executable)
+            }
+
+          {:error, _reason} ->
+            {names, paths}
+        end
+      end)
+    end)
+  end
+
+  defp executable_identity(candidate, name) do
     with {:ok, canonical} <- canonical_path(candidate),
          true <- Path.type(canonical) == :absolute,
+         :ok <- trusted_path_chain(canonical),
          {:ok, %File.Stat{} = stat} <- File.stat(canonical, time: :posix),
          true <- stat.type == :regular,
          true <- executable_mode?(stat.mode),
-         true <- trusted_file_owner?(stat, owner_uids),
+         true <- trusted_file?(stat),
          {:ok, contents} <- File.read(canonical),
          {:ok, %File.Stat{} = after_stat} <- File.stat(canonical, time: :posix),
          true <- stable_stat?(stat, after_stat) do
@@ -231,32 +272,58 @@ defmodule Arbor.Shell.ExecutablePolicy do
 
   defp executable_mode?(mode), do: (mode &&& 0o111) != 0
 
-  defp trusted_file_owner?(%File.Stat{uid: uid, mode: mode}, owner_uids) do
-    MapSet.member?(owner_uids, uid) and (mode &&& 0o002) == 0
-  end
+  # Agent processes share the service account's filesystem authority. A
+  # user-owned PATH directory is therefore mutable by the same principal and
+  # cannot anchor an executable identity. Root ownership plus no group/other
+  # write permission leaves replacement under operator authority only.
+  defp trusted_file?(%File.Stat{uid: 0, mode: mode}), do: (mode &&& 0o022) == 0
+  defp trusted_file?(_stat), do: false
 
-  defp trusted_directory?(path, owner_uids) do
+  defp trusted_directory(path) do
     with {:ok, canonical} <- canonical_path(path),
-         {:ok, %File.Stat{type: :directory, uid: uid, mode: mode}} <-
-           File.stat(canonical, time: :posix) do
-      MapSet.member?(owner_uids, uid) and (mode &&& 0o002) == 0
+         :ok <- trusted_path_chain(canonical),
+         {:ok, %File.Stat{type: :directory, uid: 0, mode: mode}} <-
+           File.stat(canonical, time: :posix),
+         true <- (mode &&& 0o022) == 0 do
+      {:ok, canonical}
     else
-      _ -> false
+      _ -> {:error, :untrusted_executable_directory}
     end
   end
 
-  defp trusted_owner_uids do
-    home_uid =
-      with home when is_binary(home) <- System.user_home(),
-           {:ok, %File.Stat{uid: uid}} <- File.stat(home) do
-        uid
-      else
-        _ -> nil
-      end
+  defp trusted_path_chain(path) do
+    path
+    |> Path.dirname()
+    |> directory_chain()
+    |> Enum.reduce_while(:ok, fn directory, :ok ->
+      case File.stat(directory, time: :posix) do
+        {:ok, %File.Stat{type: :directory, uid: 0, mode: mode}} when (mode &&& 0o022) == 0 ->
+          {:cont, :ok}
 
-    [0, home_uid]
-    |> Enum.reject(&is_nil/1)
-    |> MapSet.new()
+        _other ->
+          {:halt, {:error, :untrusted_executable_directory}}
+      end
+    end)
+  end
+
+  defp directory_chain(path) do
+    path
+    |> Path.split()
+    |> Enum.reduce({[], "/"}, fn
+      "/", {directories, current} ->
+        {directories, current}
+
+      part, {directories, current} ->
+        next = Path.join(current, part)
+        {[next | directories], next}
+    end)
+    |> elem(0)
+    |> then(&["/" | Enum.reverse(&1)])
+    |> Enum.uniq()
+  end
+
+  defp identity(executable) do
+    Map.take(executable, [:device, :inode, :size, :mtime, :ctime, :mode, :sha256])
   end
 
   defp canonical_path(path), do: resolve_links(Path.expand(path), 0)

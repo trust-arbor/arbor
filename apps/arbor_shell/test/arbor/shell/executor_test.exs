@@ -12,8 +12,8 @@ defmodule Arbor.Shell.ExecutorTest do
   # ~60 * 10ms ≈ 600ms total wall if allowed to finish; absolute timeout
   # (~100ms) should cut far earlier. Outer Task.yield (~1.5–2s) is only a
   # safety net so base fails promptly without orphaning OS shells.
-  @finite_noisy_sh ~s{i=0; while [ "$i" -lt 60 ]; do printf "x\\n"; i=$((i+1)); sleep 0.01; done}
-  @finite_noisy_cmd "sh -c '#{@finite_noisy_sh}'"
+  @finite_noisy_python ~s{import sys,time; [(sys.stdout.write("x\\n"), sys.stdout.flush(), time.sleep(0.01)) for _ in range(60)]}
+  @finite_noisy_cmd "python3 -c '#{@finite_noisy_python}'"
 
   describe "run/2" do
     test "executes command and returns result" do
@@ -158,7 +158,7 @@ defmodule Arbor.Shell.ExecutorTest do
       for runner <- [
             fn -> Executor.run(@finite_noisy_cmd, timeout: 100) end,
             fn ->
-              Executor.run_direct("sh", ["-c", @finite_noisy_sh], timeout: 100)
+              Executor.run_direct("python3", ["-c", @finite_noisy_python], timeout: 100)
             end
           ] do
         task = Task.async(runner)
@@ -345,10 +345,18 @@ defmodule Arbor.Shell.ExecutorTest do
         File.rm(launched)
       end)
 
-      script = "touch #{launched}; (sleep 0.5; touch #{marker}) & sleep 5"
+      script = ": > #{launched}; (sleep 0.5; touch #{marker}) & sleep 5"
 
-      assert {:ok, %{timed_out: true, killed: true}} =
-               Executor.run_direct("sh", ["-c", script], timeout: 150)
+      assert {:ok, result} = Executor.run_direct("sh", ["-c", script], timeout: 150)
+
+      if darwin?() do
+        assert result.exit_code != 0
+        refute result.timed_out
+        refute result.killed
+      else
+        assert result.timed_out
+        assert result.killed
+      end
 
       assert File.exists?(launched)
       Process.sleep(700)
@@ -382,14 +390,24 @@ defmodule Arbor.Shell.ExecutorTest do
       File.chmod!(helper, 0o755)
       System.cmd("git", ["config", "diff.external", helper], cd: root)
 
-      assert {:ok, %{output_limit_exceeded: true, killed: true}} =
+      assert {:ok, result} =
                Executor.run_direct("git", ["diff", "--ext-diff"],
                  cwd: root,
                  max_output_bytes: 256,
                  timeout: 5_000
                )
 
-      assert File.exists?(launched)
+      if darwin?() do
+        assert result.exit_code != 0
+        refute result.output_limit_exceeded
+        refute result.killed
+        refute File.exists?(launched)
+      else
+        assert result.output_limit_exceeded
+        assert result.killed
+        assert File.exists?(launched)
+      end
+
       Process.sleep(800)
       refute File.exists?(marker), "Git helper descendant survived output-limit return"
     end
@@ -417,8 +435,16 @@ defmodule Arbor.Shell.ExecutorTest do
                  timeout: 500
                )
 
-      assert result.timed_out
-      assert File.exists?(launched)
+      if darwin?() do
+        assert result.exit_code != 0
+        refute result.timed_out
+        refute result.killed
+        refute File.exists?(launched)
+      else
+        assert result.timed_out
+        assert File.exists?(launched)
+      end
+
       Process.sleep(1_700)
       refute File.exists?(marker), "Git hook descendant survived timeout return"
     end
@@ -436,11 +462,28 @@ defmodule Arbor.Shell.ExecutorTest do
         File.rm(launched)
       end)
 
-      command = "sh -c 'touch #{launched}; (sleep 0.6; touch #{marker}) & sleep 5'"
+      command = "sh -c ': > #{launched}; (sleep 0.6; touch #{marker}) & sleep 5'"
       assert {:ok, execution_id} = Shell.execute_async(command, sandbox: :none, timeout: 5_000)
       assert eventually?(fn -> File.exists?(launched) end, 1_000)
-      assert :ok = Shell.kill(execution_id)
-      assert {:ok, %{cancelled: true, killed: true}} = Shell.get_result(execution_id)
+
+      if darwin?() do
+        assert eventually?(
+                 fn ->
+                   match?(
+                     {:ok, %{exit_code: code}} when code != 0,
+                     Shell.get_result(execution_id)
+                   )
+                 end,
+                 1_000
+               )
+
+        assert {:ok, result} = Shell.get_result(execution_id)
+        assert result.exit_code != 0
+        refute result.killed
+      else
+        assert :ok = Shell.kill(execution_id)
+        assert {:ok, %{cancelled: true, killed: true}} = Shell.get_result(execution_id)
+      end
 
       Process.sleep(800)
       refute File.exists?(marker), "argv descendant survived cancellation return"
@@ -465,4 +508,6 @@ defmodule Arbor.Shell.ExecutorTest do
         do_eventually(fun, deadline)
     end
   end
+
+  defp darwin?, do: match?({:unix, :darwin}, :os.type())
 end

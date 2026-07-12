@@ -44,6 +44,7 @@ defmodule Arbor.Actions.Git do
   """
 
   alias Arbor.Shell
+  alias Arbor.Common.SafePath
 
   # Git command defaults - used by all nested action modules
   @doc false
@@ -94,10 +95,15 @@ defmodule Arbor.Actions.Git do
 
   @doc false
   def execute(path, args) when is_binary(path) and is_list(args) do
-    with :ok <- reject_configured_helpers(path) do
-      execute_without_audit(path, args)
+    with :ok <- validate_git_args(args),
+         {:ok, authorized_root} <- authorized_root(path),
+         :ok <- validate_effective_worktree(authorized_root),
+         :ok <- reject_configured_helpers(authorized_root) do
+      execute_without_audit(authorized_root, args)
     end
   end
+
+  def execute(_path, _args), do: {:error, :invalid_git_execution}
 
   @doc false
   def validate_ref(ref) when is_binary(ref) do
@@ -146,6 +152,78 @@ defmodule Arbor.Actions.Git do
   defp valid_ref_component?(component) do
     component != "" and not String.starts_with?(component, ".") and
       not String.ends_with?(component, ".lock")
+  end
+
+  defp validate_git_args([command | rest])
+       when is_binary(command) and command != "" and is_list(rest) do
+    dangerous_scope? =
+      Enum.any?([command | rest], fn
+        "-C" ->
+          true
+
+        "--git-dir" ->
+          true
+
+        "--work-tree" ->
+          true
+
+        "--namespace" ->
+          true
+
+        "--config-env" ->
+          true
+
+        argument when is_binary(argument) ->
+          String.starts_with?(argument, [
+            "--git-dir=",
+            "--work-tree=",
+            "--namespace=",
+            "--config-env="
+          ])
+
+        _other ->
+          true
+      end)
+
+    valid_strings? =
+      Enum.all?([command | rest], &(is_binary(&1) and not String.contains?(&1, <<0>>)))
+
+    if valid_strings? and not String.starts_with?(command, "-") and not dangerous_scope?,
+      do: :ok,
+      else: {:error, :invalid_git_execution_scope}
+  end
+
+  defp validate_git_args(_args), do: {:error, :invalid_git_execution_scope}
+
+  defp authorized_root(path) do
+    case SafePath.resolve_real(path) do
+      {:ok, canonical} when is_binary(canonical) ->
+        if File.dir?(canonical), do: {:ok, canonical}, else: {:error, :invalid_git_repository}
+
+      _other ->
+        {:error, :invalid_git_repository}
+    end
+  end
+
+  defp validate_effective_worktree(authorized_root) do
+    case execute_without_audit(authorized_root, ["rev-parse", "--show-toplevel"]) do
+      {:ok, %{exit_code: 0, stdout: output}} ->
+        with effective when effective != "" <- String.trim(output),
+             {:ok, canonical_effective} <- SafePath.resolve_real(effective),
+             true <-
+               canonical_effective == authorized_root or
+                 String.starts_with?(canonical_effective, authorized_root <> "/") do
+          :ok
+        else
+          _other -> {:error, {:git_worktree_outside_authorized_root, String.trim(output)}}
+        end
+
+      {:ok, result} ->
+        {:error, {:git_worktree_validation_failed, result.exit_code, result.stdout}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp reject_configured_helpers(path) do

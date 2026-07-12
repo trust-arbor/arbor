@@ -519,13 +519,13 @@ defmodule Arbor.Actions.Mix do
     |------|------|----------|-------------|
     | `path` | string | yes | Project root |
     | `check_only` | boolean | no | `--check-formatted` mode (default false) |
-    | `files` | list | no | Specific files/globs to format |
+    | `files` | list | no | Existing project-relative files (no options or globs) |
 
     ## Returns
 
     - `path` — project path
     - `exit_code` — exit code (0 = clean / formatted, non-zero = drift in check_only mode)
-    - `passed` — boolean (always true in write mode unless mix itself failed)
+    - `passed` — boolean derived from the formatter exit status
     - `stdout` / `stderr` — captured output
     """
 
@@ -537,10 +537,14 @@ defmodule Arbor.Actions.Mix do
       schema: [
         path: [type: :string, required: true, doc: "Project root path"],
         check_only: [type: :boolean, default: false, doc: "Check-only mode"],
-        files: [type: {:list, :string}, doc: "Specific files/globs"]
+        files: [
+          type: {:list, :string},
+          doc: "Existing project-relative files (no options or globs)"
+        ]
       ]
 
     alias Arbor.Actions
+    alias Arbor.Common.SafePath
     alias Arbor.Actions.Mix, as: MixAction
 
     def taint_roles do
@@ -553,35 +557,109 @@ defmodule Arbor.Actions.Mix do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
+    def run(%{} = params, _context) do
+      with {:ok, path, args} <- build_invocation(params) do
+        Actions.emit_started(__MODULE__, params)
 
-      args = build_args(params)
+        case MixAction.run_mix(path, args) do
+          {:ok, result} ->
+            output = %{
+              path: path,
+              exit_code: result.exit_code,
+              passed: result.exit_code == 0,
+              stdout: result.stdout,
+              stderr: result.stderr
+            }
 
-      case MixAction.run_mix(path, args) do
-        {:ok, result} ->
-          output = %{
-            path: path,
-            exit_code: result.exit_code,
-            passed: result.exit_code == 0,
-            stdout: result.stdout,
-            stderr: result.stderr
-          }
+            Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
+            {:ok, output}
 
-          Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
-          {:ok, output}
-
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, "mix format failed to execute: #{reason}"}
+        end
+      else
         {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "mix format failed to execute: #{reason}"}
+          {:error, "mix format rejected invalid invocation: #{inspect(reason)}"}
       end
     end
 
-    defp build_args(params) do
-      args = ["format"]
-      args = if params[:check_only], do: args ++ ["--check-formatted"], else: args
-      args = if params[:files], do: args ++ params[:files], else: args
-      args
+    def run(_params, _context),
+      do: {:error, "mix format rejected invalid invocation: :invalid_format_params"}
+
+    defp build_invocation(params) do
+      with :ok <- validate_option_keys(params),
+           {:ok, path} <- validate_root(params[:path]),
+           {:ok, check_only} <- validate_check_only(Map.get(params, :check_only, false)),
+           {:ok, files} <- validate_files(path, Map.get(params, :files)) do
+        options = if check_only, do: ["--check-formatted"], else: []
+        file_args = if files == [], do: [], else: ["--" | files]
+        {:ok, path, ["format"] ++ options ++ file_args}
+      end
     end
+
+    defp validate_option_keys(params) do
+      if Enum.all?(Map.keys(params), &(&1 in [:path, :check_only, :files])),
+        do: :ok,
+        else: {:error, :unsupported_format_option}
+    end
+
+    defp validate_root(path) when is_binary(path) and path != "" do
+      case SafePath.resolve_real(path) do
+        {:ok, canonical} ->
+          if File.dir?(canonical), do: {:ok, canonical}, else: {:error, :invalid_format_root}
+
+        _other ->
+          {:error, :invalid_format_root}
+      end
+    end
+
+    defp validate_root(_path), do: {:error, :invalid_format_root}
+
+    defp validate_check_only(value) when is_boolean(value), do: {:ok, value}
+    defp validate_check_only(_value), do: {:error, :invalid_check_only}
+
+    defp validate_files(_root, nil), do: {:ok, []}
+    defp validate_files(_root, []), do: {:ok, []}
+
+    defp validate_files(root, files) when is_list(files) do
+      Enum.reduce_while(files, {:ok, []}, fn file, {:ok, accepted} ->
+        case validate_file(root, file) do
+          :ok -> {:cont, {:ok, [file | accepted]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, accepted} -> {:ok, Enum.reverse(accepted)}
+        error -> error
+      end
+    end
+
+    defp validate_files(_root, _files), do: {:error, :invalid_format_files}
+
+    defp validate_file(root, file) when is_binary(file) do
+      components = Path.split(file)
+
+      valid_shape? =
+        file != "" and byte_size(file) <= 4_096 and String.valid?(file) and
+          not String.contains?(file, [<<0>>, "\n", "\r", "\\"]) and
+          not Regex.match?(~r/[\x00-\x1F\x7F]/u, file) and
+          not String.starts_with?(file, "-") and Path.type(file) == :relative and
+          Enum.all?(components, &(&1 not in ["", ".", ".."])) and
+          Regex.match?(~r/\A[A-Za-z0-9_.()&+@ -]+(?:\/[A-Za-z0-9_.()&+@ -]+)*\z/, file)
+
+      candidate = Path.expand(file, root)
+
+      with true <- valid_shape?,
+           {:ok, canonical} <- SafePath.resolve_real(candidate),
+           true <- canonical == root or String.starts_with?(canonical, root <> "/"),
+           true <- File.regular?(canonical) do
+        :ok
+      else
+        _other -> {:error, {:invalid_format_file, file}}
+      end
+    end
+
+    defp validate_file(_root, file), do: {:error, {:invalid_format_file, file}}
   end
 end

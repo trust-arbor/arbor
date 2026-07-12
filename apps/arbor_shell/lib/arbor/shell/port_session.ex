@@ -30,8 +30,12 @@ defmodule Arbor.Shell.PortSession do
     :opts,
     :start_ref,
     :tracked,
+    :owner_pid,
+    :owner_ref,
     status: :starting,
     subscribers: MapSet.new(),
+    subscriber_refs: %{},
+    had_subscribers: false,
     output_acc: [],
     output_bytes: 0,
     exit_code: nil,
@@ -44,21 +48,21 @@ defmodule Arbor.Shell.PortSession do
 
   @spec start_link(String.t(), keyword()) :: GenServer.on_start()
   def start_link(command, opts \\ []) do
-    GenServer.start_link(__MODULE__, {command, opts})
+    start_link_owned(command, opts, self())
   end
 
   @spec start_supervised(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_supervised(command, opts \\ []) do
     DynamicSupervisor.start_child(
       Arbor.Shell.PortSessionSupervisor,
-      {__MODULE__, {command, opts}}
+      child_spec({:owned, self(), command, opts})
     )
   end
 
   @doc false
   @spec start_link_direct(String.t(), [String.t()], String.t(), keyword()) :: GenServer.on_start()
   def start_link_direct(executable, args, display_command, opts) do
-    GenServer.start_link(__MODULE__, {:direct, executable, args, display_command, opts})
+    start_link_direct_owned(executable, args, display_command, opts, self())
   end
 
   @doc false
@@ -67,7 +71,21 @@ defmodule Arbor.Shell.PortSession do
   def start_supervised_direct(executable, args, display_command, opts \\ []) do
     DynamicSupervisor.start_child(
       Arbor.Shell.PortSessionSupervisor,
-      {__MODULE__, {:direct, executable, args, display_command, opts}}
+      child_spec({:direct_owned, self(), executable, args, display_command, opts})
+    )
+  end
+
+  @doc false
+  def start_link_owned(command, opts, owner_pid) when is_pid(owner_pid) do
+    GenServer.start_link(__MODULE__, {:owned, owner_pid, command, opts})
+  end
+
+  @doc false
+  def start_link_direct_owned(executable, args, display_command, opts, owner_pid)
+      when is_pid(owner_pid) do
+    GenServer.start_link(
+      __MODULE__,
+      {:direct_owned, owner_pid, executable, args, display_command, opts}
     )
   end
 
@@ -80,7 +98,7 @@ defmodule Arbor.Shell.PortSession do
     :exit, reason -> {:error, reason}
   end
 
-  @spec subscribe(GenServer.server(), pid()) :: :ok
+  @spec subscribe(GenServer.server(), pid()) :: :ok | {:error, :subscriber_not_alive}
   def subscribe(session, pid), do: GenServer.call(session, {:subscribe, pid})
 
   @spec send_input(GenServer.server(), iodata()) :: :ok | {:error, :not_running | term()}
@@ -123,14 +141,43 @@ defmodule Arbor.Shell.PortSession do
     }
   end
 
+  def child_spec({:owned, owner_pid, command, opts}) do
+    %{
+      id: {__MODULE__, make_ref()},
+      start: {__MODULE__, :start_link_owned, [command, opts, owner_pid]},
+      restart: :temporary,
+      type: :worker
+    }
+  end
+
+  def child_spec({:direct_owned, owner_pid, executable, args, display_command, opts}) do
+    %{
+      id: {__MODULE__, make_ref()},
+      start:
+        {__MODULE__, :start_link_direct_owned,
+         [executable, args, display_command, opts, owner_pid]},
+      restart: :temporary,
+      type: :worker
+    }
+  end
+
   @impl true
   def init({:direct, executable, args, display_command, opts}) do
-    init_session(executable, args, display_command, opts)
+    init_session(executable, args, display_command, opts, parent_owner())
   end
 
   def init({command, opts}) do
     {executable, args} = Sandbox.parse_command(command)
-    init_session(executable, args, command, opts)
+    init_session(executable, args, command, opts, parent_owner())
+  end
+
+  def init({:owned, owner_pid, command, opts}) do
+    {executable, args} = Sandbox.parse_command(command)
+    init_session(executable, args, command, opts, owner_pid)
+  end
+
+  def init({:direct_owned, owner_pid, executable, args, display_command, opts}) do
+    init_session(executable, args, display_command, opts, owner_pid)
   end
 
   @impl true
@@ -150,7 +197,11 @@ defmodule Arbor.Shell.PortSession do
   end
 
   def handle_call({:subscribe, pid}, _from, state) when is_pid(pid) do
-    {:reply, :ok, %{state | subscribers: MapSet.put(state.subscribers, pid)}}
+    if Process.alive?(pid) do
+      {:reply, :ok, add_subscriber(state, pid)}
+    else
+      {:reply, {:error, :subscriber_not_alive}, state}
+    end
   end
 
   def handle_call({:send_input, data}, _from, %{status: :running, handle: handle} = state) do
@@ -183,6 +234,31 @@ defmodule Arbor.Shell.PortSession do
   end
 
   def handle_info(:self_terminate, state), do: {:stop, :normal, state}
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, %{owner_ref: ref, owner_pid: pid} = state) do
+    cancelled = cancel_running(state)
+    {:stop, :normal, cancelled}
+  end
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    case Map.get(state.subscriber_refs, pid) do
+      ^ref ->
+        subscribers = MapSet.delete(state.subscribers, pid)
+        subscriber_refs = Map.delete(state.subscriber_refs, pid)
+        updated = %{state | subscribers: subscribers, subscriber_refs: subscriber_refs}
+
+        if state.had_subscribers and MapSet.size(subscribers) == 0 and
+             state.status in [:starting, :running] do
+          cancelled = cancel_running(updated)
+          {:stop, :normal, cancelled}
+        else
+          {:noreply, updated}
+        end
+
+      _other ->
+        {:noreply, state}
+    end
+  end
 
   def handle_info(message, %{handle: %ProcessGroup{} = handle} = state) do
     case ProcessGroup.decode_message(handle, message) do
@@ -221,11 +297,14 @@ defmodule Arbor.Shell.PortSession do
 
   def terminate(_reason, _state), do: :ok
 
-  defp init_session(executable, args, display_command, opts) do
+  defp init_session(executable, args, display_command, opts, owner_pid) do
     with {:ok, timeout} <- validate_timeout(Keyword.get(opts, :timeout, @default_timeout)),
-         :ok <- validate_subscribers(Keyword.get(opts, :stream_to)) do
+         :ok <- validate_subscribers(Keyword.get(opts, :stream_to)),
+         true <- is_pid(owner_pid) and Process.alive?(owner_pid) do
       start_time = Keyword.get(opts, :started_at, System.monotonic_time(:millisecond))
       deferred = Keyword.get(opts, :deferred)
+      subscribers = subscriber_set(opts)
+      subscriber_refs = Map.new(subscribers, &{&1, Process.monitor(&1)})
 
       {id, start_ref, tracked} =
         case deferred do
@@ -247,7 +326,11 @@ defmodule Arbor.Shell.PortSession do
         max_output_bytes:
           Executor.normalize_max_output_bytes(Keyword.get(opts, :max_output_bytes)),
         opts: opts,
-        subscribers: subscriber_set(opts),
+        subscribers: subscribers,
+        subscriber_refs: subscriber_refs,
+        had_subscribers: MapSet.size(subscribers) > 0,
+        owner_pid: owner_pid,
+        owner_ref: Process.monitor(owner_pid),
         start_ref: start_ref,
         tracked: tracked
       }
@@ -261,6 +344,7 @@ defmodule Arbor.Shell.PortSession do
         end
       end
     else
+      false -> {:stop, :invalid_session_owner}
       {:error, reason} -> {:stop, reason}
     end
   end
@@ -414,6 +498,26 @@ defmodule Arbor.Shell.PortSession do
       nil -> MapSet.new()
       pid when is_pid(pid) -> MapSet.new([pid])
       pids when is_list(pids) -> MapSet.new(pids)
+    end
+  end
+
+  defp add_subscriber(state, pid) do
+    if MapSet.member?(state.subscribers, pid) do
+      state
+    else
+      %{
+        state
+        | subscribers: MapSet.put(state.subscribers, pid),
+          subscriber_refs: Map.put(state.subscriber_refs, pid, Process.monitor(pid)),
+          had_subscribers: true
+      }
+    end
+  end
+
+  defp parent_owner do
+    case Process.get(:"$ancestors") do
+      [parent | _] when is_pid(parent) -> parent
+      _ -> self()
     end
   end
 

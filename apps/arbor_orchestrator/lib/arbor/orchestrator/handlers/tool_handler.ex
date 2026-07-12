@@ -116,7 +116,12 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
     authority = Keyword.fetch!(opts, :run_authorization)
     shell_opts = shell_opts(node, context, opts, authority)
 
-    case Arbor.Shell.execute_bound_agent_command(command, prepared, shell_opts) do
+    execution_opts =
+      shell_opts
+      |> Keyword.drop([:env, :allowlist, :gate_command])
+      |> Keyword.put(:sandbox, :basic)
+
+    case Arbor.Shell.execute_direct(prepared.executable, prepared.args, execution_opts) do
       {:ok, result} ->
         output = Map.get(result, :stdout, "") <> Map.get(result, :stderr, "")
         exit_code = Map.get(result, :exit_code, 0)
