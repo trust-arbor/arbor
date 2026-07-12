@@ -7,18 +7,19 @@ defmodule Arbor.Security.OIDC do
   2. OIDC claim extraction
   3. Persistent human keypair binding (via IdentityStore)
   4. Identity registration + capability grants
-  5. Signer function creation
+  5. Owner-bound signing-authority acquisition
 
   ## Usage
 
       # Full device flow (interactive CLI)
-      {:ok, agent_id, signer} = Arbor.Security.OIDC.authenticate_device_flow(config)
+      {:ok, agent_id, authority} = Arbor.Security.OIDC.authenticate_device_flow(config)
 
       # Verify an existing JWT
-      {:ok, agent_id, signer} = Arbor.Security.OIDC.authenticate_token(id_token, config)
+      {:ok, agent_id, authority} = Arbor.Security.OIDC.authenticate_token(id_token, config)
   """
 
   alias Arbor.Contracts.Security.Identity, as: IdentityContract
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry, as: IdentityRegistry
   alias Arbor.Security.OIDC.Config
@@ -41,9 +42,12 @@ defmodule Arbor.Security.OIDC do
   5. Registers identity + grants capabilities
   6. Caches the token for future sessions
 
-  Returns `{:ok, agent_id, signer}` on success.
+  Returns `{:ok, agent_id, signing_authority}` on success. The authority is
+  owned by the calling process and is revoked automatically when that process
+  exits.
   """
-  @spec authenticate_device_flow(map() | nil) :: {:ok, String.t(), function()} | {:error, term()}
+  @spec authenticate_device_flow(map() | nil) ::
+          {:ok, String.t(), SigningAuthority.t()} | {:error, term()}
   def authenticate_device_flow(config \\ nil) do
     config = config || Config.device_flow()
 
@@ -59,10 +63,11 @@ defmodule Arbor.Security.OIDC do
            :ok <- ensure_registered(identity),
            :ok <- ensure_capabilities(identity.agent_id) do
         cache_token(token_response, claims)
-        signer = Arbor.Security.make_signer(identity.agent_id, identity.private_key)
-        log_auth_result(identity, status)
 
-        {:ok, identity.agent_id, signer}
+        with {:ok, authority} <- open_operator_authority(identity) do
+          log_auth_result(identity, status)
+          {:ok, identity.agent_id, authority}
+        end
       else
         nil -> {:error, :no_id_token_in_response}
         {:error, _} = error -> error
@@ -73,10 +78,11 @@ defmodule Arbor.Security.OIDC do
   @doc """
   Authenticate using an existing ID token (e.g., from cache).
 
-  Verifies the token, loads the persistent keypair, and returns a signer.
+  Verifies the token, loads the persistent keypair, and returns an owner-bound
+  signing authority.
   """
   @spec authenticate_token(String.t(), map() | nil) ::
-          {:ok, String.t(), function()} | {:error, term()}
+          {:ok, String.t(), SigningAuthority.t()} | {:error, term()}
   def authenticate_token(id_token, config \\ nil) do
     config = config || resolve_provider_for_token(id_token)
 
@@ -87,11 +93,33 @@ defmodule Arbor.Security.OIDC do
            {:ok, identity, _status} <- IdentityStore.load_or_create(claims),
            :ok <- ensure_registered(identity),
            :ok <- ensure_capabilities(identity.agent_id) do
-        signer = Arbor.Security.make_signer(identity.agent_id, identity.private_key)
-        {:ok, identity.agent_id, signer}
+        with {:ok, authority} <- open_operator_authority(identity) do
+          {:ok, identity.agent_id, authority}
+        end
       end
     end
   end
+
+  @doc false
+  @spec open_operator_authority(IdentityContract.t()) ::
+          {:ok, SigningAuthority.t()} | {:error, term()}
+  def open_operator_authority(%IdentityContract{
+        agent_id: principal_id,
+        private_key: private_key
+      })
+      when is_binary(principal_id) and is_binary(private_key) do
+    with {:ok, proof} <-
+           Arbor.Security.build_signing_authority_acquisition_proof(
+             principal_id,
+             private_key,
+             purpose: :oidc_operator,
+             owner: self()
+           ) do
+      Arbor.Security.open_signing_authority(proof)
+    end
+  end
+
+  def open_operator_authority(_identity), do: {:error, :invalid_oidc_identity}
 
   @doc """
   Load a cached OIDC token from disk.
@@ -194,7 +222,9 @@ defmodule Arbor.Security.OIDC do
       role = Arbor.Security.Role.default_human_role()
 
       case Arbor.Security.assign_role(agent_id, role) do
-        {:ok, _caps} -> :ok
+        {:ok, _caps} ->
+          :ok
+
         {:error, reason} ->
           Logger.warning("[OIDC] Failed to assign role #{role}: #{inspect(reason)}")
           :ok

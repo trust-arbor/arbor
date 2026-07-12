@@ -73,16 +73,20 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
     dot_source = resolve_dot(goal, branches, opts)
 
     # Authenticate operator (human identity via OIDC or fallback)
-    {agent_id, signer} = authenticate_operator()
+    {agent_id, signing_authority} = authenticate_operator()
 
     # Build run options
     run_opts = build_run_opts(opts, run_id)
 
     # Thread authentication into run options
     run_opts =
-      if signer do
+      if signing_authority do
         run_opts
-        |> Keyword.put(:signer, signer)
+        |> Keyword.put(:signing_authority, signing_authority)
+        |> Keyword.put(:execution_principal, agent_id)
+        |> Keyword.put(:agent_id, agent_id)
+        |> Keyword.put(:caller_id, agent_id)
+        |> Keyword.put(:author_id, agent_id)
         |> Keyword.update(:initial_values, %{"session.agent_id" => agent_id}, fn vals ->
           Map.put(vals, "session.agent_id", agent_id)
         end)
@@ -417,9 +421,9 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
         id_token = get_in(cache_data, ["token_response", "id_token"])
 
         case Arbor.Security.authenticate_oidc_token(id_token) do
-          {:ok, agent_id, signer} ->
+          {:ok, agent_id, signing_authority} ->
             success("Authenticated: #{agent_id}")
-            {agent_id, signer}
+            {agent_id, signing_authority}
 
           {:error, reason} ->
             warn("Cached token invalid (#{inspect(reason)}), starting device flow...")
@@ -442,9 +446,9 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
          config when not is_nil(config) <- Arbor.Security.OIDC.Config.device_flow(),
          {:ok, new_tokens} <- Arbor.Security.OIDC.DeviceFlow.refresh(config, refresh_token),
          id_token when is_binary(id_token) <- Map.get(new_tokens, "id_token"),
-         {:ok, agent_id, signer} <- Arbor.Security.authenticate_oidc_token(id_token) do
+         {:ok, agent_id, signing_authority} <- Arbor.Security.authenticate_oidc_token(id_token) do
       success("Re-authenticated via refresh: #{agent_id}")
-      {agent_id, signer}
+      {agent_id, signing_authority}
     else
       _ -> run_device_flow()
     end
@@ -452,9 +456,9 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
 
   defp run_device_flow do
     case Arbor.Security.authenticate_oidc() do
-      {:ok, agent_id, signer} ->
+      {:ok, agent_id, signing_authority} ->
         success("Authenticated: #{agent_id}")
-        {agent_id, signer}
+        {agent_id, signing_authority}
 
       {:error, reason} ->
         warn("OIDC authentication failed: #{inspect(reason)}")

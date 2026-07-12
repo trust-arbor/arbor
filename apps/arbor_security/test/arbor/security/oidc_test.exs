@@ -40,11 +40,14 @@ defmodule Arbor.Security.OIDCTest do
       # tokens from previous OIDC sessions don't interfere
       prev = Application.get_env(:arbor_security, :oidc)
       tmp_path = Path.join(System.tmp_dir!(), "arbor_test_oidc_#{:rand.uniform(1_000_000)}.enc")
-      Application.put_env(:arbor_security, :oidc, [token_cache_path: tmp_path])
+      Application.put_env(:arbor_security, :oidc, token_cache_path: tmp_path)
 
       on_exit(fn ->
         File.rm(tmp_path)
-        if prev, do: Application.put_env(:arbor_security, :oidc, prev), else: Application.delete_env(:arbor_security, :oidc)
+
+        if prev,
+          do: Application.put_env(:arbor_security, :oidc, prev),
+          else: Application.delete_env(:arbor_security, :oidc)
       end)
 
       :ok
@@ -95,6 +98,30 @@ defmodule Arbor.Security.OIDCTest do
       assert Arbor.Security.human_identity?("human_abc123")
       refute Arbor.Security.human_identity?("agent_abc123")
       refute Arbor.Security.human_identity?("system")
+    end
+  end
+
+  describe "operator signing authority" do
+    test "opens a caller-owned authority without retaining a signer closure" do
+      {:ok, identity} = Arbor.Security.generate_identity(name: "OIDC authority test")
+      human_id = "human_" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+      human_identity = %{identity | agent_id: human_id}
+
+      assert :ok = Arbor.Security.register_identity(human_identity)
+      assert :ok = Arbor.Security.store_signing_key(human_id, identity.private_key)
+
+      on_exit(fn ->
+        _ = Arbor.Security.delete_signing_key(human_id)
+        _ = Arbor.Security.deregister_identity(human_id)
+      end)
+
+      assert {:ok, authority} = OIDC.open_operator_authority(human_identity)
+      refute is_function(authority)
+      assert authority.principal_id == human_id
+
+      assert {:ok, signed} = Arbor.Security.sign_with_authority(authority, "oidc-test")
+      assert signed.agent_id == human_id
+      assert signed.payload == "oidc-test"
     end
   end
 end

@@ -1379,10 +1379,10 @@ defmodule Arbor.Security do
   to authorize in their browser, then binds persistent keypairs to the
   OIDC identity.
 
-  Returns `{:ok, agent_id, signer}` where signer is a function
-  `(payload -> {:ok, SignedRequest.t()})`.
+  Returns the persistent human principal plus a caller-owned signing authority.
   """
-  @spec authenticate_oidc(map() | nil) :: {:ok, String.t(), function()} | {:error, term()}
+  @spec authenticate_oidc(map() | nil) ::
+          {:ok, String.t(), SigningAuthority.t()} | {:error, term()}
   def authenticate_oidc(config \\ nil) do
     alias Arbor.Security.OIDC
     OIDC.authenticate_device_flow(config)
@@ -1391,10 +1391,11 @@ defmodule Arbor.Security do
   @doc """
   Authenticate using an existing OIDC ID token.
 
-  Verifies the token, loads the bound keypair, and returns a signer.
+  Verifies the token, loads the bound keypair, and returns a caller-owned
+  signing authority.
   """
   @spec authenticate_oidc_token(String.t(), map() | nil) ::
-          {:ok, String.t(), function()} | {:error, term()}
+          {:ok, String.t(), SigningAuthority.t()} | {:error, term()}
   def authenticate_oidc_token(id_token, config \\ nil) do
     alias Arbor.Security.OIDC
     OIDC.authenticate_token(id_token, config)
