@@ -25,11 +25,16 @@ defmodule Arbor.LLM.Plugs.Fixture do
   of test file or session. Per-call-volatile fields
   (`:signed_request`, `:base_url`, `:provider`) are scrubbed before
   hashing so fixtures stay stable.
+
+  Streaming recording accepts eager event lists and `Arbor.LLM.OwnedStream`.
+  Generic lazy enumerables are rejected without enumeration because they have no
+  cancellation/finalization protocol when a producer callback stops returning.
   """
 
   alias Arbor.LLM.Call
   alias Arbor.LLM.Boundary
   alias Arbor.LLM.Deadline
+  alias Arbor.LLM.OwnedStream
   alias Arbor.LLM.Response
   alias Arbor.LLM.ResponseBudget
   alias Arbor.LLM.StreamEvent
@@ -199,11 +204,11 @@ defmodule Arbor.LLM.Plugs.Fixture do
     with {:ok, opts, _timeout} <-
            Deadline.normalize_options(opts, @default_record_timeout_ms),
          {:ok, receipt} <- Deadline.receipt(opts) do
-      Deadline.run(
-        fn -> do_record(call, result, opts) end,
-        receipt,
-        {:fixture_record_deadline_exceeded, receipt.timeout_ms}
-      )
+      try do
+        do_record(call, result, opts, receipt)
+      after
+        finalize_recording_stream(result)
+      end
     end
   rescue
     exception -> fixture_error({:fixture_save_exception, external_exception(exception)})
@@ -211,10 +216,13 @@ defmodule Arbor.LLM.Plugs.Fixture do
     kind, reason -> fixture_error({:fixture_save_failure, kind, external_reason(reason)})
   end
 
-  defp do_record(%Call{operation: op} = call, result, opts) do
+  defp do_record(%Call{operation: op} = call, result, opts, receipt) do
     path = path_for(call)
 
-    with {:ok, response, replayable_result} <- prepare_serialization(op, result, opts),
+    with :ok <- ensure_record_active(receipt),
+         {:ok, response, replayable_result} <-
+           prepare_serialization(op, result, opts, receipt),
+         :ok <- ensure_record_active(receipt),
          fixture = %{
            "operation" => Atom.to_string(op),
            "request_hash" => request_hash(call),
@@ -223,8 +231,11 @@ defmodule Arbor.LLM.Plugs.Fixture do
            "response" => response
          },
          {:ok, fixture} <- json_safe(fixture),
+         :ok <- ensure_record_active(receipt),
          {:ok, encoded} <- encode_fixture(fixture),
-         :ok <- Arbor.LLM.FileReceipt.publish(path, encoded, @maximum_fixture_bytes) do
+         :ok <- ensure_record_active(receipt),
+         :ok <-
+           Arbor.LLM.FileReceipt.publish(path, encoded, @maximum_fixture_bytes, receipt) do
       {:ok, replayable_result}
     else
       {:error, reason} -> fixture_error({:fixture_save_failed, reason})
@@ -233,18 +244,18 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   # ── Serialization (Arbor result shape → JSON-safe shape) ───────────
 
-  defp prepare_serialization(:complete, {:ok, %Response{} = resp} = result, _opts) do
+  defp prepare_serialization(:complete, {:ok, %Response{} = resp} = result, _opts, _receipt) do
     {:ok, %{"outcome" => "ok", "value" => serialize_response(resp)}, result}
   end
 
-  defp prepare_serialization(:stream, {:ok, enum}, opts) do
-    with {:ok, events} <- collect_stream_events(enum, opts) do
+  defp prepare_serialization(:stream, {:ok, enum}, opts, receipt) do
+    with {:ok, events} <- collect_stream_events(enum, opts, receipt) do
       serialized = Enum.map(events, &serialize_stream_event/1)
       {:ok, %{"outcome" => "ok", "value" => %{"events" => serialized}}, {:ok, events}}
     end
   end
 
-  defp prepare_serialization(op, {:ok, indexed_embeddings, usage} = result, _opts)
+  defp prepare_serialization(op, {:ok, indexed_embeddings, usage} = result, _opts, _receipt)
        when op in [:embed_cloud, :embed_local] and is_list(indexed_embeddings) do
     response = %{
       "outcome" => "ok",
@@ -258,12 +269,12 @@ defmodule Arbor.LLM.Plugs.Fixture do
     {:ok, response, result}
   end
 
-  defp prepare_serialization(_op, {:error, reason} = result, _opts),
+  defp prepare_serialization(_op, {:error, reason} = result, _opts, _receipt),
     do:
       {:ok, %{"outcome" => "error", "reason" => Arbor.LLM.inspect_external_reason(reason)},
        result}
 
-  defp prepare_serialization(_op, other, _opts),
+  defp prepare_serialization(_op, other, _opts, _receipt),
     do: {:ok, %{"outcome" => "raw", "raw" => Arbor.LLM.inspect_external_reason(other)}, other}
 
   defp serialize_response(%Response{} = r) do
@@ -288,8 +299,22 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   defp serialize_stream_event(other), do: Arbor.LLM.sanitize_external_reason(other)
 
-  defp collect_stream_events(enum, opts) do
-    with true <- not is_nil(Enumerable.impl_for(enum)) or {:error, :enumerable_stream_required},
+  defp collect_stream_events(%OwnedStream{} = stream, opts, receipt) do
+    Deadline.run(
+      fn -> do_collect_stream_events(stream, opts, receipt) end,
+      receipt,
+      {:fixture_record_deadline_exceeded, receipt.timeout_ms}
+    )
+  end
+
+  defp collect_stream_events(events, opts, receipt) when is_list(events),
+    do: do_collect_stream_events(events, opts, receipt)
+
+  defp collect_stream_events(_unowned_lazy_source, _opts, _receipt),
+    do: {:error, :owned_stream_or_eager_list_required}
+
+  defp do_collect_stream_events(enum, opts, receipt) do
+    with :ok <- ensure_record_active(receipt),
          {:ok, tracker} <- Boundary.stream_tracker(opts),
          {:ok, maximum} <- Boundary.stream_event_limit(opts) do
       result =
@@ -297,6 +322,9 @@ defmodule Arbor.LLM.Plugs.Fixture do
           next = count + 1
 
           cond do
+            not record_active?(receipt) ->
+              {:halt, {:error, {:fixture_record_deadline_exceeded, receipt.timeout_ms}}}
+
             next > maximum ->
               {:halt, {:error, {:stream_limit_exceeded, :events, maximum}}}
 
@@ -309,8 +337,13 @@ defmodule Arbor.LLM.Plugs.Fixture do
         end)
 
       case result do
-        {:error, _reason} = error -> error
-        {events, _count} -> {:ok, Enum.reverse(events)}
+        {:error, _reason} = error ->
+          error
+
+        {events, _count} ->
+          with :ok <- ensure_record_active(receipt) do
+            {:ok, Enum.reverse(events)}
+          end
       end
     end
   rescue
@@ -318,6 +351,24 @@ defmodule Arbor.LLM.Plugs.Fixture do
   catch
     kind, reason -> {:error, {:stream_collection_failure, kind, external_reason(reason)}}
   end
+
+  defp finalize_recording_stream({:ok, %OwnedStream{} = stream}) do
+    _ = OwnedStream.finalize(stream)
+    :ok
+  end
+
+  defp finalize_recording_stream(_result), do: :ok
+
+  defp ensure_record_active(receipt) do
+    if record_active?(receipt),
+      do: :ok,
+      else: {:error, {:fixture_record_deadline_exceeded, receipt.timeout_ms}}
+  end
+
+  defp record_active?(%{deadline_ms: deadline_ms}) when is_integer(deadline_ms),
+    do: System.monotonic_time(:millisecond) <= deadline_ms
+
+  defp record_active?(_receipt), do: false
 
   defp json_safe(value) do
     with :ok <- ResponseBudget.validate(value, @fixture_limits) do

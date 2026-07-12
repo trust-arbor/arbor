@@ -24,6 +24,8 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
   require Logger
 
+  alias Arbor.AI.OwnedOperation
+
   @type public_view :: %{
           worker_session_id: String.t(),
           session_id: String.t() | nil,
@@ -53,6 +55,7 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
   @registry_name __MODULE__
   @handle_prefix "acp_worker_"
+  @cleanup_timeout_ms 5_000
 
   # -- Public API -----------------------------------------------------
 
@@ -130,7 +133,24 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   def close(worker_session_id, opts \\ []) when is_binary(worker_session_id) do
     {server_opts, caller} = split_caller_opts(opts)
     return_to_pool_override = return_to_pool_override(opts)
-    call({:close, worker_session_id, caller, return_to_pool_override}, server_opts)
+
+    with {:ok, server_opts, _remaining} <- normalized_call_opts(server_opts),
+         {:ok, result, entry} <-
+           call_normalized(
+             {:take_for_close, worker_session_id, caller, return_to_pool_override},
+             server_opts
+           ) do
+      case entry do
+        nil ->
+          {:ok, result}
+
+        entry ->
+          case release_session_owned(entry, :close, server_opts) do
+            :ok -> {:ok, result}
+            {:error, reason} -> {:error, reason}
+          end
+      end
+    end
   end
 
   @doc false
@@ -220,7 +240,7 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   end
 
   def handle_call(
-        {:close, worker_session_id, caller, return_to_pool_override},
+        {:take_for_close, worker_session_id, caller, return_to_pool_override},
         {from_pid, _tag},
         state
       ) do
@@ -228,13 +248,13 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
     case Map.fetch(state.sessions, worker_session_id) do
       :error ->
-        {:reply, {:ok, already_closed_view(worker_session_id)}, state}
+        {:reply, {:ok, already_closed_view(worker_session_id), nil}, state}
 
       {:ok, entry} ->
         if authorized?(entry, caller) do
           entry = apply_return_to_pool_override(entry, return_to_pool_override)
-          {result, state} = do_close(state, entry)
-          {:reply, {:ok, result}, state}
+          {result, state} = take_for_close(state, entry)
+          {:reply, {:ok, result, entry}, state}
         else
           {:reply, {:error, :not_authorized}, state}
         end
@@ -267,26 +287,36 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   # so acquisition cleanup in AcpManaged always runs after a failed register.
   defp call(message, opts) do
     with {:ok, opts, timeout} <- normalized_call_opts(opts) do
-      server = Keyword.get(opts, :server, @registry_name)
+      call_normalized(message, opts, timeout)
+    end
+  end
 
-      try do
-        GenServer.call(server, message, timeout)
-      catch
-        :exit, {:noproc, _} ->
-          {:error, :registry_unavailable}
+  defp call_normalized(message, opts) do
+    with {:ok, _opts, timeout} <- Arbor.AI.Timeout.remaining(opts) do
+      call_normalized(message, opts, timeout)
+    end
+  end
 
-        :exit, {:normal, _} ->
-          {:error, :registry_unavailable}
+  defp call_normalized(message, opts, timeout) do
+    server = Keyword.get(opts, :server, @registry_name)
 
-        :exit, {:shutdown, _} ->
-          {:error, :registry_unavailable}
+    try do
+      GenServer.call(server, message, timeout)
+    catch
+      :exit, {:noproc, _} ->
+        {:error, :registry_unavailable}
 
-        :exit, {:timeout, _} ->
-          {:error, :timeout}
+      :exit, {:normal, _} ->
+        {:error, :registry_unavailable}
 
-        :exit, reason ->
-          {:error, {:registry_call_failed, Arbor.LLM.sanitize_external_reason(reason)}}
-      end
+      :exit, {:shutdown, _} ->
+        {:error, :registry_unavailable}
+
+      :exit, {:timeout, _} ->
+        {:error, :timeout}
+
+      :exit, reason ->
+        {:error, {:registry_call_failed, Arbor.LLM.sanitize_external_reason(reason)}}
     end
   end
 
@@ -535,9 +565,8 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
   defp non_empty_id?(id), do: is_binary(id) and id != ""
 
-  defp do_close(state, entry) do
+  defp take_for_close(state, entry) do
     state = drop_entry(state, entry)
-    release_session(entry, :close)
 
     result =
       entry
@@ -584,96 +613,95 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   end
 
   defp release_session(entry, reason) do
-    cond do
-      entry.pooled and entry.return_to_pool ->
-        checkin_pooled(entry, reason)
+    Task.start(fn ->
+      _ = release_session_owned(entry, reason, cleanup_opts())
+    end)
 
-      entry.pooled ->
-        hard_close_pooled(entry, reason)
+    :ok
+  end
 
-      true ->
-        close_session_process(entry, reason)
+  defp release_session_owned(entry, release_reason, opts) do
+    case OwnedOperation.run(
+           fn -> release_session_inline(entry, opts) end,
+           opts,
+           :timeout
+         ) do
+      :ok ->
+        :ok
+
+      {:error, _error_reason} = error ->
+        force_terminate(entry.session_pid)
+
+        Logger.debug(
+          "AcpManaged: bounded release failed after #{release_reason}: " <>
+            Arbor.LLM.inspect_external_reason(error)
+        )
+
+        error
+
+      _other ->
+        :ok
     end
   end
 
-  defp checkin_pooled(entry, reason) do
+  defp release_session_inline(entry, opts) do
+    cond do
+      entry.pooled and entry.return_to_pool -> checkin_pooled(entry, opts)
+      entry.pooled -> hard_close_pooled(entry, opts)
+      true -> close_session_process_inline(entry, opts)
+    end
+  end
+
+  defp checkin_pooled(entry, opts) do
     pool_mod = entry.pool_module || Arbor.AI.AcpPool
 
-    Task.start(fn ->
-      try do
-        if function_exported?(pool_mod, :checkin, 1) do
-          pool_mod.checkin(entry.session_pid)
-        end
-      rescue
-        error ->
-          Logger.debug(
-            "AcpManaged: pool checkin failed after #{reason}: #{Arbor.LLM.external_exception_message(error)}"
-          )
-      catch
-        _kind, _reason -> :ok
-      end
-    end)
-
-    :ok
+    cond do
+      function_exported?(pool_mod, :checkin, 2) -> pool_mod.checkin(entry.session_pid, opts)
+      function_exported?(pool_mod, :checkin, 1) -> pool_mod.checkin(entry.session_pid)
+      true -> {:error, :pool_checkin_unavailable}
+    end
   end
 
-  # Hard-close pooled sessions through the pool when possible so the pool
-  # entry is removed rather than left as a leaked checkout.
-  defp hard_close_pooled(entry, reason) do
+  defp hard_close_pooled(entry, opts) do
     pool_mod = entry.pool_module || Arbor.AI.AcpPool
 
-    Task.start(fn ->
-      try do
-        cond do
-          function_exported?(pool_mod, :close_session, 1) ->
-            pool_mod.close_session(entry.session_pid)
+    cond do
+      function_exported?(pool_mod, :close_session, 2) ->
+        pool_mod.close_session(entry.session_pid, opts)
 
-          true ->
-            close_session_process_inline(entry)
-        end
-      rescue
-        error ->
-          Logger.debug(
-            "AcpManaged: pool hard-close failed after #{reason}: #{Arbor.LLM.external_exception_message(error)}"
-          )
-      catch
-        _kind, _reason -> :ok
-      end
-    end)
+      function_exported?(pool_mod, :close_session, 1) ->
+        pool_mod.close_session(entry.session_pid)
 
-    :ok
+      true ->
+        close_session_process_inline(entry, opts)
+    end
   end
 
-  defp close_session_process(entry, reason) do
-    Task.start(fn ->
-      try do
-        close_session_process_inline(entry)
-      rescue
-        error ->
-          Logger.debug(
-            "AcpManaged: session close failed after #{reason}: #{Arbor.LLM.external_exception_message(error)}"
-          )
-      catch
-        _kind, _reason -> :ok
-      end
-    end)
-
-    :ok
-  end
-
-  defp close_session_process_inline(entry) do
+  defp close_session_process_inline(entry, opts) do
     session_mod = entry.session_module || Arbor.AI.AcpSession
     pid = entry.session_pid
 
     if is_pid(pid) and Process.alive?(pid) do
-      if function_exported?(session_mod, :close, 1) do
-        session_mod.close(pid)
-      else
-        Process.exit(pid, :shutdown)
+      cond do
+        function_exported?(session_mod, :close, 2) -> session_mod.close(pid, opts)
+        function_exported?(session_mod, :close, 1) -> session_mod.close(pid)
+        true -> force_terminate(pid)
       end
     end
 
     :ok
+  end
+
+  defp force_terminate(pid) when is_pid(pid) do
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
+    :ok
+  end
+
+  defp force_terminate(_pid), do: :ok
+
+  defp cleanup_opts do
+    {:ok, opts, _timeout} = Arbor.AI.Timeout.start_deadline([], @cleanup_timeout_ms)
+    opts
   end
 
   defp put_entry(state, entry) do

@@ -9,6 +9,23 @@ defmodule Arbor.AI.AcpPoolTest do
   # AcpSession.start_link with _skip_connect returns {:ok, pid} immediately.
   @test_client_opts [command: ["echo", "test"], _skip_connect: true]
 
+  defmodule StartupClient do
+    @moduledoc false
+
+    def start_link(opts) do
+      case opts[:start_mode] do
+        :stall ->
+          send(opts[:test_pid], {:pool_start_stalled, self()})
+          Process.sleep(:infinity)
+
+        _other ->
+          Agent.start_link(fn -> opts end)
+      end
+    end
+
+    def disconnect(client), do: Agent.stop(client, :normal)
+  end
+
   setup do
     # Start the DynamicSupervisor and Pool for each test
     start_supervised!(Arbor.AI.AcpPool.Supervisor)
@@ -27,6 +44,40 @@ defmodule Arbor.AI.AcpPoolTest do
   end
 
   describe "checkout/2" do
+    @tag timeout: 2_000
+    test "security regression: stalled startup is killed without wedging pool or supervisor", %{
+      pool: pool
+    } do
+      original = Application.get_env(:arbor_ai, :acp_client_module)
+      Application.put_env(:arbor_ai, :acp_client_module, StartupClient)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_ai, :acp_client_module, original),
+          else: Application.delete_env(:arbor_ai, :acp_client_module)
+      end)
+
+      assert {:error, _reason} =
+               AcpPool.checkout(:test,
+                 timeout: 40,
+                 client_opts: [start_mode: :stall, test_pid: self()]
+               )
+
+      assert_receive {:pool_start_stalled, startup_worker}, 200
+      Process.sleep(75)
+      refute Process.alive?(startup_worker)
+
+      assert {:ok, %{active: 0}} =
+               Task.async(fn ->
+                 DynamicSupervisor.count_children(Arbor.AI.AcpPool.Supervisor)
+               end)
+               |> Task.yield(200)
+
+      assert {:ok, %{}} = Task.async(fn -> AcpPool.status() end) |> Task.yield(200)
+      assert Process.alive?(pool)
+      assert AcpPool.sessions() == []
+    end
+
     test "security regression: an expired queued checkout never creates an orphan lease", %{
       pool: pool
     } do

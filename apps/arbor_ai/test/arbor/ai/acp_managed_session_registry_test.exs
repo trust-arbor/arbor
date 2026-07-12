@@ -15,7 +15,13 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     use GenServer
 
     def start_link(opts) do
-      if delay = Keyword.get(opts, :start_delay_ms), do: Process.sleep(delay)
+      if delay = Keyword.get(opts, :start_delay_ms) do
+        if test_pid = Keyword.get(opts, :test_pid),
+          do: send(test_pid, {:fake_start_stalled, self(), delay})
+
+        Process.sleep(delay)
+      end
+
       GenServer.start_link(__MODULE__, opts)
     end
 
@@ -53,6 +59,13 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
 
     @impl true
     def init(opts) do
+      if delay = Keyword.get(opts, :init_delay_ms) do
+        if test_pid = Keyword.get(opts, :test_pid),
+          do: send(test_pid, {:fake_init_stalled, self(), delay})
+
+        Process.sleep(delay)
+      end
+
       # Mirror AcpSession: honor explicit owner (registry/facade sets it).
       owner = Keyword.get(opts, :owner, self())
       owner_ref = if is_pid(owner), do: Process.monitor(owner), else: nil
@@ -73,6 +86,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
          create_delay_ms: Keyword.get(opts, :create_delay_ms, 0),
          resume_mode: Keyword.get(opts, :resume_mode, :ok),
          status_mode: Keyword.get(opts, :status_mode, :ok),
+         close_mode: Keyword.get(opts, :close_mode, :ok),
          # Backward-compatible flag used by older tests
          fail_create?: Keyword.get(opts, :fail_create, false),
          provider: Keyword.get(opts, :provider, :test),
@@ -185,7 +199,15 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
 
     def handle_call(:close, _from, state) do
       if state.test_pid, do: send(state.test_pid, {:fake_close, self()})
-      {:stop, :normal, :ok, %{state | status: :closed, closed: true}}
+
+      case state.close_mode do
+        :stall ->
+          if state.test_pid, do: send(state.test_pid, {:fake_close_stalled, self()})
+          Process.sleep(:infinity)
+
+        _other ->
+          {:stop, :normal, :ok, %{state | status: :closed, closed: true}}
+      end
     end
 
     @impl true
@@ -950,6 +972,28 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
   end
 
   describe "idempotent close" do
+    @tag timeout: 2_000
+    test "security regression: managed close kills a non-returning close operation", ctx do
+      assert {:ok, meta} = start_managed([close_mode: :stall], ctx)
+      {:ok, resolved} = SessionRegistry.resolve(meta.worker_session_id, server: ctx.registry)
+      session_pid = resolved.session_pid
+      session_ref = Process.monitor(session_pid)
+
+      assert {:error, :timeout} =
+               AI.acp_managed_close_session(meta.worker_session_id,
+                 server: ctx.registry,
+                 timeout: 40
+               )
+
+      assert_receive {:fake_close_stalled, ^session_pid}, 200
+      assert_receive {:DOWN, ^session_ref, :process, ^session_pid, :killed}, 300
+
+      assert {:ok, second} =
+               AI.acp_managed_close_session(meta.worker_session_id, server: ctx.registry)
+
+      assert second.status == "already_closed"
+    end
+
     test "second close returns already_closed", ctx do
       assert {:ok, meta} = start_managed([], ctx)
       id = meta.worker_session_id
@@ -966,6 +1010,42 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
   end
 
   describe "partial start / create failure cleanup" do
+    @tag timeout: 2_000
+    test "security regression: never-returning child startup leaves supervisor responsive", ctx do
+      assert {:error, :timeout} =
+               start_managed([start_delay_ms: :infinity, timeout: 40], ctx)
+
+      assert_receive {:fake_start_stalled, startup_worker, :infinity}, 200
+      refute Process.alive?(startup_worker)
+
+      assert {:ok, %{active: 0}} =
+               Task.async(fn -> DynamicSupervisor.count_children(ctx.supervisor) end)
+               |> Task.yield(200)
+
+      assert {:ok, healthy} = start_managed([], ctx)
+
+      assert {:ok, _closed} =
+               AI.acp_managed_close_session(healthy.worker_session_id, server: ctx.registry)
+    end
+
+    @tag timeout: 2_000
+    test "security regression: never-returning child init cannot wedge the supervisor", ctx do
+      assert {:error, :timeout} =
+               start_managed([init_delay_ms: :infinity, timeout: 40], ctx)
+
+      assert_receive {:fake_init_stalled, child, :infinity}, 200
+      refute Process.alive?(child)
+
+      assert {:ok, %{active: 0}} =
+               Task.async(fn -> DynamicSupervisor.count_children(ctx.supervisor) end)
+               |> Task.yield(200)
+
+      assert {:ok, healthy} = start_managed([], ctx)
+
+      assert {:ok, _closed} =
+               AI.acp_managed_close_session(healthy.worker_session_id, server: ctx.registry)
+    end
+
     test "security regression: managed child startup consumes the operation deadline", ctx do
       started_at = System.monotonic_time(:millisecond)
 

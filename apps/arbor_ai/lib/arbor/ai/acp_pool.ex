@@ -53,6 +53,7 @@ defmodule Arbor.AI.AcpPool do
   require Logger
 
   alias Arbor.AI.AcpSession
+  alias Arbor.AI.AcpManaged.Supervisor, as: ManagedSupervisor
   alias Arbor.AI.AcpPool.SessionProfile
   alias Arbor.AI.AcpPool.ToolServer
 
@@ -497,10 +498,8 @@ defmodule Arbor.AI.AcpPool do
   end
 
   defp cleanup_expired_spawn(pid, tool_server) do
-    Task.start(fn ->
-      safe_close(pid)
-      if tool_server, do: ToolServer.stop(tool_server.ref)
-    end)
+    if is_pid(pid) and Process.alive?(pid), do: Process.exit(pid, :kill)
+    if tool_server, do: stop_tool_server_async(tool_server)
 
     :ok
   end
@@ -667,6 +666,7 @@ defmodule Arbor.AI.AcpPool do
     session_opts =
       opts
       |> Keyword.put(:provider, provider)
+      |> Keyword.put_new(:owner, self())
       |> Keyword.put_new(:client_opts, Keyword.get(opts, :client_opts))
       |> Keyword.put_new(:workspace, Keyword.get(opts, :workspace))
       |> Keyword.put_new(:agent_id, agent_id)
@@ -680,15 +680,24 @@ defmodule Arbor.AI.AcpPool do
       end
 
     # Remove pool-specific opts before passing to AcpSession
-    pool_keys = [:timeout, :tool_modules, :trust_domain, :affinity_key, :name, :tags]
+    pool_keys = [:tool_modules, :trust_domain, :affinity_key, :name, :tags]
     session_opts = Keyword.drop(session_opts, pool_keys)
 
-    case DynamicSupervisor.start_child(
-           Arbor.AI.AcpPool.Supervisor,
-           {AcpSession, session_opts}
+    deadline = Keyword.fetch!(opts, :deadline_ms)
+
+    case ManagedSupervisor.start_session(AcpSession, session_opts,
+           supervisor: Arbor.AI.AcpPool.Supervisor,
+           deadline_ms: deadline
          ) do
       {:ok, pid} ->
-        {:ok, pid, tool_server}
+        case AcpSession.await_ready(pid, opts) do
+          :ok ->
+            {:ok, pid, tool_server}
+
+          {:error, reason} ->
+            cleanup_expired_spawn(pid, tool_server)
+            {:error, reason}
+        end
 
       {:error, reason} ->
         # Clean up ToolServer if session failed to start

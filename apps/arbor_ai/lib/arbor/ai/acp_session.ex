@@ -42,9 +42,13 @@ defmodule Arbor.AI.AcpSession do
   require Logger
 
   alias Arbor.AI.AcpSession.Config
+  alias Arbor.AI.OwnedOperation
 
   @default_acp_client ExMCP.ACP.Client
   @default_inactivity_timeout_ms 300_000
+  @default_operation_timeout_ms 120_000
+  @default_close_timeout_ms 5_000
+  @stream_callback_timeout_ms 5_000
   @task_control_timeout_ms 5_000
   @max_task_control_message_bytes 16_384
   @max_task_control_id_bytes 256
@@ -63,6 +67,7 @@ defmodule Arbor.AI.AcpSession do
 
   defstruct [
     :client,
+    :client_monitor,
     :session_id,
     :last_session_id,
     :provider,
@@ -73,6 +78,7 @@ defmodule Arbor.AI.AcpSession do
     :opts,
     :workspace,
     :mcp_servers,
+    :startup_error,
     status: :starting,
     accumulated_text: "",
     context_tokens: 0,
@@ -102,7 +108,8 @@ defmodule Arbor.AI.AcpSession do
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity) do
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms) do
       {gen_opts, init_opts} = Keyword.split(opts, [:name])
       # Capture the starter as the session owner so we can monitor it even when
       # the session is start_link'd (linked) and later :kill'd — trap_exit +
@@ -124,9 +131,20 @@ defmodule Arbor.AI.AcpSession do
   """
   @spec create_session(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(session, opts \\ []) do
-    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity),
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms),
          {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
-      GenServer.call(session, {:create_session, opts}, call_timeout(remaining))
+      safe_lifecycle_call(session, {:create_session, opts}, remaining)
+    end
+  end
+
+  @doc false
+  @spec await_ready(GenServer.server(), keyword()) :: :ok | {:error, term()}
+  def await_ready(session, opts \\ []) do
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms),
+         {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      safe_lifecycle_call(session, {:await_ready, opts}, remaining)
     end
   end
 
@@ -200,9 +218,10 @@ defmodule Arbor.AI.AcpSession do
   @spec resume_session(GenServer.server(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def resume_session(session, session_id, opts \\ []) do
-    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity),
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms),
          {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
-      GenServer.call(session, {:resume_session, session_id, opts}, call_timeout(remaining))
+      safe_lifecycle_call(session, {:resume_session, session_id, opts}, remaining)
     end
   end
 
@@ -222,9 +241,20 @@ defmodule Arbor.AI.AcpSession do
   @doc """
   Close the ACP session and disconnect from the agent.
   """
-  @spec close(GenServer.server()) :: :ok
-  def close(session) do
-    GenServer.call(session, :close, 30_000)
+  @spec close(GenServer.server(), keyword()) :: :ok | {:error, term()}
+  def close(session, opts \\ []) do
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline(opts, @default_close_timeout_ms),
+         {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      case safe_lifecycle_call(session, {:close, opts}, remaining) do
+        {:error, :timeout} = error ->
+          terminate_server(session)
+          error
+
+        result ->
+          result
+      end
+    end
   end
 
   # -- GenServer Callbacks --
@@ -238,85 +268,71 @@ defmodule Arbor.AI.AcpSession do
     provider = Keyword.fetch!(opts, :provider)
     {owner, owner_monitor} = monitor_owner(Keyword.get(opts, :owner))
 
-    if acp_available?() do
-      # Create workspace if requested
-      workspace_result = maybe_create_workspace(opts)
-      cwd = workspace_cwd(workspace_result, opts)
+    state = %__MODULE__{
+      provider: provider,
+      model: Keyword.get(opts, :model),
+      owner: owner,
+      owner_monitor: owner_monitor,
+      stream_callback: Keyword.get(opts, :stream_callback),
+      mcp_servers: Keyword.get(opts, :mcp_servers),
+      workspace: workspace_plan(opts),
+      status: :starting,
+      opts: opts
+    }
 
-      resolved =
-        case Keyword.get(opts, :client_opts) do
-          nil -> Config.resolve(provider, opts)
-          raw -> {:ok, raw}
+    {:ok, state, {:continue, :start_client}}
+  end
+
+  @impl true
+  def handle_continue(:start_client, state) do
+    result = start_client_owned(state)
+
+    case result do
+      {:ok, client, client_monitor, workspace} ->
+        with :ok <- Arbor.AI.Timeout.ensure_active(state.opts),
+             true <- owner_alive?(state.owner) or {:error, :owner_dead} do
+          new_state = %{
+            state
+            | client: client,
+              client_monitor: client_monitor,
+              workspace: workspace,
+              status: :ready,
+              startup_error: nil
+          }
+
+          emit_signal(:acp_session_started, new_state)
+          {:noreply, new_state}
+        else
+          {:error, reason} -> startup_failed(state, client, workspace, reason)
+          false -> startup_failed(state, client, workspace, :owner_dead)
         end
 
-      case resolved do
-        {:ok, client_opts} ->
-          # Build client options with resolved workspace cwd
-          client_opts =
-            client_opts
-            |> Keyword.put(:event_listener, self())
-            |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
-            |> Keyword.put_new(:handler_opts,
-              session_pid: self(),
-              agent_id: Keyword.get(opts, :agent_id),
-              cwd: cwd
-            )
-            |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))
-            |> inject_os_cwd(cwd)
+      {:error, reason} ->
+        startup_failed(state, nil, state.workspace, reason)
 
-          case start_acp_client(client_opts) do
-            {:ok, client} ->
-              state = %__MODULE__{
-                client: client,
-                provider: provider,
-                model: Keyword.get(opts, :model),
-                owner: owner,
-                owner_monitor: owner_monitor,
-                stream_callback: Keyword.get(opts, :stream_callback),
-                mcp_servers: Keyword.get(opts, :mcp_servers),
-                workspace: workspace_result,
-                status: :ready,
-                opts: opts
-              }
-
-              emit_signal(:acp_session_started, state)
-              {:ok, state}
-
-            {:error, reason} ->
-              demonitor_owner(owner_monitor)
-              cleanup_workspace(workspace_result)
-
-              Logger.error(
-                "Failed to start ACP client for #{provider}: " <>
-                  Arbor.LLM.inspect_external_reason(reason)
-              )
-
-              {:stop, reason}
-          end
-
-        {:error, reason} ->
-          demonitor_owner(owner_monitor)
-          cleanup_workspace(workspace_result)
-          Logger.error("Unknown ACP provider: #{Arbor.LLM.inspect_external_reason(provider)}")
-          {:stop, reason}
-      end
-    else
-      Logger.warning("ExMCP.ACP.Client not available — AcpSession will not function")
-
-      {:ok,
-       %__MODULE__{
-         provider: provider,
-         owner: owner,
-         owner_monitor: owner_monitor,
-         status: :error,
-         opts: opts
-       }}
+      other ->
+        startup_failed(
+          state,
+          nil,
+          state.workspace,
+          {:invalid_startup_result, Arbor.LLM.sanitize_external_reason(other)}
+        )
     end
   end
 
   @impl true
+  def handle_call({:await_ready, opts}, _from, state) do
+    case {Arbor.AI.Timeout.ensure_active(opts), state.status} do
+      {:ok, :ready} -> {:reply, :ok, state}
+      {{:error, reason}, _status} -> {:reply, {:error, reason}, state}
+      {:ok, :error} -> {:reply, {:error, state.startup_error || :startup_failed}, state}
+      {:ok, status} -> {:reply, {:error, {:not_ready, status}}, state}
+    end
+  end
+
   def handle_call({:create_session, _opts}, _from, %{status: :error} = state) do
-    {:reply, {:error, {:not_available, "ACP client not initialized"}}, state}
+    reason = state.startup_error || {:not_available, "ACP client not initialized"}
+    {:reply, {:error, reason}, state}
   end
 
   def handle_call({:create_session, opts}, _from, state) do
@@ -329,7 +345,8 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:resume_session, _session_id, _opts}, _from, %{status: :error} = state) do
-    {:reply, {:error, {:not_available, "ACP client not initialized"}}, state}
+    reason = state.startup_error || {:not_available, "ACP client not initialized"}
+    {:reply, {:error, reason}, state}
   end
 
   def handle_call({:resume_session, session_id, opts}, _from, state) do
@@ -352,7 +369,7 @@ defmodule Arbor.AI.AcpSession do
          :ok <- Arbor.AI.Timeout.ensure_active(opts) do
       do_send_message(content, opts, from, state)
     else
-      {:error, :timeout} -> {:reply, {:error, :timeout}, state}
+      {:error, :timeout} -> operation_timed_out(:create, state)
       {:error, reason} -> {:reply, {:error, reason}, %{state | status: :error}}
     end
   end
@@ -374,11 +391,11 @@ defmodule Arbor.AI.AcpSession do
     {:reply, task_control_capabilities_for(state), state}
   end
 
-  def handle_call(:close, _from, state) do
+  def handle_call({:close, opts}, _from, state) do
     state = settle_pending_task_controls(state, :cancelled, :session_closed)
-    disconnect_client(state)
+    result = disconnect_client_owned(state, opts)
     emit_signal(:acp_session_closed, state)
-    {:stop, :normal, :ok, %{state | status: :closed}}
+    {:stop, :normal, result, %{state | status: :closed, client: nil, client_monitor: nil}}
   end
 
   defp do_create_session(opts, state) do
@@ -393,7 +410,14 @@ defmodule Arbor.AI.AcpSession do
           opts
       end
 
-    case new_acp_session(state.client, cwd, opts) do
+    result =
+      OwnedOperation.run(
+        fn -> new_acp_session(state.client, cwd, opts) end,
+        opts,
+        :timeout
+      )
+
+    case result do
       {:ok, session_info} ->
         case Arbor.AI.Timeout.ensure_active(opts) do
           :ok ->
@@ -412,6 +436,9 @@ defmodule Arbor.AI.AcpSession do
             {:reply, {:error, reason}, state}
         end
 
+      {:error, :timeout} ->
+        operation_timed_out(:create, state)
+
       {:error, reason} = error ->
         Logger.warning(
           "AcpSession create_session failed: " <> Arbor.LLM.inspect_external_reason(reason)
@@ -427,16 +454,14 @@ defmodule Arbor.AI.AcpSession do
     cwd = resolve_cwd(opts, state.opts)
 
     result =
-      try do
-        # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        apply(acp_client_module(), :load_session, [state.client, session_id, cwd, opts])
-      rescue
-        exception ->
-          {:error, {:resume_failed, Arbor.LLM.external_exception_message(exception)}}
-      catch
-        kind, reason ->
-          {:error, {:resume_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
-      end
+      OwnedOperation.run(
+        fn ->
+          # credo:disable-for-next-line Credo.Check.Refactor.Apply
+          apply(acp_client_module(), :load_session, [state.client, session_id, cwd, opts])
+        end,
+        opts,
+        :timeout
+      )
 
     case result do
       {:ok, session_info} ->
@@ -459,6 +484,9 @@ defmodule Arbor.AI.AcpSession do
             {:reply, {:error, reason}, state}
         end
 
+      {:error, :timeout} ->
+        operation_timed_out(:resume, state)
+
       {:error, reason} ->
         reason = Arbor.LLM.sanitize_external_reason(reason)
 
@@ -473,7 +501,23 @@ defmodule Arbor.AI.AcpSession do
 
   @impl true
   def handle_info({:acp_session_update, session_id, update}, state) do
-    {:noreply, process_session_update(state, session_id, update)}
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline([], @stream_callback_timeout_ms) do
+      case process_session_update(state, session_id, update, opts) do
+        {:ok, new_state} ->
+          {:noreply, new_state}
+
+        {:error, :stream_callback_timeout, new_state} ->
+          emit_signal(:acp_session_error, new_state, %{
+            error: :stream_callback_timeout,
+            phase: :stream_callback
+          })
+
+          {:stop, :normal, %{new_state | status: :error}}
+      end
+    else
+      {:error, _reason} -> {:stop, :normal, %{state | status: :error}}
+    end
   end
 
   # No prompt is active. The control is retained for idempotency but there is
@@ -491,12 +535,15 @@ defmodule Arbor.AI.AcpSession do
     )
 
     state = settle_pending_task_controls(state, :cancelled, :owner_cancelled)
-    disconnect_client(state)
+    _ = disconnect_client_owned(state, internal_cleanup_opts())
     emit_signal(:acp_session_closed, state, %{reason: :owner_cancelled})
-    {:stop, :normal, %{state | status: :closed, owner_monitor: nil}}
+
+    {:stop, :normal,
+     %{state | status: :closed, owner_monitor: nil, client: nil, client_monitor: nil}}
   end
 
-  def handle_info({:DOWN, _ref, :process, pid, reason}, %{client: pid} = state) do
+  def handle_info({:DOWN, ref, :process, pid, reason}, %{client: pid} = state)
+      when ref == state.client_monitor do
     bounded_reason = Arbor.LLM.sanitize_external_reason(reason)
 
     Logger.warning(
@@ -515,7 +562,7 @@ defmodule Arbor.AI.AcpSession do
         new_state =
           state
           |> settle_pending_task_controls(:not_delivered, :provider_client_lost)
-          |> Map.merge(%{status: :error, client: nil})
+          |> Map.merge(%{status: :error, client: nil, client_monitor: nil})
 
         {:noreply, new_state}
     end
@@ -537,8 +584,9 @@ defmodule Arbor.AI.AcpSession do
   def terminate(_reason, state) do
     _state = settle_pending_task_controls(state, :not_delivered, :session_terminated)
     demonitor_owner(state.owner_monitor)
-    disconnect_client(state)
-    cleanup_workspace(state.workspace)
+    demonitor_owner(state.client_monitor)
+    terminate_client(state.client)
+    cleanup_workspace_owned(state.workspace)
     :ok
   end
 
@@ -552,13 +600,149 @@ defmodule Arbor.AI.AcpSession do
     Code.ensure_loaded?(acp_client_module())
   end
 
+  defp initialize_client(session_pid, provider, opts, workspace_plan) do
+    if acp_available?() do
+      workspace = materialize_workspace(workspace_plan)
+      cwd = workspace_cwd(workspace, opts)
+
+      resolved =
+        case Keyword.get(opts, :client_opts) do
+          nil -> Config.resolve(provider, opts)
+          raw -> {:ok, raw}
+        end
+
+      with {:ok, client_opts} <- resolved,
+           client_opts =
+             client_opts
+             |> Keyword.put(:event_listener, session_pid)
+             |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
+             |> Keyword.put_new(:handler_opts,
+               session_pid: session_pid,
+               agent_id: Keyword.get(opts, :agent_id),
+               cwd: cwd
+             )
+             |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))
+             |> inject_os_cwd(cwd),
+           {:ok, client} <- start_acp_client(client_opts) do
+        {:ok, client, workspace}
+      else
+        {:error, reason} ->
+          cleanup_workspace(workspace)
+          {:error, reason}
+      end
+    else
+      {:error, :acp_client_not_available}
+    end
+  end
+
+  defp start_client_owned(state) do
+    with {:ok, _opts, requested_remaining} <- Arbor.AI.Timeout.remaining(state.opts),
+         {:ok, requested_deadline} <- Arbor.AI.Timeout.deadline(state.opts) do
+      {remaining, deadline} = finite_start_deadline(requested_remaining, requested_deadline)
+      caller = self()
+      reply_alias = :erlang.alias()
+      operation_ref = make_ref()
+
+      {worker, monitor} =
+        :erlang.spawn_opt(
+          fn ->
+            result = initialize_client(caller, state.provider, state.opts, state.workspace)
+            completed_at = System.monotonic_time(:millisecond)
+            send(reply_alias, {operation_ref, result, completed_at, self()})
+
+            case result do
+              {:ok, client, _workspace} ->
+                receive do
+                  {^operation_ref, :adopted, ^caller} -> Process.unlink(client)
+                  {^operation_ref, :cancel, ^caller} -> terminate_client(client)
+                after
+                  max(deadline - System.monotonic_time(:millisecond), 0) ->
+                    terminate_client(client)
+                end
+
+              _error ->
+                :ok
+            end
+          end,
+          [:link, :monitor]
+        )
+
+      await_client_start(
+        worker,
+        monitor,
+        reply_alias,
+        operation_ref,
+        deadline,
+        remaining
+      )
+    end
+  end
+
+  defp finite_start_deadline(:infinity, :infinity) do
+    now = System.monotonic_time(:millisecond)
+    {@default_operation_timeout_ms, now + @default_operation_timeout_ms}
+  end
+
+  defp finite_start_deadline(remaining, deadline), do: {remaining, deadline}
+
+  defp await_client_start(worker, monitor, reply_alias, operation_ref, deadline, remaining) do
+    receive do
+      {^operation_ref, {:ok, client, workspace}, completed_at, ^worker}
+      when completed_at <= deadline ->
+        case attach_client(client) do
+          {:ok, client_monitor} ->
+            send(worker, {operation_ref, :adopted, self()})
+            await_start_worker_down(worker, monitor)
+            :erlang.unalias(reply_alias)
+            {:ok, client, client_monitor, workspace}
+
+          {:error, reason} ->
+            send(worker, {operation_ref, :cancel, self()})
+            await_start_worker_down(worker, monitor)
+            :erlang.unalias(reply_alias)
+            {:error, reason}
+        end
+
+      {^operation_ref, {:ok, _client, _workspace}, _completed_at, ^worker} ->
+        :erlang.unalias(reply_alias)
+        Process.exit(worker, :kill)
+        await_start_worker_down(worker, monitor)
+        {:error, :timeout}
+
+      {^operation_ref, result, completed_at, ^worker} ->
+        :erlang.unalias(reply_alias)
+        await_start_worker_down(worker, monitor)
+
+        if completed_at <= deadline,
+          do: result,
+          else: {:error, :timeout}
+
+      {:DOWN, ^monitor, :process, ^worker, reason} ->
+        :erlang.unalias(reply_alias)
+        {:error, {:startup_worker_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+    after
+      remaining ->
+        :erlang.unalias(reply_alias)
+        Process.exit(worker, :kill)
+        await_start_worker_down(worker, monitor)
+        {:error, :timeout}
+    end
+  end
+
+  defp await_start_worker_down(worker, monitor) do
+    receive do
+      {:DOWN, ^monitor, :process, ^worker, _reason} -> :ok
+    after
+      @callback_cleanup_timeout_ms -> Process.demonitor(monitor, [:flush])
+    end
+  end
+
   defp start_acp_client(opts) do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     result = apply(acp_client_module(), :start_link, [opts])
 
     case result do
       {:ok, pid} ->
-        Process.monitor(pid)
         {:ok, pid}
 
       {:error, reason} ->
@@ -578,17 +762,107 @@ defmodule Arbor.AI.AcpSession do
       {:error, {:start_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
-  defp disconnect_client(%{client: nil}), do: :ok
-
-  defp disconnect_client(%{client: client}) do
+  defp attach_client(client) when is_pid(client) do
     if Process.alive?(client) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(acp_client_module(), :disconnect, [client])
+      monitor = Process.monitor(client)
+      Process.link(client)
+
+      if Process.alive?(client) do
+        {:ok, monitor}
+      else
+        Process.demonitor(monitor, [:flush])
+        {:error, :client_died_during_startup}
+      end
+    else
+      {:error, :client_died_during_startup}
     end
-  rescue
-    _ -> :ok
-  catch
-    _kind, _reason -> :ok
+  end
+
+  defp attach_client(_client), do: {:error, :invalid_client_pid}
+
+  defp startup_failed(state, client, workspace, reason) do
+    reason = Arbor.LLM.sanitize_external_reason(reason)
+    terminate_client(client)
+    cleanup_workspace_owned(workspace)
+
+    Logger.error(
+      "Failed to start ACP client for #{state.provider}: " <>
+        Arbor.LLM.inspect_external_reason(reason)
+    )
+
+    new_state = %{
+      state
+      | client: nil,
+        client_monitor: nil,
+        workspace: nil,
+        status: :error,
+        startup_error: reason
+    }
+
+    emit_signal(:acp_session_error, new_state, %{error: reason, phase: :startup})
+    {:noreply, new_state}
+  end
+
+  defp owner_alive?(nil), do: true
+  defp owner_alive?(owner) when is_pid(owner), do: Process.alive?(owner)
+  defp owner_alive?(_owner), do: false
+
+  defp disconnect_client_owned(%{client: nil}, _opts), do: :ok
+
+  defp disconnect_client_owned(%{client: client}, opts) do
+    if Process.alive?(client) do
+      result =
+        OwnedOperation.run(
+          fn ->
+            # credo:disable-for-next-line Credo.Check.Refactor.Apply
+            apply(acp_client_module(), :disconnect, [client])
+          end,
+          opts,
+          :timeout
+        )
+
+      case result do
+        {:error, reason} ->
+          terminate_client(client)
+          {:error, Arbor.LLM.sanitize_external_reason(reason)}
+
+        _result ->
+          terminate_client(client)
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp terminate_client(client) when is_pid(client) do
+    if Process.alive?(client), do: Process.exit(client, :kill)
+    :ok
+  end
+
+  defp terminate_client(_client), do: :ok
+
+  defp terminate_server(server) when is_pid(server) do
+    if Process.alive?(server) do
+      Process.unlink(server)
+      Process.exit(server, :kill)
+    end
+
+    :ok
+  end
+
+  defp terminate_server(server) when is_atom(server) do
+    case Process.whereis(server) do
+      pid when is_pid(pid) -> terminate_server(pid)
+      nil -> :ok
+    end
+  end
+
+  defp terminate_server(_server), do: :ok
+
+  defp internal_cleanup_opts do
+    {:ok, opts, _timeout} = Arbor.AI.Timeout.start_deadline([], @callback_cleanup_timeout_ms)
+    opts
   end
 
   defp emit_signal(event, state, metadata \\ %{}) do
@@ -620,24 +894,8 @@ defmodule Arbor.AI.AcpSession do
     "text"
   ]
 
-  defp process_session_update(state, session_id, update) do
-    if state.stream_callback do
-      try do
-        state.stream_callback.(update)
-      rescue
-        exception ->
-          Logger.warning(
-            "AcpSession stream_callback error: " <>
-              Arbor.LLM.inspect_external_reason(exception)
-          )
-      catch
-        kind, reason ->
-          Logger.warning(
-            "AcpSession stream_callback #{kind}: " <>
-              Arbor.LLM.inspect_external_reason(reason)
-          )
-      end
-    end
+  defp process_session_update(state, session_id, update, opts) do
+    callback_result = run_stream_callback(state.stream_callback, update, opts)
 
     # Accumulate streaming text chunks (Gemini/adapter sessions can deliver text
     # via session/update instead of the prompt result).
@@ -648,8 +906,39 @@ defmodule Arbor.AI.AcpSession do
         Arbor.LLM.inspect_external_reason(update_type(update))
     )
 
-    state
+    case callback_result do
+      :ok ->
+        {:ok, state}
+
+      {:error, :stream_callback_timeout} ->
+        {:error, :stream_callback_timeout, state}
+
+      {:error, reason} ->
+        Logger.warning(
+          "AcpSession stream_callback failed: " <>
+            Arbor.LLM.inspect_external_reason(reason)
+        )
+
+        {:ok, state}
+    end
   end
+
+  defp run_stream_callback(nil, _update, _opts), do: :ok
+
+  defp run_stream_callback(callback, update, opts) when is_function(callback, 1) do
+    case OwnedOperation.run(
+           fn -> {:stream_callback_returned, callback.(update)} end,
+           opts,
+           :stream_callback_timeout
+         ) do
+      {:stream_callback_returned, _result} -> :ok
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_stream_callback_result}
+    end
+  end
+
+  defp run_stream_callback(_callback, _update, _opts),
+    do: {:error, :invalid_stream_callback}
 
   defp progress_update?(update), do: update_type(update) in @progress_update_types
 
@@ -766,60 +1055,76 @@ defmodule Arbor.AI.AcpSession do
   defp maybe_reconnect(%{last_session_id: nil}), do: :error
 
   defp maybe_reconnect(state) do
+    session_pid = self()
+    opts = internal_reconnect_opts()
+
+    case OwnedOperation.run(
+           fn -> reconnect_client(state, session_pid) end,
+           opts,
+           :reconnect_timeout
+         ) do
+      {:ok, client} ->
+        case attach_client(client) do
+          {:ok, client_monitor} ->
+            {:ok,
+             %{
+               state
+               | client: client,
+                 client_monitor: client_monitor,
+                 session_id: state.last_session_id,
+                 status: :ready,
+                 reconnect_attempted: true
+             }}
+
+          {:error, _reason} ->
+            terminate_client(client)
+            :error
+        end
+
+      _error ->
+        :error
+    end
+  end
+
+  defp reconnect_client(state, session_pid) do
     resolved =
       case Keyword.get(state.opts, :client_opts) do
         nil -> Config.resolve(state.provider, state.opts)
         raw -> {:ok, raw}
       end
 
-    case resolved do
-      {:ok, client_opts} ->
-        client_opts =
-          client_opts
-          |> Keyword.put(:event_listener, self())
-          |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
-          |> Keyword.put_new(:handler_opts,
-            session_pid: self(),
-            agent_id: Keyword.get(state.opts, :agent_id),
-            cwd: Keyword.get(state.opts, :cwd)
-          )
+    with {:ok, client_opts} <- resolved,
+         client_opts =
+           client_opts
+           |> Keyword.put(:event_listener, session_pid)
+           |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
+           |> Keyword.put_new(:handler_opts,
+             session_pid: session_pid,
+             agent_id: Keyword.get(state.opts, :agent_id),
+             cwd: Keyword.get(state.opts, :cwd)
+           ),
+         {:ok, client} <- start_acp_client(client_opts) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case apply(acp_client_module(), :load_session, [
+             client,
+             state.last_session_id,
+             resolve_cwd([], state.opts)
+           ]) do
+        {:ok, _session_info} ->
+          {:ok, client}
 
-        case start_acp_client(client_opts) do
-          {:ok, client} ->
-            # Try to resume the previous session
-            # credo:disable-for-next-line Credo.Check.Refactor.Apply
-            case apply(acp_client_module(), :load_session, [
-                   client,
-                   state.last_session_id,
-                   resolve_cwd([], state.opts)
-                 ]) do
-              {:ok, _session_info} ->
-                {:ok,
-                 %{
-                   state
-                   | client: client,
-                     session_id: state.last_session_id,
-                     status: :ready,
-                     reconnect_attempted: true
-                 }}
-
-              {:error, _reason} ->
-                # Resume failed — kill the new client
-                disconnect_client(%{client: client})
-                :error
-            end
-
-          {:error, _} ->
-            :error
-        end
-
-      {:error, _} ->
-        :error
+        _error ->
+          terminate_client(client)
+          :error
+      end
+    else
+      _error -> :error
     end
-  rescue
-    _ -> :error
-  catch
-    _kind, _reason -> :error
+  end
+
+  defp internal_reconnect_opts do
+    {:ok, opts, _timeout} = Arbor.AI.Timeout.start_deadline([], @default_close_timeout_ms)
+    opts
   end
 
   defp summarize_result(result) when is_map(result) do
@@ -839,6 +1144,18 @@ defmodule Arbor.AI.AcpSession do
   defp call_timeout(t) when is_integer(t) and t > 0, do: t
   defp call_timeout(:infinity), do: :infinity
 
+  defp safe_lifecycle_call(session, message, timeout) do
+    GenServer.call(session, message, call_timeout(timeout))
+  rescue
+    exception ->
+      {:error, {:session_call_failed, Arbor.LLM.external_exception_message(exception)}}
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
+    :exit, {:noproc, _call} -> {:error, :session_unavailable}
+    :exit, {:normal, _call} -> {:error, :session_unavailable}
+    :exit, reason -> {:error, {:session_call_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+  end
+
   defp safe_prompt_call(session, content, opts, timeout) do
     GenServer.call(session, {:send_message, content, opts}, call_timeout(timeout))
   rescue
@@ -850,9 +1167,15 @@ defmodule Arbor.AI.AcpSession do
     :exit, reason -> {:error, {:session_call_exit, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
+  defp operation_timed_out(phase, state) do
+    new_state = %{state | status: :error}
+    emit_signal(:acp_session_error, new_state, %{error: :timeout, phase: phase})
+    {:stop, :normal, {:error, :timeout}, new_state}
+  end
+
   # -- Workspace Lifecycle --
 
-  defp maybe_create_workspace(opts) do
+  defp workspace_plan(opts) do
     case Keyword.get(opts, :workspace) do
       {:worktree, wt_opts} ->
         id = System.unique_integer([:positive])
@@ -860,27 +1183,37 @@ defmodule Arbor.AI.AcpSession do
         base = Keyword.get(wt_opts, :base_dir, System.tmp_dir!())
         path = Path.join(base, "acp-worktree-#{id}")
 
-        case System.cmd("git", ["worktree", "add", path, "-b", branch], stderr_to_stdout: true) do
-          {_, 0} ->
-            {:worktree, path, branch}
-
-          {output, _} ->
-            Logger.warning("AcpSession: failed to create worktree: #{String.trim(output)}")
-            nil
-        end
+        {:worktree_pending, path, branch}
 
       {:directory, path} ->
-        if File.dir?(path) do
-          {:directory, path}
-        else
-          Logger.warning("AcpSession: workspace directory does not exist: #{path}")
-          nil
-        end
+        {:directory_pending, path}
 
       nil ->
         nil
     end
   end
+
+  defp materialize_workspace({:worktree_pending, path, branch}) do
+    case System.cmd("git", ["worktree", "add", path, "-b", branch], stderr_to_stdout: true) do
+      {_, 0} ->
+        {:worktree, path, branch}
+
+      {output, _} ->
+        Logger.warning("AcpSession: failed to create worktree: #{String.trim(output)}")
+        nil
+    end
+  end
+
+  defp materialize_workspace({:directory_pending, path}) do
+    if File.dir?(path) do
+      {:directory, path}
+    else
+      Logger.warning("AcpSession: workspace directory does not exist: #{path}")
+      nil
+    end
+  end
+
+  defp materialize_workspace(workspace), do: workspace
 
   # Lazily establish the ACP session before the first prompt. The pool/adapter
   # path checks a session out and prompts without an explicit create_session, so
@@ -1273,6 +1606,9 @@ defmodule Arbor.AI.AcpSession do
   defp task_control_failure_reasons(:inactivity_timeout),
     do: {:provider_delivery_inactivity_unknown, :provider_prompt_inactive_before_delivery}
 
+  defp task_control_failure_reasons(:stream_callback_timeout),
+    do: {:stream_callback_timed_out, :stream_callback_timed_out_before_delivery}
+
   defp cancellation_delivery_reason(:caller_cancelled),
     do: :caller_cancelled_during_delivery
 
@@ -1503,9 +1839,16 @@ defmodule Arbor.AI.AcpSession do
         await_prompt_result(prompt, timers, state)
 
       {:acp_session_update, session_id, update} ->
-        new_state = process_session_update(state, session_id, update)
-        timers = maybe_reset_inactivity_timer(timers, prompt.ref, session_id, new_state, update)
-        await_prompt_result(prompt, timers, new_state)
+        case process_session_update(state, session_id, update, prompt.prompt_opts) do
+          {:ok, new_state} ->
+            timers =
+              maybe_reset_inactivity_timer(timers, prompt.ref, session_id, new_state, update)
+
+            await_prompt_result(prompt, timers, new_state)
+
+          {:error, :stream_callback_timeout, new_state} ->
+            timeout_prompt(:stream_callback_timeout, prompt, timers, new_state)
+        end
 
       {:acp_prompt_inactivity_timeout, ref, timer_ref}
       when ref == prompt.ref and timer_ref == timers.inactivity_timer ->
@@ -1534,7 +1877,21 @@ defmodule Arbor.AI.AcpSession do
 
     # A few adapters enqueue the final chunks immediately before returning the
     # prompt result. Drain anything already queued before merging text.
-    state = state |> drain_pending_updates() |> drain_pending_task_controls()
+    case drain_pending_updates(state, prompt.prompt_opts) do
+      {:ok, state} ->
+        complete_prompt_after_updates(
+          prompt,
+          result,
+          completed_at,
+          drain_pending_task_controls(state)
+        )
+
+      {:error, :stream_callback_timeout, state} ->
+        timeout_prompt(:stream_callback_timeout, prompt, empty_prompt_timers(), state)
+    end
+  end
+
+  defp complete_prompt_after_updates(prompt, result, completed_at, state) do
     result = merge_accumulated_text(result, state.accumulated_text)
 
     if Arbor.AI.Timeout.completed_before_deadline?(
@@ -1595,13 +1952,14 @@ defmodule Arbor.AI.AcpSession do
     cancel_acp_prompt(state)
     kill_prompt_worker(prompt)
     cleanup_prompt(prompt, timers)
+    _ = disconnect_client_owned(state, internal_cleanup_opts())
 
     new_state =
       case kind do
         cancellation when cancellation in [:caller_cancelled, :owner_cancelled] ->
           settle_cancelled_prompt_task_controls(state, prompt, cancellation)
 
-        failure when failure in [:timeout, :inactivity_timeout] ->
+        failure when failure in [:timeout, :inactivity_timeout, :stream_callback_timeout] ->
           settle_failed_prompt_task_controls(state, prompt, failure)
       end
       |> Map.put(:status, :error)
@@ -1780,7 +2138,8 @@ defmodule Arbor.AI.AcpSession do
     default_inactivity =
       Application.get_env(:arbor_ai, :acp_inactivity_timeout_ms, @default_inactivity_timeout_ms)
 
-    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity),
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms),
          {:ok, opts, _inactivity} <-
            Arbor.AI.Timeout.normalize_key(opts, :inactivity_timeout_ms, default_inactivity,
              minimum: 0,
@@ -1802,11 +2161,27 @@ defmodule Arbor.AI.AcpSession do
   # arrive just before the client returns the prompt result.
   @doc false
   def drain_pending_updates(state) do
+    {:ok, opts, _timeout} =
+      Arbor.AI.Timeout.start_deadline([], @stream_callback_timeout_ms)
+
+    case drain_pending_updates(state, opts) do
+      {:ok, state} -> state
+      {:error, :stream_callback_timeout, state} -> Map.put(state, :status, :error)
+    end
+  end
+
+  defp drain_pending_updates(state, opts) do
     receive do
       {:acp_session_update, session_id, update} ->
-        drain_pending_updates(process_session_update(state, session_id, update))
+        case process_session_update(state, session_id, update, opts) do
+          {:ok, state} ->
+            drain_pending_updates(state, opts)
+
+          {:error, :stream_callback_timeout, state} ->
+            {:error, :stream_callback_timeout, state}
+        end
     after
-      0 -> state
+      0 -> {:ok, state}
     end
   end
 
@@ -1841,11 +2216,20 @@ defmodule Arbor.AI.AcpSession do
           opts
       end
 
-    case new_acp_session(state.client, cwd, new_opts) do
+    result =
+      OwnedOperation.run(
+        fn -> new_acp_session(state.client, cwd, new_opts) end,
+        opts,
+        :timeout
+      )
+
+    case result do
       {:ok, info} ->
         sid = Map.get(info, "sessionId") || Map.get(info, :session_id)
-        maybe_select_model(state.client, sid, state.model)
-        {:ok, %{state | session_id: sid, last_session_id: sid}}
+
+        with :ok <- maybe_select_model(state.client, sid, state.model, opts) do
+          {:ok, %{state | session_id: sid, last_session_id: sid}}
+        end
 
       {:error, reason} ->
         {:error, Arbor.LLM.sanitize_external_reason(reason)}
@@ -1971,15 +2355,20 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
-  defp maybe_select_model(_client, _sid, model) when model in [nil, ""], do: :ok
+  defp maybe_select_model(_client, _sid, model, _opts) when model in [nil, ""], do: :ok
 
-  defp maybe_select_model(client, sid, model) do
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(acp_client_module(), :set_config_option, [client, sid, "model", model])
-  rescue
-    _ -> :ok
-  catch
-    _kind, _reason -> :ok
+  defp maybe_select_model(client, sid, model, opts) do
+    case OwnedOperation.run(
+           fn ->
+             # credo:disable-for-next-line Credo.Check.Refactor.Apply
+             apply(acp_client_module(), :set_config_option, [client, sid, "model", model])
+           end,
+           opts,
+           :timeout
+         ) do
+      {:error, :timeout} -> {:error, :timeout}
+      _result -> :ok
+    end
   end
 
   defp workspace_cwd({:worktree, path, _branch}, _opts), do: path
@@ -2022,5 +2411,21 @@ defmodule Arbor.AI.AcpSession do
     _kind, _reason -> :ok
   end
 
+  defp cleanup_workspace({:worktree_pending, path, branch}),
+    do: cleanup_workspace({:worktree, path, branch})
+
   defp cleanup_workspace(_), do: :ok
+
+  defp cleanup_workspace_owned(nil), do: :ok
+
+  defp cleanup_workspace_owned(workspace) do
+    case OwnedOperation.run(
+           fn -> cleanup_workspace(workspace) end,
+           internal_cleanup_opts(),
+           :workspace_cleanup_timeout
+         ) do
+      {:error, _reason} -> :ok
+      _result -> :ok
+    end
+  end
 end

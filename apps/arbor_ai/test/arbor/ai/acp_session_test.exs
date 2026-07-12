@@ -42,7 +42,14 @@ defmodule Arbor.AI.AcpSessionTest do
     @moduledoc false
 
     def start_link(opts) do
-      Agent.start_link(fn -> %{opts: opts} end)
+      case opts[:start_mode] do
+        :stall ->
+          send(opts[:test_pid], {:fake_start_stalled, self()})
+          Process.sleep(:infinity)
+
+        _other ->
+          Agent.start_link(fn -> %{opts: opts} end)
+      end
     end
 
     def new_session(client, cwd, _opts) do
@@ -50,14 +57,32 @@ defmodule Arbor.AI.AcpSessionTest do
       send(state.opts[:test_pid], {:fake_new_session, cwd})
 
       case state.opts[:new_session_mode] do
-        :throw -> throw({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
-        :exit -> exit({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
-        _other -> {:ok, %{"sessionId" => "fake-session"}}
+        :stall ->
+          send(state.opts[:test_pid], {:fake_new_session_stalled, self()})
+          Process.sleep(:infinity)
+
+        :throw ->
+          throw({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
+
+        :exit ->
+          exit({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
+
+        _other ->
+          {:ok, %{"sessionId" => "fake-session"}}
       end
     end
 
-    def load_session(_client, session_id, _cwd, _opts) do
-      {:ok, %{"sessionId" => session_id}}
+    def load_session(client, session_id, _cwd, _opts) do
+      state = Agent.get(client, & &1)
+
+      case state.opts[:resume_mode] do
+        :stall ->
+          send(state.opts[:test_pid], {:fake_resume_stalled, self()})
+          Process.sleep(:infinity)
+
+        _other ->
+          {:ok, %{"sessionId" => session_id}}
+      end
     end
 
     def set_config_option(_client, _session_id, _key, _value), do: :ok
@@ -65,8 +90,18 @@ defmodule Arbor.AI.AcpSessionTest do
     def disconnect(client) do
       test_pid = test_pid(client)
       send(test_pid, {:fake_disconnect, client})
-      Agent.stop(client, :normal)
-      :ok
+
+      state = Agent.get(client, & &1)
+
+      case state.opts[:disconnect_mode] do
+        :stall ->
+          send(test_pid, {:fake_disconnect_stalled, self()})
+          Process.sleep(:infinity)
+
+        _other ->
+          Agent.stop(client, :normal)
+          :ok
+      end
     end
 
     def cancel(client, session_id) do
@@ -88,9 +123,9 @@ defmodule Arbor.AI.AcpSessionTest do
           end
 
         "steady_progress" ->
-          for _ <- 1..5 do
+          for sequence <- 1..5 do
             Process.sleep(15)
-            send_progress(listener, session_id)
+            send_progress(listener, session_id, sequence)
           end
 
           {:ok, %{"text" => "done"}}
@@ -104,16 +139,20 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     defp progress_forever(listener, session_id) do
-      send_progress(listener, session_id)
+      send_progress(listener, session_id, nil)
       Process.sleep(10)
       progress_forever(listener, session_id)
     end
 
-    defp send_progress(listener, session_id) do
+    defp send_progress(listener, session_id, sequence) do
       send(
         listener,
         {:acp_session_update, session_id,
-         %{"sessionUpdate" => "agent_message_chunk", "content" => %{"text" => "."}}}
+         %{
+           "sessionUpdate" => "agent_message_chunk",
+           "content" => %{"text" => "."},
+           "sequence" => sequence
+         }}
       )
     end
 
@@ -156,8 +195,8 @@ defmodule Arbor.AI.AcpSessionTest do
     server = start_supervised!(SlowCallServer)
     started_at = System.monotonic_time(:millisecond)
 
-    assert {:timeout, _call} =
-             catch_exit(AcpSession.create_session(server, timeout: 100, receive_timeout: 5))
+    assert {:error, :timeout} =
+             AcpSession.create_session(server, timeout: 100, receive_timeout: 5)
 
     assert System.monotonic_time(:millisecond) - started_at < 35
   end
@@ -348,7 +387,7 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:error, :inactivity_timeout} = AcpSession.send_message(session, "stall")
 
       assert_receive {:fake_prompt_started, _worker, "stall", opts}
-      assert Keyword.get(opts, :timeout) == :infinity
+      assert Keyword.get(opts, :timeout) in 1..120_000
       assert_receive {:fake_cancel, "fake-session"}
       assert_receive {:fake_disconnect, _client}
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
@@ -363,7 +402,7 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:ok, result} = AcpSession.send_message(session, "steady_progress")
 
       assert_receive {:fake_prompt_started, _worker, "steady_progress", opts}
-      assert Keyword.get(opts, :timeout) == :infinity
+      assert Keyword.get(opts, :timeout) in 1..120_000
       assert result["text"] == "done"
       assert Process.alive?(session)
 
@@ -425,6 +464,98 @@ defmodule Arbor.AI.AcpSessionTest do
   end
 
   describe "hostile ACP callbacks" do
+    test "finite stream callbacks preserve serial state and event order" do
+      install_fake_progress_client(100)
+      {:ok, seen} = Agent.start_link(fn -> [] end)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          client_opts: [test_pid: self()],
+          stream_callback: fn update -> Agent.update(seen, &(&1 ++ [update])) end
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+
+      assert {:ok, %{"text" => "done"}} =
+               AcpSession.send_message(session, "steady_progress", timeout: 250)
+
+      callbacks = Agent.get(seen, & &1)
+      assert length(callbacks) == 5
+      assert Enum.map(callbacks, & &1["sequence"]) == [1, 2, 3, 4, 5]
+    end
+
+    @tag timeout: 1_000
+    test "security regression: non-returning create and resume callbacks are killed" do
+      install_fake_progress_client(100)
+
+      for {mode, invoke, message} <- [
+            {:new_session_mode, &AcpSession.create_session(&1, timeout: 30),
+             :fake_new_session_stalled},
+            {:resume_mode, &AcpSession.resume_session(&1, "resume-me", timeout: 30),
+             :fake_resume_stalled}
+          ] do
+        {:ok, session} =
+          AcpSession.start_link(
+            provider: :test,
+            client_opts: [{:test_pid, self()}, {mode, :stall}]
+          )
+
+        session_ref = Process.monitor(session)
+        assert {:error, :timeout} = invoke.(session)
+        assert_receive {^message, callback_worker}, 200
+        assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}, 300
+        refute Process.alive?(callback_worker)
+      end
+    end
+
+    @tag timeout: 1_000
+    test "security regression: non-returning disconnect is killed and close terminates" do
+      install_fake_progress_client(100)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          client_opts: [test_pid: self(), disconnect_mode: :stall]
+        )
+
+      session_ref = Process.monitor(session)
+      assert {:error, :timeout} = AcpSession.close(session, timeout: 30)
+      assert_receive {:fake_disconnect_stalled, callback_worker}, 200
+      assert_receive {:DOWN, ^session_ref, :process, ^session, down_reason}, 300
+      assert down_reason in [:normal, :killed]
+      refute Process.alive?(callback_worker)
+    end
+
+    @tag timeout: 1_000
+    test "security regression: non-returning stream callback cannot wedge the session" do
+      install_fake_progress_client(200)
+      test_pid = self()
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          client_opts: [test_pid: self()],
+          stream_callback: fn _update ->
+            send(test_pid, {:stream_callback_stalled, self()})
+            Process.sleep(:infinity)
+          end
+        )
+
+      session_ref = Process.monitor(session)
+
+      assert {:error, reason} =
+               AcpSession.send_message(session, "steady_progress",
+                 timeout: 60,
+                 inactivity_timeout_ms: 200
+               )
+
+      assert reason in [:timeout, :stream_callback_timeout]
+      assert_receive {:stream_callback_stalled, callback_worker}, 200
+      assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}, 300
+      refute Process.alive?(callback_worker)
+    end
+
     test "security regression: stream callback throws are bounded and do not kill the session" do
       install_fake_progress_client(100)
 

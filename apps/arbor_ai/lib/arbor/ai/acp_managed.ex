@@ -7,6 +7,10 @@ defmodule Arbor.AI.AcpManaged do
   alias Arbor.AI.AcpManaged.Supervisor, as: ManagedSupervisor
   alias Arbor.AI.AcpPool
   alias Arbor.AI.AcpSession
+  alias Arbor.AI.OwnedOperation
+
+  @default_operation_timeout_ms 120_000
+  @cleanup_timeout_ms 500
 
   # Registry/orchestration-only opts. Deliberately excludes :agent_id so it is
   # forwarded into AcpSession / AcpPool (callback authorize identity) while still
@@ -32,7 +36,8 @@ defmodule Arbor.AI.AcpManaged do
   def start_session(provider, opts \\ []) when is_atom(provider) and is_list(opts) do
     opts = strip_caller_owner_opts(opts)
 
-    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity) do
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms) do
       use_pool? = Keyword.get(opts, :use_pool) || Keyword.get(opts, :pooled) || false
 
       if use_pool? do
@@ -47,7 +52,8 @@ defmodule Arbor.AI.AcpManaged do
   @spec send_message(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def send_message(worker_session_id, content, opts \\ [])
       when is_binary(worker_session_id) and is_binary(content) and is_list(opts) do
-    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity),
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms),
          {:ok, registry_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
          {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, registry_opts),
          {:ok, operation_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
@@ -213,25 +219,45 @@ defmodule Arbor.AI.AcpManaged do
               {:ok, view}
 
             {:error, reason} ->
-              cleanup_failed_start(session_mod, session_pid, supervisor, pooled?: false)
+              cleanup_failed_start(session_mod, session_pid, supervisor,
+                pooled?: false,
+                deadline_opts: opts
+              )
+
               {:error, reason}
           end
 
         {:error, reason} ->
-          cleanup_failed_start(session_mod, session_pid, supervisor, pooled?: false)
+          cleanup_failed_start(session_mod, session_pid, supervisor,
+            pooled?: false,
+            deadline_opts: opts
+          )
+
           {:error, Arbor.LLM.sanitize_external_reason(reason)}
       end
     rescue
       exception ->
-        cleanup_failed_start(session_mod, session_pid, supervisor, pooled?: false)
+        cleanup_failed_start(session_mod, session_pid, supervisor,
+          pooled?: false,
+          deadline_opts: opts
+        )
+
         {:error, {:managed_start_failed, Arbor.LLM.external_exception_message(exception)}}
     catch
       :exit, reason ->
-        cleanup_failed_start(session_mod, session_pid, supervisor, pooled?: false)
+        cleanup_failed_start(session_mod, session_pid, supervisor,
+          pooled?: false,
+          deadline_opts: opts
+        )
+
         {:error, {:managed_start_exit, Arbor.LLM.sanitize_external_reason(reason)}}
 
       kind, reason ->
-        cleanup_failed_start(session_mod, session_pid, supervisor, pooled?: false)
+        cleanup_failed_start(session_mod, session_pid, supervisor,
+          pooled?: false,
+          deadline_opts: opts
+        )
+
         {:error, {:managed_start_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
     end
   end
@@ -293,7 +319,7 @@ defmodule Arbor.AI.AcpManaged do
          opts,
          return_to_pool
        ) do
-    cleanup_opts = [pooled?: true, return_to_pool: return_to_pool]
+    cleanup_opts = [pooled?: true, return_to_pool: return_to_pool, deadline_opts: opts]
 
     try do
       case maybe_create_or_resume_pooled(session_mod, session_pid, opts) do
@@ -377,13 +403,20 @@ defmodule Arbor.AI.AcpManaged do
   # Non-pooled starts always create or resume.
   defp create_or_resume(session_mod, session_pid, opts) do
     with {:ok, phase_opts} <- session_phase_opts(opts) do
-      case Keyword.get(opts, :session_id) do
-        sid when is_binary(sid) and sid != "" ->
-          normalize_session_result(session_mod.resume_session(session_pid, sid, phase_opts))
+      OwnedOperation.run(
+        fn ->
+          case Keyword.get(opts, :session_id) do
+            sid when is_binary(sid) and sid != "" ->
+              session_mod.resume_session(session_pid, sid, phase_opts)
 
-        _ ->
-          normalize_session_result(session_mod.create_session(session_pid, phase_opts))
-      end
+            _ ->
+              session_mod.create_session(session_pid, phase_opts)
+          end
+        end,
+        phase_opts,
+        :timeout
+      )
+      |> normalize_session_result()
     end
   end
 
@@ -393,13 +426,23 @@ defmodule Arbor.AI.AcpManaged do
     case Keyword.get(opts, :session_id) do
       sid when is_binary(sid) and sid != "" ->
         with {:ok, phase_opts} <- session_phase_opts(opts) do
-          normalize_session_result(session_mod.resume_session(session_pid, sid, phase_opts))
+          OwnedOperation.run(
+            fn -> session_mod.resume_session(session_pid, sid, phase_opts) end,
+            phase_opts,
+            :timeout
+          )
+          |> normalize_session_result()
         end
 
       _ ->
         if Keyword.get(opts, :create_session, false) do
           with {:ok, phase_opts} <- session_phase_opts(opts) do
-            normalize_session_result(session_mod.create_session(session_pid, phase_opts))
+            OwnedOperation.run(
+              fn -> session_mod.create_session(session_pid, phase_opts) end,
+              phase_opts,
+              :timeout
+            )
+            |> normalize_session_result()
           end
         else
           case Arbor.AI.Timeout.ensure_active(opts) do
@@ -417,6 +460,10 @@ defmodule Arbor.AI.AcpManaged do
   end
 
   defp normalize_session_result({:ok, info}), do: {:ok, info}
+
+  defp normalize_session_result({:error, {:operation_failed, :exit, reason}}),
+    do: {:error, {:managed_start_exit, reason}}
+
   defp normalize_session_result({:error, reason}), do: {:error, reason}
 
   defp normalize_session_result(other),
@@ -437,67 +484,73 @@ defmodule Arbor.AI.AcpManaged do
   defp cleanup_failed_start(session_mod, session_pid, pool_or_sup, opts) do
     pooled? = Keyword.get(opts, :pooled?, false)
     return_to_pool? = Keyword.get(opts, :return_to_pool, true)
+    deadline_opts = Keyword.get(opts, :deadline_opts, expired_cleanup_opts())
+    return_to_pool? = pooled? and return_to_pool? and is_atom(pool_or_sup)
 
+    result =
+      OwnedOperation.run(
+        fn ->
+          cond do
+            return_to_pool? ->
+              pool_checkin(pool_or_sup, session_pid, deadline_opts)
+
+            pooled? and is_atom(pool_or_sup) ->
+              pool_hard_close(pool_or_sup, session_mod, session_pid, deadline_opts)
+
+            true ->
+              close_session_process(session_mod, session_pid, deadline_opts)
+          end
+        end,
+        deadline_opts,
+        :timeout
+      )
+
+    unless return_to_pool? and result == :ok do
+      terminate_session_process(session_pid)
+    end
+
+    :ok
+  end
+
+  defp pool_checkin(pool_mod, session_pid, opts) do
     cond do
-      pooled? and return_to_pool? and is_atom(pool_or_sup) ->
-        safe_pool_checkin(pool_or_sup, session_pid)
+      function_exported?(pool_mod, :checkin, 2) -> pool_mod.checkin(session_pid, opts)
+      function_exported?(pool_mod, :checkin, 1) -> pool_mod.checkin(session_pid)
+      true -> {:error, :pool_checkin_unavailable}
+    end
+  end
 
-      pooled? and is_atom(pool_or_sup) ->
-        safe_pool_hard_close(pool_or_sup, session_mod, session_pid)
+  defp pool_hard_close(pool_mod, session_mod, session_pid, opts) do
+    cond do
+      function_exported?(pool_mod, :close_session, 2) ->
+        pool_mod.close_session(session_pid, opts)
+
+      function_exported?(pool_mod, :close_session, 1) ->
+        pool_mod.close_session(session_pid)
 
       true ->
-        terminate_session(session_mod, session_pid, pool_or_sup)
+        close_session_process(session_mod, session_pid, opts)
     end
+  end
 
+  defp close_session_process(session_mod, session_pid, opts) do
+    cond do
+      function_exported?(session_mod, :close, 2) -> session_mod.close(session_pid, opts)
+      function_exported?(session_mod, :close, 1) -> session_mod.close(session_pid)
+      true -> terminate_session_process(session_pid)
+    end
+  end
+
+  defp terminate_session_process(session_pid) when is_pid(session_pid) do
+    if Process.alive?(session_pid), do: Process.exit(session_pid, :kill)
     :ok
   end
 
-  defp terminate_session(session_mod, session_pid, supervisor) do
-    if function_exported?(session_mod, :close, 1) do
-      try do
-        session_mod.close(session_pid)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
+  defp terminate_session_process(_session_pid), do: :ok
 
-    _ = ManagedSupervisor.terminate_session(session_pid, supervisor: supervisor)
-    :ok
-  end
-
-  defp safe_pool_checkin(pool_mod, session_pid) do
-    try do
-      if function_exported?(pool_mod, :checkin, 1) do
-        pool_mod.checkin(session_pid)
-      end
-    rescue
-      _ -> :ok
-    catch
-      :exit, _ -> :ok
-    end
-  end
-
-  defp safe_pool_hard_close(pool_mod, session_mod, session_pid) do
-    try do
-      cond do
-        function_exported?(pool_mod, :close_session, 1) ->
-          pool_mod.close_session(session_pid)
-
-        function_exported?(session_mod, :close, 1) ->
-          session_mod.close(session_pid)
-
-        true ->
-          if is_pid(session_pid) and Process.alive?(session_pid) do
-            Process.exit(session_pid, :shutdown)
-          end
-      end
-    rescue
-      _ -> :ok
-    catch
-      :exit, _ -> :ok
-    end
+  defp expired_cleanup_opts do
+    deadline = System.monotonic_time(:millisecond) - 1
+    [timeout: @cleanup_timeout_ms, deadline_ms: deadline]
   end
 
   # -- Helpers --------------------------------------------------------

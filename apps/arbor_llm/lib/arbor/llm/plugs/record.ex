@@ -20,6 +20,10 @@ defmodule Arbor.LLM.Plugs.Record do
   optionally after `Plugs.Replay`, so existing fixtures don't get
   re-recorded).
 
+  Stream results must be eager event lists or `Arbor.LLM.OwnedStream` values.
+  Generic lazy enumerables (including `Stream.resource/3`) are rejected before
+  enumeration because they cannot guarantee bounded cancellation/finalization.
+
   Pair with `Application.put_env(:arbor_llm, :recorder, mode:
   :record)` if you want to gate recording on an explicit mode flag
   rather than the pipeline composition itself.

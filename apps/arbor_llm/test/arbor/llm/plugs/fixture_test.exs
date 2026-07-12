@@ -25,6 +25,8 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
 
   alias Arbor.LLM.Call
   alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.FileReceipt
+  alias Arbor.LLM.OwnedStream
   alias Arbor.LLM.Plugs.Fixture
   alias Arbor.LLM.Response
   alias Arbor.LLM.StreamEvent
@@ -118,6 +120,52 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
 
       assert String.starts_with?(path, tmp_dir)
       assert String.ends_with?(path, ".json")
+    end
+  end
+
+  describe "fixture publication" do
+    test "security regression: publication is in-process and contains no Python helper" do
+      {FileReceipt, beam, _filename} = :code.get_object_code(FileReceipt)
+      assert :binary.match(beam, "/usr/bin/python3") == :nomatch
+    end
+
+    test "security regression: publication is atomic no-clobber", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "no-clobber.json")
+
+      assert :ok = FileReceipt.publish(path, "first", 1_024)
+      assert {:error, :destination_exists} = FileReceipt.publish(path, "second", 1_024)
+      assert File.read!(path) == "first"
+
+      assert {:ok, %File.Stat{type: :regular, links: 1}} = File.lstat(path)
+      refute Enum.any?(File.ls!(tmp_dir), &String.starts_with?(&1, ".arbor-fixture-"))
+    end
+
+    @tag timeout: 8_000
+    test "security regression: publication has no suspendable helper child", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "in-process-publication.json")
+      body = :binary.copy("x", 16_777_216)
+      known_ports = MapSet.new(Port.list())
+      task = Task.async(fn -> FileReceipt.publish(path, body, byte_size(body)) end)
+
+      case await_publish_helper(task, known_ports, System.monotonic_time(:millisecond) + 1_000) do
+        {:completed, result} ->
+          assert result == :ok
+
+        {:helper, os_pid} ->
+          :ok = signal_os_process(os_pid, "-STOP")
+
+          try do
+            result = Task.await(task, 6_000)
+            orphaned? = os_process_alive?(os_pid)
+
+            refute orphaned?,
+                   "suspended fixture helper outlived the publication owner deadline"
+
+            assert result == :ok
+          after
+            terminate_os_process(os_pid)
+          end
+      end
     end
   end
 
@@ -223,39 +271,76 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       assert %StreamEvent{type: :step_finish} = third
     end
 
-    test "security regression: recording enforces cumulative event and deadline limits" do
+    test "security regression: recording enforces the cumulative event limit" do
       event_call =
         Call.new(
           :stream,
           {"openai:bounded-stream", [], [max_stream_events: 4, timeout_ms: 1_000]}
         )
 
-      events =
-        Stream.repeatedly(fn -> %StreamEvent{type: :delta, data: %{text: "x"}} end)
-        |> Stream.take(100)
+      events = List.duplicate(%StreamEvent{type: :delta, data: %{text: "x"}}, 100)
 
       assert {:error, event_reason} = Fixture.save(event_call, {:ok, events})
       assert inspect(event_reason) =~ "stream_limit_exceeded"
       refute File.exists?(Fixture.path_for(event_call))
+    end
 
-      deadline_call =
-        Call.new(:stream, {"openai:stalled-stream", [], [timeout_ms: 20]})
+    test "security regression: recording rejects unowned lazy streams before enumeration" do
+      unowned_call = Call.new(:stream, {"openai:unowned-stream", [], [timeout_ms: 100]})
+      test_pid = self()
 
-      stalled =
+      unowned =
         Stream.resource(
           fn -> :waiting end,
           fn state ->
-            Process.sleep(500)
+            send(test_pid, :unowned_next_called)
             {:halt, state}
           end,
           fn _state -> :ok end
         )
 
-      task = Task.async(fn -> Fixture.save(deadline_call, {:ok, stalled}) end)
+      assert {:error, unowned_reason} = Fixture.save(unowned_call, {:ok, unowned})
+      assert inspect(unowned_reason) =~ "owned_stream_or_eager_list_required"
+      refute_receive :unowned_next_called
+      refute File.exists?(Fixture.path_for(unowned_call))
+    end
 
-      assert {:ok, {:error, deadline_reason}} = Task.yield(task, 200)
+    test "security regression: recording deadline synchronously cleans up an owned stream" do
+      deadline_call = Call.new(:stream, {"openai:owned-stall", [], [timeout_ms: 20]})
+      test_pid = self()
+
+      source =
+        Stream.resource(
+          fn -> :waiting end,
+          fn state ->
+            send(test_pid, {:owned_next_stalled, self()})
+            Process.sleep(:infinity)
+            {:halt, state}
+          end,
+          fn _state -> :ok end
+        )
+
+      {:ok, stream} =
+        OwnedStream.new(source,
+          deadline_ms: System.monotonic_time(:millisecond) + 1_000,
+          timeout_ms: 1_000,
+          validator: fn event -> {:ok, event} end
+        )
+
+      producer = stream.producer
+
+      assert {:error, deadline_reason} = Fixture.save(deadline_call, {:ok, stream})
+
       assert inspect(deadline_reason) =~ "fixture_record_deadline_exceeded"
+      assert_receive {:owned_next_stalled, ^producer}, 200
+      refute Process.alive?(producer)
+      refute Process.alive?(stream.controller)
       refute File.exists?(Fixture.path_for(deadline_call))
+
+      refute Enum.any?(
+               File.ls!(Fixture.fixtures_root()),
+               &String.starts_with?(&1, ".arbor-fixture-")
+             )
     end
   end
 
@@ -378,6 +463,8 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       ]
 
       for associations <- invalid_associations do
+        File.rm(path)
+
         :ok =
           Fixture.save(call, {
             :ok,
@@ -531,5 +618,68 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
     }
 
     File.write!(Fixture.path_for(call), Jason.encode!(fixture))
+  end
+
+  defp await_publish_helper(task, known_ports, deadline) do
+    case find_python_helper(known_ports) do
+      {:ok, os_pid} ->
+        {:helper, os_pid}
+
+      :error ->
+        case Task.yield(task, 0) do
+          {:ok, result} ->
+            {:completed, result}
+
+          {:exit, reason} ->
+            {:completed, {:error, reason}}
+
+          nil ->
+            if System.monotonic_time(:millisecond) < deadline do
+              Process.sleep(1)
+              await_publish_helper(task, known_ports, deadline)
+            else
+              {:completed, Task.await(task, 6_000)}
+            end
+        end
+    end
+  end
+
+  defp find_python_helper(known_ports) do
+    Port.list()
+    |> Enum.reject(&MapSet.member?(known_ports, &1))
+    |> Enum.find_value(:error, fn port ->
+      with {:name, ~c"/usr/bin/python3"} <- Port.info(port, :name),
+           {:os_pid, os_pid} when is_integer(os_pid) <- Port.info(port, :os_pid) do
+        {:ok, os_pid}
+      else
+        _other -> nil
+      end
+    end)
+  end
+
+  defp signal_os_process(os_pid, signal) do
+    executable = System.find_executable("kill") || "/bin/kill"
+
+    case System.cmd(executable, [signal, Integer.to_string(os_pid)], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {_output, _status} -> {:error, :signal_failed}
+    end
+  end
+
+  defp os_process_alive?(os_pid), do: signal_os_process(os_pid, "-0") == :ok
+
+  defp terminate_os_process(os_pid) do
+    _ = signal_os_process(os_pid, "-CONT")
+    _ = signal_os_process(os_pid, "-KILL")
+    await_os_process_down(os_pid, System.monotonic_time(:millisecond) + 500)
+  end
+
+  defp await_os_process_down(os_pid, deadline) do
+    if os_process_alive?(os_pid) and System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(1)
+      await_os_process_down(os_pid, deadline)
+    else
+      :ok
+    end
   end
 end

@@ -7,8 +7,9 @@ defmodule Arbor.LLM.FileReceipt do
   @maximum_path_bytes 4_096
   @read_timeout_ms 500
   @write_timeout_ms 5_000
+  @cleanup_grace_ms 250
+  @stage_attempts 8
   @helper "/usr/bin/perl"
-  @publish_helper "/usr/bin/python3"
   @helper_script ~S"""
   use strict;
   use Fcntl qw(O_RDONLY O_NONBLOCK O_NOFOLLOW S_ISREG SEEK_SET);
@@ -59,153 +60,6 @@ defmodule Arbor.LLM.FileReceipt do
    $fd_before[10] == $fd_after[10]) or fail_with("CHANGED");
   print "O\n", $second;
   """
-  @publish_python_script ~S"""
-  import errno
-  import os
-  import stat
-  import sys
-
-  root, name, length_text, maximum_text, stage_name = sys.argv[1:]
-  length = int(length_text)
-  maximum = int(maximum_text)
-  dir_fd = None
-  stage_fd = None
-  stage_exists = False
-
-  class PublishError(Exception):
-      pass
-
-  def fail(label):
-      raise PublishError(label)
-
-  def same_file(left, right):
-      return (left.st_dev == right.st_dev and left.st_ino == right.st_ino and
-              stat.S_IFMT(left.st_mode) == stat.S_IFMT(right.st_mode))
-
-  def stat_at(entry):
-      return os.stat(entry, dir_fd=dir_fd, follow_symlinks=False)
-
-  try:
-      if length < 0 or length > maximum:
-          fail("TOO_LARGE")
-      if not name or "/" in name or name in (".", ".."):
-          fail("NAME")
-      if not stage_name.startswith(".arbor-fixture-") or not stage_name.endswith(".tmp"):
-          fail("NAME")
-
-      root_before = os.lstat(root)
-      if not stat.S_ISDIR(root_before.st_mode):
-          fail("ROOT_NOT_DIRECTORY")
-
-      dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-      root_fd = os.fstat(dir_fd)
-      if not stat.S_ISDIR(root_fd.st_mode) or not same_file(root_before, root_fd):
-          fail("ROOT_OPEN_CHANGED")
-
-      try:
-          final_before = stat_at(name)
-          final_existed = True
-          if not stat.S_ISREG(final_before.st_mode):
-              fail("DEST_NOT_REGULAR")
-          if final_before.st_nlink != 1:
-              fail("DEST_HARDLINK")
-      except FileNotFoundError:
-          final_before = None
-          final_existed = False
-
-      stage_fd = os.open(
-          stage_name,
-          os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-          0o600,
-          dir_fd=dir_fd,
-      )
-      stage_exists = True
-      stage_before = os.fstat(stage_fd)
-      if not stat.S_ISREG(stage_before.st_mode) or stage_before.st_nlink != 1:
-          fail("STAGE_CHANGED")
-
-      retained = 0
-      source = sys.stdin.buffer
-      while retained < length:
-          chunk = source.read(min(65536, length - retained))
-          if not chunk:
-              fail("INPUT")
-          retained += len(chunk)
-          if retained > maximum:
-              fail("TOO_LARGE")
-          offset = 0
-          while offset < len(chunk):
-              written = os.write(stage_fd, chunk[offset:])
-              if written <= 0:
-                  fail("WRITE")
-              offset += written
-
-      os.fsync(stage_fd)
-      os.close(stage_fd)
-      stage_fd = None
-
-      stage_path_stat = stat_at(stage_name)
-      if (not stat.S_ISREG(stage_path_stat.st_mode) or stage_path_stat.st_nlink != 1 or
-              not same_file(stage_before, stage_path_stat)):
-          fail("STAGE_CHANGED")
-
-      root_now = os.lstat(root)
-      if not stat.S_ISDIR(root_now.st_mode) or not same_file(root_fd, root_now):
-          fail("ROOT_PREPUBLISH_CHANGED")
-
-      try:
-          final_now = stat_at(name)
-          now_exists = True
-      except FileNotFoundError:
-          final_now = None
-          now_exists = False
-
-      if final_existed:
-          if (not now_exists or not stat.S_ISREG(final_now.st_mode) or
-                  final_now.st_nlink != 1 or not same_file(final_before, final_now)):
-              fail("DEST_CHANGED")
-      elif now_exists:
-          fail("DEST_CHANGED")
-
-      os.replace(stage_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-      stage_exists = False
-      final_after = stat_at(name)
-      if (not stat.S_ISREG(final_after.st_mode) or final_after.st_nlink != 1 or
-              not same_file(stage_before, final_after)):
-          fail("PUBLISH_CHANGED")
-
-      root_after = os.lstat(root)
-      if not stat.S_ISDIR(root_after.st_mode) or not same_file(root_fd, root_after):
-          fail("ROOT_POSTPUBLISH_CHANGED")
-
-      os.fsync(dir_fd)
-      sys.stdout.write("O\n")
-  except PublishError as error:
-      sys.stdout.write("E\t" + str(error) + "\n")
-  except FileNotFoundError:
-      sys.stdout.write("E\tCHANGED\n")
-  except OSError:
-      sys.stdout.write("E\tWRITE\n")
-  except BaseException:
-      sys.stdout.write("E\tWRITE\n")
-  finally:
-      if stage_fd is not None:
-          try:
-              os.close(stage_fd)
-          except OSError:
-              pass
-      if stage_exists and dir_fd is not None:
-          try:
-              os.unlink(stage_name, dir_fd=dir_fd)
-          except OSError:
-              pass
-      if dir_fd is not None:
-          try:
-              os.close(dir_fd)
-          except OSError:
-              pass
-  """
-
   @spec read(term(), term()) :: {:ok, binary()} | {:error, term()}
   def read(path, maximum)
       when is_binary(path) and byte_size(path) <= @maximum_path_bytes and
@@ -230,21 +84,39 @@ defmodule Arbor.LLM.FileReceipt do
   def publish(path, body, maximum)
       when is_binary(path) and byte_size(path) <= @maximum_path_bytes and is_binary(body) and
              is_integer(maximum) and maximum > 0 do
-    maximum = min(maximum, @hard_maximum)
-
-    with true <- String.valid?(path) or {:error, :valid_utf8_path_required},
-         true <- byte_size(body) <= maximum or {:error, {:file_bytes_exceeded, maximum}},
-         :ok <- ensure_publish_root(Path.dirname(path)),
-         {:ok, receipt} <- Deadline.receipt(timeout_ms: @write_timeout_ms) do
-      Deadline.run(
-        fn -> do_publish(path, body, maximum) end,
-        receipt,
-        :file_write_deadline_exceeded
-      )
+    with {:ok, receipt} <- Deadline.receipt(timeout_ms: @write_timeout_ms) do
+      publish(path, body, maximum, receipt)
     end
   end
 
   def publish(_path, _body, _maximum), do: {:error, :bounded_regular_file_write_required}
+
+  @doc false
+  @spec publish(term(), term(), term(), Deadline.receipt()) :: :ok | {:error, term()}
+  def publish(path, body, maximum, %{deadline_ms: deadline_ms, timeout_ms: timeout_ms})
+      when is_binary(path) and byte_size(path) <= @maximum_path_bytes and is_binary(body) and
+             is_integer(maximum) and maximum > 0 and is_integer(deadline_ms) and
+             is_integer(timeout_ms) and timeout_ms > 0 do
+    maximum = min(maximum, @hard_maximum)
+    root = Path.dirname(path)
+
+    with true <- String.valid?(path) or {:error, :valid_utf8_path_required},
+         true <- byte_size(body) <= maximum or {:error, {:file_bytes_exceeded, maximum}},
+         :ok <- ensure_publish_root(root),
+         :ok <- validate_directory_chain(root),
+         {:ok, receipt} <-
+           Deadline.receipt_until(deadline_ms, min(timeout_ms, @write_timeout_ms)),
+         {:ok, directory, root_identity} <- open_directory(root) do
+      try do
+        publish_attempt(path, body, maximum, receipt, directory, root_identity, @stage_attempts)
+      after
+        :file.close(directory)
+      end
+    end
+  end
+
+  def publish(_path, _body, _maximum, _receipt),
+    do: {:error, :bounded_regular_file_write_required}
 
   defp do_read(path, maximum, expected) do
     if File.regular?(@helper) do
@@ -254,15 +126,37 @@ defmodule Arbor.LLM.FileReceipt do
     end
   end
 
-  defp do_publish(path, body, maximum) do
-    if File.regular?(@publish_helper) do
-      with :ok <- publish_with_helper(path, body, maximum),
-           {:ok, written} <- read(path, maximum),
-           true <- secure_equal(body, written) or {:error, :published_file_changed} do
-        :ok
+  defp publish_attempt(_path, _body, _maximum, _receipt, _directory, _root_identity, 0),
+    do: {:error, :fixture_stage_collision}
+
+  defp publish_attempt(path, body, maximum, receipt, directory, root_identity, attempts) do
+    root = Path.dirname(path)
+    stage = Path.join(root, stage_name())
+
+    with :ok <- ensure_root_stable(root, directory, root_identity),
+         :ok <- ensure_destination_absent(path) do
+      result =
+        Deadline.run(
+          fn -> do_publish(path, stage, body, maximum, root_identity) end,
+          receipt,
+          :file_write_deadline_exceeded
+        )
+
+      case reconcile_publication(result, path, stage, body, directory, root_identity) do
+        {:retry, :stage_collision} ->
+          publish_attempt(
+            path,
+            body,
+            maximum,
+            receipt,
+            directory,
+            root_identity,
+            attempts - 1
+          )
+
+        final ->
+          final
       end
-    else
-      {:error, :secure_publication_unavailable}
     end
   end
 
@@ -277,83 +171,345 @@ defmodule Arbor.LLM.FileReceipt do
     end
   end
 
-  defp publish_with_helper(path, body, maximum) do
+  defp do_publish(path, stage, body, maximum, root_identity) do
     root = Path.dirname(path)
-    name = Path.basename(path)
-    stage_name = ".arbor-fixture-" <> Base.encode16(:crypto.strong_rand_bytes(16)) <> ".tmp"
 
-    port =
-      Port.open(
-        {:spawn_executable, @publish_helper},
-        [
-          :binary,
-          :use_stdio,
-          :stderr_to_stdout,
-          :exit_status,
-          args: [
-            "-c",
-            @publish_python_script,
-            root,
-            name,
-            Integer.to_string(byte_size(body)),
-            Integer.to_string(maximum),
-            stage_name
-          ]
-        ]
-      )
-
-    monitor = :erlang.monitor(:port, port)
-
-    if Port.command(port, body) do
-      collect_publish_helper(port, monitor, [], 0)
+    with true <- byte_size(body) <= maximum or {:error, :file_too_large},
+         :ok <- validate_directory_chain(root),
+         {:ok, directory, ^root_identity} <- open_directory(root) do
+      try do
+        with :ok <- ensure_root_stable(root, directory, root_identity),
+             :ok <- ensure_destination_absent(path),
+             {:ok, stage_identity} <- write_stage(stage, body),
+             :ok <- ensure_root_stable(root, directory, root_identity),
+             {:ok, stage_path_identity} <- regular_path_identity(stage, [1]),
+             true <-
+               same_file?(stage_identity, stage_path_identity) or
+                 {:error, :fixture_stage_changed},
+             :ok <- ensure_destination_absent(path),
+             :ok <- File.ln(stage, path),
+             {:ok, linked_stage} <- regular_path_identity(stage, [2]),
+             {:ok, linked_final} <- regular_path_identity(path, [2]),
+             true <-
+               same_file?(stage_identity, linked_stage) or
+                 {:error, :fixture_stage_changed},
+             true <-
+               same_file?(linked_stage, linked_final) or
+                 {:error, :fixture_publication_changed},
+             :ok <- File.rm(stage),
+             {:ok, final_identity} <- regular_path_identity(path, [1]),
+             true <-
+               same_file?(stage_identity, final_identity) or
+                 {:error, :fixture_publication_changed},
+             true <-
+               final_identity.size == byte_size(body) or
+                 {:error, :fixture_publication_changed},
+             :ok <- ensure_root_stable(root, directory, root_identity),
+             :ok <- :file.sync(directory) do
+          :ok
+        else
+          {:error, :eexist} -> {:error, :destination_changed}
+          {:error, reason} -> {:error, reason}
+          false -> {:error, :fixture_publication_changed}
+        end
+      after
+        :file.close(directory)
+      end
     else
-      close_port(port, monitor, {:error, :file_write_failed})
-    end
-  rescue
-    _exception -> {:error, :file_open_failed}
-  catch
-    _kind, _reason -> {:error, :file_open_failed}
-  end
+      {:ok, changed_directory, _changed_identity} ->
+        :file.close(changed_directory)
+        {:error, :fixture_root_open_changed}
 
-  defp collect_publish_helper(port, monitor, chunks, retained) do
-    receive do
-      {^port, {:data, data}} when is_binary(data) ->
-        next = retained + byte_size(data)
+      {:error, reason} ->
+        {:error, reason}
 
-        if next <= 4_096,
-          do: collect_publish_helper(port, monitor, [data | chunks], next),
-          else: close_port(port, monitor, {:error, :invalid_file_helper_response})
-
-      {^port, {:exit_status, 0}} ->
-        await_port_down(port, monitor)
-        chunks |> Enum.reverse() |> IO.iodata_to_binary() |> parse_publish_helper()
-
-      {^port, {:exit_status, _status}} ->
-        await_port_down(port, monitor)
-        {:error, :file_write_failed}
+      false ->
+        {:error, :file_too_large}
     end
   end
 
-  defp parse_publish_helper("O\n"), do: :ok
-  defp parse_publish_helper("E\tDEST_HARDLINK\n"), do: {:error, :hardlink_rejected}
-  defp parse_publish_helper("E\tDEST_NOT_REGULAR\n"), do: {:error, :not_regular_file}
-  defp parse_publish_helper("E\tROOT_NOT_DIRECTORY\n"), do: {:error, :not_directory}
+  defp write_stage(stage, body) do
+    case File.open(stage, [:write, :binary, :raw, :exclusive], fn io ->
+           with :ok <- File.chmod(stage, 0o600),
+                {:ok, before} <- descriptor_identity(io),
+                :ok <- :file.write(io, body),
+                :ok <- :file.sync(io),
+                {:ok, after_write} <- descriptor_identity(io),
+                true <- same_file?(before, after_write) or {:error, :fixture_stage_changed},
+                true <-
+                  after_write.size == byte_size(body) or
+                    {:error, :fixture_stage_changed} do
+             {:ok, after_write}
+           else
+             {:error, reason} -> {:error, reason}
+             false -> {:error, :fixture_stage_changed}
+           end
+         end) do
+      {:ok, {:ok, identity}} -> {:ok, identity}
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, :eexist} -> {:error, :stage_collision}
+      {:error, reason} -> {:error, {:fixture_stage_open_failed, reason}}
+    end
+  end
 
-  defp parse_publish_helper("E\tROOT_OPEN_CHANGED\n"), do: {:error, :fixture_root_open_changed}
-  defp parse_publish_helper("E\tROOT_FD_CHANGED\n"), do: {:error, :fixture_root_fd_changed}
+  defp reconcile_publication(:ok, path, stage, _body, directory, root_identity) do
+    with :ok <- ensure_root_stable(Path.dirname(path), directory, root_identity),
+         {:error, {:file_stat_failed, :enoent}} <- path_identity(stage),
+         {:ok, _final} <- path_identity(path),
+         :ok <- :file.sync(directory) do
+      :ok
+    else
+      {:ok, _unexpected_stage} -> {:error, :fixture_stage_cleanup_failed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-  defp parse_publish_helper("E\tROOT_PREPUBLISH_CHANGED\n"),
-    do: {:error, :fixture_root_prepublish_changed}
+  defp reconcile_publication(
+         {:error, :stage_collision},
+         _path,
+         _stage,
+         _body,
+         _directory,
+         _root_identity
+       ),
+       do: {:retry, :stage_collision}
 
-  defp parse_publish_helper("E\tROOT_POSTPUBLISH_CHANGED\n"),
-    do: {:error, :fixture_root_postpublish_changed}
+  defp reconcile_publication(result, path, stage, body, directory, root_identity) do
+    cleanup_result =
+      reconcile_failed_publication(path, stage, body, directory, root_identity)
 
-  defp parse_publish_helper("E\tDEST_CHANGED\n"), do: {:error, :destination_changed}
-  defp parse_publish_helper("E\tPUBLISH_CHANGED\n"), do: {:error, :publication_changed}
+    case cleanup_result do
+      :ok -> result
+      {:error, reason} -> {:error, {:fixture_publication_reconciliation_failed, reason}}
+    end
+  end
 
-  defp parse_publish_helper("E\tTOO_LARGE\n"), do: {:error, :file_too_large}
-  defp parse_publish_helper("E\t" <> _reason), do: {:error, :file_write_failed}
-  defp parse_publish_helper(_other), do: {:error, :invalid_file_helper_response}
+  defp reconcile_failed_publication(path, stage, body, directory, root_identity) do
+    root = Path.dirname(path)
+    deadline = System.monotonic_time(:millisecond) + @cleanup_grace_ms
+
+    with :ok <- await_root_stable(root, directory, root_identity, deadline),
+         :ok <- remove_failed_final(path, stage, body),
+         :ok <- remove_stage(stage),
+         :ok <- ensure_root_stable(root, directory, root_identity),
+         :ok <- :file.sync(directory) do
+      :ok
+    end
+  end
+
+  defp remove_failed_final(path, stage, body) do
+    stage_identity = any_regular_path_identity(stage)
+    final_identity = any_regular_path_identity(path)
+
+    cond do
+      match?({:ok, _}, stage_identity) and match?({:ok, _}, final_identity) ->
+        {:ok, staged} = stage_identity
+        {:ok, final} = final_identity
+
+        if same_file?(staged, final), do: remove_path(path), else: :ok
+
+      match?({:ok, _}, final_identity) ->
+        {:ok, final} = final_identity
+
+        if final.size == byte_size(body) do
+          case File.read(path) do
+            {:ok, written} ->
+              if secure_equal(written, body), do: remove_path(path), else: :ok
+
+            _other ->
+              :ok
+          end
+        else
+          :ok
+        end
+
+      true ->
+        :ok
+    end
+  end
+
+  defp remove_stage(stage) do
+    case File.lstat(stage) do
+      {:ok, _stat} -> remove_path(stage)
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:fixture_stage_stat_failed, reason}}
+    end
+  end
+
+  defp remove_path(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:fixture_cleanup_failed, reason}}
+    end
+  end
+
+  defp ensure_destination_absent(path) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, %File.Stat{type: :regular, links: links}} when links != 1 ->
+        {:error, :hardlink_rejected}
+
+      {:ok, %File.Stat{type: :regular}} ->
+        {:error, :destination_exists}
+
+      {:ok, %File.Stat{type: _type}} ->
+        {:error, :not_regular_file}
+
+      {:error, reason} ->
+        {:error, {:destination_stat_failed, reason}}
+    end
+  end
+
+  defp stage_name do
+    ".arbor-fixture-" <>
+      Base.encode16(:crypto.strong_rand_bytes(16), case: :lower) <> ".tmp"
+  end
+
+  defp validate_directory_chain(path) do
+    path
+    |> Path.expand()
+    |> Path.split()
+    |> Enum.reduce_while(nil, fn component, current ->
+      current = if is_nil(current), do: component, else: Path.join(current, component)
+
+      case File.lstat(current) do
+        {:ok, %File.Stat{type: :directory}} ->
+          {:cont, current}
+
+        # Platform roots such as /var may be stable symlinks. The opened root
+        # descriptor and repeated root identity checks still detect replacement
+        # of the resolved operator directory.
+        {:ok, %File.Stat{type: :symlink}} ->
+          {:cont, current}
+
+        {:ok, %File.Stat{type: type}} ->
+          {:halt, {:error, {:fixture_ancestor_not_directory, type}}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:fixture_ancestor_stat_failed, reason}}}
+      end
+    end)
+    |> case do
+      {:error, _reason} = error -> error
+      _path -> :ok
+    end
+  end
+
+  defp open_directory(root) do
+    with {:ok, path_identity} <- directory_path_identity(root) do
+      case :file.open(String.to_charlist(root), [:read, :raw, :directory]) do
+        {:ok, directory} ->
+          case directory_descriptor_identity(directory) do
+            {:ok, descriptor_identity} when path_identity == descriptor_identity ->
+              {:ok, directory, descriptor_identity}
+
+            {:ok, _changed_identity} ->
+              :file.close(directory)
+              {:error, :fixture_root_open_changed}
+
+            {:error, reason} ->
+              :file.close(directory)
+              {:error, {:fixture_root_open_failed, reason}}
+          end
+
+        {:error, reason} ->
+          {:error, {:fixture_root_open_failed, reason}}
+      end
+    else
+      {:error, reason} -> {:error, {:fixture_root_open_failed, reason}}
+    end
+  end
+
+  defp ensure_root_stable(root, directory, expected) do
+    with {:ok, ^expected} <- directory_descriptor_identity(directory),
+         {:ok, ^expected} <- directory_path_identity(root),
+         :ok <- validate_directory_chain(root) do
+      :ok
+    else
+      {:ok, _changed} -> {:error, :fixture_root_changed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp await_root_stable(root, directory, expected, deadline) do
+    case ensure_root_stable(root, directory, expected) do
+      :ok ->
+        :ok
+
+      {:error, _reason} = error ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(1)
+          await_root_stable(root, directory, expected, deadline)
+        else
+          error
+        end
+    end
+  end
+
+  defp directory_path_identity(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} -> {:ok, stable_identity(stat)}
+      {:ok, %File.Stat{type: :symlink}} -> {:error, :fixture_root_symlink_rejected}
+      {:ok, %File.Stat{type: type}} -> {:error, {:fixture_root_not_directory, type}}
+      {:error, reason} -> {:error, {:fixture_root_stat_failed, reason}}
+    end
+  end
+
+  defp directory_descriptor_identity(io) do
+    case :file.read_file_info(io, time: :posix) do
+      {:ok, info} ->
+        case File.Stat.from_record(info) do
+          %File.Stat{type: :directory} = stat -> {:ok, stable_identity(stat)}
+          %File.Stat{type: type} -> {:error, {:fixture_root_not_directory, type}}
+        end
+
+      {:error, reason} ->
+        {:error, {:fixture_root_descriptor_failed, reason}}
+    end
+  end
+
+  defp regular_path_identity(path, allowed_links) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :regular, links: links} = stat} ->
+        if links in allowed_links,
+          do: {:ok, identity(stat)},
+          else: {:error, :fixture_link_count_changed}
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :symlink_rejected}
+
+      {:ok, %File.Stat{type: type}} ->
+        {:error, {:not_regular_file, type}}
+
+      {:error, reason} ->
+        {:error, {:file_stat_failed, reason}}
+    end
+  end
+
+  defp any_regular_path_identity(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :regular} = stat} -> {:ok, identity(stat)}
+      _missing_or_invalid -> :error
+    end
+  end
+
+  defp same_file?(left, right), do: stable_identity(left) == stable_identity(right)
+
+  defp stable_identity(%File.Stat{} = stat) do
+    %{
+      type: stat.type,
+      inode: stat.inode,
+      major_device: stat.major_device,
+      minor_device: stat.minor_device
+    }
+  end
+
+  defp stable_identity(identity) when is_map(identity) do
+    Map.take(identity, [:type, :inode, :major_device, :minor_device])
+  end
 
   defp read_with_helper(path, maximum) do
     port =
