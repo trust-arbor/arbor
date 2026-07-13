@@ -641,13 +641,15 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
          _lease,
          artifact_root
        ) do
-    root_result = rollback_owned_empty_root(root, identity)
-    control_result = remove_control_identity(control_path, control_identity)
-    directory_result = remove_empty_lease_directory(%{artifact_root: artifact_root})
+    case rollback_owned_empty_root(root, identity) do
+      :ok ->
+        with :ok <- remove_control_identity(control_path, control_identity),
+             :ok <- remove_empty_lease_directory(%{artifact_root: artifact_root}) do
+          :ok
+        end
 
-    case Enum.find([root_result, control_result, directory_result], &match?({:error, _}, &1)) do
-      nil -> :ok
-      {:error, reason} -> {:error, reason}
+      {:error, _reason} = error ->
+        error
     end
   end
 

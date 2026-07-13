@@ -1004,8 +1004,23 @@ defmodule Arbor.Commands.CodingBenchmark do
        ),
        do: true
 
+  defp artifact_release_allowed?({:returned, {wall_clock_ms, {:returned, adapter_return}}})
+       when is_integer(wall_clock_ms) and wall_clock_ms >= 0 do
+    structurally_valid_adapter_return?(adapter_return)
+  end
+
   defp artifact_release_allowed?({:returned, {_wall_clock_ms, {:timed_out, _, _}}}), do: false
-  defp artifact_release_allowed?(_measurement), do: true
+  defp artifact_release_allowed?(_measurement), do: false
+
+  defp structurally_valid_adapter_return?({:ok, envelope}),
+    do: match?({:ok, _normalized}, adapter_envelope(envelope, true))
+
+  defp structurally_valid_adapter_return?({:error, _reason}), do: true
+
+  defp structurally_valid_adapter_return?({:error, _reason, envelope}),
+    do: match?({:ok, _normalized}, adapter_envelope(envelope, false))
+
+  defp structurally_valid_adapter_return?(_other), do: false
 
   defp record_artifact_lease_retention(%{row: row} = execution, reason) do
     terminal_reason = row["terminal_reason"] || "artifact_lease_retained"
@@ -1705,7 +1720,8 @@ defmodule Arbor.Commands.CodingBenchmark do
              worktree,
              ["status", "--porcelain=v1", "--untracked-files=all"],
              verification.git_timeout_ms
-           ) do
+           ),
+         {:ok, []} <- all_untracked_paths(worktree, verification.git_timeout_ms) do
       :ok
     else
       _other -> {:error, "final_branch_or_commit_attestation_failed"}
@@ -2146,9 +2162,22 @@ defmodule Arbor.Commands.CodingBenchmark do
              ],
              timeout_ms
            ),
-         {:ok, untracked} <-
-           git_binary(workdir, ["ls-files", "--others", "--exclude-standard", "-z"], timeout_ms),
-         {:ok, paths} <- nul_paths(tracked <> untracked) do
+         {:ok, tracked_paths} <- nul_paths(tracked),
+         {:ok, untracked_paths} <- all_untracked_paths(workdir, timeout_ms) do
+      {:ok, (tracked_paths ++ untracked_paths) |> Enum.uniq() |> Enum.sort()}
+    end
+  end
+
+  defp all_untracked_paths(workdir, timeout_ms) do
+    with {:ok, ordinary} <-
+           git_binary(workdir, ["ls-files", "--others", "-z", "--"], timeout_ms),
+         {:ok, ignored} <-
+           git_binary(
+             workdir,
+             ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--"],
+             timeout_ms
+           ),
+         {:ok, paths} <- nul_paths(ordinary <> ignored) do
       {:ok, paths |> Enum.uniq() |> Enum.sort()}
     end
   end

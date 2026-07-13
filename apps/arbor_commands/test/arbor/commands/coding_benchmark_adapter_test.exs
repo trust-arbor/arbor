@@ -129,6 +129,26 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     end
   end
 
+  defmodule InfoExcludedUntrackedVerifier do
+    @moduledoc false
+    alias Arbor.Commands.CodingBenchmarkAdapterTest, as: TestSupport
+
+    def run(%{"executor_path" => "pipeline", "workdir" => workdir}),
+      do: TestSupport.write_excluded_untracked(workdir, :info_exclude)
+
+    def run(_request), do: :ok
+  end
+
+  defmodule CoreExcludedUntrackedVerifier do
+    @moduledoc false
+    alias Arbor.Commands.CodingBenchmarkAdapterTest, as: TestSupport
+
+    def run(%{"executor_path" => "pipeline", "workdir" => workdir}),
+      do: TestSupport.write_excluded_untracked(workdir, :core_excludes_file)
+
+    def run(_request), do: :ok
+  end
+
   defmodule ArtifactSwapVerifier do
     @moduledoc false
 
@@ -199,6 +219,22 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
 
     def cancel_task(principal_id, context),
       do: Arbor.Orchestrator.cancel_coding_task(principal_id, context)
+  end
+
+  defmodule LateRaisingPipelineExecutor do
+    @moduledoc false
+    alias Arbor.Commands.CodingBenchmarkAdapterTest, as: TestSupport
+
+    def run(_principal_id, _task, context),
+      do: TestSupport.allocate_late_writer_and_fail(context, :raise)
+  end
+
+  defmodule LateExitingPipelineExecutor do
+    @moduledoc false
+    alias Arbor.Commands.CodingBenchmarkAdapterTest, as: TestSupport
+
+    def run(_principal_id, _task, context),
+      do: TestSupport.allocate_late_writer_and_fail(context, :exit)
   end
 
   defmodule CapturingPipelineStatus do
@@ -359,6 +395,45 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       ])
 
     assert File.dir?(control_path)
+  end
+
+  test "security regression: failed non-empty root rollback preserves external ownership evidence" do
+    requests = benchmark_requests!()
+    assert {:ok, runtime} = Runtime.load()
+    assert {:ok, preview} = Adapter.verification_scope(requests.legacy, runtime)
+    handler_id = "coding-benchmark-nonempty-rollback-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:arbor, :commands, :coding_benchmark, :artifact_root_allocated],
+      fn _event, _measurements, %{control_path: control_path, root: root}, _config ->
+        File.write!(Path.join(root, "allocation-race"), "owned root remains managed\n")
+        File.chmod!(control_path, 0o400)
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert {:error,
+            {:benchmark_setup_error,
+             {:artifact_allocation_rollback_failed, :artifact_root_rollback_failed}}} =
+             Adapter.execution_scope(requests.legacy, runtime)
+
+    control_path =
+      Path.join([
+        runtime.artifact_root,
+        ".benchmark-leases",
+        Path.basename(preview.artifact_root) <> ".json"
+      ])
+
+    assert File.dir?(preview.artifact_root)
+    assert File.regular?(control_path)
+
+    assert %{"lease" => lease, "state" => "allocating"} =
+             control_path |> File.read!() |> Jason.decode!()
+
+    assert is_binary(lease)
   end
 
   test "request workdirs must have the harness-owned pair topology" do
@@ -811,6 +886,27 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     assert pipeline["terminal_reason"] == "final_branch_or_commit_attestation_failed"
   end
 
+  test "security regression: repository and configured excludes cannot hide untracked paths" do
+    for verifier <- [InfoExcludedUntrackedVerifier, CoreExcludedUntrackedVerifier] do
+      scenario = production_scenario!()
+      install_leased_executors()
+      Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+      assert {:ok, report} =
+               run_production_scenario(scenario,
+                 verifiers: %{"scripted_objective" => verifier}
+               )
+
+      pipeline = row(report, "pipeline")
+
+      assert pipeline["terminal_status"] == "worktree_verification_failed",
+             "exclude verifier #{inspect(verifier)} was not detected"
+
+      assert pipeline["terminal_reason"] == "final_branch_or_commit_attestation_failed"
+      assert pipeline["artifact_hash_verification"]["changed_paths_verified"] == false
+    end
+  end
+
   test "security regression: replacement refs cannot forge physical commit ancestry" do
     scenario = production_scenario!()
     install_leased_executors()
@@ -1020,6 +1116,68 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     assert File.read!(late_path) == "late write\n"
   end
 
+  test "security regression: delegated late workers retain leases after adapter raise and exit" do
+    for executor <- [LateRaisingPipelineExecutor, LateExitingPipelineExecutor] do
+      scenario = production_scenario!()
+
+      Application.put_env(
+        :arbor_commands,
+        :coding_benchmark_legacy_executor_module,
+        LeasedLegacyExecutor
+      )
+
+      Application.put_env(:arbor_commands, :coding_benchmark_pipeline_executor_module, executor)
+      Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+      assert {:ok, first} = run_production_scenario(scenario)
+      assert_receive {:late_failing_writer_started, worker, artifact_root, task_id, failure}
+      assert_receive {:late_failing_writer_finished, ^worker, late_path}, 2_000
+      assert late_path == Path.join(artifact_root, "late-write.txt")
+      assert File.read!(late_path) == "late write after #{failure}\n"
+
+      failed = row(first, "pipeline")
+      assert failed["terminal_status"] in ["executor_raised", "executor_threw"]
+      assert failed["terminal_reason"] =~ "artifact_lease_retained:unconfirmed_worker_cleanup"
+
+      assert {:ok, second} = run_production_scenario(scenario)
+
+      refute_receive {:late_failing_writer_started, _worker, ^artifact_root, ^task_id, _failure},
+                     100
+
+      rerun = row(second, "pipeline")
+      assert rerun["terminal_status"] == "executor_failed"
+      assert rerun["terminal_reason"] =~ "artifact_task_root_exists"
+      assert File.read!(late_path) == "late write after #{failure}\n"
+    end
+  end
+
+  test "invalid measurement retains leases and blocks identical reruns" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    invalid_measure = fn fun ->
+      _outcome = fun.()
+      :invalid_measurement
+    end
+
+    assert {:ok, first} = run_production_scenario(scenario, measure: invalid_measure)
+
+    for executor <- ~w(legacy pipeline) do
+      failed = row(first, executor)
+      assert failed["terminal_status"] == "measurement_failed"
+      assert failed["terminal_reason"] =~ "artifact_lease_retained:unconfirmed_worker_cleanup"
+    end
+
+    assert {:ok, second} = run_production_scenario(scenario)
+
+    for executor <- ~w(legacy pipeline) do
+      rerun = row(second, executor)
+      assert rerun["terminal_status"] == "executor_failed"
+      assert rerun["terminal_reason"] =~ "artifact_task_root_exists"
+    end
+  end
+
   test "external lease-control tampering is surfaced and retained" do
     scenario = production_scenario!()
     install_leased_executors()
@@ -1134,6 +1292,50 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
 
     send(observer, {:late_writer_started, worker, artifact_root, task_id})
     Process.sleep(:infinity)
+  end
+
+  @doc false
+  def allocate_late_writer_and_fail(%{"task_id" => task_id}, failure) do
+    observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+
+    artifact_root =
+      Path.join(Arbor.Orchestrator.coding_pipeline_logs_root(), "task-" <> sha256(task_id))
+
+    worker =
+      spawn(fn ->
+        Process.sleep(100)
+        late_path = Path.join(artifact_root, "late-write.txt")
+        File.write!(late_path, "late write after #{failure}\n")
+        send(observer, {:late_failing_writer_finished, self(), late_path})
+      end)
+
+    send(observer, {:late_failing_writer_started, worker, artifact_root, task_id, failure})
+
+    case failure do
+      :raise -> raise "adapter failed after delegating worker"
+      :exit -> exit(:adapter_failed_after_delegating_worker)
+    end
+  end
+
+  @doc false
+  def write_excluded_untracked(workdir, source) do
+    filename = "excluded-untracked-#{source}.txt"
+    git_common_dir = workdir |> git!(["rev-parse", "--git-common-dir"]) |> Path.expand(workdir)
+
+    case source do
+      :info_exclude ->
+        exclude_path = Path.join(git_common_dir, "info/exclude")
+        File.mkdir_p!(Path.dirname(exclude_path))
+        File.write!(exclude_path, filename <> "\n", [:append])
+
+      :core_excludes_file ->
+        exclude_path = Path.join(git_common_dir, "benchmark-excludes")
+        File.write!(exclude_path, filename <> "\n")
+        git!(workdir, ["config", "--local", "core.excludesFile", exclude_path])
+    end
+
+    File.write!(Path.join(workdir, filename), "must remain visible to attestation\n")
+    :ok
   end
 
   @doc false
