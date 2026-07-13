@@ -477,6 +477,7 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
         "base_ref" => plan.base_ref,
         "acp_agent" => plan.worker["provider"],
         "open_pr" => bool_string(plan.output["draft_pr"]),
+        "retain_workspace" => bool_string(plan.output["retain_workspace"]),
         "submit_review" => bool_string(plan.review_profile != "none"),
         "timeout" => plan.budgets["wall_clock_ms"],
         "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
