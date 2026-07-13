@@ -337,3 +337,42 @@ objects, reject unsupported entries, and re-attest HEAD, tree, ancestry, and cle
 and after execution. Disable replacement objects for every provenance command, and pass explicit
 cleanliness flags such as `--untracked-files=all`; repository-local config can otherwise make an
 unrelated commit appear ancestral or hide an untracked mutation.
+
+**Deferred lifecycle messages need state-owned, unforgeable settlement records.** A later
+`send(self(), ...)` carrying the full settlement payload can be forged and can be lost when the
+GenServer terminates before handling it. Store the payload in a ref-keyed private outbox, send only
+the fresh ref, accept each ref once, and flush the outbox before every close/owner/client/terminate
+path (found 2026-07-12 in ACP timeout task-control settlement).
+
+**Reply-first GenServer cleanup still has to resolve every supported server reference.** Direct
+`send/2` and `Process.monitor/1` work for PIDs but regress registered atom or `{:via, ...}` servers,
+and a queued caller can die before the server accepts its request. Resolve through
+`GenServer.whereis/1`, monitor the resolved PID, and cancel queued pre-accept work as well as active
+work (found 2026-07-12 in ACP recovery fencing).
+
+**Protocol cancellation must finish before eager transport teardown.** Starting an asynchronous
+ACP cancel callback and immediately disconnecting races the callback against a dead client. For
+caller/owner cancellation that terminates the session, run cancel through a bounded owned operation
+before disconnect; keep hard/inactivity recovery reply-first when the session must remain resumable.
+
+**Stable review finding IDs cannot include candidate identity or mutable prose.** Rework changes
+the commit and diff by design, so IDs derived from either cannot converge across cycles. Derive the
+issue key from normalized path/side/line/title plus owner, and treat every field included in that
+identity (including title) as immutable. Keep the candidate and evidence in cycle records instead.
+
+**Bounded prompt payloads must remain structurally valid.** Byte-slicing encoded JSON produces an
+invalid fragment that downstream workers cannot parse. Bound fields before encoding, then compact
+to a smaller valid JSON envelope with an explicit truncation marker if the encoded payload still
+exceeds its ceiling (found 2026-07-12 in recovery and review feedback).
+
+**Jido `:map` schemas do not accept dynamic string-keyed JSON maps.** Path-keyed values such as
+`%{"lib/a.ex" => [[1, 2]]}` fail schema validation because Jido expects atom map keys. Use `:any` at
+that outer action-schema slot only when a downstream contract constructor immediately validates a
+bounded string-keyed JSON map; add a public action test so the weaker declaration cannot become an
+unvalidated bypass (found 2026-07-12 with review `delta_ranges` and finding ledgers).
+
+**Changing a reviewed nested DOT action requires updating every action catalog.** Registering the
+action in `Arbor.Actions` is not enough: compiler fixtures, executable profile manifests, and nested
+graph tests can retain the old static module set and fail with `referenced_action_missing` before
+semantic analysis. Search action names across production manifests and test catalogs whenever a
+reviewed subgraph changes its exec action.
