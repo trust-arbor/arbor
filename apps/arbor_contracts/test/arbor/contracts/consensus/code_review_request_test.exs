@@ -31,6 +31,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert request.prior_candidate_commit == nil
       assert request.delta_diff == ""
       assert request.delta_files == []
+      assert request.delta_ranges == %{}
       assert request.finding_ledger == %{}
     end
 
@@ -62,6 +63,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert request.prior_candidate_commit == nil
       assert request.delta_diff == ""
       assert request.delta_files == []
+      assert request.delta_ranges == %{}
       assert request.finding_ledger == %{}
     end
 
@@ -100,6 +102,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
         "prior_candidate_commit" => String.duplicate("b", 40),
         "delta_diff" => "@@ -1 +1 @@",
         "delta_files" => ["lib/a.ex"],
+        "delta_ranges" => %{"lib/a.ex" => [[1, 3], [8, 10]]},
         "finding_ledger" => %{"findings" => []}
       }
 
@@ -107,12 +110,16 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert request.review_cycle == 2
       assert request.prior_candidate_commit == String.duplicate("b", 40)
       assert request.delta_files == ["lib/a.ex"]
+      assert request.delta_ranges == %{"lib/a.ex" => [[1, 3], [8, 10]]}
 
       assert {:error, {:invalid_field, :review_cycle, _}} =
                CodeReviewRequest.new(Map.put(@valid_attrs, :review_cycle, 0))
 
       assert {:error, {:invalid_field, :delta_files, {:invalid_path, "../secret.ex"}}} =
                CodeReviewRequest.new(Map.put(@valid_attrs, :delta_files, ["../secret.ex"]))
+
+      assert {:error, {:invalid_field, :delta_ranges, {:invalid_path, _}}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :delta_ranges, %{lib_a: [[1, 2]]}))
 
       assert {:error, {:invalid_field, :delta_files, :duplicate}} =
                CodeReviewRequest.new(
@@ -145,6 +152,79 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
                  })
                )
     end
+
+    test "normalizes valid delta ranges and rejects malformed range maps" do
+      attrs =
+        @valid_attrs
+        |> Map.put(:delta_ranges, %{
+          "test/a_test.exs" => [[20, 24], [30, 30]],
+          "lib/a.ex" => [[1, 3], [8, 10]]
+        })
+
+      assert {:ok, request} = CodeReviewRequest.new(attrs)
+
+      assert request.delta_ranges == %{
+               "lib/a.ex" => [[1, 3], [8, 10]],
+               "test/a_test.exs" => [[20, 24], [30, 30]]
+             }
+
+      invalid_ranges = [
+        %{<<195>> => [[1, 2]]},
+        %{"/absolute.ex" => [[1, 2]]},
+        %{"../secret.ex" => [[1, 2]]},
+        %{"lib/a.ex" => [[2, 4], [4, 5]]},
+        %{"lib/a.ex" => [[2, 4], [5, 6]]},
+        %{"lib/a.ex" => [[3, 4], [1, 2]]},
+        %{"lib/a.ex" => [[0, 2]]},
+        %{"lib/a.ex" => [[4, 2]]},
+        %{"lib/a.ex" => [[1, 2, 3]]},
+        %{"lib/a.ex" => %{1 => 2}},
+        %{"lib/a.ex" => [Date.utc_today()]},
+        %{"lib/a.ex" => [[1, 10_000_001]]}
+      ]
+
+      for ranges <- invalid_ranges do
+        assert {:error, {:invalid_field, :delta_ranges, _}} =
+                 CodeReviewRequest.new(Map.put(@valid_attrs, :delta_ranges, ranges))
+      end
+
+      assert {:error, {:invalid_field, :delta_ranges, :invalid_json}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :delta_ranges, Date.utc_today()))
+    end
+
+    test "bounds delta range files, ranges, and encoded JSON" do
+      too_many_files =
+        Map.new(1..129, fn index -> {"lib/file_#{index}.ex", [[1, 1]]} end)
+
+      assert {:error, {:invalid_field, :delta_ranges, :too_many_files}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :delta_ranges, too_many_files))
+
+      too_many_per_file = %{
+        "lib/a.ex" => Enum.map(1..129, fn index -> [index * 2, index * 2] end)
+      }
+
+      assert {:error,
+              {:invalid_field, :delta_ranges, {:invalid_ranges, "lib/a.ex", :too_many_per_file}}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :delta_ranges, too_many_per_file))
+
+      too_many_total =
+        Map.new(1..9, fn file ->
+          {"lib/file_#{file}.ex", Enum.map(1..128, fn index -> [index * 2, index * 2] end)}
+        end)
+
+      assert {:error, {:invalid_field, :delta_ranges, :too_many_total}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :delta_ranges, too_many_total))
+
+      oversized =
+        Map.new(1..128, fn index ->
+          suffix = Integer.to_string(index)
+          path = String.duplicate("x", 1_024 - byte_size(suffix)) <> suffix
+          {path, [[1, 1]]}
+        end)
+
+      assert {:error, {:invalid_field, :delta_ranges, :too_large}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :delta_ranges, oversized))
+    end
   end
 
   describe "bind_review_snapshot/2" do
@@ -165,6 +245,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert bound.prior_candidate_commit == request.prior_candidate_commit
       assert bound.delta_diff == request.delta_diff
       assert bound.delta_files == request.delta_files
+      assert bound.delta_ranges == request.delta_ranges
       assert bound.finding_ledger == request.finding_ledger
 
       assert {:error, {:review_commit_mismatch, :candidate}} =
@@ -193,6 +274,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
                "prior_candidate_commit" => nil,
                "delta_diff" => "",
                "delta_files" => [],
+               "delta_ranges" => %{},
                "finding_ledger" => %{}
              }
 
@@ -204,12 +286,23 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert context["intent"] == "Add a review loop"
       assert context["review.cycle"] == 1
       assert context["review.finding_ledger"] == %{}
+      assert context["review.delta_ranges"] == %{}
+      assert context["review.request"]["delta_ranges"] == %{}
 
       assert context["council.question"] ==
                "Should branch agent/review-loop be accepted for human review?"
 
       assert {:ok, _json} = Jason.encode(context)
       refute inspect(context) =~ "%CodeReviewRequest"
+    end
+
+    test "preserves delta ranges in the canonical map and review context" do
+      ranges = %{"lib/a.ex" => [[1, 3], [8, 10]]}
+      {:ok, request} = CodeReviewRequest.new(Map.put(@valid_attrs, :delta_ranges, ranges))
+
+      assert CodeReviewRequest.to_map(request)["delta_ranges"] == ranges
+      assert CodeReviewRequest.to_context(request)["review.delta_ranges"] == ranges
+      assert CodeReviewRequest.to_context(request)["review.request"]["delta_ranges"] == ranges
     end
 
     test "includes diff, files, branch, and intent in the reviewer prompt" do

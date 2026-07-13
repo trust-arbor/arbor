@@ -13,6 +13,10 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
 
   @max_delta_files 128
   @max_delta_file_bytes 1_024
+  @max_delta_ranges_per_file 128
+  @max_delta_ranges_total 1_024
+  @max_delta_line_number 10_000_000
+  @max_delta_ranges_bytes 131_072
   @max_finding_ledger_bytes 131_072
   @max_prompt_ledger_bytes 32_768
   @max_prompt_delta_bytes 32_768
@@ -33,6 +37,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
     field(:prior_candidate_commit, String.t() | nil, enforce: false, default: nil)
     field(:delta_diff, String.t(), enforce: false, default: "")
     field(:delta_files, [String.t()], enforce: false, default: [])
+    field(:delta_ranges, map(), enforce: false, default: %{})
     field(:finding_ledger, map(), enforce: false, default: %{})
   end
 
@@ -66,6 +71,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
            optional_utf8_string(attrs, :prior_candidate_commit, nil),
          {:ok, delta_diff} <- optional_utf8_string(attrs, :delta_diff, ""),
          {:ok, delta_files} <- optional_delta_files(attrs),
+         {:ok, delta_ranges} <- optional_delta_ranges(attrs),
          {:ok, finding_ledger} <- optional_finding_ledger(attrs) do
       {:ok,
        %__MODULE__{
@@ -81,6 +87,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
          prior_candidate_commit: prior_candidate_commit,
          delta_diff: delta_diff,
          delta_files: delta_files,
+         delta_ranges: delta_ranges,
          finding_ledger: finding_ledger
        }}
     end
@@ -107,6 +114,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
         prior_candidate_commit: request.prior_candidate_commit,
         delta_diff: request.delta_diff,
         delta_files: request.delta_files,
+        delta_ranges: request.delta_ranges,
         finding_ledger: request.finding_ledger
       })
     end
@@ -114,18 +122,10 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
 
   def bind_review_snapshot(%__MODULE__{}, _snapshot), do: {:error, :invalid_review_snapshot}
 
-  @doc """
-  Convert the request to Engine context values.
-
-  The returned map is JSON-clean and intentionally includes both flat keys
-  (`diff` / `review.diff`) and a nested `review.request` map. Flat keys are
-  convenient for `context_keys` and debugging; the nested map is convenient for
-  future handlers that want the request as one value. `review.prompt` is the
-  string fed to LLM reviewer nodes through `prompt_context_key`.
-  """
-  @spec to_context(t()) :: map()
-  def to_context(%__MODULE__{} = request) do
-    request_map = %{
+  @doc "Return the complete canonical string-keyed JSON representation."
+  @spec to_map(t()) :: %{required(String.t()) => term()}
+  def to_map(%__MODULE__{} = request) do
+    %{
       "diff" => request.diff,
       "files" => request.files,
       "branch" => request.branch,
@@ -138,8 +138,23 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
       "prior_candidate_commit" => request.prior_candidate_commit,
       "delta_diff" => request.delta_diff,
       "delta_files" => request.delta_files,
+      "delta_ranges" => request.delta_ranges,
       "finding_ledger" => request.finding_ledger
     }
+  end
+
+  @doc """
+  Convert the request to Engine context values.
+
+  The returned map is JSON-clean and intentionally includes both flat keys
+  (`diff` / `review.diff`) and a nested `review.request` map. Flat keys are
+  convenient for `context_keys` and debugging; the nested map is convenient for
+  future handlers that want the request as one value. `review.prompt` is the
+  string fed to LLM reviewer nodes through `prompt_context_key`.
+  """
+  @spec to_context(t()) :: map()
+  def to_context(%__MODULE__{} = request) do
+    request_map = to_map(request)
 
     question = "Should branch #{request.branch} be accepted for human review?"
 
@@ -170,6 +185,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
       "review.prior_candidate_commit" => request.prior_candidate_commit,
       "review.delta_diff" => request.delta_diff,
       "review.delta_files" => request.delta_files,
+      "review.delta_ranges" => request.delta_ranges,
       "review.finding_ledger" => request.finding_ledger,
       "review.prompt" => prompt_text(request),
       "council.question" => question
@@ -279,6 +295,13 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
     end
   end
 
+  defp optional_delta_ranges(attrs) do
+    case fetch_attr(attrs, :delta_ranges) do
+      {:ok, ranges} -> validate_delta_ranges(ranges)
+      {:error, {:missing_required_field, :delta_ranges}} -> {:ok, %{}}
+    end
+  end
+
   defp validate_delta_files(files) when is_list(files) do
     cond do
       length(files) > @max_delta_files ->
@@ -308,6 +331,105 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   end
 
   defp valid_repo_relative_file?(_file), do: false
+
+  defp validate_delta_ranges(ranges) when is_map(ranges) do
+    cond do
+      is_struct(ranges) -> invalid_delta_ranges(:invalid_json)
+      map_size(ranges) > @max_delta_files -> invalid_delta_ranges(:too_many_files)
+      true -> validate_delta_range_entries(ranges)
+    end
+  end
+
+  defp validate_delta_ranges(value), do: invalid_delta_ranges({:expected_map, value})
+
+  defp validate_delta_range_entries(ranges) do
+    case Enum.find(Map.to_list(ranges), fn {path, _path_ranges} ->
+           not valid_delta_range_path?(path)
+         end) do
+      {path, _path_ranges} -> invalid_delta_ranges({:invalid_path, path})
+      nil -> validate_delta_range_values(ranges)
+    end
+  end
+
+  defp validate_delta_range_values(ranges) do
+    ranges
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce_while({:ok, [], 0}, fn {path, path_ranges}, {:ok, acc, total} ->
+      case validate_delta_ranges_for_file(path_ranges) do
+        {:ok, normalized, count} when total + count <= @max_delta_ranges_total ->
+          {:cont, {:ok, [{path, normalized} | acc], total + count}}
+
+        {:ok, _normalized, _count} ->
+          {:halt, invalid_delta_ranges(:too_many_total)}
+
+        {:error, reason} ->
+          {:halt, invalid_delta_ranges({:invalid_ranges, path, reason})}
+      end
+    end)
+    |> case do
+      {:ok, entries, _total} ->
+        normalized = Map.new(Enum.reverse(entries))
+
+        case Jason.encode(normalized) do
+          {:ok, encoded} when byte_size(encoded) <= @max_delta_ranges_bytes ->
+            {:ok, normalized}
+
+          {:ok, _encoded} ->
+            invalid_delta_ranges(:too_large)
+
+          {:error, _reason} ->
+            invalid_delta_ranges(:invalid_json)
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp validate_delta_ranges_for_file(path_ranges) when is_list(path_ranges) do
+    if length(path_ranges) > @max_delta_ranges_per_file do
+      {:error, :too_many_per_file}
+    else
+      Enum.reduce_while(path_ranges, {:ok, [], nil}, fn range, {:ok, normalized, previous_end} ->
+        case range do
+          [start_line, end_line]
+          when is_integer(start_line) and start_line > 0 and
+                 is_integer(end_line) and end_line >= start_line and
+                 end_line <= @max_delta_line_number and
+                 (is_nil(previous_end) or start_line > previous_end + 1) ->
+            {:cont, {:ok, [[start_line, end_line] | normalized], end_line}}
+
+          _ ->
+            {:halt, {:error, :invalid_range}}
+        end
+      end)
+      |> case do
+        {:ok, normalized, _previous_end} ->
+          {:ok, Enum.reverse(normalized), length(path_ranges)}
+
+        error ->
+          error
+      end
+    end
+  end
+
+  defp validate_delta_ranges_for_file(_path_ranges), do: {:error, :expected_list}
+
+  defp valid_delta_range_path?(path) when is_binary(path) do
+    valid_repo_relative_file?(path) and not windows_absolute_path?(path)
+  end
+
+  defp valid_delta_range_path?(_path), do: false
+
+  defp windows_absolute_path?(<<drive, ":", rest::binary>>)
+       when drive in ?A..?Z or drive in ?a..?z do
+    String.starts_with?(rest, "/")
+  end
+
+  defp windows_absolute_path?(_path), do: false
+
+  defp invalid_delta_ranges(reason),
+    do: {:error, {:invalid_field, :delta_ranges, reason}}
 
   defp validate_finding_ledger(ledger) when is_map(ledger) do
     with true <- not is_struct(ledger),
