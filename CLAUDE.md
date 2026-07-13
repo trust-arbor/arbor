@@ -314,3 +314,9 @@ capability, trust, and identity cleanup has succeeded or reached an explicit ter
 them correctly, but Orchestrator and Agent tests that manually started only the broker failed
 far from setup with `:broker_unavailable`. Search all `start_child` helpers whenever a child
 spec gains a sibling prerequisite, and keep isolated test files independent of suite order.
+
+**Cancellation and verification must not reuse mutating scope allocators.** An execution setup
+function that exclusively creates an artifact root is correct for first admission, but calling it
+again from a timeout cancel hook turns the expected `:eexist` into a cancellation failure. Split
+scope derivation from allocation: execution uses the exclusive allocator once; status, verification,
+and cancellation derive the same task/worktree/artifact identities without creating anything.

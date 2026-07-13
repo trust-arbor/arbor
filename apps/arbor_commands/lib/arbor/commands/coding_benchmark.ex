@@ -594,24 +594,26 @@ defmodule Arbor.Commands.CodingBenchmark do
   end
 
   defp clone_fixture(source, destination, commit_oid, expected_tree, timeout_ms) do
-    with :ok <- git_clone(source, destination, timeout_ms),
-         :ok <- git_ok(destination, ["checkout", "--detach", "--quiet", commit_oid], timeout_ms),
+    with {:ok, ""} <- git_output(source, ["status", "--porcelain=v1"], timeout_ms),
+         {:ok, %{type: :directory}} <- File.lstat(Path.join(source, ".git")),
+         :ok <- Git.copy_repository(source, destination, timeout_ms),
+         {:ok, ^commit_oid} <-
+           git_output(destination, ["rev-parse", "--verify", "HEAD^{commit}"], timeout_ms),
          {:ok, actual_tree} <-
            git_output(destination, ["rev-parse", "--verify", "HEAD^{tree}"], timeout_ms),
-         :ok <- matching_tree(actual_tree, expected_tree) do
+         :ok <- matching_tree(actual_tree, expected_tree),
+         {:ok, ""} <- git_output(destination, ["status", "--porcelain=v1"], timeout_ms) do
       _ = git_ok(destination, ["remote", "remove", "origin"], timeout_ms)
       :ok
-    end
-  end
+    else
+      {:ok, dirty} when is_binary(dirty) and dirty != "" ->
+        {:error, "fixture_repository_not_clean"}
 
-  defp git_clone(source, destination, timeout_ms) do
-    case Git.run(
-           source,
-           ["clone", "--quiet", "--no-hardlinks", "--", source, destination],
-           timeout_ms
-         ) do
-      {:ok, _output} -> :ok
-      {:error, reason} -> {:error, "git_clone_failed:#{reason}"}
+      {:error, reason} when is_binary(reason) ->
+        {:error, reason}
+
+      _other ->
+        {:error, "fixture_copy_attestation_failed"}
     end
   end
 

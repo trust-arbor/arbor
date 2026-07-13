@@ -91,7 +91,7 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     with {:ok, request} <- validate_request(request, executor_path),
          {:ok, runtime} <- Runtime.load(),
          :ok <- Runtime.preflight_production(runtime),
-         {:ok, scope} <- execution_scope(request, runtime),
+         {:ok, scope} <- verification_scope(request, runtime),
          {:ok, principal_id} <- configured_principal_id(),
          {:ok, executor} <- configured_executor(executor_config_key, default_runner) do
       invoke_cancel(
