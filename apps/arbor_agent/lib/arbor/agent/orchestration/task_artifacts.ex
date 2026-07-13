@@ -14,6 +14,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     declined
     human_review_required
     no_changes
+    pipeline_error
     pr_created
     pr_failed
     review_failed
@@ -43,6 +44,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   )
   @lowercase_sha256 ~r/\A[0-9a-f]{64}\z/
   @max_metrics_depth 16
+  @max_provider_session_id_length 200
 
   alias Arbor.Contracts.Comms.ApprovalAnswer
 
@@ -76,7 +78,9 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
           metrics: metrics,
           repo_path: value(raw, :repo_path),
           worktree_path: value(raw, :worktree_path),
-          pr_url: value(raw, :pr_url)
+          pr_url: value(raw, :pr_url),
+          worker_provider_session_id:
+            bounded_provider_session_id(value(raw, :worker_provider_session_id))
         }
         |> reject_nil_values(),
       raw: raw,
@@ -237,8 +241,17 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       (Enum.any?(
          [:branch, :commit, :worktree_path, :validation, :review],
          &present?(value(map, &1))
-       ) or valid_coding_artifacts?(artifacts))
+       ) or valid_coding_artifacts?(artifacts) or pipeline_error?(map, status))
   end
+
+  defp pipeline_error?(map, "pipeline_error") do
+    Enum.any?(
+      [:error, :workspace_id, :worker_session_id, :worker_provider_session_id],
+      &present?(value(map, &1))
+    )
+  end
+
+  defp pipeline_error?(_map, _status), do: false
 
   defp files(raw) do
     cond do
@@ -281,7 +294,9 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       error: value(raw, :error) || value(raw, :review_error),
       # Stable, bounded operator-approval scalars only (never raw metadata maps).
       approval_request_id: bounded_approval_request_id(value(raw, :approval_request_id)),
-      approval_note: bounded_approval_note(value(raw, :approval_note))
+      approval_note: bounded_approval_note(value(raw, :approval_note)),
+      worker_provider_session_id:
+        bounded_provider_session_id(value(raw, :worker_provider_session_id))
     }
     |> reject_nil_values()
   end
@@ -304,6 +319,18 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   end
 
   defp bounded_approval_note(_), do: nil
+
+  # Provider session ids are opaque provider data, so retain only a bounded,
+  # JSON-clean scalar rather than imposing provider-specific identifier syntax.
+  defp bounded_provider_session_id(id) when is_binary(id) do
+    if String.valid?(id) and String.trim(id) != "" and
+         String.length(id) <= @max_provider_session_id_length and
+         not String.match?(id, ~r/[\x00-\x1F\x7F]/) do
+      id
+    end
+  end
+
+  defp bounded_provider_session_id(_), do: nil
 
   defp verdict(raw) do
     review = value(raw, :review)

@@ -22,6 +22,63 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
     assert result.payload.verdict.recommendation == :keep
   end
 
+  test "projects a bounded provider session id through successful coding payload and report" do
+    raw = %{
+      "status" => "change_committed",
+      "branch" => "agent/change",
+      "worktree_path" => "/tmp/ws",
+      "worker_provider_session_id" => "provider-session-1"
+    }
+
+    result = TaskArtifacts.normalize(raw)
+
+    assert result.result_type == :coding_change
+    assert result.payload.worker_provider_session_id == "provider-session-1"
+    assert result.payload.report.worker_provider_session_id == "provider-session-1"
+    assert result.raw === raw
+  end
+
+  test "projects a bounded provider session id through pipeline-error coding payload and report" do
+    raw = %{
+      "status" => "pipeline_error",
+      "error" => "acquire failed",
+      "worker_provider_session_id" => "provider-session-failure-1"
+    }
+
+    result = TaskArtifacts.normalize(raw)
+
+    assert result.result_type == :coding_change
+    assert result.payload.worker_provider_session_id == "provider-session-failure-1"
+    assert result.payload.report.status == "pipeline_error"
+    assert result.payload.report.worker_provider_session_id == "provider-session-failure-1"
+    assert result.raw === raw
+  end
+
+  test "omits invalid provider session ids while preserving raw coding results" do
+    for provider_session_id <- [
+          nil,
+          42,
+          "",
+          "bad\x00session",
+          <<255>>,
+          String.duplicate("a", 201)
+        ] do
+      raw = %{
+        "status" => "change_committed",
+        "branch" => "agent/change",
+        "worktree_path" => "/tmp/ws",
+        "worker_provider_session_id" => provider_session_id
+      }
+
+      result = TaskArtifacts.normalize(raw)
+
+      assert result.result_type == :coding_change
+      refute Map.has_key?(result.payload, :worker_provider_session_id)
+      refute Map.has_key?(result.payload.report, :worker_provider_session_id)
+      assert result.raw === raw
+    end
+  end
+
   test "accepts rework_exhausted as a coding status" do
     raw = %{
       "status" => "rework_exhausted",
