@@ -348,6 +348,8 @@ capability, trust, and identity cleanup has succeeded or reached an explicit ter
 them correctly, but Orchestrator and Agent tests that manually started only the broker failed
 far from setup with `:broker_unavailable`. Search all `start_child` helpers whenever a child
 spec gains a sibling prerequisite, and keep isolated test files independent of suite order.
+For token-coupled pairs, create one opaque token, pass it to both children under their respective
+option names, start the owner first, and restart an existing dependent child through its supervisor.
 
 **Cancellation and verification must not reuse mutating scope allocators.** An execution setup
 function that exclusively creates an artifact root is correct for first admission, but calling it
