@@ -688,7 +688,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     ensure_security_child!(Arbor.Security.Identity.Registry, [])
     ensure_security_child!(Arbor.Security.Identity.NonceCache, [])
     ensure_security_child!(Arbor.Security.SystemAuthority, [])
-    ensure_security_child!(SigningAuthorityBroker, [])
+    ensure_signing_authority_pair!()
   end
 
   defp ensure_buffered_store!(name, collection) do
@@ -717,6 +717,29 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         {:error, {:already_present, _id}} -> :ok
         other -> flunk("failed to start #{inspect(module)}: #{inspect(other)}")
       end
+    end
+  end
+
+  defp ensure_signing_authority_pair! do
+    case {Process.whereis(Arbor.Security.SigningAuthorityStateOwner),
+          Process.whereis(SigningAuthorityBroker)} do
+      {owner, broker} when is_pid(owner) and is_pid(broker) ->
+        :ok
+
+      {nil, nil} ->
+        token = make_ref()
+        ensure_security_child!(Arbor.Security.SigningAuthorityStateOwner, broker_token: token)
+        ensure_security_child!(SigningAuthorityBroker, state_owner_token: token)
+
+      {owner, nil} when is_pid(owner) ->
+        case Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker) do
+          {:ok, _pid} -> :ok
+          {:ok, _pid, _info} -> :ok
+          other -> flunk("failed to restart SigningAuthorityBroker: #{inspect(other)}")
+        end
+
+      partial ->
+        flunk("partial signing authority stack: #{inspect(partial)}")
     end
   end
 
