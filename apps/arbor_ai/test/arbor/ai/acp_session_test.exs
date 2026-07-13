@@ -673,8 +673,11 @@ defmodule Arbor.AI.AcpSessionTest do
       session_ref = Process.monitor(session)
       assert {:error, :timeout} = AcpSession.close(session, timeout: 30)
       assert_receive {:fake_disconnect_stalled, callback_worker}, 200
+      callback_ref = Process.monitor(callback_worker)
       assert_receive {:DOWN, ^session_ref, :process, ^session, down_reason}, 300
       assert down_reason in [:normal, :killed]
+      assert_receive {:DOWN, ^callback_ref, :process, ^callback_worker, callback_reason}, 300
+      assert callback_reason in [:killed, :noproc]
       refute Process.alive?(callback_worker)
     end
 

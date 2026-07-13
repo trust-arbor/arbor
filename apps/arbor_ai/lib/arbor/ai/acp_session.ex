@@ -2187,7 +2187,7 @@ defmodule Arbor.AI.AcpSession do
       new_state = enqueue_pending_settlement(new_state, kind, control_events)
       {:reply, {:error, error}, new_state}
     else
-      cancel_acp_prompt(state)
+      _ = cancel_acp_prompt_owned(state, internal_cleanup_opts())
       _ = disconnect_client_owned(state, internal_cleanup_opts())
 
       emit_timeout_observability(
@@ -2327,6 +2327,25 @@ defmodule Arbor.AI.AcpSession do
     _ -> :ok
   catch
     _kind, _reason -> :ok
+  end
+
+  defp cancel_acp_prompt_owned(%{client: nil}, _opts), do: :ok
+
+  defp cancel_acp_prompt_owned(%{client: client, session_id: session_id}, opts) do
+    module = acp_client_module()
+
+    if Process.alive?(client) and function_exported?(module, :cancel, 2) do
+      OwnedOperation.run(
+        fn ->
+          # credo:disable-for-next-line Credo.Check.Refactor.Apply
+          apply(module, :cancel, [client, session_id])
+        end,
+        opts,
+        :timeout
+      )
+    else
+      :ok
+    end
   end
 
   defp run_cleanup_callback(callback) when is_function(callback, 0) do

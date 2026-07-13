@@ -20,7 +20,7 @@ defmodule Arbor.AI.AcpTaskControlTest do
   defmodule FakeClient do
     @moduledoc false
 
-    def start_link(opts), do: Agent.start_link(fn -> opts end)
+    def start_link(opts), do: Agent.start_link(fn -> Keyword.put(opts, :cancelled?, false) end)
 
     def new_session(_client, _cwd, _opts), do: {:ok, %{"sessionId" => "same-session"}}
     def load_session(_client, id, _cwd, _opts), do: {:ok, %{"sessionId" => id}}
@@ -28,14 +28,37 @@ defmodule Arbor.AI.AcpTaskControlTest do
 
     def disconnect(client) do
       opts = Agent.get(client, & &1)
+
+      if opts[:disconnect_mode] == :report_cancel_state do
+        send(opts[:test_pid], {:disconnect_cancel_state, client, opts[:cancelled?]})
+      end
+
       send(opts[:test_pid], {:disconnected, client})
       Agent.stop(client, :normal)
     end
 
     def cancel(client, session_id) do
       opts = Agent.get(client, & &1)
-      send(opts[:test_pid], {:cancelled, client, session_id})
-      :ok
+
+      case opts[:cancel_mode] do
+        :gated ->
+          send(opts[:test_pid], {:cancel_started, self(), client, session_id})
+
+          receive do
+            :release_cancel ->
+              Agent.update(client, &Keyword.put(&1, :cancelled?, true))
+              send(opts[:test_pid], {:cancelled, client, session_id})
+              :ok
+          end
+
+        :stall ->
+          send(opts[:test_pid], {:cancel_stalled, self(), client, session_id})
+          Process.sleep(:infinity)
+
+        _other ->
+          send(opts[:test_pid], {:cancelled, client, session_id})
+          :ok
+      end
     end
 
     def prompt(client, session_id, content, _opts) do
@@ -72,13 +95,13 @@ defmodule Arbor.AI.AcpTaskControlTest do
     :ok
   end
 
-  defp start_session do
+  defp start_session(client_opts \\ []) do
     {:ok, session} =
       AcpSession.start_link(
         provider: :test,
         agent_id: "agent-test",
         owner: nil,
-        client_opts: [test_pid: self()]
+        client_opts: Keyword.put_new(client_opts, :test_pid, self())
       )
 
     on_exit(fn -> close_session(session) end)
@@ -792,6 +815,55 @@ defmodule Arbor.AI.AcpTaskControlTest do
       :cancelled,
       :caller_cancelled
     )
+  end
+
+  test "security regression: caller cancellation completes ACP cancel before eager disconnect" do
+    session =
+      start_session(cancel_mode: :gated, disconnect_mode: :report_cancel_state)
+
+    session_ref = Process.monitor(session)
+
+    caller =
+      spawn(fn ->
+        _ = AcpSession.send_message(session, "initial", timeout: 1_000)
+      end)
+
+    assert_receive {:prompt_started, _worker, client, "same-session", "initial"}
+    Process.exit(caller, :kill)
+
+    assert_receive {:cancel_started, cancel_worker, ^client, "same-session"}
+    refute_receive {:disconnected, ^client}, 50
+
+    send(cancel_worker, :release_cancel)
+
+    assert_receive {:cancelled, ^client, "same-session"}
+    assert_receive {:disconnect_cancel_state, ^client, true}
+    assert_receive {:disconnected, ^client}
+    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
+  end
+
+  @tag timeout: 1_500
+  test "security regression: non-returning ACP cancel is killed before bounded disconnect" do
+    session =
+      start_session(cancel_mode: :stall, disconnect_mode: :report_cancel_state)
+
+    session_ref = Process.monitor(session)
+
+    caller =
+      spawn(fn ->
+        _ = AcpSession.send_message(session, "initial", timeout: 1_000)
+      end)
+
+    assert_receive {:prompt_started, _worker, client, "same-session", "initial"}
+    Process.exit(caller, :kill)
+
+    assert_receive {:cancel_stalled, cancel_worker, ^client, "same-session"}
+    refute_receive {:disconnected, ^client}, 50
+
+    assert_receive {:disconnect_cancel_state, ^client, false}, 750
+    assert_receive {:disconnected, ^client}
+    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
+    refute Process.alive?(cancel_worker)
   end
 
   test "cancellation leaves an active follow-up unknown and cancels controls not started" do
