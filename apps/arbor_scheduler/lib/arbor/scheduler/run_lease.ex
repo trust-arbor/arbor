@@ -312,31 +312,59 @@ defmodule Arbor.Scheduler.RunLease do
     @table __MODULE__
 
     def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
-    def table, do: @table
+    def fetch(id), do: GenServer.call(__MODULE__, {:fetch, id})
     def put(id, lease), do: GenServer.call(__MODULE__, {:put, id, lease})
     def delete(id), do: GenServer.call(__MODULE__, {:delete, id})
+    def all_ids, do: GenServer.call(__MODULE__, :all_ids)
+    def all_leases, do: GenServer.call(__MODULE__, :all_leases)
 
     def open_authority(lease_id, identity, security),
       do: GenServer.call(__MODULE__, {:open_authority, lease_id, identity, security}, 30_000)
 
     @impl true
     def init(:ok) do
-      :ets.new(@table, [:named_table, :protected, :set, read_concurrency: true])
+      :ets.new(@table, [:named_table, :private, :set])
       {:ok, %{table: @table}}
     end
 
     @impl true
-    def handle_call({:put, id, lease}, _from, state) do
+    def handle_call(request, from, state) do
+      if store_caller?(from) do
+        handle_store_call(request, state)
+      else
+        {:reply, {:error, :unauthorized}, state}
+      end
+    end
+
+    defp handle_store_call({:fetch, id}, state) do
+      reply =
+        case :ets.lookup(@table, id) do
+          [{^id, lease}] -> {:ok, lease}
+          [] -> :error
+        end
+
+      {:reply, reply, state}
+    end
+
+    defp handle_store_call({:put, id, lease}, state) do
       true = :ets.insert(@table, {id, lease})
       {:reply, :ok, state}
     end
 
-    def handle_call({:delete, id}, _from, state) do
+    defp handle_store_call({:delete, id}, state) do
       true = :ets.delete(@table, id)
       {:reply, :ok, state}
     end
 
-    def handle_call({:open_authority, lease_id, identity, security}, _from, state) do
+    defp handle_store_call(:all_ids, state) do
+      {:reply, {:ok, Enum.map(:ets.tab2list(@table), &elem(&1, 0))}, state}
+    end
+
+    defp handle_store_call(:all_leases, state) do
+      {:reply, {:ok, Enum.map(:ets.tab2list(@table), &elem(&1, 1))}, state}
+    end
+
+    defp handle_store_call({:open_authority, lease_id, identity, security}, state) do
       result =
         with {:ok, proof} <-
                safe_external(fn ->
@@ -373,6 +401,8 @@ defmodule Arbor.Scheduler.RunLease do
       |> Map.put(:reason, :redacted)
       |> Map.put(:log, :redacted)
     end
+
+    defp store_caller?({pid, _tag}), do: pid == Process.whereis(Arbor.Scheduler.RunLease.Store)
 
     defp safe_external(fun) do
       fun.()
@@ -458,7 +488,7 @@ defmodule Arbor.Scheduler.RunLease do
     def discard(id), do: GenServer.call(__MODULE__, {:discard, id})
 
     @impl true
-    def init(:ok), do: {:ok, %{table: Arbor.Scheduler.RunLease.StateOwner.table()}}
+    def init(:ok), do: {:ok, %{table: Arbor.Scheduler.RunLease.StateOwner}}
 
     @impl true
     def format_status(status) when is_map(status) do
@@ -642,8 +672,8 @@ defmodule Arbor.Scheduler.RunLease do
       {:reply, ids, state}
     end
 
-    def handle_call(:all_ids, _from, %{table: table} = state) do
-      {:reply, {:ok, Enum.map(:ets.tab2list(table), &elem(&1, 0))}, state}
+    def handle_call(:all_ids, _from, state) do
+      {:reply, Arbor.Scheduler.RunLease.StateOwner.all_ids(), state}
     end
 
     def handle_call({:discard, id}, _from, state) do
@@ -676,12 +706,7 @@ defmodule Arbor.Scheduler.RunLease do
       min(base * Integer.pow(2, shifts), maximum)
     end
 
-    defp lookup(table, id) do
-      case :ets.lookup(table, id) do
-        [{^id, lease}] -> {:ok, lease}
-        [] -> :error
-      end
-    end
+    defp lookup(_table, id), do: Arbor.Scheduler.RunLease.StateOwner.fetch(id)
 
     defp put(_table, id, lease), do: Arbor.Scheduler.RunLease.StateOwner.put(id, lease)
 
@@ -692,7 +717,10 @@ defmodule Arbor.Scheduler.RunLease do
       end
     end
 
-    defp all_leases(table), do: Enum.map(:ets.tab2list(table), &elem(&1, 1))
+    defp all_leases(_table) do
+      {:ok, leases} = Arbor.Scheduler.RunLease.StateOwner.all_leases()
+      leases
+    end
 
     defp safe_external(fun) do
       fun.()

@@ -76,11 +76,11 @@ defmodule Arbor.Scheduler.RunIdentity do
         }
 
   @doc false
-  def identity_name do
+  def identity_name(peer_node \\ node()) when is_atom(peer_node) do
     runtime_id =
       Application.get_env(:arbor_scheduler, :run_identity_runtime_id) || local_runtime_marker()
 
-    "scheduler-run:#{runtime_id}"
+    "scheduler-run:#{runtime_id}:#{node_marker(peer_node)}"
   end
 
   @doc """
@@ -332,5 +332,12 @@ defmodule Arbor.Scheduler.RunIdentity do
       marker ->
         marker
     end
+  end
+
+  defp node_marker(peer_node) do
+    peer_node
+    |> Atom.to_string()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.url_encode64(padding: false)
   end
 end

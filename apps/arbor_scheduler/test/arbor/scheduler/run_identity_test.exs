@@ -472,15 +472,24 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert_eventually(fn -> run_state_removed?(handle) end)
   end
 
-  test "security regression: store sys status redacts authority bearer state", %{
-    issuer: issuer,
-    tmp_dir: tmp_dir
-  } do
+  test "security regression: lease journal and process diagnostics hide authority bearer state",
+       %{
+         issuer: issuer,
+         tmp_dir: tmp_dir
+       } do
     attestation = verified_attestation(issuer, tmp_dir, [])
     assert {:ok, handle} = RunIdentity.mint(attestation)
 
-    status = :sys.get_status(RunLease.Store)
-    refute term_contains?(status, handle.signing_authority.token)
+    token = handle.signing_authority.token
+
+    assert_raise ArgumentError, fn ->
+      :ets.lookup(RunLease.StateOwner, handle.lease)
+    end
+
+    assert {:error, :unauthorized} = RunLease.StateOwner.fetch(handle.lease)
+    refute term_contains?(:sys.get_status(RunLease.Store), token)
+    refute term_contains?(:sys.get_status(RunLease.StateOwner), token)
+    refute term_contains?(:sys.get_state(RunLease.StateOwner), token)
 
     assert :ok = RunIdentity.revoke(handle)
   end
@@ -619,14 +628,25 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     Application.put_env(:arbor_scheduler, :run_identity_runtime_id, "runtime-b")
     second_name = RunIdentity.identity_name()
 
-    assert first_name == "scheduler-run:runtime-a"
-    assert second_name == "scheduler-run:runtime-b"
+    assert String.starts_with?(first_name, "scheduler-run:runtime-a:")
+    assert String.starts_with?(second_name, "scheduler-run:runtime-b:")
+    refute first_name == second_name
+  end
+
+  test "configured runtime scopes remain disjoint across distributed peers" do
+    Application.put_env(:arbor_scheduler, :run_identity_runtime_id, "shared-runtime")
+
+    first_name = RunIdentity.identity_name(:"scheduler-a@cluster")
+    second_name = RunIdentity.identity_name(:"scheduler-b@cluster")
+
+    assert first_name == RunIdentity.identity_name(:"scheduler-a@cluster")
     refute first_name == second_name
   end
 
   test "security regression: local reaper scope cannot reap a peer runtime identity" do
     Application.put_env(:arbor_scheduler, :run_identity_runtime_id, "peer-runtime")
-    {:ok, peer_identity} = Identity.generate(name: RunIdentity.identity_name())
+    peer_name = RunIdentity.identity_name()
+    {:ok, peer_identity} = Identity.generate(name: peer_name)
     :ok = peer_identity |> Identity.public_only() |> Security.register_identity()
     assert {:ok, _cap} = Security.grant(principal: peer_identity.agent_id, resource: @lobby_uri)
 
@@ -642,7 +662,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
     assert :ok =
              RunIdentityReaper.reconcile(
-               identity_name: "scheduler-run:peer-runtime",
+               identity_name: peer_name,
                active_agent_ids: MapSet.new()
              )
   end
