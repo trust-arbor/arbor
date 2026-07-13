@@ -319,4 +319,21 @@ spec gains a sibling prerequisite, and keep isolated test files independent of s
 function that exclusively creates an artifact root is correct for first admission, but calling it
 again from a timeout cancel hook turns the expected `:eexist` into a cancellation failure. Split
 scope derivation from allocation: execution uses the exclusive allocator once; status, verification,
-and cancellation derive the same task/worktree/artifact identities without creating anything.
+and cancellation derive the same task/worktree/artifact identities without creating anything. A
+cancel request or adapter-task exit is not proof that a delegated worker stopped; retain the exact
+artifact lease until worker termination and cleanup are positively confirmed, or a late worker can
+mutate a path already reassigned to an identical rerun.
+
+**A private ETS table is not an access-control boundary if a GenServer relays its rows.**
+Keeping bearer authority in a `:private` table prevents direct ETS reads, but unrestricted
+`fetch`, enumeration, or delete calls on the owning facade still expose or erase that state for
+any local process. Authorize every relay operation by the exact lease/owner/reconciler process,
+redact diagnostics, and crash-test the table owner itself rather than only its clients.
+
+**Copying a Git repository is not commit provenance.** A clean `git status` does not cover
+ignored files, hooks, local config, alternates, or other executable `.git` metadata. For an
+attested fixture, reconstruct a neutral repository from bounded OID-verified commit/tree/blob
+objects, reject unsupported entries, and re-attest HEAD, tree, ancestry, and cleanliness before
+and after execution. Disable replacement objects for every provenance command, and pass explicit
+cleanliness flags such as `--untracked-files=all`; repository-local config can otherwise make an
+unrelated commit appear ancestral or hide an untracked mutation.
