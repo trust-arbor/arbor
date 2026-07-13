@@ -34,6 +34,10 @@ defmodule Arbor.Commands.CodingBenchmark do
   }
   @max_dot_bytes 16_777_216
   @max_json_artifact_bytes 8_388_608
+  @max_fixture_entries 10_000
+  @max_fixture_object_bytes 16_777_216
+  @max_fixture_total_bytes 268_435_456
+  @max_fixture_listing_bytes 8_388_608
   @max_fixtures 100
   @max_repetitions 100
   @max_seed 2_147_483_647
@@ -594,9 +598,19 @@ defmodule Arbor.Commands.CodingBenchmark do
   end
 
   defp clone_fixture(source, destination, commit_oid, expected_tree, timeout_ms) do
-    with {:ok, ""} <- git_output(source, ["status", "--porcelain=v1"], timeout_ms),
-         {:ok, %{type: :directory}} <- File.lstat(Path.join(source, ".git")),
-         :ok <- Git.copy_repository(source, destination, timeout_ms),
+    with {:ok, entries} <- fixture_tree_entries(source, commit_oid, expected_tree, timeout_ms),
+         :ok <- initialize_fixture_repository(destination, commit_oid, timeout_ms),
+         :ok <-
+           import_fixture_objects(
+             source,
+             destination,
+             commit_oid,
+             expected_tree,
+             entries,
+             timeout_ms
+           ),
+         :ok <- materialize_fixture_tree(source, destination, entries, timeout_ms),
+         :ok <- attach_fixture_commit(destination, commit_oid, timeout_ms),
          {:ok, ^commit_oid} <-
            git_output(destination, ["rev-parse", "--verify", "HEAD^{commit}"], timeout_ms),
          {:ok, actual_tree} <-
@@ -613,8 +627,223 @@ defmodule Arbor.Commands.CodingBenchmark do
         {:error, reason}
 
       _other ->
-        {:error, "fixture_copy_attestation_failed"}
+        {:error, "fixture_reconstruction_attestation_failed"}
     end
+  end
+
+  defp fixture_tree_entries(source, commit_oid, expected_tree, timeout_ms) do
+    with {:ok, listing} <-
+           Git.run(
+             source,
+             ["ls-tree", "-r", "-t", "-z", "--full-tree", commit_oid],
+             timeout_ms,
+             max_output_bytes: @max_fixture_listing_bytes
+           ),
+         {:ok, entries} <- parse_fixture_tree(listing),
+         true <- length(entries) <= @max_fixture_entries,
+         true <- Enum.all?(entries, &supported_fixture_entry?/1),
+         true <- Enum.all?(entries, &safe_fixture_path?(&1.path)),
+         {:ok, ^expected_tree} <-
+           git_output(source, ["rev-parse", "--verify", "#{commit_oid}^{tree}"], timeout_ms) do
+      {:ok, entries}
+    else
+      false -> {:error, "unsupported_or_oversized_fixture_tree"}
+      {:error, reason} when is_binary(reason) -> {:error, reason}
+      _other -> {:error, "invalid_fixture_tree"}
+    end
+  end
+
+  defp parse_fixture_tree(listing) do
+    listing
+    |> :binary.split(<<0>>, [:global])
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.reduce_while({:ok, []}, fn record, {:ok, acc} ->
+      case Regex.run(~r/\A([0-7]{6}) (blob|tree) ([0-9a-f]{40}|[0-9a-f]{64})\t(.+)\z/s, record) do
+        [_, mode, type, oid, path] ->
+          {:cont, {:ok, [%{mode: mode, oid: oid, path: path, type: type} | acc]}}
+
+        _other ->
+          {:halt, {:error, "invalid_fixture_tree_entry"}}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      error -> error
+    end
+  end
+
+  defp supported_fixture_entry?(%{type: "tree", mode: "040000"}), do: true
+
+  defp supported_fixture_entry?(%{type: "blob", mode: mode}) when mode in ["100644", "100755"],
+    do: true
+
+  defp supported_fixture_entry?(_entry), do: false
+
+  defp safe_fixture_path?(path) do
+    String.valid?(path) and path != "" and not String.contains?(path, <<0>>) and
+      Path.type(path) != :absolute and
+      Enum.all?(Path.split(path), fn segment ->
+        segment not in ["", ".", ".."] and String.downcase(segment) != ".git"
+      end)
+  end
+
+  defp initialize_fixture_repository(destination, commit_oid, timeout_ms) do
+    template = Path.join(destination, ".empty-git-template")
+    object_format = if byte_size(commit_oid) == 64, do: "sha256", else: "sha1"
+
+    with :ok <- mkdir(destination),
+         :ok <- mkdir(template),
+         {:ok, _output} <-
+           Git.run(
+             destination,
+             [
+               "init",
+               "--quiet",
+               "--initial-branch=benchmark",
+               "--object-format=#{object_format}",
+               "--template=#{template}",
+               "."
+             ],
+             timeout_ms
+           ),
+         :ok <- remove_empty_directory(template),
+         {:ok, _output} <-
+           Git.run(destination, ["config", "--local", "core.hooksPath", "/dev/null"], timeout_ms),
+         {:ok, _output} <-
+           Git.run(destination, ["config", "--local", "core.filemode", "true"], timeout_ms),
+         {:ok, %{type: :directory}} <- File.lstat(Path.join(destination, ".git")) do
+      :ok
+    else
+      {:error, reason} when is_binary(reason) -> {:error, reason}
+      _other -> {:error, "fixture_repository_init_failed"}
+    end
+  end
+
+  defp remove_empty_directory(path) do
+    case File.rmdir(path) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "template_cleanup_failed:#{reason}"}
+    end
+  end
+
+  defp import_fixture_objects(source, destination, commit_oid, root_tree_oid, entries, timeout_ms) do
+    objects =
+      [%{oid: commit_oid, type: "commit"}, %{oid: root_tree_oid, type: "tree"}] ++
+        Enum.map(entries, &Map.take(&1, [:oid, :type]))
+
+    objects
+    |> Enum.uniq_by(&{&1.type, &1.oid})
+    |> Enum.reduce_while({:ok, 0}, fn object, {:ok, total} ->
+      case import_fixture_object(source, destination, object, total, timeout_ms) do
+        {:ok, next_total} -> {:cont, {:ok, next_total}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, _total} -> :ok
+      error -> error
+    end
+  end
+
+  defp import_fixture_object(source, destination, %{oid: oid, type: type}, total, timeout_ms) do
+    with {:ok, content} <-
+           Git.run(source, ["cat-file", type, oid], timeout_ms,
+             max_output_bytes: @max_fixture_object_bytes
+           ),
+         size = byte_size(content),
+         true <- size <= @max_fixture_object_bytes and total + size <= @max_fixture_total_bytes,
+         :ok <- write_loose_object(destination, type, content, oid) do
+      {:ok, total + size}
+    else
+      false -> {:error, "fixture_object_attestation_failed"}
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, "fixture_object_import_failed"}
+    end
+  end
+
+  defp write_loose_object(destination, type, content, expected_oid) do
+    object = [type, " ", Integer.to_string(byte_size(content)), <<0>>, content]
+    object = IO.iodata_to_binary(object)
+    algorithm = if byte_size(expected_oid) == 40, do: :sha, else: :sha256
+    actual_oid = :crypto.hash(algorithm, object) |> Base.encode16(case: :lower)
+
+    object_path =
+      Path.join([
+        destination,
+        ".git",
+        "objects",
+        String.slice(actual_oid, 0, 2),
+        String.slice(actual_oid, 2..-1//1)
+      ])
+
+    with true <- actual_oid == expected_oid,
+         :ok <- File.mkdir_p(Path.dirname(object_path)),
+         :ok <- write_exclusive_file(object_path, :zlib.compress(object)) do
+      :ok
+    else
+      false -> {:error, "fixture_object_attestation_failed"}
+      {:error, reason} when is_binary(reason) -> {:error, reason}
+      _other -> {:error, "fixture_object_write_failed"}
+    end
+  end
+
+  defp materialize_fixture_tree(source, destination, entries, timeout_ms) do
+    entries
+    |> Enum.filter(&(&1.type == "blob"))
+    |> Enum.reduce_while(:ok, fn entry, :ok ->
+      with {:ok, path} <- SafePath.safe_join(destination, entry.path),
+           {:ok, ^path} <- SafePath.resolve_within(path, destination),
+           :ok <- ensure_fixture_parent(Path.dirname(path), destination),
+           {:ok, content} <-
+             Git.run(source, ["cat-file", "blob", entry.oid], timeout_ms,
+               max_output_bytes: @max_fixture_object_bytes
+             ),
+           :ok <- write_exclusive_file(path, content),
+           :ok <- File.chmod(path, if(entry.mode == "100755", do: 0o755, else: 0o644)) do
+        {:cont, :ok}
+      else
+        {:error, reason} when is_binary(reason) -> {:halt, {:error, reason}}
+        _other -> {:halt, {:error, "fixture_materialization_failed"}}
+      end
+    end)
+  end
+
+  defp ensure_fixture_parent(parent, destination) do
+    with {:ok, ^parent} <- SafePath.resolve_within(parent, destination),
+         :ok <- File.mkdir_p(parent),
+         {:ok, ^parent} <- SafePath.resolve_real(parent),
+         {:ok, ^parent} <- SafePath.resolve_within(parent, destination) do
+      :ok
+    else
+      _other -> {:error, "unsafe_fixture_parent"}
+    end
+  end
+
+  defp write_exclusive_file(path, content) do
+    case File.open(path, [:write, :binary, :exclusive], fn io -> IO.binwrite(io, content) end) do
+      {:ok, :ok} -> :ok
+      {:ok, {:error, reason}} -> {:error, "fixture_write_failed:#{reason}"}
+      {:error, reason} -> {:error, "fixture_write_failed:#{reason}"}
+    end
+  end
+
+  defp attach_fixture_commit(destination, commit_oid, timeout_ms) do
+    with :ok <- write_shallow_boundary(destination, commit_oid),
+         {:ok, _output} <- Git.run(destination, ["read-tree", commit_oid], timeout_ms),
+         {:ok, _output} <-
+           Git.run(destination, ["update-ref", "refs/heads/benchmark", commit_oid], timeout_ms),
+         {:ok, _output} <-
+           Git.run(destination, ["symbolic-ref", "HEAD", "refs/heads/benchmark"], timeout_ms) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp write_shallow_boundary(destination, commit_oid) do
+    destination
+    |> Path.join(".git/shallow")
+    |> write_exclusive_file(commit_oid <> "\n")
   end
 
   defp execute_adapter(executor, pair, prepared, runtime) do
@@ -640,29 +869,33 @@ defmodule Arbor.Commands.CodingBenchmark do
 
     case verification_context(callback, request, runtime) do
       {:ok, verification} ->
-        measurement = safely(fn -> measure_execution(runtime, executor, callback, request) end)
+        try do
+          measurement = safely(fn -> measure_execution(runtime, executor, callback, request) end)
 
-        case measurement do
-          {:returned, {wall_clock_ms, outcome}}
-          when is_integer(wall_clock_ms) and wall_clock_ms >= 0 ->
-            build_execution(
-              executor,
-              pair,
-              request,
-              outcome,
-              wall_clock_ms,
-              runtime,
-              verification
-            )
+          case measurement do
+            {:returned, {wall_clock_ms, outcome}}
+            when is_integer(wall_clock_ms) and wall_clock_ms >= 0 ->
+              build_execution(
+                executor,
+                pair,
+                request,
+                outcome,
+                wall_clock_ms,
+                runtime,
+                verification
+              )
 
-          {:returned, _invalid} ->
-            execution_failure(executor, pair, "measurement_failed", "invalid_measurement")
+            {:returned, _invalid} ->
+              execution_failure(executor, pair, "measurement_failed", "invalid_measurement")
 
-          {:raised, reason} ->
-            execution_failure(executor, pair, "measurement_failed", reason)
+            {:raised, reason} ->
+              execution_failure(executor, pair, "measurement_failed", reason)
 
-          {:caught, reason} ->
-            execution_failure(executor, pair, "measurement_failed", reason)
+            {:caught, reason} ->
+              execution_failure(executor, pair, "measurement_failed", reason)
+          end
+        after
+          release_artifact_lease(verification, runtime.benchmark)
         end
 
       {:error, {:benchmark_setup_error, reason}} ->
@@ -675,6 +908,8 @@ defmodule Arbor.Commands.CodingBenchmark do
       if callback in @production_adapters do
         {:ok,
          %{
+           artifact_lease: scope.artifact_lease,
+           base_commit_oid: request["base_commit_oid"],
            expected_branch: scope.branch_name,
            git_timeout_ms: runtime.benchmark.execution_timeout_ms,
            require_returned_worktree?: true,
@@ -685,6 +920,8 @@ defmodule Arbor.Commands.CodingBenchmark do
       else
         {:ok,
          %{
+           artifact_lease: nil,
+           base_commit_oid: request["base_commit_oid"],
            expected_branch: nil,
            git_timeout_ms: runtime.benchmark.execution_timeout_ms,
            require_returned_worktree?: false,
@@ -695,6 +932,14 @@ defmodule Arbor.Commands.CodingBenchmark do
       end
     end
   end
+
+  defp release_artifact_lease(%{artifact_lease: lease, trusted_artifact_root: root}, benchmark)
+       when is_binary(lease) do
+    _ = Runtime.release_artifact_root(root, lease, benchmark)
+    :ok
+  end
+
+  defp release_artifact_lease(_verification, _benchmark), do: :ok
 
   defp measure(fun) do
     {microseconds, result} = :timer.tc(fun)
@@ -1361,7 +1606,15 @@ defmodule Arbor.Commands.CodingBenchmark do
              worktree,
              ["rev-parse", "--verify", "HEAD^{commit}"],
              verification.git_timeout_ms
-           ) do
+           ),
+         :ok <-
+           git_ok(
+             worktree,
+             ["merge-base", "--is-ancestor", verification.base_commit_oid, expected_commit],
+             verification.git_timeout_ms
+           ),
+         {:ok, ""} <-
+           git_output(worktree, ["status", "--porcelain=v1"], verification.git_timeout_ms) do
       :ok
     else
       _other -> {:error, "final_branch_or_commit_attestation_failed"}
@@ -1626,7 +1879,15 @@ defmodule Arbor.Commands.CodingBenchmark do
                  regular_artifact_identity(File.Stat.from_record(info_before)),
                true <- same_artifact_identity?(handle_before, expected),
                :ok <- emit_artifact_opened(path),
-               {:ok, content} <- read_exact_artifact(io, expected.size),
+               {:ok, content} <- read_exact_artifact(io, expected.size, path, 1),
+               :ok <- eof_probe(io),
+               {:ok, info_between} <- :file.read_file_info(io, time: :posix),
+               {:ok, handle_between} <-
+                 regular_artifact_identity(File.Stat.from_record(info_between)),
+               true <- same_artifact_identity?(handle_between, expected),
+               {:ok, 0} <- :file.position(io, :bof),
+               {:ok, repeated} <- read_exact_artifact(io, expected.size, path, 2),
+               true <- repeated == content,
                :ok <- eof_probe(io),
                {:ok, info_after} <- :file.read_file_info(io, time: :posix),
                {:ok, handle_after} <- regular_artifact_identity(File.Stat.from_record(info_after)),
@@ -1646,21 +1907,36 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp read_exact_artifact(io, size), do: read_exact_artifact(io, size, [])
+  defp read_exact_artifact(io, size, path, pass),
+    do: read_exact_artifact(io, size, path, pass, 0, [])
 
-  defp read_exact_artifact(_io, 0, chunks),
+  defp read_exact_artifact(_io, 0, _path, _pass, _offset, chunks),
     do: {:ok, chunks |> Enum.reverse() |> IO.iodata_to_binary()}
 
-  defp read_exact_artifact(io, remaining, chunks) when remaining > 0 do
+  defp read_exact_artifact(io, remaining, path, pass, offset, chunks) when remaining > 0 do
     chunk_size = min(remaining, 65_536)
 
     case :file.read(io, chunk_size) do
       {:ok, chunk} when byte_size(chunk) == chunk_size ->
-        read_exact_artifact(io, remaining - chunk_size, [chunk | chunks])
+        emit_artifact_chunk_read(path, pass, offset, chunk_size)
+
+        read_exact_artifact(io, remaining - chunk_size, path, pass, offset + chunk_size, [
+          chunk | chunks
+        ])
 
       _other ->
         {:error, :short_read}
     end
+  end
+
+  defp emit_artifact_chunk_read(path, pass, offset, bytes) do
+    :telemetry.execute(
+      [:arbor, :commands, :coding_benchmark, :artifact_chunk_read],
+      %{bytes: bytes},
+      %{offset: offset, pass: pass, path: path}
+    )
+
+    :ok
   end
 
   defp eof_probe(io) do

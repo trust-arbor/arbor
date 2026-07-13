@@ -25,7 +25,8 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
           workdir: String.t(),
           pair_root: String.t(),
           worktree_root: String.t(),
-          artifact_root: String.t()
+          artifact_root: String.t(),
+          artifact_lease: String.t()
         }
 
   @spec load() :: {:ok, config()} | {:error, {:benchmark_setup_error, term()}}
@@ -147,9 +148,12 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
            create_directories(pair_root, ["worktrees", executor_path, digest]),
          {:ok, real_worktree_root} <- SafePath.resolve_real(worktree_root),
          {:ok, ^real_worktree_root} <- SafePath.resolve_within(real_worktree_root, pair_root),
-         {:ok, artifact_root} <- artifact_task_root(config.artifact_root, task_id) do
+         artifact_lease = artifact_lease(task_id, canonical_workdir),
+         {:ok, artifact_root} <-
+           artifact_task_root(config.artifact_root, task_id, artifact_lease) do
       {:ok,
        %{
+         artifact_lease: artifact_lease,
          artifact_root: artifact_root,
          pair_root: pair_root,
          workdir: canonical_workdir,
@@ -184,6 +188,7 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
            SafePath.safe_join(config.artifact_root, "task-" <> sha256(task_id)) do
       {:ok,
        %{
+         artifact_lease: artifact_lease(task_id, canonical_workdir),
          artifact_root: artifact_root,
          pair_root: pair_root,
          workdir: canonical_workdir,
@@ -298,11 +303,37 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     if path_within?(path, root), do: :ok, else: setup_error(reason)
   end
 
-  defp artifact_task_root(artifact_root, task_id) do
+  @doc "Release an exact benchmark artifact lease without following replacement symlinks."
+  @spec release_artifact_root(String.t(), String.t(), config()) :: :ok | {:error, term()}
+  def release_artifact_root(path, lease, config)
+      when is_binary(path) and is_binary(lease) do
+    marker = Path.join(path, ".benchmark-lease")
+    quarantine = Path.join(config.artifact_root, ".release-" <> sha256(lease))
+
+    with {:ok, ^path} <- SafePath.resolve_within(path, config.artifact_root),
+         {:ok, %{type: :directory}} <- File.lstat(path),
+         {:ok, %{type: :regular}} <- File.lstat(marker),
+         {:ok, ^lease} <- File.read(marker),
+         {:error, :enoent} <- File.lstat(quarantine),
+         :ok <- File.rename(path, quarantine),
+         {:ok, stat} <- File.lstat(quarantine),
+         true <- stat.type in [:directory, :symlink],
+         {:ok, _removed} <- File.rm_rf(quarantine) do
+      :ok
+    else
+      _other -> {:error, :artifact_lease_not_owned}
+    end
+  end
+
+  def release_artifact_root(_path, _lease, _config),
+    do: {:error, :artifact_lease_not_owned}
+
+  defp artifact_task_root(artifact_root, task_id, lease) do
     digest = sha256(task_id)
 
     with {:ok, root} <- SafePath.safe_join(artifact_root, "task-" <> digest),
          :ok <- create_exclusive_artifact_root(root),
+         :ok <- write_lease_marker(root, lease),
          {:ok, real_root} <- SafePath.resolve_real(root),
          {:ok, ^real_root} <- SafePath.resolve_within(real_root, artifact_root),
          true <- Path.dirname(real_root) == artifact_root do
@@ -312,6 +343,15 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
       {:error, reason} -> setup_error({:invalid_artifact_task_root, reason})
       false -> setup_error({:invalid_artifact_task_root, :outside_artifact_root})
       _other -> setup_error({:invalid_artifact_task_root, :revalidation_failed})
+    end
+  end
+
+  defp write_lease_marker(root, lease) do
+    marker = Path.join(root, ".benchmark-lease")
+
+    case File.open(marker, [:write, :binary, :exclusive], fn io -> IO.binwrite(io, lease) end) do
+      {:ok, :ok} -> :ok
+      _other -> setup_error(:artifact_lease_marker_failed)
     end
   end
 
@@ -415,6 +455,8 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   defp roots_overlap?(left, right), do: path_within?(left, right) or path_within?(right, left)
 
   defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+
+  defp artifact_lease(task_id, workdir), do: sha256(task_id <> <<0>> <> workdir)
 
   defp setup_error(reason), do: {:error, {:benchmark_setup_error, reason}}
 end

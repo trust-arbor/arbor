@@ -2,14 +2,44 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   @moduledoc false
 
   @max_output_bytes 65_536
+  @max_configured_output_bytes 268_435_456
+  @neutral_config [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "pager.status=false",
+    "-c",
+    "commit.gpgSign=false"
+  ]
 
-  @spec run(String.t(), [String.t()], pos_integer()) :: {:ok, String.t()} | {:error, String.t()}
-  def run(workdir, args, timeout_ms)
+  @spec run(String.t(), [String.t()], pos_integer(), keyword()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def run(workdir, args, timeout_ms, opts \\ [])
+
+  def run(workdir, args, timeout_ms, opts)
       when is_binary(workdir) and is_list(args) and is_integer(timeout_ms) and timeout_ms > 0 do
-    case Arbor.Shell.execute_direct("git", ["-C", workdir | args],
+    max_output_bytes = Keyword.get(opts, :max_output_bytes, @max_output_bytes)
+
+    with true <-
+           is_integer(max_output_bytes) and max_output_bytes > 0 and
+             max_output_bytes <= @max_configured_output_bytes do
+      execute(["-C", workdir] ++ @neutral_config ++ args, timeout_ms, max_output_bytes)
+    else
+      _other -> {:error, "git_invalid_request"}
+    end
+  end
+
+  def run(_workdir, _args, _timeout_ms, _opts), do: {:error, "git_invalid_request"}
+
+  defp execute(args, timeout_ms, max_output_bytes) do
+    case Arbor.Shell.execute_direct("git", args,
            sandbox: :none,
            timeout: timeout_ms,
-           max_output_bytes: @max_output_bytes
+           max_output_bytes: max_output_bytes
          ) do
       {:ok, %{timed_out: true}} ->
         {:error, "git_timeout:#{timeout_ms}"}
@@ -29,39 +59,6 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   catch
     :exit, reason -> {:error, "git_shell_unavailable:#{bounded_output(inspect(reason))}"}
   end
-
-  def run(_workdir, _args, _timeout_ms), do: {:error, "git_invalid_request"}
-
-  @spec copy_repository(String.t(), String.t(), pos_integer()) :: :ok | {:error, String.t()}
-  def copy_repository(source, destination, timeout_ms)
-      when is_binary(source) and is_binary(destination) and is_integer(timeout_ms) and
-             timeout_ms > 0 do
-    case Arbor.Shell.execute_direct("cp", ["-R", source, destination],
-           sandbox: :none,
-           timeout: timeout_ms,
-           max_output_bytes: @max_output_bytes
-         ) do
-      {:ok, %{timed_out: true}} ->
-        {:error, "fixture_copy_timeout:#{timeout_ms}"}
-
-      {:ok, %{output_limit_exceeded: true, stdout: output}} ->
-        {:error, "fixture_copy_output_limit:#{bounded_output(output)}"}
-
-      {:ok, %{exit_code: 0}} ->
-        :ok
-
-      {:ok, %{exit_code: status, stdout: output}} ->
-        {:error, "fixture_copy_failed:#{status}:#{bounded_output(output)}"}
-
-      {:error, reason} ->
-        {:error, "fixture_copy_execution_failed:#{bounded_output(inspect(reason))}"}
-    end
-  catch
-    :exit, reason -> {:error, "fixture_copy_shell_unavailable:#{bounded_output(inspect(reason))}"}
-  end
-
-  def copy_repository(_source, _destination, _timeout_ms),
-    do: {:error, "fixture_copy_invalid_request"}
 
   defp bounded_output(output) when is_binary(output) do
     output

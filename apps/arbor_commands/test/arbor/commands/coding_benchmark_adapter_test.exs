@@ -99,6 +99,17 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     end
   end
 
+  defmodule DirtyWorktreeVerifier do
+    @moduledoc false
+
+    def run(%{"executor_path" => "pipeline", "workdir" => workdir}) do
+      File.write!(Path.join(workdir, "verifier-dirt.txt"), "uncommitted\n")
+      :ok
+    end
+
+    def run(_request), do: :ok
+  end
+
   defmodule ArtifactSwapVerifier do
     @moduledoc false
 
@@ -415,6 +426,64 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     assert hd(report["pairs"])["comparison"]["status"] == "equivalent"
   end
 
+  test "security regression: fixtures are reconstructed from the attested tree only" do
+    scenario = production_scenario!()
+    fixture = Path.join(scenario.root, "fixtures/happy")
+    hook = Path.join(fixture, ".git/hooks/post-checkout")
+    alternates = Path.join(fixture, ".git/objects/info/alternates")
+    alternate_repo = Path.join(scenario.root, "alternate-objects")
+    File.mkdir!(alternate_repo)
+    git!(alternate_repo, ["init", "--quiet"])
+
+    File.write!(Path.join(fixture, ".git/info/exclude"), "ignored-secret\n")
+    File.write!(Path.join(fixture, "ignored-secret"), "must not cross boundary\n")
+    File.write!(hook, "#!/bin/sh\nexit 99\n")
+    File.chmod!(hook, 0o755)
+    File.write!(alternates, Path.join(alternate_repo, ".git/objects") <> "\n")
+    git!(fixture, ["config", "benchmark.untrusted", "present"])
+
+    git!(fixture, [
+      "-c",
+      "user.name=Arbor Benchmark",
+      "-c",
+      "user.email=benchmark@arbor.local",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "attested descendant"
+    ])
+
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, report} = run_production_scenario(scenario)
+    assert report["summary"]["equivalent_pairs"] == 1
+
+    for executor <- [:legacy, :pipeline] do
+      assert_receive {:fixture_repository_observed, ^executor,
+                      %{
+                        alternates?: false,
+                        hook?: false,
+                        ignored?: false,
+                        shallow?: true,
+                        source_config?: false
+                      }}
+    end
+  end
+
+  test "identical benchmark runs reuse released artifact leases" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, first} = run_production_scenario(scenario)
+    assert {:ok, second} = run_production_scenario(scenario)
+    assert first["summary"]["equivalent_pairs"] == 1
+    assert second["summary"]["equivalent_pairs"] == 1
+    assert File.ls!(scenario.artifact_root) == []
+  end
+
   test "missing, escaped, and non-deterministic returned worktrees fail closed" do
     scenario = production_scenario!()
     install_leased_executors()
@@ -543,6 +612,34 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     assert pipeline["artifact_hash_verification"]["status"] == "failed"
   end
 
+  test "security regression: same-inode same-size in-place mutation during read is rejected" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+    handler_id = "coding-benchmark-in-place-mutation-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:arbor, :commands, :coding_benchmark, :artifact_chunk_read],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.pass == 1 and metadata.offset == 0 and
+             Path.basename(metadata.path) == "coding-pipeline.dot" do
+          path = metadata.path
+          original = File.read!(path)
+          replacement = :binary.copy("x", byte_size(original))
+          File.write!(path, replacement)
+        end
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    assert {:ok, report} = run_production_scenario(scenario)
+    pipeline = row(report, "pipeline")
+    assert pipeline["artifact_hash_verification"]["graph_hash_verified"] == false
+    assert pipeline["artifact_hash_verification"]["status"] == "failed"
+  end
+
   test "objective verifier timeout is bounded by the benchmark timeout" do
     scenario = production_scenario!(1_000)
 
@@ -577,6 +674,34 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     assert pipeline["terminal_status"] == "worktree_verification_failed"
     assert pipeline["terminal_reason"] == "final_branch_or_commit_attestation_failed"
     assert pipeline["artifact_hash_verification"]["status"] == "failed"
+  end
+
+  test "final Git attestation rejects dirty worktrees and unrelated commits" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, dirty_report} =
+             run_production_scenario(scenario,
+               verifiers: %{"scripted_objective" => DirtyWorktreeVerifier}
+             )
+
+    assert row(dirty_report, "pipeline")["terminal_reason"] ==
+             "final_branch_or_commit_attestation_failed"
+
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :unrelated_commit)
+    assert {:ok, unrelated_report} = run_production_scenario(scenario)
+
+    for executor <- [:legacy, :pipeline] do
+      assert_receive {:unrelated_commit_observed, ^executor, commit_line}
+      assert [_commit] = String.split(commit_line)
+    end
+
+    for executor <- ~w(legacy pipeline) do
+      result = row(unrelated_report, executor)
+      assert result["terminal_status"] == "worktree_verification_failed"
+      assert result["terminal_reason"] == "final_branch_or_commit_attestation_failed"
+    end
   end
 
   test "descendant-spawning Git commands fail closed through the public shell facade" do
@@ -751,6 +876,9 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
 
       :tampered_dot ->
         leased_result(executor, principal_id, task, context, :tampered_dot)
+
+      :unrelated_commit ->
+        leased_result(executor, principal_id, task, context, :valid, :unrelated)
 
       :missing_worktree ->
         production_result(executor, principal_id, task, context, nil, %{}, nil)
@@ -962,7 +1090,16 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     CodingBenchmark.run(scenario.manifest, Keyword.merge(defaults, opts))
   end
 
-  defp leased_result(executor, principal_id, task, context, artifact_mode) do
+  defp leased_result(
+         executor,
+         principal_id,
+         task,
+         context,
+         artifact_mode,
+         commit_mode \\ :descendant
+       ) do
+    observe_fixture_repository(executor, task["repo_path"])
+
     {:ok, worktree} =
       Arbor.Orchestrator.expected_coding_worktree_path(
         task["worktree_base_dir"],
@@ -983,12 +1120,39 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     git!(worktree, ["add", "--", "result.txt"])
     commit!(worktree, "benchmark result")
 
+    if commit_mode == :unrelated do
+      git!(worktree, ["checkout", "--quiet", "--orphan", task["branch_name"] <> "-orphan"])
+      git!(worktree, ["rm", "-rf", "--quiet", "."])
+      File.write!(Path.join(worktree, "result.txt"), "completed:happy\n")
+      git!(worktree, ["add", "--", "result.txt"])
+      commit!(worktree, "unrelated benchmark result")
+      git!(worktree, ["branch", "-M", task["branch_name"]])
+      observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+      commit_line = git!(worktree, ["rev-list", "--parents", "-n", "1", "HEAD"])
+      send(observer, {:unrelated_commit_observed, executor, commit_line})
+    end
+
     {artifacts, artifact_root} =
       if executor == :pipeline,
         do: production_artifacts(task, context, artifact_mode),
         else: {%{}, nil}
 
     production_result(executor, principal_id, task, context, worktree, artifacts, artifact_root)
+  end
+
+  defp observe_fixture_repository(executor, repo_path) do
+    config = File.read!(Path.join(repo_path, ".git/config"))
+
+    facts = %{
+      alternates?: File.exists?(Path.join(repo_path, ".git/objects/info/alternates")),
+      hook?: File.exists?(Path.join(repo_path, ".git/hooks/post-checkout")),
+      ignored?: File.exists?(Path.join(repo_path, "ignored-secret")),
+      shallow?: File.exists?(Path.join(repo_path, ".git/shallow")),
+      source_config?: String.contains?(config, "benchmark")
+    }
+
+    observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+    send(observer, {:fixture_repository_observed, executor, facts})
   end
 
   defp symlink_worktree_result(executor, principal_id, task, context, outside) do
