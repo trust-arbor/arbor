@@ -50,6 +50,25 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRangesTest do
     assert {:ok, %{"lib/example.ex" => [[1, 5], [9, 9]]}} = DeltaRanges.parse(diff)
   end
 
+  test "rejects decreasing new-side hunk starts" do
+    diff = """
+    diff --git a/lib/example.ex b/lib/example.ex
+    index 1111111..2222222 100644
+    --- a/lib/example.ex
+    +++ b/lib/example.ex
+    @@ -10 +10,3 @@
+    +ten
+    +eleven
+    +twelve
+    @@ -1 +1,3 @@
+    +one
+    +two
+    +three
+    """
+
+    assert {:error, :out_of_order_unified_diff_hunk} = DeltaRanges.parse(diff)
+  end
+
   test "rejects quoted, binary, malformed, and oversized diffs" do
     assert {:error, :quoted_unified_diff_path} =
              DeltaRanges.parse("diff --git \"a/file name.ex\" \"b/file name.ex\"\n")

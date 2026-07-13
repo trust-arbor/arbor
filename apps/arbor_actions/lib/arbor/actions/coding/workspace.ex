@@ -298,9 +298,9 @@ defmodule Arbor.Actions.Coding.Workspace do
       )
       when is_binary(worktree_path) and is_binary(repo_path) and is_binary(prior_commit) do
     with :ok <- require_exact_prior_commit(prior_commit),
-         :ok <- require_prior_commit(repo_path, worktree_path, prior_commit),
          {:ok, change} <-
            materialize_committed_change(worktree_path, base_commit, requested_commit),
+         :ok <- require_prior_commit(repo_path, worktree_path, prior_commit),
          :ok <- require_distinct_prior_commit(prior_commit, change.commit_hash),
          :ok <- require_prior_ancestor(repo_path, worktree_path, prior_commit, change.commit_hash),
          {:ok, delta_diff} <-
@@ -308,7 +308,8 @@ defmodule Arbor.Actions.Coding.Workspace do
          {:ok, delta_files} <-
            committed_delta_files(repo_path, worktree_path, prior_commit, change.commit_hash),
          {:ok, delta_ranges} <- DeltaRanges.parse(delta_diff),
-         :ok <- require_delta_range_files(delta_ranges, delta_files) do
+         :ok <- require_delta_range_files(delta_ranges, delta_files),
+         :ok <- verify_materialized_head(worktree_path, change.commit_hash) do
       {:ok,
        Map.merge(change, %{
          prior_candidate_commit: prior_commit,

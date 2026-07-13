@@ -1000,6 +1000,45 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
     end
 
+    test "security regression: rejects a non-HEAD candidate before probing prior commit", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/workspace-prior-candidate-order",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{}
+               )
+
+      File.write!(Path.join(lease.worktree_path, "first.ex"), "first\n")
+      git!(lease.worktree_path, ["add", "first.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "first candidate"])
+      non_head = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      File.write!(Path.join(lease.worktree_path, "second.ex"), "second\n")
+      git!(lease.worktree_path, ["add", "second.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "advance candidate"])
+
+      # The missing prior object is syntactically valid, so this proves the
+      # candidate gate runs before any prior-object lookup.
+      assert {:error, :commit_not_head} =
+               Workspace.CommittedChange.run(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   commit: non_head,
+                   prior_commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                 },
+                 %{}
+               )
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
     test "reports deletion-only, rename, and new-file delta evidence", %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
 

@@ -185,22 +185,23 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
   defp add_range(ranges, _path, nil), do: {:ok, ranges}
 
   defp add_range(ranges, path, [start, finish]) do
-    updated =
-      case Map.get(ranges, path, []) do
-        [] -> [[start, finish]]
-        existing -> merge_range(existing, start, finish)
-      end
-
-    {:ok, Map.put(ranges, path, updated)}
+    with {:ok, updated} <- merge_range(Map.get(ranges, path, []), start, finish) do
+      {:ok, Map.put(ranges, path, updated)}
+    end
   end
+
+  defp merge_range([], start, finish), do: {:ok, [[start, finish]]}
 
   defp merge_range(ranges, start, finish) do
     case List.last(ranges) do
+      [previous_start, _previous_finish] when start < previous_start ->
+        {:error, :out_of_order_unified_diff_hunk}
+
       [previous_start, previous_finish] when start <= previous_finish + 1 ->
-        List.replace_at(ranges, -1, [previous_start, max(previous_finish, finish)])
+        {:ok, List.replace_at(ranges, -1, [previous_start, max(previous_finish, finish)])}
 
       _other ->
-        ranges ++ [[start, finish]]
+        {:ok, ranges ++ [[start, finish]]}
     end
   end
 
