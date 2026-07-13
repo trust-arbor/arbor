@@ -134,6 +134,7 @@ defmodule Arbor.Actions.CouncilTest do
           prior_candidate_commit: String.duplicate("b", 40),
           delta_diff: "@@ -1 +1 @@\n-old\n+new",
           delta_files: ["lib/a.ex"],
+          delta_ranges: %{"lib/a.ex" => [[1, 1]]},
           finding_ledger: ledger
         })
 
@@ -144,6 +145,7 @@ defmodule Arbor.Actions.CouncilTest do
       assert request.prior_candidate_commit == String.duplicate("b", 40)
       assert request.delta_diff == "@@ -1 +1 @@\n-old\n+new"
       assert request.delta_files == ["lib/a.ex"]
+      assert request.delta_ranges == %{"lib/a.ex" => [[1, 1]]}
       assert request.finding_ledger == ledger
 
       roles = Council.ReviewChange.taint_roles()
@@ -151,6 +153,7 @@ defmodule Arbor.Actions.CouncilTest do
       assert roles[:prior_candidate_commit] == :data
       assert roles[:delta_diff] == :data
       assert roles[:delta_files] == :data
+      assert roles[:delta_ranges] == :data
       assert roles[:finding_ledger] == :data
     end
 

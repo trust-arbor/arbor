@@ -464,6 +464,10 @@ defmodule Arbor.Actions.Council do
         ],
         delta_diff: [type: :string, doc: "Diff introduced since the prior review cycle"],
         delta_files: [type: {:list, :string}, doc: "Files changed since the prior review cycle"],
+        delta_ranges: [
+          type: :any,
+          doc: "String-keyed changed-line map validated by CodeReviewRequest"
+        ],
         finding_ledger: [
           type: :any,
           doc: "Frozen string-keyed JSON finding ledger for the current cycle"
@@ -496,6 +500,7 @@ defmodule Arbor.Actions.Council do
         prior_candidate_commit: :data,
         delta_diff: :data,
         delta_files: :data,
+        delta_ranges: :data,
         finding_ledger: :data
       }
     end
@@ -751,7 +756,7 @@ defmodule Arbor.Actions.Council do
 
         normalized in ~w(
           diff files branch base_ref candidate_commit intent agent_id review_cycle
-          prior_candidate_commit delta_diff delta_files finding_ledger
+          prior_candidate_commit delta_diff delta_files delta_ranges finding_ledger
         ) and
             not is_nil(value) ->
           Map.put(acc, normalized, value)
