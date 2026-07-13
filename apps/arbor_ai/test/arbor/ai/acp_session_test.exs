@@ -229,6 +229,50 @@ defmodule Arbor.AI.AcpSessionTest do
     assert :ok = AcpSession.close(session)
   end
 
+  test "send_message resolves local and via registered server identities" do
+    install_fake_progress_client(100)
+
+    local_name = :"acp_local_#{System.unique_integer([:positive])}"
+
+    {:ok, local_session} =
+      AcpSession.start_link(
+        name: local_name,
+        provider: :test,
+        client_opts: [test_pid: self()]
+      )
+
+    assert {:ok, %{"text" => "ok"}} = AcpSession.send_message(local_name, "local")
+    assert_receive {:fake_prompt_started, _worker, "local", _opts}
+    assert :ok = AcpSession.close(local_name)
+    refute Process.alive?(local_session)
+
+    registry = :"acp_registry_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, keys: :unique, name: registry})
+    via_name = {:via, Registry, {registry, :session}}
+
+    {:ok, via_session} =
+      AcpSession.start_link(
+        name: via_name,
+        provider: :test,
+        client_opts: [test_pid: self()]
+      )
+
+    assert {:ok, %{"text" => "ok"}} = AcpSession.send_message(via_name, "via")
+    assert_receive {:fake_prompt_started, _worker, "via", _opts}
+    assert :ok = AcpSession.close(via_name)
+    refute Process.alive?(via_session)
+
+    assert {:error, :session_unavailable} =
+             AcpSession.send_message(:missing_acp_session, "missing", timeout: 20)
+
+    assert {:error, :session_unavailable} =
+             AcpSession.send_message(
+               {:via, Registry, {registry, :missing}},
+               "missing-via",
+               timeout: 20
+             )
+  end
+
   test "security regression: arbitrary-size absolute deadlines are rejected before calls" do
     server = start_supervised!(SlowCallServer)
     huge_deadline = :erlang.bsl(1, 1_000_000)

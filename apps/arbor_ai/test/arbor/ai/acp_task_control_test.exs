@@ -141,6 +141,103 @@ defmodule Arbor.AI.AcpTaskControlTest do
     data
   end
 
+  defp install_pending_timeout_settlement(session, control_id) do
+    ref = make_ref()
+    session_id = "pending-#{control_id}"
+
+    terminal_control = %{
+      control_id: control_id,
+      message: "must-not-run",
+      task_id: "task-1",
+      status: :not_delivered,
+      reason: :provider_prompt_timed_out_before_delivery
+    }
+
+    settlement = %{
+      kind: :timeout,
+      control_events: [
+        {
+          :acp_task_control_not_delivered,
+          terminal_control,
+          :provider_prompt_timed_out_before_delivery
+        }
+      ]
+    }
+
+    :sys.replace_state(session, fn state ->
+      %{
+        state
+        | session_id: session_id,
+          last_session_id: session_id,
+          status: :recovery_required,
+          task_controls: Map.put(state.task_controls, control_id, terminal_control),
+          task_control_history_order: state.task_control_history_order ++ [control_id],
+          pending_settlements: %{ref => settlement},
+          pending_settlement_order: [ref]
+      }
+    end)
+
+    {ref, session_id}
+  end
+
+  defp subscribe_to_settlement_signals(session_id) do
+    test_pid = self()
+
+    {:ok, subscription_id} =
+      Signals.subscribe(
+        "agent.*",
+        fn %Signal{type: type, data: data} = signal ->
+          if Map.get(data, :session_id) == session_id and
+               type in [
+                 :acp_task_control_not_delivered,
+                 :acp_session_error,
+                 :acp_session_closed
+               ] do
+            send(test_pid, {:settlement_signal, signal})
+          end
+
+          :ok
+        end,
+        async: false
+      )
+
+    on_exit(fn -> Signals.unsubscribe(subscription_id) end)
+  end
+
+  defp assert_timeout_settlement_once(control_id, close_expected? \\ false) do
+    assert_receive {:settlement_signal,
+                    %Signal{
+                      type: :acp_task_control_not_delivered,
+                      data: %{control_id: ^control_id}
+                    }},
+                   1_000
+
+    assert_receive {:settlement_signal,
+                    %Signal{type: :acp_session_error, data: %{error: :timeout}}},
+                   1_000
+
+    if close_expected? do
+      assert_receive {:settlement_signal, %Signal{type: :acp_session_closed}}, 1_000
+    end
+
+    refute_receive {:settlement_signal, %Signal{type: :acp_task_control_not_delivered}},
+                   50
+
+    refute_receive {:settlement_signal, %Signal{type: :acp_session_error}}, 50
+  end
+
+  defp eventually(fun, attempts \\ 100)
+  defp eventually(fun, 0), do: fun.()
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(5)
+      eventually(fun, attempts - 1)
+    end
+  end
+
   test "busy controls queue and drain in order through the same ACP client and session" do
     subscribe_to_task_control_signals()
     session = start_session()
@@ -566,6 +663,101 @@ defmodule Arbor.AI.AcpTaskControlTest do
 
     send(settlement_pid, :release_settlement)
     assert %{status: :recovery_required} = AcpSession.status(session)
+  end
+
+  test "security regression: settlement wakeups reject forged payloads and emit once" do
+    session = start_session()
+    control_id = "wakeup-once"
+    {ref, session_id} = install_pending_timeout_settlement(session, control_id)
+    subscribe_to_settlement_signals(session_id)
+
+    forged_control = %{
+      control_id: "forged",
+      task_id: "task-1",
+      status: :not_delivered,
+      reason: :forged
+    }
+
+    send(session, {
+      :acp_timeout_settlement,
+      ref,
+      [{:acp_task_control_not_delivered, forged_control, :forged}]
+    })
+
+    send(session, {:acp_timeout_settlement, :not_a_reference})
+    send(session, {:acp_timeout_settlement})
+    send(session, {:acp_timeout_settlement, make_ref()})
+    send(session, {:acp_timeout_settlement, ref})
+    send(session, {:acp_timeout_settlement, ref})
+
+    assert %{status: :recovery_required} = AcpSession.status(session)
+    assert_timeout_settlement_once(control_id)
+
+    state = :sys.get_state(session)
+    assert state.pending_settlements == %{}
+    assert state.pending_settlement_order == []
+    refute_receive {:settlement_signal, %Signal{data: %{control_id: "forged"}}}, 50
+  end
+
+  test "security regression: close queued before wakeup flushes the settlement once" do
+    session = start_session()
+    session_ref = Process.monitor(session)
+    control_id = "close-race"
+    {ref, session_id} = install_pending_timeout_settlement(session, control_id)
+    subscribe_to_settlement_signals(session_id)
+
+    :ok = :sys.suspend(session)
+    close_task = Task.async(fn -> AcpSession.close(session) end)
+
+    assert eventually(fn ->
+             case Process.info(session, :messages) do
+               {:messages, messages} ->
+                 Enum.any?(messages, &match?({:"$gen_call", _from, {:close, _opts}}, &1))
+
+               nil ->
+                 false
+             end
+           end)
+
+    send(session, {:acp_timeout_settlement, ref})
+    :ok = :sys.resume(session)
+
+    assert :ok = Task.await(close_task)
+    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
+    assert_timeout_settlement_once(control_id, true)
+  end
+
+  test "security regression: owner DOWN queued before wakeup flushes the settlement once" do
+    test_pid = self()
+
+    owner =
+      spawn(fn ->
+        {:ok, session} =
+          AcpSession.start_link(
+            provider: :test,
+            agent_id: "agent-test",
+            client_opts: [test_pid: test_pid]
+          )
+
+        send(test_pid, {:owned_session, session})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:owned_session, session}
+    session_ref = Process.monitor(session)
+    control_id = "owner-race"
+    {ref, session_id} = install_pending_timeout_settlement(session, control_id)
+    subscribe_to_settlement_signals(session_id)
+    owner_monitor = :sys.get_state(session).owner_monitor
+
+    :ok = :sys.suspend(session)
+    send(session, {:DOWN, owner_monitor, :process, owner, :killed})
+    send(session, {:acp_timeout_settlement, ref})
+    :ok = :sys.resume(session)
+
+    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
+    assert_timeout_settlement_once(control_id, true)
+    Process.exit(owner, :kill)
   end
 
   test "caller cancellation aborts the active prompt and does not run queued controls" do

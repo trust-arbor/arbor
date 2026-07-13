@@ -86,7 +86,9 @@ defmodule Arbor.AI.AcpSession do
     usage: %{input_tokens: 0, output_tokens: 0},
     task_controls: %{},
     task_control_sequence: [],
-    task_control_history_order: []
+    task_control_history_order: [],
+    pending_settlements: %{},
+    pending_settlement_order: []
   ]
 
   # -- Public API --
@@ -320,6 +322,11 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
+  def handle_continue({:emit_timeout_settlement, settlement}, state) do
+    emit_pending_timeout_settlement(state, settlement)
+    {:noreply, state}
+  end
+
   @impl true
   def handle_call({:await_ready, opts}, _from, state) do
     case {Arbor.AI.Timeout.ensure_active(opts), state.status} do
@@ -413,7 +420,11 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:close, opts}, _from, state) do
-    state = settle_pending_task_controls(state, :cancelled, :session_closed)
+    state =
+      state
+      |> flush_pending_settlements()
+      |> settle_pending_task_controls(:cancelled, :session_closed)
+
     result = disconnect_client_owned(state, opts)
     emit_signal(:acp_session_closed, state)
     {:stop, :normal, result, %{state | status: :closed, client: nil, client_monitor: nil}}
@@ -579,7 +590,11 @@ defmodule Arbor.AI.AcpSession do
       "AcpSession owner gone (#{Arbor.LLM.inspect_external_reason(reason)}); aborting session #{Arbor.LLM.inspect_external_reason(state.session_id)}"
     )
 
-    state = settle_pending_task_controls(state, :cancelled, :owner_cancelled)
+    state =
+      state
+      |> flush_pending_settlements()
+      |> settle_pending_task_controls(:cancelled, :owner_cancelled)
+
     _ = disconnect_client_owned(state, internal_cleanup_opts())
     emit_signal(:acp_session_closed, state, %{reason: :owner_cancelled})
 
@@ -589,6 +604,7 @@ defmodule Arbor.AI.AcpSession do
 
   def handle_info({:DOWN, ref, :process, pid, reason}, %{client: pid} = state)
       when ref == state.client_monitor and state.status == :recovery_required do
+    state = flush_pending_settlements(state)
     bounded_reason = Arbor.LLM.sanitize_external_reason(reason)
 
     Logger.warning(
@@ -602,6 +618,7 @@ defmodule Arbor.AI.AcpSession do
 
   def handle_info({:DOWN, ref, :process, pid, reason}, %{client: pid} = state)
       when ref == state.client_monitor do
+    state = flush_pending_settlements(state)
     bounded_reason = Arbor.LLM.sanitize_external_reason(reason)
 
     Logger.warning(
@@ -633,9 +650,19 @@ defmodule Arbor.AI.AcpSession do
     {:noreply, state}
   end
 
-  def handle_info({:acp_timeout_settlement, kind, control_events}, state) do
-    cancel_acp_prompt(state)
-    emit_timeout_observability(state, kind, control_events)
+  def handle_info({:acp_timeout_settlement, ref}, state) when is_reference(ref) do
+    case take_pending_settlement(state, ref) do
+      {:ok, settlement, new_state} ->
+        {:noreply, new_state, {:continue, {:emit_timeout_settlement, settlement}}}
+
+      :not_found ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(message, state)
+      when is_tuple(message) and tuple_size(message) > 0 and
+             elem(message, 0) == :acp_timeout_settlement do
     {:noreply, state}
   end
 
@@ -646,7 +673,11 @@ defmodule Arbor.AI.AcpSession do
 
   @impl true
   def terminate(_reason, state) do
-    _state = settle_pending_task_controls(state, :not_delivered, :session_terminated)
+    _state =
+      state
+      |> flush_pending_settlements()
+      |> settle_pending_task_controls(:not_delivered, :session_terminated)
+
     demonitor_owner(state.owner_monitor)
     demonitor_owner(state.client_monitor)
     terminate_client(state.client)
@@ -1241,6 +1272,19 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp safe_prompt_call(session, content, opts, timeout) do
+    case GenServer.whereis(session) do
+      pid when is_pid(pid) -> do_safe_prompt_call(pid, content, opts, timeout)
+      nil -> {:error, :session_unavailable}
+    end
+  rescue
+    exception ->
+      {:error, {:session_call_failed, Arbor.LLM.external_exception_message(exception)}}
+  catch
+    :exit, {:noproc, _call} -> {:error, :session_unavailable}
+    :exit, reason -> {:error, {:session_call_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+  end
+
+  defp do_safe_prompt_call(session, content, opts, timeout) when is_pid(session) do
     # The session owns the hard-timeout transition. Once it has accepted the
     # prompt, wait for that authoritative reply instead of racing a second
     # caller-side timeout against the session's timeout timer. The acceptance
@@ -1268,13 +1312,6 @@ defmodule Arbor.AI.AcpSession do
         stop_prompt_proxy(proxy, monitor)
         {:error, :timeout}
     end
-  rescue
-    exception ->
-      {:error, {:session_call_failed, Arbor.LLM.external_exception_message(exception)}}
-  catch
-    :exit, {:timeout, _call} -> {:error, :timeout}
-    :exit, {:noproc, _call} -> {:error, :session_unavailable}
-    :exit, reason -> {:error, {:session_call_exit, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
   defp prompt_call_proxy(parent, session, content, opts, proxy_ref) do
@@ -2147,7 +2184,7 @@ defmodule Arbor.AI.AcpSession do
 
     if kind in [:timeout, :inactivity_timeout] do
       control_events = changed_task_control_events(previous_state, new_state)
-      send(self(), {:acp_timeout_settlement, kind, control_events})
+      new_state = enqueue_pending_settlement(new_state, kind, control_events)
       {:reply, {:error, error}, new_state}
     else
       cancel_acp_prompt(state)
@@ -2177,6 +2214,56 @@ defmodule Arbor.AI.AcpSession do
 
     error = if kind in [:caller_cancelled, :owner_cancelled], do: :cancelled, else: kind
     emit_signal(:acp_session_error, state, %{error: error, phase: :prompt})
+  end
+
+  defp enqueue_pending_settlement(state, kind, control_events) do
+    ref = make_ref()
+    settlement = %{kind: kind, control_events: control_events}
+
+    state = %{
+      state
+      | pending_settlements: Map.put(state.pending_settlements, ref, settlement),
+        pending_settlement_order: state.pending_settlement_order ++ [ref]
+    }
+
+    send(self(), {:acp_timeout_settlement, ref})
+    state
+  end
+
+  defp take_pending_settlement(state, ref) do
+    case Map.pop(state.pending_settlements, ref) do
+      {nil, _pending} ->
+        :not_found
+
+      {settlement, pending} ->
+        {:ok, settlement,
+         %{
+           state
+           | pending_settlements: pending,
+             pending_settlement_order: List.delete(state.pending_settlement_order, ref)
+         }}
+    end
+  end
+
+  defp flush_pending_settlements(%{pending_settlement_order: []} = state), do: state
+
+  defp flush_pending_settlements(state) do
+    settlements =
+      Enum.flat_map(state.pending_settlement_order, fn ref ->
+        case Map.fetch(state.pending_settlements, ref) do
+          {:ok, settlement} -> [settlement]
+          :error -> []
+        end
+      end)
+
+    state = %{state | pending_settlements: %{}, pending_settlement_order: []}
+    Enum.each(settlements, &emit_pending_timeout_settlement(state, &1))
+    state
+  end
+
+  defp emit_pending_timeout_settlement(state, %{kind: kind, control_events: control_events}) do
+    cancel_acp_prompt(state)
+    emit_timeout_observability(state, kind, control_events)
   end
 
   defp changed_task_control_events(before, settled) do

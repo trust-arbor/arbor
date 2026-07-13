@@ -1,10 +1,38 @@
 defmodule Arbor.AI.LLM.Adapter.AcpTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
+  alias Arbor.AI.AcpPool
   alias Arbor.AI.LLM.Adapter.Acp
   alias Arbor.LLM.Message
   alias Arbor.LLM.Request
   @moduletag :fast
+
+  defmodule TimeoutClient do
+    @moduledoc false
+
+    def start_link(opts), do: Agent.start_link(fn -> opts end)
+
+    def new_session(_client, _cwd, _opts),
+      do: {:ok, %{"sessionId" => "adapter-timeout-session"}}
+
+    def load_session(_client, session_id, _cwd, _opts),
+      do: {:ok, %{"sessionId" => session_id}}
+
+    def set_config_option(_client, _session_id, _key, _value), do: :ok
+
+    def prompt(client, _session_id, _content, _opts) do
+      send(Agent.get(client, & &1)[:test_pid], {:adapter_prompt, self()})
+      {:error, :timeout}
+    end
+
+    def cancel(_client, _session_id), do: :ok
+
+    def disconnect(client) do
+      test_pid = Agent.get(client, & &1)[:test_pid]
+      send(test_pid, {:adapter_disconnect, client})
+      Agent.stop(client, :normal)
+    end
+  end
 
   describe "provider/0" do
     test "returns acp" do
@@ -81,6 +109,34 @@ defmodule Arbor.AI.LLM.Adapter.AcpTest do
       agents = Acp.available_agents()
       assert is_list(agents)
     end
+  end
+
+  test "security regression: adapter removes a recovery session instead of checking it in" do
+    original_client = Application.get_env(:arbor_ai, :acp_client_module)
+    Application.put_env(:arbor_ai, :acp_client_module, TimeoutClient)
+
+    on_exit(fn ->
+      if original_client,
+        do: Application.put_env(:arbor_ai, :acp_client_module, original_client),
+        else: Application.delete_env(:arbor_ai, :acp_client_module)
+    end)
+
+    start_supervised!(Arbor.AI.AcpPool.Supervisor)
+    start_supervised!({AcpPool, default_max: 1, cleanup_interval_ms: 100_000})
+
+    request = %Request{
+      provider: "acp",
+      model: "test",
+      messages: [Message.new(:user, "timeout")],
+      provider_options: %{agent: :test}
+    }
+
+    assert {:error, :timeout} =
+             Acp.complete(request, client_opts: [test_pid: self()], timeout: 200)
+
+    assert_receive {:adapter_prompt, _worker}
+    assert AcpPool.sessions() == []
+    assert_receive {:adapter_disconnect, _client}, 1_000
   end
 
   describe "normalize_usage/1" do
