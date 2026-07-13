@@ -412,6 +412,68 @@ defmodule Arbor.Actions.ConsensusTest do
   end
 
   describe "Decide — quorum types in run" do
+    test "symbolic majority excludes abstentions from the voting population" do
+      results = [
+        make_branch_result("a", "approve"),
+        make_branch_result("b", "approve"),
+        make_branch_result("c", "approve"),
+        make_branch_result("d", "abstain"),
+        make_branch_result("e", "abstain")
+      ]
+
+      assert {:ok, result} =
+               Consensus.Decide.run(
+                 %{results: results, question: "test", quorum: "majority"},
+                 %{}
+               )
+
+      assert result.decision == "approved"
+      assert result.quorum_met
+      assert result.approve_count == 3
+      assert result.abstain_count == 2
+    end
+
+    test "symbolic majority deadlocks on an active-vote tie despite an abstention" do
+      results = [
+        make_branch_result("a", "approve"),
+        make_branch_result("b", "approve"),
+        make_branch_result("c", "reject"),
+        make_branch_result("d", "reject"),
+        make_branch_result("e", "abstain")
+      ]
+
+      assert {:ok, result} =
+               Consensus.Decide.run(
+                 %{results: results, question: "test", quorum: "majority"},
+                 %{}
+               )
+
+      assert result.decision == "deadlock"
+      refute result.quorum_met
+      assert result.approve_count == 2
+      assert result.reject_count == 2
+      assert result.abstain_count == 1
+    end
+
+    test "all abstentions remain a deadlock for symbolic quorum" do
+      for quorum <- ["majority", "supermajority", "unanimous"] do
+        results = [
+          make_branch_result("a", "abstain"),
+          make_branch_result("b", "abstain")
+        ]
+
+        assert {:ok, result} =
+                 Consensus.Decide.run(
+                   %{results: results, question: "test", quorum: quorum},
+                   %{}
+                 )
+
+        assert result.decision == "deadlock"
+        refute result.quorum_met
+        assert result.abstain_count == 2
+      end
+    end
+
     test "supermajority requires 2/3" do
       results = [
         make_branch_result("a", "approve"),
@@ -492,6 +554,44 @@ defmodule Arbor.Actions.ConsensusTest do
                )
 
       assert result.decision == "approved"
+    end
+
+    test "numeric quorum remains an absolute threshold greater than active votes" do
+      results = [
+        make_branch_result("a", "approve"),
+        make_branch_result("b", "approve"),
+        make_branch_result("c", "abstain"),
+        make_branch_result("d", "abstain")
+      ]
+
+      assert {:ok, result} =
+               Consensus.Decide.run(
+                 %{results: results, question: "test", quorum: "3"},
+                 %{}
+               )
+
+      assert result.decision == "deadlock"
+      refute result.quorum_met
+      assert result.approve_count == 2
+    end
+
+    test "security rejection remains present in veto output with abstentions" do
+      results = [
+        make_branch_result("security", "reject"),
+        make_branch_result("correctness", "approve"),
+        make_branch_result("tests", "approve"),
+        make_branch_result("docs", "abstain")
+      ]
+
+      assert {:ok, result} =
+               Consensus.Decide.run(
+                 %{results: results, question: "test", quorum: "majority"},
+                 %{}
+               )
+
+      assert result.decision == "approved"
+      assert result.security_veto
+      assert result.vetoes == ["security"]
     end
   end
 

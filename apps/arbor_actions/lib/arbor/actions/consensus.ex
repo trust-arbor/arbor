@@ -381,7 +381,7 @@ defmodule Arbor.Actions.Consensus do
       if evaluations == [] do
         {:error, "consensus.decide: no valid evaluations parsed from #{length(results)} results"}
       else
-        quorum = calculate_quorum(quorum_type, length(evaluations))
+        quorum = decision_quorum(quorum_type, evaluations)
         proposal = build_decision_proposal(question, mode)
 
         case call_from_evaluations(proposal, evaluations, quorum: quorum) do
@@ -577,6 +577,21 @@ defmodule Arbor.Actions.Consensus do
     end
 
     def calculate_quorum(_, _count), do: 1
+
+    defp decision_quorum(quorum_type, evaluations)
+         when quorum_type in ["majority", "supermajority", "unanimous"] do
+      active_vote_count = Enum.count(evaluations, &(&1.vote in [:approve, :reject]))
+
+      if active_vote_count == 0 do
+        1
+      else
+        calculate_quorum(quorum_type, active_vote_count)
+      end
+    end
+
+    defp decision_quorum(quorum_type, evaluations) do
+      calculate_quorum(quorum_type, length(evaluations))
+    end
 
     defp build_evaluation(attrs) do
       case Evaluation.new(attrs) do
