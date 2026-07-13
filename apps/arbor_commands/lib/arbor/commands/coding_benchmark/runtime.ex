@@ -267,9 +267,38 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   defp artifact_task_root(artifact_root, task_id) do
     digest = sha256(task_id)
 
-    case SafePath.safe_join(artifact_root, "task-" <> digest) do
-      {:ok, root} -> {:ok, root}
+    with {:ok, root} <- SafePath.safe_join(artifact_root, "task-" <> digest),
+         :ok <- create_exclusive_artifact_root(root),
+         {:ok, real_root} <- SafePath.resolve_real(root),
+         {:ok, ^real_root} <- SafePath.resolve_within(real_root, artifact_root),
+         true <- Path.dirname(real_root) == artifact_root do
+      {:ok, real_root}
+    else
+      {:error, {:benchmark_setup_error, _reason}} = error -> error
       {:error, reason} -> setup_error({:invalid_artifact_task_root, reason})
+      false -> setup_error({:invalid_artifact_task_root, :outside_artifact_root})
+      _other -> setup_error({:invalid_artifact_task_root, :revalidation_failed})
+    end
+  end
+
+  defp create_exclusive_artifact_root(path) do
+    case File.mkdir(path) do
+      :ok ->
+        case File.lstat(path) do
+          {:ok, %{type: :directory}} -> :ok
+          {:ok, _stat} -> setup_error(:unsafe_artifact_task_root)
+          {:error, reason} -> setup_error({:artifact_task_root_lstat_failed, reason})
+        end
+
+      {:error, :eexist} ->
+        case File.lstat(path) do
+          {:ok, %{type: :directory}} -> :ok
+          {:ok, _stat} -> setup_error(:unsafe_artifact_task_root)
+          {:error, reason} -> setup_error({:artifact_task_root_lstat_failed, reason})
+        end
+
+      {:error, reason} ->
+        setup_error({:artifact_task_root_create_failed, reason})
     end
   end
 

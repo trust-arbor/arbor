@@ -6,7 +6,9 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
   alias Arbor.Orchestrator.ActionsExecutor
   alias Arbor.Actions.TestFixtures.SessionClassifyReplacementAction
   alias Arbor.Common.ActionRegistry
+  alias Arbor.Contracts.Security.{Identity, SignedRequest}
   alias Arbor.Persistence.BufferedStore
+  alias Arbor.Security
 
   defmodule GatedPolicy do
     @moduledoc false
@@ -37,7 +39,10 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
 
     for child <- [
           {Arbor.Security.Identity.Registry, []},
+          {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
+          {Arbor.Security.SigningAuthorityStateOwner, []},
+          {Arbor.Security.SigningAuthorityBroker, []},
           {Arbor.Security.Constraint.RateLimiter, []},
           {Arbor.Security.CapabilityStore, []}
         ] do
@@ -196,6 +201,77 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
 
     assert {:ok, result} = Task.await(execution, 3_000)
     assert Jason.decode!(result)["input_type"] == "query"
+  end
+
+  test "security regression: authority approval retry mints a fresh exact-resource proof" do
+    Application.put_env(:arbor_security, :identity_verification, true)
+    {:ok, identity} = Identity.generate(name: "approval-authority-retry")
+    :ok = Security.register_identity(Identity.public_only(identity))
+    :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+
+    assert {:ok, capability} =
+             Security.grant(principal: identity.agent_id, resource: resource_uri)
+
+    on_exit(fn ->
+      _ = Security.revoke(capability.id)
+      _ = Security.delete_signing_key(identity.agent_id)
+      _ = Security.deregister_identity(identity.agent_id)
+    end)
+
+    :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+    on_exit(fn ->
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+    end)
+
+    tracer = self()
+
+    execution =
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        {:ok, proof} =
+          Security.build_signing_authority_acquisition_proof(
+            identity.agent_id,
+            identity.private_key,
+            purpose: :approval_retry_test,
+            owner: self()
+          )
+
+        {:ok, authority} = Security.open_signing_authority(proof)
+
+        try do
+          ActionsExecutor.execute(
+            "session_classify",
+            %{"input" => "fresh proof after approval"},
+            File.cwd!(),
+            agent_id: identity.agent_id,
+            signing_authority: authority
+          )
+        after
+          _ = Security.close_signing_authority(authority)
+        end
+      end)
+
+    assert_receive {:trace, _pid, :call,
+                    {Arbor.Actions, :authorize_and_execute,
+                     [_agent_id, ^action_module, _params, first_context]}}
+
+    request = await_pending_request(identity.agent_id)
+    assert :ok = Arbor.Comms.InteractionRouter.respond(request.request_id, :approved)
+    assert {:ok, result} = Task.await(execution, 3_000)
+    assert Jason.decode!(result)["input_type"] == "query"
+
+    assert_receive {:trace, _pid, :call,
+                    {Arbor.Actions, :authorize_and_execute,
+                     [_agent_id, ^action_module, _params, retry_context]}}
+
+    assert %SignedRequest{payload: ^resource_uri} = first_context.signed_request
+    assert %SignedRequest{payload: ^resource_uri} = retry_context.signed_request
+    refute first_context.signed_request.nonce == retry_context.signed_request.nonce
   end
 
   test "approved interaction retries once with the exact approval marker" do

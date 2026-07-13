@@ -52,33 +52,38 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     workdir = normalize_workdir(workdir)
 
     run_action(fn ->
-      # Try ActionRegistry first (O(1) ETS lookup), fall back to build_action_map
-      normalized = normalize_name(name)
+      with :ok <- reject_mixed_signing_credentials(opts) do
+        # Try ActionRegistry first (O(1) ETS lookup), fall back to build_action_map
+        normalized = normalize_name(name)
 
-      action_module =
-        resolve_via_registry(normalized) ||
-          resolve_via_registry(name) ||
-          resolve_via_action_map(normalized, name)
+        action_module =
+          resolve_via_registry(normalized) ||
+            resolve_via_registry(name) ||
+            resolve_via_action_map(normalized, name)
 
-      case action_module do
-        nil ->
-          {:error, "Unknown action: #{name}"}
+        case action_module do
+          nil ->
+            {:error, "Unknown action: #{name}"}
 
-        action_module ->
-          execute_resolved_action(
-            name,
-            args,
-            workdir,
-            opts,
-            action_module,
-            agent_id,
-            caller_id,
-            author_id,
-            task_id,
-            session_id,
-            signed_request,
-            signer
-          )
+          action_module ->
+            execute_resolved_action(
+              name,
+              args,
+              workdir,
+              opts,
+              action_module,
+              agent_id,
+              caller_id,
+              author_id,
+              task_id,
+              session_id,
+              signed_request,
+              signer
+            )
+        end
+      else
+        {:error, reason} ->
+          {:error, "Action #{name} execution binding rejected: #{inspect(reason)}"}
       end
     end)
   end
@@ -120,21 +125,21 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   # These values remain action-local. They are never params or Engine context,
   # and executable delegate/middleware overrides are intentionally excluded.
-  # :signing_authority is the reload-stable opaque credential for nested Engine
-  # runs (council/action). It must be forwarded so parent authority mode is not
-  # silently dropped. Never put private keys or signer closures into retained
-  # Engine/action state beyond this process-local nested opts bag.
   @nested_engine_opt_keys [
     :authorization,
     :authorizer,
     :signer,
-    :signing_authority,
     :auth_context,
     :identity_private_key,
     :on_event,
     :logs_root,
     :resumable,
     :max_depth
+  ]
+
+  @nested_engine_action_modules [
+    Arbor.Actions.Council.ReviewChange,
+    Arbor.Actions.Coding.ReviewedCommit
   ]
 
   # ============================================================================
@@ -157,7 +162,6 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
        ) do
     with {:ok, pinned_binding} <- verify_pinned_action(action_module, name, opts),
          {:ok, execution_binding_context} <- execution_binding_context(opts),
-         {:ok, nested_engine_opts} <- nested_engine_opts(opts),
          {:ok, retry_workdir_guard} <- capture_retry_workdir_guard(workdir, agent_id) do
       params =
         args
@@ -167,59 +171,70 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
       case verify_caller_authority(action_module, params, agent_id, caller_id, opts) do
         :ok ->
-          with {:ok, signed_request} <-
-                 sign_for_action(opts, signed_request, signer, action_module, params) do
-            # An authority is process-local input only. The action receives the
-            # signed request, never the opaque authority or a closure capturing it.
-            legacy_signer =
-              if Keyword.has_key?(opts, :signing_authority), do: nil, else: signer
+          with_signing_boundary(opts, fn boundary_ref ->
+            with {:ok, nested_engine_opts} <-
+                   nested_engine_opts(opts, action_module, boundary_ref),
+                 {:ok, signed_request} <-
+                   sign_for_action(opts, signed_request, signer, action_module, params) do
+              # An authority is process-local input only. The action receives the
+              # signed request, never the opaque authority or a closure capturing it.
+              legacy_signer =
+                if Keyword.has_key?(opts, :signing_authority), do: nil, else: signer
 
-            auth_context =
-              Arbor.Contracts.Security.AuthContext.new(agent_id,
-                signer: legacy_signer,
-                signed_request: signed_request,
-                session_id: session_id
+              auth_context =
+                Arbor.Contracts.Security.AuthContext.new(agent_id,
+                  signer: legacy_signer,
+                  signed_request: signed_request,
+                  session_id: session_id
+                )
+
+              Logger.debug(
+                "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
+                  "agent=#{agent_id}, caller=#{caller_id || agent_id}, module=#{action_module}"
               )
 
-            Logger.debug(
-              "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
-                "agent=#{agent_id}, caller=#{caller_id || agent_id}, module=#{action_module}"
-            )
+              context =
+                %{auth_context: auth_context, workdir: workdir}
+                |> Map.merge(execution_binding_context)
+                |> maybe_put_approval_timeout(opts, execution_binding_context)
+                |> Map.put(:retry_workdir_guard, retry_workdir_guard)
+                |> maybe_put_context(:task_id, task_id)
+                |> maybe_put_context(:session_id, session_id)
+                |> maybe_put_context(:caller_id, caller_id || agent_id)
+                |> maybe_put_context(:author_id, author_id)
+                |> maybe_put_context(:run_authorization, Keyword.get(opts, :run_authorization))
+                |> maybe_put_context(:nested_engine_opts, nested_engine_opts)
+                |> maybe_put_context(:pinned_action_binding, pinned_binding)
+                |> maybe_put_context(:pinned_action_name, name)
+                # Engine-pinned graph execution may resolve pipeline_internal actions.
+                |> Map.put(:allow_pipeline_internal, true)
+                |> maybe_put_file_workspace(action_module, workdir)
+                |> then(fn context ->
+                  if signed_request,
+                    do: Map.put(context, :signed_request, signed_request),
+                    else: context
+                end)
+                |> then(fn context ->
+                  case Keyword.get(opts, :taint) do
+                    nil -> context
+                    level -> Map.put(context, :taint, level)
+                  end
+                end)
+                |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
 
-            context =
-              %{auth_context: auth_context, workdir: workdir}
-              |> Map.merge(execution_binding_context)
-              |> maybe_put_approval_timeout(opts, execution_binding_context)
-              |> Map.put(:retry_workdir_guard, retry_workdir_guard)
-              |> maybe_put_context(:task_id, task_id)
-              |> maybe_put_context(:session_id, session_id)
-              |> maybe_put_context(:caller_id, caller_id || agent_id)
-              |> maybe_put_context(:author_id, author_id)
-              |> maybe_put_context(:run_authorization, Keyword.get(opts, :run_authorization))
-              |> maybe_put_context(:nested_engine_opts, nested_engine_opts)
-              |> maybe_put_context(:pinned_action_binding, pinned_binding)
-              |> maybe_put_context(:pinned_action_name, name)
-              # Engine-pinned graph execution may resolve pipeline_internal actions.
-              |> Map.put(:allow_pipeline_internal, true)
-              |> maybe_put_file_workspace(action_module, workdir)
-              |> then(fn context ->
-                if signed_request,
-                  do: Map.put(context, :signed_request, signed_request),
-                  else: context
-              end)
-              |> then(fn context ->
-                case Keyword.get(opts, :taint) do
-                  nil -> context
-                  level -> Map.put(context, :taint, level)
-                end
-              end)
-              |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
-
-            execute_authorized_action(agent_id, action_module, params, context, name)
-          else
-            {:error, reason} ->
-              {:error, "Action #{name} signing failed: #{inspect(reason)}"}
-          end
+              execute_authorized_action(
+                agent_id,
+                action_module,
+                params,
+                context,
+                name,
+                boundary_ref
+              )
+            else
+              {:error, reason} ->
+                {:error, "Action #{name} signing failed: #{inspect(reason)}"}
+            end
+          end)
 
         {:error, reason} ->
           {:error,
@@ -232,7 +247,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end
   end
 
-  defp execute_authorized_action(agent_id, action_module, params, context, name) do
+  defp execute_authorized_action(agent_id, action_module, params, context, name, boundary) do
     result = Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context)
 
     case result do
@@ -243,7 +258,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           action_module,
           params,
           context,
-          name
+          name,
+          boundary
         )
 
       {:ok, result} ->
@@ -361,18 +377,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end
   end
 
-  defp nested_engine_opts(opts) do
-    # Preserve key presence for :signing_authority even when the value is nil
-    # (present-invalid must remain present so the child fails closed). Other
-    # nil-valued keys are dropped as before.
+  defp nested_engine_opts(opts, action_module, boundary_ref) do
     forwarded =
       opts
       |> Keyword.take(@nested_engine_opt_keys)
-      |> Enum.reject(fn
-        {:signing_authority, _value} -> false
-        {_key, nil} -> true
-        _ -> false
-      end)
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> maybe_put_nested_authority_boundary(action_module, boundary_ref)
 
     project? =
       forwarded != [] or match?(%RunAuthorization{}, Keyword.get(opts, :run_authorization))
@@ -389,6 +399,17 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
       {:ok, nil}
     end
   end
+
+  defp maybe_put_nested_authority_boundary(opts, action_module, {pid, token} = boundary)
+       when action_module in @nested_engine_action_modules and is_pid(pid) and is_reference(token) do
+    opts
+    |> Keyword.put(:authorizer, fn principal_id, type ->
+      authorize_at_signing_boundary(boundary, principal_id, type)
+    end)
+    |> Keyword.put(:signer, fn resource -> sign_at_signing_boundary(boundary, resource) end)
+  end
+
+  defp maybe_put_nested_authority_boundary(opts, _action_module, _boundary_ref), do: opts
 
   defp verify_caller_authority(_action_module, _params, agent_id, caller_id, _opts)
        when caller_id in [nil, ""] or caller_id == agent_id,
@@ -455,11 +476,35 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   # Wait synchronously for approval, then retry execution on success.
   # On denial or timeout, return an error message to the LLM.
-  defp await_approval_and_retry(proposal_id, agent_id, action_module, params, context, name) do
+  defp await_approval_and_retry(
+         proposal_id,
+         agent_id,
+         action_module,
+         params,
+         context,
+         name,
+         boundary
+       ) do
     if interaction_request?(proposal_id) do
-      await_interaction_and_retry(proposal_id, agent_id, action_module, params, context, name)
+      await_interaction_and_retry(
+        proposal_id,
+        agent_id,
+        action_module,
+        params,
+        context,
+        name,
+        boundary
+      )
     else
-      await_consensus_and_retry(proposal_id, agent_id, action_module, params, context, name)
+      await_consensus_and_retry(
+        proposal_id,
+        agent_id,
+        action_module,
+        params,
+        context,
+        name,
+        boundary
+      )
     end
   end
 
@@ -472,7 +517,15 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp interaction_request?(id) when is_binary(id), do: String.starts_with?(id, "irq")
   defp interaction_request?(_), do: false
 
-  defp await_interaction_and_retry(request_id, agent_id, action_module, params, context, name) do
+  defp await_interaction_and_retry(
+         request_id,
+         agent_id,
+         action_module,
+         params,
+         context,
+         name,
+         boundary
+       ) do
     alias Arbor.Contracts.Comms.ApprovalAnswer
 
     with {:ok, request_id} <- ApprovalAnswer.validate_request_id(request_id) do
@@ -495,7 +548,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               context,
               name,
               request_id,
-              :operator
+              :operator,
+              boundary
             )
 
           {:error, :timeout} ->
@@ -524,7 +578,15 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   defp interaction_router, do: Module.concat([:Arbor, :Comms, :InteractionRouter])
 
-  defp await_consensus_and_retry(proposal_id, agent_id, action_module, params, context, name) do
+  defp await_consensus_and_retry(
+         proposal_id,
+         agent_id,
+         action_module,
+         params,
+         context,
+         name,
+         boundary
+       ) do
     alias Arbor.Contracts.Comms.ApprovalAnswer
 
     consensus_mod = Module.concat([:Arbor, :Consensus])
@@ -548,12 +610,22 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               context,
               name,
               proposal_id,
-              :consensus
+              :consensus,
+              boundary
             )
 
           {:ok, :approved} ->
             track_approval(agent_id, action_module)
-            retry_execution(agent_id, action_module, params, context, name, proposal_id)
+
+            retry_execution(
+              agent_id,
+              action_module,
+              params,
+              context,
+              name,
+              proposal_id,
+              boundary
+            )
 
           {:error, :timeout} ->
             Logger.info(
@@ -602,13 +674,14 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          context,
          name,
          request_id,
-         backend
+         backend,
+         boundary
        ) do
     case normalized do
       {:ok, :approve} ->
         Logger.info("[ActionsExecutor] Approval granted for #{name}, executing")
         track_approval(agent_id, action_module)
-        retry_execution(agent_id, action_module, params, context, name, request_id)
+        retry_execution(agent_id, action_module, params, context, name, request_id, boundary)
 
       {:ok, :rework, note} ->
         track_rejection(agent_id, action_module)
@@ -638,7 +711,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   # Re-execute only the exact invocation that was approved. The one-shot marker
   # satisfies ApprovalGuard for this retry without minting durable authority.
-  defp retry_execution(agent_id, action_module, params, context, name, request_id) do
+  defp retry_execution(agent_id, action_module, params, context, name, request_id, boundary) do
     with :ok <- verify_retry_resolution(name, action_module),
          :ok <- verify_retry_binding(name, action_module, context),
          :ok <- verify_retry_caller_authority(action_module, params, agent_id, context),
@@ -651,7 +724,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
              decision: :approved
            }),
          # The signed request that drove the escalated authorize is single-use.
-         retry_context = resign_for_retry(retry_context, action_module, params),
+         {:ok, retry_context} <- resign_for_retry(retry_context, resource, boundary),
          :ok <- verify_retry_workdir(retry_context) do
       result =
         Arbor.Actions.authorize_and_execute(agent_id, action_module, params, retry_context)
@@ -786,31 +859,41 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end
   end
 
-  # Mint a fresh signed request for the post-approval retry so identity
-  # verification doesn't fail on a replayed (already-consumed) nonce. Uses the
-  # signer carried on the AuthContext. If there's no signer (unsigned flow),
-  # leave the context as-is — the original behavior.
-  defp resign_for_retry(context, action_module, params) do
-    case context[:auth_context] do
-      %{signer: signer} when is_function(signer, 1) ->
-        with {:ok, resource} <- action_authorization_resource(action_module, params),
-             {:ok, fresh} <- signer.(resource) do
+  # The first proof is consumed by identity verification. Mint a fresh proof
+  # for the exact approved resource through the process-local boundary. Legacy
+  # callers may use their signer, but a signed request without either source
+  # fails closed instead of replaying its nonce.
+  defp resign_for_retry(context, resource, boundary) do
+    signer =
+      case boundary do
+        {pid, token} when is_pid(pid) and is_reference(token) ->
+          fn exact_resource -> sign_at_signing_boundary(boundary, exact_resource) end
+
+        nil ->
+          get_in(context, [:auth_context, Access.key(:signer)])
+      end
+
+    cond do
+      is_function(signer, 1) ->
+        with {:ok, fresh} <- signer.(resource) do
           auth_context = %{context.auth_context | signed_request: fresh}
 
-          context
-          |> Map.put(:signed_request, fresh)
-          |> Map.put(:auth_context, auth_context)
-        else
-          _ -> context
+          {:ok,
+           context
+           |> Map.put(:signed_request, fresh)
+           |> Map.put(:auth_context, auth_context)}
         end
 
-      _ ->
-        context
+      Map.has_key?(context, :signed_request) ->
+        {:error, :approval_retry_signer_unavailable}
+
+      true ->
+        {:ok, context}
     end
   rescue
-    _ -> context
+    _ -> {:error, :approval_retry_signing_failed}
   catch
-    :exit, _ -> context
+    :exit, _ -> {:error, :approval_retry_signing_failed}
   end
 
   # Record approval/rejection with ConfirmationTracker for graduation tracking.
@@ -1056,6 +1139,107 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   def format_result(result), do: inspect(result, pretty: true)
+
+  defp reject_mixed_signing_credentials(opts) do
+    authority? = Keyword.has_key?(opts, :signing_authority)
+    legacy? = Keyword.has_key?(opts, :signer) or Keyword.has_key?(opts, :signed_request)
+
+    if authority? and legacy?, do: {:error, :mixed_signing_credentials}, else: :ok
+  end
+
+  defp with_signing_boundary(opts, fun) when is_function(fun, 1) do
+    case Keyword.fetch(opts, :signing_authority) do
+      :error ->
+        fun.(nil)
+
+      {:ok, authority} ->
+        owner = self()
+        token = make_ref()
+        boundary_pid = spawn(fn -> signing_boundary_loop(authority, owner, token) end)
+        boundary = {boundary_pid, token}
+
+        try do
+          fun.(boundary)
+        after
+          send(boundary_pid, {:close, token})
+        end
+    end
+  end
+
+  defp signing_boundary_loop(authority, owner, token) do
+    owner_monitor = Process.monitor(owner)
+    signing_boundary_receive(authority, token, owner_monitor)
+  end
+
+  defp signing_boundary_receive(authority, token, owner_monitor) do
+    receive do
+      {:call, caller, call_ref, ^token, {:sign, resource}}
+      when is_pid(caller) and is_reference(call_ref) ->
+        send(caller, {call_ref, Arbor.Security.sign_with_authority(authority, resource)})
+        signing_boundary_receive(authority, token, owner_monitor)
+
+      {:call, caller, call_ref, ^token, {:authorize, principal_id, _type}}
+      when is_pid(caller) and is_reference(call_ref) ->
+        result =
+          case authority do
+            %{principal_id: ^principal_id} ->
+              Arbor.Orchestrator.Authorization.check_orchestrator_access(
+                principal_id,
+                authority
+              )
+
+            _other ->
+              {:error, :principal_mismatch}
+          end
+
+        send(caller, {call_ref, result})
+        signing_boundary_receive(authority, token, owner_monitor)
+
+      {:close, ^token} ->
+        :ok
+
+      {:DOWN, ^owner_monitor, :process, _pid, _reason} ->
+        :ok
+
+      _other ->
+        signing_boundary_receive(authority, token, owner_monitor)
+    end
+  end
+
+  defp sign_at_signing_boundary({pid, token}, resource)
+       when is_pid(pid) and is_reference(token) and is_binary(resource) and resource != "" do
+    signing_boundary_call(pid, token, {:sign, resource})
+  end
+
+  defp sign_at_signing_boundary(_boundary, _resource),
+    do: {:error, :invalid_signing_boundary_request}
+
+  defp authorize_at_signing_boundary({pid, token}, principal_id, type)
+       when is_pid(pid) and is_reference(token) and is_binary(principal_id) do
+    signing_boundary_call(pid, token, {:authorize, principal_id, type})
+  end
+
+  defp authorize_at_signing_boundary(_boundary, _principal_id, _type),
+    do: {:error, :invalid_signing_boundary_request}
+
+  defp signing_boundary_call(pid, token, request) do
+    call_ref = make_ref()
+    monitor = Process.monitor(pid)
+    send(pid, {:call, self(), call_ref, token, request})
+
+    receive do
+      {^call_ref, result} ->
+        Process.demonitor(monitor, [:flush])
+        result
+
+      {:DOWN, ^monitor, :process, ^pid, _reason} ->
+        {:error, :signing_boundary_unavailable}
+    after
+      5_000 ->
+        Process.demonitor(monitor, [:flush])
+        {:error, :signing_boundary_timeout}
+    end
+  end
 
   # Sign a tool call using the canonical module-derived resource URI. Authority
   # key presence selects the authority path, including when its value is nil.

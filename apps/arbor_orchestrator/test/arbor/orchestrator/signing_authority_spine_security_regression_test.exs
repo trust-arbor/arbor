@@ -620,11 +620,10 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
       assert result.final_outcome.status == :success
     end
 
-    test "security regression: ExecHandler forwards signing_authority into ActionsExecutor nested opts",
+    test "security regression: ActionsExecutor does not expose authority in nested action opts",
          ctx do
-      # Fails on a3928b18: ExecHandler nested controls only forwarded authorizer;
-      # ActionsExecutor @nested_engine_opt_keys also omitted :signing_authority.
-      # Production path: ExecHandler.execute → ActionsExecutor.execute → nested_engine_opts.
+      # ExecHandler receives the Engine credential, but ActionsExecutor must
+      # terminate that bearer-token path before invoking an action.
       {:ok, authority} = open_authority(ctx)
 
       root =
@@ -720,9 +719,10 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
 
       nested = Map.get(action_context, :nested_engine_opts)
       assert is_list(nested)
-      assert Keyword.fetch!(nested, :signing_authority) == authority
       assert Keyword.get(nested, :max_depth) == 3
-      # Authority must stay process-local opts — never action params.
+      refute Keyword.has_key?(nested, :signing_authority)
+      refute Keyword.has_key?(nested, :signer)
+      refute Keyword.has_key?(nested, :authorizer)
       refute Map.has_key?(action_context, :signing_authority)
     end
 

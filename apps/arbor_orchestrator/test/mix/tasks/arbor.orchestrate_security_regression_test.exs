@@ -77,7 +77,7 @@ defmodule Mix.Tasks.Arbor.OrchestrateSecurityRegressionTest do
                initial_values: %{"session.agent_id" => "forged"}
              )
 
-    assert is_map(result)
+    assert result.context["session.agent_id"] == identity.agent_id
   end
 
   defp restore_oidc(nil), do: Application.delete_env(:arbor_security, :oidc)

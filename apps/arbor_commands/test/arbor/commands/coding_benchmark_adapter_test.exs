@@ -4,7 +4,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
   @moduletag :fast
 
   alias Arbor.Commands.CodingBenchmark
-  alias Arbor.Commands.CodingBenchmark.{LegacyAdapter, PipelineAdapter}
+  alias Arbor.Commands.CodingBenchmark.{Adapter, LegacyAdapter, PipelineAdapter, Runtime}
   alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.Plan
@@ -183,6 +183,32 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
              PipelineAdapter.run(requests.pipeline)
 
     refute_receive {:executor_call, :pipeline, _principal, _task, _context}
+  end
+
+  test "security regression: unsafe pre-created artifact roots fail before configured executors" do
+    requests = benchmark_requests!()
+    assert {:ok, runtime} = Runtime.load()
+    assert {:ok, legacy_scope} = Adapter.execution_scope(requests.legacy, runtime)
+
+    outside = temp_directory!("coding-benchmark-artifact-symlink-target")
+    File.rm_rf!(legacy_scope.artifact_root)
+    File.ln_s!(outside, legacy_scope.artifact_root)
+
+    assert {:error, {:benchmark_setup_error, :unsafe_artifact_task_root}} =
+             LegacyAdapter.run(requests.legacy)
+
+    refute_receive {:executor_call, :legacy, _principal, _task, _context}
+    assert File.read_link!(legacy_scope.artifact_root) == outside
+
+    assert {:ok, pipeline_scope} = Adapter.execution_scope(requests.pipeline, runtime)
+    File.rm_rf!(pipeline_scope.artifact_root)
+    File.write!(pipeline_scope.artifact_root, "not a directory")
+
+    assert {:error, {:benchmark_setup_error, :unsafe_artifact_task_root}} =
+             PipelineAdapter.run(requests.pipeline)
+
+    refute_receive {:executor_call, :pipeline, _principal, _task, _context}
+    assert File.read!(pipeline_scope.artifact_root) == "not a directory"
   end
 
   test "request workdirs must have the harness-owned pair topology" do
