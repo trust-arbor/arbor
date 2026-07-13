@@ -211,6 +211,92 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
              }
   end
 
+  test "downgrades unsupported non-security rejects without changing the raw audit vote" do
+    {:ok, ledger} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report("reject"),
+        "security" => report("approve"),
+        "maintainability" => report("approve")
+      })
+
+    decision = ReviewLedgerCore.decision(ledger)
+    assert decision["disposition"] == "accept"
+    assert decision["vote_counts"] == %{"approve" => 2, "reject" => 0, "abstain" => 1}
+    assert ledger["cycles"]["1"]["votes"]["correctness"] == "reject"
+
+    assert ReviewLedgerCore.to_context(ledger)["review.perspective_votes"]["correctness"] ==
+             "abstain"
+
+    {:ok, only_reject} = apply_cycle(new_ledger(), 1, %{"correctness" => report("reject")})
+    only_reject_decision = ReviewLedgerCore.decision(only_reject)
+    assert only_reject_decision["disposition"] == "rework"
+    assert only_reject_decision["vote_counts"] == %{"approve" => 0, "reject" => 0, "abstain" => 3}
+  end
+
+  test "an uncorroborated major reject plus an approve is accepted" do
+    {:ok, ledger} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report("reject", new_findings: [finding("single major", "major")]),
+        "security" => report("approve"),
+        "maintainability" => report("approve")
+      })
+
+    decision = ReviewLedgerCore.decision(ledger)
+    assert decision["disposition"] == "accept"
+    assert decision["vote_counts"] == %{"approve" => 2, "reject" => 0, "abstain" => 1}
+    assert decision["blocking_ids"] == []
+  end
+
+  test "blocking and architectural findings keep their owners' rejects effective" do
+    {:ok, blocking} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report("reject", new_findings: [finding("must block", "blocking")]),
+        "security" => report("approve"),
+        "maintainability" => report("approve")
+      })
+
+    blocking_decision = ReviewLedgerCore.decision(blocking)
+    assert blocking_decision["vote_counts"] == %{"approve" => 2, "reject" => 1, "abstain" => 0}
+    assert blocking_decision["disposition"] == "rework"
+
+    assert ReviewLedgerCore.to_context(blocking)["review.perspective_votes"]["correctness"] ==
+             "reject"
+
+    architectural =
+      Map.merge(finding("design boundary", "nit"), %{"state" => "architectural_blocker"})
+
+    {:ok, ledger} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report("reject", new_findings: [architectural]),
+        "security" => report("approve"),
+        "maintainability" => report("approve")
+      })
+
+    decision = ReviewLedgerCore.decision(ledger)
+    assert decision["vote_counts"] == %{"approve" => 2, "reject" => 1, "abstain" => 0}
+    assert decision["disposition"] == "human_review"
+  end
+
+  test "corroborated major rejects remain effective for both independent owners" do
+    major = finding("shared major", "major")
+
+    {:ok, ledger} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report("reject", new_findings: [major]),
+        "security" => report("approve"),
+        "maintainability" => report("reject", new_findings: [major])
+      })
+
+    decision = ReviewLedgerCore.decision(ledger)
+    assert decision["vote_counts"] == %{"approve" => 1, "reject" => 2, "abstain" => 0}
+    assert decision["disposition"] == "rework"
+    assert length(decision["blocking_ids"]) == 2
+
+    votes = ReviewLedgerCore.to_context(ledger)["review.perspective_votes"]
+    assert votes["correctness"] == "reject"
+    assert votes["maintainability"] == "reject"
+  end
+
   test "uses symbolic majority and treats all abstain as rework" do
     {:ok, accepted} =
       apply_cycle(new_ledger(), 1, %{
@@ -264,6 +350,24 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
 
     forged_vote = put_in(ledger, ["cycles", "1", "votes", "security"], "reject")
     assert ReviewLedgerCore.decision(forged_vote)["security_veto"]
+  end
+
+  test "recomputes forged merge gates before deriving effective rejects" do
+    {:ok, ledger} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report("reject", new_findings: [finding("shared major", "major")]),
+        "security" => report("approve"),
+        "maintainability" => report("reject", new_findings: [finding("shared major", "major")])
+      })
+
+    forged =
+      Map.update!(ledger, "findings", fn findings ->
+        Map.new(findings, fn {id, finding} -> {id, Map.put(finding, "blocks_merge", false)} end)
+      end)
+
+    decision = ReviewLedgerCore.decision(forged)
+    assert decision["vote_counts"] == %{"approve" => 1, "reject" => 2, "abstain" => 0}
+    assert length(decision["blocking_ids"]) == 2
   end
 
   test "rejects noncanonical cycle owners and oversized otherwise-valid ledgers" do

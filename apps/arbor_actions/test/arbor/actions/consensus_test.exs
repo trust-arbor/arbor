@@ -900,6 +900,29 @@ defmodule Arbor.Actions.ConsensusTest do
       refute result["quorum_met"]
     end
 
+    test "public perspective votes use severity-backed effective rejects" do
+      results = [
+        make_review_branch(
+          "correctness",
+          review_report("reject", new_findings: [review_finding("single major", "major", 20)])
+        ),
+        make_review_branch("security", review_report("approve")),
+        make_review_branch("maintainability", review_report("approve"))
+      ]
+
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{results: results, review_cycle: 1, finding_ledger: review_ledger()},
+                 %{}
+               )
+
+      assert result["perspective_votes"]["correctness"] == "abstain"
+      assert result["reject_count"] == 0
+      assert result["abstain_count"] == 1
+      assert result["review_disposition"] == "accept"
+      assert result["finding_ledger"]["cycles"]["1"]["votes"]["correctness"] == "reject"
+    end
+
     test "failed, malformed, and unknown reports become abstentions without prose vote inference" do
       results = [
         make_review_branch("correctness", review_report("approve")),

@@ -815,7 +815,7 @@ defmodule Arbor.Actions.Consensus do
         "reject_count" => counts["reject"],
         "abstain_count" => counts["abstain"],
         "quorum_met" => disposition == "accept",
-        "perspective_votes" => latest_votes(ledger),
+        "perspective_votes" => context["review.perspective_votes"],
         "security_veto" => decision["security_veto"],
         "status" => "decided",
         "review_cycle" => ledger["review_cycle"],
@@ -827,10 +827,6 @@ defmodule Arbor.Actions.Consensus do
         "blocking_reasons" => decision["blocking_reasons"],
         "human_required" => disposition == "human_review"
       }
-    end
-
-    defp latest_votes(ledger) do
-      get_in(ledger, ["cycles", Integer.to_string(ledger["review_cycle"]), "votes"]) || %{}
     end
 
     defp top_level_decision("accept"), do: "approved"

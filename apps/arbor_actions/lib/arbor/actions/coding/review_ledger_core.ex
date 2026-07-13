@@ -87,12 +87,14 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
     case normalize_ledger(ledger) do
       {:ok, normalized} ->
         findings = normalized["findings"] |> map_values_sorted()
+        decision = build_decision(normalized)
 
         %{
           "review.finding_ledger" => normalized,
           "review.findings" => findings,
           "review.out_of_scope" => normalized["out_of_scope"],
-          "review.decision" => build_decision(normalized),
+          "review.decision" => decision,
+          "review.perspective_votes" => effective_perspective_votes(normalized),
           "finding_ledger" => normalized
         }
 
@@ -102,6 +104,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
           "review.findings" => [],
           "review.out_of_scope" => [],
           "review.decision" => fail_closed_decision(),
+          "review.perspective_votes" => %{},
           "finding_ledger" => %{}
         }
     end
@@ -893,7 +896,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
     do: {:error, :invalid_out_of_scope}
 
   defp build_decision(ledger) do
-    votes = latest_votes(ledger)
+    votes = effective_perspective_votes(ledger)
     vote_counts = Enum.frequencies(Map.values(votes))
     vote_counts = Map.merge(%{"approve" => 0, "reject" => 0, "abstain" => 0}, vote_counts)
 
@@ -951,6 +954,33 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
       0 -> Map.new(ledger["perspectives"], &{&1, "abstain"})
       cycle -> Map.get(ledger["cycles"], Integer.to_string(cycle), %{})["votes"] || %{}
     end
+  end
+
+  defp effective_perspective_votes(ledger) do
+    blocking_owners =
+      ledger["findings"]
+      |> Map.values()
+      |> Enum.filter(&merge_blocking_finding?/1)
+      |> Enum.map(& &1["owner"])
+      |> MapSet.new()
+
+    latest_votes(ledger)
+    |> Map.new(fn {owner, vote} ->
+      effective_vote =
+        if vote == "reject" and owner != "security" and
+             not MapSet.member?(blocking_owners, owner),
+           do: "abstain",
+           else: vote
+
+      {owner, effective_vote}
+    end)
+  end
+
+  defp merge_blocking_finding?(finding) do
+    active?(finding) and
+      (finding["severity"] == "blocking" or
+         finding["state"] == "architectural_blocker" or
+         finding["blocks_merge"] == true)
   end
 
   defp fail_closed_decision do
