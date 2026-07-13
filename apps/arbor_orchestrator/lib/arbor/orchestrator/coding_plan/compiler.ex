@@ -127,7 +127,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              worker_use_pool: plan.worker["use_pool"],
              worker_resume_session_id: plan.worker["resume_session_id"],
              worker_permission_mode: plan.worker["permission_mode"],
-             worker_model: plan.worker["model"]
+             worker_model: plan.worker["model"],
+             rework_max_cycles: plan.rework["max_cycles"]
            ),
          graph_hash = sha256(dot_source),
          {:ok, {execution_manifest, execution_manifest_digest}} <-

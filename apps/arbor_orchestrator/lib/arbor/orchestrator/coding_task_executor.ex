@@ -1171,7 +1171,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
              review_profile: plan.review_profile,
              worker_use_pool: plan.worker["use_pool"],
-             worker_resume_session_id: plan.worker["resume_session_id"]
+             worker_resume_session_id: plan.worker["resume_session_id"],
+             rework_max_cycles: plan.rework["max_cycles"]
            ),
          {:ok, live_catalog} <- ActionCatalog.snapshot(),
          {:ok, pinned_action_bindings} <-

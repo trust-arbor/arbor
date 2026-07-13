@@ -1059,7 +1059,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "mark_validation_rework_kind",
       "mark_validation_rework_iteration",
       nil
-    ]
+    ],
+    ["build_operator_rework_prompt", "reset_worker_turn_protocol_retry_count", nil],
+    ["build_review_rework_prompt", "reset_worker_turn_protocol_retry_count", nil],
+    ["build_validation_rework_prompt", "reset_worker_turn_protocol_retry_count", nil],
+    ["reset_worker_turn_protocol_retry_count", "implement", nil]
   ]
 
   @review_convergence_edges [
@@ -1155,6 +1159,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "prior_candidate_commit" => ["snapshot_review_prior_candidate_commit"],
       "prior_commit" => ["snapshot_review_prior_commit"],
       "review_rework_count" => ["inc_review_rework_count", "init_review_rework_count"],
+      "review_defaults" => ["init_review_defaults"],
       "review_cycle" => ["hoist_review_cycle", "inc_review_cycle", "init_review_cycle"],
       "review_disposition" => ["hoist_review_disposition"],
       "rework_iteration" => [
@@ -1233,6 +1238,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ],
       "prior_commit" => ["snapshot_review_prior_commit", "snapshot_validation_prior_commit"],
       "review_rework_count" => ["inc_review_rework_count", "init_review_rework_count"],
+      "review_defaults" => ["init_review_defaults"],
       "review_cycle" => [
         "hoist_review_cycle",
         "inc_review_cycle",

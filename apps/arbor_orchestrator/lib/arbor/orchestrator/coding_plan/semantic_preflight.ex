@@ -140,6 +140,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     * `:worker_use_pool` and `:worker_resume_session_id` — when both are
       supplied by the reviewed plan boundary, bind `open_worker`'s static ACP
       continuity parameters to that exact normalized plan.
+    * `:rework_max_cycles` — required integer from `0` through `2`, bound to the
+      normalized plan. Every shared-total rework gate must use this threshold.
   """
   @spec validate(Graph.t(), policy(), keyword()) :: :ok | {:error, validate_error()}
   def validate(graph, policy, opts \\ [])
@@ -149,6 +151,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {:ok, policy} <- normalize_policy(policy),
          {:ok, review_profile} <- normalize_review_profile(opts),
          {:ok, worker_continuity} <- normalize_worker_continuity(opts),
+         {:ok, rework_max_cycles} <- normalize_rework_max_cycles(opts),
          :ok <- require_compiled(graph) do
       errors =
         []
@@ -161,7 +164,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_forbidden_denial_bypass_attrs(graph)
         |> check_worker_continuity_bindings(graph, worker_continuity)
         |> check_worker_recovery_bindings(graph, policy, worker_continuity)
-        |> check_review_convergence_bindings(graph, policy)
+        |> check_review_convergence_bindings(graph, policy, rework_max_cycles)
         |> check_workspace_cleanup_topology(graph)
         |> check_profile_bindings(graph, policy, review_profile)
         |> check_reachability_and_dominance(graph, policy, review_profile)
@@ -756,6 +759,19 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
       _other ->
         {:error, {:invalid_semantic_policy, :invalid_worker_continuity}}
+    end
+  end
+
+  defp normalize_rework_max_cycles(opts) do
+    case Keyword.fetch(opts, :rework_max_cycles) do
+      {:ok, max_cycles} when is_integer(max_cycles) and max_cycles in 0..2 ->
+        {:ok, max_cycles}
+
+      :error ->
+        {:error, {:invalid_semantic_policy, :missing_rework_max_cycles}}
+
+      {:ok, other} ->
+        {:error, {:invalid_semantic_policy, {:invalid_rework_max_cycles, other}}}
     end
   end
 
@@ -1973,7 +1989,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     check_worker_recovery_start_nodes(errors, graph, continuity)
   end
 
-  defp check_review_convergence_bindings(errors, graph, policy) do
+  defp check_review_convergence_bindings(errors, graph, policy, rework_max_cycles) do
     convergence = policy["review_convergence"]
 
     errors =
@@ -2058,23 +2074,33 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       graph,
       "check_review_total_budget",
       "legacy_status_review_requires_rework",
-      "snapshot_review_prior_commit"
+      "snapshot_review_prior_commit",
+      rework_max_cycles
     )
     |> check_dynamic_total_budget_edges(
       graph,
       "check_validation_total_budget",
       "status_validation_failed",
-      validation_admitted_target
+      validation_admitted_target,
+      rework_max_cycles
     )
     |> check_dynamic_total_budget_edges(
       graph,
       "check_operator_rework_total_budget",
       "legacy_status_operator_approval_rework",
-      "inc_operator_rework_count"
+      "inc_operator_rework_count",
+      rework_max_cycles
     )
   end
 
-  defp check_dynamic_total_budget_edges(errors, graph, source, exhausted_target, admitted_target) do
+  defp check_dynamic_total_budget_edges(
+         errors,
+         graph,
+         source,
+         exhausted_target,
+         admitted_target,
+         rework_max_cycles
+       ) do
     outgoing = Graph.outgoing_edges(graph, source)
 
     thresholds =
@@ -2083,13 +2109,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       end)
 
     valid? =
-      Enum.any?(0..2, fn max_cycles ->
-        Enum.sort(thresholds) ==
-          Enum.sort([
-            {exhausted_target, "context.total_rework_count>=#{max_cycles}"},
-            {admitted_target, "context.total_rework_count<#{max_cycles}"}
-          ])
-      end)
+      Enum.sort(thresholds) ==
+        Enum.sort([
+          {exhausted_target, "context.total_rework_count>=#{rework_max_cycles}"},
+          {admitted_target, "context.total_rework_count<#{rework_max_cycles}"}
+        ])
 
     if valid? do
       errors
@@ -2101,7 +2125,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
             |> Enum.sort()
             |> Enum.map(fn {target, condition} -> [target, condition] end),
           "admitted_target" => admitted_target,
-          "exhausted_target" => exhausted_target
+          "exhausted_target" => exhausted_target,
+          "expected_max_cycles" => rework_max_cycles
         })
         | errors
       ]

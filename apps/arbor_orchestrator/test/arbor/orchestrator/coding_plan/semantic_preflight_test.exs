@@ -48,9 +48,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
     assert :ok =
-             SemanticPreflight.validate(graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(graph, profile["semantic_policy"], review_profile: "binding")
 
     # Structural: skip-review edge removed so review dominates publication.
     refute has_edge?(
@@ -59,6 +57,98 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              "route_publish",
              "context.submit_review=false"
            )
+  end
+
+  test "direct preflight callers fail closed without the normalized plan rework threshold", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    assert {:error, {:invalid_semantic_policy, :missing_rework_max_cycles}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert {:error, {:invalid_semantic_policy, {:invalid_rework_max_cycles, "2"}}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_max_cycles: "2"
+             )
+  end
+
+  test "security regression: every total gate is bound to the plan max_cycles", ctx do
+    for {plan, profile_name} <- [
+          {plan!(%{"rework" => %{"max_cycles" => 1}}), "default"},
+          {security_plan!(%{"rework" => %{"max_cycles" => 1}}), "security_regression"}
+        ] do
+      assert {:ok, compilation} = compile(plan, ctx)
+      graph = compiled_graph!(compilation.dot_source)
+      assert {:ok, profile} = Profiles.fetch_executable(profile_name)
+
+      assert :ok =
+               preflight(graph, profile["semantic_policy"],
+                 review_profile: "binding",
+                 rework_max_cycles: 1
+               )
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(graph, profile["semantic_policy"],
+                 review_profile: "binding",
+                 rework_max_cycles: 2
+               )
+
+      mismatched_nodes =
+        errors
+        |> Enum.filter(&(&1["code"] == "review_convergence_budget_topology_mismatch"))
+        |> Enum.map(& &1["node_id"])
+        |> Enum.sort()
+
+      assert mismatched_nodes ==
+               Enum.sort(~w[
+                 check_operator_rework_total_budget
+                 check_review_total_budget
+                 check_validation_total_budget
+               ])
+
+      assert Enum.all?(errors, fn error ->
+               error["code"] != "review_convergence_budget_topology_mismatch" or
+                 error["detail"]["expected_max_cycles"] == 2
+             end)
+    end
+  end
+
+  test "security regression: mixed total-gate thresholds fail preflight", ctx do
+    plan = plan!(%{"rework" => %{"max_cycles" => 1}})
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mixed =
+      graph
+      |> replace_edge_condition(
+        "check_review_total_budget",
+        "legacy_status_review_requires_rework",
+        "context.total_rework_count>=1",
+        "context.total_rework_count>=2"
+      )
+      |> replace_edge_condition(
+        "check_review_total_budget",
+        "snapshot_review_prior_commit",
+        "context.total_rework_count<1",
+        "context.total_rework_count<2"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(mixed, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_max_cycles: 1
+             )
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "review_convergence_budget_topology_mismatch" and
+               error["node_id"] == "check_review_total_budget" and
+               error["detail"]["expected_max_cycles"] == 1
+           end)
   end
 
   test "security regression: review convergence and shared counter mutations fail closed", ctx do
@@ -128,14 +218,26 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       update_in(
         graph.nodes["inc_operator_total_rework_count"].attrs,
         &Map.put(&1, "source_key", "operator_rework_count")
+      ),
+      replace_edge_target(
+        graph,
+        "build_review_rework_prompt",
+        "reset_worker_turn_protocol_retry_count",
+        nil,
+        "route_publish"
+      ),
+      replace_edge_target(
+        graph,
+        "build_validation_rework_prompt",
+        "reset_worker_turn_protocol_retry_count",
+        nil,
+        "commit_change"
       )
     ]
 
     for mutated <- mutations do
       assert {:error, {:semantic_preflight_failed, errors}} =
-               SemanticPreflight.validate(mutated, profile["semantic_policy"],
-                 review_profile: "binding"
-               )
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding")
 
       assert Enum.any?(errors, fn error ->
                error["code"] in [
@@ -145,6 +247,27 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                ]
              end)
     end
+  end
+
+  test "security regression: a second review_defaults writer cannot restore string cycle data",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutated = inject_string_review_defaults_writer(graph)
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(mutated, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "review_convergence_writer_violation" and
+               error["detail"]["context_key"] == "review_defaults" and
+               error["detail"]["actual_nodes"] == [
+                 "init_review_defaults",
+                 "restore_string_review_defaults"
+               ]
+           end)
   end
 
   test "security regression: overlay cannot bypass delta, cycle, or validation total counter",
@@ -183,9 +306,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     for mutated <- mutations do
       assert {:error, {:semantic_preflight_failed, errors}} =
-               SemanticPreflight.validate(mutated, profile["semantic_policy"],
-                 review_profile: "binding"
-               )
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding")
 
       assert Enum.any?(errors, fn error ->
                error["code"] in [
@@ -217,15 +338,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
     assert :ok =
-             SemanticPreflight.validate(compiled, profile["semantic_policy"],
-               review_profile: "none"
-             )
+             preflight(compiled, profile["semantic_policy"], review_profile: "none")
 
     # Under binding rules the same topology fails review dominance.
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(compiled, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(compiled, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "dominance_violation" and err["detail"]["kind"] == "review"
@@ -239,12 +356,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("security_regression")
 
     assert :ok =
-             SemanticPreflight.validate(graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(graph, profile["semantic_policy"], review_profile: "binding")
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(graph, profile["semantic_policy"], review_profile: "none")
+             preflight(graph, profile["semantic_policy"], review_profile: "none")
 
     assert Enum.any?(errors, &(&1["code"] == "security_review_profile_forbidden"))
   end
@@ -284,9 +399,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     for mutated <- mutations do
       assert {:error, {:semantic_preflight_failed, errors}} =
-               SemanticPreflight.validate(mutated, profile["semantic_policy"],
-                 review_profile: "binding"
-               )
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding")
 
       assert Enum.any?(errors, fn err ->
                err["code"] in [
@@ -324,9 +437,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       bypassed = add_edge(graph, from, to, "context.bypass=true")
 
       assert {:error, {:semantic_preflight_failed, errors}} =
-               SemanticPreflight.validate(bypassed, profile["semantic_policy"],
-                 review_profile: "binding"
-               )
+               preflight(bypassed, profile["semantic_policy"], review_profile: "binding")
 
       assert Enum.any?(errors, fn err ->
                err["code"] == "dominance_violation" and err["detail"]["kind"] == kind
@@ -347,9 +458,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       bypassed = add_edge(graph, entry, "check_security_rework_fresh", "context.bypass=true")
 
       assert {:error, {:semantic_preflight_failed, errors}} =
-               SemanticPreflight.validate(bypassed, profile["semantic_policy"],
-                 review_profile: "binding"
-               )
+               preflight(bypassed, profile["semantic_policy"], review_profile: "binding")
 
       assert Enum.any?(errors, fn err ->
                err["code"] == "dominance_violation" and err["detail"]["kind"] == kind
@@ -372,9 +481,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       bypassed = add_edge(graph, from, to, "context.rework_bypass=true")
 
       assert {:error, {:semantic_preflight_failed, errors}} =
-               SemanticPreflight.validate(bypassed, profile["semantic_policy"],
-                 review_profile: "binding"
-               )
+               preflight(bypassed, profile["semantic_policy"], review_profile: "binding")
 
       assert Enum.any?(errors, fn err ->
                err["code"] == "dominance_violation" and err["detail"]["kind"] == kind
@@ -391,9 +498,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("security_regression")
 
     assert :ok =
-             SemanticPreflight.validate(graph, profile["semantic_policy"],
-               review_profile: "human_required"
-             )
+             preflight(graph, profile["semantic_policy"], review_profile: "human_required")
 
     # Human handoff may be unattested, so review must still dominate it.
     bypassed =
@@ -405,9 +510,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(bypassed, profile["semantic_policy"],
-               review_profile: "human_required"
-             )
+             preflight(bypassed, profile["semantic_policy"], review_profile: "human_required")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "dominance_violation" and err["detail"]["kind"] == "review"
@@ -426,7 +529,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       end)
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(graph, policy, review_profile: "binding")
+             preflight(graph, policy, review_profile: "binding")
 
     assert Enum.any?(errors, fn error ->
              error["code"] == "dominance_violation" and
@@ -442,9 +545,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("security_regression")
 
     assert :ok =
-             SemanticPreflight.validate(graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(graph, profile["semantic_policy"], review_profile: "binding")
 
     present = ~s(context.review.review_attestation_id!="")
     absent = ~s(context.review.review_attestation_id="")
@@ -474,9 +575,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(unguarded, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(unguarded, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, &(&1["code"] == "security_topology_mismatch"))
   end
@@ -535,9 +634,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     refute "mix_test" in profile["semantic_policy"]["allowed_actions"]
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(injected, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(injected, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "forbidden_action" and err["node_id"] == "inspect_workspace" and
@@ -569,9 +666,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     }
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(mutated, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(mutated, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "action_placement_extra_node" and err["node_id"] == early_pr and
@@ -593,9 +688,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       add_edge(bypassed, "open_draft_pr", "init_validation_rework_count", "context.rejoin=true")
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(bypassed, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(bypassed, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "dominance_violation" and err["node_id"] == "open_draft_pr" and
@@ -617,9 +710,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       bypassed = add_edge(graph, from, to, "context.early_lifecycle=true")
 
       assert {:error, {:semantic_preflight_failed, errors}} =
-               SemanticPreflight.validate(bypassed, profile["semantic_policy"],
-                 review_profile: "binding"
-               )
+               preflight(bypassed, profile["semantic_policy"], review_profile: "binding")
 
       assert Enum.any?(errors, fn err ->
                err["code"] == "dominance_violation" and err["node_id"] == to and
@@ -648,9 +739,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(swapped, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(swapped, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "action_placement_mismatch" and err["node_id"] == "open_draft_pr"
@@ -669,14 +758,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
     assert :ok =
-             SemanticPreflight.validate(graph, profile["semantic_policy"], review_profile: "none")
+             preflight(graph, profile["semantic_policy"], review_profile: "none")
 
     bypassed = add_edge(graph, "start", "open_draft_pr", "context.early_pr_none=true")
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(bypassed, profile["semantic_policy"],
-               review_profile: "none"
-             )
+             preflight(bypassed, profile["semantic_policy"], review_profile: "none")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "dominance_violation" and err["node_id"] == "open_draft_pr"
@@ -697,18 +784,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     bad_key = Map.put(policy, "action_placements", [%{"node_id" => "x"}])
 
     assert {:error, {:invalid_semantic_policy, {:invalid_action_placement_entry, _}}} =
-             SemanticPreflight.validate(graph, bad_key, review_profile: "binding")
+             preflight(graph, bad_key, review_profile: "binding")
 
     bad_type = Map.put(policy, "action_placements", "not-a-list")
 
     assert {:error, {:invalid_semantic_policy, {:invalid_action_placements, "action_placements"}}} =
-             SemanticPreflight.validate(graph, bad_type, review_profile: "binding")
+             preflight(graph, bad_type, review_profile: "binding")
 
     unsorted =
       Map.put(policy, "action_placements", Enum.reverse(policy["action_placements"]))
 
     assert {:error, {:invalid_semantic_policy, {:unsorted_list, "action_placements"}}} =
-             SemanticPreflight.validate(graph, unsorted, review_profile: "binding")
+             preflight(graph, unsorted, review_profile: "binding")
   end
 
   test "adversarial: commit gate must be coding_reviewed_commit; denial bypass attrs rejected",
@@ -724,9 +811,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert graph.nodes["check_operator_rework_total_budget"]
 
     assert :ok =
-             SemanticPreflight.validate(graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(graph, profile["semantic_policy"], review_profile: "binding")
 
     forged =
       update_in(graph.nodes["validate"].attrs, fn attrs ->
@@ -734,9 +819,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       end)
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(forged, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(forged, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "forbidden_denial_bypass_attribute" and
@@ -747,9 +830,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       update_in(graph.nodes["commit_change"].attrs, &Map.put(&1, "action", "git_commit"))
 
     assert {:error, {:semantic_preflight_failed, action_errors}} =
-             SemanticPreflight.validate(wrong_action, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(wrong_action, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(action_errors, fn err ->
              err["code"] == "invalid_commit_approval_action" and
@@ -773,9 +854,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     }
 
     assert {:error, {:semantic_preflight_failed, bypass_errors}} =
-             SemanticPreflight.validate(bypass, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(bypass, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(bypass_errors, fn err ->
              err["code"] == "commit_approval_bypass_edge"
@@ -789,9 +868,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
     assert :ok =
-             SemanticPreflight.validate(graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(graph, profile["semantic_policy"], review_profile: "binding")
   end
 
   test "security regression: direct approval deny to terminal bypass fails closed", ctx do
@@ -1020,9 +1097,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(malformed, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(malformed, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, &(&1["code"] == "malformed_graph_edge"))
   end
@@ -1037,9 +1112,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(overridden, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(overridden, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "forbidden_authority_attribute" and
@@ -1073,9 +1146,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       update_in(graph.nodes["commit_change"].attrs, &Map.put(&1, "param.graph", "evil.dot"))
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(forged, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(forged, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "forbidden_authority_attribute" and
@@ -1097,9 +1168,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         update_in(graph.nodes["inspect_workspace"].attrs, &Map.put(&1, attr, value))
 
       assert {:error, {:semantic_preflight_failed, alias_errors}} =
-               SemanticPreflight.validate(aliased, profile["semantic_policy"],
-                 review_profile: "binding"
-               )
+               preflight(aliased, profile["semantic_policy"], review_profile: "binding")
 
       assert Enum.any?(alias_errors, fn err ->
                err["code"] == "forbidden_authority_attribute" and
@@ -1121,9 +1190,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(overridden, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(overridden, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn err ->
              err["code"] == "forbidden_authority_output" and
@@ -1143,7 +1210,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       end)
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(substituted, profile["semantic_policy"],
+             preflight(substituted, profile["semantic_policy"],
                review_profile: "binding",
                worker_use_pool: true,
                worker_resume_session_id: nil
@@ -1175,7 +1242,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     }
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(bypassed, profile["semantic_policy"],
+             preflight(bypassed, profile["semantic_policy"],
                review_profile: "binding",
                worker_use_pool: true,
                worker_resume_session_id: nil
@@ -1237,9 +1304,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       IRCompiler.compile(%{forbidden_handler | compiled: false, handler_types: %{}})
 
     assert {:error, {:semantic_preflight_failed, handler_errors}} =
-             SemanticPreflight.validate(handler_graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(handler_graph, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(handler_errors, fn err ->
              err["code"] == "forbidden_handler" and err["detail"]["handler"] == "compute"
@@ -1256,9 +1321,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       IRCompiler.compile(%{forbidden_target | compiled: false, handler_types: %{}})
 
     assert {:error, {:semantic_preflight_failed, target_errors}} =
-             SemanticPreflight.validate(target_graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(target_graph, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(target_errors, fn err ->
              err["code"] == "forbidden_exec_target" and err["node_id"] == "commit_change" and
@@ -1271,7 +1334,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     graph = minimal_compiled_graph()
 
     assert {:error, {:invalid_semantic_policy, {:missing_keys, keys}}} =
-             SemanticPreflight.validate(graph, %{}, review_profile: "binding")
+             preflight(graph, %{}, review_profile: "binding")
 
     assert "allowed_actions" in keys
     assert keys == Enum.sort(keys)
@@ -1279,7 +1342,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     bad = Map.put(profile["semantic_policy"], "allowed_actions", ["z", "a"])
 
     assert {:error, {:invalid_semantic_policy, {:unsorted_list, "allowed_actions"}}} =
-             SemanticPreflight.validate(graph, bad, review_profile: "binding")
+             preflight(graph, bad, review_profile: "binding")
 
     bad_optional =
       profile["semantic_policy"]
@@ -1287,7 +1350,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       |> Map.put("allowed_actions", profile["semantic_policy"]["allowed_actions"])
 
     assert {:error, {:invalid_semantic_policy, {:optional_actions_not_allowed, ["not_allowed"]}}} =
-             SemanticPreflight.validate(graph, bad_optional, review_profile: "binding")
+             preflight(graph, bad_optional, review_profile: "binding")
   end
 
   test "dominators handle cycles without false positives", ctx do
@@ -1299,9 +1362,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
     assert :ok =
-             SemanticPreflight.validate(compiled, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(compiled, profile["semantic_policy"], review_profile: "binding")
 
     # Adding a cycle that does not create a bypass must still pass.
     with_extra_cycle =
@@ -1312,9 +1373,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     {:ok, cycled} = IRCompiler.compile(with_extra_cycle)
 
     assert :ok =
-             SemanticPreflight.validate(cycled, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(cycled, profile["semantic_policy"], review_profile: "binding")
   end
 
   test "workspace cleanup topology cannot bypass or swap the reviewed retention policy", ctx do
@@ -1360,9 +1419,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     for mutated <- mutations do
       assert {:error, {:semantic_preflight_failed, errors}} =
-               SemanticPreflight.validate(mutated, profile["semantic_policy"],
-                 review_profile: "binding"
-               )
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding")
 
       assert Enum.any?(errors, fn error ->
                error["code"] in [
@@ -1408,7 +1465,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     for mutated <- mutations do
       assert {:error, {:semantic_preflight_failed, errors}} =
-               SemanticPreflight.validate(mutated, profile["semantic_policy"],
+               preflight(mutated, profile["semantic_policy"],
                  review_profile: "binding",
                  worker_use_pool: true,
                  worker_resume_session_id: nil
@@ -1470,6 +1527,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     compiled
   end
 
+  defp preflight(graph, policy, opts) do
+    SemanticPreflight.validate(
+      graph,
+      policy,
+      Keyword.put_new(opts, :rework_max_cycles, 2)
+    )
+  end
+
   defp has_edge?(graph, from, to, condition) do
     Enum.any?(graph.edges, fn edge ->
       edge.from == from and edge.to == to and Map.get(edge.attrs, "condition") == condition
@@ -1514,9 +1579,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
   defp assert_preflight_error(graph, profile, code, kind) do
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(graph, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn error ->
              error["code"] == code and error["detail"]["kind"] == kind
@@ -1526,9 +1589,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
   defp assert_preflight_path_violation(graph, profile, violation_type) do
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(graph, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn error ->
              error["code"] == "all_path_violation" and
@@ -1540,9 +1601,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
   defp assert_graph_limit(graph, profile, resource) do
     assert {:error, {:semantic_preflight_failed, errors}} =
-             SemanticPreflight.validate(graph, profile["semantic_policy"],
-               review_profile: "binding"
-             )
+             preflight(graph, profile["semantic_policy"], review_profile: "binding")
 
     assert Enum.any?(errors, fn error ->
              error["code"] == "graph_limit_exceeded" and
@@ -1568,6 +1627,35 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       end)
 
     %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}
+  end
+
+  defp replace_edge_condition(graph, from, to, condition, replacement) do
+    edges =
+      Enum.map(graph.edges, fn edge ->
+        if edge.from == from and edge.to == to and Map.get(edge.attrs, "condition") == condition do
+          %{edge | attrs: Map.put(edge.attrs, "condition", replacement)}
+        else
+          edge
+        end
+      end)
+
+    %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}
+  end
+
+  defp inject_string_review_defaults_writer(graph) do
+    writer_id = "restore_string_review_defaults"
+
+    graph
+    |> add_cloned_node("init_review_defaults", writer_id)
+    |> update_in([Access.key!(:nodes), writer_id, Access.key!(:attrs)], fn attrs ->
+      Map.put(
+        attrs,
+        "expression",
+        ~s({"review_cycle":"1","finding_ledger":{},"delta_diff":"","delta_files":[],"delta_ranges":{}})
+      )
+    end)
+    |> replace_edge_target("init_review_defaults", "init_finding_ledger", nil, writer_id)
+    |> add_edge(writer_id, "init_finding_ledger", nil)
   end
 
   defp minimal_compiled_graph do
