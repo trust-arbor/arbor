@@ -27,10 +27,11 @@ end
 
 # Persistence — adapter selected by ARBOR_DB env var
 # Default: SQLite (zero-config). Set ARBOR_DB=postgres for PostgreSQL.
+# ARBOR_DB_NAME / ARBOR_SQLITE_PATH select an isolated development database.
 if System.get_env("ARBOR_DB") == "postgres" do
   # PostgreSQL
   config :arbor_persistence, Arbor.Persistence.Repo,
-    database: "arbor_persistence_dev",
+    database: System.get_env("ARBOR_DB_NAME", "arbor_persistence_dev"),
     username: System.get_env("DB_USER", "arbor_dev"),
     password: System.get_env("DB_PASS", ""),
     hostname: "localhost",
@@ -54,7 +55,9 @@ else
     stores: []
 
   config :arbor_persistence, Arbor.Persistence.Repo,
-    database: Path.expand("~/.arbor/arbor_dev.db"),
+    database:
+      System.get_env("ARBOR_SQLITE_PATH", Path.expand("~/.arbor/arbor_dev.db"))
+      |> Path.expand(),
     busy_timeout: 5_000,
     journal_mode: :wal,
     cache_size: -64_000,
