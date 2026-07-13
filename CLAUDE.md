@@ -365,11 +365,14 @@ invalid fragment that downstream workers cannot parse. Bound fields before encod
 to a smaller valid JSON envelope with an explicit truncation marker if the encoded payload still
 exceeds its ceiling (found 2026-07-12 in recovery and review feedback).
 
-**Jido `:map` schemas do not accept dynamic string-keyed JSON maps.** Path-keyed values such as
-`%{"lib/a.ex" => [[1, 2]]}` fail schema validation because Jido expects atom map keys. Use `:any` at
-that outer action-schema slot only when a downstream contract constructor immediately validates a
-bounded string-keyed JSON map; add a public action test so the weaker declaration cannot become an
-unvalidated bypass (found 2026-07-12 with review `delta_ranges` and finding ledgers).
+**Jido `:map` schemas do not accept dynamic string-keyed JSON maps, and `:any` is not an honest
+tool-schema fallback.** Path-keyed values such as `%{"lib/a.ex" => [[1, 2]]}` fail Nimble schema
+validation because Jido expects atom map keys, while Jido's JSON-schema converter publishes
+Nimble `:any` as `type=string`. Use a terminating Zoi object/array schema with dynamic string-keyed
+maps; when strict conversion would close those nested maps, publish the non-strict schema and close
+only the fixed root object. Exercise `validate_params/1` with atom top-level keys because string
+top-level keys are treated as unknown passthrough fields, and assert both malformed outer types and
+the emitted `to_tool/0` schema (found 2026-07-12 with review `delta_ranges` and finding ledgers).
 
 **Changing a reviewed nested DOT action requires updating every action catalog.** Registering the
 action in `Arbor.Actions` is not enough: compiler fixtures, executable profile manifests, and nested
