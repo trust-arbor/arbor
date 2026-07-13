@@ -223,6 +223,29 @@ defmodule Arbor.Shell.PortSessionTest do
       PortSession.kill(pid)
     end
 
+    test "interactive session keeps stdin open for later send_input" do
+      # Interactive PortSession must not close stdin after start (one-shot does).
+      # cat stays alive until we write later, then echoes exact bytes.
+      {:ok, pid} = PortSession.start_link("cat", stream_to: self(), timeout: 5_000)
+      id = PortSession.get_id(pid)
+
+      # Give the child time to start; it must still be waiting on stdin (no EOF).
+      Process.sleep(150)
+      assert Process.alive?(pid)
+      refute_received {:port_exit, ^id, _, _}
+
+      assert :ok = PortSession.send_input(pid, "later interactive input\n")
+      assert_receive {:port_data, ^id, chunk}, 5_000
+      assert chunk == "later interactive input\n"
+
+      # A second write still works — stdin was not closed after the first.
+      assert :ok = PortSession.send_input(pid, "second write\n")
+      assert_receive {:port_data, ^id, chunk2}, 5_000
+      assert chunk2 == "second write\n"
+
+      PortSession.kill(pid)
+    end
+
     test "returns error when not running" do
       {:ok, pid} = PortSession.start_link("echo done", stream_to: self())
       id = PortSession.get_id(pid)

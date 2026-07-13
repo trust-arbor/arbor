@@ -43,6 +43,7 @@ extern char **environ;
 #define CMD_START 10
 #define CMD_INPUT 11
 #define CMD_CANCEL 12
+#define CMD_CLOSE_STDIN 13
 
 #define REASON_NORMAL 0
 #define REASON_TIMEOUT 1
@@ -1032,6 +1033,9 @@ static int run_exec(int argc, char **argv) {
   int child_done = 0;
   uint8_t reason = REASON_NORMAL;
   uint8_t output[IO_CHUNK];
+  /* Parent write end of child stdin. Closed only via CMD_CLOSE_STDIN or teardown.
+   * Tracking -1 after close keeps close idempotent and blocks writes to a closed fd. */
+  int input_write_fd = input_pipe[1];
 
   while (!child_done) {
     if (monotonic_ms() >= deadline) {
@@ -1066,13 +1070,33 @@ static int run_exec(int argc, char **argv) {
         reason = REASON_CANCELLED;
         break;
       }
-      if (input_tag != CMD_INPUT ||
-          (input_length > 0 && write_all(input_pipe[1], input_payload, input_length) != 0)) {
+
+      if (input_tag == CMD_CLOSE_STDIN) {
+        free(input_payload);
+        /* Payload must be empty; close is idempotent when already closed. */
+        if (input_length != 0) {
+          reason = REASON_CANCELLED;
+          break;
+        }
+        if (input_write_fd >= 0) {
+          close(input_write_fd);
+          input_write_fd = -1;
+        }
+      } else if (input_tag == CMD_INPUT) {
+        /* Fail closed: never write after stdin was closed. */
+        if (input_write_fd < 0 ||
+            (input_length > 0 &&
+             write_all(input_write_fd, input_payload, input_length) != 0)) {
+          free(input_payload);
+          reason = REASON_CANCELLED;
+          break;
+        }
+        free(input_payload);
+      } else {
         free(input_payload);
         reason = REASON_CANCELLED;
         break;
       }
-      free(input_payload);
     }
 
     if (fds[0].revents & (POLLIN | POLLHUP)) {
@@ -1097,7 +1121,10 @@ static int run_exec(int argc, char **argv) {
     if (waited < 0 && errno == ECHILD) child_done = 1;
   }
 
-  close(input_pipe[1]);
+  if (input_write_fd >= 0) {
+    close(input_write_fd);
+    input_write_fd = -1;
+  }
   int teardown_discovery = discover_descendants(&tracker, child);
   int live_descendants =
       teardown_discovery < 0 ? -1 : tracked_descendants_live(&tracker, child);

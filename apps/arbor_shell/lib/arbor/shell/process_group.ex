@@ -13,6 +13,7 @@ defmodule Arbor.Shell.ProcessGroup do
   @start 10
   @input 11
   @cancel 12
+  @close_stdin 13
 
   @normal 0
   @timeout 1
@@ -23,14 +24,15 @@ defmodule Arbor.Shell.ProcessGroup do
   @teardown_timeout_ms 2_000
   @cleanup_retry_ms 100
 
-  defstruct [:port, :group_id, :deadline, :start_time, :max_output_bytes]
+  defstruct [:port, :group_id, :deadline, :start_time, :max_output_bytes, stdin_open: true]
 
   @type t :: %__MODULE__{
           port: port(),
           group_id: pos_integer(),
           deadline: integer(),
           start_time: integer(),
-          max_output_bytes: pos_integer()
+          max_output_bytes: pos_integer(),
+          stdin_open: boolean()
         }
 
   @type terminal_reason ::
@@ -64,7 +66,11 @@ defmodule Arbor.Shell.ProcessGroup do
         ) :: {:ok, map()} | {:error, term()}
   def run_executable(executable, args, opts, start_time, timeout, max_output_bytes) do
     with {:ok, handle} <- open(executable, args, opts, start_time, timeout, max_output_bytes),
-         :ok <- start(handle, Keyword.get(opts, :stdin)) do
+         :ok <- start(handle, Keyword.get(opts, :stdin)),
+         # One-shot path always closes child stdin after optional initial bytes so
+         # EOF-reading programs (e.g. cat) exit. Interactive PortSession leaves
+         # stdin open for later send_input/2.
+         {:ok, handle} <- close_stdin(handle) do
       collect(handle, Keyword.get(opts, :cancel_id), [], 0)
     end
   end
@@ -99,7 +105,8 @@ defmodule Arbor.Shell.ProcessGroup do
          group_id: group_id,
          deadline: deadline,
          start_time: start_time,
-         max_output_bytes: max_output_bytes
+         max_output_bytes: max_output_bytes,
+         stdin_open: true
        }}
     else
       remaining when is_integer(remaining) and remaining <= 0 -> {:error, :timeout_during_setup}
@@ -114,6 +121,27 @@ defmodule Arbor.Shell.ProcessGroup do
          :ok <- maybe_send_stdin(port, encoded_stdin) do
       :ok
     else
+      {:error, reason} ->
+        {:ok, _terminal_reason} = terminate_until_exhausted(handle, :cancelled)
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Close the child process stdin write end (EOF).
+
+  Idempotent: a second close is a no-op success. After close, `send_input/2`
+  fails closed without writing. One-shot `run_executable/6` always closes;
+  interactive `PortSession` leaves stdin open for later input.
+  """
+  @spec close_stdin(t()) :: {:ok, t()} | {:error, term()}
+  def close_stdin(%__MODULE__{stdin_open: false} = handle), do: {:ok, handle}
+
+  def close_stdin(%__MODULE__{port: port} = handle) do
+    case command(port, <<@close_stdin>>) do
+      :ok ->
+        {:ok, %{handle | stdin_open: false}}
+
       {:error, reason} ->
         {:ok, _terminal_reason} = terminate_until_exhausted(handle, :cancelled)
         {:error, reason}
@@ -157,6 +185,8 @@ defmodule Arbor.Shell.ProcessGroup do
   end
 
   @spec send_input(t(), iodata()) :: :ok | {:error, term()}
+  def send_input(%__MODULE__{stdin_open: false}, _data), do: {:error, :stdin_closed}
+
   def send_input(%__MODULE__{port: port}, data) do
     with {:ok, encoded} <- encode_input(data) do
       command(port, [<<@input>>, encoded])

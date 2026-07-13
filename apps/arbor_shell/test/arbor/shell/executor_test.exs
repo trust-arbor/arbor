@@ -47,6 +47,41 @@ defmodule Arbor.Shell.ExecutorTest do
       assert String.contains?(result.stdout, "test input")
     end
 
+    test "one-shot closes stdin so EOF readers exit with exact bytes" do
+      # Pre-fix: C launcher left input_pipe[1] open after optional stdin, so
+      # programs that read until EOF (cat) hung until timeout. Candidate sends
+      # initial stdin then close-stdin so the child sees EOF and exits normally.
+      payload = "exact-eof-payload-bytes\n"
+
+      {:ok, result} = Executor.run("cat", stdin: payload, timeout: 2_000)
+
+      assert result.exit_code == 0
+      assert result.timed_out == false
+      assert result.killed == false
+      assert result.stdout == payload
+    end
+
+    test "one-shot closes stdin even when stdin is nil" do
+      # Nil stdin must still close the write end; otherwise cat blocks forever.
+      {:ok, result} = Executor.run("cat", timeout: 2_000)
+
+      assert result.exit_code == 0
+      assert result.timed_out == false
+      assert result.killed == false
+      assert result.stdout == ""
+    end
+
+    test "one-shot execute_direct closes stdin for EOF readers" do
+      payload = "direct-argv-eof\n"
+
+      {:ok, result} =
+        Shell.execute_direct("cat", [], stdin: payload, timeout: 2_000, sandbox: :none)
+
+      assert result.exit_code == 0
+      assert result.timed_out == false
+      assert result.stdout == payload
+    end
+
     test "handles timeout" do
       {:ok, result} = Executor.run("sleep 10", timeout: 100)
 
