@@ -581,6 +581,8 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
     assert {:error, :unauthorized} = GenServer.call(RunLease.Store, {:fetch, handle.lease})
     assert {:error, :unauthorized} = GenServer.call(RunLease.Store, :all_ids)
+    assert {:error, :unauthorized} = GenServer.call(RunLease.Store, :begin_recovery)
+    assert {:error, :unauthorized} = GenServer.call(RunLease.Store, :recovery_snapshot)
     assert {:error, :unauthorized} = GenServer.call(RunLease.Store, {:discard, handle.lease})
     assert {:error, :unauthorized} = RunLease.StateOwner.fetch(handle.lease)
     assert {:error, :unauthorized} = RunLease.JournalOwner.fetch(handle.lease)
@@ -633,6 +635,90 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
       refute_receive {:store_death_mint_result, ^stage, {:ok, _handle}}, 100
       Process.exit(owner, :kill)
+    end
+  end
+
+  test "security regression: JournalOwner death reaps the lost lease namespace", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+    assert {:ok, handle} = RunIdentity.mint(attestation)
+
+    old_journal_owner = Process.whereis(RunLease.JournalOwner)
+    old_runtime_supervisor = Process.whereis(Arbor.Scheduler.Supervisor)
+    journal_ref = Process.monitor(old_journal_owner)
+    Process.exit(old_journal_owner, :kill)
+    assert_receive {:DOWN, ^journal_ref, :process, ^old_journal_owner, :killed}, 5_000
+
+    assert_eventually(fn ->
+      new_journal_owner = Process.whereis(RunLease.JournalOwner)
+      new_runtime_supervisor = Process.whereis(Arbor.Scheduler.Supervisor)
+
+      is_pid(new_journal_owner) and new_journal_owner != old_journal_owner and
+        is_pid(new_runtime_supervisor) and new_runtime_supervisor != old_runtime_supervisor
+    end)
+
+    # The scheduler test application starts with runtime children disabled.
+    assert {:ok, _supervisor} =
+             Supervisor.start_child(
+               Arbor.Scheduler.Supervisor,
+               Arbor.Scheduler.RunLeaseSupervisor
+             )
+
+    assert_eventually(fn -> run_state_removed?(handle) end)
+    assert is_nil(safe_lease_whereis(handle.lease))
+
+    assert {:error, :authority_not_found} =
+             Security.sign_with_authority(handle.signing_authority, "stale-journal-handle")
+  end
+
+  test "security regression: StateOwner death after identity or grant success reaps orphans", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+
+    for stage <- [:identity, :grant] do
+      Application.put_env(:arbor_scheduler, :run_identity_race_stage, stage)
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          result = RunIdentity.mint(attestation, security_facade: ProvisionRaceSecurityStub)
+          send(parent, {:state_owner_death_mint_result, stage, result})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:race_agent, agent_id}, 5_000
+      assert_receive {:race_effect, ^stage, artifact, state_owner}, 5_000
+      assert state_owner == Process.whereis(RunLease.StateOwner)
+
+      state_owner_ref = Process.monitor(state_owner)
+      Process.exit(state_owner, :kill)
+      assert_receive {:DOWN, ^state_owner_ref, :process, ^state_owner, :killed}, 5_000
+
+      assert_eventually(fn ->
+        new_state_owner = Process.whereis(RunLease.StateOwner)
+        is_pid(new_state_owner) and new_state_owner != state_owner
+      end)
+
+      case stage do
+        :identity ->
+          assert_eventually(fn ->
+            match?({:error, :not_found}, Security.lookup_public_key(agent_id))
+          end)
+
+        :grant ->
+          assert_eventually(fn -> match?({:error, _reason}, CapabilityStore.get(artifact.id)) end)
+      end
+
+      refute_receive {:state_owner_death_mint_result, ^stage, {:ok, _handle}}, 100
+      Process.exit(owner, :kill)
+
+      assert_eventually(fn ->
+        match?({:error, :not_found}, Security.lookup_public_key(agent_id))
+      end)
     end
   end
 

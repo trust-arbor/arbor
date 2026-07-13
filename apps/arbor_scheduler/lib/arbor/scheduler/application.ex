@@ -30,7 +30,9 @@ defmodule Arbor.Scheduler.Application do
     ]
 
     Supervisor.start_link(children,
-      strategy: :one_for_one,
+      strategy: :rest_for_one,
+      max_restarts: 5,
+      max_seconds: 5,
       name: Arbor.Scheduler.ApplicationSupervisor
     )
   end

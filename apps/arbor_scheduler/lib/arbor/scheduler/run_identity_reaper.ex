@@ -37,13 +37,21 @@ defmodule Arbor.Scheduler.RunIdentityReaper do
     security = Keyword.get(opts, :security_facade, Security)
     trust = Keyword.get(opts, :trust_facade, Trust)
     identity_name = Keyword.get(opts, :identity_name, RunIdentity.identity_name())
-    active_ids = Keyword.get_lazy(opts, :active_agent_ids, &RunLease.active_agent_ids/0)
+    active_cap_ids = Keyword.get(opts, :active_cap_ids)
+
+    active_ids =
+      Keyword.get_lazy(opts, :active_agent_ids, fn ->
+        if is_map(active_cap_ids) do
+          active_cap_ids |> Map.keys() |> MapSet.new()
+        else
+          RunLease.active_agent_ids()
+        end
+      end)
 
     with {:ok, agent_ids} <- lookup_run_identities(security, identity_name) do
       agent_ids
-      |> Enum.reject(&MapSet.member?(active_ids, &1))
       |> Enum.reduce_while(:ok, fn agent_id, :ok ->
-        case reap(agent_id, security, trust) do
+        case reconcile_agent(agent_id, active_ids, active_cap_ids, security, trust) do
           :ok -> {:cont, :ok}
           {:error, reason} -> {:halt, {:error, {agent_id, reason}}}
         end
@@ -53,6 +61,28 @@ defmodule Arbor.Scheduler.RunIdentityReaper do
     exception -> {:error, {:exception, Exception.message(exception)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp reconcile_agent(agent_id, active_ids, active_cap_ids, security, trust) do
+    cond do
+      is_map(active_cap_ids) and Map.has_key?(active_cap_ids, agent_id) ->
+        reap_orphan_capabilities(agent_id, Map.fetch!(active_cap_ids, agent_id), security)
+
+      MapSet.member?(active_ids, agent_id) ->
+        :ok
+
+      true ->
+        reap(agent_id, security, trust)
+    end
+  end
+
+  defp reap_orphan_capabilities(agent_id, allowed_cap_ids, security) do
+    allowed_cap_ids = MapSet.new(allowed_cap_ids)
+
+    with {:ok, caps} <- list_capabilities(security, agent_id) do
+      orphan_caps = Enum.reject(caps, &MapSet.member?(allowed_cap_ids, &1.id))
+      revoke_capabilities(security, orphan_caps)
+    end
   end
 
   defp lookup_run_identities(security, identity_name) do

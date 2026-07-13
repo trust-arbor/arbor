@@ -68,6 +68,10 @@ defmodule Arbor.Scheduler.RunLease do
       [{pid, _value}] -> pid
       [] -> nil
     end
+  rescue
+    ArgumentError -> nil
+  catch
+    :exit, _reason -> nil
   end
 
   @impl true
@@ -325,11 +329,13 @@ defmodule Arbor.Scheduler.RunLease do
     def delete(id), do: GenServer.call(__MODULE__, {:delete, id})
     def all_ids, do: GenServer.call(__MODULE__, :all_ids)
     def all_leases, do: GenServer.call(__MODULE__, :all_leases)
+    def recovery_snapshot, do: GenServer.call(__MODULE__, :recovery_snapshot)
+    def complete_recovery, do: GenServer.call(__MODULE__, :complete_recovery)
 
     @impl true
     def init(:ok) do
       :ets.new(@table, [:named_table, :private, :set])
-      {:ok, %{table: @table}}
+      {:ok, %{table: @table, recovery_required: true}}
     end
 
     @impl true
@@ -369,6 +375,22 @@ defmodule Arbor.Scheduler.RunLease do
       {:reply, {:ok, Enum.map(:ets.tab2list(@table), &elem(&1, 1))}, state}
     end
 
+    defp handle_state_owner_call(:recovery_snapshot, state) do
+      leases = :ets.tab2list(@table)
+
+      snapshot = %{
+        lease_ids: Enum.map(leases, fn {id, _lease} -> id end),
+        active_cap_ids: active_cap_ids(leases),
+        journal_lost: state.recovery_required
+      }
+
+      {:reply, {:ok, snapshot}, state}
+    end
+
+    defp handle_state_owner_call(:complete_recovery, state) do
+      {:reply, :ok, %{state | recovery_required: false}}
+    end
+
     @impl true
     def format_status(status) when is_map(status) do
       status
@@ -380,6 +402,19 @@ defmodule Arbor.Scheduler.RunLease do
 
     defp state_owner_caller?({pid, _tag}),
       do: pid == Process.whereis(Arbor.Scheduler.RunLease.StateOwner)
+
+    defp active_cap_ids(leases) do
+      Enum.reduce(leases, %{}, fn
+        {_id, %{status: :active, owner: owner, agent_id: agent_id, cap_ids: cap_ids}}, acc
+        when is_pid(owner) and is_binary(agent_id) ->
+          if Process.alive?(owner),
+            do: Map.put(acc, agent_id, MapSet.new(cap_ids)),
+            else: acc
+
+        _entry, acc ->
+          acc
+      end)
+    end
   end
 
   defmodule StateOwner do
@@ -395,6 +430,8 @@ defmodule Arbor.Scheduler.RunLease do
     def delete(id), do: GenServer.call(__MODULE__, {:delete, id})
     def all_ids, do: GenServer.call(__MODULE__, :all_ids)
     def all_leases, do: GenServer.call(__MODULE__, :all_leases)
+    def recovery_snapshot, do: GenServer.call(__MODULE__, :recovery_snapshot)
+    def complete_recovery, do: GenServer.call(__MODULE__, :complete_recovery)
 
     def register_identity(lease_id, identity, security),
       do: GenServer.call(__MODULE__, {:register_identity, lease_id, identity, security}, 30_000)
@@ -426,6 +463,14 @@ defmodule Arbor.Scheduler.RunLease do
     defp handle_store_call({:delete, id}, state), do: {:reply, JournalOwner.delete(id), state}
     defp handle_store_call(:all_ids, state), do: {:reply, JournalOwner.all_ids(), state}
     defp handle_store_call(:all_leases, state), do: {:reply, JournalOwner.all_leases(), state}
+
+    defp handle_store_call(:recovery_snapshot, state) do
+      {:reply, JournalOwner.recovery_snapshot(), state}
+    end
+
+    defp handle_store_call(:complete_recovery, state) do
+      {:reply, JournalOwner.complete_recovery(), state}
+    end
 
     defp handle_store_call({:register_identity, lease_id, identity, security}, state) do
       result =
@@ -537,16 +582,22 @@ defmodule Arbor.Scheduler.RunLease do
 
     @impl true
     def init(:ok) do
-      case Arbor.Scheduler.RunLease.Store.all_ids() do
-        {:ok, lease_ids} ->
-          case restart_leases(lease_ids) do
-            :ok -> {:ok, %{lease_count: length(lease_ids)}}
-            {:error, reason} -> {:stop, {:lease_reconciliation_failed, reason}}
-          end
-
-        {:error, reason} ->
-          {:stop, {:lease_journal_unavailable, reason}}
+      with :ok <- Arbor.Scheduler.RunLease.Store.begin_recovery(),
+           {:ok, snapshot} <- Arbor.Scheduler.RunLease.Store.recovery_snapshot(),
+           :ok <- reconcile_orphans(snapshot),
+           :ok <- Arbor.Scheduler.RunLease.Store.complete_recovery(),
+           :ok <- restart_leases(snapshot.lease_ids) do
+        {:ok, %{lease_count: length(snapshot.lease_ids), journal_lost: snapshot.journal_lost}}
+      else
+        {:error, reason} -> {:stop, {:lease_reconciliation_failed, reason}}
       end
+    end
+
+    defp reconcile_orphans(snapshot) do
+      Arbor.Scheduler.RunIdentityReaper.reconcile(
+        active_agent_ids: snapshot.active_cap_ids |> Map.keys() |> MapSet.new(),
+        active_cap_ids: snapshot.active_cap_ids
+      )
     end
 
     defp restart_leases(lease_ids) do
@@ -601,13 +652,16 @@ defmodule Arbor.Scheduler.RunLease do
 
     def active_agent_ids, do: GenServer.call(__MODULE__, :active_agent_ids)
     def all_ids, do: GenServer.call(__MODULE__, :all_ids)
+    def begin_recovery, do: GenServer.call(__MODULE__, :begin_recovery)
+    def recovery_snapshot, do: GenServer.call(__MODULE__, :recovery_snapshot, 30_000)
+    def complete_recovery, do: GenServer.call(__MODULE__, :complete_recovery)
     def discard(id), do: GenServer.call(__MODULE__, {:discard, id})
 
     def discard_unstarted(id, creation_token),
       do: GenServer.call(__MODULE__, {:discard_unstarted, id, creation_token})
 
     @impl true
-    def init(:ok), do: {:ok, %{table: Arbor.Scheduler.RunLease.StateOwner}}
+    def init(:ok), do: {:ok, %{table: Arbor.Scheduler.RunLease.StateOwner, ready: false}}
 
     @impl true
     def format_status(status) when is_map(status) do
@@ -619,6 +673,37 @@ defmodule Arbor.Scheduler.RunLease do
     end
 
     @impl true
+    def handle_call(:begin_recovery, {caller, _tag}, state) do
+      if caller == Process.whereis(Arbor.Scheduler.RunLease.Reconciler) do
+        {:reply, :ok, %{state | ready: false}}
+      else
+        {:reply, {:error, :unauthorized}, state}
+      end
+    end
+
+    def handle_call(:recovery_snapshot, {caller, _tag}, state) do
+      if caller == Process.whereis(Arbor.Scheduler.RunLease.Reconciler) do
+        {:reply, Arbor.Scheduler.RunLease.StateOwner.recovery_snapshot(), state}
+      else
+        {:reply, {:error, :unauthorized}, state}
+      end
+    end
+
+    def handle_call(:complete_recovery, {caller, _tag}, state) do
+      if caller == Process.whereis(Arbor.Scheduler.RunLease.Reconciler) do
+        case Arbor.Scheduler.RunLease.StateOwner.complete_recovery() do
+          :ok -> {:reply, :ok, %{state | ready: true}}
+          {:error, _reason} = error -> {:reply, error, state}
+        end
+      else
+        {:reply, {:error, :unauthorized}, state}
+      end
+    end
+
+    def handle_call(_request, _from, %{ready: false} = state) do
+      {:reply, {:error, :recovery_in_progress}, state}
+    end
+
     def handle_call({:create, id, owner, opts}, {caller, _tag}, %{table: table} = state) do
       if caller != owner do
         {:reply, {:error, :unauthorized}, state}
