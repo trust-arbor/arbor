@@ -11,6 +11,7 @@ defmodule Arbor.Actions.Coding.Workspace do
   |--------|---------------|
   | `Acquire` | `arbor://action/coding/workspace/acquire` |
   | `Inspect` | `arbor://action/coding/workspace/inspect` |
+  | `RecoverySummary` | `arbor://action/coding/workspace/recovery_summary` |
   | `Release` | `arbor://action/coding/workspace/release` |
   | `CommittedChange` | `arbor://action/coding/workspace/committed_change` |
   """

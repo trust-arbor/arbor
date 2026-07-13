@@ -1162,6 +1162,7 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.CrossApp.Validate,
         Arbor.Actions.Coding.Workspace.Acquire,
         Arbor.Actions.Coding.Workspace.Inspect,
+        Arbor.Actions.Coding.Workspace.RecoverySummary,
         Arbor.Actions.Coding.Workspace.Release,
         Arbor.Actions.Coding.Workspace.CommittedChange,
         Arbor.Actions.Coding.ReviewTree.Read,
@@ -2187,6 +2188,8 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.CrossApp.Validate => "arbor://action/coding/cross_app/validate",
     Arbor.Actions.Coding.Workspace.Acquire => "arbor://action/coding/workspace/acquire",
     Arbor.Actions.Coding.Workspace.Inspect => "arbor://action/coding/workspace/inspect",
+    Arbor.Actions.Coding.Workspace.RecoverySummary =>
+      "arbor://action/coding/workspace/recovery_summary",
     Arbor.Actions.Coding.Workspace.Release => "arbor://action/coding/workspace/release",
     Arbor.Actions.Coding.Workspace.CommittedChange =>
       "arbor://action/coding/workspace/committed_change",
