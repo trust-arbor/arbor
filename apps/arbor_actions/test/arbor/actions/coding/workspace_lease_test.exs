@@ -895,6 +895,144 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       assert change.commit_hash == head
       assert change.base_ref == lease.base_commit
       assert "head_only.ex" in change.files
+      refute Map.has_key?(change, :prior_candidate_commit)
+      refute Map.has_key?(change, :delta_diff)
+      refute Map.has_key?(change, :delta_files)
+      refute Map.has_key?(change, :delta_ranges)
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
+    test "adds review-cycle delta evidence from an exact ancestor commit", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/workspace-delta-evidence",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{}
+               )
+
+      File.write!(Path.join(lease.worktree_path, "existing.ex"), "one\ntwo\n")
+      git!(lease.worktree_path, ["add", "existing.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "add existing file"])
+      prior = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      File.write!(Path.join(lease.worktree_path, "existing.ex"), "one\nchanged\nadded\n")
+      File.write!(Path.join(lease.worktree_path, "new_file.ex"), "new\n")
+      git!(lease.worktree_path, ["add", "existing.ex", "new_file.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "change review cycle"])
+      head = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:ok, change} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, prior_commit: prior},
+                 %{}
+               )
+
+      assert Workspace.json_clean?(change)
+      assert change.commit_hash == head
+      assert change.prior_candidate_commit == prior
+      assert change.diff =~ "existing.ex"
+      assert "existing.ex" in change.files
+      assert "new_file.ex" in change.files
+      assert change.delta_diff =~ "new_file.ex"
+      assert change.delta_files == ["existing.ex", "new_file.ex"]
+      assert change.delta_ranges["existing.ex"] == [[1, 3]]
+      assert change.delta_ranges["new_file.ex"] == [[1, 1]]
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
+    test "rejects missing, invalid, equal, and non-ancestor prior commits", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/workspace-invalid-prior",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{}
+               )
+
+      File.write!(Path.join(lease.worktree_path, "candidate.ex"), "candidate\n")
+      git!(lease.worktree_path, ["add", "candidate.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "candidate"])
+      head = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:error, :invalid_prior_commit} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, prior_commit: "HEAD~1"},
+                 %{}
+               )
+
+      assert {:error, :prior_commit_missing} =
+               Workspace.CommittedChange.run(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   prior_commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                 },
+                 %{}
+               )
+
+      assert {:error, :prior_commit_equal_candidate} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, prior_commit: head},
+                 %{}
+               )
+
+      File.write!(Path.join(repo, "other_branch.ex"), "other\n")
+      git!(repo, ["add", "other_branch.ex"])
+      git!(repo, ["commit", "-m", "unrelated candidate sibling"])
+      non_ancestor = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:error, :prior_commit_not_ancestor} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, prior_commit: non_ancestor},
+                 %{}
+               )
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
+    test "reports deletion-only, rename, and new-file delta evidence", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/workspace-delta-file-kinds",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{}
+               )
+
+      File.write!(Path.join(lease.worktree_path, "removed.ex"), "remove me\n")
+      File.write!(Path.join(lease.worktree_path, "old_name.ex"), "keep contents\n")
+      git!(lease.worktree_path, ["add", "removed.ex", "old_name.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "seed delta files"])
+      prior = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      git!(lease.worktree_path, ["rm", "removed.ex"])
+      git!(lease.worktree_path, ["mv", "old_name.ex", "renamed.ex"])
+      File.write!(Path.join(lease.worktree_path, "new_file.ex"), "new line\n")
+      git!(lease.worktree_path, ["add", "new_file.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "replace delta files"])
+
+      assert {:ok, change} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, prior_commit: prior},
+                 %{}
+               )
+
+      assert change.delta_files == ["new_file.ex", "removed.ex", "renamed.ex"]
+      assert change.delta_ranges == %{"new_file.ex" => [[1, 1]]}
 
       _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
     end

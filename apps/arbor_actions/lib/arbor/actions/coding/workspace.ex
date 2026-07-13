@@ -18,6 +18,9 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   # -- Shared worktree lifecycle (pure helpers + git side effects) ---
 
+  alias Arbor.Actions.Git
+  alias Arbor.Actions.Coding.Workspace.DeltaRanges
+
   @doc false
   def resolve_repo_root(path) when is_binary(path) do
     expanded = Path.expand(path)
@@ -279,6 +282,47 @@ defmodule Arbor.Actions.Coding.Workspace do
   def materialize_committed_change(_, _, _), do: {:error, :invalid_committed_change_args}
 
   @doc false
+  @spec materialize_committed_change_with_delta(
+          String.t(),
+          String.t(),
+          String.t() | nil,
+          String.t() | nil,
+          String.t()
+        ) :: {:ok, map()} | {:error, term()}
+  def materialize_committed_change_with_delta(
+        worktree_path,
+        repo_path,
+        base_commit,
+        requested_commit,
+        prior_commit
+      )
+      when is_binary(worktree_path) and is_binary(repo_path) and is_binary(prior_commit) do
+    with :ok <- require_exact_prior_commit(prior_commit),
+         :ok <- require_prior_commit(repo_path, worktree_path, prior_commit),
+         {:ok, change} <-
+           materialize_committed_change(worktree_path, base_commit, requested_commit),
+         :ok <- require_distinct_prior_commit(prior_commit, change.commit_hash),
+         :ok <- require_prior_ancestor(repo_path, worktree_path, prior_commit, change.commit_hash),
+         {:ok, delta_diff} <-
+           committed_delta_diff(repo_path, worktree_path, prior_commit, change.commit_hash),
+         {:ok, delta_files} <-
+           committed_delta_files(repo_path, worktree_path, prior_commit, change.commit_hash),
+         {:ok, delta_ranges} <- DeltaRanges.parse(delta_diff),
+         :ok <- require_delta_range_files(delta_ranges, delta_files) do
+      {:ok,
+       Map.merge(change, %{
+         prior_candidate_commit: prior_commit,
+         delta_diff: delta_diff,
+         delta_files: delta_files,
+         delta_ranges: delta_ranges
+       })}
+    end
+  end
+
+  def materialize_committed_change_with_delta(_, _, _, _, _),
+    do: {:error, :invalid_committed_change_args}
+
+  @doc false
   @spec materialize_security_regression_material(String.t(), String.t(), String.t(), [String.t()]) ::
           {:ok, map()} | {:error, term()}
   def materialize_security_regression_material(
@@ -370,6 +414,109 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   defp require_base_commit(base) when is_binary(base) and base != "", do: {:ok, base}
   defp require_base_commit(_), do: {:error, :missing_base_commit}
+
+  defp require_exact_prior_commit(prior_commit) when is_binary(prior_commit) do
+    if Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, prior_commit),
+      do: :ok,
+      else: {:error, :invalid_prior_commit}
+  end
+
+  defp require_exact_prior_commit(_), do: {:error, :missing_prior_commit}
+
+  defp require_prior_commit(repo_path, worktree_path, prior_commit) do
+    case lease_git(repo_path, worktree_path, ["rev-parse", "--verify", "#{prior_commit}^{commit}"]) do
+      {:ok, output} when is_binary(output) ->
+        if String.trim(output) == prior_commit,
+          do: :ok,
+          else: {:error, :prior_commit_missing}
+
+      _other ->
+        {:error, :prior_commit_missing}
+    end
+  end
+
+  defp require_distinct_prior_commit(prior_commit, candidate_commit) do
+    if prior_commit == candidate_commit,
+      do: {:error, :prior_commit_equal_candidate},
+      else: :ok
+  end
+
+  defp require_prior_ancestor(repo_path, worktree_path, prior_commit, candidate_commit) do
+    case lease_git_result(repo_path, worktree_path, [
+           "merge-base",
+           "--is-ancestor",
+           prior_commit,
+           candidate_commit
+         ]) do
+      {:ok, %{exit_code: 0}} -> :ok
+      _other -> {:error, :prior_commit_not_ancestor}
+    end
+  end
+
+  defp committed_delta_diff(repo_path, worktree_path, prior_commit, candidate_commit) do
+    case lease_git(repo_path, worktree_path, [
+           "diff",
+           "--find-renames",
+           "--no-ext-diff",
+           "--no-textconv",
+           "#{prior_commit}..#{candidate_commit}"
+         ]) do
+      {:ok, diff} when diff != "" -> {:ok, diff}
+      {:ok, _empty} -> {:error, :empty_delta_diff}
+      {:error, _reason} -> {:error, :delta_diff_failed}
+    end
+  end
+
+  defp committed_delta_files(repo_path, worktree_path, prior_commit, candidate_commit) do
+    case lease_git(repo_path, worktree_path, [
+           "diff",
+           "--name-only",
+           "-z",
+           "--find-renames",
+           "#{prior_commit}..#{candidate_commit}"
+         ]) do
+      {:ok, output} -> parse_delta_files(output)
+      {:error, _reason} -> {:error, :delta_files_failed}
+    end
+  end
+
+  defp parse_delta_files(output) when is_binary(output) do
+    files = String.split(output, <<0>>, trim: true)
+
+    with true <- files != [],
+         true <- files == Enum.sort(files),
+         true <- files == Enum.uniq(files),
+         true <- Enum.all?(files, &valid_delta_file?/1) do
+      {:ok, files}
+    else
+      _other -> {:error, :invalid_delta_files}
+    end
+  end
+
+  defp parse_delta_files(_), do: {:error, :invalid_delta_files}
+
+  defp valid_delta_file?(path) do
+    match?({:ok, _}, Arbor.Actions.Coding.ReviewTree.validate_repo_relative_path(path))
+  end
+
+  defp require_delta_range_files(delta_ranges, delta_files) do
+    if Enum.all?(Map.keys(delta_ranges), &(&1 in delta_files)),
+      do: :ok,
+      else: {:error, :delta_ranges_not_in_files}
+  end
+
+  defp lease_git(repo_path, worktree_path, args) do
+    case lease_git_result(repo_path, worktree_path, args) do
+      {:ok, %{exit_code: 0, stdout: output, output_limit_exceeded: false}} -> {:ok, output}
+      _other -> {:error, :lease_git_failed}
+    end
+  end
+
+  defp lease_git_result(repo_path, worktree_path, args) do
+    Git.with_storage_authority(repo_path, worktree_path, fn ->
+      Git.execute(worktree_path, args)
+    end)
+  end
 
   defp validate_selected_test_paths(paths) when is_list(paths) and paths != [] do
     if paths == Enum.sort(paths) and Enum.uniq(paths) == paths and
@@ -970,9 +1117,10 @@ defmodule Arbor.Actions.Coding.Workspace do
     commits is included. The worktree must be clean before materialization.
 
     Optional `commit` must equal the current HEAD exactly; non-HEAD values are
-    rejected before any git read. Returns JSON-clean `diff`, `files`,
-    `commit_hash` (HEAD), and `base_ref` (lease base_commit). Does not mutate
-    the worktree.
+    rejected before any git read. Optional `prior_commit` is an exact ancestor
+    commit used to add review-cycle delta evidence. Without `prior_commit`, the
+    response remains the cumulative JSON-clean `diff`, `files`, `commit_hash`
+    (HEAD), and `base_ref` (lease base_commit). Does not mutate the worktree.
     """
 
     use Jido.Action,
@@ -992,6 +1140,12 @@ defmodule Arbor.Actions.Coding.Workspace do
           doc:
             "Optional exact HEAD commit hash only. Ancestors, other branches, and " <>
               "revision expressions are rejected. Omit to use current HEAD."
+        ],
+        prior_commit: [
+          type: :string,
+          doc:
+            "Optional exact ancestor commit hash. Adds delta_diff, delta_files, and " <>
+              "new-side delta_ranges from this commit to the current HEAD."
         ]
       ]
 
@@ -1002,7 +1156,8 @@ defmodule Arbor.Actions.Coding.Workspace do
     def taint_roles do
       %{
         workspace_id: :control,
-        commit: {:control, requires: [:command_injection]}
+        commit: {:control, requires: [:command_injection]},
+        prior_commit: {:control, requires: [:command_injection]}
       }
     end
 
@@ -1019,14 +1174,25 @@ defmodule Arbor.Actions.Coding.Workspace do
            }) do
         {:ok, lease} ->
           worktree_path = map_value(lease, :worktree_path)
+          repo_path = map_value(lease, :repo_path)
           base_commit = map_value(lease, :base_commit)
           requested_commit = map_value(params, :commit)
+          prior_commit = map_value(params, :prior_commit)
 
-          case Workspace.materialize_committed_change(
-                 worktree_path,
-                 base_commit,
-                 requested_commit
-               ) do
+          material =
+            if is_nil(prior_commit) do
+              Workspace.materialize_committed_change(worktree_path, base_commit, requested_commit)
+            else
+              Workspace.materialize_committed_change_with_delta(
+                worktree_path,
+                repo_path,
+                base_commit,
+                requested_commit,
+                prior_commit
+              )
+            end
+
+          case material do
             {:ok, material} ->
               result = %{
                 workspace_id: workspace_id,
@@ -1037,6 +1203,18 @@ defmodule Arbor.Actions.Coding.Workspace do
                 branch: map_value(lease, :branch),
                 worktree_path: worktree_path
               }
+
+              result =
+                if is_nil(prior_commit) do
+                  result
+                else
+                  Map.merge(result, %{
+                    prior_candidate_commit: material.prior_candidate_commit,
+                    delta_diff: material.delta_diff,
+                    delta_files: material.delta_files,
+                    delta_ranges: material.delta_ranges
+                  })
+                end
 
               Actions.emit_completed(__MODULE__, %{
                 workspace_id: workspace_id,
