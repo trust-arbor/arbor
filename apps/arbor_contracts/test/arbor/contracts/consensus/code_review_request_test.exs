@@ -27,6 +27,11 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert request.review_snapshot_id == nil
       assert request.intent == "Add a review loop"
       assert request.agent_id == "agent_123"
+      assert request.review_cycle == 1
+      assert request.prior_candidate_commit == nil
+      assert request.delta_diff == ""
+      assert request.delta_files == []
+      assert request.finding_ledger == %{}
     end
 
     test "accepts string-keyed attrs from JSON boundaries" do
@@ -53,6 +58,11 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert request.review_snapshot_id == nil
       assert request.intent == ""
       assert request.agent_id == nil
+      assert request.review_cycle == 1
+      assert request.prior_candidate_commit == nil
+      assert request.delta_diff == ""
+      assert request.delta_files == []
+      assert request.finding_ledger == %{}
     end
 
     test "rejects missing required fields" do
@@ -80,6 +90,58 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert {:error, {:invalid_field, :files, {:expected_list, "lib/a.ex"}}} =
                CodeReviewRequest.new(%{@valid_attrs | files: "lib/a.ex"})
     end
+
+    test "accepts string-keyed review-cycle fields and rejects malformed values" do
+      attrs = %{
+        "diff" => @valid_attrs.diff,
+        "files" => @valid_attrs.files,
+        "branch" => @valid_attrs.branch,
+        "review_cycle" => 2,
+        "prior_candidate_commit" => String.duplicate("b", 40),
+        "delta_diff" => "@@ -1 +1 @@",
+        "delta_files" => ["lib/a.ex"],
+        "finding_ledger" => %{"findings" => []}
+      }
+
+      assert {:ok, request} = CodeReviewRequest.new(attrs)
+      assert request.review_cycle == 2
+      assert request.prior_candidate_commit == String.duplicate("b", 40)
+      assert request.delta_files == ["lib/a.ex"]
+
+      assert {:error, {:invalid_field, :review_cycle, _}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :review_cycle, 0))
+
+      assert {:error, {:invalid_field, :delta_files, {:invalid_path, "../secret.ex"}}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :delta_files, ["../secret.ex"]))
+
+      assert {:error, {:invalid_field, :delta_files, :duplicate}} =
+               CodeReviewRequest.new(
+                 Map.put(@valid_attrs, :delta_files, ["lib/a.ex", "lib/a.ex"])
+               )
+
+      assert {:error, {:invalid_field, :delta_files, :too_many}} =
+               CodeReviewRequest.new(
+                 Map.put(@valid_attrs, :delta_files, List.duplicate("lib/a.ex", 129))
+               )
+
+      assert {:error, {:invalid_field, :delta_files, {:invalid_path, _}}} =
+               CodeReviewRequest.new(
+                 Map.put(@valid_attrs, :delta_files, [String.duplicate("a", 1_025)])
+               )
+
+      assert {:error, {:invalid_field, :delta_diff, :invalid_utf8}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :delta_diff, <<195>>))
+
+      assert {:error, {:invalid_field, :finding_ledger, _}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :finding_ledger, %{bad: :atom}))
+
+      assert {:error, {:invalid_field, :finding_ledger, :invalid_json_or_size}} =
+               CodeReviewRequest.new(
+                 Map.put(@valid_attrs, :finding_ledger, %{
+                   "large" => String.duplicate("x", 131_073)
+                 })
+               )
+    end
   end
 
   describe "bind_review_snapshot/2" do
@@ -95,6 +157,12 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert {:ok, bound} = CodeReviewRequest.bind_review_snapshot(request, snapshot)
       assert bound.review_snapshot_id == "review_snap_123"
       assert bound.candidate_commit == @valid_attrs.candidate_commit
+
+      assert bound.review_cycle == request.review_cycle
+      assert bound.prior_candidate_commit == request.prior_candidate_commit
+      assert bound.delta_diff == request.delta_diff
+      assert bound.delta_files == request.delta_files
+      assert bound.finding_ledger == request.finding_ledger
 
       assert {:error, {:review_commit_mismatch, :candidate}} =
                CodeReviewRequest.bind_review_snapshot(request, %{
@@ -117,7 +185,12 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
                "candidate_commit" => String.duplicate("a", 40),
                "review_snapshot_id" => nil,
                "intent" => "Add a review loop",
-               "agent_id" => "agent_123"
+               "agent_id" => "agent_123",
+               "review_cycle" => 1,
+               "prior_candidate_commit" => nil,
+               "delta_diff" => "",
+               "delta_files" => [],
+               "finding_ledger" => %{}
              }
 
       assert context["review.diff"] == @valid_attrs.diff
@@ -126,6 +199,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert context["diff"] == @valid_attrs.diff
       assert context["files"] == @valid_attrs.files
       assert context["intent"] == "Add a review loop"
+      assert context["review.cycle"] == 1
+      assert context["review.finding_ledger"] == %{}
 
       assert context["council.question"] ==
                "Should branch agent/review-loop be accepted for human review?"
@@ -141,10 +216,34 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert prompt =~ "Branch: agent/review-loop"
       assert prompt =~ "Candidate commit: #{String.duplicate("a", 40)}"
       assert prompt =~ "Review snapshot id: unavailable"
+      assert prompt =~ "Review cycle: 1"
+      assert prompt =~ "Recheck: initial review"
+      assert prompt =~ "Delta files:\n- none supplied"
+      assert prompt =~ "Finding ledger (canonical JSON, bounded):"
+      assert prompt =~ "Review charter:\nCycle 1: review the stated intent and full diff."
       assert prompt =~ "Intent:\nAdd a review loop"
       assert prompt =~ "- lib/a.ex"
       assert prompt =~ "```diff"
       assert prompt =~ @valid_attrs.diff
+    end
+
+    test "keeps multibyte prompt truncation valid and context JSON-clean" do
+      attrs =
+        @valid_attrs
+        |> Map.put(:review_cycle, 2)
+        |> Map.put(:delta_diff, String.duplicate("é", 20_000))
+        |> Map.put(:delta_files, ["lib/a.ex"])
+        |> Map.put(:finding_ledger, %{"z" => String.duplicate("é", 20_000), "a" => "first"})
+
+      assert {:ok, request} = CodeReviewRequest.new(attrs)
+      context = CodeReviewRequest.to_context(request)
+      prompt = context["review.prompt"]
+
+      assert {:ok, _encoded} = Jason.encode(context)
+      assert String.valid?(prompt)
+      assert prompt =~ "Cycle >1: verify owned open findings"
+      assert prompt =~ "pre-existing or out-of-delta issues as nonblocking/out-of-scope"
+      assert prompt =~ "[truncated]"
     end
   end
 
