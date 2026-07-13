@@ -652,12 +652,32 @@ defmodule Arbor.Actions.Consensus do
     use Jido.Action,
       name: "consensus_decide_review",
       description: "Apply strict code-review reports to a frozen finding ledger",
-      schema: [
-        results: [type: :any, required: false, doc: "Parallel reviewer branch results"],
-        review_cycle: [type: :any, required: false, doc: "Next review cycle"],
-        finding_ledger: [type: :any, required: false, doc: "Frozen finding ledger"],
-        delta_ranges: [type: :any, required: false, doc: "Changed line ranges for a recheck"]
-      ]
+      schema:
+        Zoi.object(%{
+          results:
+            Zoi.array(
+              Zoi.map(Zoi.string(), Zoi.json()),
+              description: "Parallel reviewer branch results"
+            )
+            |> Zoi.optional(),
+          review_cycle:
+            Zoi.union([Zoi.integer(), Zoi.string()], description: "Next review cycle")
+            |> Zoi.optional(),
+          finding_ledger:
+            Zoi.map(Zoi.string(), Zoi.json(), description: "Frozen finding ledger")
+            |> Zoi.optional(),
+          delta_ranges:
+            Zoi.map(Zoi.string(), Zoi.json(), description: "Changed line ranges for a recheck")
+            |> Zoi.optional()
+        })
+
+    # Jido's strict converter closes nested objects, but these three values are dynamic JSON maps.
+    defoverridable to_tool: 0
+
+    def to_tool do
+      tool = Jido.Action.Tool.to_tool(__MODULE__)
+      Map.update!(tool, :parameters_schema, &Map.put(&1, :additionalProperties, false))
+    end
 
     alias Arbor.Actions.Coding.ReviewLedgerCore
 

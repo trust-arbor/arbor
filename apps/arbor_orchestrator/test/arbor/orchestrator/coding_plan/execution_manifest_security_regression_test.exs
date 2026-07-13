@@ -83,23 +83,25 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     assert consensus["resource_uri"] == "arbor://action/consensus/decide_review"
 
     assert consensus["parameters_schema"] == %{
+             "$schema" => "https://json-schema.org/draft/2020-12/schema",
              "additionalProperties" => false,
              "properties" => %{
                "delta_ranges" => %{
                  "description" => "Changed line ranges for a recheck",
-                 "type" => "string"
+                 "type" => "object"
                },
                "finding_ledger" => %{
                  "description" => "Frozen finding ledger",
-                 "type" => "string"
+                 "type" => "object"
                },
                "results" => %{
                  "description" => "Parallel reviewer branch results",
-                 "type" => "string"
+                 "items" => %{"type" => "object"},
+                 "type" => "array"
                },
                "review_cycle" => %{
-                 "description" => "Next review cycle",
-                 "type" => "string"
+                 "anyOf" => [%{"type" => "integer"}, %{"type" => "string"}],
+                 "description" => "Next review cycle"
                }
              },
              "required" => [],

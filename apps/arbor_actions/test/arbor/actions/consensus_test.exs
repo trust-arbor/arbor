@@ -745,18 +745,44 @@ defmodule Arbor.Actions.ConsensusTest do
 
     test "public parameter validation accepts checkpointed dynamic JSON" do
       params = %{
-        "results" => [
+        results: [
           make_review_branch("correctness", review_report("approve"))
         ],
-        "review_cycle" => "2",
-        "finding_ledger" => review_ledger(),
-        "delta_ranges" => %{"lib/example.ex" => [[4, 9]]}
+        review_cycle: "2",
+        finding_ledger: review_ledger(),
+        delta_ranges: %{"lib/example.ex" => [[4, 9]]}
       }
 
-      assert {:ok, validated} = Consensus.DecideReview.validate_params(params)
-      assert validated["results"] == params["results"]
-      assert validated["finding_ledger"] == params["finding_ledger"]
-      assert validated["delta_ranges"] == params["delta_ranges"]
+      assert {:ok, ^params} = Consensus.DecideReview.validate_params(params)
+
+      for invalid <- [
+            %{results: %{}},
+            %{finding_ledger: []},
+            %{delta_ranges: "lib/example.ex:4-9"}
+          ] do
+        assert {:error, %Jido.Action.Error.InvalidInputError{}} =
+                 Consensus.DecideReview.validate_params(invalid)
+      end
+    end
+
+    test "publishes an honest terminating schema for dynamic review JSON" do
+      schema = Consensus.DecideReview.to_tool().parameters_schema
+
+      assert schema.type == :object
+      assert schema.additionalProperties == false
+      assert schema.properties.results.type == :array
+      assert schema.properties.results.items == %{type: :object}
+      assert schema.properties.finding_ledger.type == :object
+      assert schema.properties.delta_ranges.type == :object
+
+      assert schema.properties.review_cycle.anyOf == [
+               %{type: :integer},
+               %{type: :string}
+             ]
+
+      refute Map.has_key?(schema.properties.results.items, :additionalProperties)
+      refute Map.has_key?(schema.properties.finding_ledger, :additionalProperties)
+      refute Map.has_key?(schema.properties.delta_ranges, :additionalProperties)
     end
 
     test "initial cycle accepts DOT input and returns JSON-clean ledger context" do

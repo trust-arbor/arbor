@@ -406,8 +406,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
     end)
   end
 
-  defp normalize_json(value, path) when is_atom(value),
-    do: {:error, {:invalid_json, {:atom, path}}}
+  defp normalize_json(value, _path) when is_atom(value), do: {:ok, Atom.to_string(value)}
 
   defp normalize_json(_value, path), do: {:error, {:invalid_json, {:unsupported_value, path}}}
 
