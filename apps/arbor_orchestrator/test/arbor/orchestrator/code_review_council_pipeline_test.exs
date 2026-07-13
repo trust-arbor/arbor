@@ -37,6 +37,7 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
       graph = load_graph()
       evaluate = graph.nodes["evaluate"]
 
+      assert map_size(@reviewers) == 10
       assert evaluate.attrs["type"] == "parallel"
       assert evaluate.attrs["join_policy"] == "wait_all"
       assert evaluate.attrs["error_policy"] == "continue"
@@ -63,21 +64,43 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
       end
     end
 
-    test "reviewer prompts require consensus-compatible JSON votes" do
+    test "reviewer prompts require strict frozen-ledger JSON reports" do
       graph = load_graph()
 
       for reviewer <- Map.keys(@reviewers) do
         prompt = graph.nodes[reviewer].attrs["system_prompt"]
 
-        assert prompt =~ "vote"
-        assert prompt =~ "reasoning"
-        assert prompt =~ "confidence"
-        assert prompt =~ "concerns"
-        assert prompt =~ "risk_score"
-        assert prompt =~ "Return only a JSON object"
+        assert prompt =~
+                 "Return ONLY one strict JSON object with exactly vote, finding_updates, new_findings"
+
+        assert prompt =~ "never infer or emit prose outside JSON"
+        assert prompt =~ "existing same-owner ledger id"
+        assert prompt =~ "state fixed, open, or architectural_blocker"
+        assert prompt =~ "severity blocking, major, minor, or nit"
+        assert prompt =~ "anchor has exactly path, side, and line"
+        assert prompt =~ "side is new or old"
+        assert prompt =~ "optional state only architectural_blocker"
+        assert prompt =~ "Max 8 total entries across finding_updates and new_findings"
+        assert prompt =~ "Review only the candidate intent and diff"
+
+        assert prompt =~
+                 "tree read/search tools are context, not permission to veto pre-existing issues"
+
+        assert prompt =~ "On review cycle >= 2, verify your owned open ledger findings"
+        assert prompt =~ "inspect only the explicit delta_ranges for new regressions"
+        assert prompt =~ "Do not reject or submit new_findings for issues outside that delta"
+        assert prompt =~ "supported blocking/architectural finding"
+        assert prompt =~ "record major findings, but a major alone does not justify reject"
+        assert prompt =~ "corroborated majors block through ledger aggregation"
+        refute prompt =~ "materially supported major finding"
+        assert prompt =~ "Minor/nit do not reject"
+        assert prompt =~ "Approve when no blocking issue remains in this perspective"
+        assert prompt =~ "Abstain when evidence is insufficient or you cannot meet this contract"
       end
 
-      assert graph.nodes["security"].attrs["system_prompt"] =~ "fail-open"
+      security_prompt = graph.nodes["security"].attrs["system_prompt"]
+      assert security_prompt =~ "fail-open"
+      assert security_prompt =~ "actual security veto"
 
       assert graph.nodes["regression_test_coverage"].attrs["system_prompt"] =~
                "Security bug fixes must include"
@@ -85,7 +108,7 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
       assert graph.nodes["architecture_grain_fit"].attrs["system_prompt"] =~ "DOT graph"
     end
 
-    test "collects reviews and calls consensus.decide in decision mode" do
+    test "collects reviews and calls the strict frozen-ledger decision action" do
       graph = load_graph()
 
       assert graph.nodes["collect"].attrs["type"] == "parallel.fan_in"
@@ -93,10 +116,13 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
       decide = graph.nodes["decide"]
       assert decide.attrs["type"] == "exec"
       assert decide.attrs["target"] == "action"
-      assert decide.attrs["action"] == "consensus_decide"
-      assert decide.attrs["param.quorum"] == "majority"
-      assert decide.attrs["param.mode"] == "decision"
-      assert decide.attrs["context_keys"] == "parallel.results,council.question"
+      assert decide.attrs["action"] == "consensus_decide_review"
+
+      assert decide.attrs["context_keys"] ==
+               "parallel.results,review.review_cycle,review.finding_ledger,review.delta_ranges"
+
+      refute Map.has_key?(decide.attrs, "param.quorum")
+      refute Map.has_key?(decide.attrs, "param.mode")
       assert decide.attrs["output_prefix"] == "council"
     end
 
