@@ -145,6 +145,45 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
     end
   end
 
+  test "security regression: authority rejects recursively hidden caller credentials", ctx do
+    marker = Path.join(ctx.root, "must-not-run")
+
+    hidden_credentials = [
+      %{"review_context" => %{"signed_request" => %{token: "caller"}}},
+      %{metadata: [auth_context: %{signer: fn _ -> {:error, :caller} end}]},
+      %{"payload" => %{"identityPrivateKey" => "caller-key"}},
+      %{nested: [[authorizer: fn _, _ -> :ok end]]},
+      %{"request" => %{"bearer-token" => "caller-token"}}
+    ]
+
+    for hidden <- hidden_credentials do
+      assert {:error, message} =
+               ActionsExecutor.execute(
+                 "shell.execute",
+                 %{"command" => "touch #{marker}", "input" => hidden},
+                 ctx.root,
+                 agent_id: ctx.agent_id,
+                 signing_authority: ctx.authority
+               )
+
+      assert message =~ "caller_supplied_signing_credentials"
+      refute File.exists?(marker)
+    end
+
+    assert {:error, message} =
+             ActionsExecutor.execute(
+               "shell.execute",
+               %{"command" => "touch #{marker}"},
+               ctx.root,
+               agent_id: ctx.agent_id,
+               signing_authority: ctx.authority,
+               metadata: %{request: [signing_authority: :caller_controlled]}
+             )
+
+    assert message =~ "caller_supplied_signing_credentials"
+    refute File.exists?(marker)
+  end
+
   test "security regression: authority is absent from action context", ctx do
     :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
 
@@ -187,19 +226,19 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
 
     tracer = self()
 
-    Task.async(fn ->
-      :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+    task =
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
 
-      ActionsExecutor.execute(
-        "council_review_change",
-        %{"diff" => "", "branch" => "review-boundary"},
-        ctx.root,
-        agent_id: ctx.agent_id,
-        signing_authority: ctx.authority,
-        max_depth: 3
-      )
-    end)
-    |> Task.await()
+        ActionsExecutor.execute(
+          "council_review_change",
+          %{"diff" => "", "branch" => "review-boundary"},
+          ctx.root,
+          agent_id: ctx.agent_id,
+          signing_authority: ctx.authority,
+          max_depth: 3
+        )
+      end)
 
     assert_receive {:trace, _pid, :call,
                     {Arbor.Actions, :authorize_and_execute,
@@ -207,8 +246,46 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
 
     nested = context.nested_engine_opts
     refute Keyword.has_key?(nested, :signing_authority)
-    assert is_function(Keyword.fetch!(nested, :signer), 1)
+    signer = Keyword.fetch!(nested, :signer)
+    assert is_function(signer, 1)
     assert is_function(Keyword.fetch!(nested, :authorizer), 2)
+
+    _result = Task.await(task)
+
+    assert {:error, :signing_boundary_unavailable} = signer.("arbor://shell/exec/retained")
+  end
+
+  test "security regression: generic actions never receive authority-derived closures", ctx do
+    :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+    on_exit(fn ->
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+    end)
+
+    tracer = self()
+
+    assert {:ok, _output} =
+             Task.async(fn ->
+               :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+               ActionsExecutor.execute(
+                 "shell.execute",
+                 %{"command" => "echo generic-boundary-check"},
+                 ctx.root,
+                 agent_id: ctx.agent_id,
+                 signing_authority: ctx.authority,
+                 max_depth: 3
+               )
+             end)
+             |> Task.await()
+
+    assert_receive {:trace, _pid, :call,
+                    {Arbor.Actions, :authorize_and_execute,
+                     [_agent_id, Arbor.Actions.Shell.Execute, _params, context]}}
+
+    nested = context.nested_engine_opts
+    refute Keyword.has_key?(nested, :signer)
+    refute Keyword.has_key?(nested, :authorizer)
   end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

@@ -243,6 +243,7 @@ defmodule Arbor.Agent.BranchSupervisor.BootstrapCleanup do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
     {:ok, %{bootstraps: Keyword.fetch!(opts, :bootstraps)}}
   end
 

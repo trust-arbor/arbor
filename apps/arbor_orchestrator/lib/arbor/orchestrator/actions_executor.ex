@@ -52,7 +52,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     workdir = normalize_workdir(workdir)
 
     run_action(fn ->
-      with :ok <- reject_mixed_signing_credentials(opts) do
+      with :ok <- reject_mixed_signing_credentials(opts, args) do
         # Try ActionRegistry first (O(1) ETS lookup), fall back to build_action_map
         normalized = normalize_name(name)
 
@@ -141,6 +141,23 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     Arbor.Actions.Council.ReviewChange,
     Arbor.Actions.Coding.ReviewedCommit
   ]
+
+  @credential_key_names MapSet.new([
+                          "signer",
+                          "signedrequest",
+                          "signingauthority",
+                          "identityprivatekey",
+                          "authorizer",
+                          "authcontext",
+                          "privatekey",
+                          "credential",
+                          "credentials",
+                          "bearertoken",
+                          "accesstoken",
+                          "secretkey"
+                        ])
+
+  @signing_boundary_timeout_ms 5_000
 
   # ============================================================================
   # Private
@@ -896,14 +913,11 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     :exit, _ -> {:error, :approval_retry_signing_failed}
   end
 
-  # Record approval/rejection with ConfirmationTracker for graduation tracking.
-  # arbor_trust is a hard dep; the Process.whereis liveness check stays (the
-  # tracker process may not be running in standalone/test slices).
+  # Record approval/rejection through the public trust facade. The tracker may
+  # not be running in standalone/test slices, so tracking remains best-effort.
   defp track_approval(agent_id, action_module) do
-    if Process.whereis(Arbor.Trust.ConfirmationTracker) do
-      resource = Arbor.Actions.canonical_uri_for(action_module, %{})
-      Arbor.Trust.ConfirmationTracker.record_approval(agent_id, resource)
-    end
+    resource = Arbor.Actions.canonical_uri_for(action_module, %{})
+    Arbor.Trust.record_approval(agent_id, resource)
   rescue
     _ -> :ok
   catch
@@ -911,10 +925,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp track_rejection(agent_id, action_module) do
-    if Process.whereis(Arbor.Trust.ConfirmationTracker) do
-      resource = Arbor.Actions.canonical_uri_for(action_module, %{})
-      Arbor.Trust.ConfirmationTracker.record_rejection(agent_id, resource)
-    end
+    resource = Arbor.Actions.canonical_uri_for(action_module, %{})
+    Arbor.Trust.record_rejection(agent_id, resource)
   rescue
     _ -> :ok
   catch
@@ -1140,12 +1152,50 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   def format_result(result), do: inspect(result, pretty: true)
 
-  defp reject_mixed_signing_credentials(opts) do
+  defp reject_mixed_signing_credentials(opts, args) do
     authority? = Keyword.has_key?(opts, :signing_authority)
     legacy? = Keyword.has_key?(opts, :signer) or Keyword.has_key?(opts, :signed_request)
 
-    if authority? and legacy?, do: {:error, :mixed_signing_credentials}, else: :ok
+    cond do
+      authority? and legacy? ->
+        {:error, :mixed_signing_credentials}
+
+      authority? and
+          (credential_bearing_term?(args) or
+             credential_bearing_term?(Keyword.delete(opts, :signing_authority))) ->
+        {:error, :caller_supplied_signing_credentials}
+
+      true ->
+        :ok
+    end
   end
+
+  defp credential_bearing_term?(term) when is_map(term) do
+    Enum.any?(term, fn {key, value} ->
+      credential_key?(key) or credential_bearing_term?(value)
+    end)
+  end
+
+  defp credential_bearing_term?(term) when is_list(term) do
+    Enum.any?(term, fn
+      {key, value} -> credential_key?(key) or credential_bearing_term?(value)
+      value -> credential_bearing_term?(value)
+    end)
+  end
+
+  defp credential_bearing_term?(_term), do: false
+
+  defp credential_key?(key) when is_atom(key) or is_binary(key) do
+    normalized =
+      key
+      |> to_string()
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9]/, "")
+
+    MapSet.member?(@credential_key_names, normalized)
+  end
+
+  defp credential_key?(_key), do: false
 
   defp with_signing_boundary(opts, fun) when is_function(fun, 1) do
     case Keyword.fetch(opts, :signing_authority) do
@@ -1155,13 +1205,30 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
       {:ok, authority} ->
         owner = self()
         token = make_ref()
-        boundary_pid = spawn(fn -> signing_boundary_loop(authority, owner, token) end)
+
+        {boundary_pid, boundary_monitor} =
+          spawn_monitor(fn -> signing_boundary_loop(authority, owner, token) end)
+
         boundary = {boundary_pid, token}
 
-        try do
-          fun.(boundary)
-        after
-          send(boundary_pid, {:close, token})
+        result =
+          try do
+            {:return, fun.(boundary)}
+          catch
+            kind, reason -> {:raise, kind, reason, __STACKTRACE__}
+          end
+
+        close_result = close_signing_boundary(boundary_pid, token, boundary_monitor)
+
+        case {result, close_result} do
+          {{:return, value}, :ok} ->
+            value
+
+          {{:return, _value}, {:error, reason}} ->
+            {:error, "Signing boundary close failed: #{inspect(reason)}"}
+
+          {{:raise, kind, reason, stacktrace}, _close_result} ->
+            :erlang.raise(kind, reason, stacktrace)
         end
     end
   end
@@ -1195,7 +1262,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         send(caller, {call_ref, result})
         signing_boundary_receive(authority, token, owner_monitor)
 
-      {:close, ^token} ->
+      {:close, closer, close_ref, ^token}
+      when is_pid(closer) and is_reference(close_ref) ->
+        send(closer, {:signing_boundary_closed, close_ref})
         :ok
 
       {:DOWN, ^owner_monitor, :process, _pid, _reason} ->
@@ -1203,6 +1272,44 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
       _other ->
         signing_boundary_receive(authority, token, owner_monitor)
+    end
+  end
+
+  defp close_signing_boundary(pid, token, monitor) do
+    close_ref = make_ref()
+    send(pid, {:close, self(), close_ref, token})
+
+    receive do
+      {:signing_boundary_closed, ^close_ref} ->
+        await_signing_boundary_down(pid, monitor)
+
+      {:DOWN, ^monitor, :process, ^pid, _reason} ->
+        {:error, :signing_boundary_closed_without_acknowledgement}
+    after
+      @signing_boundary_timeout_ms ->
+        Process.exit(pid, :kill)
+        await_forced_signing_boundary_down(pid, monitor)
+        {:error, :signing_boundary_close_timeout}
+    end
+  end
+
+  defp await_signing_boundary_down(pid, monitor) do
+    receive do
+      {:DOWN, ^monitor, :process, ^pid, :normal} -> :ok
+      {:DOWN, ^monitor, :process, ^pid, _reason} -> {:error, :signing_boundary_close_failed}
+    after
+      @signing_boundary_timeout_ms ->
+        Process.exit(pid, :kill)
+        await_forced_signing_boundary_down(pid, monitor)
+        {:error, :signing_boundary_close_timeout}
+    end
+  end
+
+  defp await_forced_signing_boundary_down(pid, monitor) do
+    receive do
+      {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+    after
+      @signing_boundary_timeout_ms -> Process.demonitor(monitor, [:flush])
     end
   end
 
