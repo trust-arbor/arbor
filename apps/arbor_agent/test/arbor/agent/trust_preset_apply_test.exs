@@ -37,6 +37,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   alias Arbor.Agent.{BranchSupervisor, Lifecycle}
   alias Arbor.Contracts.TenantContext
   alias Arbor.Persistence.BufferedStore
+  alias Arbor.Security.SigningAuthorityBroker
   alias Arbor.Trust.Store, as: TrustStore
 
   @profiles_store :arbor_agent_profiles
@@ -607,6 +608,44 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
   end
 
+  describe "concurrent lifecycle start security regression" do
+    test "losing idempotent start permanently closes only its issued bootstrap" do
+      assert {:ok, profile} =
+               Lifecycle.create("Concurrent Bootstrap Probe", template: "test_agent")
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      assert principal_bootstraps(agent_id) == []
+
+      supervisor = Process.whereis(Arbor.Agent.Supervisor)
+      assert is_pid(supervisor)
+      :ok = :sys.suspend(supervisor)
+
+      tasks =
+        for _ <- 1..2 do
+          Task.async(fn ->
+            Lifecycle.start(agent_id, start_heartbeat: false, recover_session: false)
+          end)
+        end
+
+      try do
+        assert_eventually(fn -> length(principal_bootstraps(agent_id)) == 2 end)
+      after
+        :ok = :sys.resume(supervisor)
+      end
+
+      assert [{:ok, winner}, {:ok, winner}] = Task.await_many(tasks, 10_000)
+
+      assert_eventually(fn ->
+        case principal_bootstraps(agent_id) do
+          [%{purpose: :session, status: status}] when status in [:unclaimed, :claimed] -> true
+          _ -> false
+        end
+      end)
+    end
+  end
+
   # --- helpers ---
 
   defp assert_eventually(assertion, attempts \\ 50)
@@ -621,6 +660,11 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   end
 
   defp assert_eventually(_assertion, 0), do: flunk("expected condition to become true")
+
+  defp principal_bootstraps(agent_id) do
+    SigningAuthorityBroker.debug_state().bootstrap_entries
+    |> Enum.filter(&(&1.principal_id == agent_id))
+  end
 
   defp start_security_child(child) do
     case Supervisor.start_child(Arbor.Security.Supervisor, child) do

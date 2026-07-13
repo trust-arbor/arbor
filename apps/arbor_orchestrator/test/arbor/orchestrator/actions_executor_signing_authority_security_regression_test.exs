@@ -1,6 +1,10 @@
 defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTest do
   use ExUnit.Case, async: false
 
+  defmodule TraversalStruct do
+    defstruct [:payload]
+  end
+
   @moduletag :fast
   @moduletag :security_regression
 
@@ -153,7 +157,10 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
       %{metadata: [auth_context: %{signer: fn _ -> {:error, :caller} end}]},
       %{"payload" => %{"identityPrivateKey" => "caller-key"}},
       %{nested: [[authorizer: fn _, _ -> :ok end]]},
-      %{"request" => %{"bearer-token" => "caller-token"}}
+      %{"request" => %{"bearer-token" => "caller-token"}},
+      {:wrapper, {:signer, fn _ -> {:error, :caller} end}},
+      %{{:metadata, {:signed_request, :token}} => "caller"},
+      %TraversalStruct{payload: %{access_token: "caller-token"}}
     ]
 
     for hidden <- hidden_credentials do
@@ -182,6 +189,33 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
 
     assert message =~ "caller_supplied_signing_credentials"
     refute File.exists?(marker)
+  end
+
+  test "security regression: ordinary structs traverse without crashing", ctx do
+    assert {:error, message} =
+             ActionsExecutor.execute(
+               "unknown.action",
+               %{"input" => %URI{scheme: "https", host: "example.test", path: "/safe"}},
+               ctx.root,
+               agent_id: ctx.agent_id,
+               signing_authority: ctx.authority
+             )
+
+    assert message == "Unknown action: unknown.action"
+  end
+
+  test "security regression: ordinary scalar values matching credential names remain values",
+       ctx do
+    assert {:error, message} =
+             ActionsExecutor.execute(
+               "unknown.action",
+               %{"input" => {:wrapper, ["signer", :signed_request]}},
+               ctx.root,
+               agent_id: ctx.agent_id,
+               signing_authority: ctx.authority
+             )
+
+    assert message == "Unknown action: unknown.action"
   end
 
   test "security regression: authority is absent from action context", ctx do
@@ -247,12 +281,16 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
     nested = context.nested_engine_opts
     refute Keyword.has_key?(nested, :signing_authority)
     signer = Keyword.fetch!(nested, :signer)
+    authorizer = Keyword.fetch!(nested, :authorizer)
     assert is_function(signer, 1)
-    assert is_function(Keyword.fetch!(nested, :authorizer), 2)
+    assert is_function(authorizer, 2)
 
     _result = Task.await(task)
 
     assert {:error, :signing_boundary_unavailable} = signer.("arbor://shell/exec/retained")
+
+    assert {:error, :signing_boundary_unavailable} =
+             authorizer.(ctx.agent_id, :execute)
   end
 
   test "security regression: generic actions never receive authority-derived closures", ctx do

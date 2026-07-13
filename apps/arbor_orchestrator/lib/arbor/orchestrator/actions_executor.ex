@@ -1174,18 +1174,48 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     term
     |> Map.to_list()
     |> Enum.any?(fn {key, value} ->
-      credential_key?(key) or credential_bearing_term?(value)
+      credential_bearing_key?(key) or credential_bearing_term?(value)
     end)
   end
 
   defp credential_bearing_term?(term) when is_list(term) do
     Enum.any?(term, fn
-      {key, value} -> credential_key?(key) or credential_bearing_term?(value)
+      {key, value} -> credential_bearing_key?(key) or credential_bearing_term?(value)
       value -> credential_bearing_term?(value)
     end)
   end
 
+  defp credential_bearing_term?({key, value}) do
+    credential_bearing_key?(key) or credential_bearing_term?(value)
+  end
+
+  defp credential_bearing_term?(term) when is_tuple(term) do
+    term
+    |> Tuple.to_list()
+    |> Enum.any?(&credential_bearing_term?/1)
+  end
+
   defp credential_bearing_term?(_term), do: false
+
+  defp credential_bearing_key?(key) when is_atom(key) or is_binary(key),
+    do: credential_key?(key)
+
+  defp credential_bearing_key?(key) when is_map(key) do
+    Enum.any?(Map.to_list(key), fn {nested_key, nested_value} ->
+      credential_bearing_key?(nested_key) or credential_bearing_key?(nested_value)
+    end)
+  end
+
+  defp credential_bearing_key?(key) when is_list(key),
+    do: Enum.any?(key, &credential_bearing_key?/1)
+
+  defp credential_bearing_key?(key) when is_tuple(key) do
+    key
+    |> Tuple.to_list()
+    |> Enum.any?(&credential_bearing_key?/1)
+  end
+
+  defp credential_bearing_key?(_key), do: false
 
   defp credential_key?(key) when is_atom(key) or is_binary(key) do
     normalized =

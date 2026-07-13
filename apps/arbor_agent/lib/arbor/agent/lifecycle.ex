@@ -348,6 +348,10 @@ defmodule Arbor.Agent.Lifecycle do
           {:ok, sup_pid}
 
         {:error, {:already_started, sup_pid}} ->
+          # Another concurrent start won after this call issued its own restart
+          # slots. The running branch owns the winner's slots; close only the
+          # losing call's freshly issued slots before returning idempotently.
+          close_branch_authority_bootstraps(bootstraps)
           {:ok, sup_pid}
 
         {:error, reason} ->
