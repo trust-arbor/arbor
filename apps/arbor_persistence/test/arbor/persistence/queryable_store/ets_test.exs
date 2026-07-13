@@ -16,7 +16,11 @@ defmodule Arbor.Persistence.QueryableStore.ETSTest do
     test "put and get a record", %{name: name} do
       record = Record.new("user:1", %{name: "Alice"})
       assert :ok = ETS.put("user:1", record, name: name)
-      assert {:ok, ^record} = ETS.get("user:1", name: name)
+      assert {:ok, stored} = ETS.get("user:1", name: name)
+      assert stored.key == "user:1"
+      assert stored.data == %{name: "Alice"}
+      assert stored.generation == 1
+      assert stored.revision == 1
     end
 
     test "returns not_found for missing key", %{name: name} do
@@ -52,8 +56,9 @@ defmodule Arbor.Persistence.QueryableStore.ETSTest do
         Record.new("u3", %{role: "admin", age: 40})
       ]
 
-      for {r, i} <- Enum.with_index(records) do
-        ETS.put("key_#{i}", r, name: name)
+      for r <- records do
+        # Structured put requires Record.key == store key
+        ETS.put(r.key, r, name: name)
       end
 
       {:ok, records: records}

@@ -132,6 +132,56 @@ defmodule Arbor.Contracts.API.Persistence do
               opts()
             ) :: boolean()
 
+  @typedoc """
+  Expected state for compare-and-swap fencing.
+
+  - `:not_found` — insert only when absent (or only a structured-record tombstone)
+  - `{:value, expected}` — replace only when the current logical version/value matches
+    (for Records: generation **and** revision; for plain values: term equality)
+  """
+  @type cas_expected :: :not_found | {:value, term()}
+
+  @typedoc """
+  Code-owned durability class reported by a backend.
+  """
+  @type durability_class ::
+          :volatile | :process_lifetime | :application_restart | :node_restart
+
+  @doc """
+  Atomically compare-and-swap a key using the specified backend.
+
+  Inserts when `expected` is `:not_found` and the key is absent (or only a
+  structured-record tombstone remains), or replaces when `expected` is
+  `{:value, current}` and the stored fencing token/value matches.
+
+  Structured Records fence on `(generation, revision)` and survive delete/reinsert
+  ABA via backend-owned generation tombstones. Ordinary unversioned values use
+  term equality only and do **not** prevent delete/reinsert ABA.
+
+  Exactly one concurrent claimant may succeed; conflicts return
+  `{:error, :conflict}`. Backends without CAS return `{:error, :unsupported}`.
+  """
+  @callback compare_and_swap_value_using_backend(
+              store_name(),
+              backend(),
+              key(),
+              cas_expected(),
+              replacement :: term(),
+              opts()
+            ) :: {:ok, term()} | {:error, :conflict | :unsupported | term()}
+
+  @doc """
+  Report the backend's code-owned durability class.
+
+  Returns `{:ok, class}` for backends that implement durability classification,
+  or `{:error, :unsupported}` when the backend does not expose it.
+  """
+  @callback report_backend_durability_class(
+              store_name(),
+              backend(),
+              opts()
+            ) :: {:ok, durability_class()} | {:error, :unsupported}
+
   # ===========================================================================
   # QueryableStore Operations (optional)
   # ===========================================================================
@@ -312,6 +362,9 @@ defmodule Arbor.Contracts.API.Persistence do
   # ===========================================================================
 
   @optional_callbacks [
+    # CAS / durability (optional — third-party backends need not implement)
+    compare_and_swap_value_using_backend: 6,
+    report_backend_durability_class: 3,
     # QueryableStore operations
     query_records_by_filter_using_backend: 4,
     count_records_by_filter_using_backend: 4,

@@ -3,12 +3,15 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   ETS-backed implementation of the QueryableStore behaviour.
 
   Uses a GenServer to own a named ETS table. Records are stored as
-  `{key, %Record{}}` tuples. Query operations use `Filter.matches?/2`
-  to scan the table in-memory.
+  `{key, %Record{} | {:tombstone, generation}}` tuples. Query operations use
+  `Filter.matches?/2` to scan live records in-memory.
 
       children = [
         {Arbor.Persistence.QueryableStore.ETS, name: :my_queryable_store}
       ]
+
+  Durability class: `:process_lifetime`. Linearizable CAS and generation+revision
+  advancement are GenServer-serialized. Delete leaves a generation tombstone.
   """
 
   use GenServer
@@ -16,13 +19,19 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   @behaviour Arbor.Contracts.Persistence.Store
 
   alias Arbor.Contracts.Persistence.Filter
+  alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Persistence.Store.Revision
 
   # --- Client API ---
 
   @impl true
   def put(key, record, opts) do
-    name = Keyword.fetch!(opts, :name)
-    GenServer.call(name, {:put, key, record})
+    if Revision.key_mismatch?(key, record) do
+      {:error, :key_mismatch}
+    else
+      name = Keyword.fetch!(opts, :name)
+      GenServer.call(name, {:put, key, record})
+    end
   end
 
   @impl true
@@ -31,8 +40,14 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
     table = GenServer.call(name, :table)
 
     case :ets.lookup(table, key) do
-      [{^key, record}] -> {:ok, record}
-      [] -> {:error, :not_found}
+      [{^key, entry}] ->
+        case Revision.live_value(entry) do
+          {:ok, record} -> {:ok, record}
+          :not_found -> {:error, :not_found}
+        end
+
+      [] ->
+        {:error, :not_found}
     end
   end
 
@@ -46,7 +61,16 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   def list(opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
-    keys = :ets.foldl(fn {k, _v}, acc -> [k | acc] end, [], table)
+
+    keys =
+      :ets.foldl(
+        fn {k, v}, acc ->
+          if match?({:ok, _}, Revision.live_value(v)), do: [k | acc], else: acc
+        end,
+        [],
+        table
+      )
+
     {:ok, keys}
   end
 
@@ -54,7 +78,11 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   def exists?(key, opts) do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
-    :ets.member(table, key)
+
+    case :ets.lookup(table, key) do
+      [{^key, entry}] -> match?({:ok, _}, Revision.live_value(entry))
+      [] -> false
+    end
   end
 
   @impl true
@@ -63,7 +91,16 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
     table = GenServer.call(name, :table)
 
     records =
-      :ets.foldl(fn {_k, record}, acc -> [record | acc] end, [], table)
+      :ets.foldl(
+        fn {_k, entry}, acc ->
+          case Revision.live_value(entry) do
+            {:ok, record} -> [record | acc]
+            :not_found -> acc
+          end
+        end,
+        [],
+        table
+      )
       |> then(&Filter.apply(filter, &1))
 
     {:ok, records}
@@ -97,6 +134,19 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
     {:ok, result}
   end
 
+  @impl true
+  def compare_and_swap(key, expected, replacement, opts) do
+    if Revision.cas_operands_key_mismatch?(key, expected, replacement) do
+      {:error, :key_mismatch}
+    else
+      name = Keyword.fetch!(opts, :name)
+      GenServer.call(name, {:compare_and_swap, key, expected, replacement})
+    end
+  end
+
+  @impl true
+  def durability_class(_opts), do: :process_lifetime
+
   # --- GenServer ---
 
   def start_link(opts) do
@@ -116,16 +166,100 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
 
   @impl GenServer
   def handle_call({:put, key, record}, _from, %{table: table} = state) do
-    :ets.insert(table, {key, record})
-    {:reply, :ok, state}
+    current =
+      case :ets.lookup(table, key) do
+        [{^key, v}] -> v
+        [] -> :absent
+      end
+
+    case Revision.apply_put(current, record) do
+      {:ok, stored} ->
+        :ets.insert(table, {key, stored})
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:delete, key}, _from, %{table: table} = state) do
-    :ets.delete(table, key)
+    case :ets.lookup(table, key) do
+      [{^key, entry}] ->
+        case Revision.to_tombstone(entry) do
+          :absent -> :ets.delete(table, key)
+          tombstone -> :ets.insert(table, {key, tombstone})
+        end
+
+      [] ->
+        :ok
+    end
+
     {:reply, :ok, state}
   end
 
   def handle_call(:table, _from, %{table: table} = state) do
     {:reply, table, state}
   end
+
+  def handle_call(
+        {:compare_and_swap, key, :not_found, replacement},
+        _from,
+        %{table: table} = state
+      ) do
+    reply =
+      case :ets.lookup(table, key) do
+        [] ->
+          stored = Revision.advance_cas_insert(replacement)
+          true = :ets.insert_new(table, {key, stored})
+          {:ok, stored}
+
+        [{^key, {:tombstone, prev_gen}}] ->
+          stored = Revision.advance_cas_insert_from_tombstone(prev_gen, replacement)
+          :ets.insert(table, {key, stored})
+          {:ok, stored}
+
+        [{^key, _live}] ->
+          {:error, :conflict}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:compare_and_swap, key, {:value, expected}, replacement},
+        _from,
+        %{table: table} = state
+      ) do
+    reply =
+      case :ets.lookup(table, key) do
+        [{^key, current}] ->
+          if Revision.cas_matches?(current, expected) do
+            case cas_store(current, replacement) do
+              {:ok, stored} ->
+                true = :ets.insert(table, {key, stored})
+                {:ok, stored}
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+          else
+            {:error, :conflict}
+          end
+
+        [] ->
+          {:error, :conflict}
+      end
+
+    {:reply, reply, state}
+  end
+
+  defp cas_store(%Record{} = current, %Record{} = replacement) do
+    Revision.advance_cas_update(current, replacement)
+  end
+
+  defp cas_store(_current, replacement) when not is_struct(replacement, Record) do
+    {:ok, replacement}
+  end
+
+  defp cas_store(_current, _replacement), do: {:error, :conflict}
 end

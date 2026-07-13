@@ -6,6 +6,20 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   (jobs, mailbox, sessions, etc.) share one table, differentiated by
   the `namespace` column. Domain-specific data lives in JSONB columns.
 
+  ## Identity
+
+  - **Logical id** — `Record.id` is stored as the table primary key and is
+    preserved on update. It is never rewritten as `namespace <> ":" <> key`.
+  - **Physical identity** — unique `(namespace, key)`. All get/delete/CAS
+    predicates bind those columns so `("a", "b:c")` and `("a:b", "c")` coexist.
+
+  ## Fencing
+
+  Backend-owned `generation` + `revision` (both `>= 0`). Put/CAS advance tokens
+  from stored state; callers cannot roll them backward. Soft-delete sets
+  `deleted_at` and retains generation so reinsert becomes a new incarnation
+  (ABA-safe for structured Records).
+
   ## Configuration
 
   The Repo module must be configured and started:
@@ -27,6 +41,10 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
 
   The `:name` option is used as the namespace. When called via the facade,
   this is the atom name passed to `Arbor.Persistence.put(:jobs, Postgres, ...)`.
+
+  Durability class: `:node_restart`. Supports linearizable compare-and-swap as
+  one atomic SQL insert-or-update decision (generation+revision predicate +
+  affected rows), scoped by true `(namespace, key)`.
   """
 
   @behaviour Arbor.Contracts.Persistence.Store
@@ -37,6 +55,7 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Record, as: RecordSchema
+  alias Arbor.Persistence.Store.Revision
 
   require Logger
 
@@ -45,48 +64,20 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   # ===========================================================================
 
   @impl true
-  def put(_key, %Record{} = record, opts \\ []) do
-    namespace = namespace_from_opts(opts)
-    repo = repo_from_opts(opts)
-    attrs = RecordSchema.from_record(record, namespace)
-    now = DateTime.utc_now()
+  def put(key, %Record{} = record, opts \\ []) do
+    if Revision.key_mismatch?(key, record) do
+      {:error, :key_mismatch}
+    else
+      namespace = namespace_from_opts(opts)
+      repo = repo_from_opts(opts)
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      data = record.data || %{}
+      metadata = record.metadata || %{}
 
-    attrs_with_timestamps =
-      Map.merge(attrs, %{
-        inserted_at: now,
-        updated_at: now
-      })
-
-    # `id` is the deterministic identity for a record: `namespace:key`. It is the
-    # table's primary key AND the SOLE unique arbiter for the upsert (the redundant
-    # `(namespace, key)` UNIQUE index was dropped — see migration
-    # `20260625000001_records_single_unique_identity`). Arbitrating on `id` is
-    # race-safe: a concurrent INSERT for the same `(namespace, key)` computes the
-    # same `id` and so ON CONFLICT(id) DO UPDATE fires instead of raising a pkey
-    # violation on a non-arbiter index.
-    #
-    # Latent constraint: this requires `namespace:key` to be unambiguous — no
-    # namespace may be a prefix of another such that two distinct `(namespace, key)`
-    # pairs concatenate to the same `id`. True for all current namespaces (the
-    # store always looks up by the full `(namespace, key)` pair, and `id` is an
-    # internal surrogate that nothing reads by value).
-    scoped_attrs = %{attrs_with_timestamps | id: scoped_id(namespace, attrs.key)}
-
-    %RecordSchema{}
-    |> RecordSchema.changeset(scoped_attrs)
-    |> repo.insert(
-      on_conflict: [
-        set: [
-          data: attrs.data,
-          metadata: attrs.metadata,
-          updated_at: now
-        ]
-      ],
-      conflict_target: [:id]
-    )
-    |> case do
-      {:ok, _schema} -> :ok
-      {:error, changeset} -> {:error, changeset}
+      case atomic_upsert(repo, record.id, namespace, key, data, metadata, now) do
+        {:ok, _record} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
     end
   rescue
     e ->
@@ -95,18 +86,48 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   end
 
   @impl true
+  def compare_and_swap(key, expected, %Record{} = replacement, opts \\ []) do
+    if Revision.cas_operands_key_mismatch?(key, expected, replacement) do
+      {:error, :key_mismatch}
+    else
+      namespace = namespace_from_opts(opts)
+      repo = repo_from_opts(opts)
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      data = replacement.data || %{}
+      metadata = replacement.metadata || %{}
+
+      case expected do
+        :not_found ->
+          atomic_cas_insert(repo, replacement.id, namespace, key, data, metadata, now)
+
+        {:value, %Record{generation: exp_gen, revision: exp_rev}}
+        when is_integer(exp_gen) and is_integer(exp_rev) and exp_gen >= 0 and exp_rev >= 0 ->
+          atomic_cas_update(repo, namespace, key, exp_gen, exp_rev, data, metadata, now)
+
+        {:value, _other} ->
+          {:error, :conflict}
+      end
+    end
+  rescue
+    e ->
+      Logger.error("Failed to compare_and_swap record: #{inspect(e)}")
+      {:error, {:compare_and_swap_failed, e}}
+  end
+
+  @impl true
+  def durability_class(_opts), do: :node_restart
+
+  @impl true
   def get(key, opts \\ []) do
     namespace = namespace_from_opts(opts)
     repo = repo_from_opts(opts)
 
-    # Exact (namespace, key) point lookup → resolve via the primary key `id`
-    # (= "namespace:key", matching put/2's scheme) for an O(1) pkey lookup.
-    # The redundant (namespace, key) UNIQUE index was dropped (migration
-    # 20260625000001), so a where-ns-and-key query would now scan the
-    # non-unique records_namespace_index instead.
-    id = scoped_id(namespace, key)
+    query =
+      from(r in RecordSchema,
+        where: r.namespace == ^namespace and r.key == ^key and is_nil(r.deleted_at)
+      )
 
-    case repo.get(RecordSchema, id) do
+    case repo.one(query) do
       nil -> {:error, :not_found}
       schema -> {:ok, RecordSchema.to_record(schema)}
     end
@@ -120,12 +141,13 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   def delete(key, opts \\ []) do
     namespace = namespace_from_opts(opts)
     repo = repo_from_opts(opts)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
-    # Exact point delete → target the primary key `id` directly (see get/2).
-    id = scoped_id(namespace, key)
-
-    from(r in RecordSchema, where: r.id == ^id)
-    |> repo.delete_all()
+    # Soft-delete tombstone: retain generation for ABA-safe reinsert fencing.
+    from(r in RecordSchema,
+      where: r.namespace == ^namespace and r.key == ^key and is_nil(r.deleted_at)
+    )
+    |> repo.update_all(set: [deleted_at: now, updated_at: now])
 
     :ok
   rescue
@@ -141,7 +163,7 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
 
     keys =
       from(r in RecordSchema,
-        where: r.namespace == ^namespace,
+        where: r.namespace == ^namespace and is_nil(r.deleted_at),
         select: r.key,
         order_by: r.key
       )
@@ -159,10 +181,9 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     namespace = namespace_from_opts(opts)
     repo = repo_from_opts(opts)
 
-    # Exact point existence check → primary key `id` (see get/2).
-    id = scoped_id(namespace, key)
-
-    from(r in RecordSchema, where: r.id == ^id)
+    from(r in RecordSchema,
+      where: r.namespace == ^namespace and r.key == ^key and is_nil(r.deleted_at)
+    )
     |> repo.exists?()
   end
 
@@ -237,11 +258,6 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   # Private Helpers
   # ===========================================================================
 
-  # The deterministic primary-key identity for a record: "namespace:key". This is
-  # the single source of truth for the id scheme — put/2 writes it and the exact
-  # point lookups (get/2, delete/2, exists?/2) resolve against it.
-  defp scoped_id(namespace, key), do: "#{namespace}:#{key}"
-
   defp namespace_from_opts(opts) do
     opts |> Keyword.fetch!(:name) |> to_string()
   end
@@ -250,8 +266,146 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     Keyword.get(opts, :repo, Repo)
   end
 
+  # Upsert bound to true (namespace, key). Logical id preserved on live update;
+  # resurrected tombstones take the caller's logical id as a new incarnation.
+  # Generation/revision are backend-owned (never taken from caller input).
+  # Tombstone resurrection is a new incarnation: reset inserted_at; live updates
+  # preserve the original inserted_at.
+  defp atomic_upsert(repo, logical_id, namespace, key, data, metadata, now) do
+    sql = """
+    INSERT INTO records (
+      id, namespace, key, data, metadata, generation, revision,
+      deleted_at, inserted_at, updated_at
+    )
+    VALUES ($1, $2, $3, $4, $5, 1, 1, NULL, $6, $7)
+    ON CONFLICT (namespace, key) DO UPDATE SET
+      data = EXCLUDED.data,
+      metadata = EXCLUDED.metadata,
+      id = CASE
+        WHEN records.deleted_at IS NULL THEN records.id
+        ELSE EXCLUDED.id
+      END,
+      generation = CASE
+        WHEN records.deleted_at IS NULL THEN records.generation
+        ELSE records.generation + 1
+      END,
+      revision = CASE
+        WHEN records.deleted_at IS NULL THEN records.revision + 1
+        ELSE 1
+      END,
+      deleted_at = NULL,
+      inserted_at = CASE
+        WHEN records.deleted_at IS NULL THEN records.inserted_at
+        ELSE EXCLUDED.inserted_at
+      END,
+      updated_at = EXCLUDED.updated_at
+    RETURNING id, namespace, key, data, metadata, generation, revision,
+              deleted_at, inserted_at, updated_at
+    """
+
+    case repo.query(sql, [logical_id, namespace, key, data, metadata, now, now]) do
+      {:ok, %{num_rows: 1, rows: [row], columns: columns}} ->
+        {:ok, row_to_record(columns, row)}
+
+      {:ok, other} ->
+        {:error, {:put_failed, other}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Insert-only CAS: succeeds when absent, or when only a soft-deleted tombstone
+  # remains (new generation). Bound to true (namespace, key). Resurrection is a
+  # new incarnation and therefore resets inserted_at.
+  defp atomic_cas_insert(repo, logical_id, namespace, key, data, metadata, now) do
+    sql = """
+    INSERT INTO records (
+      id, namespace, key, data, metadata, generation, revision,
+      deleted_at, inserted_at, updated_at
+    )
+    VALUES ($1, $2, $3, $4, $5, 1, 1, NULL, $6, $7)
+    ON CONFLICT (namespace, key) DO UPDATE SET
+      id = EXCLUDED.id,
+      data = EXCLUDED.data,
+      metadata = EXCLUDED.metadata,
+      generation = records.generation + 1,
+      revision = 1,
+      deleted_at = NULL,
+      inserted_at = EXCLUDED.inserted_at,
+      updated_at = EXCLUDED.updated_at
+    WHERE records.deleted_at IS NOT NULL
+    RETURNING id, namespace, key, data, metadata, generation, revision,
+              deleted_at, inserted_at, updated_at
+    """
+
+    case repo.query(sql, [logical_id, namespace, key, data, metadata, now, now]) do
+      {:ok, %{num_rows: 1, rows: [row], columns: columns}} ->
+        {:ok, row_to_record(columns, row)}
+
+      {:ok, %{num_rows: 0}} ->
+        {:error, :conflict}
+
+      {:ok, other} ->
+        {:error, {:compare_and_swap_failed, other}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Expected generation+revision CAS on the true (namespace, key) row.
+  defp atomic_cas_update(repo, namespace, key, exp_gen, exp_rev, data, metadata, now) do
+    sql = """
+    UPDATE records
+    SET data = $1,
+        metadata = $2,
+        revision = revision + 1,
+        updated_at = $3
+    WHERE namespace = $4
+      AND key = $5
+      AND generation = $6
+      AND revision = $7
+      AND deleted_at IS NULL
+    RETURNING id, namespace, key, data, metadata, generation, revision,
+              deleted_at, inserted_at, updated_at
+    """
+
+    case repo.query(sql, [data, metadata, now, namespace, key, exp_gen, exp_rev]) do
+      {:ok, %{num_rows: 1, rows: [row], columns: columns}} ->
+        {:ok, row_to_record(columns, row)}
+
+      {:ok, %{num_rows: 0}} ->
+        {:error, :conflict}
+
+      {:ok, other} ->
+        {:error, {:compare_and_swap_failed, other}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp row_to_record(columns, row) do
+    map =
+      columns
+      |> Enum.zip(row)
+      |> Map.new(fn {col, val} -> {to_string(col), val} end)
+
+    %Record{
+      id: map["id"],
+      key: map["key"],
+      data: map["data"] || %{},
+      metadata: map["metadata"] || %{},
+      generation: map["generation"] || 0,
+      revision: map["revision"] || 0,
+      inserted_at: map["inserted_at"],
+      updated_at: map["updated_at"]
+    }
+  end
+
   defp base_query(namespace) do
-    from(r in RecordSchema, where: r.namespace == ^namespace)
+    from(r in RecordSchema, where: r.namespace == ^namespace and is_nil(r.deleted_at))
   end
 
   # ---------------------------------------------------------------------------

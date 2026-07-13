@@ -482,6 +482,67 @@ defmodule Arbor.Persistence do
     end
   end
 
+  @doc """
+  Atomically compare-and-swap a key via the public facade.
+
+  Delegates only when the backend exports `compare_and_swap/4`. Otherwise
+  returns `{:error, :unsupported}`. Consumers must not call backend internals.
+  """
+  @spec compare_and_swap(
+          atom(),
+          module(),
+          String.t(),
+          :not_found | {:value, term()},
+          term(),
+          keyword()
+        ) ::
+          {:ok, term()} | {:error, :conflict | :unsupported | term()}
+  def compare_and_swap(name, backend, key, expected, replacement, opts \\ []) do
+    if supports_compare_and_swap?(backend) do
+      backend.compare_and_swap(key, expected, replacement, Keyword.put(opts, :name, name))
+    else
+      {:error, :unsupported}
+    end
+  end
+
+  @doc """
+  Report a backend's code-owned durability class via the public facade.
+
+  Returns `{:ok, class}` when the backend exports `durability_class/1`, else
+  `{:error, :unsupported}`.
+  """
+  @spec durability_class(atom(), module(), keyword()) ::
+          {:ok, :volatile | :process_lifetime | :application_restart | :node_restart}
+          | {:error, :unsupported}
+  def durability_class(name, backend, opts \\ []) do
+    if supports_durability_class?(backend) do
+      class = backend.durability_class(Keyword.put(opts, :name, name))
+      {:ok, class}
+    else
+      {:error, :unsupported}
+    end
+  end
+
+  @doc """
+  True when the backend module is loaded and exports linearizable `compare_and_swap/4`.
+  """
+  @spec supports_compare_and_swap?(module()) :: boolean()
+  def supports_compare_and_swap?(backend) when is_atom(backend) do
+    Code.ensure_loaded?(backend) and function_exported?(backend, :compare_and_swap, 4)
+  end
+
+  def supports_compare_and_swap?(_backend), do: false
+
+  @doc """
+  True when the backend module is loaded and exports `durability_class/1`.
+  """
+  @spec supports_durability_class?(module()) :: boolean()
+  def supports_durability_class?(backend) when is_atom(backend) do
+    Code.ensure_loaded?(backend) and function_exported?(backend, :durability_class, 1)
+  end
+
+  def supports_durability_class?(_backend), do: false
+
   # ---------------------------------------------------------------
   # QueryableStore operations
   # ---------------------------------------------------------------
@@ -645,6 +706,14 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def check_key_exists_using_backend(name, backend, key, opts),
     do: exists?(name, backend, key, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def compare_and_swap_value_using_backend(name, backend, key, expected, replacement, opts),
+    do: compare_and_swap(name, backend, key, expected, replacement, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def report_backend_durability_class(name, backend, opts),
+    do: durability_class(name, backend, opts)
 
   # -- QueryableStore (optional) --
 

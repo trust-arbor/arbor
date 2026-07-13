@@ -133,6 +133,13 @@ defmodule Arbor.Persistence.BufferedStore do
     end
   end
 
+  # Buffered/async stores cannot preserve synchronous linearizable CAS across
+  # the cache + durable backend boundary. Do not implement compare_and_swap/4;
+  # the facade reports {:error, :unsupported}.
+
+  @impl true
+  def durability_class(_opts), do: :process_lifetime
+
   # ===========================================================================
   # GenServer start
   # ===========================================================================
