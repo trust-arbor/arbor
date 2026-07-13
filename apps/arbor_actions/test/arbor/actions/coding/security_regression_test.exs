@@ -754,6 +754,97 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     end
   end
 
+  test "security regression: council attestation binds completed ledger findings, not the incoming ledger",
+       %{
+         tmp_dir: tmp_dir
+       } do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/council_completed_ledger_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.CouncilCompletedLedgerTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        fixture.lease.worktree_path,
+        fixture.lease.workspace_id,
+        fixture.lease.base_commit,
+        [test_path]
+      )
+
+    incoming_ledger = %{"findings" => %{}}
+
+    params = %{
+      diff: material.diff,
+      files: [test_path],
+      branch: fixture.lease.branch,
+      base_ref: fixture.lease.base_commit,
+      intent: "bind completed review ledger",
+      agent_id: fixture.context.agent_id,
+      workspace_id: fixture.lease.workspace_id,
+      commit_hash: material.candidate_commit,
+      test_paths: [test_path],
+      validation_profile: "security_regression",
+      review_cycle: 1,
+      finding_ledger: incoming_ledger
+    }
+
+    completed_ledger = completed_review_ledger("New contract finding")
+
+    decision = %{
+      decision: "approved",
+      approve_count: 3,
+      reject_count: 0,
+      abstain_count: 0,
+      quorum_met: true,
+      review_cycle: 1,
+      finding_ledger: completed_ledger,
+      review_disposition: "accept",
+      blocking_ids: [],
+      blocking_reasons: [],
+      human_required: false
+    }
+
+    context =
+      Map.merge(fixture.context, %{
+        persist_verdict: false,
+        review_runner: fn _request, _params, _context -> {:ok, decision} end
+      })
+
+    assert {:ok, %{review_attestation_id: first_id} = result} =
+             Council.ReviewChange.run(params, context)
+
+    assert result.finding_ledger == completed_ledger
+    assert [%{"id" => "completed-finding"}] = result.feedback["review"]["active_findings"]
+
+    assert {:ok, %{council_decision_digest: first_digest}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(first_id, fixture.context)
+
+    changed_ledger = completed_review_ledger("Changed completed finding")
+
+    changed_decision = %{
+      decision
+      | finding_ledger: changed_ledger
+    }
+
+    changed_context = %{
+      context
+      | review_runner: fn _request, _params, _context -> {:ok, changed_decision} end
+    }
+
+    assert {:ok, %{review_attestation_id: second_id}} =
+             Council.ReviewChange.run(params, changed_context)
+
+    assert {:ok, %{council_decision_digest: second_digest}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(second_id, fixture.context)
+
+    refute first_digest == second_digest
+  end
+
   test "owner death removes its private attestation records", %{tmp_dir: tmp_dir} do
     repo = create_base_project(Path.join(tmp_dir, "owner-death-repo"), valid_module())
     server = :"attestation_owner_death_#{System.unique_integer([:positive])}"
@@ -841,6 +932,27 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
       )
 
     %{review_attestation_id: id}
+  end
+
+  defp completed_review_ledger(title) do
+    %{
+      "findings" => %{
+        "completed-finding" => %{
+          "id" => "completed-finding",
+          "owner" => "correctness",
+          "severity" => "minor",
+          "state" => "new_regression",
+          "title" => title,
+          "required_action" => "Resolve the completed finding",
+          "anchor" => %{
+            "path" => "test/council_completed_ledger_test.exs",
+            "side" => "new",
+            "line" => 3
+          },
+          "evidence" => "The completed council pass introduced this finding."
+        }
+      }
+    }
   end
 
   defp leased_project(tmp_dir, base_module) do

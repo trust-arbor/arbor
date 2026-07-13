@@ -53,7 +53,9 @@ defmodule Arbor.Actions.Council do
 
   @feedback_text_limit 1_000
   @feedback_list_limit 20
+  @feedback_json_bytes_limit 32_768
   @result_files_limit 100
+  @active_finding_states ~w(open new_regression architectural_blocker)
 
   # Perspectives available in AdvisoryLLM
   @allowed_perspectives [
@@ -454,7 +456,18 @@ defmodule Arbor.Actions.Council do
         ],
         workspace_id: [type: :string, doc: "Active coding workspace lease under review"],
         test_paths: [type: {:list, :string}, doc: "Selected reviewed security regression tests"],
-        validation_profile: [type: :string, doc: "Optional reviewed-tree validation profile"]
+        validation_profile: [type: :string, doc: "Optional reviewed-tree validation profile"],
+        review_cycle: [type: :pos_integer, doc: "Review-loop cycle number"],
+        prior_candidate_commit: [
+          type: :string,
+          doc: "Candidate commit reviewed in the prior cycle"
+        ],
+        delta_diff: [type: :string, doc: "Diff introduced since the prior review cycle"],
+        delta_files: [type: {:list, :string}, doc: "Files changed since the prior review cycle"],
+        finding_ledger: [
+          type: :any,
+          doc: "Frozen string-keyed JSON finding ledger for the current cycle"
+        ]
       ]
 
     alias Arbor.Actions
@@ -478,7 +491,12 @@ defmodule Arbor.Actions.Council do
         tier_decision: :data,
         workspace_id: :control,
         test_paths: {:control, requires: [:path_traversal]},
-        validation_profile: :control
+        validation_profile: :control,
+        review_cycle: :data,
+        prior_candidate_commit: :data,
+        delta_diff: :data,
+        delta_files: :data,
+        finding_ledger: :data
       }
     end
 
@@ -497,6 +515,7 @@ defmodule Arbor.Actions.Council do
       with {:ok, request} <- Council.build_code_review_request(params),
            :ok <- Council.reject_bound_review_overrides(params, run_authorization),
            {:ok, request, decision} <- run_review_with_snapshot(request, params, context),
+           :ok <- Council.validate_review_decision_cycle(decision, request),
            {:ok, verdict} <- Council.verdict_from_review_decision(decision, request) do
         routing = Council.review_routing(verdict, request, decision, context)
 
@@ -616,7 +635,7 @@ defmodule Arbor.Actions.Council do
 
     defp maybe_issue_security_regression_attestation(
            result,
-           _decision,
+           decision,
            request,
            routing,
            params,
@@ -641,7 +660,7 @@ defmodule Arbor.Actions.Council do
                WorkspaceLeaseRegistry.issue_review_attestation(
                  workspace_id,
                  material,
-                 council_decision_digest(result, routing),
+                 council_decision_digest(result, decision, request, routing),
                  registry_caller(context)
                ) do
           {:ok, Map.put(result, :review_attestation_id, issued.review_attestation_id)}
@@ -667,22 +686,29 @@ defmodule Arbor.Actions.Council do
       }
     end
 
-    defp council_decision_digest(result, routing) do
-      [
-        "arbor-council-review-v1",
-        result.decision,
-        Integer.to_string(result.approve_count),
-        Integer.to_string(result.reject_count),
-        Integer.to_string(result.abstain_count),
-        Atom.to_string(routing.action),
-        Atom.to_string(routing.blast_radius),
-        if(result.quorum_met, do: "true", else: "false")
-      ]
-      |> Enum.map(fn value -> [Integer.to_string(byte_size(value)), ":", value, "\n"] end)
-      |> IO.iodata_to_binary()
+    defp council_decision_digest(result, decision, request, routing) do
+      result
+      |> Council.review_attestation_decision_projection(decision, request, routing)
+      |> canonical_json()
       |> then(&:crypto.hash(:sha256, &1))
       |> Base.encode16(case: :lower)
     end
+
+    defp canonical_json(value) when is_map(value) do
+      entries =
+        value
+        |> Enum.map(fn {key, item} -> {to_string(key), item} end)
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.map(fn {key, item} -> [Jason.encode!(key), ":", canonical_json(item)] end)
+
+      ["{", Enum.intersperse(entries, ","), "}"]
+    end
+
+    defp canonical_json(value) when is_list(value) do
+      ["[", Enum.intersperse(Enum.map(value, &canonical_json/1), ","), "]"]
+    end
+
+    defp canonical_json(value), do: Jason.encode!(value)
   end
 
   # ===========================================================================
@@ -723,7 +749,10 @@ defmodule Arbor.Actions.Council do
         normalized == "commit_hash" and not is_nil(value) ->
           Map.put(acc, "candidate_commit", value)
 
-        normalized in ~w(diff files branch base_ref candidate_commit intent agent_id) and
+        normalized in ~w(
+          diff files branch base_ref candidate_commit intent agent_id review_cycle
+          prior_candidate_commit delta_diff delta_files finding_ledger
+        ) and
             not is_nil(value) ->
           Map.put(acc, normalized, value)
 
@@ -803,12 +832,70 @@ defmodule Arbor.Actions.Council do
 
   @doc false
   def review_routing(%Verdict{} = verdict, %CodeReviewRequest{} = request, decision, context) do
-    BlastRadius.route(verdict, request.files,
-      security_veto?: security_veto?(decision, context),
-      authority_widening?: truthy?(context_value(context, :authority_widening?)),
-      capability_profile_for_path: context_value(context, :capability_profile_for_path),
-      policy: context_value(context, :blast_radius_policy) || %{}
-    )
+    routing =
+      BlastRadius.route(verdict, request.files,
+        security_veto?: security_veto?(decision, context),
+        authority_widening?: truthy?(context_value(context, :authority_widening?)),
+        capability_profile_for_path: context_value(context, :capability_profile_for_path),
+        policy: context_value(context, :blast_radius_policy) || %{}
+      )
+
+    if review_human_required?(decision) do
+      %{
+        routing
+        | action: :human_review,
+          human_required: true,
+          reasons: Enum.uniq([:ledger_human_required | routing.reasons])
+      }
+    else
+      routing
+    end
+  end
+
+  @doc false
+  def review_attestation_decision_projection(
+        result,
+        decision,
+        %CodeReviewRequest{} = request,
+        routing
+      ) do
+    %{
+      "version" => "arbor-council-review-v2",
+      "decision" => result.decision,
+      "approve_count" => result.approve_count,
+      "reject_count" => result.reject_count,
+      "abstain_count" => result.abstain_count,
+      "quorum_met" => result.quorum_met,
+      "routing" => %{
+        "action" => Atom.to_string(routing.action),
+        "blast_radius" => Atom.to_string(routing.blast_radius)
+      },
+      "review" => %{
+        "review_cycle" => completed_review_cycle(decision, request),
+        "finding_ledger" => completed_finding_ledger(decision),
+        "review_disposition" => review_disposition(decision),
+        "blocking_ids" => review_blocking_ids(decision),
+        "blocking_reasons" => review_blocking_reasons(decision),
+        "human_required" => result.human_required
+      }
+    }
+  end
+
+  @doc false
+  def validate_review_decision_cycle(decision, %CodeReviewRequest{} = request) do
+    cond do
+      not review_specific_decision?(decision) ->
+        :ok
+
+      is_nil(value(decision, "review_cycle")) ->
+        :ok
+
+      value(decision, "review_cycle") == request.review_cycle ->
+        :ok
+
+      true ->
+        {:error, :review_cycle_mismatch}
+    end
   end
 
   @doc false
@@ -824,6 +911,7 @@ defmodule Arbor.Actions.Council do
     blast_radius = enum_string(routing.blast_radius)
     tier_reasons = bounded_enum_list(routing.reasons)
     verdict = verdict_projection(verdict)
+    review = review_metadata(decision, request, routing)
 
     feedback = %{
       "recommendation" => recommendation,
@@ -848,7 +936,12 @@ defmodule Arbor.Actions.Council do
       }
     }
 
-    %{
+    feedback =
+      if is_nil(review), do: feedback, else: Map.put(feedback, "review", review_feedback(review))
+
+    {feedback, feedback_json} = bounded_feedback_json(feedback)
+
+    result = %{
       status: "reviewed",
       verdict: verdict,
       recommendation: recommendation,
@@ -867,8 +960,20 @@ defmodule Arbor.Actions.Council do
       tier_reasons: tier_reasons,
       persistence: persistence_metadata(persistence),
       feedback: feedback,
-      feedback_json: Jason.encode!(feedback)
+      feedback_json: feedback_json
     }
+
+    if review == nil do
+      result
+    else
+      result
+      |> Map.put(:review_cycle, review["review_cycle"])
+      |> Map.put(:prior_candidate_commit, review["prior_candidate_commit"])
+      |> Map.put(:finding_ledger, review["finding_ledger"])
+      |> Map.put(:review_disposition, review["review_disposition"])
+      |> Map.put(:blocking_ids, review["blocking_ids"])
+      |> Map.put(:blocking_reasons, review["blocking_reasons"])
+    end
   end
 
   @doc false
@@ -1003,7 +1108,7 @@ defmodule Arbor.Actions.Council do
   end
 
   defp verdict_meta(decision, request, decision_atom) do
-    %{
+    meta = %{
       source: "code_review_council",
       decision: decision_atom,
       branch: request.branch,
@@ -1015,10 +1120,15 @@ defmodule Arbor.Actions.Council do
       abstain_count: integer_value(decision, "abstain_count"),
       quorum_met: boolean_value(decision, "quorum_met")
     }
+
+    case review_compact_metadata(decision, request) do
+      nil -> meta
+      review -> Map.put(meta, :review, review)
+    end
   end
 
   defp review_result_metadata(request, decision, routing) do
-    %{
+    metadata = %{
       "branch" => request.branch,
       "base_ref" => request.base_ref,
       "files" => request.files,
@@ -1036,6 +1146,11 @@ defmodule Arbor.Actions.Council do
       "authority_widening" => routing.authority_widening,
       "tier_reasons" => Enum.map(routing.reasons, &Atom.to_string/1)
     }
+
+    case review_metadata(decision, request, routing) do
+      nil -> metadata
+      review -> Map.put(metadata, "review", review)
+    end
   end
 
   # The action result crosses the Engine checkpoint boundary. Keep this
@@ -1069,6 +1184,7 @@ defmodule Arbor.Actions.Council do
       "abstain_count" => integer_value(meta, "abstain_count"),
       "quorum_met" => boolean_value(meta, "quorum_met")
     }
+    |> maybe_put_review_meta(Map.get(meta, :review) || Map.get(meta, "review"))
   end
 
   defp verdict_meta_projection(_meta), do: %{}
@@ -1095,6 +1211,238 @@ defmodule Arbor.Actions.Council do
 
   defp bounded_text(value),
     do: value |> inspect(limit: 20, printable_limit: @feedback_text_limit) |> bounded_text()
+
+  defp review_specific_decision?(decision) when is_map(decision) do
+    Enum.any?(
+      [
+        {"finding_ledger", :finding_ledger},
+        {"review_disposition", :review_disposition},
+        {"disposition", :disposition},
+        {"blocking_ids", :blocking_ids},
+        {"blocking_reasons", :blocking_reasons},
+        {"human_required", :human_required}
+      ],
+      fn {string_key, atom_key} ->
+        Map.has_key?(decision, string_key) or Map.has_key?(decision, atom_key)
+      end
+    )
+  end
+
+  defp review_specific_decision?(_decision), do: false
+
+  defp review_human_required?(decision),
+    do: review_specific_decision?(decision) and boolean_value(decision, "human_required")
+
+  defp review_metadata(decision, %CodeReviewRequest{} = request, routing \\ nil) do
+    if review_specific_decision?(decision) do
+      %{
+        "review_cycle" => completed_review_cycle(decision, request),
+        "prior_candidate_commit" => bounded_text(request.prior_candidate_commit),
+        "finding_ledger" => completed_finding_ledger(decision),
+        "review_disposition" => review_disposition(decision),
+        "blocking_ids" => review_blocking_ids(decision),
+        "blocking_reasons" => review_blocking_reasons(decision),
+        "human_required" =>
+          if(is_nil(routing),
+            do: boolean_value(decision, "human_required"),
+            else: routing.human_required
+          )
+      }
+    end
+  end
+
+  defp review_compact_metadata(decision, %CodeReviewRequest{} = request) do
+    case review_metadata(decision, request) do
+      nil -> nil
+      review -> Map.take(review, ["review_cycle", "review_disposition", "blocking_ids"])
+    end
+  end
+
+  defp completed_review_cycle(decision, %CodeReviewRequest{} = request) do
+    case value(decision, "review_cycle") do
+      cycle when is_integer(cycle) -> cycle
+      _ -> request.review_cycle
+    end
+  end
+
+  defp completed_finding_ledger(decision) do
+    case value(decision, "finding_ledger") do
+      ledger when is_map(ledger) -> ledger
+      _ -> %{}
+    end
+  end
+
+  defp review_disposition(decision) do
+    decision
+    |> value("review_disposition")
+    |> case do
+      nil -> value(decision, "disposition")
+      disposition -> disposition
+    end
+    |> bounded_text()
+  end
+
+  defp review_blocking_ids(decision) do
+    decision
+    |> value("blocking_ids")
+    |> bounded_text_list()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort()
+  end
+
+  defp review_blocking_reasons(decision) do
+    decision
+    |> value("blocking_reasons")
+    |> List.wrap()
+    |> Enum.filter(&is_map/1)
+    |> Enum.map(fn reason ->
+      %{
+        "id" => bounded_text(value(reason, "id")),
+        "reason" => bounded_text(value(reason, "reason"))
+      }
+    end)
+    |> Enum.sort_by(&{&1["id"], &1["reason"]})
+    |> Enum.take(@feedback_list_limit)
+  end
+
+  defp review_feedback(review) do
+    %{
+      "review_cycle" => review["review_cycle"],
+      "disposition" => review["review_disposition"],
+      "blocking_ids" => review["blocking_ids"],
+      "blocking_reasons" => review["blocking_reasons"],
+      "human_required" => review["human_required"],
+      "active_findings" => active_findings(review["finding_ledger"])
+    }
+  end
+
+  defp bounded_feedback_json(feedback) do
+    json = Jason.encode!(feedback)
+
+    if byte_size(json) <= @feedback_json_bytes_limit do
+      {feedback, json}
+    else
+      feedback = compact_feedback(feedback)
+      json = Jason.encode!(feedback)
+
+      if byte_size(json) <= @feedback_json_bytes_limit do
+        {feedback, json}
+      else
+        minimal = %{
+          "recommendation" => feedback["recommendation"],
+          "flags" => feedback["flags"],
+          "feedback_truncated" => true
+        }
+
+        {minimal, Jason.encode!(minimal)}
+      end
+    end
+  end
+
+  defp compact_feedback(feedback) do
+    feedback
+    |> update_in(["verdict", "weaknesses"], &compact_text_list(&1, 8))
+    |> update_in(["tier", "reasons"], &compact_text_list(&1, 8))
+    |> Map.update("review", nil, &compact_review_feedback/1)
+  end
+
+  defp compact_review_feedback(nil), do: nil
+
+  defp compact_review_feedback(review) do
+    review
+    |> Map.update("blocking_ids", [], &compact_text_list(&1, 8))
+    |> Map.update("blocking_reasons", [], fn reasons ->
+      reasons
+      |> List.wrap()
+      |> Enum.take(8)
+      |> Enum.map(fn reason ->
+        %{
+          "id" => compact_text(value(reason, "id")),
+          "reason" => compact_text(value(reason, "reason"))
+        }
+      end)
+    end)
+    |> Map.update("active_findings", [], fn findings ->
+      findings
+      |> List.wrap()
+      |> Enum.take(6)
+      |> Enum.map(&compact_active_finding/1)
+    end)
+  end
+
+  defp compact_active_finding(finding) do
+    finding
+    |> Map.new(fn {key, value} -> {key, compact_feedback_value(key, value)} end)
+  end
+
+  defp compact_feedback_value("anchor", anchor) when is_map(anchor) do
+    Map.new(anchor, fn
+      {"line", value} -> {"line", value}
+      {key, value} -> {key, compact_text(value)}
+    end)
+  end
+
+  defp compact_feedback_value(_key, value) when is_binary(value), do: compact_text(value)
+  defp compact_feedback_value(_key, value), do: value
+
+  defp compact_text_list(values, limit) do
+    values
+    |> List.wrap()
+    |> Enum.take(limit)
+    |> Enum.map(&compact_text/1)
+  end
+
+  defp compact_text(nil), do: nil
+  defp compact_text(value) when is_binary(value), do: String.slice(value, 0, 256)
+
+  defp compact_text(value),
+    do: value |> inspect(limit: 10, printable_limit: 256) |> compact_text()
+
+  defp active_findings(ledger) when is_map(ledger) do
+    ledger
+    |> value("findings")
+    |> case do
+      findings when is_map(findings) -> Map.values(findings)
+      findings when is_list(findings) -> findings
+      _ -> []
+    end
+    |> Enum.filter(&(is_map(&1) and value(&1, "state") in @active_finding_states))
+    |> Enum.map(&active_finding_projection/1)
+    |> Enum.filter(&(is_binary(&1["id"]) and &1["id"] != ""))
+    |> Enum.sort_by(& &1["id"])
+    |> Enum.take(@feedback_list_limit)
+  end
+
+  defp active_findings(_ledger), do: []
+
+  defp active_finding_projection(finding) do
+    %{
+      "id" => bounded_text(value(finding, "id")),
+      "owner" => bounded_text(value(finding, "owner")),
+      "severity" => bounded_text(value(finding, "severity")),
+      "state" => bounded_text(value(finding, "state")),
+      "title" => bounded_text(value(finding, "title")),
+      "required_action" => bounded_text(value(finding, "required_action"))
+    }
+    |> maybe_put("anchor", active_finding_anchor(value(finding, "anchor")))
+    |> maybe_put("evidence", bounded_text(value(finding, "evidence")))
+  end
+
+  defp active_finding_anchor(anchor) when is_map(anchor) do
+    %{
+      "path" => bounded_text(value(anchor, "path")),
+      "side" => bounded_text(value(anchor, "side")),
+      "line" => integer_value(anchor, "line")
+    }
+  end
+
+  defp active_finding_anchor(_anchor), do: nil
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp maybe_put_review_meta(meta, nil), do: meta
+  defp maybe_put_review_meta(meta, review), do: Map.put(meta, "review", review)
 
   defp enum_string(value) when is_atom(value), do: Atom.to_string(value)
   defp enum_string(value) when is_binary(value), do: bounded_text(value)

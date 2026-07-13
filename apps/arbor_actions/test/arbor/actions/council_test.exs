@@ -123,6 +123,37 @@ defmodule Arbor.Actions.CouncilTest do
                })
     end
 
+    test "projects review-cycle request fields and preserves commit_hash compatibility" do
+      ledger = review_ledger()
+
+      params =
+        @valid_review_params
+        |> Map.merge(%{
+          commit_hash: String.duplicate("c", 40),
+          review_cycle: 2,
+          prior_candidate_commit: String.duplicate("b", 40),
+          delta_diff: "@@ -1 +1 @@\n-old\n+new",
+          delta_files: ["lib/a.ex"],
+          finding_ledger: ledger
+        })
+
+      assert {:ok, _} = Council.ReviewChange.validate_params(params)
+      assert {:ok, request} = Council.build_code_review_request(params)
+      assert request.candidate_commit == String.duplicate("c", 40)
+      assert request.review_cycle == 2
+      assert request.prior_candidate_commit == String.duplicate("b", 40)
+      assert request.delta_diff == "@@ -1 +1 @@\n-old\n+new"
+      assert request.delta_files == ["lib/a.ex"]
+      assert request.finding_ledger == ledger
+
+      roles = Council.ReviewChange.taint_roles()
+      assert roles[:review_cycle] == :data
+      assert roles[:prior_candidate_commit] == :data
+      assert roles[:delta_diff] == :data
+      assert roles[:delta_files] == :data
+      assert roles[:finding_ledger] == :data
+    end
+
     test "validates action metadata and egress classification" do
       assert Council.ReviewChange.name() == "council_review_change"
       assert Council.ReviewChange.category() == "council"
@@ -174,11 +205,121 @@ defmodule Arbor.Actions.CouncilTest do
       assert result.tier_decision == "auto_proceed"
       refute result.human_required
       assert result.persistence == %{"status" => "recorded", "run_id" => "run_123"}
+      refute Map.has_key?(result, :review_disposition)
+      refute Map.has_key?(result, :finding_ledger)
 
       assert_receive {:persisted, verdict, request, decision}
       assert verdict.meta.branch == "agent/review-loop"
       assert request.agent_id == "agent_123"
       assert decision.decision == "approved"
+    end
+
+    test "projects review ledger decisions into results, feedback, and persisted verdict metadata" do
+      initial_ledger = %{"findings" => %{}}
+      ledger = review_ledger()
+      parent = self()
+
+      decision = %{
+        "decision" => "deadlock",
+        "approve_count" => 1,
+        "reject_count" => 2,
+        "abstain_count" => 0,
+        "quorum_met" => false,
+        "review_cycle" => 2,
+        "finding_ledger" => ledger,
+        "review_disposition" => "rework",
+        "blocking_ids" => ["finding-2", "finding-1"],
+        "blocking_reasons" => [
+          %{"id" => "finding-2", "reason" => "active_blocking"},
+          %{"id" => "finding-1", "reason" => "corroborated_major"}
+        ],
+        "human_required" => false
+      }
+
+      params = Map.merge(@valid_review_params, %{review_cycle: 2, finding_ledger: initial_ledger})
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(params, %{
+                 review_runner: fn request, _params, _context ->
+                   assert request.review_cycle == 2
+                   assert request.finding_ledger == initial_ledger
+                   {:ok, decision}
+                 end,
+                 persist_verdict: fn verdict, _request, _decision ->
+                   send(parent, {:review_meta, verdict.meta.review})
+                   :ok
+                 end
+               })
+
+      assert result.decision == "deadlock"
+      assert result.recommendation == "revise"
+      assert result.tier_decision == "rework"
+      assert result.review_disposition == "rework"
+      assert result.blocking_ids == ["finding-1", "finding-2"]
+      assert result.finding_ledger == ledger
+      assert result.feedback["review"]["disposition"] == "rework"
+      assert result.feedback["review"]["blocking_ids"] == ["finding-1", "finding-2"]
+
+      assert [first | _] = result.feedback["review"]["active_findings"]
+      assert first["id"] == "finding-1"
+      assert first["owner"] == "correctness"
+      assert first["required_action"] == "Repair the contract boundary"
+      assert first["anchor"] == %{"path" => "lib/a.ex", "side" => "new", "line" => 12}
+      assert first["evidence"] == "Caller can pass an unsupported option."
+
+      assert_receive {:review_meta, persisted_review}
+      refute Map.has_key?(persisted_review, "finding_ledger")
+      assert persisted_review["review_cycle"] == 2
+      assert persisted_review["review_disposition"] == "rework"
+      assert persisted_review["blocking_ids"] == ["finding-1", "finding-2"]
+    end
+
+    test "architectural ledger handoff routes rejected decisions to human review without security veto" do
+      ledger = review_ledger(%{"state" => "architectural_blocker"})
+
+      decision = %{
+        decision: "rejected",
+        reject_count: 1,
+        review_cycle: 1,
+        finding_ledger: ledger,
+        review_disposition: "human_review",
+        blocking_ids: ["finding-1"],
+        blocking_reasons: [%{"id" => "finding-1", "reason" => "architectural_blocker"}],
+        human_required: true
+      }
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(
+                 Map.put(@valid_review_params, :finding_ledger, ledger),
+                 %{review_runner: fn _, _, _ -> {:ok, decision} end, persist_verdict: false}
+               )
+
+      assert result.decision == "rejected"
+      assert result.recommendation == "reject"
+      assert result.tier_decision == "human_review"
+      assert result.human_required
+      refute result.security_veto
+      refute result.authority_widening
+      assert "ledger_human_required" in result.tier_reasons
+      refute "security_veto" in result.tier_reasons
+    end
+
+    test "rejects a review-specific decision from a different review cycle" do
+      decision = %{
+        decision: "approved",
+        review_cycle: 2,
+        finding_ledger: %{"findings" => %{}},
+        review_disposition: "accept",
+        blocking_ids: [],
+        blocking_reasons: [],
+        human_required: false
+      }
+
+      assert {:error, :review_cycle_mismatch} =
+               Council.ReviewChange.run(
+                 @valid_review_params,
+                 %{review_runner: fn _, _, _ -> {:ok, decision} end, persist_verdict: false}
+               )
     end
 
     test "negative regression: rejecting panel yields reject verdict, not keep" do
@@ -614,6 +755,39 @@ defmodule Arbor.Actions.CouncilTest do
       assert length(result.feedback["verdict"]["weaknesses"]) == 20
       assert Enum.all?(result.feedback["verdict"]["weaknesses"], &(String.length(&1) <= 1_000))
     end
+
+    test "review feedback is bounded and remains valid JSON" do
+      ledger = review_ledger_with_many_findings()
+
+      decision = %{
+        decision: "deadlock",
+        review_cycle: 1,
+        finding_ledger: ledger,
+        review_disposition: "rework",
+        blocking_ids: Enum.map(1..25, &"finding-#{&1}"),
+        blocking_reasons:
+          Enum.map(1..25, &%{"id" => "finding-#{&1}", "reason" => "active_blocking"}),
+        human_required: false
+      }
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(
+                 Map.put(@valid_review_params, :finding_ledger, ledger),
+                 %{review_runner: fn _, _, _ -> {:ok, decision} end, persist_verdict: false}
+               )
+
+      assert {:ok, feedback} = Jason.decode(result.feedback_json)
+      assert feedback == result.feedback
+      assert length(feedback["review"]["active_findings"]) <= 20
+      assert length(feedback["review"]["blocking_ids"]) <= 20
+      assert byte_size(result.feedback_json) <= 32_768
+
+      assert Enum.all?(feedback["review"]["active_findings"], fn finding ->
+               String.length(finding["title"]) <= 1_000 and
+                 String.length(finding["required_action"]) <= 1_000 and
+                 String.length(finding["evidence"]) <= 1_000
+             end)
+    end
   end
 
   describe "normalize_perspective/1" do
@@ -712,6 +886,44 @@ defmodule Arbor.Actions.CouncilTest do
     """)
 
     path
+  end
+
+  defp review_ledger(overrides \\ %{}) do
+    finding =
+      %{
+        "id" => "finding-1",
+        "owner" => "correctness",
+        "severity" => "blocking",
+        "state" => "open",
+        "title" => "Reject unsupported options",
+        "required_action" => "Repair the contract boundary",
+        "anchor" => %{"path" => "lib/a.ex", "side" => "new", "line" => 12},
+        "evidence" => "Caller can pass an unsupported option."
+      }
+      |> Map.merge(overrides)
+
+    %{"findings" => %{"finding-1" => finding}}
+  end
+
+  defp review_ledger_with_many_findings do
+    findings =
+      Map.new(1..25, fn number ->
+        id = "finding-#{number}"
+
+        {id,
+         %{
+           "id" => id,
+           "owner" => "correctness",
+           "severity" => "blocking",
+           "state" => "open",
+           "title" => String.duplicate("t", 1_500),
+           "required_action" => String.duplicate("a", 1_500),
+           "anchor" => %{"path" => "lib/a.ex", "side" => "new", "line" => number},
+           "evidence" => String.duplicate("e", 1_500)
+         }}
+      end)
+
+    %{"findings" => findings}
   end
 
   defp git!(path, args) do
