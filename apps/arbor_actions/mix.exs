@@ -36,6 +36,9 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_trust, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
+      # L2 — public LLM eval-subject catalog (`Arbor.LLM.eval_subject/1`).
+      # Legal: actions (L6) may depend only downward.
+      {:arbor_llm, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
       {:arbor_sandbox, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},

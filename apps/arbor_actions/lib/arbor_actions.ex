@@ -1188,6 +1188,13 @@ defmodule Arbor.Actions do
         Arbor.Actions.Eval.ListRuns,
         Arbor.Actions.Eval.GetRun
       ],
+      eval_pipeline: [
+        Arbor.Actions.EvalPipeline.LoadDataset,
+        Arbor.Actions.EvalPipeline.RunEval,
+        Arbor.Actions.EvalPipeline.Aggregate,
+        Arbor.Actions.EvalPipeline.Persist,
+        Arbor.Actions.EvalPipeline.Report
+      ],
       relationship: [
         Arbor.Actions.Relationship.Get,
         Arbor.Actions.Relationship.Save,

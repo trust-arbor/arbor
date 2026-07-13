@@ -61,6 +61,10 @@ defmodule Arbor.LLM do
   def eval_subject(name) when is_binary(name), do: Map.get(@eval_subjects, name)
   def eval_subject(_name), do: nil
 
+  @doc "Returns all registered LLM-owned eval subject symbolic names."
+  @spec eval_subject_names() :: [String.t()]
+  def eval_subject_names, do: Map.keys(@eval_subjects)
+
   @spec generate(generate_opts()) ::
           {:ok, Arbor.LLM.Response.t()} | {:error, term()}
   def generate(opts) when is_list(opts) do

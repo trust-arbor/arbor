@@ -181,13 +181,25 @@ defmodule Arbor.Eval do
       |> Enum.map(&grader/1)
       |> Enum.reject(&is_nil/1)
 
+    run_eval_modules(samples, subject_module, grader_modules, opts)
+  end
+
+  @doc """
+  Runs already-resolved trusted subject and grader modules over samples.
+
+  Module selection is the caller's responsibility. Untrusted string inputs must
+  be resolved through closed public catalogs (`subject/1`, `grader/1`, or the
+  LLM/AI facades) before calling this function.
+  """
+  @spec run_eval_modules([map()], module(), [module()], keyword()) :: [map()]
+  def run_eval_modules(samples, subject_module, grader_modules, opts \\ [])
+      when is_atom(subject_module) and is_list(grader_modules) do
     Pipeline.run_eval(samples, subject_module, grader_modules, opts)
   end
 
   @doc "Computes a built-in pipeline metric."
   @spec compute_metric(String.t(), [map()], keyword()) :: float()
   defdelegate compute_metric(name, results, opts \\ []), to: Metrics, as: :compute
-
   @doc "Returns the built-in pipeline metric names."
   @spec metric_names() :: [String.t()]
   defdelegate metric_names(), to: Metrics, as: :known_metrics

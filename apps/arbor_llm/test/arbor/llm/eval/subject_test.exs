@@ -588,6 +588,10 @@ defmodule Arbor.LLM.Eval.SubjectTest do
       assert LLM.eval_subject(nil) == nil
     end
 
+    test "exposes the closed symbolic subject catalog names" do
+      assert LLM.eval_subject_names() == ["llm"]
+    end
+
     test "unknown strings do not intern atoms or resolve modules" do
       unknown = "unknown_eval_#{System.unique_integer([:positive, :monotonic])}"
 

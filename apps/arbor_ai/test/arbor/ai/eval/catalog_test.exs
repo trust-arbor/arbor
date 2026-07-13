@@ -14,6 +14,9 @@ defmodule Arbor.AI.Eval.CatalogTest do
     assert Arbor.AI.eval_subject("passthrough") == nil
     assert Arbor.AI.eval_subject("Arbor.AI.Eval.Subjects.EmbeddingRetrieval") == nil
     assert Arbor.AI.eval_subject(EmbeddingRetrieval) == nil
+
+    assert Enum.sort(Arbor.AI.eval_subject_names()) ==
+             Enum.sort(["embedding_retrieval", "llm_router", "hybrid_retrieval"])
   end
 
   test "resolves exactly the AI-owned symbolic graders" do
@@ -23,6 +26,9 @@ defmodule Arbor.AI.Eval.CatalogTest do
     assert Arbor.AI.eval_grader("exact_match") == nil
     assert Arbor.AI.eval_grader("Arbor.AI.Eval.Graders.EmbeddingSimilarity") == nil
     assert Arbor.AI.eval_grader(EmbeddingSimilarity) == nil
+
+    assert Enum.sort(Arbor.AI.eval_grader_names()) ==
+             Enum.sort(["embedding_similarity", "intent_conformance"])
   end
 
   test "unknown untrusted strings do not intern atoms" do

@@ -141,5 +141,20 @@ defmodule Arbor.Eval.PipelineTest do
       assert Pipeline.run_eval(samples, Passthrough, [ExactMatch]) ==
                Eval.run_eval(samples, "passthrough", ["exact_match"])
     end
+
+    test "run_eval_modules runs already-resolved trusted modules" do
+      samples = [
+        %{"id" => "ok", "input" => "same", "expected" => "same"},
+        %{"id" => "no", "input" => "left", "expected" => "right"}
+      ]
+
+      results = Eval.run_eval_modules(samples, Passthrough, [ExactMatch])
+
+      assert results ==
+               Pipeline.run_eval(samples, Passthrough, [ExactMatch])
+
+      assert results == Eval.run_eval(samples, "passthrough", ["exact_match"])
+      assert Enum.map(results, & &1["passed"]) == [true, false]
+    end
   end
 end

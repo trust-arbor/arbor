@@ -85,6 +85,10 @@ defmodule Arbor.AI do
   def eval_subject(name) when is_binary(name), do: Map.get(@eval_subjects, name)
   def eval_subject(_name), do: nil
 
+  @doc "Returns all registered AI-owned eval subject symbolic names."
+  @spec eval_subject_names() :: [String.t()]
+  def eval_subject_names, do: Map.keys(@eval_subjects)
+
   @doc """
   Resolves an AI-owned evaluation grader from its closed symbolic catalog.
 
@@ -95,6 +99,9 @@ defmodule Arbor.AI do
   def eval_grader(name) when is_binary(name), do: Map.get(@eval_graders, name)
   def eval_grader(_name), do: nil
 
+  @doc "Returns all registered AI-owned eval grader symbolic names."
+  @spec eval_grader_names() :: [String.t()]
+  def eval_grader_names, do: Map.keys(@eval_graders)
   # ── Authorized API (for agent callers) ──
 
   @doc """

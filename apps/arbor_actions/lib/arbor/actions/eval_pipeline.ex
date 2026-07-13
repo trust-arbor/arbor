@@ -2,13 +2,9 @@ defmodule Arbor.Actions.EvalPipeline do
   @moduledoc """
   Pipeline-level evaluation operations as Jido actions.
 
-  These actions wrap the orchestrator's eval pipeline stages (dataset loading,
-  evaluation execution, aggregation, persistence, reporting) so they can be
-  invoked via `exec target="action"` in DOT pipelines instead of domain-specific
-  handler types.
-
-  Uses runtime bridges (`Code.ensure_loaded?` + `apply/3`) since
-  `arbor_orchestrator` is a Standalone app.
+  These actions compose public lower-level facades (`Arbor.Eval`, `Arbor.LLM`,
+  `Arbor.AI`, `Arbor.Persistence`) so they can be invoked via
+  `exec target="action"` in DOT pipelines.
 
   ## Actions
 
@@ -20,19 +16,6 @@ defmodule Arbor.Actions.EvalPipeline do
   | `Persist` | Persist eval run to database |
   | `Report` | Generate formatted eval report |
   """
-
-  @doc false
-  def bridge(module, function, args, default \\ nil) do
-    if Code.ensure_loaded?(module) do
-      apply(module, function, args)
-    else
-      default
-    end
-  rescue
-    e -> {:error, "Bridge call failed: #{Exception.message(e)}"}
-  catch
-    :exit, reason -> {:error, "Bridge process error: #{inspect(reason)}"}
-  end
 
   # ============================================================================
   # LoadDataset
@@ -67,20 +50,19 @@ defmodule Arbor.Actions.EvalPipeline do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.File, as: FileActions
     alias Arbor.Actions.EvalPipeline
 
     def taint_roles, do: %{path: :control, shuffle: :data, limit: :data, seed: :data}
 
+    def effect_class, do: :read
+
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       Actions.emit_started(__MODULE__, %{path: params.path})
 
       workdir = params[:workdir] || "."
-
-      resolved =
-        if Path.type(params.path) == :absolute,
-          do: params.path,
-          else: Path.join(workdir, params.path)
+      resolved = EvalPipeline.resolve_path(params.path, workdir)
 
       load_opts =
         []
@@ -88,17 +70,18 @@ defmodule Arbor.Actions.EvalPipeline do
         |> maybe_add(:seed, params[:seed])
         |> maybe_add(:limit, params[:limit])
 
-      case EvalPipeline.bridge(Arbor.Orchestrator.Eval, :load_dataset, [resolved, load_opts]) do
-        {:ok, samples} ->
-          Actions.emit_completed(__MODULE__, %{count: length(samples)})
-          {:ok, %{dataset: samples, count: length(samples), path: resolved}}
+      with {:ok, authorized_path} <- FileActions.authorize_file_op(context, resolved, :read),
+           {:ok, samples} <- Arbor.Eval.load_dataset(authorized_path, load_opts) do
+        Actions.emit_completed(__MODULE__, %{count: length(samples)})
+        {:ok, %{dataset: samples, count: length(samples), path: authorized_path}}
+      else
+        {:error, {:unauthorized, _} = reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "Failed to load dataset: #{inspect(reason)}"}
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, "Failed to load dataset: #{inspect(reason)}"}
-
-        nil ->
-          {:error, "Eval module not available"}
       end
     end
 
@@ -115,13 +98,17 @@ defmodule Arbor.Actions.EvalPipeline do
     @moduledoc """
     Execute evaluation on dataset samples.
 
+    Subject and grader names are resolved only through closed public catalogs
+    (`Arbor.Eval`, `Arbor.LLM`, `Arbor.AI`). Caller strings are never interned
+    as atoms or resolved as module names.
+
     ## Parameters
 
     | Name | Type | Required | Description |
     |------|------|----------|-------------|
     | `dataset` | list | yes | List of sample maps from LoadDataset |
     | `graders` | string | yes | Comma-separated grader names |
-    | `subject` | string | no | Subject module name (default: passthrough) |
+    | `subject` | string | no | Symbolic subject name (default: passthrough) |
     | `model` | string | no | Model name for the subject |
     | `provider` | string | no | Provider name for the subject |
     """
@@ -134,86 +121,101 @@ defmodule Arbor.Actions.EvalPipeline do
       schema: [
         dataset: [type: {:list, :map}, required: true, doc: "List of sample maps"],
         graders: [type: :string, required: true, doc: "Comma-separated grader names"],
-        subject: [type: :string, doc: "Subject module name"],
+        subject: [type: :string, doc: "Symbolic subject name"],
         model: [type: :string, doc: "Model name for subject"],
         provider: [type: :string, doc: "Provider name for subject"]
       ]
 
     alias Arbor.Actions
-    alias Arbor.Actions.EvalPipeline
-    alias Arbor.Common.SafeAtom
 
     def taint_roles do
       %{dataset: :data, graders: :control, subject: :control, model: :data, provider: :data}
     end
 
+    # Provider-backed and AI subjects may egress; default gated tier is acceptable.
+    def effect_class, do: :network_egress
+
     @impl true
     def run(params, _context) do
       Actions.emit_started(__MODULE__, %{sample_count: length(params.dataset)})
 
-      grader_names =
-        params.graders
-        |> String.split(",", trim: true)
-        |> Enum.map(&String.trim/1)
+      with {:ok, subject_module} <- resolve_subject(params[:subject]),
+           {:ok, grader_modules} <- resolve_graders(params.graders) do
+        subject_opts =
+          []
+          |> maybe_add(:model, params[:model])
+          |> maybe_add(:provider, params[:provider])
 
-      subject = resolve_subject(params[:subject])
+        results =
+          Arbor.Eval.run_eval_modules(
+            params.dataset,
+            subject_module,
+            grader_modules,
+            subject_opts
+          )
 
-      subject_opts =
-        []
-        |> maybe_add(:model, params[:model])
-        |> maybe_add(:provider, params[:provider])
+        passed = Enum.count(results, & &1["passed"])
 
-      case EvalPipeline.bridge(Arbor.Orchestrator.Eval, :run_eval, [
-             params.dataset,
-             subject,
-             grader_names,
-             subject_opts
-           ]) do
-        results when is_list(results) ->
-          passed = Enum.count(results, & &1["passed"])
-
-          Actions.emit_completed(__MODULE__, %{count: length(results), passed: passed})
-          {:ok, %{results: results, count: length(results), passed: passed}}
-
+        Actions.emit_completed(__MODULE__, %{count: length(results), passed: passed})
+        {:ok, %{results: results, count: length(results), passed: passed}}
+      else
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, "Eval run failed: #{inspect(reason)}"}
-
-        nil ->
-          {:error, "Eval module not available"}
       end
     end
 
-    @passthrough Arbor.Orchestrator.Eval.Subjects.Passthrough
+    # Omitted/blank subject defaults to deterministic passthrough.
+    defp resolve_subject(nil), do: resolve_subject("passthrough")
+    defp resolve_subject(""), do: resolve_subject("passthrough")
 
-    defp resolve_subject(nil), do: resolve_module(@passthrough)
-    defp resolve_subject(""), do: resolve_module(@passthrough)
-
-    # Resolve only existing module atoms. Module.concat/1 interns caller-controlled
-    # strings into the atom table (DoS); SafeAtom.to_existing/1 refuses unknown names.
     defp resolve_subject(name) when is_binary(name) do
-      prefixed =
-        if String.starts_with?(name, "Elixir.") do
-          name
-        else
-          "Elixir." <> name
-        end
+      cond do
+        module = Arbor.Eval.subject(name) ->
+          {:ok, module}
 
-      case SafeAtom.to_existing(prefixed) do
-        {:ok, module} ->
-          # Known module name: use it when loadable; otherwise fall back like
-          # unknown/unloaded subjects (nil, blank, non-binary).
-          resolve_module(module) || resolve_module(@passthrough)
+        module = Arbor.LLM.eval_subject(name) ->
+          {:ok, module}
 
-        {:error, _} ->
-          resolve_module(@passthrough)
+        module = Arbor.AI.eval_subject(name) ->
+          {:ok, module}
+
+        true ->
+          {:error, {:unknown_subject, name}}
       end
     end
 
-    defp resolve_subject(_), do: resolve_module(@passthrough)
+    defp resolve_subject(other), do: {:error, {:unknown_subject, other}}
 
-    defp resolve_module(mod) do
-      if Code.ensure_loaded?(mod), do: mod, else: nil
+    defp resolve_graders(graders) when is_binary(graders) do
+      names =
+        graders
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+
+      if names == [] do
+        {:error, :empty_grader_list}
+      else
+        resolve_grader_names(names, [])
+      end
+    end
+
+    defp resolve_graders(_), do: {:error, :empty_grader_list}
+
+    defp resolve_grader_names([], modules), do: {:ok, Enum.reverse(modules)}
+
+    defp resolve_grader_names([name | rest], modules) do
+      cond do
+        module = Arbor.Eval.grader(name) ->
+          resolve_grader_names(rest, [module | modules])
+
+        module = Arbor.AI.eval_grader(name) ->
+          resolve_grader_names(rest, [module | modules])
+
+        true ->
+          {:error, {:unknown_grader, name}}
+      end
     end
 
     defp maybe_add(opts, _key, nil), do: opts
@@ -249,9 +251,10 @@ defmodule Arbor.Actions.EvalPipeline do
       ]
 
     alias Arbor.Actions
-    alias Arbor.Actions.EvalPipeline
 
     def taint_roles, do: %{results: :data, metrics: :control, threshold: :data}
+
+    def effect_class, do: :read
 
     @impl true
     def run(params, _context) do
@@ -264,15 +267,7 @@ defmodule Arbor.Actions.EvalPipeline do
 
       metrics =
         Map.new(metric_names, fn name ->
-          value =
-            EvalPipeline.bridge(
-              Arbor.Orchestrator.Eval.Metrics,
-              :compute,
-              [name, params.results, []],
-              0.0
-            )
-
-          {name, value}
+          {name, Arbor.Eval.compute_metric(name, params.results, [])}
         end)
 
       primary_metric = List.first(metric_names)
@@ -324,11 +319,12 @@ defmodule Arbor.Actions.EvalPipeline do
       ]
 
     alias Arbor.Actions
-    alias Arbor.Actions.EvalPipeline
 
     def taint_roles do
       %{results: :data, metrics: :data, domain: :control, model: :data, provider: :data}
     end
+
+    def effect_class, do: :local_write
 
     @impl true
     def run(params, _context) do
@@ -491,6 +487,7 @@ defmodule Arbor.Actions.EvalPipeline do
     | `metrics` | map | no | Computed metrics |
     | `format` | string | no | Report format: "terminal", "json", "markdown" (default: "terminal") |
     | `output_path` | string | no | File path to write report (stores in result if omitted) |
+    | `workdir` | string | no | Working directory for relative output paths |
     """
 
     use Jido.Action,
@@ -502,24 +499,28 @@ defmodule Arbor.Actions.EvalPipeline do
         results: [type: {:list, :map}, required: true, doc: "Eval results"],
         metrics: [type: :map, default: %{}, doc: "Computed metrics"],
         format: [type: :string, default: "terminal", doc: "Report format"],
-        output_path: [type: :string, doc: "File path for report output"]
+        output_path: [type: :string, doc: "File path for report output"],
+        workdir: [type: :string, doc: "Working directory for relative output paths"]
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.File, as: FileActions
+    alias Arbor.Actions.EvalPipeline
 
     def taint_roles do
       %{results: :data, metrics: :data, format: :control, output_path: :control}
     end
 
+    def effect_class, do: :local_write
+
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       Actions.emit_started(__MODULE__, %{format: params[:format] || "terminal"})
 
       results = params.results
       metrics = params[:metrics] || %{}
       format = params[:format] || "terminal"
-
-      report = Arbor.Eval.Report.format(results, metrics, format)
+      report = Arbor.Eval.format_report(results, metrics, format)
 
       case params[:output_path] do
         nil ->
@@ -527,11 +528,44 @@ defmodule Arbor.Actions.EvalPipeline do
           {:ok, %{report: report, format: format}}
 
         output_path ->
-          File.mkdir_p!(Path.dirname(output_path))
-          File.write!(output_path, report)
-          Actions.emit_completed(__MODULE__, %{format: format, path: output_path})
-          {:ok, %{report: report, format: format, path: output_path}}
+          write_report(context, output_path, params[:workdir], report, format)
       end
+    end
+
+    defp write_report(context, output_path, workdir, report, format) do
+      workdir = workdir || "."
+      resolved = EvalPipeline.resolve_path(output_path, workdir)
+
+      with {:ok, authorized_path} <- FileActions.authorize_file_op(context, resolved, :write),
+           :ok <- ensure_parent_dir(authorized_path),
+           :ok <- File.write(authorized_path, report) do
+        Actions.emit_completed(__MODULE__, %{format: format, path: authorized_path})
+        {:ok, %{report: report, format: format, path: authorized_path}}
+      else
+        {:error, {:unauthorized, _} = reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "Failed to write report: #{inspect(reason)}"}
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "Failed to write report: #{inspect(reason)}"}
+      end
+    end
+
+    defp ensure_parent_dir(path) do
+      case File.mkdir_p(Path.dirname(path)) do
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  @doc false
+  def resolve_path(path, workdir) when is_binary(path) do
+    if Path.type(path) == :absolute do
+      path
+    else
+      Path.join(workdir || ".", path)
     end
   end
 end

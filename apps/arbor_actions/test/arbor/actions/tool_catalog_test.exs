@@ -64,10 +64,12 @@ defmodule Arbor.Actions.ToolCatalogTest do
     test "is byte-capped (stays a summary, not a schema dump)" do
       section = CatalogSection.build(:action, tools: :enabled)
 
-      # The bullet body is capped at 13_000 bytes (+ header/instruction). Assert
-      # the whole section stays bounded well under the ~50k a full-schema dump of
-      # ~172 tools would cost — this is a name+purpose summary.
-      assert byte_size(section) < 13_500
+      # CatalogSection action body uses a 32k backstop so every registered tool
+      # stays visible; purpose lines are trimmed to 48 chars. Assert the whole
+      # section stays a name+purpose summary, well under the ~50k a full-schema
+      # dump of ~180 tools would cost. Bound includes the five eval_pipeline.*
+      # stage actions registered for DOT exec nodes.
+      assert byte_size(section) < 14_500
     end
 
     test "renders nothing when gated off" do
