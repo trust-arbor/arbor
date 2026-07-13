@@ -1581,6 +1581,90 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
   end
 
+  describe "fixture: ensure_broker_started token-pair invariant" do
+    test "accepts a healthy owner/broker pair" do
+      owner = Process.whereis(SigningAuthorityStateOwner)
+      broker = Process.whereis(SigningAuthorityBroker)
+      assert is_pid(owner)
+      assert is_pid(broker)
+      assert Process.alive?(owner)
+      assert Process.alive?(broker)
+
+      assert :ok = ensure_broker_started()
+      assert Process.whereis(SigningAuthorityStateOwner) == owner
+      assert Process.whereis(SigningAuthorityBroker) == broker
+    end
+
+    test "restarts supervised broker when only the owner exists", ctx do
+      owner = Process.whereis(SigningAuthorityStateOwner)
+      assert is_pid(owner)
+
+      :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
+      refute is_pid(Process.whereis(SigningAuthorityBroker))
+      assert Process.whereis(SigningAuthorityStateOwner) == owner
+
+      assert :ok = ensure_broker_started()
+
+      broker = Process.whereis(SigningAuthorityBroker)
+      assert is_pid(broker)
+      assert Process.alive?(broker)
+      assert Process.whereis(SigningAuthorityStateOwner) == owner
+
+      # Paired restart must yield a usable authority path, not an empty-opts crash.
+      assert {:ok, authority} = open_authority(ctx, purpose: :pair_restart_ok)
+      assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, "pair-restart")
+    end
+
+    test "starts a matched pair when both are absent", ctx do
+      :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
+      :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, SigningAuthorityStateOwner)
+      refute is_pid(Process.whereis(SigningAuthorityBroker))
+      refute is_pid(Process.whereis(SigningAuthorityStateOwner))
+
+      assert :ok = ensure_broker_started()
+
+      owner = Process.whereis(SigningAuthorityStateOwner)
+      broker = Process.whereis(SigningAuthorityBroker)
+      assert is_pid(owner)
+      assert is_pid(broker)
+
+      assert {:ok, authority} = open_authority(ctx, purpose: :pair_both_absent)
+      assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, "both-absent")
+    end
+
+    test "fails clearly on impossible partial state (broker without owner)" do
+      # rest_for_one normally prevents this; force the partial with a dummy
+      # registered name and no live owner so the helper must flunk.
+      :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
+      :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, SigningAuthorityStateOwner)
+      refute is_pid(Process.whereis(SigningAuthorityStateOwner))
+      refute is_pid(Process.whereis(SigningAuthorityBroker))
+
+      parent = self()
+
+      dummy =
+        spawn(fn ->
+          Process.register(self(), SigningAuthorityBroker)
+          send(parent, :registered)
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive :registered, 1_000
+      refute is_pid(Process.whereis(SigningAuthorityStateOwner))
+      assert Process.whereis(SigningAuthorityBroker) == dummy
+
+      assert_raise ExUnit.AssertionError, ~r/partial signing authority stack/, fn ->
+        ensure_broker_started()
+      end
+
+      ref = Process.monitor(dummy)
+      Process.exit(dummy, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^dummy, _}, 1_000
+      # Restore a healthy matched pair for subsequent tests / on_exit.
+      assert :ok = ensure_broker_started()
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
@@ -1686,26 +1770,103 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
   defp contains_key?(_term, _target), do: false
 
+  # Preserve the SigningAuthorityStateOwner/Broker token-pair invariant.
+  # Never start SigningAuthorityBroker with empty opts — init requires a
+  # matched state_owner_token shared with the owner.
   defp ensure_broker_started do
-    case Process.whereis(SigningAuthorityBroker) do
+    case {Process.whereis(SigningAuthorityStateOwner), Process.whereis(SigningAuthorityBroker)} do
+      {owner, broker} when is_pid(owner) and is_pid(broker) ->
+        :ok
+
+      {nil, nil} ->
+        # Prefer restarting the supervised matched pair (same original token).
+        # Only mint a fresh token pair when neither child spec is present.
+        case restart_security_child(SigningAuthorityStateOwner) do
+          :ok ->
+            case restart_security_child(SigningAuthorityBroker) do
+              :ok ->
+                :ok
+
+              :not_found ->
+                flunk(
+                  "SigningAuthorityBroker child missing after owner restart; " <>
+                    "refusing empty-opts broker start"
+                )
+
+              {:error, reason} ->
+                flunk("failed to restart SigningAuthorityBroker: #{inspect(reason)}")
+            end
+
+          :not_found ->
+            token = make_ref()
+            ensure_security_child!(SigningAuthorityStateOwner, broker_token: token)
+            ensure_security_child!(SigningAuthorityBroker, state_owner_token: token)
+
+          {:error, reason} ->
+            flunk("failed to restart SigningAuthorityStateOwner: #{inspect(reason)}")
+        end
+
+      {owner, nil} when is_pid(owner) ->
+        case restart_security_child(SigningAuthorityBroker) do
+          :ok ->
+            :ok
+
+          :not_found ->
+            flunk(
+              "SigningAuthorityBroker child missing while owner is alive; " <>
+                "refusing empty-opts broker start"
+            )
+
+          {:error, reason} ->
+            flunk("failed to restart SigningAuthorityBroker: #{inspect(reason)}")
+        end
+
+      partial ->
+        flunk("partial signing authority stack: #{inspect(partial)}")
+    end
+  end
+
+  defp restart_security_child(module) do
+    case Supervisor.restart_child(Arbor.Security.Supervisor, module) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      {:error, :running} -> :ok
+      {:error, :not_found} -> :not_found
+      other -> {:error, other}
+    end
+  end
+
+  defp ensure_security_child!(module, args) do
+    case Process.whereis(module) do
+      pid when is_pid(pid) ->
+        :ok
+
       nil ->
-        case Supervisor.start_child(Arbor.Security.Supervisor, {SigningAuthorityBroker, []}) do
+        case Supervisor.start_child(Arbor.Security.Supervisor, {module, args}) do
           {:ok, _} ->
             :ok
 
           {:error, {:already_started, _}} ->
             :ok
 
+          # OTP may return bare :already_present or {:already_present, child}.
+          {:error, :already_present} ->
+            restart_security_child!(module)
+
           {:error, {:already_present, _}} ->
-            _ = Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
-            :ok
+            restart_security_child!(module)
 
           other ->
-            flunk("failed to start SigningAuthorityBroker: #{inspect(other)}")
+            flunk("failed to start #{inspect(module)}: #{inspect(other)}")
         end
+    end
+  end
 
-      pid when is_pid(pid) ->
-        :ok
+  defp restart_security_child!(module) do
+    case restart_security_child(module) do
+      :ok -> :ok
+      :not_found -> flunk("failed to restart #{inspect(module)}: :not_found")
+      {:error, reason} -> flunk("failed to restart #{inspect(module)}: #{inspect(reason)}")
     end
   end
 

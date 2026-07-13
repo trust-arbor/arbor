@@ -21,7 +21,8 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
   @ets_table :arbor_pipeline_runs
 
   setup do
-    # Ensure the ETS table exists for pipeline tracking
+    # Ensure the shared application-owned ETS table exists. Never clear all
+    # objects — concurrent/isolated suites may hold live rows in this table.
     try do
       :ets.new(@ets_table, [
         :set,
@@ -31,18 +32,16 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
         write_concurrency: true
       ])
     rescue
-      ArgumentError -> :ets.delete_all_objects(@ets_table)
+      ArgumentError -> :ok
     end
 
+    run_prefix = "hb_#{System.unique_integer([:positive, :monotonic])}_"
+
     on_exit(fn ->
-      try do
-        :ets.delete_all_objects(@ets_table)
-      rescue
-        _ -> :ok
-      end
+      delete_owned_pipeline_runs(run_prefix)
     end)
 
-    :ok
+    {:ok, run_prefix: run_prefix}
   end
 
   describe "init/1" do
@@ -220,15 +219,17 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
   end
 
   describe "terminate cleanup" do
-    test "marks active ETS entries as abandoned on terminate" do
+    test "marks active ETS entries as abandoned on terminate", %{run_prefix: prefix} do
       {:ok, pid} = start_test_service()
 
-      # Insert a fake active entry in ETS
+      # Collision-resistant owned row — never assume exclusive table ownership.
+      run_id = prefix <> "terminate_abandon"
+
       :ets.insert(
         @ets_table,
-        {"run_heartbeat_test_001",
+        {run_id,
          %{
-           run_id: "run_heartbeat_test_001",
+           run_id: run_id,
            status: :running,
            spawning_pid: pid,
            current_node: "bg_checks",
@@ -237,7 +238,7 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
            completed_count: 0,
            total_nodes: 19,
            graph_id: "Heartbeat",
-           pipeline_id: "run_heartbeat_test_001",
+           pipeline_id: run_id,
            completed_nodes: [],
            node_durations: %{},
            finished_at: nil,
@@ -254,8 +255,8 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
       Process.sleep(100)
 
       # The entry should now be abandoned
-      case :ets.lookup(@ets_table, "run_heartbeat_test_001") do
-        [{_, entry}] ->
+      case :ets.lookup(@ets_table, run_id) do
+        [{^run_id, entry}] ->
           assert entry.status == :abandoned
 
         [] ->
@@ -322,6 +323,25 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
       |> Keyword.merge(extra_opts)
 
     HeartbeatService.start_link(opts)
+  end
+
+  defp delete_owned_pipeline_runs(prefix) when is_binary(prefix) do
+    try do
+      case :ets.info(@ets_table) do
+        :undefined ->
+          :ok
+
+        _ ->
+          for {key, _entry} <- :ets.tab2list(@ets_table),
+              is_binary(key) and String.starts_with?(key, prefix) do
+            :ets.delete(@ets_table, key)
+          end
+
+          :ok
+      end
+    rescue
+      _ -> :ok
+    end
   end
 
   describe "first beat at startup (A5)" do
