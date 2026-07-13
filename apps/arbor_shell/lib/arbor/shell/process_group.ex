@@ -319,7 +319,12 @@ defmodule Arbor.Shell.ProcessGroup do
       :use_stdio,
       {:packet, 4},
       args: Enum.map(launcher_args, &to_charlist/1),
-      env: build_env(Keyword.get(opts, :env, %{}), child_path)
+      env:
+        build_env(
+          Keyword.get(opts, :env, %{}),
+          child_path,
+          Keyword.get(opts, :clear_env, false) == true
+        )
     ]
 
     try do
@@ -329,10 +334,33 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
-  defp build_env(env, child_path) when is_map(env) do
-    env
-    |> Map.put("PATH", child_path)
-    |> Enum.map(fn
+  # Port.env merges into the BEAM process environment by default. When
+  # `clear_env` is true, every ambient key not in the intentional map is
+  # unset via `{name, false}` so only the pinned PATH and trusted facade
+  # values remain for the launcher/target. Trusted system callers leave
+  # `clear_env` false unless they opt in.
+  defp build_env(env, child_path, clear_env?) when is_map(env) do
+    desired = Map.put(env, "PATH", child_path)
+    entries = encode_env_entries(desired)
+
+    if clear_env? do
+      desired_keys = MapSet.new(Map.keys(desired))
+
+      unsets =
+        for {key, _value} <- System.get_env(),
+            not MapSet.member?(desired_keys, key),
+            do: {String.to_charlist(key), false}
+
+      unsets ++ entries
+    else
+      entries
+    end
+  end
+
+  defp build_env(_env, child_path, clear_env?), do: build_env(%{}, child_path, clear_env?)
+
+  defp encode_env_entries(env) when is_map(env) do
+    Enum.map(env, fn
       {key, false} when is_binary(key) ->
         {to_charlist(key), false}
 
@@ -340,8 +368,6 @@ defmodule Arbor.Shell.ProcessGroup do
         {to_charlist(key), to_charlist(value)}
     end)
   end
-
-  defp build_env(_env, child_path), do: [{~c"PATH", to_charlist(child_path)}]
 
   defp launcher_path do
     case :code.priv_dir(:arbor_shell) do

@@ -202,8 +202,9 @@ defmodule Arbor.Shell do
 
   - `agent_id` - The agent's ID for capability lookup
   - `command` - The shell command to execute
-  - `opts` - Direct execution options; non-empty `:env` is rejected and
-    `sandbox: :none` cannot widen the agent policy
+  - `opts` - Direct execution options; non-empty `:env` is rejected,
+    `sandbox: :none` cannot widen the agent policy, and the child environment
+    is always cleared (ambient VM variables are not inherited)
 
   ## Returns
 
@@ -313,7 +314,11 @@ defmodule Arbor.Shell do
     truncation keeps a valid UTF-8 prefix (may be slightly under the ceiling).
     Invalid or non-positive values fall back to the default.
   - `:cwd` - Working directory
-  - `:env` - Environment variables map
+  - `:env` - Environment variables map (merged into the ambient VM environment
+    unless `:clear_env` is set)
+  - `:clear_env` - When `true`, unset every ambient variable before applying
+    `:env` and the internally pinned `PATH` (default: `false` for trusted
+    system callers; agent-facing APIs always force this on)
   - `:sandbox` - Sandbox mode: `:none`, `:basic`, `:strict` (default: `:basic`)
   - `:stdin` - Input to send to the process
 
@@ -698,11 +703,15 @@ defmodule Arbor.Shell do
   # Generic agent commands are already bound to a fixed executable + argv by
   # Sandbox.prepare_agent_command/2. Force the legacy sandbox marker to :basic
   # and drop all child-environment/capability-projection options so sandbox:none
-  # and env can never widen execution after authorization.
+  # and env can never widen execution after authorization. Always clear the
+  # ambient VM environment for agent children (deny-by-default) so authorized
+  # utilities like printenv cannot read host credentials; only the internally
+  # pinned PATH remains.
   defp agent_execution_opts(opts) do
     opts
-    |> Keyword.drop([:env, :allowlist, :gate_command])
+    |> Keyword.drop([:env, :allowlist, :gate_command, :clear_env])
     |> Keyword.put(:sandbox, :basic)
+    |> Keyword.put(:clear_env, true)
   end
 
   defp execute_prepared_agent_command(
@@ -766,7 +775,7 @@ defmodule Arbor.Shell do
            PortSession.validate_timeout(Keyword.get(execution_opts, :timeout, 30_000)) do
       session_opts =
         execution_opts
-        |> Keyword.take([:max_output_bytes, :cwd, :stream_to])
+        |> Keyword.take([:max_output_bytes, :cwd, :stream_to, :clear_env, :env, :stdin])
         |> Keyword.put(:timeout, timeout)
         |> Keyword.put(:started_at, start_time)
 
