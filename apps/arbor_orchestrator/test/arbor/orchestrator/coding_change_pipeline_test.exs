@@ -789,7 +789,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     graph
   end
 
-  defp run_fixture(scenario, initial_overrides \\ %{}) do
+  defp run_fixture(scenario, initial_overrides \\ %{}, dot_source \\ load_dot()) do
     {:ok, state} =
       Agent.start_link(fn ->
         %{scenario: scenario, calls: [], counters: %{}}
@@ -829,7 +829,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       sleep_fn: fn _ -> :ok end
     ]
 
-    result = Arbor.Orchestrator.run(load_dot(), opts)
+    result = Arbor.Orchestrator.run(dot_source, opts)
     calls = Agent.get(state, & &1.calls)
     {result, calls}
   end
@@ -972,8 +972,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       release = graph.nodes["release_workspace"]
       assert release.attrs["action"] == "coding_workspace_release"
-      assert graph.nodes["route_release_mode"].attrs["fan_out"] == false
-      assert graph.nodes["route_success_workspace_retention"].attrs["fan_out"] == false
+      assert graph.nodes["route_release_mode"].attrs["fan_out"] == "false"
+      assert graph.nodes["route_success_workspace_retention"].attrs["fan_out"] == "false"
 
       # Validation is top-level mix_compile (not nested shell)
       validate = graph.nodes["validate"]
@@ -1054,6 +1054,32 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           assert_release_mode(calls, expected_mode)
         end
       end
+    end
+
+    test "unknown terminal status retains instead of dead-ending before release" do
+      unknown_status_dot =
+        String.replace(
+          load_dot(),
+          ~s(expression="change_committed"),
+          ~s(expression="unknown_terminal"),
+          global: false
+        )
+
+      assert {{:ok, result}, calls} = run_fixture(:change_committed, %{}, unknown_status_dot)
+      assert result.context["status"] == "unknown_terminal"
+      assert "route_release_mode" in result.completed_nodes
+      assert "prep_release_mode_retain" in result.completed_nodes
+      assert_release_mode(calls, "retain")
+    end
+
+    test "malformed retain_workspace retains instead of dead-ending before release" do
+      assert {{:ok, result}, calls} =
+               run_fixture(:change_committed, %{"retain_workspace" => "malformed"})
+
+      assert result.context["status"] == "change_committed"
+      assert "route_success_workspace_retention" in result.completed_nodes
+      assert "prep_release_mode_retain" in result.completed_nodes
+      assert_release_mode(calls, "retain")
     end
 
     test "declined closes worker and removes workspace" do

@@ -915,11 +915,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "output_prefix" => "release",
       "max_retries" => "0"
     },
-    "route_release_mode" => %{"type" => "branch", "shape" => "diamond", "fan_out" => false},
+    "route_release_mode" => %{
+      "type" => "branch",
+      "shape" => "diamond",
+      "fan_out" => "false"
+    },
     "route_success_workspace_retention" => %{
       "type" => "branch",
       "shape" => "diamond",
-      "fan_out" => false
+      "fan_out" => "false"
     }
   }
 
@@ -947,13 +951,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"prep_release_mode_retain", "context.status=review_rejected"},
       {"prep_release_mode_retain", "context.status=rework_exhausted"},
       {"prep_release_mode_retain", "context.status=validation_failed"},
+      {"prep_release_mode_retain", nil},
       {"route_success_workspace_retention", "context.status=change_committed"},
       {"route_success_workspace_retention", "context.status=human_review_required"},
       {"route_success_workspace_retention", "context.status=pr_created"}
     ],
     "route_success_workspace_retention" => [
       {"prep_release_mode_remove", "context.retain_workspace=false"},
-      {"prep_release_mode_retain", "context.retain_workspace=true"}
+      {"prep_release_mode_retain", "context.retain_workspace=true"},
+      {"prep_release_mode_retain", nil}
     ],
     "status_pipeline_error" => [{"done", nil}]
   }

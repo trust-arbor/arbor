@@ -1129,13 +1129,13 @@ digraph CodingChangeV1 {
   route_release_mode [
     type="branch",
     shape=diamond,
-    fan_out=false
+    fan_out="false"
   ]
 
   route_success_workspace_retention [
     type="branch",
     shape=diamond,
-    fan_out=false
+    fan_out="false"
   ]
 
   prep_release_mode_retain [
@@ -1475,8 +1475,17 @@ digraph CodingChangeV1 {
   route_release_mode -> route_success_workspace_retention [condition="context.status=change_committed"]
   route_release_mode -> route_success_workspace_retention [condition="context.status=pr_created"]
   route_release_mode -> route_success_workspace_retention [condition="context.status=human_review_required"]
+
+  // Unknown terminal statuses fail closed to bounded retention rather than
+  // dead-ending before release.
+  route_release_mode -> prep_release_mode_retain
+
   route_success_workspace_retention -> prep_release_mode_retain [condition="context.retain_workspace=true"]
   route_success_workspace_retention -> prep_release_mode_remove [condition="context.retain_workspace=false"]
+
+  // A malformed or absent plan value also retains; compiler-attested plans
+  // always provide canonical true/false strings.
+  route_success_workspace_retention -> prep_release_mode_retain
 
   prep_release_mode_retain -> release_workspace -> done
   prep_release_mode_remove -> release_workspace

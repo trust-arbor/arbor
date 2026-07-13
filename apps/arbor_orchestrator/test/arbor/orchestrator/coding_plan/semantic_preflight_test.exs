@@ -1202,6 +1202,22 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
               end
             end)
       },
+      %{
+        graph
+        | edges:
+            Enum.reject(graph.edges, fn edge ->
+              edge.from == "route_release_mode" and edge.to == "prep_release_mode_retain" and
+                is_nil(edge.attrs["condition"])
+            end)
+      },
+      %{
+        graph
+        | edges:
+            Enum.reject(graph.edges, fn edge ->
+              edge.from == "route_success_workspace_retention" and
+                edge.to == "prep_release_mode_retain" and is_nil(edge.attrs["condition"])
+            end)
+      },
       add_edge(graph, "close_worker", "release_workspace", "context.bypass=true")
     ]
 
