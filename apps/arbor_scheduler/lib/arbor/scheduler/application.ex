@@ -5,7 +5,7 @@ defmodule Arbor.Scheduler.Application do
 
   @impl true
   def start(_type, _args) do
-    children =
+    runtime_children =
       if Application.get_env(:arbor_scheduler, :start_children, true) do
         [
           Arbor.Scheduler.RunLeaseSupervisor,
@@ -24,7 +24,29 @@ defmodule Arbor.Scheduler.Application do
         []
       end
 
-    opts = [strategy: :one_for_one, name: Arbor.Scheduler.Supervisor]
-    Supervisor.start_link(children, opts)
+    children = [
+      Arbor.Scheduler.RunLease.JournalOwner,
+      {Arbor.Scheduler.RuntimeSupervisor, runtime_children}
+    ]
+
+    Supervisor.start_link(children,
+      strategy: :one_for_one,
+      name: Arbor.Scheduler.ApplicationSupervisor
+    )
+  end
+end
+
+defmodule Arbor.Scheduler.RuntimeSupervisor do
+  @moduledoc false
+
+  use Supervisor
+
+  def start_link(children) do
+    Supervisor.start_link(__MODULE__, children, name: Arbor.Scheduler.Supervisor)
+  end
+
+  @impl true
+  def init(children) do
+    Supervisor.init(children, strategy: :one_for_one, max_restarts: 10, max_seconds: 5)
   end
 end

@@ -2,12 +2,14 @@ defmodule Arbor.Scheduler.RunIdentityReaper do
   @moduledoc """
   Reconciles scheduler-run identities owned by this local BEAM runtime.
 
-  The runtime marker is bound to the local distributed node name, so even an
-  explicitly shared `:run_identity_runtime_id` cannot collide with a live peer.
-  The default marker is stable across scheduler application restarts. Residue
-  from an obsolete BEAM runtime cannot be discovered safely without a durable
-  node-ownership registry; this remains unresolved for non-distributed runtimes
-  that restart without an explicitly configured stable runtime ID.
+  The runtime marker includes both the distributed node name and a per-BEAM
+  instance marker. `:run_identity_runtime_id` is a logical namespace only; it
+  never removes the instance marker. This prevents concurrent non-distributed
+  runtimes from reaping each other's live identities.
+
+  Residue from an obsolete BEAM runtime cannot be discovered safely without a
+  durable ownership registry, so reconciliation is intentionally limited to
+  the current BEAM instance.
   """
 
   alias Arbor.Scheduler.{RunIdentity, RunLease}

@@ -12,13 +12,15 @@ defmodule Arbor.Scheduler.RunLeaseSupervisor do
   @impl true
   def init(_opts) do
     children = [
-      {Registry, keys: :unique, name: RunLease.Registry},
       RunLease.StateOwner,
       RunLease.Store,
+      {Registry, keys: :unique, name: RunLease.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: RunLease.DynamicSupervisor},
       RunLease.Reconciler
     ]
 
-    Supervisor.init(children, strategy: :rest_for_one)
+    # A StateOwner failure legitimately restarts all five children. OTP counts
+    # each dependent restart against the intensity budget.
+    Supervisor.init(children, strategy: :rest_for_one, max_restarts: 10, max_seconds: 5)
   end
 end

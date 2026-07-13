@@ -77,10 +77,14 @@ defmodule Arbor.Scheduler.RunIdentity do
 
   @doc false
   def identity_name(peer_node \\ node()) when is_atom(peer_node) do
-    runtime_id =
-      Application.get_env(:arbor_scheduler, :run_identity_runtime_id) || local_runtime_marker()
+    identity_name(peer_node, local_runtime_marker())
+  end
 
-    "scheduler-run:#{runtime_id}:#{node_marker(peer_node)}"
+  @doc false
+  def identity_name(peer_node, instance_id) when is_atom(peer_node) and is_binary(instance_id) do
+    runtime_id = Application.get_env(:arbor_scheduler, :run_identity_runtime_id, "ephemeral")
+
+    "scheduler-run:#{runtime_id}:#{node_marker(peer_node)}:#{instance_marker(instance_id)}"
   end
 
   @doc """
@@ -337,6 +341,12 @@ defmodule Arbor.Scheduler.RunIdentity do
   defp node_marker(peer_node) do
     peer_node
     |> Atom.to_string()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.url_encode64(padding: false)
+  end
+
+  defp instance_marker(instance_id) do
+    instance_id
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.url_encode64(padding: false)
   end

@@ -103,7 +103,7 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     def register_identity(identity) do
       result = Arbor.Security.register_identity(identity)
       if result == :ok, do: send(test_pid(), {:race_agent, identity.agent_id})
-      result
+      maybe_pause_identity(result, identity.agent_id)
     end
 
     def grant(opts) do
@@ -126,6 +126,17 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     end
 
     defp maybe_pause(result, _stage), do: result
+
+    defp maybe_pause_identity(:ok = result, agent_id) do
+      if Application.get_env(:arbor_scheduler, :run_identity_race_stage) == :identity do
+        send(test_pid(), {:race_effect, :identity, agent_id, self()})
+        receive do: ({:release_race, :identity} -> result)
+      else
+        result
+      end
+    end
+
+    defp maybe_pause_identity(result, _agent_id), do: result
 
     defp test_pid, do: Application.fetch_env!(:arbor_scheduler, :run_identity_test_pid)
   end
@@ -472,6 +483,159 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert_eventually(fn -> run_state_removed?(handle) end)
   end
 
+  test "security regression: StateOwner crash preserves cleanup authority", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+    assert {:ok, handle} = RunIdentity.mint(attestation)
+
+    journal_owner = Process.whereis(RunLease.JournalOwner)
+    old_state_owner = Process.whereis(RunLease.StateOwner)
+    old_lease = RunLease.whereis(handle.lease)
+    Process.exit(old_state_owner, :kill)
+
+    assert_eventually(fn ->
+      new_state_owner = Process.whereis(RunLease.StateOwner)
+      new_lease = RunLease.whereis(handle.lease)
+
+      is_pid(new_state_owner) and new_state_owner != old_state_owner and is_pid(new_lease) and
+        new_lease != old_lease
+    end)
+
+    assert Process.whereis(RunLease.JournalOwner) == journal_owner
+    assert :ok = RunIdentity.revoke(handle)
+    assert_eventually(fn -> run_state_removed?(handle) end)
+  end
+
+  test "security regression: Registry and RunLeaseSupervisor restarts preserve journals", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+
+    for target <- [:registry, :lease_supervisor] do
+      assert {:ok, handle} = RunIdentity.mint(attestation)
+      journal_owner = Process.whereis(RunLease.JournalOwner)
+      old_lease = RunLease.whereis(handle.lease)
+
+      old_target =
+        case target do
+          :registry -> Process.whereis(RunLease.Registry)
+          :lease_supervisor -> Process.whereis(Arbor.Scheduler.RunLeaseSupervisor)
+        end
+
+      if target == :registry do
+        assert :ok =
+                 Supervisor.terminate_child(
+                   Arbor.Scheduler.RunLeaseSupervisor,
+                   RunLease.Registry
+                 )
+
+        assert {:ok, _registry} =
+                 Supervisor.restart_child(
+                   Arbor.Scheduler.RunLeaseSupervisor,
+                   RunLease.Registry
+                 )
+
+        Process.exit(Process.whereis(RunLease.DynamicSupervisor), :kill)
+      else
+        assert :ok =
+                 Supervisor.terminate_child(
+                   Arbor.Scheduler.Supervisor,
+                   Arbor.Scheduler.RunLeaseSupervisor
+                 )
+
+        assert {:ok, _supervisor} =
+                 Supervisor.restart_child(
+                   Arbor.Scheduler.Supervisor,
+                   Arbor.Scheduler.RunLeaseSupervisor
+                 )
+      end
+
+      assert_eventually(fn ->
+        new_target =
+          case target do
+            :registry -> Process.whereis(RunLease.Registry)
+            :lease_supervisor -> Process.whereis(Arbor.Scheduler.RunLeaseSupervisor)
+          end
+
+        new_lease = safe_lease_whereis(handle.lease)
+
+        is_pid(new_target) and new_target != old_target and is_pid(new_lease) and
+          new_lease != old_lease
+      end)
+
+      assert Process.whereis(RunLease.JournalOwner) == journal_owner
+      assert :ok = RunIdentity.revoke(handle)
+      assert_eventually(fn -> run_state_removed?(handle) end)
+    end
+  end
+
+  test "security regression: unrelated callers cannot read enumerate or erase lease journals", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+    assert {:ok, handle} = RunIdentity.mint(attestation)
+
+    assert {:error, :unauthorized} = GenServer.call(RunLease.Store, {:fetch, handle.lease})
+    assert {:error, :unauthorized} = GenServer.call(RunLease.Store, :all_ids)
+    assert {:error, :unauthorized} = GenServer.call(RunLease.Store, {:discard, handle.lease})
+    assert {:error, :unauthorized} = RunLease.StateOwner.fetch(handle.lease)
+    assert {:error, :unauthorized} = RunLease.JournalOwner.fetch(handle.lease)
+
+    assert {:ok, _signed_request} =
+             Security.sign_with_authority(handle.signing_authority, "journal-still-present")
+
+    assert :ok = RunIdentity.revoke(handle)
+  end
+
+  test "security regression: Store death cannot split identity or capability journaling", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+
+    for stage <- [:identity, :grant] do
+      Application.put_env(:arbor_scheduler, :run_identity_race_stage, stage)
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          result = RunIdentity.mint(attestation, security_facade: ProvisionRaceSecurityStub)
+          send(parent, {:store_death_mint_result, stage, result})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:race_agent, agent_id}, 5_000
+      assert_receive {:race_effect, ^stage, artifact, coordinator}, 5_000
+      assert coordinator == Process.whereis(RunLease.StateOwner)
+
+      old_store = Process.whereis(RunLease.Store)
+      store_ref = Process.monitor(old_store)
+      Process.exit(old_store, :kill)
+      assert_receive {:DOWN, ^store_ref, :process, ^old_store, :killed}, 5_000
+      send(coordinator, {:release_race, stage})
+
+      assert_eventually(fn ->
+        new_store = Process.whereis(RunLease.Store)
+        is_pid(new_store) and new_store != old_store
+      end)
+
+      assert_eventually(fn ->
+        match?({:error, :not_found}, Security.lookup_public_key(agent_id))
+      end)
+
+      if stage == :grant do
+        assert_eventually(fn -> match?({:error, _reason}, CapabilityStore.get(artifact.id)) end)
+      end
+
+      refute_receive {:store_death_mint_result, ^stage, {:ok, _handle}}, 100
+      Process.exit(owner, :kill)
+    end
+  end
+
   test "security regression: lease journal and process diagnostics hide authority bearer state",
        %{
          issuer: issuer,
@@ -490,6 +654,8 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     refute term_contains?(:sys.get_status(RunLease.Store), token)
     refute term_contains?(:sys.get_status(RunLease.StateOwner), token)
     refute term_contains?(:sys.get_state(RunLease.StateOwner), token)
+    refute term_contains?(:sys.get_status(RunLease.JournalOwner), token)
+    refute term_contains?(:sys.get_state(RunLease.JournalOwner), token)
 
     assert :ok = RunIdentity.revoke(handle)
   end
@@ -643,6 +809,29 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     refute first_name == second_name
   end
 
+  test "security regression: configured runtime IDs remain isolated across local BEAM instances" do
+    Application.put_env(:arbor_scheduler, :run_identity_runtime_id, "shared-local-runtime")
+
+    first_name = RunIdentity.identity_name(:nonode@nohost, "beam-instance-a")
+    second_name = RunIdentity.identity_name(:nonode@nohost, "beam-instance-b")
+    refute first_name == second_name
+
+    {:ok, first_identity} = Identity.generate(name: first_name)
+    {:ok, second_identity} = Identity.generate(name: second_name)
+    :ok = Security.register_identity(Identity.public_only(first_identity))
+    :ok = Security.register_identity(Identity.public_only(second_identity))
+
+    assert :ok =
+             RunIdentityReaper.reconcile(
+               identity_name: first_name,
+               active_agent_ids: MapSet.new()
+             )
+
+    assert {:error, :not_found} = Security.lookup_public_key(first_identity.agent_id)
+    assert {:ok, _public_key} = Security.lookup_public_key(second_identity.agent_id)
+    assert :ok = Security.deregister_identity(second_identity.agent_id)
+  end
+
   test "security regression: local reaper scope cannot reap a peer runtime identity" do
     Application.put_env(:arbor_scheduler, :run_identity_runtime_id, "peer-runtime")
     peer_name = RunIdentity.identity_name()
@@ -787,6 +976,14 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       Process.sleep(10)
       assert_eventually(fun, attempts - 1)
     end
+  end
+
+  defp safe_lease_whereis(lease_id) do
+    RunLease.whereis(lease_id)
+  rescue
+    ArgumentError -> nil
+  catch
+    :exit, _reason -> nil
   end
 
   defp authorize_as(handle, resource) do
