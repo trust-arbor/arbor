@@ -526,6 +526,48 @@ defmodule Arbor.AI.AcpTaskControlTest do
     )
   end
 
+  @tag timeout: 2_000
+  test "security regression: timeout replies before queued task-control settlement work" do
+    test_pid = self()
+
+    {:ok, subscription_id} =
+      Signals.subscribe(
+        "agent.*",
+        fn
+          %Signal{type: :acp_task_control_delivery_unknown} ->
+            send(test_pid, {:settlement_started, self()})
+
+            receive do
+              :release_settlement -> :ok
+            end
+
+          _signal ->
+            :ok
+        end,
+        async: false
+      )
+
+    on_exit(fn -> Signals.unsubscribe(subscription_id) end)
+
+    session = start_session()
+    caller = Task.async(fn -> AcpSession.send_message(session, "initial", timeout: 1_000) end)
+
+    assert_receive {:prompt_started, initial_worker, _client, "same-session", "initial"}
+
+    assert {:ok, :queued, :same_session_follow_up} =
+             AcpSession.deliver_task_control(session, control("settlement", "follow"))
+
+    send(initial_worker, {:release, {:ok, %{"text" => "initial"}}})
+    assert_receive {:prompt_started, active_worker, _client, "same-session", "follow"}
+    send(active_worker, {:release, {:error, :timeout}})
+
+    assert {:error, :timeout} = Task.await(caller)
+    assert_receive {:settlement_started, settlement_pid}
+
+    send(settlement_pid, :release_settlement)
+    assert %{status: :recovery_required} = AcpSession.status(session)
+  end
+
   test "caller cancellation aborts the active prompt and does not run queued controls" do
     subscribe_to_task_control_signals()
     session = start_session()

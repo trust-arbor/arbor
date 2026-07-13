@@ -214,6 +214,21 @@ defmodule Arbor.AI.AcpSessionTest do
     assert {:ok, %{}} = Task.await(blocker)
   end
 
+  @tag timeout: 1_000
+  test "security regression: pre-accept timeout cannot start an orphan prompt" do
+    install_fake_progress_client(100)
+    {:ok, session} = start_fake_progress_session()
+
+    :ok = :sys.suspend(session)
+    assert {:error, :timeout} = AcpSession.send_message(session, "must-not-start", timeout: 20)
+
+    :ok = :sys.resume(session)
+    refute_receive {:fake_prompt_started, _worker, "must-not-start", _opts}, 100
+    assert %{status: :ready} = AcpSession.status(session)
+
+    assert :ok = AcpSession.close(session)
+  end
+
   test "security regression: arbitrary-size absolute deadlines are rejected before calls" do
     server = start_supervised!(SlowCallServer)
     huge_deadline = :erlang.bsl(1, 1_000_000)
@@ -499,6 +514,26 @@ defmodule Arbor.AI.AcpSessionTest do
       assert :ok = AcpSession.close(session)
       assert_receive {:fake_disconnect, _client}
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
+    end
+
+    @tag timeout: 1_000
+    test "security regression: late client DOWN cannot clear the recovery fence" do
+      install_fake_progress_client(30)
+
+      {:ok, session} = start_fake_progress_session()
+      assert {:error, :inactivity_timeout} = AcpSession.send_message(session, "stall")
+
+      client = :sys.get_state(session).client
+      assert is_pid(client)
+      Process.exit(client, :kill)
+      Process.sleep(50)
+
+      assert :sys.get_state(session).client == nil
+
+      assert %{status: :recovery_required, session_id: "fake-session"} =
+               AcpSession.status(session)
+
+      assert :ok = AcpSession.close(session)
     end
 
     @tag timeout: 2_000

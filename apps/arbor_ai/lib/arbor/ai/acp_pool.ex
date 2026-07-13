@@ -342,8 +342,20 @@ defmodule Arbor.AI.AcpPool do
   def handle_call({:checkin, session_pid}, _from, state) do
     case find_session_by_pid(state, session_pid) do
       {:ok, ref, entry} ->
-        state = checkin_session(state, ref, entry)
-        {:reply, :ok, state}
+        case validate_session(entry.pid) do
+          :ok ->
+            state = checkin_session(state, ref, entry)
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            Logger.debug(
+              "AcpPool: removing non-ready session #{inspect(entry.pid)} on checkin (#{inspect(reason)})"
+            )
+
+            state = remove_session(state, ref)
+            safe_close(entry.pid)
+            {:reply, :ok, state}
+        end
 
       :not_found ->
         {:reply, {:error, :not_found}, state}
@@ -413,7 +425,7 @@ defmodule Arbor.AI.AcpPool do
 
         finalize_existing_checkout(state, entry, opts)
 
-      :no_affinity ->
+      {:no_affinity, state} ->
         case find_compatible_session(state, profile) do
           {:ok, entry, state} ->
             state =
@@ -557,12 +569,12 @@ defmodule Arbor.AI.AcpPool do
   # -- Private: Matching --
 
   # Hard affinity: if the request has an affinity_key, find the exact session
-  defp find_by_affinity(_state, %SessionProfile{affinity_key: nil}), do: :no_affinity
+  defp find_by_affinity(state, %SessionProfile{affinity_key: nil}), do: {:no_affinity, state}
 
   defp find_by_affinity(state, %SessionProfile{affinity_key: key}) do
     case Map.get(state.by_affinity, key) do
       nil ->
-        :no_affinity
+        {:no_affinity, state}
 
       ref ->
         case Map.get(state.sessions, ref) do
@@ -578,10 +590,10 @@ defmodule Arbor.AI.AcpPool do
 
           %Entry{status: :checked_out} ->
             # Session exists but is busy — don't mint a duplicate, wait
-            :no_affinity
+            {:no_affinity, state}
 
           nil ->
-            :no_affinity
+            {:no_affinity, state}
         end
     end
   end

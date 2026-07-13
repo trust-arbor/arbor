@@ -57,7 +57,6 @@ defmodule Arbor.AI.AcpSession do
   @max_task_control_history 256
   @max_queued_task_controls 64
   @callback_cleanup_timeout_ms 250
-  @prompt_call_settlement_ms 10
   @task_control_stream_id "agent:task_steering"
   @terminal_task_control_statuses [
     :delivered,
@@ -377,13 +376,22 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:send_message, content, opts}, from, state) do
-    with :ok <- Arbor.AI.Timeout.ensure_active(opts),
+    with true <- prompt_caller_alive?(from),
+         :ok <- Arbor.AI.Timeout.ensure_active(opts),
          {:ok, state} <- ensure_session(state, opts),
-         :ok <- Arbor.AI.Timeout.ensure_active(opts) do
+         :ok <- Arbor.AI.Timeout.ensure_active(opts),
+         true <- prompt_caller_alive?(from) do
+      acknowledge_prompt_call(from)
       do_send_message(content, opts, from, state)
     else
-      {:error, :timeout} -> operation_timed_out(:create, state)
-      {:error, reason} -> {:reply, {:error, reason}, %{state | status: :error}}
+      {:error, :timeout} ->
+        operation_timed_out(:create, state)
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, %{state | status: :error}}
+
+      false ->
+        {:reply, {:error, :caller_unavailable}, state}
     end
   end
 
@@ -580,6 +588,19 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_info({:DOWN, ref, :process, pid, reason}, %{client: pid} = state)
+      when ref == state.client_monitor and state.status == :recovery_required do
+    bounded_reason = Arbor.LLM.sanitize_external_reason(reason)
+
+    Logger.warning(
+      "ACP client process died while recovery was required: #{Arbor.LLM.inspect_external_reason(bounded_reason)}"
+    )
+
+    new_state = %{state | client: nil, client_monitor: nil}
+    emit_signal(:acp_session_error, new_state, %{error: :client_down, reason: bounded_reason})
+    {:noreply, new_state}
+  end
+
+  def handle_info({:DOWN, ref, :process, pid, reason}, %{client: pid} = state)
       when ref == state.client_monitor do
     bounded_reason = Arbor.LLM.sanitize_external_reason(reason)
 
@@ -609,6 +630,12 @@ defmodule Arbor.AI.AcpSession do
     # trap_exit keeps us alive when a linked owner/client dies with :kill so the
     # matching Process.monitor DOWN path can cancel/disconnect orderly. Do not
     # handle owner/client cleanup here — that would race/double-run with DOWN.
+    {:noreply, state}
+  end
+
+  def handle_info({:acp_timeout_settlement, kind, control_events}, state) do
+    cancel_acp_prompt(state)
+    emit_timeout_observability(state, kind, control_events)
     {:noreply, state}
   end
 
@@ -1107,6 +1134,7 @@ defmodule Arbor.AI.AcpSession do
 
   # -- Crash Recovery --
 
+  defp maybe_reconnect(%{status: :recovery_required}), do: :error
   defp maybe_reconnect(%{reconnect_attempted: true}), do: :error
   defp maybe_reconnect(%{last_session_id: nil}), do: :error
 
@@ -1213,10 +1241,33 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp safe_prompt_call(session, content, opts, timeout) do
-    # The GenServer owns the hard-timeout transition. Give its timer a narrow
-    # window to reply before GenServer.call exits and the monitored caller is
-    # indistinguishable from explicit cancellation.
-    GenServer.call(session, {:send_message, content, opts}, prompt_call_timeout(timeout))
+    # The session owns the hard-timeout transition. Once it has accepted the
+    # prompt, wait for that authoritative reply instead of racing a second
+    # caller-side timeout against the session's timeout timer. The acceptance
+    # handshake still bounds time spent waiting behind another GenServer call.
+    proxy_ref = make_ref()
+    parent = self()
+
+    {proxy, monitor} =
+      spawn_monitor(fn ->
+        prompt_call_proxy(parent, session, content, opts, proxy_ref)
+      end)
+
+    receive do
+      {:acp_prompt_proxy, ^proxy_ref, :accepted} ->
+        await_prompt_proxy_result(proxy_ref, monitor, proxy)
+
+      {:acp_prompt_proxy, ^proxy_ref, {:result, result}} ->
+        Process.demonitor(monitor, [:flush])
+        result
+
+      {:DOWN, ^monitor, :process, ^proxy, _reason} ->
+        {:error, :session_unavailable}
+    after
+      call_timeout(timeout) ->
+        stop_prompt_proxy(proxy, monitor)
+        {:error, :timeout}
+    end
   rescue
     exception ->
       {:error, {:session_call_failed, Arbor.LLM.external_exception_message(exception)}}
@@ -1226,10 +1277,70 @@ defmodule Arbor.AI.AcpSession do
     :exit, reason -> {:error, {:session_call_exit, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
-  defp prompt_call_timeout(:infinity), do: :infinity
+  defp prompt_call_proxy(parent, session, content, opts, proxy_ref) do
+    call_ref = make_ref()
+    session_monitor = Process.monitor(session)
+    parent_monitor = Process.monitor(parent)
+    send(session, {:"$gen_call", {self(), call_ref}, {:send_message, content, opts}})
 
-  defp prompt_call_timeout(timeout) when is_integer(timeout) and timeout > 0,
-    do: timeout + @prompt_call_settlement_ms
+    receive do
+      {:acp_prompt_accepted, ^call_ref} ->
+        send(parent, {:acp_prompt_proxy, proxy_ref, :accepted})
+        await_prompt_proxy_reply(parent, parent_monitor, session_monitor, call_ref, proxy_ref)
+
+      {^call_ref, result} ->
+        send(parent, {:acp_prompt_proxy, proxy_ref, {:result, result}})
+
+      {:DOWN, ^session_monitor, :process, ^session, _reason} ->
+        send(parent, {:acp_prompt_proxy, proxy_ref, {:result, {:error, :session_unavailable}}})
+
+      {:DOWN, ^parent_monitor, :process, ^parent, _reason} ->
+        :ok
+    end
+  end
+
+  defp await_prompt_proxy_result(proxy_ref, monitor, proxy) do
+    receive do
+      {:acp_prompt_proxy, ^proxy_ref, {:result, result}} ->
+        Process.demonitor(monitor, [:flush])
+        result
+
+      {:DOWN, ^monitor, :process, ^proxy, _reason} ->
+        {:error, :session_unavailable}
+    end
+  end
+
+  defp stop_prompt_proxy(proxy, monitor) do
+    Process.exit(proxy, :kill)
+
+    receive do
+      {:DOWN, ^monitor, :process, ^proxy, _reason} -> :ok
+    after
+      @callback_cleanup_timeout_ms ->
+        Process.demonitor(monitor, [:flush])
+    end
+  end
+
+  defp await_prompt_proxy_reply(parent, parent_monitor, session_monitor, call_ref, proxy_ref) do
+    receive do
+      {^call_ref, result} ->
+        send(parent, {:acp_prompt_proxy, proxy_ref, {:result, result}})
+
+      {:DOWN, ^session_monitor, :process, _session, _reason} ->
+        send(parent, {:acp_prompt_proxy, proxy_ref, {:result, {:error, :session_unavailable}}})
+
+      {:DOWN, ^parent_monitor, :process, ^parent, _reason} ->
+        :ok
+    end
+  end
+
+  defp acknowledge_prompt_call({caller, ref}) when is_pid(caller) and is_reference(ref),
+    do: send(caller, {:acp_prompt_accepted, ref})
+
+  defp acknowledge_prompt_call(_from), do: :ok
+
+  defp prompt_caller_alive?({caller, _ref}) when is_pid(caller), do: Process.alive?(caller)
+  defp prompt_caller_alive?(_from), do: false
 
   defp operation_timed_out(phase, state) do
     new_state = %{state | status: :error}
@@ -1567,7 +1678,7 @@ defmodule Arbor.AI.AcpSession do
 
   defp terminal_task_control?(_control), do: false
 
-  defp transition_task_control(state, control_id, status, reason)
+  defp transition_task_control(state, control_id, status, reason, opts \\ [])
        when status in @terminal_task_control_statuses do
     case Map.fetch(state.task_controls, control_id) do
       {:ok, %{status: current_status}}
@@ -1577,7 +1688,11 @@ defmodule Arbor.AI.AcpSession do
       {:ok, control} ->
         updated = control |> Map.put(:status, status) |> Map.put(:reason, reason)
         state = %{state | task_controls: Map.put(state.task_controls, control_id, updated)}
-        emit_task_control_signal(task_control_event(status), state, updated, reason)
+
+        if Keyword.get(opts, :emit?, true) do
+          emit_task_control_signal(task_control_event(status), state, updated, reason)
+        end
+
         state
 
       :error ->
@@ -1590,17 +1705,12 @@ defmodule Arbor.AI.AcpSession do
   defp task_control_event(:delivery_unknown), do: :acp_task_control_delivery_unknown
   defp task_control_event(:cancelled), do: :acp_task_control_cancelled
 
-  defp settle_failed_prompt_task_controls(state, prompt, failure) do
+  defp settle_failed_prompt_task_controls(state, prompt, failure, opts \\ []) do
     {active_reason, queued_reason} = task_control_failure_reasons(failure)
 
     state =
       if prompt.control do
-        transition_task_control(
-          state,
-          prompt.control,
-          :delivery_unknown,
-          active_reason
-        )
+        transition_task_control(state, prompt.control, :delivery_unknown, active_reason, opts)
       else
         state
       end
@@ -1610,18 +1720,19 @@ defmodule Arbor.AI.AcpSession do
       [:queued],
       :not_delivered,
       queued_reason,
-      except: prompt.control
+      Keyword.put(opts, :except, prompt.control)
     )
   end
 
-  defp settle_cancelled_prompt_task_controls(state, prompt, cancellation) do
+  defp settle_cancelled_prompt_task_controls(state, prompt, cancellation, opts) do
     state =
       if prompt.control do
         transition_task_control(
           state,
           prompt.control,
           :delivery_unknown,
-          cancellation_delivery_reason(cancellation)
+          cancellation_delivery_reason(cancellation),
+          opts
         )
       else
         state
@@ -1632,7 +1743,7 @@ defmodule Arbor.AI.AcpSession do
       [:queued, :deferred],
       :cancelled,
       cancellation,
-      except: prompt.control
+      Keyword.put(opts, :except, prompt.control)
     )
   end
 
@@ -1648,7 +1759,7 @@ defmodule Arbor.AI.AcpSession do
 
       if control_id != except and is_map(control) and
            Enum.member?(source_statuses, Map.get(control, :status)) do
-        transition_task_control(acc, control_id, status, reason)
+        transition_task_control(acc, control_id, status, reason, opts)
       else
         acc
       end
@@ -2013,17 +2124,18 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp timeout_prompt(kind, prompt, timers, state) do
-    cancel_acp_prompt(state)
     kill_prompt_worker(prompt)
     cleanup_prompt(prompt, timers)
+
+    previous_state = state
 
     new_state =
       case kind do
         cancellation when cancellation in [:caller_cancelled, :owner_cancelled] ->
-          settle_cancelled_prompt_task_controls(state, prompt, cancellation)
+          settle_cancelled_prompt_task_controls(state, prompt, cancellation, emit?: false)
 
         failure when failure in [:timeout, :inactivity_timeout, :stream_callback_timeout] ->
-          settle_failed_prompt_task_controls(state, prompt, failure)
+          settle_failed_prompt_task_controls(state, prompt, failure, emit?: false)
       end
       |> Map.put(:accumulated_text, "")
       |> Map.put(
@@ -2031,27 +2143,54 @@ defmodule Arbor.AI.AcpSession do
         if(kind in [:timeout, :inactivity_timeout], do: :recovery_required, else: :error)
       )
 
-    # Inactivity means the ACP agent went silent — could be stuck awaiting a
-    # host-side approval, or truly hung. Emit a distinct idle signal before the
-    # error/kill so Signal/dashboard subscribers can distinguish "waiting" from
-    # hard failure (acp_session_error still fires for the abort itself).
+    error = if kind in [:caller_cancelled, :owner_cancelled], do: :cancelled, else: kind
+
+    if kind in [:timeout, :inactivity_timeout] do
+      control_events = changed_task_control_events(previous_state, new_state)
+      send(self(), {:acp_timeout_settlement, kind, control_events})
+      {:reply, {:error, error}, new_state}
+    else
+      cancel_acp_prompt(state)
+      _ = disconnect_client_owned(state, internal_cleanup_opts())
+
+      emit_timeout_observability(
+        new_state,
+        kind,
+        changed_task_control_events(previous_state, new_state)
+      )
+
+      {:stop, :normal, {:error, error}, new_state}
+    end
+  end
+
+  defp emit_timeout_observability(state, kind, control_events) do
+    Enum.each(control_events, fn {event, control, reason} ->
+      emit_task_control_signal(event, state, control, reason)
+    end)
+
     if kind == :inactivity_timeout do
-      emit_signal(:acp_session_idle, new_state, %{
+      emit_signal(:acp_session_idle, state, %{
         reason: :inactivity_timeout,
         phase: :prompt
       })
     end
 
     error = if kind in [:caller_cancelled, :owner_cancelled], do: :cancelled, else: kind
+    emit_signal(:acp_session_error, state, %{error: error, phase: :prompt})
+  end
 
-    if kind in [:timeout, :inactivity_timeout] do
-      emit_signal(:acp_session_error, new_state, %{error: error, phase: :prompt})
-      {:reply, {:error, error}, new_state}
-    else
-      _ = disconnect_client_owned(state, internal_cleanup_opts())
-      emit_signal(:acp_session_error, new_state, %{error: error, phase: :prompt})
-      {:stop, :normal, {:error, error}, new_state}
-    end
+  defp changed_task_control_events(before, settled) do
+    Enum.flat_map(settled.task_control_history_order, fn control_id ->
+      previous = Map.get(before.task_controls, control_id)
+      current = Map.get(settled.task_controls, control_id)
+
+      if is_map(previous) and is_map(current) and
+           previous.status != current.status and terminal_task_control?(current) do
+        [{task_control_event(current.status), current, Map.get(current, :reason, :unspecified)}]
+      else
+        []
+      end
+    end)
   end
 
   defp cleanup_prompt(prompt, timers, opts \\ []) do

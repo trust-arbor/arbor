@@ -234,24 +234,15 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
 
   defp pool_checkin(session, opts) do
     if Code.ensure_loaded?(@pool_mod) do
-      case Arbor.AI.Timeout.remaining(opts) do
-        {:ok, cleanup_opts, _remaining} ->
-          if function_exported?(@pool_mod, :checkin, 2),
-            do: apply(@pool_mod, :checkin, [session, cleanup_opts]),
-            else: apply(@pool_mod, :checkin, [session])
+      case live_session_ready?(session) do
+        true ->
+          pool_call(session, :checkin, opts)
 
-        {:error, _reason} ->
-          Task.start(fn ->
-            try do
-              apply(@pool_mod, :checkin, [session])
-            rescue
-              _exception -> :ok
-            catch
-              _kind, _reason -> :ok
-            end
-          end)
-
-          :ok
+        false ->
+          # A failed prompt may leave the provider session fenced in
+          # :recovery_required. It is not reusable and must leave the pool,
+          # even when this cleanup runs after the caller deadline.
+          pool_call(session, :close_session, opts)
       end
     else
       :ok
@@ -260,6 +251,47 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
     _exception -> :ok
   catch
     _kind, _reason -> :ok
+  end
+
+  defp live_session_ready?(session) do
+    if Code.ensure_loaded?(@session_mod) and function_exported?(@session_mod, :status, 1) do
+      case apply(@session_mod, :status, [session]) do
+        %{status: :ready} -> true
+        _other -> false
+      end
+    else
+      false
+    end
+  rescue
+    _exception -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp pool_call(session, function, opts) do
+    args = [session]
+    supports_options? = function_exported?(@pool_mod, function, 2)
+
+    case Arbor.AI.Timeout.remaining(opts) do
+      {:ok, cleanup_opts, _remaining} when supports_options? ->
+        apply(@pool_mod, function, args ++ [cleanup_opts])
+
+      {:ok, _cleanup_opts, _remaining} ->
+        apply(@pool_mod, function, args)
+
+      {:error, _reason} ->
+        Task.start(fn ->
+          try do
+            apply(@pool_mod, function, args)
+          rescue
+            _exception -> :ok
+          catch
+            _kind, _reason -> :ok
+          end
+        end)
+
+        :ok
+    end
   end
 
   defp session_prompt(session, request, opts, timeout) do

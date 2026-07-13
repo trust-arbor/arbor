@@ -164,6 +164,18 @@ defmodule Arbor.AI.AcpPoolTest do
       # Now we can checkout again
       assert {:ok, _} = AcpPool.checkout(:test, client_opts: @test_client_opts)
     end
+
+    test "security regression: recovery sessions are removed instead of returned idle" do
+      assert {:ok, session} = AcpPool.checkout(:test, client_opts: @test_client_opts)
+
+      :sys.replace_state(session, fn state -> %{state | status: :recovery_required} end)
+
+      assert :ok = AcpPool.checkin(session)
+      assert AcpPool.sessions() == []
+
+      Process.sleep(50)
+      refute Process.alive?(session)
+    end
   end
 
   describe "close_session/1" do
@@ -312,6 +324,20 @@ defmodule Arbor.AI.AcpPoolTest do
 
       {:ok, s2} = AcpPool.checkout(:test, client_opts: @test_client_opts, affinity_key: "key_b")
       refute s1 == s2
+    end
+
+    test "security regression: invalid affinity session state is propagated before fallback" do
+      {:ok, session} =
+        AcpPool.checkout(:test, client_opts: @test_client_opts, affinity_key: "broken")
+
+      :ok = AcpPool.checkin(session)
+      :sys.replace_state(session, fn state -> %{state | status: :recovery_required} end)
+
+      assert {:ok, replacement} =
+               AcpPool.checkout(:test, client_opts: @test_client_opts, affinity_key: "broken")
+
+      refute replacement == session
+      assert length(AcpPool.sessions()) == 1
     end
   end
 
