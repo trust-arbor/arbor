@@ -55,12 +55,13 @@ defmodule Arbor.Consensus.LLMBridge do
   - `:runtime` — `:acp` to force CLI subprocess (agents can read source
     code), `:arbor` to force in-BEAM HTTP via arbor_llm. Default:
     auto-detect.
+  - `:complete_fun` — internal arity-3 dependency-injection seam used by
+    deterministic tests
   """
   @spec complete(String.t(), String.t(), keyword()) ::
           {:ok, %{text: String.t(), duration_ms: non_neg_integer(), usage: map()}}
           | {:error, term()}
   def complete(system_prompt, user_prompt, opts \\ []) do
-    runtime = Keyword.get(opts, :runtime)
     provider = Keyword.get(opts, :provider, "unknown")
     model = Keyword.get(opts, :model, "unknown")
     trace_id = Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
@@ -73,28 +74,13 @@ defmodule Arbor.Consensus.LLMBridge do
 
     start = System.monotonic_time(:millisecond)
 
-    result =
-      cond do
-        runtime == :acp ->
-          complete_via_fallback(system_prompt, user_prompt, opts)
-
-        runtime == :arbor and available?() ->
-          complete_via_unified(system_prompt, user_prompt, opts)
-
-        available?() ->
-          complete_via_unified(system_prompt, user_prompt, opts)
-
-        true ->
-          complete_via_fallback(system_prompt, user_prompt, opts)
-      end
-
+    result = dispatch_complete(system_prompt, user_prompt, opts)
     duration_ms = System.monotonic_time(:millisecond) - start
 
     case result do
-      {:ok, text, usage} ->
-        tokens = Map.get(usage, :total_tokens, 0)
-        cost = Map.get(usage, :cost)
-        cost_str = if cost, do: " cost=$#{Float.round(cost * 1.0, 4)}", else: ""
+      {:ok, text, usage} when is_map(usage) ->
+        tokens = Map.get(usage, :total_tokens) || Map.get(usage, "total_tokens") || 0
+        cost_str = format_cost_suffix(usage)
 
         Logger.info(
           "[LLM] trace=#{trace_id} OK    llm_bridge " <>
@@ -129,6 +115,82 @@ defmodule Arbor.Consensus.LLMBridge do
     kind, reason ->
       Logger.warning("LLMBridge.complete #{kind}: #{inspect(reason)}")
       {:error, {kind, reason}}
+  end
+
+  defp dispatch_complete(system_prompt, user_prompt, opts) do
+    case Keyword.get(opts, :complete_fun) do
+      fun when is_function(fun, 3) ->
+        fun.(system_prompt, user_prompt, Keyword.delete(opts, :complete_fun))
+
+      _other ->
+        dispatch_runtime(system_prompt, user_prompt, opts)
+    end
+  end
+
+  defp dispatch_runtime(system_prompt, user_prompt, opts) do
+    runtime = Keyword.get(opts, :runtime)
+
+    cond do
+      runtime == :acp ->
+        complete_via_fallback(system_prompt, user_prompt, opts)
+
+      runtime == :arbor and available?() ->
+        complete_via_unified(system_prompt, user_prompt, opts)
+
+      available?() ->
+        complete_via_unified(system_prompt, user_prompt, opts)
+
+      true ->
+        complete_via_fallback(system_prompt, user_prompt, opts)
+    end
+  end
+
+  defp format_cost_suffix(usage) do
+    with cost when is_number(cost) <- loggable_cost_total(usage),
+         formatted when is_binary(formatted) <- format_cost(cost) do
+      " cost=$#{formatted}"
+    else
+      _ -> ""
+    end
+  end
+
+  defp format_cost(cost) when is_integer(cost), do: Integer.to_string(cost)
+
+  defp format_cost(cost) when is_float(cost) do
+    :erlang.float_to_binary(cost, decimals: 4)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp loggable_cost_total(usage) when is_map(usage) do
+    case fetch_usage_value(usage, :cost) do
+      cost when is_number(cost) -> cost
+      cost when is_map(cost) -> recognized_numeric_total(cost) || top_level_total(usage)
+      _other -> top_level_total(usage)
+    end
+  end
+
+  defp loggable_cost_total(_usage), do: nil
+
+  defp top_level_total(usage) do
+    case fetch_usage_value(usage, :total_cost) do
+      total when is_number(total) -> total
+      _other -> nil
+    end
+  end
+
+  defp recognized_numeric_total(cost) do
+    [:total, "total", :total_cost, "total_cost"]
+    |> Enum.find_value(fn key ->
+      case Map.get(cost, key) do
+        value when is_number(value) -> value
+        _other -> nil
+      end
+    end)
+  end
+
+  defp fetch_usage_value(map, key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
 
   # ============================================================================

@@ -242,6 +242,12 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 
 ## Applied Learning
 
+**LLM usage cost may be a nested breakdown map, not a number.** Logging and
+aggregation code must normalize a recognized numeric total before doing any
+arithmetic. A logging-only `:badarith` can otherwise turn a successful model
+response into an apparent provider failure (found 2026-07-13 in council
+perspective calls through `Arbor.Consensus.LLMBridge`).
+
 **Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.
 
 **Verify "X doesn't exist" claims in roadmap docs against source before designing.** Roadmap/brainstorming docs frequently understate what's built (2026-07-04 session found three in one day: ACP delegation actions existed, Goal `parent_id` hierarchy existed, the interview-agent's trust actions existed — each doc claimed otherwise). The docs age; the code is the truth. One grep before design saves a redesign. The drift runs both directions: "implemented" claims can also be stale or refer to pre-decision-era artifacts (2026-07-12: `jobs-mailbox-sessions-design.md` claimed Jobs *actions* existed; they were actually Mix tasks from a personal task system predating the everything-is-a-Jido-action decision, never generalized, and not in the tracked tree). Verify what was built AND in what form.
