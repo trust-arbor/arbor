@@ -867,6 +867,20 @@ defmodule Arbor.AI do
   def acp_known_provider?(provider) when is_atom(provider), do: provider in acp_providers()
   def acp_known_provider?(_), do: false
 
+  @doc """
+  Classify whether an ACP resume failed because the provider does not support
+  the `load_session` capability.
+
+  This is deliberately an exact structural match. Provider messages, generic
+  JSON-RPC errors, transport failures, and timeouts are not evidence that a
+  fresh session is safe to start.
+  """
+  @spec classify_resume_unavailability(term()) :: :resume_unavailable | :not_resume_unavailable
+  def classify_resume_unavailability({:unsupported_capability, :load_session}),
+    do: :resume_unavailable
+
+  def classify_resume_unavailability(_reason), do: :not_resume_unavailable
+
   # -- ACP Pool API --
 
   @doc """

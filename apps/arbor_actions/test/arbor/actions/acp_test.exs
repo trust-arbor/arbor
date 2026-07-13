@@ -6,19 +6,26 @@ defmodule Arbor.Actions.AcpTest.FakeAI do
   def acp_managed_start_session(provider, opts) when is_atom(provider) and is_list(opts) do
     notify({:managed_start, provider, opts})
 
-    :persistent_term.get(
-      {__MODULE__, :start_result},
-      {:ok,
-       %{
-         worker_session_id:
-           "acp_worker_" <> Integer.to_string(System.unique_integer([:positive])),
-         session_id: "provider_sess_1",
-         provider: Atom.to_string(provider),
-         model: Keyword.get(opts, :model) || "default",
-         status: "ready",
-         pooled: Keyword.get(opts, :use_pool, false) == true
-       }}
-    )
+    case :persistent_term.get({__MODULE__, :start_results}, []) do
+      [result | rest] ->
+        :persistent_term.put({__MODULE__, :start_results}, rest)
+        result
+
+      _ ->
+        :persistent_term.get(
+          {__MODULE__, :start_result},
+          {:ok,
+           %{
+             worker_session_id:
+               "acp_worker_" <> Integer.to_string(System.unique_integer([:positive])),
+             session_id: "provider_sess_1",
+             provider: Atom.to_string(provider),
+             model: Keyword.get(opts, :model) || "default",
+             status: "ready",
+             pooled: Keyword.get(opts, :use_pool, false) == true
+           }}
+        )
+    end
   end
 
   def acp_managed_send_message(worker_session_id, content, opts)
@@ -126,6 +133,7 @@ defmodule Arbor.Actions.AcpTest do
 
       :persistent_term.erase({FakeAI, :parent})
       :persistent_term.erase({FakeAI, :start_result})
+      :persistent_term.erase({FakeAI, :start_results})
       :persistent_term.erase({FakeAI, :send_result})
       :persistent_term.erase({FakeAI, :status_result})
     end)
@@ -159,6 +167,7 @@ defmodule Arbor.Actions.AcpTest do
                  cwd: "/tmp",
                  session_id: "sess_123",
                  use_pool: true,
+                 fallback_to_fresh_on_resume_unavailable: true,
                  permission_mode: "default",
                  allowed_tools: ["Read"],
                  disallowed_tools: ["Write"],
@@ -173,10 +182,35 @@ defmodule Arbor.Actions.AcpTest do
       assert {:ok, %{use_pool: false}} =
                Acp.StartSession.validate_params(%{provider: "claude", use_pool: "false"})
 
+      assert {:ok, %{fallback_to_fresh_on_resume_unavailable: true}} =
+               Acp.StartSession.validate_params(%{
+                 provider: "claude",
+                 fallback_to_fresh_on_resume_unavailable: "true"
+               })
+
+      assert {:ok, %{fallback_to_fresh_on_resume_unavailable: false}} =
+               Acp.StartSession.validate_params(%{
+                 provider: "claude",
+                 fallback_to_fresh_on_resume_unavailable: "false"
+               })
+
       for invalid <- ["TRUE", "1", 1, nil, "yes"] do
         assert {:error, _reason} =
                  Acp.StartSession.validate_params(%{provider: "claude", use_pool: invalid})
+
+        assert {:error, _reason} =
+                 Acp.StartSession.validate_params(%{
+                   provider: "claude",
+                   fallback_to_fresh_on_resume_unavailable: invalid
+                 })
       end
+
+      assert {:error, _} =
+               Acp.StartSession.validate_params(%{
+                 "fallback_to_fresh_on_resume_unavailable" => false,
+                 :provider => "claude",
+                 :fallback_to_fresh_on_resume_unavailable => true
+               })
     end
 
     test "generates tool schema" do
@@ -272,6 +306,7 @@ defmodule Arbor.Actions.AcpTest do
       assert result.model == "opus"
       assert result.status == "ready"
       assert result.pooled == false
+      assert result.continuity == "new"
       refute Map.has_key?(result, :session_pid)
 
       assert json_clean?(result)
@@ -298,7 +333,7 @@ defmodule Arbor.Actions.AcpTest do
 
       auth = %AuthContext{principal_id: "agent_auth_ctx"}
 
-      assert {:ok, _result} =
+      assert {:ok, result} =
                Acp.StartSession.run(
                  %{
                    provider: "claude",
@@ -325,6 +360,7 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(opts, :cwd) == "/repo"
       assert Keyword.get(opts, :use_pool) == true
       assert Keyword.get(opts, :session_id) == "provider-session-resume-1"
+      assert result.continuity == "resumed"
 
       adapter_opts = Keyword.fetch!(opts, :adapter_opts)
       assert Keyword.get(adapter_opts, :permission_mode) == :default
@@ -341,6 +377,135 @@ defmodule Arbor.Actions.AcpTest do
                )
 
       assert error =~ "use_pool must be"
+      refute_received {:managed_start, _provider, _opts}
+    end
+
+    test "resume unavailable falls back exactly once with a fresh pooled session and preserves options" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :start_results},
+        [
+          {:error, {:unsupported_capability, :load_session}},
+          {:ok,
+           %{
+             worker_session_id: "acp_worker_recovery",
+             session_id: "provider_sess_fresh",
+             provider: "claude",
+             model: "sonnet",
+             status: "ready",
+             pooled: true
+           }}
+        ]
+      )
+
+      assert {:ok, result} =
+               Acp.StartSession.run(
+                 %{
+                   provider: "claude",
+                   model: "sonnet",
+                   cwd: "/repo",
+                   session_id: "provider_sess_old",
+                   use_pool: "true",
+                   fallback_to_fresh_on_resume_unavailable: "true",
+                   permission_mode: "default",
+                   allowed_tools: ["Read"],
+                   disallowed_tools: ["Write"],
+                   timeout: 60_000
+                 },
+                 %{
+                   auth_context: %AuthContext{principal_id: "agent_recovery"},
+                   task_id: "task_recovery"
+                 }
+               )
+
+      assert result.continuity == "fresh_recovery"
+      assert result.session_id == "provider_sess_fresh"
+
+      assert_receive {:managed_start, :claude, first_opts}
+      assert_receive {:managed_start, :claude, second_opts}
+      refute_receive {:managed_start, :claude, _opts}
+
+      assert Keyword.get(first_opts, :session_id) == "provider_sess_old"
+      assert Keyword.get(first_opts, :create_session) == nil
+      assert Keyword.get(first_opts, :use_pool) == true
+      assert Keyword.get(first_opts, :agent_id) == "agent_recovery"
+      assert Keyword.get(first_opts, :principal_id) == "agent_recovery"
+      assert Keyword.get(first_opts, :task_id) == "task_recovery"
+
+      assert Keyword.get(second_opts, :session_id) == nil
+      assert Keyword.get(second_opts, :create_session) == true
+      assert Keyword.get(second_opts, :use_pool) == true
+      assert Keyword.get(second_opts, :model) == Keyword.get(first_opts, :model)
+      assert Keyword.get(second_opts, :cwd) == Keyword.get(first_opts, :cwd)
+      assert Keyword.get(second_opts, :agent_id) == Keyword.get(first_opts, :agent_id)
+      assert Keyword.get(second_opts, :principal_id) == Keyword.get(first_opts, :principal_id)
+      assert Keyword.get(second_opts, :task_id) == Keyword.get(first_opts, :task_id)
+      assert Keyword.get(second_opts, :timeout) == Keyword.get(first_opts, :timeout)
+      assert Keyword.get(second_opts, :adapter_opts) == Keyword.get(first_opts, :adapter_opts)
+    end
+
+    test "resume unavailable with fallback disabled fails closed without retry" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :start_result},
+        {:error, {:unsupported_capability, :load_session}}
+      )
+
+      assert {:error, _} =
+               Acp.StartSession.run(
+                 %{
+                   provider: "claude",
+                   session_id: "provider_sess_old",
+                   fallback_to_fresh_on_resume_unavailable: false
+                 },
+                 %{}
+               )
+
+      assert_receive {:managed_start, :claude, _opts}
+      refute_receive {:managed_start, :claude, _opts}
+    end
+
+    test "timeout, transport, and JSON-RPC errors do not trigger a fresh retry" do
+      for reason <- [
+            :timeout,
+            {:transport_error, :closed},
+            %{"code" => -32601, "message" => "load_session is not supported"},
+            %{"error" => %{"code" => -32601, "message" => "method not found"}}
+          ] do
+        install_fake_ai()
+        :persistent_term.put({FakeAI, :start_result}, {:error, reason})
+
+        assert {:error, _} =
+                 Acp.StartSession.run(
+                   %{
+                     provider: "claude",
+                     session_id: "provider_sess_old",
+                     fallback_to_fresh_on_resume_unavailable: true
+                   },
+                   %{}
+                 )
+
+        assert_receive {:managed_start, :claude, _opts}
+        refute_receive {:managed_start, :claude, _opts}
+      end
+    end
+
+    test "duplicate fallback keys are rejected before managed start" do
+      install_fake_ai()
+
+      assert {:error, error} =
+               Acp.StartSession.run(
+                 %{
+                   "fallback_to_fresh_on_resume_unavailable" => false,
+                   :provider => "claude",
+                   :fallback_to_fresh_on_resume_unavailable => true
+                 },
+                 %{}
+               )
+
+      assert error =~ "fallback_to_fresh_on_resume_unavailable must be"
       refute_received {:managed_start, _provider, _opts}
     end
   end

@@ -197,6 +197,9 @@ defmodule Arbor.Actions.Acp do
   def format_error(:invalid_use_pool),
     do: "use_pool must be true, false, \"true\", or \"false\""
 
+  def format_error(:invalid_fallback_to_fresh_on_resume_unavailable),
+    do: "fallback_to_fresh_on_resume_unavailable must be true, false, \"true\", or \"false\""
+
   def format_error(reason) when is_binary(reason), do: reason
   def format_error(reason), do: "ACP error: #{inspect(reason)}"
 
@@ -268,6 +271,7 @@ defmodule Arbor.Actions.Acp do
     | `cwd` | string | no | Working directory for the session |
     | `session_id` | string | no | Provider conversation ID to resume |
     | `use_pool` | boolean | no | Checkout from pool instead of starting fresh (default: false); DOT may serialize this as `"true"` or `"false"` |
+    | `fallback_to_fresh_on_resume_unavailable` | boolean | no | Start a fresh conversation when resume is structurally unsupported (default: false); DOT may serialize this as `"true"` or `"false"` |
     | `permission_mode` | string | no | Adapter permission mode: default, bypass, or deny |
     | `allowed_tools` | list | no | Adapter tool allowlist |
     | `disallowed_tools` | list | no | Adapter tool denylist |
@@ -302,6 +306,11 @@ defmodule Arbor.Actions.Acp do
           default: false,
           doc: "Checkout from pool instead of starting fresh"
         ],
+        fallback_to_fresh_on_resume_unavailable: [
+          type: :boolean,
+          default: false,
+          doc: "Start a fresh conversation when resume is unsupported"
+        ],
         permission_mode: [
           type: :any,
           doc: "Adapter permission mode: default, bypass, or deny"
@@ -335,6 +344,7 @@ defmodule Arbor.Actions.Acp do
         allowed_tools: :control,
         disallowed_tools: :control,
         use_pool: :data,
+        fallback_to_fresh_on_resume_unavailable: :data,
         timeout: :data
       }
     end
@@ -348,8 +358,11 @@ defmodule Arbor.Actions.Acp do
 
     @impl true
     def on_before_validate_params(params) do
-      case normalize_use_pool_param(params) do
-        {:ok, normalized} -> {:ok, normalized}
+      with {:ok, normalized} <- normalize_use_pool_param(params),
+           {:ok, normalized} <-
+             normalize_fallback_to_fresh_on_resume_unavailable_param(normalized) do
+        {:ok, normalized}
+      else
         {:error, reason} -> {:error, Acp.format_error(reason)}
       end
     end
@@ -367,10 +380,12 @@ defmodule Arbor.Actions.Acp do
       task_id = Acp.caller_task_id(context)
 
       with {:ok, params} <- normalize_use_pool_param(params),
+           {:ok, params} <- normalize_fallback_to_fresh_on_resume_unavailable_param(params),
            :ok <- Acp.require_acp!(),
            {:ok, provider} <- normalize_provider(Acp.param(params, :provider)),
-           {:ok, meta} <- managed_start(provider, params, agent_id, task_id),
-           {:ok, result} <- public_start_result(meta, params, provider) do
+           {:ok, meta, continuity} <-
+             managed_start_with_resume_fallback(provider, params, agent_id, task_id),
+           {:ok, result} <- public_start_result(meta, params, provider, continuity) do
         {:ok, result}
       else
         {:error, reason} -> {:error, Acp.format_error(reason)}
@@ -381,14 +396,44 @@ defmodule Arbor.Actions.Acp do
       :exit, reason -> {:error, Acp.format_error(reason)}
     end
 
-    defp managed_start(provider, params, agent_id, task_id) do
+    defp managed_start_with_resume_fallback(provider, params, agent_id, task_id) do
       opts = build_managed_opts(params, agent_id, task_id)
+      resume_requested? = non_empty_string(params[:session_id]) != nil
 
+      case managed_start(provider, opts) do
+        {:ok, meta} ->
+          {:ok, meta, if(resume_requested?, do: "resumed", else: "new")}
+
+        {:error, reason} ->
+          case {resume_requested?, Map.get(params, :fallback_to_fresh_on_resume_unavailable)} do
+            {true, true} ->
+              if Arbor.AI.classify_resume_unavailability(reason) == :resume_unavailable do
+                fallback_opts =
+                  params
+                  |> Map.delete(:session_id)
+                  |> build_managed_opts(agent_id, task_id)
+                  |> Keyword.put(:create_session, true)
+
+                case managed_start(provider, fallback_opts) do
+                  {:ok, meta} -> {:ok, meta, "fresh_recovery"}
+                  {:error, fallback_reason} -> {:error, fallback_reason}
+                end
+              else
+                {:error, reason}
+              end
+
+            _ ->
+              {:error, reason}
+          end
+      end
+    end
+
+    defp managed_start(provider, opts) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       apply(Acp.ai_module(), :acp_managed_start_session, [provider, opts])
     end
 
-    defp public_start_result(meta, params, provider) when is_map(meta) do
+    defp public_start_result(meta, params, provider, continuity) when is_map(meta) do
       worker_session_id = map_get(meta, :worker_session_id) || map_get(meta, "worker_session_id")
 
       if is_binary(worker_session_id) and worker_session_id != "" do
@@ -404,7 +449,8 @@ defmodule Arbor.Actions.Acp do
            status: to_string(map_get(meta, :status) || map_get(meta, "status") || "ready"),
            pooled:
              truthy?(map_get(meta, :pooled) || map_get(meta, "pooled")) ||
-               params[:use_pool] == true
+               params[:use_pool] == true,
+           continuity: continuity
          }}
       else
         {:error, :invalid_worker_session_handle}
@@ -489,6 +535,41 @@ defmodule Arbor.Actions.Acp do
     def normalize_use_pool(_value), do: {:error, :invalid_use_pool}
 
     @doc false
+    def normalize_fallback_to_fresh_on_resume_unavailable_param(params) when is_map(params) do
+      key = :fallback_to_fresh_on_resume_unavailable
+      string_key = Atom.to_string(key)
+
+      case {Map.fetch(params, key), Map.fetch(params, string_key)} do
+        {:error, :error} ->
+          {:ok, Map.put(params, key, false)}
+
+        {{:ok, _atom_value}, {:ok, _string_value}} ->
+          {:error, :invalid_fallback_to_fresh_on_resume_unavailable}
+
+        {{:ok, value}, :error} ->
+          put_normalized_fallback_to_fresh_on_resume_unavailable(params, value)
+
+        {:error, {:ok, value}} ->
+          params
+          |> Map.delete(string_key)
+          |> put_normalized_fallback_to_fresh_on_resume_unavailable(value)
+      end
+    end
+
+    def normalize_fallback_to_fresh_on_resume_unavailable_param(_params),
+      do: {:error, :invalid_fallback_to_fresh_on_resume_unavailable}
+
+    @doc false
+    def normalize_fallback_to_fresh_on_resume_unavailable(value) when is_boolean(value),
+      do: {:ok, value}
+
+    def normalize_fallback_to_fresh_on_resume_unavailable("true"), do: {:ok, true}
+    def normalize_fallback_to_fresh_on_resume_unavailable("false"), do: {:ok, false}
+
+    def normalize_fallback_to_fresh_on_resume_unavailable(_value),
+      do: {:error, :invalid_fallback_to_fresh_on_resume_unavailable}
+
+    @doc false
     def normalize_permission_mode(nil), do: nil
     def normalize_permission_mode(:default), do: :default
     def normalize_permission_mode(:bypass), do: :bypass
@@ -535,6 +616,16 @@ defmodule Arbor.Actions.Acp do
       case normalize_use_pool(value) do
         {:ok, normalized} -> {:ok, Map.put(params, :use_pool, normalized)}
         {:error, _reason} = error -> error
+      end
+    end
+
+    defp put_normalized_fallback_to_fresh_on_resume_unavailable(params, value) do
+      case normalize_fallback_to_fresh_on_resume_unavailable(value) do
+        {:ok, normalized} ->
+          {:ok, Map.put(params, :fallback_to_fresh_on_resume_unavailable, normalized)}
+
+        {:error, _reason} = error ->
+          error
       end
     end
 
