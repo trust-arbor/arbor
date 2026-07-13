@@ -412,6 +412,79 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert :ok = RunIdentity.revoke(handle)
   end
 
+  test "security regression: dynamic supervisor restart reconstructs active lease monitors", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+    parent = self()
+
+    owner =
+      spawn(fn ->
+        {:ok, handle} = RunIdentity.mint(attestation)
+        send(parent, {:reconstructed_run_handle, handle})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:reconstructed_run_handle, handle}, 5_000
+
+    old_supervisor = Process.whereis(RunLease.DynamicSupervisor)
+    old_lease = RunLease.whereis(handle.lease)
+    Process.exit(old_supervisor, :kill)
+
+    assert_eventually(fn ->
+      new_supervisor = Process.whereis(RunLease.DynamicSupervisor)
+      new_lease = RunLease.whereis(handle.lease)
+
+      is_pid(new_supervisor) and new_supervisor != old_supervisor and is_pid(new_lease) and
+        new_lease != old_lease
+    end)
+
+    owner_ref = Process.monitor(owner)
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}, 5_000
+    assert_eventually(fn -> run_state_removed?(handle) end)
+  end
+
+  test "security regression: store restart preserves journals and opaque authority handles", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+    assert {:ok, handle} = RunIdentity.mint(attestation)
+
+    old_store = Process.whereis(RunLease.Store)
+    old_lease = RunLease.whereis(handle.lease)
+    Process.exit(old_store, :kill)
+
+    assert_eventually(fn ->
+      new_store = Process.whereis(RunLease.Store)
+      new_lease = RunLease.whereis(handle.lease)
+
+      is_pid(new_store) and new_store != old_store and is_pid(new_lease) and
+        new_lease != old_lease
+    end)
+
+    assert {:ok, _signed_request} =
+             Security.sign_with_authority(handle.signing_authority, "survived-store-restart")
+
+    assert :ok = RunIdentity.revoke(handle)
+    assert_eventually(fn -> run_state_removed?(handle) end)
+  end
+
+  test "security regression: store sys status redacts authority bearer state", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+    assert {:ok, handle} = RunIdentity.mint(attestation)
+
+    status = :sys.get_status(RunLease.Store)
+    refute term_contains?(status, handle.signing_authority.token)
+
+    assert :ok = RunIdentity.revoke(handle)
+  end
+
   test "security regression: owner death cannot split grant or authority recording", %{
     issuer: issuer,
     tmp_dir: tmp_dir
@@ -478,6 +551,31 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     end
   end
 
+  test "cleanup remains supervised after reporting the synchronous retry threshold", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+    :ets.insert(:run_identity_cleanup_stub, {{:identity, :failures}, 1})
+
+    assert {:ok, handle} =
+             RunIdentity.mint(attestation,
+               security_facade: CleanupSecurityStub,
+               trust_facade: CleanupTrustStub,
+               cleanup_max_attempts: 1,
+               cleanup_reconcile_base_ms: 5,
+               cleanup_reconcile_max_ms: 10
+             )
+
+    assert {:error, {:cleanup_failed, failures}} = RunIdentity.revoke(handle)
+    assert cleanup_failure_present?(failures, :identity)
+    assert is_pid(RunLease.whereis(handle.lease))
+
+    :ets.insert(:run_identity_cleanup_stub, {{:identity, :failures}, 0})
+    assert_eventually(fn -> run_state_removed?(handle) end)
+    assert_eventually(fn -> is_nil(RunLease.whereis(handle.lease)) end)
+  end
+
   test "startup reconciliation removes stable run residue after node display-name changes" do
     refute String.contains?(RunIdentity.identity_name(), Atom.to_string(node()))
 
@@ -524,6 +622,29 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert first_name == "scheduler-run:runtime-a"
     assert second_name == "scheduler-run:runtime-b"
     refute first_name == second_name
+  end
+
+  test "security regression: local reaper scope cannot reap a peer runtime identity" do
+    Application.put_env(:arbor_scheduler, :run_identity_runtime_id, "peer-runtime")
+    {:ok, peer_identity} = Identity.generate(name: RunIdentity.identity_name())
+    :ok = peer_identity |> Identity.public_only() |> Security.register_identity()
+    assert {:ok, _cap} = Security.grant(principal: peer_identity.agent_id, resource: @lobby_uri)
+
+    assert {:ok, _profile} =
+             Trust.ensure_trust_profile(peer_identity.agent_id, baseline: :ask, rules: %{})
+
+    Application.put_env(:arbor_scheduler, :run_identity_runtime_id, "local-runtime")
+    assert :ok = RunIdentityReaper.reconcile()
+
+    assert {:ok, _public_key} = Security.lookup_public_key(peer_identity.agent_id)
+    assert {:ok, [_cap]} = Security.list_capabilities(peer_identity.agent_id)
+    assert {:ok, _profile} = Trust.get_trust_profile(peer_identity.agent_id)
+
+    assert :ok =
+             RunIdentityReaper.reconcile(
+               identity_name: "scheduler-run:peer-runtime",
+               active_agent_ids: MapSet.new()
+             )
   end
 
   test "startup reconciliation fails closed for every cleanup boundary" do
@@ -662,6 +783,23 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       _other -> false
     end)
   end
+
+  defp term_contains?(term, needle) when term == needle, do: true
+
+  defp term_contains?(term, needle) when is_list(term),
+    do: Enum.any?(term, &term_contains?(&1, needle))
+
+  defp term_contains?(term, needle) when is_tuple(term) do
+    term |> Tuple.to_list() |> Enum.any?(&term_contains?(&1, needle))
+  end
+
+  defp term_contains?(term, needle) when is_map(term) do
+    Enum.any?(term, fn {key, value} ->
+      term_contains?(key, needle) or term_contains?(value, needle)
+    end)
+  end
+
+  defp term_contains?(_term, _needle), do: false
 
   defp sha256(value) do
     value

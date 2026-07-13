@@ -13,8 +13,10 @@ defmodule Arbor.Scheduler.RunLeaseSupervisor do
   def init(_opts) do
     children = [
       {Registry, keys: :unique, name: RunLease.Registry},
+      RunLease.StateOwner,
       RunLease.Store,
-      {DynamicSupervisor, strategy: :one_for_one, name: RunLease.DynamicSupervisor}
+      {DynamicSupervisor, strategy: :one_for_one, name: RunLease.DynamicSupervisor},
+      RunLease.Reconciler
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)

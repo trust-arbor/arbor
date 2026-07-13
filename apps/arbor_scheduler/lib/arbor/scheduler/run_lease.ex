@@ -126,11 +126,16 @@ defmodule Arbor.Scheduler.RunLease do
             Process.send_after(self(), :cleanup, delay_ms)
             {:noreply, state}
 
-          {:terminal, terminal_failures} ->
+          {:reconcile, terminal_failures, delay_ms} ->
             error = {:error, {:cleanup_failed, terminal_failures}}
-            Logger.error("[RunLease] terminal cleanup failure: #{inspect(terminal_failures)}")
+
+            Logger.error(
+              "[RunLease] cleanup threshold reached; reconciliation remains active: #{inspect(terminal_failures)}"
+            )
+
             reply_waiters(state.waiters, error)
-            {:stop, :normal, %{state | waiters: []}}
+            Process.send_after(self(), :cleanup, delay_ms)
+            {:noreply, %{state | waiters: []}}
         end
 
       {:error, :not_found} ->
@@ -299,6 +304,120 @@ defmodule Arbor.Scheduler.RunLease do
 
   defp via(lease_id), do: {:via, Registry, {__MODULE__.Registry, lease_id}}
 
+  defmodule StateOwner do
+    @moduledoc false
+
+    use GenServer
+
+    @table __MODULE__
+
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+    def table, do: @table
+    def put(id, lease), do: GenServer.call(__MODULE__, {:put, id, lease})
+    def delete(id), do: GenServer.call(__MODULE__, {:delete, id})
+
+    def open_authority(lease_id, identity, security),
+      do: GenServer.call(__MODULE__, {:open_authority, lease_id, identity, security}, 30_000)
+
+    @impl true
+    def init(:ok) do
+      :ets.new(@table, [:named_table, :protected, :set, read_concurrency: true])
+      {:ok, %{table: @table}}
+    end
+
+    @impl true
+    def handle_call({:put, id, lease}, _from, state) do
+      true = :ets.insert(@table, {id, lease})
+      {:reply, :ok, state}
+    end
+
+    def handle_call({:delete, id}, _from, state) do
+      true = :ets.delete(@table, id)
+      {:reply, :ok, state}
+    end
+
+    def handle_call({:open_authority, lease_id, identity, security}, _from, state) do
+      result =
+        with {:ok, proof} <-
+               safe_external(fn ->
+                 security.build_signing_authority_acquisition_proof(
+                   identity.agent_id,
+                   identity.private_key,
+                   purpose: :pipeline_run,
+                   owner: self()
+                 )
+               end) do
+          safe_external(fn ->
+            security.open_ephemeral_signing_authority(proof, identity.private_key)
+          end)
+        end
+
+      case result do
+        {:ok, authority} ->
+          [{^lease_id, lease}] = :ets.lookup(@table, lease_id)
+          updated = %{lease | authority: authority, generation: lease.generation + 1}
+          true = :ets.insert(@table, {lease_id, updated})
+
+        _other ->
+          :ok
+      end
+
+      {:reply, result, state}
+    end
+
+    @impl true
+    def format_status(status) when is_map(status) do
+      status
+      |> Map.put(:message, :redacted)
+      |> Map.put(:state, %{journal: :owned})
+      |> Map.put(:reason, :redacted)
+      |> Map.put(:log, :redacted)
+    end
+
+    defp safe_external(fun) do
+      fun.()
+    rescue
+      exception -> {:error, {:exception, Exception.message(exception)}}
+    catch
+      :exit, reason -> {:error, {:exit, reason}}
+    end
+  end
+
+  defmodule Reconciler do
+    @moduledoc false
+
+    use GenServer
+
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+    @impl true
+    def init(:ok) do
+      case Arbor.Scheduler.RunLease.Store.all_ids() do
+        {:ok, lease_ids} ->
+          case restart_leases(lease_ids) do
+            :ok -> {:ok, %{lease_count: length(lease_ids)}}
+            {:error, reason} -> {:stop, {:lease_reconciliation_failed, reason}}
+          end
+
+        {:error, reason} ->
+          {:stop, {:lease_journal_unavailable, reason}}
+      end
+    end
+
+    defp restart_leases(lease_ids) do
+      Enum.reduce_while(lease_ids, :ok, fn lease_id, :ok ->
+        case DynamicSupervisor.start_child(
+               Arbor.Scheduler.RunLease.DynamicSupervisor,
+               {Arbor.Scheduler.RunLease, lease_id}
+             ) do
+          {:ok, _pid} -> {:cont, :ok}
+          {:error, {:already_started, _pid}} -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, {lease_id, reason}}}
+        end
+      end)
+    end
+  end
+
   defmodule Store do
     @moduledoc false
 
@@ -307,8 +426,10 @@ defmodule Arbor.Scheduler.RunLease do
     @default_retry_base_ms 25
     @default_retry_max_ms 1_000
     @default_max_attempts 5
+    @default_reconcile_base_ms 5_000
+    @default_reconcile_max_ms 60_000
 
-    def start_link(_opts), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
     def create(id, owner, opts), do: GenServer.call(__MODULE__, {:create, id, owner, opts})
     def fetch(id), do: GenServer.call(__MODULE__, {:fetch, id})
@@ -333,15 +454,25 @@ defmodule Arbor.Scheduler.RunLease do
       do: GenServer.call(__MODULE__, {:finish_attempt, id, generation, failures})
 
     def active_agent_ids, do: GenServer.call(__MODULE__, :active_agent_ids)
+    def all_ids, do: GenServer.call(__MODULE__, :all_ids)
     def discard(id), do: GenServer.call(__MODULE__, {:discard, id})
 
     @impl true
-    def init(state), do: {:ok, state}
+    def init(:ok), do: {:ok, %{table: Arbor.Scheduler.RunLease.StateOwner.table()}}
 
     @impl true
-    def handle_call({:create, id, owner, opts}, _from, leases) do
-      if Map.has_key?(leases, id) do
-        {:reply, {:error, :already_present}, leases}
+    def format_status(status) when is_map(status) do
+      status
+      |> Map.put(:message, :redacted)
+      |> Map.put(:state, %{journal: :external})
+      |> Map.put(:reason, :redacted)
+      |> Map.put(:log, :redacted)
+    end
+
+    @impl true
+    def handle_call({:create, id, owner, opts}, _from, %{table: table} = state) do
+      if lookup(table, id) != :error do
+        {:reply, {:error, :already_present}, state}
       else
         now = System.monotonic_time(:millisecond)
 
@@ -361,148 +492,164 @@ defmodule Arbor.Scheduler.RunLease do
           max_attempts: Keyword.get(opts, :cleanup_max_attempts, @default_max_attempts),
           retry_base_ms: Keyword.get(opts, :cleanup_retry_base_ms, @default_retry_base_ms),
           retry_max_ms: Keyword.get(opts, :cleanup_retry_max_ms, @default_retry_max_ms),
+          reconcile_base_ms:
+            Keyword.get(opts, :cleanup_reconcile_base_ms, @default_reconcile_base_ms),
+          reconcile_max_ms:
+            Keyword.get(opts, :cleanup_reconcile_max_ms, @default_reconcile_max_ms),
           failures: []
         }
 
-        {:reply, :ok, Map.put(leases, id, lease)}
+        put(table, id, lease)
+        {:reply, :ok, state}
       end
     end
 
-    def handle_call({:fetch, id}, _from, leases) do
-      case Map.fetch(leases, id) do
-        {:ok, lease} -> {:reply, {:ok, lease}, leases}
-        :error -> {:reply, {:error, :not_found}, leases}
+    def handle_call({:fetch, id}, _from, %{table: table} = state) do
+      case lookup(table, id) do
+        {:ok, lease} -> {:reply, {:ok, lease}, state}
+        :error -> {:reply, {:error, :not_found}, state}
       end
     end
 
-    def handle_call({:record, id, operation}, _from, leases) do
-      case Map.fetch(leases, id) do
+    def handle_call({:record, id, operation}, _from, %{table: table} = state) do
+      case lookup(table, id) do
         {:ok, lease} ->
           updated = lease |> put_operation(operation) |> Map.update!(:generation, &(&1 + 1))
-          leases = Map.put(leases, id, updated)
+          put(table, id, updated)
 
           if lease.status == :active do
-            {:reply, :ok, leases}
+            {:reply, :ok, state}
           else
-            {:reply, {:cleanup_started, Arbor.Scheduler.RunLease.whereis(id)}, leases}
+            {:reply, {:cleanup_started, Arbor.Scheduler.RunLease.whereis(id)}, state}
           end
 
         :error ->
-          {:reply, {:error, :lease_not_found}, leases}
+          {:reply, {:error, :lease_not_found}, state}
       end
     end
 
-    def handle_call({:register_identity, id, identity, security}, _from, leases) do
-      with {:ok, lease} <- active_lease(leases, id),
+    def handle_call(
+          {:register_identity, id, identity, security},
+          _from,
+          %{table: table} = state
+        ) do
+      with {:ok, lease} <- active_lease(table, id),
            :ok <- safe_external(fn -> security.register_identity(identity) end) do
         updated = lease |> put_operation({:identity, identity.agent_id}) |> bump_generation()
-        {:reply, :ok, Map.put(leases, id, updated)}
+        put(table, id, updated)
+        {:reply, :ok, state}
       else
-        {:error, :lease_closing} -> {:reply, {:error, :lease_closing}, leases}
-        {:error, reason} -> {:reply, {:error, {:identity_registration_failed, reason}}, leases}
+        {:error, :lease_closing} -> {:reply, {:error, :lease_closing}, state}
+        {:error, reason} -> {:reply, {:error, {:identity_registration_failed, reason}}, state}
       end
     end
 
-    def handle_call({:grant_capability, id, opts, security}, _from, leases) do
-      with {:ok, lease} <- active_lease(leases, id),
+    def handle_call({:grant_capability, id, opts, security}, _from, %{table: table} = state) do
+      with {:ok, lease} <- active_lease(table, id),
            {:ok, cap} <- safe_external(fn -> security.grant(opts) end) do
         updated = lease |> put_operation({:capability, cap.id}) |> bump_generation()
-        {:reply, {:ok, cap}, Map.put(leases, id, updated)}
+        put(table, id, updated)
+        {:reply, {:ok, cap}, state}
       else
         {:error, :lease_closing} ->
-          {:reply, {:error, :lease_closing}, leases}
+          {:reply, {:error, :lease_closing}, state}
 
         {:error, reason} ->
           resource = Keyword.fetch!(opts, :resource)
-          {:reply, {:error, {:grant_failed, resource, reason}}, leases}
+          {:reply, {:error, {:grant_failed, resource, reason}}, state}
       end
     end
 
-    def handle_call({:open_authority, id, identity, security}, _from, leases) do
-      with {:ok, lease} <- active_lease(leases, id),
-           {:ok, proof} <-
-             safe_external(fn ->
-               security.build_signing_authority_acquisition_proof(
-                 identity.agent_id,
-                 identity.private_key,
-                 purpose: :pipeline_run,
-                 owner: self()
-               )
-             end),
+    def handle_call({:open_authority, id, identity, security}, _from, %{table: table} = state) do
+      with {:ok, _lease} <- active_lease(table, id),
            {:ok, authority} <-
-             safe_external(fn ->
-               security.open_ephemeral_signing_authority(proof, identity.private_key)
-             end) do
-        updated = lease |> put_operation({:authority, authority}) |> bump_generation()
-        {:reply, {:ok, authority}, Map.put(leases, id, updated)}
+             Arbor.Scheduler.RunLease.StateOwner.open_authority(id, identity, security) do
+        {:reply, {:ok, authority}, state}
       else
-        {:error, :lease_closing} -> {:reply, {:error, :lease_closing}, leases}
-        {:error, reason} -> {:reply, {:error, {:authority_open_failed, reason}}, leases}
+        {:error, :lease_closing} -> {:reply, {:error, :lease_closing}, state}
+        {:error, reason} -> {:reply, {:error, {:authority_open_failed, reason}}, state}
       end
     end
 
-    def handle_call({:begin_cleanup, id}, _from, leases) do
-      leases =
-        update_in(leases, [Access.key(id)], fn
-          nil -> nil
-          lease -> %{lease | status: :cleaning}
-        end)
+    def handle_call({:begin_cleanup, id}, _from, %{table: table} = state) do
+      update(table, id, fn lease -> %{lease | status: :cleaning} end)
 
-      {:reply, :ok, leases}
+      {:reply, :ok, state}
     end
 
-    def handle_call({:snapshot, id}, _from, leases) do
-      case Map.fetch(leases, id) do
-        {:ok, lease} -> {:reply, {:ok, lease}, leases}
-        :error -> {:reply, {:error, :not_found}, leases}
+    def handle_call({:snapshot, id}, _from, %{table: table} = state) do
+      case lookup(table, id) do
+        {:ok, lease} -> {:reply, {:ok, lease}, state}
+        :error -> {:reply, {:error, :not_found}, state}
       end
     end
 
-    def handle_call({:operation_succeeded, id, operation}, _from, leases) do
-      leases = update_in(leases, [Access.key(id)], &clear_operation(&1, operation))
-      {:reply, :ok, leases}
+    def handle_call({:operation_succeeded, id, operation}, _from, %{table: table} = state) do
+      update(table, id, &clear_operation(&1, operation))
+      {:reply, :ok, state}
     end
 
-    def handle_call({:finish_attempt, id, generation, failures}, _from, leases) do
-      case Map.fetch(leases, id) do
+    def handle_call(
+          {:finish_attempt, id, generation, failures},
+          _from,
+          %{table: table} = state
+        ) do
+      case lookup(table, id) do
         {:ok, %{generation: current_generation} = lease}
         when current_generation != generation ->
           updated = %{lease | attempts: 0, failures: failures}
-          {:reply, {:retry, 0}, Map.put(leases, id, updated)}
+          put(table, id, updated)
+          {:reply, {:retry, 0}, state}
 
         {:ok, _lease} when failures == [] ->
-          {:reply, :complete, leases}
+          {:reply, :complete, state}
 
         {:ok, lease} ->
           attempts = lease.attempts + 1
           updated = %{lease | attempts: attempts, failures: failures, status: :cleaning}
-          leases = Map.put(leases, id, updated)
+          put(table, id, updated)
 
           if attempts >= lease.max_attempts do
-            {:reply, {:terminal, Enum.reverse(failures)}, leases}
+            reconciliation_attempt = attempts - lease.max_attempts
+
+            delay =
+              bounded_backoff(
+                lease.reconcile_base_ms,
+                lease.reconcile_max_ms,
+                reconciliation_attempt
+              )
+
+            {:reply, {:reconcile, Enum.reverse(failures), delay}, state}
           else
-            delay = min(lease.retry_base_ms * Integer.pow(2, attempts - 1), lease.retry_max_ms)
-            {:reply, {:retry, delay}, leases}
+            delay = bounded_backoff(lease.retry_base_ms, lease.retry_max_ms, attempts - 1)
+            {:reply, {:retry, delay}, state}
           end
 
         :error ->
-          {:reply, :complete, leases}
+          {:reply, :complete, state}
       end
     end
 
-    def handle_call(:active_agent_ids, _from, leases) do
+    def handle_call(:active_agent_ids, _from, %{table: table} = state) do
       ids =
-        leases
-        |> Map.values()
+        table
+        |> all_leases()
         |> Enum.filter(&(&1.status == :active and Process.alive?(&1.owner)))
         |> Enum.map(& &1.agent_id)
         |> Enum.reject(&is_nil/1)
         |> MapSet.new()
 
-      {:reply, ids, leases}
+      {:reply, ids, state}
     end
 
-    def handle_call({:discard, id}, _from, leases), do: {:reply, :ok, Map.delete(leases, id)}
+    def handle_call(:all_ids, _from, %{table: table} = state) do
+      {:reply, {:ok, Enum.map(:ets.tab2list(table), &elem(&1, 0))}, state}
+    end
+
+    def handle_call({:discard, id}, _from, state) do
+      :ok = Arbor.Scheduler.RunLease.StateOwner.delete(id)
+      {:reply, :ok, state}
+    end
 
     defp put_operation(lease, {:identity, agent_id}) do
       %{lease | agent_id: agent_id, trust_pending: true, identity_pending: true}
@@ -514,8 +661,8 @@ defmodule Arbor.Scheduler.RunLease do
 
     defp put_operation(lease, {:authority, authority}), do: %{lease | authority: authority}
 
-    defp active_lease(leases, id) do
-      case Map.fetch(leases, id) do
+    defp active_lease(table, id) do
+      case lookup(table, id) do
         {:ok, %{status: :active} = lease} -> {:ok, lease}
         {:ok, _lease} -> {:error, :lease_closing}
         :error -> {:error, :lease_closing}
@@ -523,6 +670,29 @@ defmodule Arbor.Scheduler.RunLease do
     end
 
     defp bump_generation(lease), do: Map.update!(lease, :generation, &(&1 + 1))
+
+    defp bounded_backoff(base, maximum, exponent) do
+      shifts = min(exponent, 30)
+      min(base * Integer.pow(2, shifts), maximum)
+    end
+
+    defp lookup(table, id) do
+      case :ets.lookup(table, id) do
+        [{^id, lease}] -> {:ok, lease}
+        [] -> :error
+      end
+    end
+
+    defp put(_table, id, lease), do: Arbor.Scheduler.RunLease.StateOwner.put(id, lease)
+
+    defp update(table, id, fun) do
+      case lookup(table, id) do
+        {:ok, lease} -> put(table, id, fun.(lease))
+        :error -> :ok
+      end
+    end
+
+    defp all_leases(table), do: Enum.map(:ets.tab2list(table), &elem(&1, 1))
 
     defp safe_external(fun) do
       fun.()

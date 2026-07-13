@@ -66,6 +66,7 @@ defmodule Arbor.Scheduler.RunIdentity do
   # each must be present in the signed attestation before it can be granted.
   @orchestrator_execute_uri "arbor://orchestrator/execute"
   @default_lease_ttl_ms :timer.hours(24)
+  @runtime_marker_key {__MODULE__, :runtime_marker}
 
   @type run_handle :: %{
           agent_id: String.t(),
@@ -76,7 +77,9 @@ defmodule Arbor.Scheduler.RunIdentity do
 
   @doc false
   def identity_name do
-    runtime_id = Application.get_env(:arbor_scheduler, :run_identity_runtime_id, "default")
+    runtime_id =
+      Application.get_env(:arbor_scheduler, :run_identity_runtime_id) || local_runtime_marker()
+
     "scheduler-run:#{runtime_id}"
   end
 
@@ -103,7 +106,13 @@ defmodule Arbor.Scheduler.RunIdentity do
     ttl_ms = Keyword.get(opts, :lease_ttl_ms, lease_ttl_ms())
 
     cleanup_opts =
-      Keyword.take(opts, [:cleanup_max_attempts, :cleanup_retry_base_ms, :cleanup_retry_max_ms])
+      Keyword.take(opts, [
+        :cleanup_max_attempts,
+        :cleanup_retry_base_ms,
+        :cleanup_retry_max_ms,
+        :cleanup_reconcile_base_ms,
+        :cleanup_reconcile_max_ms
+      ])
 
     with :ok <- CapsFile.verify_attestation(attestation),
          {:ok, lease} <-
@@ -311,5 +320,17 @@ defmodule Arbor.Scheduler.RunIdentity do
 
   defp lease_ttl_ms do
     Application.get_env(:arbor_scheduler, :run_identity_lease_ttl_ms, @default_lease_ttl_ms)
+  end
+
+  defp local_runtime_marker do
+    case :persistent_term.get(@runtime_marker_key, :missing) do
+      :missing ->
+        marker = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+        :persistent_term.put(@runtime_marker_key, marker)
+        marker
+
+      marker ->
+        marker
+    end
   end
 end
