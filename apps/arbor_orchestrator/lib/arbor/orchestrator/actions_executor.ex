@@ -1171,7 +1171,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp credential_bearing_term?(term) when is_map(term) do
-    Enum.any?(term, fn {key, value} ->
+    term
+    |> Map.to_list()
+    |> Enum.any?(fn {key, value} ->
       credential_key?(key) or credential_bearing_term?(value)
     end)
   end
