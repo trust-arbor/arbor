@@ -93,6 +93,11 @@ defmodule Arbor.Orchestrator.Pipelines.EvalDotMigrationTest do
     assert run_eval.attrs["context_keys"] == "exec.load_dataset.dataset"
     assert run_eval.attrs["param.subject"] == "llm"
 
+    load_dataset = Map.fetch!(graph.nodes, "load_dataset")
+
+    assert load_dataset.attrs["context_keys"] ==
+             "eval.path,eval.limit,eval.shuffle,eval.seed"
+
     graders =
       run_eval.attrs["param.graders"]
       |> String.split(",", trim: true)

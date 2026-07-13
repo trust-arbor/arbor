@@ -8,9 +8,7 @@
 // mix arbor.pipeline.eval):
 //   "eval.path"        — dataset path override (leaf -> path)
 //   "eval.output_path" — report output path (leaf -> output_path)
-//   "eval.limit" / "eval.shuffle" / "eval.seed" / "eval.model" / "eval.provider"
-//     — available from the mix task; extend context_keys on the consuming node
-//       when a pipeline needs them.
+//   "eval.limit" / "eval.shuffle" / "eval.seed" — dataset controls
 //
 // Usage:
 //   Engine.run(graph, initial_values: %{
@@ -32,7 +30,7 @@ digraph CodingEval {
     target="action",
     action="eval_pipeline.load_dataset",
     param.path="priv/eval_datasets/elixir_coding.jsonl",
-    context_keys="eval.path",
+    context_keys="eval.path,eval.limit,eval.shuffle,eval.seed",
     data_class="internal"
   ]
 
