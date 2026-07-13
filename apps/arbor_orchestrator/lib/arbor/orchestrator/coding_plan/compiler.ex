@@ -121,7 +121,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
              review_profile: plan.review_profile,
              worker_use_pool: plan.worker["use_pool"],
-             worker_resume_session_id: plan.worker["resume_session_id"]
+             worker_resume_session_id: plan.worker["resume_session_id"],
+             worker_permission_mode: plan.worker["permission_mode"],
+             worker_model: plan.worker["model"]
            ),
          graph_hash = sha256(dot_source),
          {:ok, {execution_manifest, execution_manifest_digest}} <-
@@ -376,6 +378,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp apply_reviewed_mutations(graph, plan, plan_fingerprint, action_catalog) do
     with {:ok, graph} <- rewrite_classification(graph, plan.task_class),
          {:ok, graph} <- rewrite_worker_open(graph, plan.worker),
+         {:ok, graph} <- rewrite_worker_recovery_open(graph, plan.worker),
          {:ok, graph} <- rewrite_worker_close(graph, plan.worker),
          {:ok, graph} <- rewrite_prompt_budgets(graph),
          {:ok, graph} <- rewrite_profile_flow(graph, plan),
@@ -406,7 +409,31 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          |> Map.put("context_keys", context_keys)
          |> Map.put("param.permission_mode", worker["permission_mode"])
          |> Map.put("param.use_pool", bool_string(worker["use_pool"]))
+         |> Map.put("output_prefix", "worker")
+         |> Map.put("max_retries", "0")
+         |> Map.delete("param.fallback_to_fresh_on_resume_unavailable")
          |> put_optional_static_param("param.session_id", worker["resume_session_id"])}
+      end
+    end)
+  end
+
+  defp rewrite_worker_recovery_open(graph, worker) do
+    update_node(graph, "open_recovery_worker", fn attrs ->
+      with :ok <- require_action_attrs(attrs, "acp_start_session") do
+        context_keys =
+          if is_nil(worker["model"]),
+            do: "provider,cwd,session_id",
+            else: "provider,cwd,session_id,model"
+
+        {:ok,
+         attrs
+         |> Map.put("context_keys", context_keys)
+         |> Map.put("param.permission_mode", worker["permission_mode"])
+         |> Map.put("param.use_pool", bool_string(worker["use_pool"]))
+         |> Map.put("param.fallback_to_fresh_on_resume_unavailable", true)
+         |> Map.put("output_prefix", "worker")
+         |> Map.put("max_retries", "0")
+         |> Map.delete("param.session_id")}
       end
     end)
   end
@@ -420,9 +447,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   end
 
   defp rewrite_prompt_budgets(graph) do
-    with {:ok, graph} <- rewrite_prompt_budget_node(graph, "implement") do
-      rewrite_prompt_budget_node(graph, "repair_worker_protocol")
-    end
+    Enum.reduce_while(
+      ["implement", "repair_worker_protocol", "retry_recovered_send"],
+      {:ok, graph},
+      fn node_id, {:ok, graph} ->
+        case rewrite_prompt_budget_node(graph, node_id) do
+          {:ok, graph} -> {:cont, {:ok, graph}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end
+    )
   end
 
   defp rewrite_prompt_budget_node(graph, node_id) do
@@ -433,7 +467,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            attrs,
            "context_keys",
            "worker_session_id,prompt,timeout,inactivity_timeout_ms"
-         )}
+         )
+         |> Map.put("max_retries", "0")}
       end
     end)
   end

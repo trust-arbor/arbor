@@ -45,6 +45,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     review_gate
     review_routing_gate
     validation_profile
+    worker_recovery
   )
 
   @placement_entry_keys MapSet.new(~w(
@@ -158,6 +159,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_forbidden_authority(graph)
         |> check_forbidden_denial_bypass_attrs(graph)
         |> check_worker_continuity_bindings(graph, worker_continuity)
+        |> check_worker_recovery_bindings(graph, policy, worker_continuity)
         |> check_profile_bindings(graph, policy, review_profile)
         |> check_reachability_and_dominance(graph, policy, review_profile)
         |> Enum.sort_by(&error_sort_key/1)
@@ -362,6 +364,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
              :ok <- require_nonempty_string(policy, "review_gate"),
              :ok <- require_nonempty_string(policy, "review_routing_gate"),
              :ok <- require_nonempty_string(policy, "validation_profile"),
+             :ok <- require_worker_recovery_policy(policy),
              :ok <- require_action_placements(policy),
              :ok <- require_profile_policy(policy),
              :ok <- require_sorted_unique(policy, "allowed_handlers"),
@@ -608,6 +611,81 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp require_profile_policy(_policy), do: :ok
 
+  defp require_worker_recovery_policy(policy) do
+    case Map.fetch(policy, "worker_recovery") do
+      {:ok,
+       %{
+         "node_attrs" => node_attrs,
+         "protected_writers" => protected_writers,
+         "edges" => edges
+       }}
+      when is_list(node_attrs) and is_map(protected_writers) and is_list(edges) ->
+        with :ok <- require_worker_recovery_node_attrs(node_attrs),
+             :ok <- require_worker_recovery_writers(protected_writers),
+             :ok <- require_worker_recovery_edges(edges) do
+          :ok
+        end
+
+      _other ->
+        {:error, {:invalid_semantic_policy, :invalid_worker_recovery_policy}}
+    end
+  end
+
+  defp require_worker_recovery_node_attrs(entries) do
+    valid? =
+      Enum.all?(entries, fn
+        %{"node_id" => node_id, "attrs" => attrs}
+        when is_binary(node_id) and node_id != "" and is_map(attrs) ->
+          Enum.all?(attrs, fn {key, _value} -> is_binary(key) end)
+
+        _other ->
+          false
+      end)
+
+    node_ids = Enum.map(entries, & &1["node_id"])
+
+    if valid? and node_ids == Enum.sort(node_ids) and
+         length(node_ids) == length(Enum.uniq(node_ids)) do
+      :ok
+    else
+      {:error, {:invalid_semantic_policy, :invalid_worker_recovery_node_attrs}}
+    end
+  end
+
+  defp require_worker_recovery_writers(writers) do
+    keys = Map.keys(writers)
+
+    if Enum.all?(keys, &is_binary/1) and keys == Enum.sort(keys) and
+         Enum.all?(writers, fn {_key, nodes} ->
+           is_list(nodes) and nodes == Enum.sort(nodes) and
+             length(nodes) == length(Enum.uniq(nodes)) and
+             Enum.all?(nodes, &(is_binary(&1) and &1 != ""))
+         end) do
+      :ok
+    else
+      {:error, {:invalid_semantic_policy, :invalid_worker_recovery_writers}}
+    end
+  end
+
+  defp require_worker_recovery_edges(edges) do
+    valid? =
+      Enum.all?(edges, fn
+        [from, to, condition]
+        when is_binary(from) and from != "" and is_binary(to) and to != "" and
+               (is_binary(condition) or is_nil(condition)) ->
+          true
+
+        _other ->
+          false
+      end)
+
+    if valid? and edges == Enum.sort(edges) and length(edges) == length(Enum.uniq(edges)) do
+      :ok
+    else
+      {:error, {:invalid_semantic_policy, :invalid_worker_recovery_edges}}
+    end
+  end
+
   defp normalize_review_profile(opts) do
     if not Keyword.keyword?(opts) do
       {:error, {:invalid_semantic_policy, :invalid_options}}
@@ -635,7 +713,19 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
              (is_nil(resume_session_id) or is_binary(resume_session_id)) ->
         if is_nil(resume_session_id) or
              (String.valid?(resume_session_id) and String.trim(resume_session_id) != "") do
-          {:ok, %{use_pool: use_pool, resume_session_id: resume_session_id}}
+          {:ok,
+           %{
+             use_pool: use_pool,
+             resume_session_id: resume_session_id,
+             permission_mode: Keyword.get(opts, :worker_permission_mode),
+             model:
+               case Keyword.get(opts, :worker_model, :unknown) do
+                 nil -> nil
+                 :unknown -> :unknown
+                 value when is_binary(value) -> value
+                 _other -> :invalid
+               end
+           }}
         else
           {:error, {:invalid_semantic_policy, :invalid_worker_continuity}}
         end
@@ -1637,6 +1727,182 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       require_worker_continuity_edge(acc, graph, from, to, condition)
     end)
   end
+
+  defp check_worker_recovery_bindings(errors, graph, policy, continuity) do
+    recovery = policy["worker_recovery"]
+
+    errors =
+      Enum.reduce(recovery["node_attrs"], errors, fn %{"node_id" => node_id, "attrs" => expected},
+                                                     acc ->
+        case Map.fetch(graph.nodes, node_id) do
+          {:ok, %{attrs: ^expected}} ->
+            acc
+
+          {:ok, node} ->
+            [
+              error("worker_recovery_node_mismatch", node_id, %{
+                "expected" => expected,
+                "actual" => node.attrs
+              })
+              | acc
+            ]
+
+          :error ->
+            [error("worker_recovery_missing_node", node_id, %{}) | acc]
+        end
+      end)
+
+    errors =
+      Enum.reduce(recovery["protected_writers"], errors, fn {attribute, expected_nodes}, acc ->
+        actual_nodes =
+          graph.nodes
+          |> Enum.flat_map(fn {node_id, node} ->
+            if Map.get(node.attrs, "output_key") == attribute, do: [node_id], else: []
+          end)
+          |> Enum.sort()
+
+        if actual_nodes == expected_nodes do
+          acc
+        else
+          [
+            error("worker_recovery_writer_violation", nil, %{
+              "attribute" => attribute,
+              "expected_nodes" => expected_nodes,
+              "actual_nodes" => actual_nodes
+            })
+            | acc
+          ]
+        end
+      end)
+
+    errors =
+      Enum.reduce(
+        recovery["edges"]
+        |> Enum.map(fn [from, to, condition] -> {from, to, condition} end)
+        |> Enum.group_by(&elem(&1, 0)),
+        errors,
+        fn {from, expected}, acc ->
+          actual =
+            graph
+            |> Graph.outgoing_edges(from)
+            |> Enum.map(&{&1.from, &1.to, Map.get(&1.attrs, "condition")})
+            |> Enum.sort()
+
+          if actual == expected do
+            acc
+          else
+            [
+              error("worker_recovery_topology_mismatch", from, %{
+                "expected" => Enum.map(expected, &recovery_edge_json/1),
+                "actual" => Enum.map(actual, &recovery_edge_json/1)
+              })
+              | acc
+            ]
+          end
+        end
+      )
+
+    check_worker_recovery_start_nodes(errors, graph, continuity)
+  end
+
+  defp recovery_edge_json({from, to, condition}), do: [from, to, condition]
+
+  defp check_worker_recovery_start_nodes(errors, graph, continuity) do
+    errors
+    |> require_recovery_start_attrs(graph, "open_worker", false, continuity)
+    |> require_recovery_start_attrs(graph, "open_recovery_worker", true, continuity)
+  end
+
+  defp require_recovery_start_attrs(errors, graph, node_id, recovery?, continuity) do
+    case Map.fetch(graph.nodes, node_id) do
+      :error ->
+        [error("worker_recovery_missing_node", node_id, %{}) | errors]
+
+      {:ok, node} ->
+        attrs = node.attrs
+        expected_use_pool = continuity_value(continuity, :use_pool, attrs["param.use_pool"])
+        expected_permission = continuity_value(continuity, :permission_mode, nil)
+        expected_model = continuity_value(continuity, :model, :unknown)
+
+        expected_context_keys =
+          case {recovery?, expected_model} do
+            {false, nil} -> "provider,cwd"
+            {false, :unknown} -> attrs["context_keys"]
+            {false, _model} -> "provider,cwd,model"
+            {true, nil} -> "provider,cwd,session_id"
+            {true, :unknown} -> attrs["context_keys"]
+            {true, _model} -> "provider,cwd,session_id,model"
+          end
+
+        expected_static =
+          %{
+            "param.use_pool" => expected_use_pool,
+            "context_keys" => expected_context_keys
+          }
+          |> maybe_expected(
+            "param.fallback_to_fresh_on_resume_unavailable",
+            if(recovery?, do: true, else: nil)
+          )
+          |> maybe_expected("param.permission_mode", expected_permission)
+
+        errors =
+          Enum.reduce(expected_static, errors, fn {attribute, expected}, acc ->
+            actual = Map.get(attrs, attribute)
+
+            if actual == expected do
+              acc
+            else
+              [
+                error("worker_recovery_start_binding_mismatch", node_id, %{
+                  "attribute" => attribute,
+                  "expected" => expected,
+                  "actual" => actual
+                })
+                | acc
+              ]
+            end
+          end)
+
+        cond do
+          recovery? and not Map.has_key?(attrs, "param.session_id") ->
+            errors
+
+          recovery? ->
+            [
+              error("worker_recovery_dynamic_session_id_violation", node_id, %{
+                "attribute" => "param.session_id",
+                "expected" => nil,
+                "actual" => Map.get(attrs, "param.session_id")
+              })
+              | errors
+            ]
+
+          Map.get(attrs, "param.fallback_to_fresh_on_resume_unavailable") == true ->
+            [
+              error("worker_recovery_start_binding_mismatch", node_id, %{
+                "attribute" => "param.fallback_to_fresh_on_resume_unavailable",
+                "expected" => nil,
+                "actual" => true
+              })
+              | errors
+            ]
+
+          true ->
+            errors
+        end
+    end
+  end
+
+  defp continuity_value(%{use_pool: value}, :use_pool, _default), do: bool_string(value)
+  defp continuity_value(%{permission_mode: value}, :permission_mode, _default), do: value
+  defp continuity_value(%{model: value}, :model, _default), do: value
+  defp continuity_value(_continuity, _key, default), do: default
+
+  defp maybe_expected(map, _key, nil), do: map
+  defp maybe_expected(map, key, value), do: Map.put(map, key, value)
+
+  defp bool_string(true), do: "true"
+  defp bool_string(false), do: "false"
 
   defp require_worker_continuity_node_attrs(errors, graph, node_id, expected) do
     case Map.fetch(graph.nodes, node_id) do

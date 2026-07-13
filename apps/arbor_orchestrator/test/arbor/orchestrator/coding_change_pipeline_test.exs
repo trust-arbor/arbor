@@ -16,8 +16,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     coding_workspace_inspect
     coding_workspace_release
     coding_workspace_committed_change
+    coding_workspace_recovery_summary
     acp_start_session
     acp_send_message
+    acp_session_status
     acp_close_session
     mix_compile
     coding_reviewed_commit
@@ -79,18 +81,52 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           end
 
         "acp_start_session" ->
+          n = Map.get(counters, :start, 0)
+          Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :start, n + 1)} end)
+
           case scenario do
             :worker_open_failed ->
               {:error, "worker open failed"}
 
+            :recovery_reopen_failed when n == 1 ->
+              {:error, "recovery reopen failed"}
+
             _ ->
+              replacement? = n > 0
+
+              worker_id =
+                if replacement?, do: "acp_worker_fixture_2", else: "acp_worker_fixture_1"
+
+              session_id =
+                cond do
+                  scenario in [:recovery_status_failed_without_id, :recovery_status_empty_no_id] and
+                      not replacement? ->
+                    ""
+
+                  replacement? ->
+                    "sess_2"
+
+                  true ->
+                    "sess_1"
+                end
+
+              continuity =
+                cond do
+                  not replacement? -> "new"
+                  scenario == :recovery_fresh_success -> "fresh_recovery"
+                  scenario == :recovery_continuity_new -> "new"
+                  scenario == :recovery_continuity_unknown -> "unknown"
+                  true -> "resumed"
+                end
+
               {:ok,
                %{
-                 worker_session_id: "acp_worker_fixture_1",
-                 session_id: "sess_1",
+                 worker_session_id: worker_id,
+                 session_id: session_id,
                  provider: Map.get(args, "provider") || Map.get(args, :provider) || "codex",
                  model: "default",
                  status: "ready",
+                 continuity: continuity,
                  pooled:
                    (Map.get(args, "use_pool") || Map.get(args, :use_pool) || false) in [
                      true,
@@ -101,6 +137,36 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
         "acp_send_message" ->
           implement_response(scenario, counters, state)
+
+        "acp_session_status" ->
+          n = Map.get(counters, :status, 0)
+          Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :status, n + 1)} end)
+
+          case scenario do
+            scenario
+            when scenario in [
+                   :recovery_status_failure_with_id,
+                   :recovery_status_failed_without_id
+                 ] ->
+              {:error, "session status unavailable"}
+
+            scenario
+            when scenario in [:recovery_status_empty_preserves_id, :recovery_status_empty_no_id] ->
+              {:ok, %{session_id: ""}}
+
+            _ ->
+              {:ok, %{session_id: "status_sess_1"}}
+          end
+
+        "coding_workspace_recovery_summary" ->
+          n = Map.get(counters, :recovery_summary, 0)
+
+          Agent.update(state, fn s ->
+            %{s | counters: Map.put(s.counters, :recovery_summary, n + 1)}
+          end)
+
+          pending = Map.get(args, "pending_prompt") || Map.get(args, :pending_prompt) || ""
+          {:ok, %{workspace_id: "ws_fixture_1", recovery_prompt: "RECOVERY SUMMARY\n" <> pending}}
 
         "coding_workspace_inspect" ->
           inspect_response(scenario, counters, state)
@@ -124,6 +190,19 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           case scenario do
             :close_failed ->
               {:error, "close session failed"}
+
+            :recovery_close_failed ->
+              return_to_pool =
+                (Map.get(args, "return_to_pool") || Map.get(args, :return_to_pool) || false) in [
+                  true,
+                  "true"
+                ]
+
+              if return_to_pool do
+                {:ok, %{worker_session_id: "acp_worker_fixture_1", status: "closed"}}
+              else
+                {:error, "stale close failed"}
+              end
 
             _ ->
               return_to_pool =
@@ -160,8 +239,30 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :implement, n + 1)} end)
 
       case {scenario, n} do
+        {scenario, 0}
+        when scenario in [
+               :recovery_resumed_success,
+               :recovery_fresh_success,
+               :recovery_status_failure_with_id,
+               :recovery_status_failed_without_id,
+               :recovery_status_empty_preserves_id,
+               :recovery_status_empty_no_id,
+               :recovery_close_failed,
+               :recovery_reopen_failed,
+               :recovery_second_send_failed,
+               :recovery_continuity_new,
+               :recovery_continuity_unknown
+             ] ->
+          {:error, "initial send failed"}
+
+        {:recovery_second_send_failed, 1} ->
+          {:error, "recovered send failed"}
+
         {:implement_hard_fail, _} ->
           {:error, "implement transport failed"}
+
+        {:protocol_repair_failure_recovery, 1} ->
+          {:error, "protocol steering transport failed"}
 
         {:protocol_repair_transport_failed, 1} ->
           {:error, "protocol steering transport failed"}
@@ -251,6 +352,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                 "Implemented the requested change.\n" <>
                   Jason.encode!(%{status: "implemented", summary: "prefixed progress"})
 
+              {:protocol_repair_failure_recovery, 0} ->
+                "Implemented the requested change.\n" <>
+                  Jason.encode!(%{status: "implemented", summary: "prefixed progress"})
+
               {scenario, n}
               when scenario in [
                      :protocol_repair_validation_turns_success,
@@ -300,7 +405,26 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                 Jason.encode!(%{status: "implemented", summary: "default"})
             end
 
-          {:ok, %{text: text, stop_reason: "end_turn", session_id: "sess_1", usage: %{}}}
+          response_session_id =
+            if (scenario in [
+                  :recovery_resumed_success,
+                  :recovery_fresh_success,
+                  :recovery_status_failure_with_id,
+                  :recovery_status_failed_without_id,
+                  :recovery_status_empty_preserves_id,
+                  :recovery_status_empty_no_id,
+                  :recovery_close_failed,
+                  :recovery_reopen_failed,
+                  :recovery_second_send_failed,
+                  :recovery_continuity_new,
+                  :recovery_continuity_unknown
+                ] and n > 0) or
+                 (scenario == :protocol_repair_failure_recovery and n > 1),
+               do: "sess_2",
+               else: "sess_1"
+
+          {:ok,
+           %{text: text, stop_reason: "end_turn", session_id: response_session_id, usage: %{}}}
       end
     end
 
@@ -679,6 +803,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "branch_name" => "arbor/coding-agent/fixture",
         "worktree_base_dir" => "/tmp/worktrees",
         "acp_agent" => "codex",
+        "timeout" => 900_000,
+        "inactivity_timeout_ms" => 300_000,
         "open_pr" => "false",
         "submit_review" => "true",
         "session.agent_id" => "agent_fixture",
@@ -1244,6 +1370,133 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
     end
+
+    test "send failure resumes the current prompt once on a replacement worker" do
+      assert {{:ok, result}, calls} = run_fixture(:recovery_resumed_success)
+      assert result.context["status"] == "change_committed"
+      assert result.context["worker_send_recovery_count"] == 1
+
+      starts = Enum.filter(calls, fn {name, _args} -> name == "acp_start_session" end)
+      sends = Enum.filter(calls, fn {name, _args} -> name == "acp_send_message" end)
+      closes = Enum.filter(calls, fn {name, _args} -> name == "acp_close_session" end)
+
+      assert length(starts) == 2
+      assert length(sends) == 2
+      assert length(closes) == 2
+
+      assert Enum.at(sends, 0) |> elem(1) |> Map.fetch!("prompt") ==
+               Enum.at(sends, 1) |> elem(1) |> Map.fetch!("prompt")
+
+      assert Enum.at(starts, 1) |> elem(1) |> Map.fetch!("session_id") == "status_sess_1"
+      assert Enum.at(closes, 0) |> elem(1) |> Map.fetch!("return_to_pool") == false
+      assert result.context["worker_provider_session_id"] == "sess_2"
+      assert_closed_and_released(calls)
+    end
+
+    test "fresh recovery summarizes the workspace and replaces the pending prompt" do
+      assert {{:ok, result}, calls} = run_fixture(:recovery_fresh_success)
+      assert result.context["status"] == "change_committed"
+      assert result.context["worker_send_recovery_count"] == 1
+
+      sends = Enum.filter(calls, fn {name, _args} -> name == "acp_send_message" end)
+      assert length(sends) == 2
+      original_prompt = Enum.at(sends, 0) |> elem(1) |> Map.fetch!("prompt")
+      recovered_prompt = Enum.at(sends, 1) |> elem(1) |> Map.fetch!("prompt")
+      assert recovered_prompt == "RECOVERY SUMMARY\n" <> original_prompt
+      refute recovered_prompt == original_prompt
+
+      assert {"coding_workspace_recovery_summary", summary_args} =
+               Enum.find(calls, fn {name, _args} ->
+                 name == "coding_workspace_recovery_summary"
+               end)
+
+      assert summary_args["workspace_id"] == "ws_fixture_1"
+      assert summary_args["task"] == "fixture task for recovery_fresh_success"
+      assert summary_args["pending_prompt"] == original_prompt
+      assert_closed_and_released(calls)
+    end
+
+    test "successful status with an empty session id preserves the captured provider id" do
+      assert {{:ok, result}, calls} = run_fixture(:recovery_status_empty_preserves_id)
+      assert result.context["status"] == "change_committed"
+
+      assert {"acp_start_session", replacement_args} =
+               calls
+               |> Enum.filter(fn {name, _args} -> name == "acp_start_session" end)
+               |> List.last()
+
+      assert replacement_args["session_id"] == "sess_1"
+      refute called?(calls, "coding_workspace_recovery_summary")
+      assert_closed_and_released(calls)
+    end
+
+    for scenario <- [:recovery_status_failure_with_id, :recovery_status_empty_no_id] do
+      test "#{scenario} applies the provider-id gate before reopening" do
+        assert {{:ok, result}, calls} = run_fixture(unquote(scenario))
+
+        assert result.context["status"] == "change_committed" or
+                 result.context["status"] == "pipeline_error"
+
+        starts = Enum.filter(calls, fn {name, _args} -> name == "acp_start_session" end)
+
+        if unquote(scenario) == :recovery_status_failure_with_id do
+          assert length(starts) == 2
+          assert Enum.at(starts, 1) |> elem(1) |> Map.fetch!("session_id") == "sess_1"
+        else
+          assert length(starts) == 1
+          assert result.context["error"] == "worker_provider_session_id_missing"
+        end
+
+        assert_closed_and_released(calls)
+      end
+    end
+
+    test "status failure without a captured provider id fails terminally" do
+      assert {{:ok, result}, calls} = run_fixture(:recovery_status_failed_without_id)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_provider_session_id_missing"
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_start_session" end)) == 1
+      assert_closed_and_released(calls)
+    end
+
+    test "stale close failure is terminal and still closes/releases the worker" do
+      assert {{:ok, result}, calls} = run_fixture(:recovery_close_failed)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_stale_close_failed"
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_start_session" end)) == 1
+      assert_closed_and_released(calls)
+    end
+
+    test "replacement open failure is terminal without a duplicate live worker" do
+      assert {{:ok, result}, calls} = run_fixture(:recovery_reopen_failed)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_recovery_reopen_failed"
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_start_session" end)) == 2
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_send_message" end)) == 1
+      assert_closed_and_released(calls)
+    end
+
+    test "recovered send failure does not trigger a second recovery attempt" do
+      assert {{:ok, result}, calls} = run_fixture(:recovery_second_send_failed)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_recovery_send_failed"
+      assert result.context["worker_send_recovery_count"] == 1
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_send_message" end)) == 2
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_session_status" end)) == 1
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_start_session" end)) == 2
+      assert_closed_and_released(calls)
+    end
+
+    for scenario <- [:recovery_continuity_new, :recovery_continuity_unknown] do
+      test "#{scenario} fails closed without retrying the prompt" do
+        assert {{:ok, result}, calls} = run_fixture(unquote(scenario))
+        assert result.context["status"] == "pipeline_error"
+        assert result.context["error"] == "worker_recovery_continuity_invalid"
+        assert length(Enum.filter(calls, fn {name, _} -> name == "acp_send_message" end)) == 1
+        assert length(Enum.filter(calls, fn {name, _} -> name == "acp_start_session" end)) == 2
+        assert_closed_and_released(calls)
+      end
+    end
   end
 
   describe "hard-failure routing and cleanup" do
@@ -1300,14 +1553,26 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_json_clean_context(result.context)
     end
 
-    test "protocol steering transport failure is terminal and still cleans up" do
+    test "protocol steering transport failure uses the same one-shot recovery" do
       assert {{:ok, result}, calls} = run_fixture(:protocol_repair_transport_failed)
-      assert result.context["status"] == "pipeline_error"
-      assert result.context["error"] == "worker_protocol_repair_failed"
+      assert result.context["status"] == "change_committed"
+      assert result.context["worker_send_recovery_count"] == 1
       assert result.context["protocol_retry_count"] == 1
-      assert_single_worker_session(calls, 2)
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_send_message" end)) == 3
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
+    end
+
+    test "protocol repair failure recovery retries the unchanged repair prompt" do
+      assert {{:ok, result}, calls} = run_fixture(:protocol_repair_failure_recovery)
+      assert result.context["status"] == "change_committed"
+      assert result.context["worker_send_recovery_count"] == 1
+
+      prompts = action_prompts(calls)
+      assert length(prompts) == 3
+      assert Enum.at(prompts, 1) =~ "ONLY one JSON object"
+      assert Enum.at(prompts, 2) == Enum.at(prompts, 1)
+      assert_closed_and_released(calls)
     end
 
     test "workspace inspect hard failure sets pipeline_error and cleans up" do

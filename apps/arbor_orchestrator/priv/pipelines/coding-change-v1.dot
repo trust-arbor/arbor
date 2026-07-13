@@ -105,6 +105,13 @@ digraph CodingChangeV1 {
     output_key="protocol_retry_count"
   ]
 
+  init_worker_send_recovery_count [
+    type="transform",
+    transform="constant",
+    expression="0",
+    output_key="worker_send_recovery_count"
+  ]
+
   reset_worker_turn_protocol_retry_count [
     type="transform",
     transform="constant",
@@ -218,7 +225,7 @@ digraph CodingChangeV1 {
     action="acp_send_message",
     context_keys="worker_session_id,prompt",
     output_prefix="worker_msg",
-    max_retries="2"
+    max_retries="0"
   ]
 
   extract_worker_status [
@@ -270,6 +277,131 @@ digraph CodingChangeV1 {
     target="action",
     action="acp_send_message",
     context_keys="worker_session_id,prompt",
+    output_prefix="worker_msg",
+    max_retries="0"
+  ]
+
+  // One-shot send recovery. The current prompt remains in `prompt` until a
+  // fresh-conversation summary deliberately replaces it.
+
+  check_worker_send_recovery_budget [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  inc_worker_send_recovery_count [
+    type="transform",
+    transform="increment",
+    source_key="worker_send_recovery_count",
+    output_key="worker_send_recovery_count"
+  ]
+
+  acp_session_status [
+    type="exec",
+    target="action",
+    action="acp_session_status",
+    context_keys="worker_session_id",
+    output_prefix="worker_status",
+    max_retries="0"
+  ]
+
+  hoist_worker_provider_session_id_from_status [
+    type="transform",
+    transform="identity",
+    source_key="worker_status.session_id",
+    output_key="worker_provider_session_id"
+  ]
+
+  check_worker_status_session_id [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  check_recovery_provider_id [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  copy_worker_provider_session_id_to_session_id [
+    type="transform",
+    transform="identity",
+    source_key="worker_provider_session_id",
+    output_key="session_id"
+  ]
+
+  close_stale_worker [
+    type="exec",
+    target="action",
+    action="acp_close_session",
+    context_keys="worker_session_id",
+    param.return_to_pool=false,
+    output_prefix="stale_close",
+    max_retries="0"
+  ]
+
+  open_recovery_worker [
+    type="exec",
+    target="action",
+    action="acp_start_session",
+    context_keys="provider,cwd,session_id",
+    param.permission_mode="default",
+    param.use_pool="true",
+    param.fallback_to_fresh_on_resume_unavailable=true,
+    output_prefix="worker",
+    max_retries="0"
+  ]
+
+  hoist_recovery_worker_session_id [
+    type="transform",
+    transform="identity",
+    source_key="worker.worker_session_id",
+    output_key="worker_session_id"
+  ]
+
+  hoist_recovery_worker_provider_session_id [
+    type="transform",
+    transform="identity",
+    source_key="worker.session_id",
+    output_key="worker_provider_session_id"
+  ]
+
+  route_recovery_continuity [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  copy_recovery_pending_prompt [
+    type="transform",
+    transform="identity",
+    source_key="prompt",
+    output_key="pending_prompt"
+  ]
+
+  coding_workspace_recovery_summary [
+    type="exec",
+    target="action",
+    action="coding_workspace_recovery_summary",
+    context_keys="workspace_id,task,pending_prompt",
+    output_prefix="recovery",
+    max_retries="0"
+  ]
+
+  hoist_recovery_prompt [
+    type="transform",
+    transform="identity",
+    source_key="recovery.recovery_prompt",
+    output_key="prompt"
+  ]
+
+  retry_recovered_send [
+    type="exec",
+    target="action",
+    action="acp_send_message",
+    context_keys="worker_session_id,prompt,timeout,inactivity_timeout_ms",
     output_prefix="worker_msg",
     max_retries="0"
   ]
@@ -928,10 +1060,52 @@ digraph CodingChangeV1 {
     output_key="error"
   ]
 
-  error_worker_protocol_repair [
+  error_worker_send_recovery_exhausted [
     type="transform",
     transform="constant",
-    expression="worker_protocol_repair_failed",
+    expression="worker_send_recovery_exhausted",
+    output_key="error"
+  ]
+
+  error_worker_provider_session_missing [
+    type="transform",
+    transform="constant",
+    expression="worker_provider_session_id_missing",
+    output_key="error"
+  ]
+
+  error_worker_stale_close_failed [
+    type="transform",
+    transform="constant",
+    expression="worker_stale_close_failed",
+    output_key="error"
+  ]
+
+  error_worker_recovery_reopen_failed [
+    type="transform",
+    transform="constant",
+    expression="worker_recovery_reopen_failed",
+    output_key="error"
+  ]
+
+  error_worker_recovery_continuity_invalid [
+    type="transform",
+    transform="constant",
+    expression="worker_recovery_continuity_invalid",
+    output_key="error"
+  ]
+
+  error_worker_recovery_summary_failed [
+    type="transform",
+    transform="constant",
+    expression="worker_recovery_summary_failed",
+    output_key="error"
+  ]
+
+  error_worker_recovery_send_failed [
+    type="transform",
+    transform="constant",
+    expression="worker_recovery_send_failed",
     output_key="error"
   ]
 
@@ -985,7 +1159,8 @@ digraph CodingChangeV1 {
   start -> init_validation_rework_count -> init_review_rework_count
   init_review_rework_count -> init_operator_rework_count
   init_operator_rework_count -> init_total_rework_count -> init_protocol_retry_count
-  init_protocol_retry_count -> classify_profile -> acquire_workspace
+  init_protocol_retry_count -> init_worker_send_recovery_count
+  init_worker_send_recovery_count -> classify_profile -> acquire_workspace
 
   // Acquire failure: no lease held
   acquire_workspace -> status_pipeline_error [condition="outcome=fail"]
@@ -1004,8 +1179,44 @@ digraph CodingChangeV1 {
   hoist_worker_provider_session_id -> build_implement_prompt -> reset_worker_turn_protocol_retry_count
   reset_worker_turn_protocol_retry_count -> implement
 
-  // Implement hard failure -> status then cleanup
-  implement -> status_pipeline_error_then_close [condition="outcome=fail"]
+  // Both send sites use one engine-attempt and converge on one recovery gate.
+  implement -> check_worker_send_recovery_budget [condition="outcome=fail"]
+  repair_worker_protocol -> check_worker_send_recovery_budget [condition="outcome=fail"]
+  check_worker_send_recovery_budget -> error_worker_send_recovery_exhausted [condition="context.worker_send_recovery_count>=1"]
+  check_worker_send_recovery_budget -> inc_worker_send_recovery_count [condition="context.worker_send_recovery_count<1"]
+  inc_worker_send_recovery_count -> acp_session_status
+  acp_session_status -> check_worker_status_session_id [condition="outcome=success"]
+  acp_session_status -> check_recovery_provider_id [condition="outcome=fail"]
+  check_worker_status_session_id -> hoist_worker_provider_session_id_from_status [condition="context.worker_status.session_id!=\"\""]
+  check_worker_status_session_id -> check_recovery_provider_id
+  hoist_worker_provider_session_id_from_status -> check_recovery_provider_id
+  check_recovery_provider_id -> copy_worker_provider_session_id_to_session_id [condition="context.worker_provider_session_id!=\"\""]
+  check_recovery_provider_id -> error_worker_provider_session_missing
+  copy_worker_provider_session_id_to_session_id -> close_stale_worker
+  close_stale_worker -> open_recovery_worker [condition="outcome=success"]
+  close_stale_worker -> error_worker_stale_close_failed [condition="outcome=fail"]
+  open_recovery_worker -> hoist_recovery_worker_session_id [condition="outcome=success"]
+  open_recovery_worker -> error_worker_recovery_reopen_failed [condition="outcome=fail"]
+  hoist_recovery_worker_session_id -> hoist_recovery_worker_provider_session_id
+  hoist_recovery_worker_provider_session_id -> route_recovery_continuity
+  route_recovery_continuity -> retry_recovered_send [condition="context.worker.continuity=resumed"]
+  route_recovery_continuity -> copy_recovery_pending_prompt [condition="context.worker.continuity=fresh_recovery"]
+  route_recovery_continuity -> error_worker_recovery_continuity_invalid
+  copy_recovery_pending_prompt -> coding_workspace_recovery_summary
+  coding_workspace_recovery_summary -> error_worker_recovery_summary_failed [condition="outcome=fail"]
+  coding_workspace_recovery_summary -> hoist_recovery_prompt [condition="outcome=success"]
+  hoist_recovery_prompt -> retry_recovered_send
+  retry_recovered_send -> error_worker_recovery_send_failed [condition="outcome=fail"]
+  retry_recovered_send -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
+
+  // Every recovery terminal uses the existing close/release tail.
+  error_worker_send_recovery_exhausted -> status_pipeline_error_then_close
+  error_worker_provider_session_missing -> status_pipeline_error_then_close
+  error_worker_stale_close_failed -> status_pipeline_error_then_close
+  error_worker_recovery_reopen_failed -> status_pipeline_error_then_close
+  error_worker_recovery_continuity_invalid -> status_pipeline_error_then_close
+  error_worker_recovery_summary_failed -> status_pipeline_error_then_close
+  error_worker_recovery_send_failed -> status_pipeline_error_then_close
   status_pipeline_error_then_close -> close_worker
 
   implement -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
@@ -1016,8 +1227,6 @@ digraph CodingChangeV1 {
   inc_worker_turn_protocol_retry_count -> check_protocol_retry_budget
   check_protocol_retry_budget -> build_protocol_repair_prompt [condition="context.worker_turn_protocol_retry_count<2"]
   build_protocol_repair_prompt -> repair_worker_protocol
-  repair_worker_protocol -> error_worker_protocol_repair [condition="outcome=fail"]
-  error_worker_protocol_repair -> status_pipeline_error_then_close
   repair_worker_protocol -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
   check_protocol_retry_budget -> error_worker_protocol_invalid [condition="context.worker_turn_protocol_retry_count>=2"]
   error_worker_protocol_invalid -> status_pipeline_error_then_close

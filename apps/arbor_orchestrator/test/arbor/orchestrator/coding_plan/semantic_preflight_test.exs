@@ -11,11 +11,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
   @action_modules [
     Arbor.Actions.Acp.StartSession,
     Arbor.Actions.Acp.SendMessage,
+    Arbor.Actions.Acp.SessionStatus,
     Arbor.Actions.Acp.CloseSession,
     Arbor.Actions.Coding.Workspace.Acquire,
     Arbor.Actions.Coding.Workspace.Inspect,
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
+    Arbor.Actions.Coding.Workspace.RecoverySummary,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Mix.Compile,
     Arbor.Actions.Mix.Test,
@@ -1168,7 +1170,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     with_extra_cycle =
       compilation.dot_source
       |> parse!()
-      |> add_edge("implement", "implement", "context.noop=true")
+      |> add_edge("classify_profile", "classify_profile", "context.noop=true")
 
     {:ok, cycled} = IRCompiler.compile(with_extra_cycle)
 
@@ -1176,6 +1178,57 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              SemanticPreflight.validate(cycled, profile["semantic_policy"],
                review_profile: "binding"
              )
+  end
+
+  test "recovery graph pins status refresh, dynamic session binding, hard close, and continuity edges",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      update_in(
+        graph.nodes["open_worker"].attrs,
+        &Map.put(&1, "param.fallback_to_fresh_on_resume_unavailable", true)
+      ),
+      update_in(
+        graph.nodes["open_recovery_worker"].attrs,
+        &Map.put(&1, "param.session_id", "forged-session")
+      ),
+      update_in(
+        graph.nodes["close_stale_worker"].attrs,
+        &Map.put(&1, "param.return_to_pool", true)
+      ),
+      %{
+        graph
+        | edges:
+            Enum.map(graph.edges, fn edge ->
+              if edge.from == "acp_session_status" and edge.to == "check_worker_status_session_id" do
+                %{edge | to: "check_recovery_provider_id"}
+              else
+                edge
+              end
+            end)
+      }
+    ]
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               SemanticPreflight.validate(mutated, profile["semantic_policy"],
+                 review_profile: "binding",
+                 worker_use_pool: true,
+                 worker_resume_session_id: nil
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] in [
+                 "worker_recovery_start_binding_mismatch",
+                 "worker_recovery_dynamic_session_id_violation",
+                 "worker_recovery_node_mismatch",
+                 "worker_recovery_topology_mismatch"
+               ]
+             end)
+    end
   end
 
   defp compile(plan, ctx, template_source \\ nil) do

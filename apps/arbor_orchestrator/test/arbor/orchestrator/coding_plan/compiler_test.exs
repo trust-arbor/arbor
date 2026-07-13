@@ -15,11 +15,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   @action_modules [
     Arbor.Actions.Acp.StartSession,
     Arbor.Actions.Acp.SendMessage,
+    Arbor.Actions.Acp.SessionStatus,
     Arbor.Actions.Acp.CloseSession,
     Arbor.Actions.Coding.Workspace.Acquire,
     Arbor.Actions.Coding.Workspace.Inspect,
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
+    Arbor.Actions.Coding.Workspace.RecoverySummary,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.CrossApp.Validate,
     Arbor.Actions.Coding.ReviewTree.Read,
@@ -145,8 +147,25 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "classify_profile")["expression"] == "default"
     assert node_attrs(graph, "open_worker")["param.permission_mode"] == "deny"
     assert node_attrs(graph, "open_worker")["param.use_pool"] == "true"
+
+    refute Map.has_key?(
+             node_attrs(graph, "open_worker"),
+             "param.fallback_to_fresh_on_resume_unavailable"
+           )
+
     refute Map.has_key?(node_attrs(graph, "open_worker"), "param.session_id")
     assert node_attrs(graph, "open_worker")["context_keys"] == "provider,cwd,model"
+    assert node_attrs(graph, "open_recovery_worker")["param.permission_mode"] == "deny"
+    assert node_attrs(graph, "open_recovery_worker")["param.use_pool"] == "true"
+
+    assert node_attrs(graph, "open_recovery_worker")[
+             "param.fallback_to_fresh_on_resume_unavailable"
+           ] == true
+
+    assert node_attrs(graph, "open_recovery_worker")["context_keys"] ==
+             "provider,cwd,session_id,model"
+
+    refute Map.has_key?(node_attrs(graph, "open_recovery_worker"), "param.session_id")
     assert node_attrs(graph, "close_worker")["param.return_to_pool"] == true
 
     for node_id <- ~w[implement repair_worker_protocol] do
@@ -220,6 +239,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert open_worker["param.use_pool"] == "false"
     assert open_worker["param.session_id"] == resume_id
     assert open_worker["context_keys"] == "provider,cwd,model"
+    recovery_open = node_attrs(graph, "open_recovery_worker")
+    assert recovery_open["param.use_pool"] == "false"
+    assert recovery_open["param.fallback_to_fresh_on_resume_unavailable"] == true
+    assert recovery_open["context_keys"] == "provider,cwd,session_id,model"
+    refute Map.has_key?(recovery_open, "param.session_id")
     assert node_attrs(graph, "close_worker")["param.return_to_pool"] == false
 
     assert node_attrs(graph, "hoist_worker_provider_session_id") == %{
@@ -678,7 +702,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       )
 
     assert {:error,
-            {:invalid_static_action_parameter, "open_worker", "acp_start_session",
+            {:invalid_static_action_parameter, "open_recovery_worker", "acp_start_session",
              "permission_mode", "string", "default"}} =
              compile_with_catalog(plan!(), ctx, ctx.template_source, enum_catalog)
 
@@ -716,7 +740,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       )
 
     assert {:error,
-            {:invalid_action_schema, "open_worker", "acp_start_session",
+            {:invalid_action_schema, "open_recovery_worker", "acp_start_session",
              {:invalid_parameter_schema, "permission_mode", {:unsupported_types, ["unsupported"]}}}} =
              compile_with_catalog(plan!(), ctx, ctx.template_source, unsupported_catalog)
   end
@@ -731,7 +755,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       )
 
     assert {:error,
-            {:invalid_action_schema, "open_worker", "acp_start_session",
+            {:invalid_action_schema, "open_recovery_worker", "acp_start_session",
              {:invalid_parameter_schema, "permission_mode", {:invalid_constraint, "minLength"}}}} =
              compile_with_catalog(plan!(), ctx, ctx.template_source, malformed_catalog)
   end

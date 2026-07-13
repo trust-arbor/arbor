@@ -21,20 +21,44 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     check_validation_passed
                     check_validation_total_budget
                     close_worker
+                    close_stale_worker
                     commit_change
+                    check_recovery_provider_id
+                    check_worker_send_recovery_budget
+                    check_worker_status_session_id
+                    coding_workspace_recovery_summary
                     done
+                    error_worker_provider_session_missing
+                    error_worker_recovery_continuity_invalid
+                    error_worker_recovery_reopen_failed
+                    error_worker_recovery_send_failed
+                    error_worker_recovery_summary_failed
+                    error_worker_send_recovery_exhausted
+                    error_worker_stale_close_failed
+                    hoist_recovery_prompt
+                    hoist_recovery_worker_provider_session_id
+                    hoist_recovery_worker_session_id
                     hoist_worker_provider_session_id
                     hoist_worker_provider_session_id_from_message
+                    hoist_worker_provider_session_id_from_status
                     implement
                     inspect_workspace
                     load_committed_change
                     open_worker
+                    open_recovery_worker
                     release_workspace
+                    retry_recovered_send
                     review_change
                     route_after_commit
                     route_commit_interaction
+                    route_recovery_continuity
                     route_review
                     status_approval_denied
+                    acp_session_status
+                    copy_recovery_pending_prompt
+                    copy_worker_provider_session_id_to_session_id
+                    inc_worker_send_recovery_count
+                    init_worker_send_recovery_count
                     validate
                   ])
 
@@ -60,8 +84,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @common_required_actions Enum.sort(~w[
                              acp_close_session
+                             acp_session_status
                              acp_send_message
                              acp_start_session
+                             coding_workspace_recovery_summary
                              coding_reviewed_commit
                              coding_workspace_acquire
                              coding_workspace_committed_change
@@ -112,96 +138,430 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   # Publication for git_pr is a cut-set (route_publish OR route_human_review)
   # so human_required graphs without route_publish still fail closed on early
   # PR edges. Review dominance applies only under binding/human review_profile.
-  @common_action_placements [
-    %{
-      "node_id" => "acquire_workspace",
-      "action" => "coding_workspace_acquire",
-      "required_dominators" => [],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    },
-    %{
-      "node_id" => "close_worker",
-      "action" => "acp_close_session",
-      "required_dominators" => ["open_worker"],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    },
-    %{
-      "node_id" => "commit_change",
-      "action" => "coding_reviewed_commit",
-      "required_dominators" => [
-        "check_validation_passed",
-        "inspect_workspace",
-        "validate"
+  @common_action_placements Enum.sort_by(
+                              [
+                                %{
+                                  "node_id" => "acquire_workspace",
+                                  "action" => "coding_workspace_acquire",
+                                  "required_dominators" => [],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "close_worker",
+                                  "action" => "acp_close_session",
+                                  "required_dominators" => ["open_worker"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "acp_session_status",
+                                  "action" => "acp_session_status",
+                                  "required_dominators" => [
+                                    "inc_worker_send_recovery_count",
+                                    "open_worker"
+                                  ],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "close_stale_worker",
+                                  "action" => "acp_close_session",
+                                  "required_dominators" => [
+                                    "check_recovery_provider_id",
+                                    "open_worker"
+                                  ],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "commit_change",
+                                  "action" => "coding_reviewed_commit",
+                                  "required_dominators" => [
+                                    "check_validation_passed",
+                                    "inspect_workspace",
+                                    "validate"
+                                  ],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "implement",
+                                  "action" => "acp_send_message",
+                                  "required_dominators" => ["open_worker"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "coding_workspace_recovery_summary",
+                                  "action" => "coding_workspace_recovery_summary",
+                                  "required_dominators" => [
+                                    "acquire_workspace",
+                                    "route_recovery_continuity"
+                                  ],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "inspect_workspace",
+                                  "action" => "coding_workspace_inspect",
+                                  "required_dominators" => ["acquire_workspace"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "load_committed_change",
+                                  "action" => "coding_workspace_committed_change",
+                                  "required_dominators" => ["acquire_workspace", "commit_change"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "open_draft_pr",
+                                  "action" => "git_pr",
+                                  "required_dominators" => ["route_after_commit"],
+                                  "review_required_dominators" => ["route_review"],
+                                  "required_dominator_sets" => [
+                                    ["route_human_review", "route_publish"]
+                                  ]
+                                },
+                                %{
+                                  "node_id" => "open_worker",
+                                  "action" => "acp_start_session",
+                                  "required_dominators" => ["acquire_workspace"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "open_recovery_worker",
+                                  "action" => "acp_start_session",
+                                  "required_dominators" => ["close_stale_worker", "open_worker"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "release_workspace",
+                                  "action" => "coding_workspace_release",
+                                  "required_dominators" => ["acquire_workspace"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "release_workspace_only",
+                                  "action" => "coding_workspace_release",
+                                  "required_dominators" => ["acquire_workspace"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "repair_worker_protocol",
+                                  "action" => "acp_send_message",
+                                  "required_dominators" => ["open_worker"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "retry_recovered_send",
+                                  "action" => "acp_send_message",
+                                  "required_dominators" => [
+                                    "open_recovery_worker",
+                                    "route_recovery_continuity"
+                                  ],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "review_change",
+                                  "action" => "council_review_change",
+                                  "required_dominators" => ["load_committed_change"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                }
+                              ],
+                              & &1["node_id"]
+                            )
+
+  @worker_recovery_policy %{
+    "node_attrs" => [
+      %{
+        "node_id" => "acp_session_status",
+        "attrs" => %{
+          "type" => "exec",
+          "target" => "action",
+          "action" => "acp_session_status",
+          "context_keys" => "worker_session_id",
+          "output_prefix" => "worker_status",
+          "max_retries" => "0"
+        }
+      },
+      %{
+        "node_id" => "check_recovery_provider_id",
+        "attrs" => %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}
+      },
+      %{
+        "node_id" => "check_worker_send_recovery_budget",
+        "attrs" => %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}
+      },
+      %{
+        "node_id" => "check_worker_status_session_id",
+        "attrs" => %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}
+      },
+      %{
+        "node_id" => "close_stale_worker",
+        "attrs" => %{
+          "type" => "exec",
+          "target" => "action",
+          "action" => "acp_close_session",
+          "context_keys" => "worker_session_id",
+          "param.return_to_pool" => false,
+          "output_prefix" => "stale_close",
+          "max_retries" => "0"
+        }
+      },
+      %{
+        "node_id" => "coding_workspace_recovery_summary",
+        "attrs" => %{
+          "type" => "exec",
+          "target" => "action",
+          "action" => "coding_workspace_recovery_summary",
+          "context_keys" => "workspace_id,task,pending_prompt",
+          "output_prefix" => "recovery",
+          "max_retries" => "0"
+        }
+      },
+      %{
+        "node_id" => "copy_recovery_pending_prompt",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "identity",
+          "source_key" => "prompt",
+          "output_key" => "pending_prompt"
+        }
+      },
+      %{
+        "node_id" => "copy_worker_provider_session_id_to_session_id",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "identity",
+          "source_key" => "worker_provider_session_id",
+          "output_key" => "session_id"
+        }
+      },
+      %{
+        "node_id" => "error_worker_provider_session_missing",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "constant",
+          "expression" => "worker_provider_session_id_missing",
+          "output_key" => "error"
+        }
+      },
+      %{
+        "node_id" => "error_worker_recovery_continuity_invalid",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "constant",
+          "expression" => "worker_recovery_continuity_invalid",
+          "output_key" => "error"
+        }
+      },
+      %{
+        "node_id" => "error_worker_recovery_reopen_failed",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "constant",
+          "expression" => "worker_recovery_reopen_failed",
+          "output_key" => "error"
+        }
+      },
+      %{
+        "node_id" => "error_worker_recovery_send_failed",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "constant",
+          "expression" => "worker_recovery_send_failed",
+          "output_key" => "error"
+        }
+      },
+      %{
+        "node_id" => "error_worker_recovery_summary_failed",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "constant",
+          "expression" => "worker_recovery_summary_failed",
+          "output_key" => "error"
+        }
+      },
+      %{
+        "node_id" => "error_worker_send_recovery_exhausted",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "constant",
+          "expression" => "worker_send_recovery_exhausted",
+          "output_key" => "error"
+        }
+      },
+      %{
+        "node_id" => "error_worker_stale_close_failed",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "constant",
+          "expression" => "worker_stale_close_failed",
+          "output_key" => "error"
+        }
+      },
+      %{
+        "node_id" => "hoist_recovery_prompt",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "identity",
+          "source_key" => "recovery.recovery_prompt",
+          "output_key" => "prompt"
+        }
+      },
+      %{
+        "node_id" => "hoist_recovery_worker_provider_session_id",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "identity",
+          "source_key" => "worker.session_id",
+          "output_key" => "worker_provider_session_id"
+        }
+      },
+      %{
+        "node_id" => "hoist_recovery_worker_session_id",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "identity",
+          "source_key" => "worker.worker_session_id",
+          "output_key" => "worker_session_id"
+        }
+      },
+      %{
+        "node_id" => "hoist_worker_provider_session_id_from_status",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "identity",
+          "source_key" => "worker_status.session_id",
+          "output_key" => "worker_provider_session_id"
+        }
+      },
+      %{
+        "node_id" => "inc_worker_send_recovery_count",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "increment",
+          "source_key" => "worker_send_recovery_count",
+          "output_key" => "worker_send_recovery_count"
+        }
+      },
+      %{
+        "node_id" => "init_worker_send_recovery_count",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "constant",
+          "expression" => "0",
+          "output_key" => "worker_send_recovery_count"
+        }
+      },
+      %{
+        "node_id" => "retry_recovered_send",
+        "attrs" => %{
+          "type" => "exec",
+          "target" => "action",
+          "action" => "acp_send_message",
+          "context_keys" => "worker_session_id,prompt,timeout,inactivity_timeout_ms",
+          "output_prefix" => "worker_msg",
+          "max_retries" => "0"
+        }
+      },
+      %{
+        "node_id" => "route_recovery_continuity",
+        "attrs" => %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}
+      }
+    ],
+    "protected_writers" => %{
+      "session_id" => ["copy_worker_provider_session_id_to_session_id"],
+      "worker_provider_session_id" => [
+        "hoist_recovery_worker_provider_session_id",
+        "hoist_worker_provider_session_id",
+        "hoist_worker_provider_session_id_from_message",
+        "hoist_worker_provider_session_id_from_status"
       ],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
+      "worker_session_id" => ["hoist_recovery_worker_session_id", "hoist_worker_session_id"]
     },
-    %{
-      "node_id" => "implement",
-      "action" => "acp_send_message",
-      "required_dominators" => ["open_worker"],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    },
-    %{
-      "node_id" => "inspect_workspace",
-      "action" => "coding_workspace_inspect",
-      "required_dominators" => ["acquire_workspace"],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    },
-    %{
-      "node_id" => "load_committed_change",
-      "action" => "coding_workspace_committed_change",
-      "required_dominators" => ["acquire_workspace", "commit_change"],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    },
-    %{
-      "node_id" => "open_draft_pr",
-      "action" => "git_pr",
-      "required_dominators" => ["route_after_commit"],
-      "review_required_dominators" => ["route_review"],
-      "required_dominator_sets" => [["route_human_review", "route_publish"]]
-    },
-    %{
-      "node_id" => "open_worker",
-      "action" => "acp_start_session",
-      "required_dominators" => ["acquire_workspace"],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    },
-    %{
-      "node_id" => "release_workspace",
-      "action" => "coding_workspace_release",
-      "required_dominators" => ["acquire_workspace"],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    },
-    %{
-      "node_id" => "release_workspace_only",
-      "action" => "coding_workspace_release",
-      "required_dominators" => ["acquire_workspace"],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    },
-    %{
-      "node_id" => "repair_worker_protocol",
-      "action" => "acp_send_message",
-      "required_dominators" => ["open_worker"],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    },
-    %{
-      "node_id" => "review_change",
-      "action" => "council_review_change",
-      "required_dominators" => ["load_committed_change"],
-      "review_required_dominators" => [],
-      "required_dominator_sets" => []
-    }
-  ]
+    "edges" => [
+      ["acp_session_status", "check_recovery_provider_id", "outcome=fail"],
+      ["acp_session_status", "check_worker_status_session_id", "outcome=success"],
+      ["build_protocol_repair_prompt", "repair_worker_protocol", nil],
+      [
+        "check_recovery_provider_id",
+        "copy_worker_provider_session_id_to_session_id",
+        "context.worker_provider_session_id!=\"\""
+      ],
+      ["check_recovery_provider_id", "error_worker_provider_session_missing", nil],
+      [
+        "check_worker_send_recovery_budget",
+        "error_worker_send_recovery_exhausted",
+        "context.worker_send_recovery_count>=1"
+      ],
+      [
+        "check_worker_send_recovery_budget",
+        "inc_worker_send_recovery_count",
+        "context.worker_send_recovery_count<1"
+      ],
+      ["check_worker_status_session_id", "check_recovery_provider_id", nil],
+      [
+        "check_worker_status_session_id",
+        "hoist_worker_provider_session_id_from_status",
+        "context.worker_status.session_id!=\"\""
+      ],
+      ["close_stale_worker", "error_worker_stale_close_failed", "outcome=fail"],
+      ["close_stale_worker", "open_recovery_worker", "outcome=success"],
+      [
+        "coding_workspace_recovery_summary",
+        "error_worker_recovery_summary_failed",
+        "outcome=fail"
+      ],
+      ["coding_workspace_recovery_summary", "hoist_recovery_prompt", "outcome=success"],
+      ["copy_recovery_pending_prompt", "coding_workspace_recovery_summary", nil],
+      ["copy_worker_provider_session_id_to_session_id", "close_stale_worker", nil],
+      ["error_worker_provider_session_missing", "status_pipeline_error_then_close", nil],
+      ["error_worker_recovery_continuity_invalid", "status_pipeline_error_then_close", nil],
+      ["error_worker_recovery_reopen_failed", "status_pipeline_error_then_close", nil],
+      ["error_worker_recovery_send_failed", "status_pipeline_error_then_close", nil],
+      ["error_worker_recovery_summary_failed", "status_pipeline_error_then_close", nil],
+      ["error_worker_send_recovery_exhausted", "status_pipeline_error_then_close", nil],
+      ["error_worker_stale_close_failed", "status_pipeline_error_then_close", nil],
+      ["hoist_recovery_prompt", "retry_recovered_send", nil],
+      ["hoist_recovery_worker_provider_session_id", "route_recovery_continuity", nil],
+      ["hoist_recovery_worker_session_id", "hoist_recovery_worker_provider_session_id", nil],
+      ["implement", "check_worker_send_recovery_budget", "outcome=fail"],
+      ["implement", "hoist_worker_provider_session_id_from_message", "outcome=success"],
+      ["inc_worker_send_recovery_count", "acp_session_status", nil],
+      ["open_recovery_worker", "error_worker_recovery_reopen_failed", "outcome=fail"],
+      ["open_recovery_worker", "hoist_recovery_worker_session_id", "outcome=success"],
+      ["repair_worker_protocol", "check_worker_send_recovery_budget", "outcome=fail"],
+      [
+        "repair_worker_protocol",
+        "hoist_worker_provider_session_id_from_message",
+        "outcome=success"
+      ],
+      ["retry_recovered_send", "error_worker_recovery_send_failed", "outcome=fail"],
+      [
+        "retry_recovered_send",
+        "hoist_worker_provider_session_id_from_message",
+        "outcome=success"
+      ],
+      [
+        "route_recovery_continuity",
+        "copy_recovery_pending_prompt",
+        "context.worker.continuity=fresh_recovery"
+      ],
+      ["route_recovery_continuity", "error_worker_recovery_continuity_invalid", nil],
+      ["route_recovery_continuity", "retry_recovered_send", "context.worker.continuity=resumed"]
+    ]
+  }
 
   @default_action_placements Enum.sort_by(
                                [
@@ -288,6 +648,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "committed_change_routing" => "route_after_commit",
     "review_gate" => "review_change",
     "review_routing_gate" => "route_review",
+    "worker_recovery" => @worker_recovery_policy,
     "action_placements" => []
   }
 
