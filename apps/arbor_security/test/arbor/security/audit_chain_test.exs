@@ -122,7 +122,9 @@ defmodule Arbor.Security.AuditChainTest do
 
       # Valid chain passes
       key_lookup_fn = fn id -> Arbor.Security.Identity.Registry.lookup(id) end
-      assert :ok = Arbor.Security.Capability.Signer.verify_delegation_chain(delegated, key_lookup_fn)
+
+      assert :ok =
+               Arbor.Security.Capability.Signer.verify_delegation_chain(delegated, key_lookup_fn)
 
       # Tampered chain fails
       [record] = delegated.delegation_chain
@@ -130,7 +132,10 @@ defmodule Arbor.Security.AuditChainTest do
       tampered_cap = %{delegated | delegation_chain: [tampered_record]}
 
       assert {:error, :broken_delegation_chain} =
-               Arbor.Security.Capability.Signer.verify_delegation_chain(tampered_cap, key_lookup_fn)
+               Arbor.Security.Capability.Signer.verify_delegation_chain(
+                 tampered_cap,
+                 key_lookup_fn
+               )
     end
 
     test "empty delegation chain passes verification", %{parent: parent} do
@@ -205,19 +210,17 @@ defmodule Arbor.Security.AuditChainTest do
       trace_id = Security.generate_trace_id()
 
       {:ok, :authorized} =
-        Security.authorize(parent.agent_id, "arbor://audit/trace/auth", nil,
-          trace_id: trace_id
-        )
+        Security.authorize(parent.agent_id, "arbor://audit/trace/auth", nil, trace_id: trace_id)
 
       {:ok, events} = Events.get_by_type(:authorization_granted)
 
       matching =
         Enum.find(events, fn e ->
-          e.data.trace_id == trace_id
+          e.data["trace_id"] == trace_id
         end)
 
       assert matching != nil
-      assert matching.data.principal_id == parent.agent_id
+      assert matching.data["principal_id"] == parent.agent_id
     end
   end
 
@@ -238,14 +241,14 @@ defmodule Arbor.Security.AuditChainTest do
 
       matching =
         Enum.find(events, fn e ->
-          e.data.agent_id == parent.agent_id and e.data.signature != nil
+          e.data["agent_id"] == parent.agent_id and e.data["signature"] != nil
         end)
 
       assert matching != nil
-      assert is_binary(matching.data.signature)
-      assert is_binary(matching.data.payload_hash)
-      assert is_binary(matching.data.nonce)
-      assert is_binary(matching.data.signed_at)
+      assert is_binary(matching.data["signature"])
+      assert is_binary(matching.data["payload_hash"])
+      assert is_binary(matching.data["nonce"])
+      assert is_binary(matching.data["signed_at"])
     end
 
     test "failed verification event includes nonce metadata", %{parent: parent} do
@@ -262,12 +265,12 @@ defmodule Arbor.Security.AuditChainTest do
 
       matching =
         Enum.find(events, fn e ->
-          e.data.agent_id == parent.agent_id and e.data.nonce != nil
+          e.data["agent_id"] == parent.agent_id and e.data["nonce"] != nil
         end)
 
       assert matching != nil
-      assert is_binary(matching.data.nonce)
-      assert is_binary(matching.data.signed_at)
+      assert is_binary(matching.data["nonce"])
+      assert is_binary(matching.data["signed_at"])
     end
   end
 end
