@@ -684,6 +684,7 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
       assert outcome.status == :success
       assert_receive {:executor_opts, executor_opts}, 1_000
       assert Keyword.fetch!(executor_opts, :signing_authority) == authority
+      refute Keyword.has_key?(executor_opts, :signer)
 
       # Real ActionsExecutor nested projection (production nested_engine_opts).
       :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])

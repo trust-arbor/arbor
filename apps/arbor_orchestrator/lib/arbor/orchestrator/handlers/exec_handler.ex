@@ -153,11 +153,11 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
           agent_id: agent_id,
           caller_id: caller_id,
           author_id: author_id,
-          signer: Keyword.get(opts, :signer),
           task_id: task_id,
           session_id: session_id,
           taint: input_taint
         ]
+        |> maybe_put_action_signer(opts)
         |> maybe_put_param_taint(context, context_keys)
         |> maybe_put_execution_binding(authority)
         |> maybe_put_nested_engine_controls(opts, authority)
@@ -333,6 +333,16 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   end
 
   defp maybe_put_execution_binding(opts, _authority), do: opts
+
+  # Signing credentials are mutually exclusive by key presence. Authority runs
+  # forward only :signing_authority below; inserting even `signer: nil` here
+  # makes ActionsExecutor correctly reject the invocation as mixed credentials.
+  defp maybe_put_action_signer(executor_opts, engine_opts) do
+    case Keyword.fetch(engine_opts, :signing_authority) do
+      {:ok, _authority} -> executor_opts
+      :error -> maybe_put_executor_opt(executor_opts, :signer, Keyword.get(engine_opts, :signer))
+    end
+  end
 
   # Council actions can launch a child Engine run. Forward only the live,
   # non-secret controls that bind that child to this authorized parent run.
