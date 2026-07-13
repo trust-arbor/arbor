@@ -11,14 +11,14 @@ defmodule Arbor.Orchestrator.HeartbeatRefresher do
   recovery, but the log noise drowns out real warnings.
 
   This module wraps a blocking call with a background ticker that
-  periodically calls `JobRegistry.touch_heartbeat/1` so the pipeline
+  periodically calls `PipelineStatus.touch_heartbeat/1` so the pipeline
   stays visibly alive. The ticker:
 
     - Runs in a separate, unlinked process so a failure in the
       blocking call can't take the ticker down (and vice versa)
     - Self-terminates when the caller's `after` clause kills it
     - Is a no-op when `run_id` is `nil` (out-of-engine call sites)
-    - Catches and swallows JobRegistry errors — refreshing is
+    - Catches and swallows journal errors — refreshing is
       best-effort, never the failure axis
 
   See
@@ -27,7 +27,7 @@ defmodule Arbor.Orchestrator.HeartbeatRefresher do
 
   require Logger
 
-  alias Arbor.Orchestrator.JobRegistry
+  alias Arbor.Orchestrator.PipelineStatus
 
   @default_interval_ms 30_000
 
@@ -88,7 +88,7 @@ defmodule Arbor.Orchestrator.HeartbeatRefresher do
     Process.sleep(interval_ms)
 
     try do
-      JobRegistry.touch_heartbeat(run_id)
+      PipelineStatus.touch_heartbeat(run_id)
     rescue
       _ -> :ok
     catch

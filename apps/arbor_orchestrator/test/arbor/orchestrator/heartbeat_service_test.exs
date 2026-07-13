@@ -15,26 +15,12 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Orchestrator.HeartbeatService
+  alias Arbor.Orchestrator.PipelineStatus
 
   @moduletag :fast
 
-  @ets_table :arbor_pipeline_runs
-
   setup do
-    # Ensure the shared application-owned ETS table exists. Never clear all
-    # objects — concurrent/isolated suites may hold live rows in this table.
-    try do
-      :ets.new(@ets_table, [
-        :set,
-        :public,
-        :named_table,
-        read_concurrency: true,
-        write_concurrency: true
-      ])
-    rescue
-      ArgumentError -> :ok
-    end
-
+    # Hot lifecycle table is owned by RunJournal — do not create or write ETS.
     run_prefix = "hb_#{System.unique_integer([:positive, :monotonic])}_"
 
     on_exit(fn ->
@@ -219,49 +205,49 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
   end
 
   describe "terminate cleanup" do
-    test "marks active ETS entries as abandoned on terminate", %{run_prefix: prefix} do
+    test "marks active pipeline entries as abandoned on terminate", %{run_prefix: prefix} do
       {:ok, pid} = start_test_service()
 
-      # Collision-resistant owned row — never assume exclusive table ownership.
+      # Collision-resistant owned row via public PipelineStatus — never touch
+      # the private RunJournal ETS table from tests.
       run_id = prefix <> "terminate_abandon"
 
-      :ets.insert(
-        @ets_table,
-        {run_id,
-         %{
-           run_id: run_id,
-           status: :running,
-           spawning_pid: pid,
-           current_node: "bg_checks",
-           started_at: DateTime.utc_now(),
-           last_ets_sync: DateTime.utc_now(),
-           completed_count: 0,
-           total_nodes: 19,
-           graph_id: "Heartbeat",
-           pipeline_id: run_id,
-           completed_nodes: [],
-           node_durations: %{},
-           finished_at: nil,
-           duration_ms: nil,
-           failure_reason: nil,
-           owner_node: node(),
-           source_node: node(),
-           last_heartbeat: DateTime.utc_now()
-         }}
-      )
+      assert :ok =
+               PipelineStatus.put(%{
+                 run_id: run_id,
+                 status: :running,
+                 spawning_pid: pid,
+                 current_node: "bg_checks",
+                 started_at: DateTime.utc_now(),
+                 last_ets_sync: DateTime.utc_now(),
+                 completed_count: 0,
+                 total_nodes: 19,
+                 graph_id: "Heartbeat",
+                 pipeline_id: run_id,
+                 completed_nodes: [],
+                 node_durations: %{},
+                 finished_at: nil,
+                 duration_ms: nil,
+                 failure_reason: nil,
+                 owner_node: node(),
+                 source_node: node(),
+                 last_heartbeat: DateTime.utc_now()
+               })
 
       # Stop the service (triggers terminate)
       GenServer.stop(pid, :normal)
       Process.sleep(100)
 
-      # The entry should now be abandoned
-      case :ets.lookup(@ets_table, run_id) do
-        [{^run_id, entry}] ->
-          assert entry.status == :abandoned
-
-        [] ->
-          # Entry may have been cleaned up entirely — also acceptable
+      # The entry should now be abandoned (or cleaned up)
+      case PipelineStatus.get(run_id) do
+        %{status: :abandoned} ->
           :ok
+
+        nil ->
+          :ok
+
+        other ->
+          flunk("expected abandoned or deleted, got: #{inspect(other)}")
       end
     end
   end
@@ -327,20 +313,18 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
 
   defp delete_owned_pipeline_runs(prefix) when is_binary(prefix) do
     try do
-      case :ets.info(@ets_table) do
-        :undefined ->
-          :ok
-
-        _ ->
-          for {key, _entry} <- :ets.tab2list(@ets_table),
-              is_binary(key) and String.starts_with?(key, prefix) do
-            :ets.delete(@ets_table, key)
-          end
-
-          :ok
+      for entry <-
+            PipelineStatus.list_active() ++
+              PipelineStatus.list_interrupted() ++ PipelineStatus.list_recent(limit: 200),
+          is_binary(entry.run_id) and String.starts_with?(entry.run_id, prefix) do
+        _ = PipelineStatus.delete(entry.run_id)
       end
+
+      :ok
     rescue
       _ -> :ok
+    catch
+      :exit, _ -> :ok
     end
   end
 

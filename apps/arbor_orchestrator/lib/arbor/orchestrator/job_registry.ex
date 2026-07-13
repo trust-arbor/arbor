@@ -1,11 +1,14 @@
 defmodule Arbor.Orchestrator.JobRegistry do
   @moduledoc """
-  Tracks running and recently completed pipeline executions.
+  Historical compatibility store for pipeline job records.
 
-  Subscribes to orchestrator EventEmitter events and maintains state in
-  BufferedStore (ETS reads + optional durable backend). All reads are direct
-  ETS lookups for performance. On restart, previously persisted entries are
-  reloaded from the backend, enabling crash recovery of interrupted pipelines.
+  **Current runs are owned by `PipelineStatus` / `RunJournal`.** This module
+  retains BufferedStore-backed historical entries and recovery discovery
+  helpers only. Engine does not dual-write here; RecoveryCoordinator may
+  merge bounded legacy `:interrupted` records into discovery but mutates
+  current records through the canonical boundary.
+
+  EventEmitter subscription was removed with the Engine lifecycle redesign.
   """
 
   use GenServer

@@ -60,7 +60,10 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.Engine.RunAuthorization
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.IR
-  alias Arbor.Orchestrator.JobRegistry
+  alias Arbor.Orchestrator.PipelineStatus
+  alias Arbor.Orchestrator.RunLifecycle.Adapter
+  alias Arbor.Orchestrator.RunLifecycle.LegacyJobAdapter
+  alias Arbor.Orchestrator.RunLifecycle.Record
   alias Arbor.Orchestrator.Transforms.ModelStylesheet
   alias Arbor.Orchestrator.Transforms.VariableExpansion
   alias Arbor.Orchestrator.Validation.Diagnostic
@@ -490,129 +493,407 @@ defmodule Arbor.Orchestrator do
   @doc """
   List pipelines that were interrupted by a crash and may be resumable.
 
-  Returns entries with `status: :interrupted` that have checkpoint files.
+  Returns `{:ok, public_maps}` for interrupted records with checkpoint files,
+  or `{:error, :journal_unavailable}` on journal outage (never confuses
+  outage with empty). Only **interrupted** records are resumable. Bounded
+  legacy jobs are merged only when the journal is available.
   """
-  @spec list_resumable() :: [JobRegistry.Entry.t()]
+  @spec list_resumable() :: {:ok, [map()]} | {:error, :journal_unavailable | term()}
   def list_resumable do
-    JobRegistry.list_interrupted()
-    |> Enum.filter(fn entry ->
-      entry.logs_root != nil and
-        File.exists?(Path.join(entry.logs_root, "checkpoint.json"))
-    end)
+    case PipelineStatus.list_interrupted_records() do
+      {:ok, records} ->
+        current =
+          records
+          |> Enum.filter(&resumable_checkpoint_record?/1)
+          |> Enum.map(&Adapter.to_public_map/1)
+
+        current_ids = MapSet.new(current, & &1.run_id)
+
+        legacy =
+          LegacyJobAdapter.list_interrupted()
+          |> Enum.reject(fn %Record{run_id: id} -> MapSet.member?(current_ids, id) end)
+          |> Enum.filter(&resumable_checkpoint_record?/1)
+          |> Enum.map(&Adapter.to_public_map/1)
+
+        {:ok, current ++ legacy}
+
+      {:error, :journal_unavailable} = err ->
+        err
+
+      {:error, _} = err ->
+        err
+    end
   end
 
   @doc """
   Resume an interrupted pipeline by run_id.
 
-  Validates that the checkpoint exists and the DOT source hasn't changed
-  since the original run. Returns `{:error, :graph_changed}` if the
-  pipeline definition was modified.
+  Preflights non-mutating checks (status, checkpoint, graph hash), then
+  **atomically claims** via PipelineStatus (current) or LegacyJobAdapter
+  (historical) before `Engine.run/2`. Only `:interrupted` records are
+  resumable — failed runs must be re-marked interrupted first.
   """
   @spec resume(String.t(), keyword()) :: run_result()
-  def resume(run_id, opts \\ []) do
-    case JobRegistry.get(run_id) do
+  def resume(run_id, opts \\ []) when is_binary(run_id) do
+    case lookup_lifecycle_candidate(run_id) do
       nil ->
         {:error, :not_found}
 
-      %{status: status} when status not in [:interrupted, :failed] ->
+      {:error, _} = err ->
+        err
+
+      %{record: %Record{status: status}} when status != :interrupted ->
         {:error, {:invalid_status, status}}
 
-      entry ->
-        do_resume_entry(entry, opts)
+      candidate ->
+        do_resume_candidate(candidate, opts)
     end
   end
 
   @doc """
   Mark an interrupted pipeline as abandoned (will not be recovered).
+
+  Current records mutate only through `PipelineStatus`. Historical-only
+  JobRegistry entries go through `LegacyJobAdapter` only when the journal
+  reports `:not_found` — never during `:journal_unavailable`.
   """
   @spec abandon(String.t()) :: :ok | {:error, term()}
   def abandon(run_id) do
-    case JobRegistry.get(run_id) do
-      nil -> {:error, :not_found}
-      _ -> JobRegistry.mark_abandoned(run_id)
+    case PipelineStatus.get_record(run_id) do
+      %Record{} ->
+        PipelineStatus.mark_abandoned(run_id)
+
+      {:error, :journal_unavailable} ->
+        {:error, :journal_unavailable}
+
+      nil ->
+        case LegacyJobAdapter.get(run_id) do
+          nil -> {:error, :not_found}
+          _ -> LegacyJobAdapter.mark_abandoned(run_id)
+        end
     end
   end
 
   @doc """
   List resumable pipelines across the cluster.
 
-  Queries both the local JobRegistry (which may have shared Postgres backend)
-  and optionally queries peer nodes via RPC for ETS-only deployments.
+  Queries the local canonical lifecycle store (and optional durable backend)
+  and peer nodes via RPC when needed. Local journal outage is surfaced as
+  `{:error, :journal_unavailable}` rather than empty success.
   """
-  @spec list_cluster_resumable() :: [JobRegistry.Entry.t()]
+  @spec list_cluster_resumable() :: {:ok, [map()]} | {:error, term()}
   def list_cluster_resumable do
-    local = list_resumable()
+    case list_resumable() do
+      {:error, _} = err ->
+        err
 
-    # In shared-Postgres mode, local query already covers all nodes.
-    # In ETS-only mode, query peer nodes.
-    remote =
-      Node.list()
-      |> Enum.flat_map(fn node ->
-        try do
-          :erpc.call(node, __MODULE__, :list_resumable, [], 5_000)
-        catch
-          _, _ -> []
-        end
-      end)
+      {:ok, local} ->
+        remote =
+          Node.list()
+          |> Enum.flat_map(fn node ->
+            try do
+              case :erpc.call(node, __MODULE__, :list_resumable, [], 5_000) do
+                {:ok, list} when is_list(list) -> list
+                list when is_list(list) -> list
+                _ -> []
+              end
+            catch
+              _, _ -> []
+            end
+          end)
 
-    # Deduplicate by run_id
-    (local ++ remote)
-    |> Enum.uniq_by(fn entry -> entry.run_id || entry.pipeline_id end)
+        {:ok,
+         (local ++ remote)
+         |> Enum.uniq_by(fn entry ->
+           entry.run_id || entry[:pipeline_id] || entry["pipeline_id"]
+         end)}
+    end
   end
 
-  defp do_resume_entry(entry, opts) do
-    checkpoint_path = Path.join(entry.logs_root, "checkpoint.json")
+  defp lookup_lifecycle_candidate(run_id) do
+    case PipelineStatus.get_record(run_id) do
+      %Record{} = record ->
+        %{record: record, source: :current}
 
-    unless File.exists?(checkpoint_path) do
+      {:error, :journal_unavailable} ->
+        # Mutating/recovery lookup: never fall through to legacy on outage.
+        {:error, :journal_unavailable}
+
+      nil ->
+        case LegacyJobAdapter.get(run_id) do
+          %Record{} = record -> %{record: record, source: :legacy}
+          nil -> nil
+        end
+    end
+  end
+
+  defp resumable_checkpoint_record?(%Record{logs_root: logs_root}) do
+    is_binary(logs_root) and File.exists?(Path.join(logs_root, "checkpoint.json"))
+  end
+
+  defp do_resume_candidate(%{record: %Record{} = entry, source: source}, opts) do
+    logs_root = entry.logs_root
+    run_id = entry.run_id
+
+    if not is_binary(logs_root) do
       {:error, :checkpoint_not_found}
     else
-      with :ok <- verify_graph_unchanged(entry) do
-        resume_opts =
-          [
-            resume_from: checkpoint_path,
-            run_id: entry.run_id,
-            logs_root: entry.logs_root,
-            graph_hash: entry.graph_hash,
-            dot_source_path: entry.dot_source_path
-          ] ++ opts
+      checkpoint_path = Path.join(logs_root, "checkpoint.json")
 
-        case load_graph_for_entry(entry) do
-          {:ok, graph} ->
-            Engine.run(graph, resume_opts)
+      cond do
+        not File.exists?(checkpoint_path) ->
+          {:error, :checkpoint_not_found}
 
-          {:error, reason} ->
-            {:error, {:cannot_load_graph, reason}}
-        end
+        true ->
+          # Non-mutating preflight first, then claim, then settle every post-claim exit.
+          with :ok <- verify_graph_unchanged_record(entry),
+               {:ok, _claimed} <- claim_for_resume(run_id, source) do
+            settle_after_claim(run_id, source, fn ->
+              with {:ok, graph} <- load_graph_for_record(entry) do
+                # Caller opts first; record identity/claim fields win.
+                resume_opts =
+                  Keyword.merge(opts,
+                    resume_from: checkpoint_path,
+                    run_id: run_id,
+                    logs_root: logs_root,
+                    graph_hash: entry.graph_hash,
+                    dot_source_path: entry.dot_source_path,
+                    execution_principal: entry.execution_principal,
+                    resume: true,
+                    recovery: true
+                  )
+
+                Engine.run(graph, resume_opts)
+              end
+            end)
+          end
       end
     end
   end
 
-  defp verify_graph_unchanged(%{graph_hash: nil}), do: :ok
-  defp verify_graph_unchanged(%{dot_source_path: nil}), do: :ok
+  # Claim settlement classifier:
+  # - non-retryable (graph identity / load / structural checkpoint corruption)
+  #   → :failed (or abandon legacy)
+  # - retryable credential/backend unavailability → :interrupted
+  # Exactly one settlement per claimed resume attempt.
+  # Settlement failure is first-class: never hide a stuck :recovering row.
+  defp settle_after_claim(run_id, source, fun) do
+    try do
+      case fun.() do
+        {:ok, _} = ok ->
+          ok
 
-  defp verify_graph_unchanged(%{graph_hash: hash, dot_source_path: path}) do
-    case File.read(path) do
-      {:ok, source} ->
-        current = :crypto.hash(:sha256, source) |> Base.encode16(case: :lower)
-        if current == hash, do: :ok, else: {:error, :graph_changed}
+        {:error, reason} = err ->
+          case release_resume_claim(run_id, source, reason) do
+            :ok ->
+              err
 
-      {:error, _} ->
-        # Can't read source file — allow resume from checkpoint
+            {:error, settle_reason} ->
+              {:error, {:resume_settlement_failed, settle_reason, reason}}
+          end
+      end
+    rescue
+      e ->
+        reason = {:resume_exception, Exception.message(e)}
+
+        case release_resume_claim(run_id, source, reason) do
+          :ok -> {:error, reason}
+          {:error, settle_reason} -> {:error, {:resume_settlement_failed, settle_reason, reason}}
+        end
+    catch
+      :throw, value ->
+        reason = {:resume_throw, inspect(value, limit: 20, printable_limit: 200)}
+
+        case release_resume_claim(run_id, source, reason) do
+          :ok -> {:error, reason}
+          {:error, settle_reason} -> {:error, {:resume_settlement_failed, settle_reason, reason}}
+        end
+
+      :exit, reason ->
+        settled = {:resume_exit, classify_resume_exit(reason)}
+
+        case release_resume_claim(run_id, source, settled) do
+          :ok -> {:error, settled}
+          {:error, settle_reason} -> {:error, {:resume_settlement_failed, settle_reason, settled}}
+        end
+    end
+  end
+
+  defp classify_resume_exit(:normal), do: "normal"
+  defp classify_resume_exit(:shutdown), do: "shutdown"
+  defp classify_resume_exit({:shutdown, reason}), do: {"shutdown", classify_resume_exit(reason)}
+  defp classify_resume_exit(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp classify_resume_exit(reason) when is_binary(reason), do: reason
+  defp classify_resume_exit(reason), do: inspect(reason, limit: 20, printable_limit: 200)
+
+  defp claim_for_resume(run_id, :current) do
+    PipelineStatus.claim_for_recovery_record(run_id)
+  end
+
+  defp claim_for_resume(run_id, :legacy) do
+    LegacyJobAdapter.claim_for_recovery(run_id)
+  end
+
+  defp release_resume_claim(run_id, :legacy, reason) do
+    case resume_record_status(run_id, :legacy) do
+      status when status in [:completed, :failed, :abandoned] ->
+        # Never reopen an already-terminal/failed record.
         :ok
+
+      nil ->
+        {:error, :not_found}
+
+      _ ->
+        result =
+          if non_retryable_resume_error?(reason) do
+            LegacyJobAdapter.mark_abandoned(run_id)
+          else
+            LegacyJobAdapter.mark_interrupted(run_id)
+          end
+
+        normalize_settlement_result(result)
     end
   end
 
-  defp load_graph_for_entry(%{dot_source_path: path}) when is_binary(path) do
-    case File.read(path) do
-      # Resume feeds this graph into Engine.run/2; authorized resume requires
-      # an IR-compiled graph (RunAuthorization + compiled_graph_hash/1).
-      # compile/1 goes through ensure_graph (DotCache by source hash).
-      {:ok, source} -> compile(source)
-      {:error, reason} -> {:error, {:dot_file_unavailable, reason}}
+  defp release_resume_claim(run_id, source, reason) do
+    case resume_record_status(run_id, source) do
+      status when status in [:completed, :failed, :abandoned] ->
+        :ok
+
+      nil ->
+        {:error, :not_found}
+
+      _ ->
+        result =
+          if non_retryable_resume_error?(reason) do
+            PipelineStatus.mark_failed(run_id, reason)
+          else
+            PipelineStatus.mark_interrupted(run_id)
+          end
+
+        normalize_settlement_result(result)
     end
   end
 
-  defp load_graph_for_entry(_), do: {:error, :no_dot_source_path}
+  defp normalize_settlement_result(:ok), do: :ok
+  defp normalize_settlement_result({:error, _} = err), do: err
+  defp normalize_settlement_result(other), do: {:error, {:unexpected_settlement_result, other}}
+
+  defp resume_record_status(run_id, :legacy) do
+    case LegacyJobAdapter.get(run_id) do
+      %Record{status: status} -> status
+      _ -> nil
+    end
+  end
+
+  defp resume_record_status(run_id, _) do
+    case PipelineStatus.get_record(run_id) do
+      %Record{status: status} -> status
+      _ -> nil
+    end
+  end
+
+  # Explicit typed classification — graph hash/parse/required-pointer corruption
+  # is non-retryable; typed filesystem/mount I/O unavailability is retryable.
+  # Nested `{:cannot_load_graph, cause}` inspects the nested cause.
+  defp non_retryable_resume_error?(:graph_changed), do: true
+  defp non_retryable_resume_error?(:graph_source_unavailable), do: true
+  defp non_retryable_resume_error?(:no_dot_source_path), do: true
+  defp non_retryable_resume_error?(:checkpoint_current_node_missing), do: true
+  defp non_retryable_resume_error?(:checkpoint_corrupt), do: true
+  defp non_retryable_resume_error?({:checkpoint_corrupt, _}), do: true
+  defp non_retryable_resume_error?({:checkpoint_invalid, _}), do: true
+  defp non_retryable_resume_error?({:unsafe_recovery_path, _}), do: true
+
+  defp non_retryable_resume_error?({:cannot_load_graph, cause}),
+    do: non_retryable_resume_error?(cause)
+
+  defp non_retryable_resume_error?({:graph_source_unavailable, reason}),
+    do: not filesystem_io_unavailable?(reason)
+
+  defp non_retryable_resume_error?({:dot_file_unavailable, reason}),
+    do: not filesystem_io_unavailable?(reason)
+
+  defp non_retryable_resume_error?({:parse_error, _}), do: true
+  defp non_retryable_resume_error?({:compile_error, _}), do: true
+  defp non_retryable_resume_error?({:invalid_graph, _}), do: true
+
+  # Retryable credential / backend unavailability
+  defp non_retryable_resume_error?(:identity_required_for_resume), do: false
+  defp non_retryable_resume_error?(:authentication_unavailable), do: false
+  defp non_retryable_resume_error?(:checkpoint_not_found), do: false
+  defp non_retryable_resume_error?(:checkpoint_hmac_invalid), do: false
+  defp non_retryable_resume_error?(:checkpoint_hmac_missing), do: false
+  defp non_retryable_resume_error?({:unauthorized_resume, _}), do: false
+  defp non_retryable_resume_error?({:checkpoint_load_failed, _}), do: false
+  defp non_retryable_resume_error?({:checkpoint_hmac_derivation_failed, _}), do: false
+  defp non_retryable_resume_error?(:invalid_signing_authority), do: false
+  defp non_retryable_resume_error?(:mixed_signing_credentials), do: false
+  defp non_retryable_resume_error?(_), do: false
+
+  defp filesystem_io_unavailable?(reason)
+       when reason in [
+              :eio,
+              :enxio,
+              :enodev,
+              :estale,
+              :ebusy,
+              :emfile,
+              :enfile,
+              :enomem,
+              :eagain,
+              :ehostdown,
+              :ehostunreach,
+              :enetdown,
+              :enetunreach,
+              :etimedout,
+              :econnrefused,
+              :econnreset,
+              :econnaborted,
+              :eunavailable,
+              :erofs
+            ],
+       do: true
+
+  defp filesystem_io_unavailable?(_), do: false
+
+  # Fail closed: when a graph hash says source identity matters, missing path
+  # or unreadable file is an explicit error — never allow silent resume.
+  defp verify_graph_unchanged_record(%Record{} = entry) do
+    hash = entry.graph_hash
+    path = entry.dot_source_path
+
+    cond do
+      is_nil(hash) ->
+        :ok
+
+      not is_binary(path) or path == "" ->
+        {:error, :graph_source_unavailable}
+
+      true ->
+        case File.read(path) do
+          {:ok, source} ->
+            current = :crypto.hash(:sha256, source) |> Base.encode16(case: :lower)
+            if current == hash, do: :ok, else: {:error, :graph_changed}
+
+          {:error, reason} ->
+            {:error, {:graph_source_unavailable, reason}}
+        end
+    end
+  end
+
+  defp load_graph_for_record(%Record{} = entry) do
+    path = entry.dot_source_path
+
+    if is_binary(path) do
+      case File.read(path) do
+        {:ok, source} -> compile(source)
+        {:error, reason} -> {:error, {:dot_file_unavailable, reason}}
+      end
+    else
+      {:error, :no_dot_source_path}
+    end
+  end
 
   defp normalize_coding_plan(%Plan{} = plan), do: {:ok, plan}
   defp normalize_coding_plan(attrs), do: Plan.new(attrs)
