@@ -58,9 +58,9 @@ defmodule Arbor.Scheduler.RunLease do
   def revoke(nil), do: :ok
   def revoke(lease_id), do: call(lease_id, :revoke)
 
-  def active_agent_ids do
-    Store.active_agent_ids()
-  end
+  @doc false
+  @spec active_agent_ids() :: MapSet.t(String.t())
+  def active_agent_ids, do: Store.active_agent_ids()
 
   @doc false
   def whereis(lease_id) do
@@ -332,6 +332,9 @@ defmodule Arbor.Scheduler.RunLease do
     def recovery_snapshot, do: GenServer.call(__MODULE__, :recovery_snapshot)
     def complete_recovery, do: GenServer.call(__MODULE__, :complete_recovery)
 
+    def open_authority(lease_id, identity, security),
+      do: GenServer.call(__MODULE__, {:open_authority, lease_id, identity, security}, 30_000)
+
     @impl true
     def init(:ok) do
       :ets.new(@table, [:named_table, :private, :set])
@@ -391,6 +394,31 @@ defmodule Arbor.Scheduler.RunLease do
       {:reply, :ok, %{state | recovery_required: false}}
     end
 
+    defp handle_state_owner_call({:open_authority, lease_id, identity, security}, state) do
+      result =
+        mutate_active_lease(lease_id, fn lease ->
+          with {:ok, proof} <-
+                 safe_external(fn ->
+                   security.build_signing_authority_acquisition_proof(
+                     identity.agent_id,
+                     identity.private_key,
+                     purpose: :pipeline_run,
+                     owner: self()
+                   )
+                 end),
+               {:ok, authority} <-
+                 safe_external(fn ->
+                   security.open_ephemeral_signing_authority(proof, identity.private_key)
+                 end) do
+            updated = %{lease | authority: authority, generation: lease.generation + 1}
+            true = :ets.insert(@table, {lease_id, updated})
+            {:ok, authority}
+          end
+        end)
+
+      {:reply, result, state}
+    end
+
     @impl true
     def format_status(status) when is_map(status) do
       status
@@ -414,6 +442,22 @@ defmodule Arbor.Scheduler.RunLease do
         _entry, acc ->
           acc
       end)
+    end
+
+    defp mutate_active_lease(lease_id, fun) do
+      case :ets.lookup(@table, lease_id) do
+        [{^lease_id, %{status: :active} = lease}] -> fun.(lease)
+        [{^lease_id, _lease}] -> {:error, :lease_closing}
+        [] -> {:error, :lease_closing}
+      end
+    end
+
+    defp safe_external(fun) do
+      fun.()
+    rescue
+      exception -> {:error, {:exception, Exception.message(exception)}}
+    catch
+      :exit, reason -> {:error, {:exit, reason}}
     end
   end
 
@@ -511,28 +555,7 @@ defmodule Arbor.Scheduler.RunLease do
     end
 
     defp handle_store_call({:open_authority, lease_id, identity, security}, state) do
-      result =
-        mutate_active_lease(lease_id, fn lease ->
-          with {:ok, proof} <-
-                 safe_external(fn ->
-                   security.build_signing_authority_acquisition_proof(
-                     identity.agent_id,
-                     identity.private_key,
-                     purpose: :pipeline_run,
-                     owner: self()
-                   )
-                 end),
-               {:ok, authority} <-
-                 safe_external(fn ->
-                   security.open_ephemeral_signing_authority(proof, identity.private_key)
-                 end) do
-            updated = %{lease | authority: authority, generation: lease.generation + 1}
-            :ok = JournalOwner.put(lease_id, updated)
-            {:ok, authority}
-          end
-        end)
-
-      {:reply, result, state}
+      {:reply, JournalOwner.open_authority(lease_id, identity, security), state}
     end
 
     @impl true
@@ -723,8 +746,20 @@ defmodule Arbor.Scheduler.RunLease do
       end
     end
 
-    def handle_call({:exists, id}, _from, %{table: table} = state) do
-      {:reply, lookup(table, id) != :error, state}
+    def handle_call({:exists, id}, {caller, _tag}, %{table: table} = state) do
+      reply =
+        case lookup(table, id) do
+          {:ok, %{owner: ^caller}} ->
+            true
+
+          {:ok, _lease} ->
+            if lease_process?(caller, id), do: true, else: {:error, :unauthorized}
+
+          :error ->
+            false
+        end
+
+      {:reply, reply, state}
     end
 
     def handle_call({:record, id, operation}, {caller, _tag}, %{table: table} = state) do
@@ -839,6 +874,8 @@ defmodule Arbor.Scheduler.RunLease do
     end
 
     def handle_call(:active_agent_ids, _from, %{table: table} = state) do
+      # Deliberately public to local callers: this is a principal-only
+      # reconciliation view and never returns lease or bearer state.
       ids =
         table
         |> all_leases()

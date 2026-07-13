@@ -504,6 +504,13 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     end)
 
     assert Process.whereis(RunLease.JournalOwner) == journal_owner
+
+    assert {:ok, _signed_request} =
+             Security.sign_with_authority(
+               handle.signing_authority,
+               "survived-state-owner-restart"
+             )
+
     assert :ok = RunIdentity.revoke(handle)
     assert_eventually(fn -> run_state_removed?(handle) end)
   end
@@ -567,6 +574,13 @@ defmodule Arbor.Scheduler.RunIdentityTest do
       end)
 
       assert Process.whereis(RunLease.JournalOwner) == journal_owner
+
+      assert {:ok, _signed_request} =
+               Security.sign_with_authority(
+                 handle.signing_authority,
+                 "survived-#{target}-restart"
+               )
+
       assert :ok = RunIdentity.revoke(handle)
       assert_eventually(fn -> run_state_removed?(handle) end)
     end
@@ -580,12 +594,23 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     assert {:ok, handle} = RunIdentity.mint(attestation)
 
     assert {:error, :unauthorized} = GenServer.call(RunLease.Store, {:fetch, handle.lease})
+    assert RunLease.Store.exists?(handle.lease)
+
+    assert {:error, :unauthorized} =
+             unrelated_call(fn -> GenServer.call(RunLease.Store, {:exists, handle.lease}) end)
+
     assert {:error, :unauthorized} = GenServer.call(RunLease.Store, :all_ids)
     assert {:error, :unauthorized} = GenServer.call(RunLease.Store, :begin_recovery)
     assert {:error, :unauthorized} = GenServer.call(RunLease.Store, :recovery_snapshot)
     assert {:error, :unauthorized} = GenServer.call(RunLease.Store, {:discard, handle.lease})
     assert {:error, :unauthorized} = RunLease.StateOwner.fetch(handle.lease)
     assert {:error, :unauthorized} = RunLease.JournalOwner.fetch(handle.lease)
+
+    active_agent_ids = GenServer.call(RunLease.Store, :active_agent_ids)
+    assert active_agent_ids == MapSet.new([handle.agent_id])
+    refute MapSet.member?(active_agent_ids, handle.lease)
+    refute Enum.any?(handle.cap_ids, &MapSet.member?(active_agent_ids, &1))
+    refute MapSet.member?(active_agent_ids, handle.signing_authority.token)
 
     assert {:ok, _signed_request} =
              Security.sign_with_authority(handle.signing_authority, "journal-still-present")
@@ -1070,6 +1095,13 @@ defmodule Arbor.Scheduler.RunIdentityTest do
     ArgumentError -> nil
   catch
     :exit, _reason -> nil
+  end
+
+  defp unrelated_call(fun) do
+    parent = self()
+    spawn(fn -> send(parent, {:unrelated_call_result, fun.()}) end)
+    assert_receive {:unrelated_call_result, result}, 5_000
+    result
   end
 
   defp authorize_as(handle, resource) do
