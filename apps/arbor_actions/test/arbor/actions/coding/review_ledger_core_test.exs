@@ -69,6 +69,16 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
                  )
              })
 
+    assert {:error, :immutable_finding_field} =
+             apply_cycle(ledger, 2, %{
+               "correctness" =>
+                 report(
+                   finding_updates: [
+                     %{"id" => id, "state" => "open", "title" => "changed identity"}
+                   ]
+                 )
+             })
+
     {:ok, fixed} =
       apply_cycle(ledger, 2, %{
         "correctness" => report(finding_updates: [%{"id" => id, "state" => "fixed"}])
@@ -135,6 +145,18 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
                "reports" => %{},
                "delta_ranges" => %{"lib/a.ex" => [[11, 12], [12, 14]]}
              })
+
+    forged = put_in(rechecked, ["out_of_scope", Access.at(0), "reason"], "forged")
+    assert ReviewLedgerCore.decision(forged)["security_veto"]
+
+    unbounded =
+      put_in(
+        rechecked,
+        ["out_of_scope", Access.at(0), "evidence"],
+        String.duplicate("x", 2_049)
+      )
+
+    assert ReviewLedgerCore.decision(unbounded)["security_veto"]
   end
 
   test "derives corroborated major and blocking gates, but not minor gates" do
@@ -242,6 +264,40 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
 
     forged_vote = put_in(ledger, ["cycles", "1", "votes", "security"], "reject")
     assert ReviewLedgerCore.decision(forged_vote)["security_veto"]
+  end
+
+  test "rejects noncanonical cycle owners and oversized otherwise-valid ledgers" do
+    {:ok, ledger} = ReviewLedgerCore.new(%{})
+
+    reports =
+      Map.new(ledger["perspectives"], fn owner ->
+        findings = Enum.map(1..8, &finding("#{owner}-#{&1}", "minor", &1))
+        {owner, report(new_findings: findings)}
+      end)
+
+    {:ok, populated} = ReviewLedgerCore.apply_cycle(ledger, 1, reports)
+
+    reversed_owners =
+      put_in(
+        populated,
+        ["cycles", "1", "reported_owners"],
+        Enum.reverse(populated["cycles"]["1"]["reported_owners"])
+      )
+
+    assert ReviewLedgerCore.decision(reversed_owners)["security_veto"]
+
+    oversized_findings =
+      Map.new(populated["findings"], fn {id, stored} ->
+        {id, Map.put(stored, "evidence", String.duplicate("x", 2_048))}
+      end)
+
+    oversized = Map.put(populated, "findings", oversized_findings)
+    assert byte_size(Jason.encode!(oversized)) > 131_072
+
+    decision = ReviewLedgerCore.decision(oversized)
+    assert decision["disposition"] == "human_review"
+    assert decision["security_veto"]
+    assert decision["blocking_reasons"] == [%{"id" => "ledger", "reason" => "invalid_ledger"}]
   end
 
   test "defaults to all ten static owners and abstains missing reports" do

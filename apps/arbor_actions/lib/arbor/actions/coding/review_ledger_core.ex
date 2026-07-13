@@ -150,7 +150,8 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
     do: {:ok, empty_ledger(@default_perspectives)}
 
   defp normalize_ledger(ledger) when is_map(ledger) do
-    with :ok <- ensure_string_keyed_json(ledger),
+    with :ok <- bounded?(ledger),
+         :ok <- ensure_string_keyed_json(ledger),
          true <- Map.get(ledger, "version") == @version,
          {:ok, perspectives} <- validate_perspectives(Map.get(ledger, "perspectives")),
          review_cycle when is_integer(review_cycle) and review_cycle >= 0 <-
@@ -159,7 +160,8 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
            validate_findings(Map.get(ledger, "findings"), perspectives, review_cycle),
          {:ok, cycles} <-
            validate_cycles(Map.get(ledger, "cycles"), perspectives, review_cycle),
-         {:ok, out_of_scope} <- validate_out_of_scope(Map.get(ledger, "out_of_scope")) do
+         {:ok, out_of_scope} <-
+           validate_out_of_scope(Map.get(ledger, "out_of_scope"), perspectives, review_cycle) do
       normalized = %{
         "version" => @version,
         "perspectives" => perspectives,
@@ -169,7 +171,12 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
         "out_of_scope" => out_of_scope
       }
 
-      {:ok, recompute_derived(normalized)}
+      normalized = recompute_derived(normalized)
+
+      case bounded?(normalized) do
+        :ok -> {:ok, normalized}
+        {:error, reason} -> {:error, reason}
+      end
     else
       false -> {:error, :invalid_ledger}
       nil -> {:error, :invalid_ledger}
@@ -316,7 +323,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
   defp validate_update(_owner, _update, _ledger), do: {:error, :invalid_finding_update}
 
   defp immutable_update_fields(update, finding) do
-    immutable = ["issue_key", "owner", "origin_cycle", "severity", "anchor"]
+    immutable = ["issue_key", "owner", "origin_cycle", "severity", "anchor", "title"]
 
     if Enum.all?(immutable, fn key ->
          not Map.has_key?(update, key) or Map.get(update, key) == finding[key]
@@ -635,7 +642,9 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
         {:ok,
          ledger
          |> Map.put("findings", findings)
-         |> Map.update!("out_of_scope", &(&1 ++ out_of_scope))}
+         |> Map.update!("out_of_scope", fn existing ->
+           Enum.sort_by(existing ++ out_of_scope, & &1["id"])
+         end)}
     end
   end
 
@@ -782,6 +791,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
              true <- Enum.sort(Map.keys(value["votes"])) == perspectives,
              true <- is_list(value["reported_owners"]),
              true <- Enum.uniq(value["reported_owners"]) == value["reported_owners"],
+             true <- Enum.sort(value["reported_owners"]) == value["reported_owners"],
              true <- Enum.all?(value["reported_owners"], &(&1 in perspectives)),
              true <-
                Enum.all?(perspectives, fn owner ->
@@ -802,14 +812,85 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
 
   defp validate_cycles(_cycles, _perspectives, _review_cycle), do: {:error, :invalid_cycles}
 
-  defp validate_out_of_scope(out_of_scope)
+  defp validate_out_of_scope(out_of_scope, perspectives, review_cycle)
        when is_list(out_of_scope) and length(out_of_scope) <= @max_out_of_scope do
-    if Enum.all?(out_of_scope, &is_map/1),
-      do: {:ok, out_of_scope},
-      else: {:error, :invalid_out_of_scope}
+    result =
+      Enum.reduce_while(out_of_scope, {:ok, []}, fn record, {:ok, acc} ->
+        case validate_out_of_scope_record(record, perspectives, review_cycle) do
+          {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    with {:ok, records} <- result,
+         records <- Enum.sort_by(records, & &1["id"]),
+         ids = Enum.map(records, & &1["id"]),
+         true <- ids == Enum.uniq(ids) do
+      {:ok, records}
+    else
+      _ -> {:error, :invalid_out_of_scope}
+    end
   end
 
-  defp validate_out_of_scope(_out_of_scope), do: {:error, :invalid_out_of_scope}
+  defp validate_out_of_scope(_out_of_scope, _perspectives, _review_cycle),
+    do: {:error, :invalid_out_of_scope}
+
+  defp validate_out_of_scope_record(record, perspectives, review_cycle) when is_map(record) do
+    required = [
+      "id",
+      "issue_key",
+      "owner",
+      "origin_cycle",
+      "severity",
+      "state",
+      "title",
+      "required_action",
+      "anchor",
+      "reason"
+    ]
+
+    with true <- Enum.all?(required, &Map.has_key?(record, &1)),
+         true <- Enum.all?(Map.keys(record), &(&1 in (required ++ ["evidence"]))),
+         :ok <- ensure_string_keyed_json(record),
+         true <- record["state"] == "out_of_scope",
+         true <- record["reason"] == "outside_delta",
+         true <- record["owner"] in perspectives,
+         true <- record["severity"] in @severities,
+         true <- is_integer(record["origin_cycle"]),
+         true <- record["origin_cycle"] > 0 and record["origin_cycle"] <= review_cycle,
+         {:ok, title} <- required_bounded_text(record, "title", @max_title_bytes),
+         {:ok, required_action} <-
+           required_bounded_text(record, "required_action", @max_required_action_bytes),
+         {:ok, anchor} <- validate_anchor(record["anchor"]),
+         {:ok, evidence} <- optional_evidence(record),
+         issue_key = issue_key(anchor, title),
+         true <- record["issue_key"] == issue_key,
+         id = finding_id(record["owner"], issue_key),
+         true <- record["id"] == id do
+      normalized = %{
+        "id" => id,
+        "issue_key" => issue_key,
+        "owner" => record["owner"],
+        "origin_cycle" => record["origin_cycle"],
+        "severity" => record["severity"],
+        "state" => "out_of_scope",
+        "title" => title,
+        "required_action" => required_action,
+        "anchor" => anchor,
+        "reason" => "outside_delta"
+      }
+
+      normalized =
+        if evidence == nil, do: normalized, else: Map.put(normalized, "evidence", evidence)
+
+      {:ok, normalized}
+    else
+      _ -> {:error, :invalid_out_of_scope}
+    end
+  end
+
+  defp validate_out_of_scope_record(_record, _perspectives, _review_cycle),
+    do: {:error, :invalid_out_of_scope}
 
   defp build_decision(ledger) do
     votes = latest_votes(ledger)

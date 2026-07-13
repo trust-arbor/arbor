@@ -62,7 +62,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
          {:ok, intent} <- optional_string(attrs, :intent, ""),
          {:ok, agent_id} <- optional_string(attrs, :agent_id, nil),
          {:ok, review_cycle} <- optional_positive_integer(attrs, :review_cycle, 1),
-         {:ok, prior_candidate_commit} <- optional_string(attrs, :prior_candidate_commit, nil),
+         {:ok, prior_candidate_commit} <-
+           optional_utf8_string(attrs, :prior_candidate_commit, nil),
          {:ok, delta_diff} <- optional_utf8_string(attrs, :delta_diff, ""),
          {:ok, delta_files} <- optional_delta_files(attrs),
          {:ok, finding_ledger} <- optional_finding_ledger(attrs) do
@@ -180,7 +181,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   """
   @spec prompt_text(t()) :: String.t()
   def prompt_text(%__MODULE__{} = request) do
-    ledger_json = request.finding_ledger |> canonicalize_json() |> Jason.encode!()
+    ledger_json = bounded_json(request.finding_ledger, @max_prompt_ledger_bytes)
 
     """
     Branch: #{request.branch}
@@ -202,9 +203,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
     Review charter:
     #{review_charter(request)}
 
-    Finding ledger (canonical JSON, bounded):
+    Finding ledger (bounded JSON):
     ```json
-    #{bounded_text(ledger_json, @max_prompt_ledger_bytes)}
+    #{ledger_json}
     ```
 
     Intent:
@@ -313,7 +314,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
          true <- json_clean?(ledger),
          {:ok, encoded} <- Jason.encode(ledger),
          true <- byte_size(encoded) <= @max_finding_ledger_bytes do
-      {:ok, canonicalize_json(ledger)}
+      {:ok, ledger}
     else
       _ -> {:error, {:invalid_field, :finding_ledger, :invalid_json_or_size}}
     end
@@ -432,12 +433,35 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
     if String.valid?(prefix), do: prefix, else: utf8_prefix(value, limit - 1)
   end
 
-  defp canonicalize_json(value) when is_map(value) do
-    value
-    |> Enum.sort_by(fn {key, _nested} -> key end)
-    |> Map.new(fn {key, nested} -> {key, canonicalize_json(nested)} end)
+  defp bounded_json(value, limit) do
+    encoded = Jason.encode!(value)
+
+    if byte_size(encoded) <= limit do
+      encoded
+    else
+      envelope = %{
+        "truncated" => true,
+        "original_bytes" => byte_size(encoded),
+        "preview" => ""
+      }
+
+      empty = Jason.encode!(envelope)
+      fit_json_preview(encoded, envelope, limit, 0, min(byte_size(encoded), limit), empty)
+    end
   end
 
-  defp canonicalize_json(value) when is_list(value), do: Enum.map(value, &canonicalize_json/1)
-  defp canonicalize_json(value), do: value
+  defp fit_json_preview(_encoded, _envelope, _limit, low, high, best) when low > high,
+    do: best
+
+  defp fit_json_preview(encoded, envelope, limit, low, high, best) do
+    midpoint = div(low + high, 2)
+    preview = utf8_prefix(encoded, midpoint)
+    candidate = envelope |> Map.put("preview", preview) |> Jason.encode!()
+
+    if byte_size(candidate) <= limit do
+      fit_json_preview(encoded, envelope, limit, midpoint + 1, high, candidate)
+    else
+      fit_json_preview(encoded, envelope, limit, low, midpoint - 1, best)
+    end
+  end
 end

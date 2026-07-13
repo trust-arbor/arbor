@@ -132,6 +132,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert {:error, {:invalid_field, :delta_diff, :invalid_utf8}} =
                CodeReviewRequest.new(Map.put(@valid_attrs, :delta_diff, <<195>>))
 
+      assert {:error, {:invalid_field, :prior_candidate_commit, :invalid_utf8}} =
+               CodeReviewRequest.new(Map.put(@valid_attrs, :prior_candidate_commit, <<195>>))
+
       assert {:error, {:invalid_field, :finding_ledger, _}} =
                CodeReviewRequest.new(Map.put(@valid_attrs, :finding_ledger, %{bad: :atom}))
 
@@ -219,12 +222,13 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert prompt =~ "Review cycle: 1"
       assert prompt =~ "Recheck: initial review"
       assert prompt =~ "Delta files:\n- none supplied"
-      assert prompt =~ "Finding ledger (canonical JSON, bounded):"
+      assert prompt =~ "Finding ledger (bounded JSON):"
       assert prompt =~ "Review charter:\nCycle 1: review the stated intent and full diff."
       assert prompt =~ "Intent:\nAdd a review loop"
       assert prompt =~ "- lib/a.ex"
       assert prompt =~ "```diff"
       assert prompt =~ @valid_attrs.diff
+      assert Jason.decode!(extract_ledger_json(prompt)) == %{}
     end
 
     test "keeps multibyte prompt truncation valid and context JSON-clean" do
@@ -244,10 +248,25 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert prompt =~ "Cycle >1: verify owned open findings"
       assert prompt =~ "pre-existing or out-of-delta issues as nonblocking/out-of-scope"
       assert prompt =~ "[truncated]"
+
+      ledger_json = extract_ledger_json(prompt)
+      bounded = Jason.decode!(ledger_json)
+      assert byte_size(ledger_json) <= 32_768
+      assert bounded["truncated"] == true
+      assert bounded["original_bytes"] > 32_768
+      assert is_binary(bounded["preview"])
+      assert String.valid?(bounded["preview"])
     end
   end
 
   test "is listed by the contracts facade" do
     assert CodeReviewRequest in Contracts.list_contracts()
+  end
+
+  defp extract_ledger_json(prompt) do
+    [_, json] =
+      Regex.run(~r/Finding ledger \(bounded JSON\):\n```json\n(.*?)\n```/s, prompt)
+
+    json
   end
 end
