@@ -445,27 +445,25 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
   end
 
   defp ensure_broker_started do
-    ensure_child!(Arbor.Security.SigningAuthorityStateOwner, [])
-
-    case Process.whereis(SigningAuthorityBroker) do
-      pid when is_pid(pid) ->
+    case {Process.whereis(Arbor.Security.SigningAuthorityStateOwner),
+          Process.whereis(SigningAuthorityBroker)} do
+      {owner, broker} when is_pid(owner) and is_pid(broker) ->
         :ok
 
-      nil ->
-        case Supervisor.start_child(Arbor.Security.Supervisor, {SigningAuthorityBroker, []}) do
-          {:ok, _} ->
-            :ok
+      {nil, nil} ->
+        token = make_ref()
+        ensure_child!(Arbor.Security.SigningAuthorityStateOwner, broker_token: token)
+        ensure_child!(SigningAuthorityBroker, state_owner_token: token)
 
-          {:error, {:already_started, _}} ->
-            :ok
-
-          {:error, {:already_present, _}} ->
-            _ = Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
-            :ok
-
-          other ->
-            flunk("failed to start SigningAuthorityBroker: #{inspect(other)}")
+      {owner, nil} when is_pid(owner) ->
+        case Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker) do
+          {:ok, _pid} -> :ok
+          {:ok, _pid, _info} -> :ok
+          other -> flunk("failed to restart SigningAuthorityBroker: #{inspect(other)}")
         end
+
+      partial ->
+        flunk("partial signing authority stack: #{inspect(partial)}")
     end
   end
 end

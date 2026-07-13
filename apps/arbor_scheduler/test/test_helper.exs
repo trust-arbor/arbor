@@ -31,6 +31,8 @@ for {name, collection} <- [
   end
 end
 
+signing_authority_owner_token = make_ref()
+
 for child <- [
       {Arbor.Security.Identity.Registry, []},
       {Arbor.Security.IssuerRegistry, []},
@@ -39,8 +41,8 @@ for child <- [
       # checks). Mirror what arbor_security's own test_helper starts.
       {Arbor.Security.Identity.NonceCache, []},
       {Arbor.Security.SystemAuthority, []},
-      {Arbor.Security.SigningAuthorityStateOwner, []},
-      {Arbor.Security.SigningAuthorityBroker, []},
+      {Arbor.Security.SigningAuthorityStateOwner, broker_token: signing_authority_owner_token},
+      {Arbor.Security.SigningAuthorityBroker, state_owner_token: signing_authority_owner_token},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.CapabilityStore, []}
     ] do

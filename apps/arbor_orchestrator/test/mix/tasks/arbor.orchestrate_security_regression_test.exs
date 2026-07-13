@@ -91,8 +91,30 @@ defmodule Mix.Tasks.Arbor.OrchestrateSecurityRegressionTest do
     ensure_child!(Arbor.Security.Identity.Registry, [])
     ensure_child!(Arbor.Security.Identity.NonceCache, [])
     ensure_child!(Arbor.Security.SystemAuthority, [])
-    ensure_child!(Arbor.Security.SigningAuthorityStateOwner, [])
-    ensure_child!(SigningAuthorityBroker, [])
+    ensure_authority_pair!()
+  end
+
+  defp ensure_authority_pair! do
+    case {Process.whereis(Arbor.Security.SigningAuthorityStateOwner),
+          Process.whereis(SigningAuthorityBroker)} do
+      {nil, nil} ->
+        token = make_ref()
+        ensure_child!(Arbor.Security.SigningAuthorityStateOwner, broker_token: token)
+        ensure_child!(SigningAuthorityBroker, state_owner_token: token)
+
+      {owner, nil} when is_pid(owner) ->
+        case Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker) do
+          {:ok, _pid} -> :ok
+          {:ok, _pid, _info} -> :ok
+          other -> flunk("failed to restart SigningAuthorityBroker: #{inspect(other)}")
+        end
+
+      {owner, broker} when is_pid(owner) and is_pid(broker) ->
+        :ok
+
+      partial ->
+        flunk("partial signing authority stack: #{inspect(partial)}")
+    end
   end
 
   defp ensure_buffered_store!(name, collection) do

@@ -37,12 +37,16 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
       )
     end
 
+    signing_authority_owner_token = make_ref()
+
     for child <- [
           {Arbor.Security.Identity.Registry, []},
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
-          {Arbor.Security.SigningAuthorityStateOwner, []},
-          {Arbor.Security.SigningAuthorityBroker, []},
+          {Arbor.Security.SigningAuthorityStateOwner,
+           broker_token: signing_authority_owner_token},
+          {Arbor.Security.SigningAuthorityBroker,
+           state_owner_token: signing_authority_owner_token},
           {Arbor.Security.Constraint.RateLimiter, []},
           {Arbor.Security.CapabilityStore, []}
         ] do
