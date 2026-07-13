@@ -165,6 +165,40 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   def prepare_execution(_workdir, _executor_path, _digest, _task_id, _config),
     do: setup_error(:invalid_execution_topology)
 
+  @spec preview_execution(String.t(), String.t(), String.t(), String.t(), config()) ::
+          {:ok, topology()} | {:error, {:benchmark_setup_error, term()}}
+  def preview_execution(workdir, executor_path, digest, task_id, config)
+      when executor_path in ["legacy", "pipeline"] and is_binary(digest) and
+             is_binary(task_id) do
+    pair_path = Path.dirname(workdir)
+
+    with {:ok, canonical_workdir} <- canonical_directory(workdir),
+         :ok <-
+           require_within(canonical_workdir, config.workspace_root, :workdir_outside_workspace),
+         true <- Path.basename(canonical_workdir) == executor_path,
+         {:ok, pair_root} <- canonical_pair_root(pair_path, config),
+         true <- Path.dirname(canonical_workdir) == pair_root,
+         {:ok, worktree_root} <-
+           SafePath.safe_join(pair_root, Path.join(["worktrees", executor_path, digest])),
+         {:ok, artifact_root} <-
+           SafePath.safe_join(config.artifact_root, "task-" <> sha256(task_id)) do
+      {:ok,
+       %{
+         artifact_root: artifact_root,
+         pair_root: pair_root,
+         workdir: canonical_workdir,
+         worktree_root: worktree_root
+       }}
+    else
+      false -> setup_error(:invalid_request_workdir_topology)
+      {:error, {:benchmark_setup_error, _reason}} = error -> error
+      _other -> setup_error(:invalid_execution_topology)
+    end
+  end
+
+  def preview_execution(_workdir, _executor_path, _digest, _task_id, _config),
+    do: setup_error(:invalid_execution_topology)
+
   defp configured_directory(key) do
     case Application.fetch_env(@app, key) do
       {:ok, path} when is_binary(path) ->
@@ -291,11 +325,7 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
         end
 
       {:error, :eexist} ->
-        case File.lstat(path) do
-          {:ok, %{type: :directory}} -> :ok
-          {:ok, _stat} -> setup_error(:unsafe_artifact_task_root)
-          {:error, reason} -> setup_error({:artifact_task_root_lstat_failed, reason})
-        end
+        setup_error(:artifact_task_root_exists)
 
       {:error, reason} ->
         setup_error({:artifact_task_root_create_failed, reason})
@@ -315,10 +345,30 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
 
   defp ensure_directory(path) do
     case File.lstat(path) do
-      {:ok, %{type: :directory}} -> :ok
-      {:ok, _stat} -> {:error, :unsafe_existing_path}
-      {:error, :enoent} -> File.mkdir(path)
-      {:error, reason} -> {:error, reason}
+      {:ok, %{type: :directory}} ->
+        :ok
+
+      {:ok, _stat} ->
+        {:error, :unsafe_existing_path}
+
+      {:error, :enoent} ->
+        case File.mkdir(path) do
+          :ok ->
+            :ok
+
+          {:error, :eexist} ->
+            case File.lstat(path) do
+              {:ok, %{type: :directory}} -> :ok
+              {:ok, _stat} -> {:error, :unsafe_existing_path}
+              {:error, reason} -> {:error, reason}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

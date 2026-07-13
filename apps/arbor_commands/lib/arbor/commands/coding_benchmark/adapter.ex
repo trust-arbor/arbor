@@ -1,7 +1,7 @@
 defmodule Arbor.Commands.CodingBenchmark.Adapter do
   @moduledoc false
 
-  alias Arbor.Commands.CodingBenchmark.Runtime
+  alias Arbor.Commands.CodingBenchmark.{Git, Runtime}
 
   @app :arbor_commands
   @principal_key :coding_benchmark_principal_id
@@ -26,7 +26,12 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
          {:ok, scope} <- execution_scope(request, runtime),
          request = Map.put(request, "workdir", scope.workdir),
          :ok <-
-           matching_base(request["workdir"], request["base_commit_oid"], request["base_tree_oid"]),
+           matching_base(
+             request["workdir"],
+             request["base_commit_oid"],
+             request["base_tree_oid"],
+             runtime.execution_timeout_ms
+           ),
          {:ok, principal_id} <- configured_principal_id(),
          {:ok, executor} <- configured_executor(executor_config_key, default_runner),
          {:ok, task, context} <- execution_inputs(request, scope, runtime.execution_timeout_ms),
@@ -43,6 +48,28 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
 
     with {:ok, topology} <-
            Runtime.prepare_execution(
+             request["workdir"],
+             request["executor_path"],
+             digest,
+             task_id,
+             runtime
+           ) do
+      {:ok,
+       Map.merge(topology, %{
+         branch_name: branch_name(request, digest),
+         task_id: task_id
+       })}
+    end
+  end
+
+  @spec verification_scope(map(), Runtime.config()) ::
+          {:ok, map()} | {:error, {:benchmark_setup_error, term()}}
+  def verification_scope(request, runtime) when is_map(request) do
+    digest = execution_digest(request)
+    task_id = task_id(request, digest)
+
+    with {:ok, topology} <-
+           Runtime.preview_execution(
              request["workdir"],
              request["executor_path"],
              digest,
@@ -169,12 +196,12 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
       else: {:error, :normalized_input_hash_mismatch}
   end
 
-  defp matching_base(workdir, commit_oid, tree_oid) do
-    with {:ok, ^workdir} <- git_output(workdir, ["rev-parse", "--show-toplevel"]),
+  defp matching_base(workdir, commit_oid, tree_oid, timeout_ms) do
+    with {:ok, ^workdir} <- git_output(workdir, ["rev-parse", "--show-toplevel"], timeout_ms),
          {:ok, ^commit_oid} <-
-           git_output(workdir, ["rev-parse", "--verify", "#{commit_oid}^{commit}"]),
+           git_output(workdir, ["rev-parse", "--verify", "#{commit_oid}^{commit}"], timeout_ms),
          {:ok, ^tree_oid} <-
-           git_output(workdir, ["rev-parse", "--verify", "#{commit_oid}^{tree}"]) do
+           git_output(workdir, ["rev-parse", "--verify", "#{commit_oid}^{tree}"], timeout_ms) do
       :ok
     else
       _other -> {:error, :benchmark_base_mismatch}
@@ -464,12 +491,10 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
 
   defp normalized_token(_value, default), do: default
 
-  defp git_output(workdir, args) do
-    # Fixed executable and argument vector; no shell interpolation occurs.
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
-    case System.cmd("git", ["-C", workdir | args], stderr_to_stdout: true) do
-      {output, 0} -> {:ok, String.trim(output)}
-      {_output, _status} -> {:error, :git_failed}
+  defp git_output(workdir, args, timeout_ms) do
+    case Git.run(workdir, args, timeout_ms) do
+      {:ok, output} -> {:ok, String.trim(output)}
+      {:error, _reason} -> {:error, :git_failed}
     end
   end
 

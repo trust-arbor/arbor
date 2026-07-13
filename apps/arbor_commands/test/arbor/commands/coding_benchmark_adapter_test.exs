@@ -4,7 +4,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
   @moduletag :fast
 
   alias Arbor.Commands.CodingBenchmark
-  alias Arbor.Commands.CodingBenchmark.{Adapter, LegacyAdapter, PipelineAdapter, Runtime}
+  alias Arbor.Commands.CodingBenchmark.{Adapter, Git, LegacyAdapter, PipelineAdapter, Runtime}
   alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.Plan
@@ -71,6 +71,55 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     end
   end
 
+  defmodule HangingVerifier do
+    @moduledoc false
+
+    def run(_request) do
+      observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+      send(observer, {:hanging_verifier_started, self()})
+      Process.sleep(:infinity)
+    end
+  end
+
+  defmodule FinalBranchSwapVerifier do
+    @moduledoc false
+
+    def run(%{"executor_path" => "pipeline", "workdir" => workdir}) do
+      git!(workdir, ["checkout", "--detach", "--quiet"])
+      :ok
+    end
+
+    def run(_request), do: :ok
+
+    defp git!(workdir, args) do
+      case System.cmd("git", ["-C", workdir | args], stderr_to_stdout: true) do
+        {_output, 0} -> :ok
+        {output, status} -> raise "git failed (#{status}): #{output}"
+      end
+    end
+  end
+
+  defmodule ArtifactSwapVerifier do
+    @moduledoc false
+
+    def run(%{"executor_path" => "pipeline", "workdir" => workdir}) do
+      root =
+        Application.fetch_env!(:arbor_commands, :coding_benchmark_artifact_root)
+        |> File.ls!()
+        |> Enum.map(
+          &Path.join(Application.fetch_env!(:arbor_commands, :coding_benchmark_artifact_root), &1)
+        )
+        |> Enum.find(&File.exists?(Path.join(&1, "coding-plan.json")))
+
+      plan_path = Path.join(root, "coding-plan.json")
+      File.rm!(plan_path)
+      File.ln_s!(Path.join(workdir, "README.md"), plan_path)
+      :ok
+    end
+
+    def run(_request), do: :ok
+  end
+
   defmodule ResourcePipelineExecutor do
     @moduledoc false
     alias Arbor.Commands.CodingBenchmarkAdapterTest, as: TestSupport
@@ -119,6 +168,21 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       send(observer, {:pipeline_mark_abandoned, task_id})
       :ok
     end
+  end
+
+  setup_all do
+    for child <- [
+          {Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")},
+          {Arbor.Shell.ExecutionRegistry, []},
+          {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
+        ] do
+      case Supervisor.start_child(Arbor.Shell.Supervisor, child) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+      end
+    end
+
+    :ok
   end
 
   setup do
@@ -185,30 +249,25 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     refute_receive {:executor_call, :pipeline, _principal, _task, _context}
   end
 
-  test "security regression: unsafe pre-created artifact roots fail before configured executors" do
+  test "security regression: concurrent identical task scopes receive exclusive artifact roots" do
     requests = benchmark_requests!()
     assert {:ok, runtime} = Runtime.load()
-    assert {:ok, legacy_scope} = Adapter.execution_scope(requests.legacy, runtime)
 
-    outside = temp_directory!("coding-benchmark-artifact-symlink-target")
-    File.rm_rf!(legacy_scope.artifact_root)
-    File.ln_s!(outside, legacy_scope.artifact_root)
+    results =
+      for _ <- 1..2 do
+        Task.async(fn -> Adapter.execution_scope(requests.legacy, runtime) end)
+      end
+      |> Enum.map(&Task.await(&1, 1_000))
 
-    assert {:error, {:benchmark_setup_error, :unsafe_artifact_task_root}} =
-             LegacyAdapter.run(requests.legacy)
+    assert Enum.count(results, &match?({:ok, _scope}, &1)) == 1
 
-    refute_receive {:executor_call, :legacy, _principal, _task, _context}
-    assert File.read_link!(legacy_scope.artifact_root) == outside
+    assert Enum.count(
+             results,
+             &match?({:error, {:benchmark_setup_error, :artifact_task_root_exists}}, &1)
+           ) == 1
 
-    assert {:ok, pipeline_scope} = Adapter.execution_scope(requests.pipeline, runtime)
-    File.rm_rf!(pipeline_scope.artifact_root)
-    File.write!(pipeline_scope.artifact_root, "not a directory")
-
-    assert {:error, {:benchmark_setup_error, :unsafe_artifact_task_root}} =
-             PipelineAdapter.run(requests.pipeline)
-
-    refute_receive {:executor_call, :pipeline, _principal, _task, _context}
-    assert File.read!(pipeline_scope.artifact_root) == "not a directory"
+    assert {:ok, scope} = Enum.find(results, &match?({:ok, _scope}, &1))
+    assert File.dir?(scope.artifact_root)
   end
 
   test "request workdirs must have the harness-owned pair topology" do
@@ -370,7 +429,9 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       assert result["artifact_hash_verification"]["status"] == "failed"
     end
 
-    escaped = Path.join(scenario.root, "fixtures/happy")
+    symlink_scenario = production_scenario!()
+    install_leased_executors()
+    escaped = Path.join(symlink_scenario.root, "fixtures/happy")
 
     Application.put_env(
       :arbor_commands,
@@ -378,7 +439,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       {:symlink_worktree, escaped}
     )
 
-    assert {:ok, symlink_report} = run_production_scenario(scenario)
+    assert {:ok, symlink_report} = run_production_scenario(symlink_scenario)
 
     for result <- symlink_report["rows"] do
       assert result["terminal_status"] == "worktree_verification_failed"
@@ -386,16 +447,20 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       assert result["objective_verifier"]["status"] == "failed"
     end
 
+    wrong_path_scenario = production_scenario!()
+    install_leased_executors()
     Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :wrong_worktree)
-    assert {:ok, wrong_path_report} = run_production_scenario(scenario)
+    assert {:ok, wrong_path_report} = run_production_scenario(wrong_path_scenario)
 
     for result <- wrong_path_report["rows"] do
       assert result["terminal_status"] == "worktree_verification_failed"
       assert result["terminal_reason"] == "unexpected_returned_worktree"
     end
 
+    wrong_branch_scenario = production_scenario!()
+    install_leased_executors()
     Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :wrong_branch)
-    assert {:ok, wrong_branch_report} = run_production_scenario(scenario)
+    assert {:ok, wrong_branch_report} = run_production_scenario(wrong_branch_scenario)
 
     for result <- wrong_branch_report["rows"] do
       assert result["terminal_status"] == "worktree_verification_failed"
@@ -430,6 +495,95 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     tampered = row(tampered_report, "pipeline")["artifact_hash_verification"]
     assert tampered["graph_hash_verified"] == false
     assert tampered["status"] == "failed"
+  end
+
+  test "provenance artifact swaps are rejected immediately before reads" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, report} =
+             run_production_scenario(scenario,
+               verifiers: %{"scripted_objective" => ArtifactSwapVerifier}
+             )
+
+    pipeline = row(report, "pipeline")
+    assert pipeline["terminal_status"] == "change_committed"
+    assert pipeline["artifact_hash_verification"]["graph_hash_verified"] == false
+    assert pipeline["artifact_hash_verification"]["status"] == "failed"
+  end
+
+  test "same-size regular artifact swaps fail descriptor identity verification" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+    handler_id = "coding-benchmark-inode-swap-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:arbor, :commands, :coding_benchmark, :artifact_opened],
+        fn _event, _measurements, %{path: path}, _config ->
+          if Path.basename(path) == "coding-pipeline.dot" do
+            backup = path <> ".inode-swap"
+            :ok = File.rename(path, backup)
+            :ok = File.cp(backup, path)
+          end
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert {:ok, report} = run_production_scenario(scenario)
+
+    pipeline = row(report, "pipeline")
+    assert pipeline["terminal_status"] == "change_committed"
+    assert pipeline["artifact_hash_verification"]["graph_hash_verified"] == false
+    assert pipeline["artifact_hash_verification"]["status"] == "failed"
+  end
+
+  test "objective verifier timeout is bounded by the benchmark timeout" do
+    scenario = production_scenario!(1_000)
+
+    assert {:ok, report} =
+             run_production_scenario(scenario,
+               adapters: Scenario.adapters(),
+               verifiers: %{"scripted_objective" => HangingVerifier}
+             )
+
+    assert_receive {:hanging_verifier_started, verifier_pid}
+    refute Process.alive?(verifier_pid)
+
+    for result <- report["rows"] do
+      assert result["objective_verifier"] == %{
+               "reason" => "verifier_timeout:1000",
+               "status" => "failed"
+             }
+    end
+  end
+
+  test "final symbolic branch and commit attestation rejects verifier branch swaps" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, report} =
+             run_production_scenario(scenario,
+               verifiers: %{"scripted_objective" => FinalBranchSwapVerifier}
+             )
+
+    pipeline = row(report, "pipeline")
+    assert pipeline["terminal_status"] == "worktree_verification_failed"
+    assert pipeline["terminal_reason"] == "final_branch_or_commit_attestation_failed"
+    assert pipeline["artifact_hash_verification"]["status"] == "failed"
+  end
+
+  test "descendant-spawning Git commands fail closed through the public shell facade" do
+    assert {:error, reason} =
+             Git.run(File.cwd!(), ["daemon", "--reuseaddr", "--base-path=.", "."], 50)
+
+    assert reason =~ "git_failed:" or reason =~ "git_timeout:50"
   end
 
   test "hanging executor is killed and cannot block pair-root cleanup" do
@@ -508,7 +662,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
   end
 
   test "hanging pipeline cancel hook is bounded before pair-root cleanup" do
-    scenario = production_scenario!(100, 50)
+    scenario = production_scenario!(1_000, 50)
 
     Application.put_env(
       :arbor_commands,
@@ -527,7 +681,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     assert {:ok, report} = run_production_scenario(scenario)
 
     assert_receive {:hanging_pipeline_started, run_pid, "agent_benchmark", task,
-                    %{"timeout" => 100}}
+                    %{"timeout" => 1_000}}
 
     assert_receive {:hanging_cancel_started, cancel_pid, "agent_benchmark",
                     %{"task_id" => task_id}}
@@ -544,7 +698,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
   end
 
   test "status-only production cancellation is not reported as worker cancellation" do
-    scenario = production_scenario!(100, 50)
+    scenario = production_scenario!(1_000, 50)
 
     Application.put_env(
       :arbor_commands,
@@ -794,8 +948,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     )
   end
 
-  defp run_production_scenario(scenario) do
-    CodingBenchmark.run(scenario.manifest,
+  defp run_production_scenario(scenario, opts \\ []) do
+    defaults = [
       acp_agent: "codex",
       adapters: %{"legacy" => LegacyAdapter, "pipeline" => PipelineAdapter},
       executor_selector: false,
@@ -803,7 +957,9 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       measure: &Scenario.deterministic_measure/1,
       verifiers: Scenario.verifiers(),
       workspace_root: scenario.root
-    )
+    ]
+
+    CodingBenchmark.run(scenario.manifest, Keyword.merge(defaults, opts))
   end
 
   defp leased_result(executor, principal_id, task, context, artifact_mode) do

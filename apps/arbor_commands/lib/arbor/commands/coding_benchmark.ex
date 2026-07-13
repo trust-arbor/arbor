@@ -12,7 +12,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   timing, and independently observed Git and artifact evidence.
   """
 
-  alias Arbor.Commands.CodingBenchmark.{Adapter, LegacyAdapter, PipelineAdapter, Runtime}
+  alias Arbor.Commands.CodingBenchmark.{Adapter, Git, LegacyAdapter, PipelineAdapter, Runtime}
   alias Arbor.Commands.CodingParity
   alias Arbor.Common.SafePath
   alias Arbor.Orchestrator
@@ -544,13 +544,18 @@ defmodule Arbor.Commands.CodingBenchmark do
   end
 
   defp prepare_pair(fixture, pair_root, fixture_root, benchmark) do
+    timeout_ms = benchmark.execution_timeout_ms
+
     with {:ok, source} <- fixture_source(fixture_root, fixture["fixture_path"]),
-         {:ok, commit_oid} <- git_output(source, ["rev-parse", "--verify", "HEAD^{commit}"]),
-         {:ok, source_tree_oid} <- git_output(source, ["rev-parse", "--verify", "HEAD^{tree}"]),
+         {:ok, commit_oid} <-
+           git_output(source, ["rev-parse", "--verify", "HEAD^{commit}"], timeout_ms),
+         {:ok, source_tree_oid} <-
+           git_output(source, ["rev-parse", "--verify", "HEAD^{tree}"], timeout_ms),
          :ok <- matching_tree(source_tree_oid, fixture["base_tree_oid"]),
          :ok <- mkdir(pair_root),
          {:ok, pair_root} <- Runtime.canonical_pair_root(pair_root, benchmark),
-         {:ok, workdirs} <- clone_pair(source, commit_oid, fixture["base_tree_oid"], pair_root) do
+         {:ok, workdirs} <-
+           clone_pair(source, commit_oid, fixture["base_tree_oid"], pair_root, timeout_ms) do
       {:ok, %{commit_oid: commit_oid, pair_root: pair_root, workdirs: workdirs}}
     end
   end
@@ -577,35 +582,36 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp clone_pair(source, commit_oid, expected_tree, pair_root) do
+  defp clone_pair(source, commit_oid, expected_tree, pair_root, timeout_ms) do
     Enum.reduce_while(@executor_paths, {:ok, %{}}, fn executor, {:ok, acc} ->
       destination = Path.join(pair_root, executor)
 
-      case clone_fixture(source, destination, commit_oid, expected_tree) do
+      case clone_fixture(source, destination, commit_oid, expected_tree, timeout_ms) do
         :ok -> {:cont, {:ok, Map.put(acc, executor, destination)}}
         {:error, _reason} = error -> {:halt, error}
       end
     end)
   end
 
-  defp clone_fixture(source, destination, commit_oid, expected_tree) do
-    with :ok <- git_clone(source, destination),
-         :ok <- git_ok(destination, ["checkout", "--detach", "--quiet", commit_oid]),
-         {:ok, actual_tree} <- git_output(destination, ["rev-parse", "--verify", "HEAD^{tree}"]),
+  defp clone_fixture(source, destination, commit_oid, expected_tree, timeout_ms) do
+    with :ok <- git_clone(source, destination, timeout_ms),
+         :ok <- git_ok(destination, ["checkout", "--detach", "--quiet", commit_oid], timeout_ms),
+         {:ok, actual_tree} <-
+           git_output(destination, ["rev-parse", "--verify", "HEAD^{tree}"], timeout_ms),
          :ok <- matching_tree(actual_tree, expected_tree) do
-      _ = git_ok(destination, ["remote", "remove", "origin"])
+      _ = git_ok(destination, ["remote", "remove", "origin"], timeout_ms)
       :ok
     end
   end
 
-  defp git_clone(source, destination) do
-    # Fixed executable and argument vector; no shell interpolation occurs.
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
-    case System.cmd("git", ["clone", "--quiet", "--no-hardlinks", "--", source, destination],
-           stderr_to_stdout: true
+  defp git_clone(source, destination, timeout_ms) do
+    case Git.run(
+           source,
+           ["clone", "--quiet", "--no-hardlinks", "--", source, destination],
+           timeout_ms
          ) do
-      {_output, 0} -> :ok
-      {output, status} -> {:error, "git_clone_failed:#{status}:#{bounded_output(output)}"}
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, "git_clone_failed:#{reason}"}
     end
   end
 
@@ -663,11 +669,12 @@ defmodule Arbor.Commands.CodingBenchmark do
   end
 
   defp verification_context(callback, request, runtime) do
-    with {:ok, scope} <- Adapter.execution_scope(request, runtime.benchmark) do
+    with {:ok, scope} <- Adapter.verification_scope(request, runtime.benchmark) do
       if callback in @production_adapters do
         {:ok,
          %{
            expected_branch: scope.branch_name,
+           git_timeout_ms: runtime.benchmark.execution_timeout_ms,
            require_returned_worktree?: true,
            strict_provenance?: request["executor_path"] == "pipeline",
            trusted_artifact_root: scope.artifact_root,
@@ -677,6 +684,7 @@ defmodule Arbor.Commands.CodingBenchmark do
         {:ok,
          %{
            expected_branch: nil,
+           git_timeout_ms: runtime.benchmark.execution_timeout_ms,
            require_returned_worktree?: false,
            strict_provenance?: false,
            trusted_artifact_root: scope.workdir,
@@ -1115,7 +1123,7 @@ defmodule Arbor.Commands.CodingBenchmark do
          worktree,
          verification
        ) do
-    observations = observed_tree(envelope.observations, worktree)
+    observations = observed_tree(envelope.observations, worktree, verification.git_timeout_ms)
 
     case CodingParity.project(envelope.result, observations) do
       {:ok, projection} ->
@@ -1132,38 +1140,57 @@ defmodule Arbor.Commands.CodingBenchmark do
             worktree
           )
 
-        row = %{
-          "approval_observations" => approval_observations(semantic["approval"]),
-          "artifact_hash_verification" =>
-            artifact_verification(
-              executor,
-              request,
-              envelope.result,
-              projection,
-              worktree,
-              verification
-            ),
-          "base_tree_oid" => pair.fixture["base_tree_oid"],
-          "cancellation_observations" =>
-            cancellation_observations(
-              semantic["cancellation"],
-              semantic["cleanup"],
-              envelope.worker_ownership
-            ),
-          "changed_paths" => semantic["changed_files"],
-          "counters" => envelope.counters,
-          "executor_path" => executor,
-          "fixture_id" => pair.fixture["fixture_id"],
-          "normalized_input_hash" => pair.fixture["normalized_input_hash"],
-          "objective_verifier" => verifier,
-          "repetition" => pair.repetition,
-          "review_outcome" => review_outcome(semantic["review"] || %{}),
-          "terminal_reason" => result_reason(envelope.result, status),
-          "terminal_status" => status,
-          "wall_clock_ms" => valid_wall_clock(wall_clock_ms)
-        }
+        artifact_verification =
+          artifact_verification(
+            executor,
+            request,
+            envelope.result,
+            projection,
+            worktree,
+            verification
+          )
 
-        %{executor: executor, projection: projection, row: row}
+        case final_worktree_attestation(status, envelope.result, worktree, verification) do
+          :ok ->
+            row = %{
+              "approval_observations" => approval_observations(semantic["approval"]),
+              "artifact_hash_verification" => artifact_verification,
+              "base_tree_oid" => pair.fixture["base_tree_oid"],
+              "cancellation_observations" =>
+                cancellation_observations(
+                  semantic["cancellation"],
+                  semantic["cleanup"],
+                  envelope.worker_ownership
+                ),
+              "changed_paths" => semantic["changed_files"],
+              "counters" => envelope.counters,
+              "executor_path" => executor,
+              "fixture_id" => pair.fixture["fixture_id"],
+              "normalized_input_hash" => pair.fixture["normalized_input_hash"],
+              "objective_verifier" => verifier,
+              "repetition" => pair.repetition,
+              "review_outcome" => review_outcome(semantic["review"] || %{}),
+              "terminal_reason" => result_reason(envelope.result, status),
+              "terminal_status" => status,
+              "wall_clock_ms" => valid_wall_clock(wall_clock_ms)
+            }
+
+            %{executor: executor, projection: projection, row: row}
+
+          {:error, reason} ->
+            row =
+              failure_row(executor, pair, "worktree_verification_failed", reason,
+                artifact_failed: true,
+                counters: envelope.counters,
+                objective_failure: reason,
+                observations: envelope.observations,
+                prepared: true,
+                wall_clock_ms: wall_clock_ms,
+                worker_ownership: envelope.worker_ownership
+              )
+
+            %{executor: executor, projection: nil, row: row}
+        end
 
       {:error, reason} ->
         row =
@@ -1193,7 +1220,8 @@ defmodule Arbor.Commands.CodingBenchmark do
              path,
              verification.trusted_worktree_root,
              expected_path,
-             branch
+             branch,
+             verification.git_timeout_ms
            ) do
       {:ok, worktree}
     else
@@ -1209,10 +1237,14 @@ defmodule Arbor.Commands.CodingBenchmark do
   defp observed_worktree(result, request, verification) do
     case result_worktree_path(result) do
       {:ok, path} ->
-        canonical_worktree(path, verification.trusted_worktree_root)
+        canonical_worktree(path, verification.trusted_worktree_root, verification.git_timeout_ms)
 
       :missing when not verification.require_returned_worktree? ->
-        canonical_worktree(request["workdir"], verification.trusted_worktree_root)
+        canonical_worktree(
+          request["workdir"],
+          verification.trusted_worktree_root,
+          verification.git_timeout_ms
+        )
 
       :missing ->
         {:error, "missing_returned_worktree"}
@@ -1267,41 +1299,95 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp returned_branch(_branch), do: {:error, "invalid_returned_branch"}
 
-  defp canonical_worktree(path, trusted_root) do
+  defp canonical_worktree(path, trusted_root, timeout_ms) do
     with {:ok, root} <- SafePath.resolve_real(trusted_root),
          true <- File.dir?(root),
          {:ok, lexical} <- SafePath.resolve_within(path, root),
          {:ok, real} <- SafePath.resolve_real(lexical),
          {:ok, ^real} <- SafePath.resolve_within(real, root),
          true <- File.dir?(real),
-         {:ok, ^real} <- git_output(real, ["rev-parse", "--show-toplevel"]) do
+         {:ok, ^real} <- git_output(real, ["rev-parse", "--show-toplevel"], timeout_ms) do
       {:ok, real}
     else
       _other -> {:error, "unsafe_or_missing_returned_worktree"}
     end
   end
 
-  defp exact_canonical_worktree(path, trusted_root, expected_path, expected_branch) do
+  defp exact_canonical_worktree(path, trusted_root, expected_path, expected_branch, timeout_ms) do
     with {:ok, root} <- SafePath.resolve_real(trusted_root),
          true <- File.dir?(root),
          {:ok, ^expected_path} <- SafePath.resolve_within(expected_path, root),
          {:ok, %{type: :directory}} <- File.lstat(expected_path),
          {:ok, ^expected_path} <- SafePath.resolve_real(expected_path),
          {:ok, ^expected_path} <- SafePath.resolve_within(path, root),
-         {:ok, ^expected_path} <- git_output(expected_path, ["rev-parse", "--show-toplevel"]),
+         {:ok, ^expected_path} <-
+           git_output(expected_path, ["rev-parse", "--show-toplevel"], timeout_ms),
          {:ok, ^expected_branch} <-
-           git_output(expected_path, ["symbolic-ref", "--quiet", "--short", "HEAD"]) do
+           git_output(expected_path, ["symbolic-ref", "--quiet", "--short", "HEAD"], timeout_ms) do
       {:ok, expected_path}
     else
       _other -> {:error, "unexpected_returned_worktree"}
     end
   end
 
-  defp observed_tree(observations, worktree) do
+  defp final_worktree_attestation(status, _result, _worktree, _verification)
+       when status not in ~w(change_committed pr_created),
+       do: :ok
+
+  defp final_worktree_attestation(_status, _result, _worktree, %{
+         require_returned_worktree?: false
+       }),
+       do: :ok
+
+  defp final_worktree_attestation(_status, result, worktree, verification) do
+    with {:ok, path} <- result_worktree_path(result),
+         {:ok, branch} <- result_branch(result),
+         true <- branch == verification.expected_branch,
+         {:ok, expected_path} <-
+           Orchestrator.expected_coding_worktree_path(verification.trusted_worktree_root, branch),
+         {:ok, ^worktree} <-
+           exact_canonical_worktree(
+             path,
+             verification.trusted_worktree_root,
+             expected_path,
+             branch,
+             verification.git_timeout_ms
+           ),
+         {:ok, expected_commit} <- result_commit(result),
+         {:ok, ^expected_commit} <-
+           git_output(
+             worktree,
+             ["rev-parse", "--verify", "HEAD^{commit}"],
+             verification.git_timeout_ms
+           ) do
+      :ok
+    else
+      _other -> {:error, "final_branch_or_commit_attestation_failed"}
+    end
+  end
+
+  defp result_commit(result) do
+    result
+    |> fetch_value("payload", :payload, %{})
+    |> fetch_value("commit", :commit, nil)
+    |> case do
+      commit when is_binary(commit) ->
+        commit = String.downcase(commit)
+
+        if Regex.match?(@oid_pattern, commit),
+          do: {:ok, commit},
+          else: {:error, :invalid_returned_commit}
+
+      _other ->
+        {:error, :invalid_returned_commit}
+    end
+  end
+
+  defp observed_tree(observations, worktree, timeout_ms) do
     has_tree? =
       Map.has_key?(observations, "tree_oid") or Map.has_key?(observations, :tree_oid)
 
-    case {has_tree?, git_output(worktree, ["rev-parse", "--verify", "HEAD^{tree}"])} do
+    case {has_tree?, git_output(worktree, ["rev-parse", "--verify", "HEAD^{tree}"], timeout_ms)} do
       {false, {:ok, tree_oid}} -> Map.put(observations, "tree_oid", tree_oid)
       _other -> observations
     end
@@ -1323,7 +1409,12 @@ defmodule Arbor.Commands.CodingBenchmark do
       "workdir" => worktree
     }
 
-    case safely(fn -> invoke(verifier, verifier_request) end) do
+    case invoke_with_timeout(
+           verifier,
+           verifier_request,
+           runtime.benchmark.execution_timeout_ms,
+           runtime.benchmark.cancellation_timeout_ms
+         ) do
       {:returned, :ok} ->
         objective_result("passed", nil)
 
@@ -1341,6 +1432,9 @@ defmodule Arbor.Commands.CodingBenchmark do
 
       {:caught, reason} ->
         objective_result("failed", "verifier_threw:#{reason}")
+
+      {:timed_out, timeout_ms, _cancellation} ->
+        objective_result("failed", "verifier_timeout:#{timeout_ms}")
     end
   end
 
@@ -1350,16 +1444,21 @@ defmodule Arbor.Commands.CodingBenchmark do
     semantic = projection["semantic"]
     quality = projection["artifact_quality"]
 
-    actual_tree = git_output(workdir, ["rev-parse", "--verify", "HEAD^{tree}"])
+    timeout_ms = verification.git_timeout_ms
+    actual_tree = git_output(workdir, ["rev-parse", "--verify", "HEAD^{tree}"], timeout_ms)
 
     actual_base_tree =
-      git_output(workdir, [
-        "rev-parse",
-        "--verify",
-        "#{request["base_commit_oid"]}^{tree}"
-      ])
+      git_output(
+        workdir,
+        [
+          "rev-parse",
+          "--verify",
+          "#{request["base_commit_oid"]}^{tree}"
+        ],
+        timeout_ms
+      )
 
-    actual_paths = changed_paths(workdir, request["base_commit_oid"])
+    actual_paths = changed_paths(workdir, request["base_commit_oid"], timeout_ms)
     expected_tree = semantic["tree_oid"]
     expected_paths = semantic["changed_files"]
     expected_base_tree = request["base_tree_oid"]
@@ -1414,8 +1513,7 @@ defmodule Arbor.Commands.CodingBenchmark do
          true <- Regex.match?(@hash_pattern, String.downcase(hash)),
          path when is_binary(path) <-
            fetch_value(artifacts, "coding_pipeline_path", :coding_pipeline_path, nil),
-         {:ok, real_path} <- contained_existing_file(path, workdir),
-         {:ok, content} <- File.read(real_path) do
+         {:ok, content} <- read_trusted_artifact(path, workdir, @max_dot_bytes) do
       sha256(content) == String.downcase(hash)
     else
       _other -> false
@@ -1425,10 +1523,20 @@ defmodule Arbor.Commands.CodingBenchmark do
   defp production_provenance_verified(result, trusted_root) do
     with {:ok, artifacts} <- result_artifacts(result),
          {:ok, paths} <- exact_provenance_paths(artifacts, trusted_root),
-         {:ok, dot} <- read_bounded(paths["coding_pipeline_path"], @max_dot_bytes),
-         {:ok, plan_json} <- read_bounded(paths["coding_plan_path"], @max_json_artifact_bytes),
+         {:ok, dot} <-
+           read_trusted_artifact(paths["coding_pipeline_path"], trusted_root, @max_dot_bytes),
+         {:ok, plan_json} <-
+           read_trusted_artifact(
+             paths["coding_plan_path"],
+             trusted_root,
+             @max_json_artifact_bytes
+           ),
          {:ok, manifest_json} <-
-           read_bounded(paths["compile_manifest_path"], @max_json_artifact_bytes),
+           read_trusted_artifact(
+             paths["compile_manifest_path"],
+             trusted_root,
+             @max_json_artifact_bytes
+           ),
          {:ok, plan_map} <- decode_json_object(plan_json),
          {:ok, manifest} <- decode_json_object(manifest_json),
          {:ok, identity} <- Orchestrator.verify_coding_provenance(plan_map, dot, manifest),
@@ -1436,7 +1544,8 @@ defmodule Arbor.Commands.CodingBenchmark do
            fetch_value(artifacts, "graph_hash", :graph_hash, nil) == identity["graph_hash"],
          true <-
            fetch_value(artifacts, "compiler_version", :compiler_version, nil) ==
-             identity["compiler_version"] do
+             identity["compiler_version"],
+         {:ok, ^paths} <- exact_provenance_paths(artifacts, trusted_root) do
       true
     else
       _other -> false
@@ -1497,15 +1606,77 @@ defmodule Arbor.Commands.CodingBenchmark do
   defp artifact_atom_key("coding_pipeline_path"), do: :coding_pipeline_path
   defp artifact_atom_key("compile_manifest_path"), do: :compile_manifest_path
 
-  defp read_bounded(path, max_bytes) do
-    with {:ok, %{type: :regular, size: size}} <- File.stat(path),
-         true <- size > 0 and size <= max_bytes,
-         {:ok, content} <- File.read(path),
-         true <- byte_size(content) == size do
-      {:ok, content}
+  defp read_trusted_artifact(path, trusted_root, max_bytes) do
+    with {:ok, expected} <- trusted_artifact_identity(path, trusted_root),
+         true <- expected.size > 0 and expected.size <= max_bytes do
+      read_open_artifact(path, trusted_root, expected)
     else
       _other -> {:error, :invalid_artifact_file}
     end
+  end
+
+  defp read_open_artifact(path, trusted_root, expected) do
+    case :file.open(String.to_charlist(path), [:read, :binary, :raw]) do
+      {:ok, io} ->
+        try do
+          with {:ok, info_before} <- :file.read_file_info(io, time: :posix),
+               {:ok, handle_before} <-
+                 regular_artifact_identity(File.Stat.from_record(info_before)),
+               true <- same_artifact_identity?(handle_before, expected),
+               :ok <- emit_artifact_opened(path),
+               {:ok, content} <- read_exact_artifact(io, expected.size),
+               :ok <- eof_probe(io),
+               {:ok, info_after} <- :file.read_file_info(io, time: :posix),
+               {:ok, handle_after} <- regular_artifact_identity(File.Stat.from_record(info_after)),
+               true <- same_artifact_identity?(handle_after, expected),
+               {:ok, path_after} <- trusted_artifact_identity(path, trusted_root),
+               true <- same_artifact_identity?(path_after, expected) do
+            {:ok, content}
+          else
+            _other -> {:error, :invalid_artifact_file}
+          end
+        after
+          :file.close(io)
+        end
+
+      {:error, _reason} ->
+        {:error, :invalid_artifact_file}
+    end
+  end
+
+  defp read_exact_artifact(io, size), do: read_exact_artifact(io, size, [])
+
+  defp read_exact_artifact(_io, 0, chunks),
+    do: {:ok, chunks |> Enum.reverse() |> IO.iodata_to_binary()}
+
+  defp read_exact_artifact(io, remaining, chunks) when remaining > 0 do
+    chunk_size = min(remaining, 65_536)
+
+    case :file.read(io, chunk_size) do
+      {:ok, chunk} when byte_size(chunk) == chunk_size ->
+        read_exact_artifact(io, remaining - chunk_size, [chunk | chunks])
+
+      _other ->
+        {:error, :short_read}
+    end
+  end
+
+  defp eof_probe(io) do
+    case :file.read(io, 1) do
+      :eof -> :ok
+      {:ok, <<>>} -> :ok
+      _other -> {:error, :file_changed}
+    end
+  end
+
+  defp emit_artifact_opened(path) do
+    :telemetry.execute(
+      [:arbor, :commands, :coding_benchmark, :artifact_opened],
+      %{count: 1},
+      %{path: path}
+    )
+
+    :ok
   end
 
   defp decode_json_object(content) do
@@ -1550,18 +1721,64 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp changed_paths(workdir, base_commit_oid) do
+  defp trusted_artifact_file(path, trusted_root) do
+    with {:ok, %{type: :directory}} <- File.lstat(trusted_root),
+         {:ok, ^trusted_root} <- SafePath.resolve_real(trusted_root),
+         {:ok, lexical} <- SafePath.resolve_within(path, trusted_root),
+         {:ok, %{type: :regular} = stat} <- File.lstat(lexical),
+         {:ok, real} <- SafePath.resolve_real(lexical),
+         true <- real == lexical,
+         {:ok, ^real} <- SafePath.resolve_within(real, trusted_root) do
+      {:ok, stat}
+    else
+      _other -> {:error, :unsafe_artifact_path}
+    end
+  end
+
+  defp trusted_artifact_identity(path, trusted_root) do
+    with {:ok, stat} <- trusted_artifact_file(path, trusted_root),
+         {:ok, identity} <- regular_artifact_identity(stat) do
+      {:ok, identity}
+    end
+  end
+
+  defp regular_artifact_identity(%File.Stat{type: :regular} = stat)
+       when is_integer(stat.inode) and stat.inode > 0 and is_integer(stat.major_device) and
+              is_integer(stat.minor_device) and is_integer(stat.size) and stat.size >= 0 do
+    {:ok,
+     %{
+       inode: stat.inode,
+       major_device: stat.major_device,
+       minor_device: stat.minor_device,
+       size: stat.size,
+       type: stat.type
+     }}
+  end
+
+  defp regular_artifact_identity(_stat), do: {:error, :unsafe_artifact_path}
+
+  defp same_artifact_identity?(left, right) do
+    left.type == right.type and left.inode == right.inode and
+      left.major_device == right.major_device and left.minor_device == right.minor_device and
+      left.size == right.size
+  end
+
+  defp changed_paths(workdir, base_commit_oid, timeout_ms) do
     with {:ok, tracked} <-
-           git_binary(workdir, [
-             "diff",
-             "--name-only",
-             "-z",
-             "--no-renames",
-             base_commit_oid,
-             "--"
-           ]),
+           git_binary(
+             workdir,
+             [
+               "diff",
+               "--name-only",
+               "-z",
+               "--no-renames",
+               base_commit_oid,
+               "--"
+             ],
+             timeout_ms
+           ),
          {:ok, untracked} <-
-           git_binary(workdir, ["ls-files", "--others", "--exclude-standard", "-z"]),
+           git_binary(workdir, ["ls-files", "--others", "--exclude-standard", "-z"], timeout_ms),
          {:ok, paths} <- nul_paths(tracked <> untracked) do
       {:ok, paths |> Enum.uniq() |> Enum.sort()}
     end
@@ -1763,35 +1980,22 @@ defmodule Arbor.Commands.CodingBenchmark do
     }
   end
 
-  defp git_ok(workdir, args) do
-    case git_binary(workdir, args) do
+  defp git_ok(workdir, args, timeout_ms) do
+    case git_binary(workdir, args, timeout_ms) do
       {:ok, _output} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp git_output(workdir, args) do
-    case git_binary(workdir, args) do
+  defp git_output(workdir, args, timeout_ms) do
+    case git_binary(workdir, args, timeout_ms) do
       {:ok, output} -> {:ok, String.trim(output)}
       error -> error
     end
   end
 
-  defp git_binary(workdir, args) do
-    # Fixed executable and argument vector; no shell interpolation occurs.
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
-    case System.cmd("git", ["-C", workdir | args], stderr_to_stdout: true) do
-      {output, 0} -> {:ok, output}
-      {output, status} -> {:error, "git_failed:#{status}:#{bounded_output(output)}"}
-    end
-  end
-
-  defp bounded_output(output) do
-    output
-    |> reason_string()
-    |> String.replace(~r/\s+/u, " ")
-    |> String.trim()
-    |> String.slice(0, 500)
+  defp git_binary(workdir, args, timeout_ms) do
+    Git.run(workdir, args, timeout_ms)
   end
 
   defp fetch_value(map, string, atom, default) when is_map(map) do
