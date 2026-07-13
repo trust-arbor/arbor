@@ -1109,7 +1109,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.Consensus.Ask,
         Arbor.Actions.Consensus.Await,
         Arbor.Actions.Consensus.Check,
-        Arbor.Actions.Consensus.Decide
+        Arbor.Actions.Consensus.Decide,
+        Arbor.Actions.Consensus.DecideReview
       ],
       review: [
         Arbor.Actions.Review.Synthesize
@@ -2077,6 +2078,7 @@ defmodule Arbor.Actions do
     Arbor.Actions.Consensus.Await => "arbor://consensus/ask",
     Arbor.Actions.Consensus.Check => "arbor://consensus/ask",
     Arbor.Actions.Consensus.Decide => "arbor://consensus/decide",
+    Arbor.Actions.Consensus.DecideReview => "arbor://action/consensus/decide_review",
     Arbor.Actions.Proposal.Submit => "arbor://consensus/propose",
     Arbor.Actions.Proposal.Revise => "arbor://consensus/propose",
 

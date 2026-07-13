@@ -737,6 +737,278 @@ defmodule Arbor.Actions.ConsensusTest do
   end
 
   # ============================================================================
+  # DecideReview — frozen review ledger
+  # ============================================================================
+
+  describe "DecideReview — strict ledger reduction" do
+    @review_perspectives ["correctness", "security", "maintainability"]
+
+    test "initial cycle accepts DOT input and returns JSON-clean ledger context" do
+      results = [
+        make_review_branch("correctness", review_report("approve")),
+        make_review_branch("security", review_report("approve")),
+        make_review_branch("maintainability", review_report("abstain"))
+      ]
+
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{
+                   "parallel.results" => results,
+                   "review_cycle" => "1",
+                   "finding_ledger" => review_ledger()
+                 },
+                 %{}
+               )
+
+      assert result["decision"] == "approved"
+      assert result["review_disposition"] == "accept"
+      assert result["quorum_met"]
+      assert result["review_cycle"] == 1
+
+      assert result["perspective_votes"] == %{
+               "correctness" => "approve",
+               "security" => "approve",
+               "maintainability" => "abstain"
+             }
+
+      assert result["finding_ledger"]["review_cycle"] == 1
+      assert {:ok, _encoded} = Jason.encode(result)
+    end
+
+    test "applies a fixed finding on the exact next cycle" do
+      finding = review_finding("must be fixed", "blocking", 10)
+
+      assert {:ok, first} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("reject", new_findings: [finding])
+                     )
+                   ],
+                   review_cycle: 1,
+                   finding_ledger: review_ledger(),
+                   delta_ranges: %{}
+                 },
+                 %{}
+               )
+
+      [stored] = first["findings"]
+
+      assert {:ok, second} =
+               Consensus.DecideReview.run(
+                 %{
+                   "parallel.results" => [
+                     make_review_branch(
+                       "correctness",
+                       review_report("approve",
+                         finding_updates: [%{"id" => stored["id"], "state" => "fixed"}]
+                       )
+                     ),
+                     make_review_branch("security", review_report("approve")),
+                     make_review_branch("maintainability", review_report("approve"))
+                   ],
+                   "review_cycle" => "2",
+                   "finding_ledger" => first["finding_ledger"],
+                   "delta_ranges" => %{}
+                 },
+                 %{}
+               )
+
+      assert second["decision"] == "approved"
+      assert second["review_disposition"] == "accept"
+      assert [fixed] = second["findings"]
+      assert fixed["id"] == stored["id"]
+      assert fixed["state"] == "fixed"
+    end
+
+    test "corroborated major findings block through the ledger" do
+      finding = review_finding("shared major", "major", 20)
+
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("approve", new_findings: [finding])
+                     ),
+                     make_review_branch(
+                       "security",
+                       review_report("approve", new_findings: [finding])
+                     )
+                   ],
+                   review_cycle: 1,
+                   finding_ledger: review_ledger()
+                 },
+                 %{}
+               )
+
+      assert result["decision"] == "deadlock"
+      assert result["review_disposition"] == "rework"
+      assert result["blocking_ids"] |> length() == 2
+      assert Enum.all?(result["blocking_reasons"], &(&1["reason"] == "corroborated_major"))
+      refute result["human_required"]
+    end
+
+    test "routes an out-of-delta new finding to the side channel" do
+      assert {:ok, initial} =
+               Consensus.DecideReview.run(
+                 %{results: [], review_cycle: 1, finding_ledger: review_ledger()},
+                 %{}
+               )
+
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("approve",
+                         new_findings: [review_finding("old code", "major", 20)]
+                       )
+                     )
+                   ],
+                   review_cycle: 2,
+                   finding_ledger: initial["finding_ledger"],
+                   delta_ranges: %{"lib/a.ex" => [[1, 5]]}
+                 },
+                 %{}
+               )
+
+      assert result["decision"] == "approved"
+      assert result["findings"] == []
+      assert [%{"reason" => "outside_delta", "state" => "out_of_scope"}] = result["out_of_scope"]
+    end
+
+    test "all abstentions remain a rework decision" do
+      results =
+        Enum.map(@review_perspectives, fn perspective ->
+          make_review_branch(perspective, review_report("abstain"))
+        end)
+
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{results: results, review_cycle: 1, finding_ledger: review_ledger()},
+                 %{}
+               )
+
+      assert result["decision"] == "deadlock"
+      assert result["review_disposition"] == "rework"
+      assert result["abstain_count"] == 3
+      refute result["quorum_met"]
+    end
+
+    test "failed, malformed, and unknown reports become abstentions without prose vote inference" do
+      results = [
+        make_review_branch("correctness", review_report("approve")),
+        make_review_branch("security", review_report("reject"), "fail"),
+        make_review_branch("maintainability", "I approve this code"),
+        make_review_branch("unknown", review_report("reject"))
+      ]
+
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{results: results, review_cycle: 1, finding_ledger: review_ledger()},
+                 %{}
+               )
+
+      assert result["perspective_votes"]["security"] == "abstain"
+      assert result["perspective_votes"]["maintainability"] == "abstain"
+      assert result["approve_count"] == 1
+      assert result["abstain_count"] == 2
+    end
+
+    test "projects a security veto as rejected human review" do
+      results = [
+        make_review_branch("correctness", review_report("approve")),
+        make_review_branch("security", review_report("reject"))
+      ]
+
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{results: results, review_cycle: 1, finding_ledger: review_ledger()},
+                 %{}
+               )
+
+      assert result["decision"] == "rejected"
+      assert result["review_disposition"] == "human_review"
+      assert result["security_veto"]
+      assert result["human_required"]
+      refute result["quorum_met"]
+    end
+
+    test "fails closed on duplicate valid perspective reports" do
+      results = [
+        make_review_branch("correctness", review_report("approve")),
+        make_review_branch("correctness", review_report("reject"))
+      ]
+
+      assert {:error,
+              %{
+                "code" => "consensus_decide_review_failed",
+                "reason" => "ambiguous_duplicate_perspective_report"
+              }} =
+               Consensus.DecideReview.run(
+                 %{results: results, review_cycle: 1, finding_ledger: review_ledger()},
+                 %{}
+               )
+    end
+
+    test "fails closed when a branch has conflicting exact perspective identities" do
+      branch =
+        make_review_branch("correctness", review_report("approve"))
+        |> Map.put("perspective", "security")
+
+      assert {:error,
+              %{
+                "code" => "consensus_decide_review_failed",
+                "reason" => "ambiguous_branch_perspective"
+              }} =
+               Consensus.DecideReview.run(
+                 %{results: [branch], review_cycle: 1, finding_ledger: review_ledger()},
+                 %{}
+               )
+    end
+
+    test "fails closed on invalid cycle, ledger, and delta ranges" do
+      assert {:error, %{"reason" => "invalid_review_cycle"}} =
+               Consensus.DecideReview.run(
+                 %{results: [], review_cycle: "01", finding_ledger: review_ledger()},
+                 %{}
+               )
+
+      assert {:error, %{"reason" => "invalid_finding_ledger"}} =
+               Consensus.DecideReview.run(
+                 %{results: [], review_cycle: 1, finding_ledger: %{"version" => "forged"}},
+                 %{}
+               )
+
+      assert {:error, %{"reason" => "invalid_delta_ranges"}} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [],
+                   review_cycle: 1,
+                   finding_ledger: review_ledger(),
+                   delta_ranges: %{"lib/a.ex" => [[1, 1], [1, 2]]}
+                 },
+                 %{}
+               )
+    end
+
+    test "does not change generic consensus text vote behavior" do
+      results = [
+        make_text_result("security", "I approve of this design."),
+        make_text_result("stability", "I approve with reservations.")
+      ]
+
+      assert {:ok, %{decision: "approved"}} =
+               Consensus.Decide.run(%{results: results, question: "generic behavior"}, %{})
+    end
+  end
+
+  # ============================================================================
   # Module structure
   # ============================================================================
 
@@ -747,7 +1019,8 @@ defmodule Arbor.Actions.ConsensusTest do
         Consensus.Ask,
         Consensus.Await,
         Consensus.Check,
-        Consensus.Decide
+        Consensus.Decide,
+        Consensus.DecideReview
       ]
 
       for mod <- modules do
@@ -755,6 +1028,31 @@ defmodule Arbor.Actions.ConsensusTest do
         assert function_exported?(mod, :run, 2), "#{inspect(mod)} should export run/2"
       end
     end
+  end
+
+  defp make_review_branch(perspective, report, status \\ "success") do
+    %{
+      "id" => perspective,
+      "status" => status,
+      "context_updates" => %{
+        "last_response" => if(is_binary(report), do: report, else: Jason.encode!(report))
+      }
+    }
+  end
+
+  defp review_ledger, do: %{"perspectives" => @review_perspectives}
+
+  defp review_report(vote, opts \\ []) do
+    Map.merge(%{"vote" => vote, "finding_updates" => [], "new_findings" => []}, Map.new(opts))
+  end
+
+  defp review_finding(title, severity, line) do
+    %{
+      "title" => title,
+      "required_action" => "Address #{title}",
+      "severity" => severity,
+      "anchor" => %{"path" => "lib/a.ex", "side" => "new", "line" => line}
+    }
   end
 
   # ============================================================================

@@ -635,4 +635,230 @@ defmodule Arbor.Actions.Consensus do
       |> Enum.uniq()
     end
   end
+
+  # ============================================================================
+  # DecideReview
+  # ============================================================================
+
+  defmodule DecideReview do
+    @moduledoc """
+    Reduce strict reviewer reports into a frozen code-review finding ledger.
+
+    Unlike `Decide`, this action accepts only a JSON object matching
+    `ReviewLedgerCore`'s report contract. It never infers votes or findings from
+    prose. Missing, failed, malformed, and unknown branch reports remain
+    abstentions through the ledger's complete-perspective vote set.
+    """
+    use Jido.Action,
+      name: "consensus_decide_review",
+      description: "Apply strict code-review reports to a frozen finding ledger",
+      schema: [
+        results: [type: {:list, :map}, required: false, doc: "Parallel reviewer branch results"],
+        review_cycle: [type: :any, required: false, doc: "Next review cycle"],
+        finding_ledger: [type: :map, required: false, doc: "Frozen finding ledger"],
+        delta_ranges: [type: :map, required: false, doc: "Changed line ranges for a recheck"]
+      ]
+
+    alias Arbor.Actions.Coding.ReviewLedgerCore
+
+    @impl true
+    def run(params, _context) when is_map(params) do
+      with {:ok, results} <- results_param(params),
+           {:ok, review_cycle} <- review_cycle_param(params),
+           {:ok, finding_ledger} <- finding_ledger_param(params),
+           {:ok, delta_ranges} <- delta_ranges_param(params),
+           {:ok, ledger} <- ReviewLedgerCore.new(finding_ledger),
+           {:ok, reports} <- strict_reports(results, ledger, review_cycle, delta_ranges),
+           {:ok, completed_ledger} <-
+             ReviewLedgerCore.apply_cycle(ledger, review_cycle, %{
+               "reports" => reports,
+               "delta_ranges" => delta_ranges
+             }) do
+        {:ok, result_for(completed_ledger)}
+      else
+        {:error, reason} -> review_error(reason)
+      end
+    end
+
+    def run(_params, _context), do: review_error(:invalid_params)
+
+    defp results_param(params) do
+      case param(params, ["parallel.results", :results, "results"], []) do
+        results when is_list(results) -> {:ok, results}
+        _other -> {:error, :invalid_parallel_results}
+      end
+    end
+
+    defp review_cycle_param(params) do
+      params
+      |> param(["review_cycle", "review.cycle", :review_cycle], :missing)
+      |> parse_review_cycle()
+    end
+
+    defp finding_ledger_param(params) do
+      case param(params, ["finding_ledger", "review.finding_ledger", :finding_ledger], %{}) do
+        ledger when is_map(ledger) -> {:ok, ledger}
+        _other -> {:error, :invalid_finding_ledger}
+      end
+    end
+
+    defp delta_ranges_param(params) do
+      case param(params, ["delta_ranges", "review.delta_ranges", :delta_ranges], %{}) do
+        ranges when is_map(ranges) -> {:ok, ranges}
+        _other -> {:error, :invalid_delta_ranges}
+      end
+    end
+
+    defp param(params, keys, default) do
+      Enum.find_value(keys, default, fn key ->
+        case Map.fetch(params, key) do
+          {:ok, value} -> {:found, value}
+          :error -> false
+        end
+      end)
+      |> case do
+        {:found, value} -> value
+        value -> value
+      end
+    end
+
+    defp parse_review_cycle(cycle) when is_integer(cycle) and cycle > 0, do: {:ok, cycle}
+
+    defp parse_review_cycle(cycle) when is_binary(cycle) do
+      case Integer.parse(cycle) do
+        {number, ""} when number > 0 ->
+          if Integer.to_string(number) == cycle,
+            do: {:ok, number},
+            else: {:error, :invalid_review_cycle}
+
+        _ ->
+          {:error, :invalid_review_cycle}
+      end
+    end
+
+    defp parse_review_cycle(_cycle), do: {:error, :invalid_review_cycle}
+
+    defp strict_reports(results, ledger, review_cycle, delta_ranges) do
+      Enum.reduce_while(results, {:ok, %{}}, fn branch, {:ok, reports} ->
+        case strict_report(branch, ledger, review_cycle, delta_ranges) do
+          {:ok, perspective, report} ->
+            if Map.has_key?(reports, perspective) do
+              {:halt, {:error, :ambiguous_duplicate_perspective_report}}
+            else
+              {:cont, {:ok, Map.put(reports, perspective, report)}}
+            end
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+
+          :abstain ->
+            {:cont, {:ok, reports}}
+        end
+      end)
+    end
+
+    defp strict_report(branch, ledger, review_cycle, delta_ranges) when is_map(branch) do
+      with {:ok, perspective} <- branch_perspective(branch),
+           true <- perspective in ledger["perspectives"],
+           true <- Map.get(branch, "status") in ["success", "partial_success"],
+           %{} = context_updates <- Map.get(branch, "context_updates"),
+           response when is_binary(response) <- Map.get(context_updates, "last_response"),
+           {:ok, report} when is_map(report) <- Jason.decode(response),
+           true <- valid_report?(ledger, review_cycle, delta_ranges, perspective, report) do
+        {:ok, perspective, report}
+      else
+        {:error, :ambiguous_branch_perspective} -> {:error, :ambiguous_branch_perspective}
+        _other -> :abstain
+      end
+    end
+
+    defp strict_report(_branch, _ledger, _review_cycle, _delta_ranges), do: :abstain
+
+    defp branch_perspective(branch) do
+      case {Map.get(branch, "id"), Map.get(branch, "perspective")} do
+        {id, nil} when is_binary(id) ->
+          {:ok, id}
+
+        {nil, perspective} when is_binary(perspective) ->
+          {:ok, perspective}
+
+        {id, id} when is_binary(id) ->
+          {:ok, id}
+
+        {id, perspective} when is_binary(id) and is_binary(perspective) ->
+          {:error, :ambiguous_branch_perspective}
+
+        _other ->
+          :abstain
+      end
+    end
+
+    defp valid_report?(ledger, review_cycle, delta_ranges, perspective, report) do
+      match?(
+        {:ok, _},
+        ReviewLedgerCore.apply_cycle(ledger, review_cycle, %{
+          "reports" => %{perspective => report},
+          "delta_ranges" => delta_ranges
+        })
+      )
+    end
+
+    defp result_for(ledger) do
+      context = ReviewLedgerCore.to_context(ledger)
+      decision = context["review.decision"]
+      counts = decision["vote_counts"]
+      disposition = decision["disposition"]
+
+      %{
+        "decision" => top_level_decision(disposition),
+        "approve_count" => counts["approve"],
+        "reject_count" => counts["reject"],
+        "abstain_count" => counts["abstain"],
+        "quorum_met" => disposition == "accept",
+        "perspective_votes" => latest_votes(ledger),
+        "security_veto" => decision["security_veto"],
+        "status" => "decided",
+        "review_cycle" => ledger["review_cycle"],
+        "finding_ledger" => ledger,
+        "findings" => context["review.findings"],
+        "out_of_scope" => context["review.out_of_scope"],
+        "review_disposition" => disposition,
+        "blocking_ids" => decision["blocking_ids"],
+        "blocking_reasons" => decision["blocking_reasons"],
+        "human_required" => disposition == "human_review"
+      }
+    end
+
+    defp latest_votes(ledger) do
+      get_in(ledger, ["cycles", Integer.to_string(ledger["review_cycle"]), "votes"]) || %{}
+    end
+
+    defp top_level_decision("accept"), do: "approved"
+    defp top_level_decision("human_review"), do: "rejected"
+    defp top_level_decision(_disposition), do: "deadlock"
+
+    defp review_error(reason) do
+      {:error,
+       %{
+         "code" => "consensus_decide_review_failed",
+         "reason" => error_reason(reason)
+       }}
+    end
+
+    defp error_reason(:ambiguous_duplicate_perspective_report),
+      do: "ambiguous_duplicate_perspective_report"
+
+    defp error_reason(:ambiguous_branch_perspective), do: "ambiguous_branch_perspective"
+
+    defp error_reason(:invalid_delta_ranges), do: "invalid_delta_ranges"
+    defp error_reason(:invalid_finding_ledger), do: "invalid_finding_ledger"
+    defp error_reason(:invalid_ledger), do: "invalid_finding_ledger"
+    defp error_reason(:invalid_ledger_options), do: "invalid_finding_ledger"
+    defp error_reason(:ledger_perspectives_mismatch), do: "invalid_finding_ledger"
+    defp error_reason(:invalid_parallel_results), do: "invalid_parallel_results"
+    defp error_reason(:invalid_params), do: "invalid_params"
+    defp error_reason(:invalid_review_cycle), do: "invalid_review_cycle"
+    defp error_reason(:unexpected_review_cycle), do: "unexpected_review_cycle"
+    defp error_reason(_reason), do: "invalid_review_input"
+  end
 end

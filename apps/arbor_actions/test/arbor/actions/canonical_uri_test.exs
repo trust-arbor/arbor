@@ -97,6 +97,18 @@ defmodule Arbor.Actions.CanonicalUriTest do
       assert "arbor://action/coding/cross_app/validate" in Actions.action_namespace_uri_prefixes()
     end
 
+    test "review ledger decision action is registered under its exact canonical URI" do
+      action = Arbor.Actions.Consensus.DecideReview
+
+      assert action in Actions.all_actions()
+      assert {:ok, ^action} = Actions.name_to_module("consensus_decide_review")
+
+      assert Actions.canonical_uri_for(action, %{}) ==
+               "arbor://action/consensus/decide_review"
+
+      assert "arbor://action/consensus/decide_review" in Actions.action_namespace_uri_prefixes()
+    end
+
     test "action namespace URI prefixes are generated and registered without a broad prefix" do
       prefixes = Actions.action_namespace_uri_prefixes()
 
