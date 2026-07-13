@@ -27,7 +27,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Arbor.Actions.Coding.ReviewTree.Read,
     Arbor.Actions.Coding.ReviewTree.Search,
     Arbor.Actions.Council.ReviewChange,
-    Arbor.Actions.Consensus.Decide
+    Arbor.Actions.Consensus.DecideReview
   ]
 
   setup_all do
@@ -59,6 +59,95 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              "route_publish",
              "context.submit_review=false"
            )
+  end
+
+  test "review convergence mutations fail closed before execution", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      update_in(
+        graph.nodes["load_committed_change"].attrs["context_keys"],
+        &String.replace(&1, ",prior_commit", "")
+      ),
+      update_in(
+        graph.nodes["review_change"].attrs["context_keys"],
+        &String.replace(&1, ",finding_ledger", "")
+      ),
+      replace_edge_target(
+        graph,
+        "review_change",
+        "hoist_review_finding_ledger",
+        "outcome=success",
+        "route_review"
+      ),
+      replace_edge_target(
+        graph,
+        "route_review_material",
+        "prep_review_delta_diff",
+        "context.review_cycle=2",
+        "route_prepared_review"
+      ),
+      replace_edge_target(
+        graph,
+        "snapshot_review_prior_candidate_commit",
+        "inc_review_cycle",
+        nil,
+        "inc_review_rework_count"
+      )
+    ]
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               SemanticPreflight.validate(mutated, profile["semantic_policy"],
+                 review_profile: "binding"
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] in [
+                 "review_convergence_node_mismatch",
+                 "review_convergence_topology_mismatch"
+               ]
+             end)
+    end
+  end
+
+  test "security overlay cannot bypass shared delta or validation cycle wiring", ctx do
+    assert {:ok, compilation} = compile(security_plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    mutations = [
+      replace_edge_target(
+        graph,
+        "route_prepared_review",
+        "prep_review_validation_profile",
+        nil,
+        "review_change"
+      ),
+      replace_edge_target(
+        graph,
+        "snapshot_validation_prior_candidate_commit",
+        "inc_validation_review_cycle",
+        nil,
+        "inc_validation_rework_count"
+      )
+    ]
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               SemanticPreflight.validate(mutated, profile["semantic_policy"],
+                 review_profile: "binding"
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] in [
+                 "review_convergence_topology_mismatch",
+                 "security_topology_mismatch"
+               ]
+             end)
+    end
   end
 
   test "legacy review_profile=none keeps skip-review topology and passes without review dominance",
@@ -914,8 +1003,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     template_override =
       String.replace(
         ctx.template_source,
-        ~s(action="council_review_change",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash",),
-        ~s(action="council_review_change",\n    agent_id="agent_forged",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash",),
+        ~s(action="council_review_change",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",),
+        ~s(action="council_review_change",\n    agent_id="agent_forged",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",),
         global: false
       )
 
@@ -1074,8 +1163,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     bypassed =
       String.replace(
         ctx.template_source,
-        ~s(review_change -> route_review [condition="outcome=success"]),
-        ~s(review_change -> route_review [condition="outcome=success"]\n  review_change -> route_publish [condition="context.bypass_review_routing=true"])
+        ~s(review_change -> hoist_review_finding_ledger [condition="outcome=success"]),
+        ~s(review_change -> hoist_review_finding_ledger [condition="outcome=success"]\n  review_change -> route_publish [condition="context.bypass_review_routing=true"])
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} = compile(plan!(), ctx, bypassed)
@@ -1418,6 +1507,19 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     graph.edges
     |> Enum.find(&(&1.from == from and &1.attrs["condition"] == condition))
     |> Map.fetch!(:to)
+  end
+
+  defp replace_edge_target(graph, from, to, condition, replacement) do
+    edges =
+      Enum.map(graph.edges, fn edge ->
+        if edge.from == from and edge.to == to and Map.get(edge.attrs, "condition") == condition do
+          %{edge | to: replacement}
+        else
+          edge
+        end
+      end)
+
+    %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}
   end
 
   defp minimal_compiled_graph do

@@ -32,7 +32,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Git.Commit,
     Arbor.Actions.Git.PR,
     Arbor.Actions.Council.ReviewChange,
-    Arbor.Actions.Consensus.Decide
+    Arbor.Actions.Consensus.DecideReview
   ]
 
   setup_all do
@@ -144,6 +144,22 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "validate")["action"] == "mix_compile"
     assert node_attrs(graph, "validate")["param.warnings_as_errors"] == true
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
+
+    assert node_attrs(graph, "load_committed_change")["context_keys"] ==
+             "workspace_id,commit,prior_commit"
+
+    assert edge_target(graph, "review_change", "outcome=success") ==
+             "hoist_review_finding_ledger"
+
+    assert edge_target(graph, "route_review_material", "context.review_cycle=1") ==
+             "route_prepared_review"
+
+    assert edge_target(graph, "route_review_material", "context.review_cycle=2") ==
+             "prep_review_delta_diff"
+
+    assert edge_target(graph, "snapshot_review_prior_candidate_commit", nil) ==
+             "inc_review_cycle"
+
     assert node_attrs(graph, "classify_profile")["expression"] == "default"
     assert node_attrs(graph, "open_worker")["param.permission_mode"] == "deny"
     assert node_attrs(graph, "open_worker")["param.use_pool"] == "true"
@@ -195,7 +211,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert "arbor://action/mix/compile" in compilation.execution_manifest["capability_uris"]
 
     assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
-             binding["name"] == "consensus_decide"
+             binding["name"] == "consensus_decide_review"
            end)
 
     for action_name <- ~w(coding_review_tree_read coding_review_tree_search) do
@@ -217,6 +233,16 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
                binding["module"] == Atom.to_string(Arbor.Actions.Mix.Compile) and
                binding["beam_sha256"] =~ ~r/^[0-9a-f]{64}$/
            end)
+  end
+
+  test "current nested code-review council requires consensus_decide_review", ctx do
+    actions =
+      Enum.reject(ctx.action_catalog["actions"], &(&1["name"] == "consensus_decide_review"))
+
+    catalog = %{"actions" => actions, "digest" => canonical_digest(actions)}
+
+    assert {:error, {:referenced_action_missing, "consensus_decide_review"}} =
+             compile_with_catalog(plan!(), ctx, ctx.template_source, catalog)
   end
 
   test "worker continuity policy compiles only to StartSession static parameters", ctx do
@@ -303,10 +329,22 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute validate["context_keys"] =~ "test_paths"
 
     assert node_attrs(graph, "review_change")["context_keys"] ==
-             "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,test_paths,validation_profile"
+             "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile"
 
     assert node_attrs(graph, "prep_review_validation_profile")["expression"] ==
              "security_regression"
+
+    assert edge_target(graph, "route_prepared_review", nil) ==
+             "prep_review_validation_profile"
+
+    assert edge_target(
+             graph,
+             "check_validation_total_budget",
+             "context.total_rework_count<2"
+           ) == "snapshot_validation_prior_commit"
+
+    assert edge_target(graph, "snapshot_validation_prior_candidate_commit", nil) ==
+             "inc_validation_review_cycle"
 
     assert node_attrs(graph, "hoist_review_attestation_id") == %{
              "type" => "transform",
@@ -526,7 +564,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
                "legacy_status_review_requires_rework"
              ) == "context.total_rework_count>=#{max_cycles}"
 
-      assert edge_condition(graph, "check_review_total_budget", "inc_review_rework_count") ==
+      assert edge_condition(graph, "check_review_total_budget", "snapshot_review_prior_commit") ==
                "context.total_rework_count<#{max_cycles}"
 
       assert edge_condition(

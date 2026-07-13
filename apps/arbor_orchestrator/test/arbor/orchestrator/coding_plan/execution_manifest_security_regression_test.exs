@@ -8,7 +8,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     UnrelatedBindingAction
   }
 
-  alias Arbor.Actions.Consensus.Decide
+  alias Arbor.Actions.Consensus.DecideReview
   alias Arbor.Actions.Coding.ReviewTree.{Read, Search}
 
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
@@ -76,10 +76,36 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
   test "declared nested graph closure binds its source, topology, capabilities, and egress" do
     graph = compiled_graph!(@nested_parent_dot)
     graph_hash = sha256(@nested_parent_dot)
-    catalog = catalog!([Decide, Read, Search, BindingOriginalAction])
+    catalog = catalog!([DecideReview, Read, Search, BindingOriginalAction])
 
     assert {:ok, {manifest, _digest}} = ExecutionManifest.build(graph, catalog, graph_hash)
-    assert {:ok, consensus} = ActionCatalog.fetch(catalog, "consensus_decide")
+    assert {:ok, consensus} = ActionCatalog.fetch(catalog, "consensus_decide_review")
+    assert consensus["resource_uri"] == "arbor://action/consensus/decide_review"
+
+    assert consensus["parameters_schema"] == %{
+             "additionalProperties" => false,
+             "properties" => %{
+               "delta_ranges" => %{
+                 "description" => "Changed line ranges for a recheck",
+                 "type" => "string"
+               },
+               "finding_ledger" => %{
+                 "description" => "Frozen finding ledger",
+                 "type" => "string"
+               },
+               "results" => %{
+                 "description" => "Parallel reviewer branch results",
+                 "type" => "string"
+               },
+               "review_cycle" => %{
+                 "description" => "Next review cycle",
+                 "type" => "string"
+               }
+             },
+             "required" => [],
+             "type" => "object"
+           }
+
     assert [%{"id" => "code_review_council"} = nested_graph] = manifest["nested_graphs"]
     assert manifest["version"] == 3
     assert nested_graph["execution_manifest"]["version"] == 2
@@ -89,7 +115,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     assert Enum.any?(manifest["actions"], &(&1["name"] == "coding_review_tree_read"))
     assert Enum.any?(manifest["actions"], &(&1["name"] == "coding_review_tree_search"))
     assert consensus["resource_uri"] in manifest["capability_uris"]
-    assert Enum.any?(manifest["egress"], &(&1["action"] == "consensus_decide"))
+    assert Enum.any?(manifest["egress"], &(&1["action"] == "consensus_decide_review"))
     assert "parallel" in Enum.map(manifest["handlers"], & &1["handler_type"])
     assert "compute" in Enum.map(manifest["handlers"], & &1["handler_type"])
     assert nested_graph["source_id"] == "arbor_actions:priv/pipelines/code-review-council.dot"
@@ -153,7 +179,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
       assert {:error, {:invalid_nested_graphs_declaration, ^reason}} =
                ExecutionManifest.build(
                  compiled_graph!(dot),
-                 catalog!([Decide, BindingOriginalAction]),
+                 catalog!([DecideReview, BindingOriginalAction]),
                  sha256(dot)
                )
     end
@@ -163,7 +189,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     assert {:error, {:unknown_nested_graph, "unknown_graph"}} =
              ExecutionManifest.build(
                compiled_graph!(unknown_dot),
-               catalog!([Decide]),
+               catalog!([DecideReview]),
                sha256(unknown_dot)
              )
   end
@@ -216,7 +242,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
         graph [nested_graphs="code_review_council"]
       """)
 
-    catalog = catalog!([BindingOriginalAction, Decide, Read, Search])
+    catalog = catalog!([BindingOriginalAction, DecideReview, Read, Search])
 
     assert {:ok, {direct_manifest, direct_digest}} =
              ExecutionManifest.build(compiled_graph!(direct_dot), catalog, sha256(direct_dot))
@@ -229,7 +255,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
   end
 
   test "subset is reflexive while declared child policy pins the exact nested topology" do
-    catalog = catalog!([Decide, Read, Search, BindingOriginalAction])
+    catalog = catalog!([DecideReview, Read, Search, BindingOriginalAction])
     parent = manifest!(@nested_parent_dot, catalog)
     child_dot = code_review_council_dot()
     child_graph = compiled_graph!(child_dot)

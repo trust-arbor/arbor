@@ -653,10 +653,10 @@ defmodule Arbor.Actions.Consensus do
       name: "consensus_decide_review",
       description: "Apply strict code-review reports to a frozen finding ledger",
       schema: [
-        results: [type: {:list, :map}, required: false, doc: "Parallel reviewer branch results"],
+        results: [type: :any, required: false, doc: "Parallel reviewer branch results"],
         review_cycle: [type: :any, required: false, doc: "Next review cycle"],
-        finding_ledger: [type: :map, required: false, doc: "Frozen finding ledger"],
-        delta_ranges: [type: :map, required: false, doc: "Changed line ranges for a recheck"]
+        finding_ledger: [type: :any, required: false, doc: "Frozen finding ledger"],
+        delta_ranges: [type: :any, required: false, doc: "Changed line ranges for a recheck"]
       ]
 
     alias Arbor.Actions.Coding.ReviewLedgerCore

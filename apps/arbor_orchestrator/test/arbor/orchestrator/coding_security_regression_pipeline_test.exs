@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
   @action_modules [
     Arbor.Actions.Acp.StartSession,
     Arbor.Actions.Acp.SendMessage,
+    Arbor.Actions.Acp.SessionStatus,
     Arbor.Actions.Acp.CloseSession,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.ReviewTree.Read,
@@ -18,11 +19,12 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     Arbor.Actions.Coding.Workspace.Inspect,
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
+    Arbor.Actions.Coding.Workspace.RecoverySummary,
     Arbor.Actions.Coding.ReviewedCommit,
     Arbor.Actions.Git.Commit,
     Arbor.Actions.Git.PR,
     Arbor.Actions.Council.ReviewChange,
-    Arbor.Actions.Consensus.Decide
+    Arbor.Actions.Consensus.DecideReview
   ]
 
   defmodule FakeActionsExecutor do
@@ -152,20 +154,35 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
       else
         commit = args["commit"]
 
-        {:ok,
-         %{
-           workspace_id: "ws_security_fixture",
-           commit_hash: commit,
-           diff: "diff for #{commit}",
-           files: ["test/security_regression_test.exs", "lib/security.ex"],
-           base_ref: "base-commit",
-           branch: "arbor/security-fixture",
-           worktree_path: "/tmp/ws_security_fixture"
-         }}
+        result = %{
+          workspace_id: "ws_security_fixture",
+          commit_hash: commit,
+          diff: "diff for #{commit}",
+          files: ["test/security_regression_test.exs", "lib/security.ex"],
+          base_ref: "base-commit",
+          branch: "arbor/security-fixture",
+          worktree_path: "/tmp/ws_security_fixture"
+        }
+
+        result =
+          case args["prior_commit"] do
+            prior when is_binary(prior) and prior != "" ->
+              Map.merge(result, %{
+                prior_candidate_commit: prior,
+                delta_diff: "security delta for #{commit}",
+                delta_files: ["lib/security.ex"],
+                delta_ranges: %{"lib/security.ex" => [[1, 4]]}
+              })
+
+            _other ->
+              result
+          end
+
+        {:ok, result}
       end
     end
 
-    defp dispatch("council_review_change", _args, scenario, state) do
+    defp dispatch("council_review_change", args, scenario, state) do
       review_index = bump(state, :review)
 
       case scenario do
@@ -178,25 +195,26 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
             "verdict" => %{"weaknesses" => ["security_veto"]}
           }
 
-          {:ok,
-           %{
-             status: "reviewed",
-             tier_decision: "human_review",
-             recommendation: "revise",
-             decision: "deadlock",
-             approve_count: 0,
-             reject_count: 0,
-             abstain_count: 0,
-             quorum_met: false,
-             human_required: true,
-             security_veto: true,
-             authority_widening: false,
-             blast_radius: "high",
-             tier_reasons: ["security_veto", "quorum_not_met"],
-             persistence: %{"status" => "recorded"},
-             feedback: feedback,
-             feedback_json: Jason.encode!(feedback)
-           }}
+          result = %{
+            status: "reviewed",
+            tier_decision: "human_review",
+            recommendation: "revise",
+            decision: "deadlock",
+            approve_count: 0,
+            reject_count: 0,
+            abstain_count: 0,
+            quorum_met: false,
+            human_required: true,
+            security_veto: true,
+            authority_widening: false,
+            blast_radius: "high",
+            tier_reasons: ["security_veto", "quorum_not_met"],
+            persistence: %{"status" => "recorded"},
+            feedback: feedback,
+            feedback_json: Jason.encode!(feedback)
+          }
+
+          {:ok, Map.merge(result, review_decision_fields("human_review", args))}
 
         _other ->
           tier =
@@ -212,7 +230,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
                 "auto_proceed"
             end
 
-          result = review_payload(tier)
+          result = review_payload(tier, args)
 
           if tier in ["auto_proceed", "human_review"] do
             {:ok, Map.put(result, :review_attestation_id, "attestation-#{review_index}")}
@@ -260,32 +278,95 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
 
     defp dispatch(name, _args, _scenario, _state), do: {:error, "unexpected action: #{name}"}
 
-    defp review_payload(tier) do
+    defp review_payload(tier, args) do
       feedback = %{
         "recommendation" => if(tier == "rework", do: "revise", else: "keep"),
         "tier" => %{"decision" => tier},
         "verdict" => %{"weaknesses" => []}
       }
 
+      Map.merge(
+        %{
+          status: "reviewed",
+          tier_decision: tier,
+          recommendation: if(tier == "rework", do: "revise", else: "keep"),
+          decision: "approved",
+          approve_count: 1,
+          reject_count: 0,
+          abstain_count: 0,
+          quorum_met: true,
+          human_required: tier == "human_review",
+          security_veto: false,
+          authority_widening: false,
+          blast_radius: "low",
+          tier_reasons: ["fixture"],
+          persistence: %{"status" => "recorded"},
+          feedback: feedback,
+          feedback_json: Jason.encode!(feedback)
+        },
+        review_decision_fields(tier, args)
+      )
+    end
+
+    defp review_decision_fields(tier, args) do
+      cycle = parse_cycle(args["review_cycle"])
+      ledger = args["finding_ledger"] || %{}
+      findings = Map.get(ledger, "findings", %{})
+
+      updates =
+        if tier == "rework" do
+          []
+        else
+          Enum.map(findings, fn {id, _finding} -> %{"id" => id, "state" => "fixed"} end)
+        end
+
+      new_findings =
+        if tier == "rework" and cycle == 1 do
+          [
+            %{
+              "severity" => "blocking",
+              "title" => "security fixture blocker",
+              "required_action" => "fix the security fixture blocker",
+              "anchor" => %{"path" => "lib/security.ex", "side" => "new", "line" => 1},
+              "evidence" => "fixture evidence"
+            }
+          ]
+        else
+          []
+        end
+
+      report = %{
+        "vote" => if(tier == "rework", do: "reject", else: "approve"),
+        "finding_updates" => updates,
+        "new_findings" => new_findings
+      }
+
+      branch = %{
+        "id" => "security",
+        "status" => "success",
+        "context_updates" => %{"last_response" => Jason.encode!(report)}
+      }
+
+      {:ok, decision} =
+        Arbor.Actions.Consensus.DecideReview.run(
+          %{
+            results: [branch],
+            review_cycle: cycle,
+            finding_ledger: ledger,
+            delta_ranges: args["delta_ranges"] || %{}
+          },
+          %{}
+        )
+
       %{
-        status: "reviewed",
-        tier_decision: tier,
-        recommendation: if(tier == "rework", do: "revise", else: "keep"),
-        decision: "approved",
-        approve_count: 1,
-        reject_count: 0,
-        abstain_count: 0,
-        quorum_met: true,
-        human_required: tier == "human_review",
-        security_veto: false,
-        authority_widening: false,
-        blast_radius: "low",
-        tier_reasons: ["fixture"],
-        persistence: %{"status" => "recorded"},
-        feedback: feedback,
-        feedback_json: Jason.encode!(feedback)
+        review_cycle: decision["review_cycle"],
+        finding_ledger: decision["finding_ledger"],
+        review_disposition: decision["review_disposition"]
       }
     end
+
+    defp parse_cycle(cycle) when is_integer(cycle), do: cycle
+    defp parse_cycle(cycle) when is_binary(cycle), do: String.to_integer(cycle)
 
     defp bump(state, key) do
       Agent.get_and_update(state, fn current ->
@@ -332,6 +413,12 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert review_args["workspace_id"] == "ws_security_fixture"
     assert review_args["commit_hash"] == "commit-1"
     assert review_args["validation_profile"] == "security_regression"
+    assert review_args["review_cycle"] == "1"
+    assert review_args["finding_ledger"] == %{}
+    assert review_args["delta_diff"] == ""
+    assert review_args["delta_files"] == []
+    assert review_args["delta_ranges"] == %{}
+    refute Map.has_key?(review_args, "prior_candidate_commit")
 
     assert review_args["test_paths"] == [
              "apps/arbor_security/test/a_security_test.exs",
@@ -389,6 +476,34 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
                "diff for commit-1",
                "diff for commit-2"
              ]
+
+      [first_review, second_review] = Enum.map(reviews, &elem(&1, 1))
+      assert first_review["review_cycle"] == "1"
+      assert second_review["review_cycle"] == 2
+      assert second_review["prior_candidate_commit"] == "commit-1"
+      assert second_review["finding_ledger"]["review_cycle"] == 1
+      assert second_review["delta_diff"] == "security delta for commit-2"
+      assert second_review["delta_files"] == ["lib/security.ex"]
+      assert second_review["delta_ranges"] == %{"lib/security.ex" => [[1, 4]]}
+
+      assert Enum.any?(calls_for(calls, "coding_workspace_committed_change"), fn {_name, args} ->
+               args["prior_commit"] == "commit-1" and args["commit"] == "commit-2"
+             end)
+
+      assert "route_review_material" in result.completed_nodes
+      assert "prep_review_delta_diff" in result.completed_nodes
+      assert "prep_review_delta_files" in result.completed_nodes
+      assert "prep_review_delta_ranges" in result.completed_nodes
+
+      if unquote(source) == :validation do
+        assert "snapshot_validation_prior_commit" in result.completed_nodes
+        assert "snapshot_validation_prior_candidate_commit" in result.completed_nodes
+        assert "inc_validation_review_cycle" in result.completed_nodes
+      else
+        assert "snapshot_review_prior_commit" in result.completed_nodes
+        assert "snapshot_review_prior_candidate_commit" in result.completed_nodes
+        assert "inc_review_cycle" in result.completed_nodes
+      end
 
       validator_ids =
         calls

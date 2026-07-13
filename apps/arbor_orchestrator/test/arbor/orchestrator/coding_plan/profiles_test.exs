@@ -36,7 +36,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
         assert is_map(profile["review_strategy"])
         assert profile["required_nodes"] == Enum.sort(Enum.uniq(profile["required_nodes"]))
         assert profile["required_actions"] == Enum.sort(Enum.uniq(profile["required_actions"]))
+        assert profile["required_nested_actions"] == ["consensus_decide_review"]
       end
+    end
+
+    test "requires the frozen-ledger reducer in compiled execution manifests" do
+      assert {:ok, profile} = Profiles.fetch_executable("default")
+
+      manifest = %{"actions" => [%{"name" => "consensus_decide_review"}]}
+      assert :ok = Profiles.validate_execution_manifest(profile, manifest)
+
+      assert {:error, {:missing_nested_actions, ["consensus_decide_review"]}} =
+               Profiles.validate_execution_manifest(profile, %{"actions" => []})
+
+      assert {:error, :invalid_manifest} = Profiles.validate_execution_manifest(profile, %{})
     end
 
     test "exposes only reviewed enforceable validation strategies" do

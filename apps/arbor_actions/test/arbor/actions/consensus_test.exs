@@ -743,6 +743,22 @@ defmodule Arbor.Actions.ConsensusTest do
   describe "DecideReview — strict ledger reduction" do
     @review_perspectives ["correctness", "security", "maintainability"]
 
+    test "public parameter validation accepts checkpointed dynamic JSON" do
+      params = %{
+        "results" => [
+          make_review_branch("correctness", review_report("approve"))
+        ],
+        "review_cycle" => "2",
+        "finding_ledger" => review_ledger(),
+        "delta_ranges" => %{"lib/example.ex" => [[4, 9]]}
+      }
+
+      assert {:ok, validated} = Consensus.DecideReview.validate_params(params)
+      assert validated["results"] == params["results"]
+      assert validated["finding_ledger"] == params["finding_ledger"]
+      assert validated["delta_ranges"] == params["delta_ranges"]
+    end
+
     test "initial cycle accepts DOT input and returns JSON-clean ledger context" do
       results = [
         make_review_branch("correctness", review_report("approve")),

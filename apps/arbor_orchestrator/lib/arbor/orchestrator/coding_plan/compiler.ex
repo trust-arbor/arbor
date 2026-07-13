@@ -43,6 +43,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     route_security_attested_auto
     route_security_attested_human
     route_validated_review
+    snapshot_validation_prior_candidate_commit
+    snapshot_validation_prior_commit
+    inc_validation_review_cycle
   ]
   @security_dormant_roots ~w[
     route_security_after_commit
@@ -53,6 +56,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     post_validation_expected_commit
     route_security_attested_human
     route_security_attested_auto
+    snapshot_validation_prior_commit
   ]
   @security_dormant_seed_condition "0=1"
   @allowed_options [:template_path, :template_source, :action_catalog]
@@ -127,7 +131,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            ),
          graph_hash = sha256(dot_source),
          {:ok, {execution_manifest, execution_manifest_digest}} <-
-           ExecutionManifest.build(compiled_graph, action_catalog, graph_hash) do
+           ExecutionManifest.build(compiled_graph, action_catalog, graph_hash),
+         :ok <- Profiles.validate_execution_manifest(profile, execution_manifest) do
       initial_values = build_initial_values(plan, plan_fingerprint, action_catalog["digest"])
 
       manifest =
@@ -381,8 +386,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <- rewrite_worker_recovery_open(graph, plan.worker),
          {:ok, graph} <- rewrite_worker_close(graph, plan.worker),
          {:ok, graph} <- rewrite_prompt_budgets(graph),
-         {:ok, graph} <- rewrite_profile_flow(graph, plan),
          {:ok, graph} <- rewrite_rework_budget(graph, plan.rework["max_cycles"]),
+         {:ok, graph} <- rewrite_profile_flow(graph, plan),
          {:ok, graph} <-
            rewrite_review_route(graph, plan.review_profile, plan.validation_profile),
          :ok <- require_action_node(graph, "review_change", "council_review_change") do
@@ -489,11 +494,22 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          graph,
          %Plan{validation_profile: "security_regression"} = plan
        ) do
+    max_cycles = plan.rework["max_cycles"]
+
     with :ok <- validate_security_test_paths(plan.requested_paths),
          {:ok, graph} <- remove_security_dormant_seed_edges(graph),
          {:ok, graph} <- rewrite_security_validator(graph),
          {:ok, graph} <- rewrite_security_review(graph),
          {:ok, graph} <- rewrite_security_rework_prompt(graph),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "check_validation_total_budget",
+             "inc_validation_rework_count",
+             "context.total_rework_count<#{max_cycles}",
+             "snapshot_validation_prior_commit",
+             "context.total_rework_count<#{max_cycles}"
+           ),
          {:ok, graph} <-
            rewrite_edge(
              graph,
@@ -533,7 +549,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <-
            rewrite_unconditional_edge(
              graph,
-             "prep_review_base",
+             "route_prepared_review",
              "review_change",
              "prep_review_validation_profile"
            ),
@@ -592,7 +608,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          Map.put(
            attrs,
            "context_keys",
-           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,test_paths,validation_profile"
+           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile"
          )}
       end
     end)
@@ -639,8 +655,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
        "context.total_rework_count<2", "context.total_rework_count<#{max_cycles}"},
       {"check_review_total_budget", "legacy_status_review_requires_rework",
        "context.total_rework_count>=2", "context.total_rework_count>=#{max_cycles}"},
-      {"check_review_total_budget", "inc_review_rework_count", "context.total_rework_count<2",
-       "context.total_rework_count<#{max_cycles}"},
+      {"check_review_total_budget", "snapshot_review_prior_commit",
+       "context.total_rework_count<2", "context.total_rework_count<#{max_cycles}"},
       {"check_operator_rework_total_budget", "legacy_status_operator_approval_rework",
        "context.total_rework_count>=2", "context.total_rework_count>=#{max_cycles}"},
       {"check_operator_rework_total_budget", "inc_operator_rework_count",

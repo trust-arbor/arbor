@@ -178,10 +178,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           commit_response(scenario, counters, state, args)
 
         "coding_workspace_committed_change" ->
-          committed_change_response(scenario)
+          committed_change_response(scenario, args)
 
         "council_review_change" ->
-          review_response(scenario, counters, state)
+          review_response(scenario, counters, state, args)
 
         "git_pr" ->
           pr_response(scenario)
@@ -620,42 +620,68 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
            }}
 
         _ ->
+          commit_hash =
+            if scenario in [
+                 :review_requires_rework,
+                 :rework_exhausted,
+                 :validation_then_review_rework_success,
+                 :protocol_repair_review_turns_success,
+                 :resolved_finding_accepted,
+                 :in_delta_blocker_reworks,
+                 :outside_delta_side_channel,
+                 :two_review_reworks_exhaust
+               ] do
+              "commit-review-#{n + 1}"
+            else
+              if(dirty?, do: "commitabc123", else: "selfcommit9999")
+            end
+
           {:ok,
            %{
              interaction_outcome: "",
              request_id: "",
              note: "",
              path: "/tmp/ws_fixture_1",
-             commit_hash: if(dirty?, do: "commitabc123", else: "selfcommit9999"),
+             commit_hash: commit_hash,
              message: "fixture commit"
            }}
       end
     end
 
-    defp committed_change_response(:committed_change_failed) do
+    defp committed_change_response(:committed_change_failed, _args) do
       {:error, "dirty workspace or missing base"}
     end
 
-    defp committed_change_response(scenario) do
-      commit_hash =
-        case scenario do
-          :commit_approval_rework_success -> "commitrework456"
-          _ -> "commitabc123"
+    defp committed_change_response(_scenario, args) do
+      commit_hash = Map.get(args, "commit") || Map.get(args, :commit) || "commitabc123"
+      prior_commit = Map.get(args, "prior_commit") || Map.get(args, :prior_commit)
+
+      result = %{
+        workspace_id: "ws_fixture_1",
+        commit_hash: commit_hash,
+        diff: "diff --git a/file.ex b/file.ex\n+hello\n",
+        files: ["file.ex"],
+        base_ref: "basecommit0001",
+        branch: "arbor/coding-agent/fixture",
+        worktree_path: "/tmp/ws_fixture_1"
+      }
+
+      result =
+        if is_binary(prior_commit) and prior_commit != "" do
+          Map.merge(result, %{
+            prior_candidate_commit: prior_commit,
+            delta_diff: "diff --git a/file.ex b/file.ex\n+cycle delta\n",
+            delta_files: ["file.ex"],
+            delta_ranges: %{"file.ex" => [[1, 3]]}
+          })
+        else
+          result
         end
 
-      {:ok,
-       %{
-         workspace_id: "ws_fixture_1",
-         commit_hash: commit_hash,
-         diff: "diff --git a/file.ex b/file.ex\n+hello\n",
-         files: ["file.ex"],
-         base_ref: "basecommit0001",
-         branch: "arbor/coding-agent/fixture",
-         worktree_path: "/tmp/ws_fixture_1"
-       }}
+      {:ok, result}
     end
 
-    defp review_response(scenario, counters, state) do
+    defp review_response(scenario, counters, state, args) do
       n = Map.get(counters, :review, 0)
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :review, n + 1)} end)
 
@@ -664,37 +690,55 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           {:error, "council unavailable"}
 
         :review_rejected ->
-          {:ok, review_payload("stop")}
+          {:ok, review_payload("stop", args)}
 
         :human_review_required ->
-          {:ok, review_payload("human_review")}
+          {:ok, review_payload("human_review", args)}
 
         :review_requires_rework ->
-          {:ok, review_payload("rework")}
+          {:ok, review_payload("rework", args)}
 
         :rework_exhausted ->
           # After validation rework, review keeps asking for rework until exhausted
-          {:ok, review_payload("rework")}
+          {:ok, review_payload("rework", args)}
 
         :validation_then_review_rework_success ->
-          {:ok, review_payload(if(n == 0, do: "rework", else: "auto_proceed"))}
+          {:ok, review_payload(if(n == 0, do: "rework", else: "auto_proceed"), args)}
 
         :protocol_repair_review_turns_success ->
-          {:ok, review_payload(if(n == 0, do: "rework", else: "auto_proceed"))}
+          {:ok, review_payload(if(n == 0, do: "rework", else: "auto_proceed"), args)}
+
+        :resolved_finding_accepted ->
+          {:ok, review_payload(if(n == 0, do: "rework", else: "auto_proceed"), args)}
+
+        :in_delta_blocker_reworks ->
+          tier = if(n < 2, do: "rework", else: "auto_proceed")
+          {:ok, review_payload(tier, args, :new_in_delta_on_cycle_two)}
+
+        :outside_delta_side_channel ->
+          tier = if(n == 0, do: "rework", else: "auto_proceed")
+          {:ok, review_payload(tier, args, :outside_delta_on_cycle_two)}
+
+        :two_review_reworks_exhaust ->
+          {:ok, review_payload("rework", args)}
 
         :unknown_review_tier ->
-          {:ok, review_payload("unexpected_tier")}
+          {:ok, review_payload("unexpected_tier", args)}
 
         :missing_review_tier ->
-          {:ok, Map.delete(review_payload("auto_proceed"), :tier_decision)}
+          {:ok, Map.delete(review_payload("auto_proceed", args), :tier_decision)}
+
+        :malformed_review_cycle ->
+          {:ok, Map.put(review_payload("auto_proceed", args), :review_cycle, "01")}
 
         _ ->
-          {:ok, review_payload("auto_proceed")}
+          {:ok, review_payload("auto_proceed", args)}
       end
     end
 
-    defp review_payload(tier) do
+    defp review_payload(tier, args, mode \\ :normal) do
       recommendation = if(tier == "stop", do: "reject", else: "revise")
+      decision = strict_review_decision(tier, args, mode)
 
       feedback = %{
         "recommendation" => recommendation,
@@ -753,9 +797,83 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         tier_reasons: ["bounded_reason"],
         persistence: %{"status" => "recorded"},
         feedback: feedback,
-        feedback_json: Jason.encode!(feedback)
+        feedback_json: Jason.encode!(feedback),
+        review_cycle: decision["review_cycle"],
+        finding_ledger: decision["finding_ledger"],
+        review_disposition: decision["review_disposition"]
       }
     end
+
+    defp strict_review_decision(tier, args, mode) do
+      cycle = parse_cycle(Map.get(args, "review_cycle") || Map.get(args, :review_cycle))
+      ledger = Map.get(args, "finding_ledger") || Map.get(args, :finding_ledger) || %{}
+      delta_ranges = Map.get(args, "delta_ranges") || Map.get(args, :delta_ranges) || %{}
+      findings = Map.get(ledger, "findings", %{})
+
+      updates =
+        if tier == "auto_proceed" do
+          findings
+          |> Enum.filter(fn {_id, finding} -> finding["owner"] == "correctness" end)
+          |> Enum.map(fn {id, _finding} -> %{"id" => id, "state" => "fixed"} end)
+        else
+          []
+        end
+
+      new_findings =
+        cond do
+          tier == "rework" and cycle == 1 ->
+            [strict_finding("initial blocker", 1)]
+
+          mode == :new_in_delta_on_cycle_two and cycle == 2 ->
+            [strict_finding("new in-delta blocker", 2)]
+
+          mode == :outside_delta_on_cycle_two and cycle == 2 ->
+            [strict_finding("outside-delta side channel", 99)]
+
+          true ->
+            []
+        end
+
+      vote = if(tier == "rework", do: "reject", else: "approve")
+
+      report = %{
+        "vote" => vote,
+        "finding_updates" => updates,
+        "new_findings" => new_findings
+      }
+
+      branch = %{
+        "id" => "correctness",
+        "status" => "success",
+        "context_updates" => %{"last_response" => Jason.encode!(report)}
+      }
+
+      {:ok, decision} =
+        Arbor.Actions.Consensus.DecideReview.run(
+          %{
+            results: [branch],
+            review_cycle: cycle,
+            finding_ledger: ledger,
+            delta_ranges: delta_ranges
+          },
+          %{}
+        )
+
+      decision
+    end
+
+    defp strict_finding(title, line) do
+      %{
+        "severity" => "blocking",
+        "title" => title,
+        "required_action" => "fix #{title}",
+        "anchor" => %{"path" => "file.ex", "side" => "new", "line" => line},
+        "evidence" => "fixture evidence"
+      }
+    end
+
+    defp parse_cycle(cycle) when is_integer(cycle), do: cycle
+    defp parse_cycle(cycle) when is_binary(cycle), do: String.to_integer(cycle)
 
     defp pr_response(:pr_failed), do: {:error, "scm rejected draft PR"}
     defp pr_response(_), do: {:ok, %{url: "https://example.test/pr/1", number: 1, draft: true}}
@@ -1014,10 +1132,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       # Bind materialization to the exact commit produced by this run.
       load = graph.nodes["load_committed_change"]
-      assert load.attrs["context_keys"] == "workspace_id,commit"
+      assert load.attrs["context_keys"] == "workspace_id,commit,prior_commit"
 
       assert graph.nodes["review_change"].attrs["context_keys"] ==
-               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash"
+               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges"
     end
   end
 
@@ -1129,18 +1247,119 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["status"] == "rework_exhausted"
       assert result.context["legacy_status"] == "review_requires_rework"
       assert result.context["validation_rework_count"] == "0"
-      assert result.context["review_rework_count"] == 1
-      assert result.context["total_rework_count"] == 1
+      assert result.context["review_rework_count"] == 2
+      assert result.context["total_rework_count"] == 2
       assert result.context["rework_kind"] == "review"
-      assert result.context["rework_iteration"] == 1
+      assert result.context["rework_iteration"] == 2
+      assert result.context["review_cycle"] == 3
       assert_closed_and_released(calls)
 
-      assert Enum.count(calls, fn {name, _args} -> name == "council_review_change" end) == 2
+      assert Enum.count(calls, fn {name, _args} -> name == "council_review_change" end) == 3
       prompts = action_prompts(calls)
-      assert_single_worker_session(calls, 2)
+      assert_single_worker_session(calls, 3)
       assert Enum.at(prompts, 1) =~ "Structured review feedback JSON"
       assert Enum.at(prompts, 1) =~ "bounded council feedback"
       assert Enum.at(prompts, 1) =~ "ONLY one JSON object"
+    end
+
+    test "cycle one supplies empty delta evidence and no prior candidate" do
+      assert {{:ok, result}, calls} = run_fixture(:change_committed)
+      assert result.context["status"] == "change_committed"
+
+      assert [{"council_review_change", review_args}] =
+               Enum.filter(calls, fn {name, _args} -> name == "council_review_change" end)
+
+      assert review_args["review_cycle"] == "1"
+      assert review_args["finding_ledger"] == %{}
+      assert review_args["delta_diff"] == ""
+      assert review_args["delta_files"] == []
+      assert review_args["delta_ranges"] == %{}
+      refute Map.has_key?(review_args, "prior_candidate_commit")
+
+      assert [{"coding_workspace_committed_change", material_args}] =
+               Enum.filter(calls, fn {name, _args} ->
+                 name == "coding_workspace_committed_change"
+               end)
+
+      refute Map.has_key?(material_args, "prior_commit")
+    end
+
+    test "cycle two carries the prior commit, scoped delta, and completed ledger" do
+      assert {{:ok, result}, calls} = run_fixture(:resolved_finding_accepted)
+      assert result.context["status"] == "change_committed"
+      assert result.context["review_cycle"] == 2
+      assert result.context["review_disposition"] == "accept"
+
+      [first_material, second_material] =
+        calls
+        |> Enum.filter(fn {name, _args} -> name == "coding_workspace_committed_change" end)
+        |> Enum.map(&elem(&1, 1))
+
+      refute Map.has_key?(first_material, "prior_commit")
+      assert second_material["prior_commit"] == "commit-review-1"
+      assert second_material["commit"] == "commit-review-2"
+
+      [first_review, second_review] =
+        calls
+        |> Enum.filter(fn {name, _args} -> name == "council_review_change" end)
+        |> Enum.map(&elem(&1, 1))
+
+      assert first_review["review_cycle"] == "1"
+      assert second_review["review_cycle"] == 2
+      assert second_review["prior_candidate_commit"] == "commit-review-1"
+      assert second_review["finding_ledger"]["review_cycle"] == 1
+      assert second_review["delta_diff"] =~ "cycle delta"
+      assert second_review["delta_files"] == ["file.ex"]
+      assert second_review["delta_ranges"] == %{"file.ex" => [[1, 3]]}
+
+      assert Enum.all?(result.context["finding_ledger"]["findings"], fn {_id, finding} ->
+               finding["state"] == "fixed"
+             end)
+    end
+
+    test "new in-delta blocker reworks and is resolved on cycle three" do
+      assert {{:ok, result}, calls} = run_fixture(:in_delta_blocker_reworks)
+      assert result.context["status"] == "change_committed"
+      assert result.context["review_cycle"] == 3
+      assert result.context["review_rework_count"] == 2
+      assert Enum.count(calls, fn {name, _args} -> name == "council_review_change" end) == 3
+
+      cycle_two =
+        calls
+        |> Enum.filter(fn {name, _args} -> name == "council_review_change" end)
+        |> Enum.at(1)
+        |> elem(1)
+
+      assert cycle_two["delta_ranges"] == %{"file.ex" => [[1, 3]]}
+      assert result.context["review_disposition"] == "accept"
+
+      assert Enum.all?(result.context["finding_ledger"]["findings"], fn {_id, finding} ->
+               finding["state"] == "fixed"
+             end)
+    end
+
+    test "outside-delta finding is retained as a non-blocking side channel" do
+      assert {{:ok, result}, calls} = run_fixture(:outside_delta_side_channel)
+      assert result.context["status"] == "change_committed"
+      assert result.context["review_cycle"] == 2
+      assert result.context["review_disposition"] == "accept"
+      assert Enum.count(calls, fn {name, _args} -> name == "council_review_change" end) == 2
+
+      assert [%{"reason" => "outside_delta", "title" => "outside-delta side channel"}] =
+               Enum.map(
+                 result.context["finding_ledger"]["out_of_scope"],
+                 &Map.take(&1, ["reason", "title"])
+               )
+    end
+
+    test "two council reworks reach cycle three before category exhaustion" do
+      assert {{:ok, result}, calls} = run_fixture(:two_review_reworks_exhaust)
+      assert result.context["status"] == "rework_exhausted"
+      assert result.context["review_cycle"] == 3
+      assert result.context["review_rework_count"] == 2
+      assert result.context["total_rework_count"] == 2
+      assert Enum.count(calls, fn {name, _args} -> name == "council_review_change" end) == 3
+      assert_single_worker_session(calls, 3)
     end
 
     test "validation retry then successful council retry reuse one worker session" do
@@ -1283,6 +1502,15 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         assert_closed_and_released(calls)
         assert_json_clean_context(result.context)
       end
+    end
+
+    test "malformed completed review cycle fails closed as review_failed" do
+      assert {{:ok, result}, calls} = run_fixture(:malformed_review_cycle)
+      assert result.context["status"] == "review_failed"
+      assert result.context["error"] == "review_cycle_invalid_or_missing"
+      assert "error_review_cycle_invalid" in result.completed_nodes
+      refute called?(calls, "git_pr")
+      assert_closed_and_released(calls)
     end
 
     test "human_review_required without PR" do

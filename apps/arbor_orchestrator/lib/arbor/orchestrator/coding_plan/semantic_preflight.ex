@@ -46,6 +46,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     review_routing_gate
     validation_profile
     worker_recovery
+    review_convergence
   )
 
   @placement_entry_keys MapSet.new(~w(
@@ -160,6 +161,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_forbidden_denial_bypass_attrs(graph)
         |> check_worker_continuity_bindings(graph, worker_continuity)
         |> check_worker_recovery_bindings(graph, policy, worker_continuity)
+        |> check_review_convergence_bindings(graph, policy)
         |> check_workspace_cleanup_topology(graph)
         |> check_profile_bindings(graph, policy, review_profile)
         |> check_reachability_and_dominance(graph, policy, review_profile)
@@ -366,6 +368,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
              :ok <- require_nonempty_string(policy, "review_routing_gate"),
              :ok <- require_nonempty_string(policy, "validation_profile"),
              :ok <- require_worker_recovery_policy(policy),
+             :ok <- require_review_convergence_policy(policy),
              :ok <- require_action_placements(policy),
              :ok <- require_profile_policy(policy),
              :ok <- require_sorted_unique(policy, "allowed_handlers"),
@@ -629,6 +632,26 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
       _other ->
         {:error, {:invalid_semantic_policy, :invalid_worker_recovery_policy}}
+    end
+  end
+
+  defp require_review_convergence_policy(policy) do
+    case Map.fetch(policy, "review_convergence") do
+      {:ok,
+       %{
+         "node_attrs" => node_attrs,
+         "protected_writers" => protected_writers,
+         "edges" => edges
+       }}
+      when is_list(node_attrs) and is_map(protected_writers) and is_list(edges) ->
+        with :ok <- require_worker_recovery_node_attrs(node_attrs),
+             :ok <- require_worker_recovery_writers(protected_writers),
+             :ok <- require_worker_recovery_edges(edges) do
+          :ok
+        end
+
+      _other ->
+        {:error, {:invalid_semantic_policy, :invalid_review_convergence_policy}}
     end
   end
 
@@ -1950,6 +1973,137 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     check_worker_recovery_start_nodes(errors, graph, continuity)
   end
 
+  defp check_review_convergence_bindings(errors, graph, policy) do
+    convergence = policy["review_convergence"]
+
+    errors =
+      Enum.reduce(convergence["node_attrs"], errors, fn %{
+                                                          "node_id" => node_id,
+                                                          "attrs" => expected
+                                                        },
+                                                        acc ->
+        case Map.fetch(graph.nodes, node_id) do
+          {:ok, %{attrs: ^expected}} ->
+            acc
+
+          {:ok, node} ->
+            [
+              error("review_convergence_node_mismatch", node_id, %{
+                "expected" => expected,
+                "actual" => node.attrs
+              })
+              | acc
+            ]
+
+          :error ->
+            [error("review_convergence_missing_node", node_id, %{}) | acc]
+        end
+      end)
+
+    errors =
+      Enum.reduce(convergence["protected_writers"], errors, fn {context_key, expected_nodes},
+                                                               acc ->
+        actual_nodes = writer_nodes(graph, "output_key", context_key)
+
+        if actual_nodes == expected_nodes do
+          acc
+        else
+          [
+            error("review_convergence_writer_violation", nil, %{
+              "context_key" => context_key,
+              "expected_nodes" => expected_nodes,
+              "actual_nodes" => actual_nodes
+            })
+            | acc
+          ]
+        end
+      end)
+
+    errors =
+      Enum.reduce(
+        convergence["edges"]
+        |> Enum.map(fn [from, to, condition] -> {from, to, condition} end)
+        |> Enum.group_by(&elem(&1, 0)),
+        errors,
+        fn {from, expected}, acc ->
+          actual =
+            graph
+            |> Graph.outgoing_edges(from)
+            |> Enum.map(&{&1.from, &1.to, Map.get(&1.attrs, "condition")})
+            |> Enum.sort()
+
+          if actual == expected do
+            acc
+          else
+            [
+              error("review_convergence_topology_mismatch", from, %{
+                "expected" => Enum.map(expected, &recovery_edge_json/1),
+                "actual" => Enum.map(actual, &recovery_edge_json/1)
+              })
+              | acc
+            ]
+          end
+        end
+      )
+
+    errors
+    |> check_dynamic_total_budget_edges(
+      graph,
+      "check_review_total_budget",
+      "legacy_status_review_requires_rework",
+      "snapshot_review_prior_commit"
+    )
+    |> maybe_check_security_validation_cycle_budget(graph, convergence)
+  end
+
+  defp maybe_check_security_validation_cycle_budget(errors, graph, convergence) do
+    if Enum.any?(convergence["node_attrs"], &(&1["node_id"] == "inc_validation_review_cycle")) do
+      check_dynamic_total_budget_edges(
+        errors,
+        graph,
+        "check_validation_total_budget",
+        "status_validation_failed",
+        "snapshot_validation_prior_commit"
+      )
+    else
+      errors
+    end
+  end
+
+  defp check_dynamic_total_budget_edges(errors, graph, source, exhausted_target, admitted_target) do
+    outgoing = Graph.outgoing_edges(graph, source)
+
+    thresholds =
+      Enum.map(outgoing, fn edge ->
+        {edge.to, Map.get(edge.attrs, "condition")}
+      end)
+
+    valid? =
+      Enum.any?(0..2, fn max_cycles ->
+        Enum.sort(thresholds) ==
+          Enum.sort([
+            {exhausted_target, "context.total_rework_count>=#{max_cycles}"},
+            {admitted_target, "context.total_rework_count<#{max_cycles}"}
+          ])
+      end)
+
+    if valid? do
+      errors
+    else
+      [
+        error("review_convergence_budget_topology_mismatch", source, %{
+          "actual" =>
+            thresholds
+            |> Enum.sort()
+            |> Enum.map(fn {target, condition} -> [target, condition] end),
+          "admitted_target" => admitted_target,
+          "exhausted_target" => exhausted_target
+        })
+        | errors
+      ]
+    end
+  end
+
   defp recovery_edge_json({from, to, condition}), do: [from, to, condition]
 
   defp check_worker_recovery_start_nodes(errors, graph, continuity) do
@@ -2409,7 +2563,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "type" => "exec",
          "target" => "action",
          "action" => "coding_workspace_committed_change",
-         "context_keys" => "workspace_id,commit",
+         "context_keys" => "workspace_id,commit,prior_commit",
          "output_prefix" => "change"
        }},
       {"prep_review_diff",
@@ -2439,7 +2593,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "target" => "action",
          "action" => "council_review_change",
          "context_keys" =>
-           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,test_paths,validation_profile",
+           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile",
          "output_prefix" => "review"
        }},
       {"remember_validation_reviewed_commit",
@@ -2646,10 +2800,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {"hoist_change_commit", "outcome=success"}
        ]},
       {"prep_review_validation_profile", [{"review_change", nil}]},
+      {"route_prepared_review", [{"prep_review_validation_profile", nil}]},
       {"review_change",
        [
          {"error_council_review", "outcome=fail"},
-         {"route_review", "outcome=success"}
+         {"hoist_review_finding_ledger", "outcome=success"}
        ]},
       {"route_review",
        [

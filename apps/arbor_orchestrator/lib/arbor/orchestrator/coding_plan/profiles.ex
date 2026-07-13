@@ -35,6 +35,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     error_worker_recovery_summary_failed
                     error_worker_send_recovery_exhausted
                     error_worker_stale_close_failed
+                    error_review_cycle_invalid
+                    hoist_review_cycle
+                    hoist_review_disposition
+                    hoist_review_finding_ledger
                     hoist_recovery_prompt
                     hoist_recovery_worker_provider_session_id
                     hoist_recovery_worker_session_id
@@ -42,6 +46,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_worker_provider_session_id_from_message
                     hoist_worker_provider_session_id_from_status
                     implement
+                    inc_review_cycle
+                    init_delta_diff
+                    init_delta_files
+                    init_delta_ranges
+                    init_finding_ledger
+                    init_review_cycle
+                    init_review_defaults
                     inspect_workspace
                     load_committed_change
                     open_worker
@@ -49,10 +60,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     prep_release_mode_only
                     prep_release_mode_remove
                     prep_release_mode_retain
+                    prep_review_delta_diff
+                    prep_review_delta_files
+                    prep_review_delta_ranges
                     release_workspace
                     release_workspace_only
                     retry_recovered_send
                     route_release_mode
+                    route_completed_review_cycle
+                    route_prepared_review
+                    route_review_material
                     review_change
                     route_after_commit
                     route_commit_interaction
@@ -60,6 +77,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     route_review
                     route_success_workspace_retention
                     status_approval_denied
+                    snapshot_review_prior_candidate_commit
+                    snapshot_review_prior_commit
                     acp_session_status
                     copy_recovery_pending_prompt
                     copy_worker_provider_session_id_to_session_id
@@ -85,6 +104,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                  route_security_attested_auto
                                  route_security_attested_human
                                  route_validated_review
+                                 snapshot_validation_prior_candidate_commit
+                                 snapshot_validation_prior_commit
+                                 inc_validation_review_cycle
                                ]
                            )
 
@@ -101,6 +123,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                              coding_workspace_release
                              council_review_change
                            ])
+
+  @required_nested_actions ["consensus_decide_review"]
 
   @binding_council_review %{
     "action" => "council_review_change",
@@ -279,7 +303,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                 %{
                                   "node_id" => "review_change",
                                   "action" => "council_review_change",
-                                  "required_dominators" => ["load_committed_change"],
+                                  "required_dominators" => [
+                                    "init_finding_ledger",
+                                    "init_review_cycle",
+                                    "load_committed_change",
+                                    "route_prepared_review",
+                                    "route_review_material"
+                                  ],
                                   "review_required_dominators" => [],
                                   "required_dominator_sets" => []
                                 }
@@ -569,6 +599,376 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     ]
   }
 
+  @review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash," <>
+                         "review_cycle,finding_ledger,prior_candidate_commit,delta_diff," <>
+                         "delta_files,delta_ranges"
+
+  @security_review_context_keys @review_context_keys <>
+                                  ",test_paths,validation_profile"
+
+  @review_convergence_node_attrs [
+                                   %{
+                                     "node_id" => "check_review_category_budget",
+                                     "attrs" => %{
+                                       "type" => "branch",
+                                       "shape" => "diamond",
+                                       "fan_out" => "false"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "check_review_total_budget",
+                                     "attrs" => %{
+                                       "type" => "branch",
+                                       "shape" => "diamond",
+                                       "fan_out" => "false"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "hoist_review_cycle",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" => "review.review_cycle",
+                                       "output_key" => "review_cycle"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "hoist_review_disposition",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" => "review.review_disposition",
+                                       "output_key" => "review_disposition"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "hoist_review_finding_ledger",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" => "review.finding_ledger",
+                                       "output_key" => "finding_ledger"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "inc_review_cycle",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "increment",
+                                       "source_key" => "review_cycle",
+                                       "output_key" => "review_cycle"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "init_delta_diff",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "json_extract",
+                                       "source_key" => "review_defaults",
+                                       "expression" => "delta_diff",
+                                       "output_key" => "delta_diff"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "init_delta_files",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "json_extract",
+                                       "source_key" => "review_defaults",
+                                       "expression" => "delta_files",
+                                       "output_key" => "delta_files"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "init_delta_ranges",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "json_extract",
+                                       "source_key" => "review_defaults",
+                                       "expression" => "delta_ranges",
+                                       "output_key" => "delta_ranges"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "init_finding_ledger",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "json_extract",
+                                       "source_key" => "review_defaults",
+                                       "expression" => "finding_ledger",
+                                       "output_key" => "finding_ledger"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "init_review_cycle",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "constant",
+                                       "expression" => "1",
+                                       "output_key" => "review_cycle"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "init_review_defaults",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "constant",
+                                       "expression" =>
+                                         "{\"finding_ledger\":{},\"delta_diff\":\"\",\"delta_files\":[],\"delta_ranges\":{}}",
+                                       "output_key" => "review_defaults"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "load_committed_change",
+                                     "attrs" => %{
+                                       "type" => "exec",
+                                       "target" => "action",
+                                       "action" => "coding_workspace_committed_change",
+                                       "context_keys" => "workspace_id,commit,prior_commit",
+                                       "output_prefix" => "change",
+                                       "max_retries" => "0"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "prep_review_delta_diff",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" => "change.delta_diff",
+                                       "output_key" => "delta_diff"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "prep_review_delta_files",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" => "change.delta_files",
+                                       "output_key" => "delta_files"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "prep_review_delta_ranges",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" => "change.delta_ranges",
+                                       "output_key" => "delta_ranges"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "review_change",
+                                     "attrs" => %{
+                                       "type" => "exec",
+                                       "target" => "action",
+                                       "action" => "council_review_change",
+                                       "context_keys" => @review_context_keys,
+                                       "output_prefix" => "review",
+                                       "max_retries" => "0"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "route_completed_review_cycle",
+                                     "attrs" => %{
+                                       "type" => "branch",
+                                       "shape" => "diamond",
+                                       "fan_out" => "false"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "route_prepared_review",
+                                     "attrs" => %{
+                                       "type" => "branch",
+                                       "shape" => "diamond",
+                                       "fan_out" => "false"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "route_review_material",
+                                     "attrs" => %{
+                                       "type" => "branch",
+                                       "shape" => "diamond",
+                                       "fan_out" => "false"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "snapshot_review_prior_candidate_commit",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" => "commit_hash",
+                                       "output_key" => "prior_candidate_commit"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "snapshot_review_prior_commit",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" => "commit_hash",
+                                       "output_key" => "prior_commit"
+                                     }
+                                   }
+                                 ]
+                                 |> Enum.sort_by(& &1["node_id"])
+
+  @review_convergence_edges [
+                              [
+                                "check_review_category_budget",
+                                "check_review_total_budget",
+                                "context.review_rework_count<2"
+                              ],
+                              [
+                                "check_review_category_budget",
+                                "legacy_status_review_requires_rework",
+                                "context.review_rework_count>=2"
+                              ],
+                              ["hoist_review_cycle", "hoist_review_disposition", nil],
+                              ["hoist_review_disposition", "route_completed_review_cycle", nil],
+                              ["hoist_review_finding_ledger", "hoist_review_cycle", nil],
+                              ["inc_review_cycle", "inc_review_rework_count", nil],
+                              ["prep_review_base", "route_review_material", nil],
+                              ["prep_review_delta_diff", "prep_review_delta_files", nil],
+                              ["prep_review_delta_files", "prep_review_delta_ranges", nil],
+                              ["prep_review_delta_ranges", "route_prepared_review", nil],
+                              ["review_change", "error_council_review", "outcome=fail"],
+                              ["review_change", "hoist_review_finding_ledger", "outcome=success"],
+                              ["route_completed_review_cycle", "error_review_cycle_invalid", nil],
+                              [
+                                "route_completed_review_cycle",
+                                "route_review",
+                                "context.review_cycle=1"
+                              ],
+                              [
+                                "route_completed_review_cycle",
+                                "route_review",
+                                "context.review_cycle=2"
+                              ],
+                              [
+                                "route_completed_review_cycle",
+                                "route_review",
+                                "context.review_cycle=3"
+                              ],
+                              ["route_prepared_review", "review_change", nil],
+                              ["route_review_material", "error_review_cycle_invalid", nil],
+                              [
+                                "route_review_material",
+                                "prep_review_delta_diff",
+                                "context.review_cycle=2"
+                              ],
+                              [
+                                "route_review_material",
+                                "prep_review_delta_diff",
+                                "context.review_cycle=3"
+                              ],
+                              [
+                                "route_review_material",
+                                "route_prepared_review",
+                                "context.review_cycle=1"
+                              ],
+                              ["snapshot_review_prior_candidate_commit", "inc_review_cycle", nil],
+                              [
+                                "snapshot_review_prior_commit",
+                                "snapshot_review_prior_candidate_commit",
+                                nil
+                              ]
+                            ]
+                            |> Enum.sort()
+
+  @review_convergence_policy %{
+    "node_attrs" => @review_convergence_node_attrs,
+    "protected_writers" => %{
+      "delta_diff" => ["init_delta_diff", "prep_review_delta_diff"],
+      "delta_files" => ["init_delta_files", "prep_review_delta_files"],
+      "delta_ranges" => ["init_delta_ranges", "prep_review_delta_ranges"],
+      "finding_ledger" => ["hoist_review_finding_ledger", "init_finding_ledger"],
+      "prior_candidate_commit" => ["snapshot_review_prior_candidate_commit"],
+      "prior_commit" => ["snapshot_review_prior_commit"],
+      "review_cycle" => ["hoist_review_cycle", "inc_review_cycle", "init_review_cycle"],
+      "review_disposition" => ["hoist_review_disposition"]
+    },
+    "edges" => @review_convergence_edges
+  }
+
+  @security_review_convergence_policy %{
+    "node_attrs" =>
+      @review_convergence_node_attrs
+      |> Enum.map(fn
+        %{"node_id" => "review_change", "attrs" => attrs} = entry ->
+          %{entry | "attrs" => Map.put(attrs, "context_keys", @security_review_context_keys)}
+
+        entry ->
+          entry
+      end)
+      |> Kernel.++([
+        %{
+          "node_id" => "inc_validation_review_cycle",
+          "attrs" => %{
+            "type" => "transform",
+            "transform" => "increment",
+            "source_key" => "review_cycle",
+            "output_key" => "review_cycle"
+          }
+        },
+        %{
+          "node_id" => "snapshot_validation_prior_candidate_commit",
+          "attrs" => %{
+            "type" => "transform",
+            "transform" => "identity",
+            "source_key" => "commit_hash",
+            "output_key" => "prior_candidate_commit"
+          }
+        },
+        %{
+          "node_id" => "snapshot_validation_prior_commit",
+          "attrs" => %{
+            "type" => "transform",
+            "transform" => "identity",
+            "source_key" => "commit_hash",
+            "output_key" => "prior_commit"
+          }
+        }
+      ])
+      |> Enum.sort_by(& &1["node_id"]),
+    "protected_writers" => %{
+      "delta_diff" => ["init_delta_diff", "prep_review_delta_diff"],
+      "delta_files" => ["init_delta_files", "prep_review_delta_files"],
+      "delta_ranges" => ["init_delta_ranges", "prep_review_delta_ranges"],
+      "finding_ledger" => ["hoist_review_finding_ledger", "init_finding_ledger"],
+      "prior_candidate_commit" => [
+        "snapshot_review_prior_candidate_commit",
+        "snapshot_validation_prior_candidate_commit"
+      ],
+      "prior_commit" => ["snapshot_review_prior_commit", "snapshot_validation_prior_commit"],
+      "review_cycle" => [
+        "hoist_review_cycle",
+        "inc_review_cycle",
+        "inc_validation_review_cycle",
+        "init_review_cycle"
+      ],
+      "review_disposition" => ["hoist_review_disposition"]
+    },
+    "edges" =>
+      @review_convergence_edges
+      |> Enum.reject(&(&1 == ["route_prepared_review", "review_change", nil]))
+      |> Kernel.++([
+        ["inc_validation_review_cycle", "inc_validation_rework_count", nil],
+        ["prep_review_validation_profile", "review_change", nil],
+        ["route_prepared_review", "prep_review_validation_profile", nil],
+        [
+          "snapshot_validation_prior_candidate_commit",
+          "inc_validation_review_cycle",
+          nil
+        ],
+        [
+          "snapshot_validation_prior_commit",
+          "snapshot_validation_prior_candidate_commit",
+          nil
+        ]
+      ])
+      |> Enum.sort()
+  }
+
   @default_action_placements Enum.sort_by(
                                [
                                  %{
@@ -655,6 +1055,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "review_gate" => "review_change",
     "review_routing_gate" => "route_review",
     "worker_recovery" => @worker_recovery_policy,
+    "review_convergence" => @review_convergence_policy,
     "action_placements" => []
   }
 
@@ -703,6 +1104,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "semantic_policy" =>
                   @semantic_policy_base
                   |> Map.merge(@security_semantic_nodes)
+                  |> Map.put("review_convergence", @security_review_convergence_policy)
                   |> Map.put("validation_profile", "security_regression")
                   |> Map.put("mandatory_gate_nodes", @security_required_nodes)
                   |> Map.put("post_validation_commit_routing", "route_validated_review")
@@ -833,6 +1235,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     "checks, a mandatory human gate, and prohibition of unattended publication."
               }
             ]
+            |> Enum.map(&Map.put(&1, "required_nested_actions", @required_nested_actions))
             |> Enum.sort_by(& &1["id"])
 
   @profiles_by_id Map.new(@profiles, &{&1["id"], &1})
@@ -882,6 +1285,29 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       end
     end
   end
+
+  @doc "Verifies that a compiled execution manifest contains reviewed nested actions."
+  @spec validate_execution_manifest(descriptor(), map()) ::
+          :ok | {:error, {:missing_nested_actions, [String.t()]}} | {:error, :invalid_manifest}
+  def validate_execution_manifest(
+        %{"required_nested_actions" => required},
+        %{"actions" => actions}
+      )
+      when is_list(required) and is_list(actions) do
+    present =
+      actions
+      |> Enum.flat_map(fn
+        %{"name" => name} when is_binary(name) -> [name]
+        _other -> []
+      end)
+      |> MapSet.new()
+
+    missing = Enum.reject(required, &MapSet.member?(present, &1))
+
+    if missing == [], do: :ok, else: {:error, {:missing_nested_actions, Enum.sort(missing)}}
+  end
+
+  def validate_execution_manifest(_profile, _manifest), do: {:error, :invalid_manifest}
 
   @doc """
   Verifies that a graph or inventory contains every node and action required by

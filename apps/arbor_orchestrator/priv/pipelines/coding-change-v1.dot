@@ -33,6 +33,15 @@
 //   validation_rework_count / review_rework_count / operator_rework_count
 //                        / total_rework_count
 //                        - initiated same-session rework-cycle counters
+//   review_cycle         - completed/next council cycle (1..3)
+//   finding_ledger       - frozen JSON finding ledger from the last council cycle
+//   review_disposition   - frozen ledger disposition from the last council cycle
+//   prior_commit / prior_candidate_commit
+//                        - prior reviewed candidate, snapshotted only after
+//                          a rework budget admits another council cycle
+//   delta_diff / delta_files / delta_ranges
+//                        - scoped evidence since prior_commit; cumulative
+//                          diff/files remain the reviewed candidate
 //   rework_kind          - most recently initiated rework category
 //   rework_iteration     - total initiated rework-cycle sequence
 //   error                - stable terminal failure code when applicable
@@ -53,8 +62,8 @@
 //
 // Does NOT call coding_produce_reviewable_change.
 //
-// Rework bound: one initiated validation repair, one initiated council
-// repair, and one initiated operator-approval repair, with a hard total
+// Rework bound: one initiated validation repair, up to two initiated council
+// repairs, and one initiated operator-approval repair, with a hard total
 // maximum of two same-session repair attempts across all kinds.
 // Review-budget exhaustion emits status=rework_exhausted (canonical). A
 // legacy_status=review_requires_rework field is also set for Phase 2 adapters.
@@ -87,6 +96,52 @@ digraph CodingChangeV1 {
     transform="constant",
     expression="0",
     output_key="review_rework_count"
+  ]
+
+  init_review_defaults [
+    type="transform",
+    transform="constant",
+    expression="{\"finding_ledger\":{},\"delta_diff\":\"\",\"delta_files\":[],\"delta_ranges\":{}}",
+    output_key="review_defaults"
+  ]
+
+  init_finding_ledger [
+    type="transform",
+    transform="json_extract",
+    source_key="review_defaults",
+    expression="finding_ledger",
+    output_key="finding_ledger"
+  ]
+
+  init_delta_diff [
+    type="transform",
+    transform="json_extract",
+    source_key="review_defaults",
+    expression="delta_diff",
+    output_key="delta_diff"
+  ]
+
+  init_delta_files [
+    type="transform",
+    transform="json_extract",
+    source_key="review_defaults",
+    expression="delta_files",
+    output_key="delta_files"
+  ]
+
+  init_delta_ranges [
+    type="transform",
+    transform="json_extract",
+    source_key="review_defaults",
+    expression="delta_ranges",
+    output_key="delta_ranges"
+  ]
+
+  init_review_cycle [
+    type="transform",
+    transform="constant",
+    expression="1",
+    output_key="review_cycle"
   ]
 
   init_total_rework_count [
@@ -683,7 +738,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="coding_workspace_committed_change",
-    context_keys="workspace_id,commit",
+    context_keys="workspace_id,commit,prior_commit",
     output_prefix="change",
     max_retries="0"
   ]
@@ -730,13 +785,88 @@ digraph CodingChangeV1 {
     output_key="commit_hash"
   ]
 
+  // Cycle 1 reviews the cumulative candidate with initialized empty delta
+  // evidence. Cycles 2-3 retain that cumulative candidate and additionally
+  // hoist the materialized prior_commit..HEAD delta for scoped rechecks.
+
+  route_review_material [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  prep_review_delta_diff [
+    type="transform",
+    transform="identity",
+    source_key="change.delta_diff",
+    output_key="delta_diff"
+  ]
+
+  prep_review_delta_files [
+    type="transform",
+    transform="identity",
+    source_key="change.delta_files",
+    output_key="delta_files"
+  ]
+
+  prep_review_delta_ranges [
+    type="transform",
+    transform="identity",
+    source_key="change.delta_ranges",
+    output_key="delta_ranges"
+  ]
+
+  route_prepared_review [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  error_review_cycle_invalid [
+    type="transform",
+    transform="constant",
+    expression="review_cycle_invalid_or_missing",
+    output_key="error"
+  ]
+
   review_change [
     type="exec",
     target="action",
     action="council_review_change",
-    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash",
+    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",
     output_prefix="review",
     max_retries="0"
+  ]
+
+  // Freeze every completed council cycle at top level before routing. This
+  // keeps checkpoints/results self-contained and makes the next cycle consume
+  // exactly the completed ledger rather than reconstructing review state.
+
+  hoist_review_finding_ledger [
+    type="transform",
+    transform="identity",
+    source_key="review.finding_ledger",
+    output_key="finding_ledger"
+  ]
+
+  hoist_review_cycle [
+    type="transform",
+    transform="identity",
+    source_key="review.review_cycle",
+    output_key="review_cycle"
+  ]
+
+  hoist_review_disposition [
+    type="transform",
+    transform="identity",
+    source_key="review.review_disposition",
+    output_key="review_disposition"
+  ]
+
+  route_completed_review_cycle [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
   ]
 
   route_review [
@@ -813,6 +943,31 @@ digraph CodingChangeV1 {
     output_key="prior_reviewed_commit"
   ]
 
+  // Security validation runs after council review. When that validation
+  // admits rework, preserve the reviewed candidate and advance the ledger
+  // cycle before returning feedback to the worker.
+
+  snapshot_validation_prior_commit [
+    type="transform",
+    transform="identity",
+    source_key="commit_hash",
+    output_key="prior_commit"
+  ]
+
+  snapshot_validation_prior_candidate_commit [
+    type="transform",
+    transform="identity",
+    source_key="commit_hash",
+    output_key="prior_candidate_commit"
+  ]
+
+  inc_validation_review_cycle [
+    type="transform",
+    transform="increment",
+    source_key="review_cycle",
+    output_key="review_cycle"
+  ]
+
   hoist_review_attestation_id [
     type="transform",
     transform="identity",
@@ -869,6 +1024,27 @@ digraph CodingChangeV1 {
     transform="increment",
     source_key="review_rework_count",
     output_key="review_rework_count"
+  ]
+
+  snapshot_review_prior_commit [
+    type="transform",
+    transform="identity",
+    source_key="commit_hash",
+    output_key="prior_commit"
+  ]
+
+  snapshot_review_prior_candidate_commit [
+    type="transform",
+    transform="identity",
+    source_key="commit_hash",
+    output_key="prior_candidate_commit"
+  ]
+
+  inc_review_cycle [
+    type="transform",
+    transform="increment",
+    source_key="review_cycle",
+    output_key="review_cycle"
   ]
 
   inc_review_total_rework_count [
@@ -1182,7 +1358,9 @@ digraph CodingChangeV1 {
   // Flow
 
   start -> init_validation_rework_count -> init_review_rework_count
-  init_review_rework_count -> init_operator_rework_count
+  init_review_rework_count -> init_review_defaults -> init_finding_ledger
+  init_finding_ledger -> init_delta_diff -> init_delta_files -> init_delta_ranges
+  init_delta_ranges -> init_review_cycle -> init_operator_rework_count
   init_operator_rework_count -> init_total_rework_count -> init_protocol_retry_count
   init_protocol_retry_count -> init_worker_send_recovery_count
   init_worker_send_recovery_count -> classify_profile -> acquire_workspace
@@ -1267,6 +1445,7 @@ digraph CodingChangeV1 {
   start -> post_validation_expected_commit [condition="0=1"]
   start -> route_security_attested_human [condition="0=1"]
   start -> route_security_attested_auto [condition="0=1"]
+  start -> snapshot_validation_prior_commit [condition="0=1"]
 
   // Dormant security-regression edges retain default behavior until the
   // compiler connects the reviewed profile-specific entry points.
@@ -1277,6 +1456,9 @@ digraph CodingChangeV1 {
   check_security_rework_fresh -> error_security_rework_not_fresh [condition="outcome=fail"]
   error_security_rework_not_fresh -> status_validation_failed
   prep_review_validation_profile -> review_change
+  snapshot_validation_prior_commit -> snapshot_validation_prior_candidate_commit
+  snapshot_validation_prior_candidate_commit -> inc_validation_review_cycle
+  inc_validation_review_cycle -> inc_validation_rework_count
   remember_validation_reviewed_commit -> check_validation_category_budget
   remember_review_reviewed_commit -> check_review_category_budget
   route_security_attested_human -> hoist_review_attestation_id [condition="context.review.review_attestation_id!=\"\""]
@@ -1399,13 +1581,30 @@ digraph CodingChangeV1 {
   load_committed_change -> hoist_change_commit [condition="outcome=success"]
   hoist_change_commit -> prep_review_diff
   prep_review_diff -> prep_review_files -> prep_review_intent -> prep_review_agent -> prep_review_base
-  prep_review_base -> review_change
+  prep_review_base -> route_review_material
+
+  // Only canonical cycles are reviewable. Cycle 1 uses the initialized empty
+  // delta values; cycles 2-3 must traverse the materialized delta hoists.
+  route_review_material -> route_prepared_review [condition="context.review_cycle=1"]
+  route_review_material -> prep_review_delta_diff [condition="context.review_cycle=2"]
+  route_review_material -> prep_review_delta_diff [condition="context.review_cycle=3"]
+  route_review_material -> error_review_cycle_invalid
+  prep_review_delta_diff -> prep_review_delta_files -> prep_review_delta_ranges
+  prep_review_delta_ranges -> route_prepared_review
+  route_prepared_review -> review_change
+  error_review_cycle_invalid -> status_review_failed
 
   review_change -> error_council_review [condition="outcome=fail"]
   error_council_review -> status_review_failed
   status_review_failed -> close_worker
 
-  review_change -> route_review [condition="outcome=success"]
+  review_change -> hoist_review_finding_ledger [condition="outcome=success"]
+  hoist_review_finding_ledger -> hoist_review_cycle -> hoist_review_disposition
+  hoist_review_disposition -> route_completed_review_cycle
+  route_completed_review_cycle -> route_review [condition="context.review_cycle=1"]
+  route_completed_review_cycle -> route_review [condition="context.review_cycle=2"]
+  route_completed_review_cycle -> route_review [condition="context.review_cycle=3"]
+  route_completed_review_cycle -> error_review_cycle_invalid
 
   // Review routing by tier_decision
   route_review -> check_review_category_budget [condition="context.review.tier_decision=rework"]
@@ -1427,16 +1626,19 @@ digraph CodingChangeV1 {
   status_human_review_required -> close_worker
   route_human_review -> prep_pr_path [condition="context.open_pr=true"]
 
-  // Review repair uses its own one-cycle category budget and the shared hard
-  // total of two initiated repair attempts.
-  check_review_category_budget -> legacy_status_review_requires_rework [condition="context.review_rework_count>=1"]
-  check_review_category_budget -> check_review_total_budget [condition="context.review_rework_count<1"]
+  // Review repair admits up to two council cycles while retaining the shared
+  // hard total of two initiated repair attempts across all categories.
+  check_review_category_budget -> legacy_status_review_requires_rework [condition="context.review_rework_count>=2"]
+  check_review_category_budget -> check_review_total_budget [condition="context.review_rework_count<2"]
   check_review_total_budget -> legacy_status_review_requires_rework [condition="context.total_rework_count>=2"]
-  check_review_total_budget -> inc_review_rework_count [condition="context.total_rework_count<2"]
+  check_review_total_budget -> snapshot_review_prior_commit [condition="context.total_rework_count<2"]
 
   // Exhausted: canonical rework_exhausted + legacy_status for Phase 2 adapters
   legacy_status_review_requires_rework -> status_rework_exhausted
   status_rework_exhausted -> close_worker
+  snapshot_review_prior_commit -> snapshot_review_prior_candidate_commit
+  snapshot_review_prior_candidate_commit -> inc_review_cycle
+  inc_review_cycle -> inc_review_rework_count
   inc_review_rework_count -> inc_review_total_rework_count
   inc_review_total_rework_count -> mark_review_rework_kind
   mark_review_rework_kind -> mark_review_rework_iteration
