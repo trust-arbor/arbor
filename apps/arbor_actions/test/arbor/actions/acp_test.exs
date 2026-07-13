@@ -492,6 +492,43 @@ defmodule Arbor.Actions.AcpTest do
       end
     end
 
+    test "ACP resource-not-found resumes with one fresh recovery attempt" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :start_results},
+        [
+          {:error, %{"code" => -32_002, "message" => "session unavailable"}},
+          {:ok,
+           %{
+             worker_session_id: "acp_worker_fresh_resource_missing",
+             session_id: "provider_sess_fresh_resource_missing",
+             provider: "claude",
+             status: "ready"
+           }}
+        ]
+      )
+
+      assert {:ok, result} =
+               Acp.StartSession.run(
+                 %{
+                   provider: "claude",
+                   cwd: "/repo",
+                   use_pool: true,
+                   session_id: "provider-session-missing",
+                   fallback_to_fresh_on_resume_unavailable: true
+                 },
+                 %{agent_id: "agent_start", task_id: "task_start"}
+               )
+
+      assert result.continuity == "fresh_recovery"
+      assert_receive {:managed_start, :claude, first_opts}
+      assert_receive {:managed_start, :claude, fallback_opts}
+      assert Keyword.get(first_opts, :session_id) == "provider-session-missing"
+      refute Keyword.has_key?(fallback_opts, :session_id)
+      assert Keyword.get(fallback_opts, :create_session) == true
+    end
+
     test "duplicate fallback keys are rejected before managed start" do
       install_fake_ai()
 

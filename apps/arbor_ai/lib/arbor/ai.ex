@@ -879,6 +879,8 @@ defmodule Arbor.AI do
   def classify_resume_unavailability({:unsupported_capability, :load_session}),
     do: :resume_unavailable
 
+  def classify_resume_unavailability(%{"code" => -32_002}), do: :resume_unavailable
+
   def classify_resume_unavailability(_reason), do: :not_resume_unavailable
 
   # -- ACP Pool API --
