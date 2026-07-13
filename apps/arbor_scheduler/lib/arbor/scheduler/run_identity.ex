@@ -71,11 +71,14 @@ defmodule Arbor.Scheduler.RunIdentity do
           agent_id: String.t(),
           signing_authority: SigningAuthority.t(),
           cap_ids: [String.t()],
-          lease: pid()
+          lease: RunLease.id()
         }
 
   @doc false
-  def identity_name, do: "scheduler-run:#{node()}"
+  def identity_name do
+    runtime_id = Application.get_env(:arbor_scheduler, :run_identity_runtime_id, "default")
+    "scheduler-run:#{runtime_id}"
+  end
 
   @doc """
   Mint a per-run identity from a verified attestation and grant only its
@@ -99,12 +102,14 @@ defmodule Arbor.Scheduler.RunIdentity do
     trust = Keyword.get(opts, :trust_facade, Trust)
     ttl_ms = Keyword.get(opts, :lease_ttl_ms, lease_ttl_ms())
 
+    cleanup_opts =
+      Keyword.take(opts, [:cleanup_max_attempts, :cleanup_retry_base_ms, :cleanup_retry_max_ms])
+
     with :ok <- CapsFile.verify_attestation(attestation),
          {:ok, lease} <-
-           RunLease.start(self(),
-             security_facade: security,
-             trust_facade: trust,
-             ttl_ms: ttl_ms
+           RunLease.start(
+             self(),
+             [security_facade: security, trust_facade: trust, ttl_ms: ttl_ms] ++ cleanup_opts
            ) do
       provision(attestation, lease, security, trust, ttl_ms)
     end
@@ -116,18 +121,17 @@ defmodule Arbor.Scheduler.RunIdentity do
   Revoke every cap in the run handle and deregister the ephemeral
   identity.
 
-  Best-effort: each revoke is logged on failure but never raises. This
-  function MUST be safe to call in an `after` clause regardless of
-  whether `mint/1` succeeded — that's how `PipelineRunner` guarantees
-  cleanup even on pipeline crash.
+  Cleanup retries transient failures with bounded exponential backoff. If an
+  operation still fails, the error is returned and retained by the lease so it
+  cannot be mistaken for successful revocation.
 
   Pass `nil` for runs that never minted (caps file missing, etc.) to
   make the call-site uniform.
   """
-  @spec revoke(run_handle() | nil) :: :ok
+  @spec revoke(run_handle() | nil) :: :ok | {:error, term()}
   def revoke(nil), do: :ok
 
-  def revoke(%{lease: lease}), do: normalize_revoke(RunLease.revoke(lease))
+  def revoke(%{lease: lease}), do: RunLease.revoke(lease)
 
   # ===========================================================================
   # Internals
@@ -138,8 +142,7 @@ defmodule Arbor.Scheduler.RunIdentity do
 
     result =
       with {:ok, identity} <- security.generate_identity(name: identity_name()),
-           :ok <- RunLease.record_identity(lease, identity.agent_id),
-           :ok <- register_identity(identity, security),
+           :ok <- register_identity(lease, identity, security),
            {:ok, lobby_cap} <-
              grant_capability(
                lease,
@@ -152,8 +155,7 @@ defmodule Arbor.Scheduler.RunIdentity do
            {:ok, run_caps} <-
              grant_run_caps(lease, security, identity.agent_id, attestation, expires_at),
            :ok <- set_trust_profile_rules(trust, identity.agent_id, attestation.capabilities),
-           {:ok, authority} <- open_authority(identity, security),
-           :ok <- record_authority(lease, authority, security) do
+           {:ok, authority} <- open_authority(lease, identity, security) do
         {:ok,
          %{
            agent_id: identity.agent_id,
@@ -181,58 +183,19 @@ defmodule Arbor.Scheduler.RunIdentity do
       {:error, {:provision_exit, reason}}
   end
 
-  defp register_identity(identity, security) do
-    case security.register_identity(Arbor.Contracts.Security.Identity.public_only(identity)) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:identity_registration_failed, reason}}
-    end
+  defp register_identity(lease, identity, security) do
+    public_identity = Arbor.Contracts.Security.Identity.public_only(identity)
+    RunLease.register_identity(lease, public_identity, security)
   end
 
   defp grant_capability(lease, security, agent_id, resource, expires_at, extra_opts) do
     opts = [principal: agent_id, resource: resource, expires_at: expires_at] ++ extra_opts
 
-    case security.grant(opts) do
-      {:ok, cap} ->
-        case RunLease.record_capability(lease, cap.id) do
-          :ok ->
-            {:ok, cap}
-
-          {:error, reason} ->
-            _ = security.revoke(cap.id)
-            {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, {:grant_failed, resource, reason}}
-    end
+    RunLease.grant_capability(lease, opts, security)
   end
 
-  defp open_authority(identity, security) do
-    with {:ok, proof} <-
-           security.build_signing_authority_acquisition_proof(
-             identity.agent_id,
-             identity.private_key,
-             purpose: :pipeline_run,
-             owner: self()
-           ),
-         {:ok, authority} <-
-           security.open_ephemeral_signing_authority(proof, identity.private_key) do
-      {:ok, authority}
-    else
-      {:error, reason} -> {:error, {:authority_open_failed, reason}}
-    end
-  end
-
-  defp record_authority(lease, authority, security) do
-    case RunLease.record_authority(lease, authority) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        _ = security.close_signing_authority(authority)
-        {:error, reason}
-    end
-  end
+  defp open_authority(lease, identity, security),
+    do: RunLease.open_authority(lease, identity, security)
 
   defp grant_run_caps(lease, security, agent_id, attestation, expires_at) do
     attestation.capabilities
@@ -349,7 +312,4 @@ defmodule Arbor.Scheduler.RunIdentity do
   defp lease_ttl_ms do
     Application.get_env(:arbor_scheduler, :run_identity_lease_ttl_ms, @default_lease_ttl_ms)
   end
-
-  defp normalize_revoke(:ok), do: :ok
-  defp normalize_revoke({:error, _reason}), do: :ok
 end
