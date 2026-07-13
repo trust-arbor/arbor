@@ -2046,6 +2046,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         end
       )
 
+    validation_admitted_target =
+      if Enum.any?(convergence["node_attrs"], &(&1["node_id"] == "inc_validation_review_cycle")) do
+        "snapshot_validation_prior_commit"
+      else
+        "inc_validation_rework_count"
+      end
+
     errors
     |> check_dynamic_total_budget_edges(
       graph,
@@ -2053,21 +2060,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "legacy_status_review_requires_rework",
       "snapshot_review_prior_commit"
     )
-    |> maybe_check_security_validation_cycle_budget(graph, convergence)
-  end
-
-  defp maybe_check_security_validation_cycle_budget(errors, graph, convergence) do
-    if Enum.any?(convergence["node_attrs"], &(&1["node_id"] == "inc_validation_review_cycle")) do
-      check_dynamic_total_budget_edges(
-        errors,
-        graph,
-        "check_validation_total_budget",
-        "status_validation_failed",
-        "snapshot_validation_prior_commit"
-      )
-    else
-      errors
-    end
+    |> check_dynamic_total_budget_edges(
+      graph,
+      "check_validation_total_budget",
+      "status_validation_failed",
+      validation_admitted_target
+    )
+    |> check_dynamic_total_budget_edges(
+      graph,
+      "check_operator_rework_total_budget",
+      "legacy_status_operator_approval_rework",
+      "inc_operator_rework_count"
+    )
   end
 
   defp check_dynamic_total_budget_edges(errors, graph, source, exhausted_target, admitted_target) do

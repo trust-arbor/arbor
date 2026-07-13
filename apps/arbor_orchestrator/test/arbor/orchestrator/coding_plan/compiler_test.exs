@@ -145,6 +145,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "validate")["param.warnings_as_errors"] == true
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
 
+    assert node_attrs(graph, "init_review_cycle") == %{
+             "type" => "transform",
+             "transform" => "json_extract",
+             "source_key" => "review_defaults",
+             "expression" => "review_cycle",
+             "output_key" => "review_cycle"
+           }
+
     assert node_attrs(graph, "load_committed_change")["context_keys"] ==
              "workspace_id,commit,prior_commit"
 

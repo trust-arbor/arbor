@@ -682,6 +682,13 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     end
 
     defp review_response(scenario, counters, state, args) do
+      case Arbor.Actions.Council.build_code_review_request(args) do
+        {:ok, _request} -> do_review_response(scenario, counters, state, args)
+        {:error, reason} -> {:error, "invalid real review request: #{inspect(reason)}"}
+      end
+    end
+
+    defp do_review_response(scenario, counters, state, args) do
       n = Map.get(counters, :review, 0)
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :review, n + 1)} end)
 
@@ -1262,19 +1269,22 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert Enum.at(prompts, 1) =~ "ONLY one JSON object"
     end
 
-    test "cycle one supplies empty delta evidence and no prior candidate" do
+    test "cycle one reaches the real request boundary as an integer with empty delta evidence" do
       assert {{:ok, result}, calls} = run_fixture(:change_committed)
       assert result.context["status"] == "change_committed"
 
       assert [{"council_review_change", review_args}] =
                Enum.filter(calls, fn {name, _args} -> name == "council_review_change" end)
 
-      assert review_args["review_cycle"] == "1"
+      assert review_args["review_cycle"] == 1
       assert review_args["finding_ledger"] == %{}
       assert review_args["delta_diff"] == ""
       assert review_args["delta_files"] == []
       assert review_args["delta_ranges"] == %{}
       refute Map.has_key?(review_args, "prior_candidate_commit")
+
+      assert {:ok, request} = Arbor.Actions.Council.build_code_review_request(review_args)
+      assert request.review_cycle == 1
 
       assert [{"coding_workspace_committed_change", material_args}] =
                Enum.filter(calls, fn {name, _args} ->
@@ -1304,7 +1314,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         |> Enum.filter(fn {name, _args} -> name == "council_review_change" end)
         |> Enum.map(&elem(&1, 1))
 
-      assert first_review["review_cycle"] == "1"
+      assert first_review["review_cycle"] == 1
       assert second_review["review_cycle"] == 2
       assert second_review["prior_candidate_commit"] == "commit-review-1"
       assert second_review["finding_ledger"]["review_cycle"] == 1

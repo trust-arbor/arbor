@@ -61,7 +61,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            )
   end
 
-  test "review convergence mutations fail closed before execution", ctx do
+  test "security regression: review convergence and shared counter mutations fail closed", ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)
     assert {:ok, profile} = Profiles.fetch_executable("default")
@@ -95,6 +95,39 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         "inc_review_cycle",
         nil,
         "inc_review_rework_count"
+      ),
+      replace_edge_target(
+        graph,
+        "inc_review_rework_count",
+        "inc_review_total_rework_count",
+        nil,
+        "mark_review_rework_kind"
+      ),
+      replace_edge_target(
+        graph,
+        "inc_validation_rework_count",
+        "inc_validation_total_rework_count",
+        nil,
+        "mark_validation_rework_kind"
+      ),
+      replace_edge_target(
+        graph,
+        "inc_operator_rework_count",
+        "inc_operator_total_rework_count",
+        nil,
+        "mark_operator_rework_kind"
+      ),
+      update_in(
+        graph.nodes["inc_review_total_rework_count"].attrs,
+        &Map.put(&1, "transform", "identity")
+      ),
+      update_in(
+        graph.nodes["inc_validation_rework_count"].attrs,
+        &Map.put(&1, "output_key", "forged_validation_rework_count")
+      ),
+      update_in(
+        graph.nodes["inc_operator_total_rework_count"].attrs,
+        &Map.put(&1, "source_key", "operator_rework_count")
       )
     ]
 
@@ -107,13 +140,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       assert Enum.any?(errors, fn error ->
                error["code"] in [
                  "review_convergence_node_mismatch",
-                 "review_convergence_topology_mismatch"
+                 "review_convergence_topology_mismatch",
+                 "review_convergence_writer_violation"
                ]
              end)
     end
   end
 
-  test "security overlay cannot bypass shared delta or validation cycle wiring", ctx do
+  test "security regression: overlay cannot bypass delta, cycle, or validation total counter",
+       ctx do
     assert {:ok, compilation} = compile(security_plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)
     assert {:ok, profile} = Profiles.fetch_executable("security_regression")
@@ -132,6 +167,17 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         "inc_validation_review_cycle",
         nil,
         "inc_validation_rework_count"
+      ),
+      replace_edge_target(
+        graph,
+        "inc_validation_rework_count",
+        "inc_validation_total_rework_count",
+        nil,
+        "mark_validation_rework_kind"
+      ),
+      update_in(
+        graph.nodes["inc_validation_total_rework_count"].attrs,
+        &Map.put(&1, "output_key", "validation_rework_count")
       )
     ]
 
@@ -143,7 +189,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
       assert Enum.any?(errors, fn error ->
                error["code"] in [
+                 "review_convergence_node_mismatch",
                  "review_convergence_topology_mismatch",
+                 "review_convergence_writer_violation",
                  "security_topology_mismatch"
                ]
              end)

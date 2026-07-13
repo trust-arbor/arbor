@@ -606,6 +606,185 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @security_review_context_keys @review_context_keys <>
                                   ",test_paths,validation_profile"
 
+  @rework_budget_node_attrs [
+    %{
+      "node_id" => "check_operator_rework_category_budget",
+      "attrs" => %{
+        "type" => "branch",
+        "shape" => "diamond",
+        "fan_out" => "false"
+      }
+    },
+    %{
+      "node_id" => "check_operator_rework_total_budget",
+      "attrs" => %{
+        "type" => "branch",
+        "shape" => "diamond",
+        "fan_out" => "false"
+      }
+    },
+    %{
+      "node_id" => "check_validation_category_budget",
+      "attrs" => %{
+        "type" => "branch",
+        "shape" => "diamond",
+        "fan_out" => "false"
+      }
+    },
+    %{
+      "node_id" => "check_validation_total_budget",
+      "attrs" => %{
+        "type" => "branch",
+        "shape" => "diamond",
+        "fan_out" => "false"
+      }
+    },
+    %{
+      "node_id" => "inc_operator_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "increment",
+        "source_key" => "operator_rework_count",
+        "output_key" => "operator_rework_count"
+      }
+    },
+    %{
+      "node_id" => "inc_operator_total_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "increment",
+        "source_key" => "total_rework_count",
+        "output_key" => "total_rework_count"
+      }
+    },
+    %{
+      "node_id" => "inc_review_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "increment",
+        "source_key" => "review_rework_count",
+        "output_key" => "review_rework_count"
+      }
+    },
+    %{
+      "node_id" => "inc_review_total_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "increment",
+        "source_key" => "total_rework_count",
+        "output_key" => "total_rework_count"
+      }
+    },
+    %{
+      "node_id" => "inc_validation_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "increment",
+        "source_key" => "validation_rework_count",
+        "output_key" => "validation_rework_count"
+      }
+    },
+    %{
+      "node_id" => "inc_validation_total_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "increment",
+        "source_key" => "total_rework_count",
+        "output_key" => "total_rework_count"
+      }
+    },
+    %{
+      "node_id" => "init_operator_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "0",
+        "output_key" => "operator_rework_count"
+      }
+    },
+    %{
+      "node_id" => "init_review_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "0",
+        "output_key" => "review_rework_count"
+      }
+    },
+    %{
+      "node_id" => "init_total_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "0",
+        "output_key" => "total_rework_count"
+      }
+    },
+    %{
+      "node_id" => "init_validation_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "0",
+        "output_key" => "validation_rework_count"
+      }
+    },
+    %{
+      "node_id" => "mark_operator_rework_iteration",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "total_rework_count",
+        "output_key" => "rework_iteration"
+      }
+    },
+    %{
+      "node_id" => "mark_operator_rework_kind",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "operator_approval",
+        "output_key" => "rework_kind"
+      }
+    },
+    %{
+      "node_id" => "mark_review_rework_iteration",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "total_rework_count",
+        "output_key" => "rework_iteration"
+      }
+    },
+    %{
+      "node_id" => "mark_review_rework_kind",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "review",
+        "output_key" => "rework_kind"
+      }
+    },
+    %{
+      "node_id" => "mark_validation_rework_iteration",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "total_rework_count",
+        "output_key" => "rework_iteration"
+      }
+    },
+    %{
+      "node_id" => "mark_validation_rework_kind",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "validation",
+        "output_key" => "rework_kind"
+      }
+    }
+  ]
+
   @review_convergence_node_attrs [
                                    %{
                                      "node_id" => "check_review_category_budget",
@@ -703,8 +882,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                      "node_id" => "init_review_cycle",
                                      "attrs" => %{
                                        "type" => "transform",
-                                       "transform" => "constant",
-                                       "expression" => "1",
+                                       "transform" => "json_extract",
+                                       "source_key" => "review_defaults",
+                                       "expression" => "review_cycle",
                                        "output_key" => "review_cycle"
                                      }
                                    },
@@ -714,7 +894,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                        "type" => "transform",
                                        "transform" => "constant",
                                        "expression" =>
-                                         "{\"finding_ledger\":{},\"delta_diff\":\"\",\"delta_files\":[],\"delta_ranges\":{}}",
+                                         "{\"review_cycle\":1,\"finding_ledger\":{},\"delta_diff\":\"\",\"delta_files\":[],\"delta_ranges\":{}}",
                                        "output_key" => "review_defaults"
                                      }
                                    },
@@ -812,6 +992,76 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                  ]
                                  |> Enum.sort_by(& &1["node_id"])
 
+  @review_convergence_node_attrs (@rework_budget_node_attrs ++ @review_convergence_node_attrs)
+                                 |> Enum.sort_by(& &1["node_id"])
+
+  @rework_budget_edges [
+    [
+      "check_operator_rework_category_budget",
+      "check_operator_rework_total_budget",
+      "context.operator_rework_count<1"
+    ],
+    [
+      "check_operator_rework_category_budget",
+      "legacy_status_operator_approval_rework",
+      "context.operator_rework_count>=1"
+    ],
+    [
+      "check_validation_category_budget",
+      "check_validation_total_budget",
+      "context.validation_rework_count<1"
+    ],
+    [
+      "check_validation_category_budget",
+      "status_validation_failed",
+      "context.validation_rework_count>=1"
+    ],
+    [
+      "inc_operator_rework_count",
+      "inc_operator_total_rework_count",
+      nil
+    ],
+    [
+      "inc_operator_total_rework_count",
+      "mark_operator_rework_kind",
+      nil
+    ],
+    ["inc_review_rework_count", "inc_review_total_rework_count", nil],
+    ["inc_review_total_rework_count", "mark_review_rework_kind", nil],
+    [
+      "inc_validation_rework_count",
+      "inc_validation_total_rework_count",
+      nil
+    ],
+    [
+      "inc_validation_total_rework_count",
+      "mark_validation_rework_kind",
+      nil
+    ],
+    [
+      "mark_operator_rework_iteration",
+      "build_operator_rework_prompt",
+      nil
+    ],
+    [
+      "mark_operator_rework_kind",
+      "mark_operator_rework_iteration",
+      nil
+    ],
+    ["mark_review_rework_iteration", "build_review_rework_prompt", nil],
+    ["mark_review_rework_kind", "mark_review_rework_iteration", nil],
+    [
+      "mark_validation_rework_iteration",
+      "build_validation_rework_prompt",
+      nil
+    ],
+    [
+      "mark_validation_rework_kind",
+      "mark_validation_rework_iteration",
+      nil
+    ]
+  ]
+
   @review_convergence_edges [
                               [
                                 "check_review_category_budget",
@@ -824,7 +1074,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                 "context.review_rework_count>=2"
                               ],
                               ["hoist_review_cycle", "hoist_review_disposition", nil],
-                              ["hoist_review_disposition", "route_completed_review_cycle", nil],
+                              [
+                                "hoist_review_disposition",
+                                "route_completed_review_cycle",
+                                nil
+                              ],
                               ["hoist_review_finding_ledger", "hoist_review_cycle", nil],
                               ["inc_review_cycle", "inc_review_rework_count", nil],
                               ["prep_review_base", "route_review_material", nil],
@@ -832,8 +1086,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                               ["prep_review_delta_files", "prep_review_delta_ranges", nil],
                               ["prep_review_delta_ranges", "route_prepared_review", nil],
                               ["review_change", "error_council_review", "outcome=fail"],
-                              ["review_change", "hoist_review_finding_ledger", "outcome=success"],
-                              ["route_completed_review_cycle", "error_review_cycle_invalid", nil],
+                              [
+                                "review_change",
+                                "hoist_review_finding_ledger",
+                                "outcome=success"
+                              ],
+                              [
+                                "route_completed_review_cycle",
+                                "error_review_cycle_invalid",
+                                nil
+                              ],
                               [
                                 "route_completed_review_cycle",
                                 "route_review",
@@ -866,13 +1128,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                 "route_prepared_review",
                                 "context.review_cycle=1"
                               ],
-                              ["snapshot_review_prior_candidate_commit", "inc_review_cycle", nil],
+                              [
+                                "snapshot_review_prior_candidate_commit",
+                                "inc_review_cycle",
+                                nil
+                              ],
                               [
                                 "snapshot_review_prior_commit",
                                 "snapshot_review_prior_candidate_commit",
                                 nil
                               ]
                             ]
+                            |> Enum.sort()
+
+  @review_convergence_edges (@rework_budget_edges ++ @review_convergence_edges)
                             |> Enum.sort()
 
   @review_convergence_policy %{
@@ -882,10 +1151,32 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "delta_files" => ["init_delta_files", "prep_review_delta_files"],
       "delta_ranges" => ["init_delta_ranges", "prep_review_delta_ranges"],
       "finding_ledger" => ["hoist_review_finding_ledger", "init_finding_ledger"],
+      "operator_rework_count" => ["inc_operator_rework_count", "init_operator_rework_count"],
       "prior_candidate_commit" => ["snapshot_review_prior_candidate_commit"],
       "prior_commit" => ["snapshot_review_prior_commit"],
+      "review_rework_count" => ["inc_review_rework_count", "init_review_rework_count"],
       "review_cycle" => ["hoist_review_cycle", "inc_review_cycle", "init_review_cycle"],
-      "review_disposition" => ["hoist_review_disposition"]
+      "review_disposition" => ["hoist_review_disposition"],
+      "rework_iteration" => [
+        "mark_operator_rework_iteration",
+        "mark_review_rework_iteration",
+        "mark_validation_rework_iteration"
+      ],
+      "rework_kind" => [
+        "mark_operator_rework_kind",
+        "mark_review_rework_kind",
+        "mark_validation_rework_kind"
+      ],
+      "total_rework_count" => [
+        "inc_operator_total_rework_count",
+        "inc_review_total_rework_count",
+        "inc_validation_total_rework_count",
+        "init_total_rework_count"
+      ],
+      "validation_rework_count" => [
+        "inc_validation_rework_count",
+        "init_validation_rework_count"
+      ]
     },
     "edges" => @review_convergence_edges
   }
@@ -935,18 +1226,40 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "delta_files" => ["init_delta_files", "prep_review_delta_files"],
       "delta_ranges" => ["init_delta_ranges", "prep_review_delta_ranges"],
       "finding_ledger" => ["hoist_review_finding_ledger", "init_finding_ledger"],
+      "operator_rework_count" => ["inc_operator_rework_count", "init_operator_rework_count"],
       "prior_candidate_commit" => [
         "snapshot_review_prior_candidate_commit",
         "snapshot_validation_prior_candidate_commit"
       ],
       "prior_commit" => ["snapshot_review_prior_commit", "snapshot_validation_prior_commit"],
+      "review_rework_count" => ["inc_review_rework_count", "init_review_rework_count"],
       "review_cycle" => [
         "hoist_review_cycle",
         "inc_review_cycle",
         "inc_validation_review_cycle",
         "init_review_cycle"
       ],
-      "review_disposition" => ["hoist_review_disposition"]
+      "review_disposition" => ["hoist_review_disposition"],
+      "rework_iteration" => [
+        "mark_operator_rework_iteration",
+        "mark_review_rework_iteration",
+        "mark_validation_rework_iteration"
+      ],
+      "rework_kind" => [
+        "mark_operator_rework_kind",
+        "mark_review_rework_kind",
+        "mark_validation_rework_kind"
+      ],
+      "total_rework_count" => [
+        "inc_operator_total_rework_count",
+        "inc_review_total_rework_count",
+        "inc_validation_total_rework_count",
+        "init_total_rework_count"
+      ],
+      "validation_rework_count" => [
+        "inc_validation_rework_count",
+        "init_validation_rework_count"
+      ]
     },
     "edges" =>
       @review_convergence_edges

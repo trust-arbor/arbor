@@ -101,7 +101,7 @@ digraph CodingChangeV1 {
   init_review_defaults [
     type="transform",
     transform="constant",
-    expression="{\"finding_ledger\":{},\"delta_diff\":\"\",\"delta_files\":[],\"delta_ranges\":{}}",
+    expression="{\"review_cycle\":1,\"finding_ledger\":{},\"delta_diff\":\"\",\"delta_files\":[],\"delta_ranges\":{}}",
     output_key="review_defaults"
   ]
 
@@ -139,8 +139,9 @@ digraph CodingChangeV1 {
 
   init_review_cycle [
     type="transform",
-    transform="constant",
-    expression="1",
+    transform="json_extract",
+    source_key="review_defaults",
+    expression="review_cycle",
     output_key="review_cycle"
   ]
 

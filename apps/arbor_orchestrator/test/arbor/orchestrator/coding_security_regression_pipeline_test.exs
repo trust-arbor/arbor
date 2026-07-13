@@ -183,6 +183,51 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     end
 
     defp dispatch("council_review_change", args, scenario, state) do
+      case Arbor.Actions.Council.build_code_review_request(args) do
+        {:ok, _request} -> review_response(args, scenario, state)
+        {:error, reason} -> {:error, "invalid real review request: #{inspect(reason)}"}
+      end
+    end
+
+    defp dispatch("coding_security_regression_validate", _args, scenario, state) do
+      validation_index = bump(state, :validation)
+
+      passed =
+        not (scenario in [
+               :validation_rework_dirty,
+               :validation_rework_self_commit,
+               :validation_rework_noop
+             ] and validation_index == 1)
+
+      {:ok,
+       %{
+         passed: passed,
+         reason: if(passed, do: "security_regression_validated", else: "candidate_tests_failed"),
+         evidence_type: "reviewed_regression_evidence"
+       }}
+    end
+
+    defp dispatch("acp_close_session", _args, _scenario, _state) do
+      {:ok, %{worker_session_id: "worker-security-fixture", status: "closed"}}
+    end
+
+    defp dispatch("coding_workspace_release", args, _scenario, _state) do
+      {:ok,
+       %{
+         workspace_id: "ws_security_fixture",
+         status: "retained",
+         mode: args["mode"],
+         active: false
+       }}
+    end
+
+    defp dispatch("git_pr", _args, _scenario, _state) do
+      {:ok, %{url: "https://example.test/pr/1", number: 1, draft: true}}
+    end
+
+    defp dispatch(name, _args, _scenario, _state), do: {:error, "unexpected action: #{name}"}
+
+    defp review_response(args, scenario, state) do
       review_index = bump(state, :review)
 
       case scenario do
@@ -239,44 +284,6 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
           end
       end
     end
-
-    defp dispatch("coding_security_regression_validate", _args, scenario, state) do
-      validation_index = bump(state, :validation)
-
-      passed =
-        not (scenario in [
-               :validation_rework_dirty,
-               :validation_rework_self_commit,
-               :validation_rework_noop
-             ] and validation_index == 1)
-
-      {:ok,
-       %{
-         passed: passed,
-         reason: if(passed, do: "security_regression_validated", else: "candidate_tests_failed"),
-         evidence_type: "reviewed_regression_evidence"
-       }}
-    end
-
-    defp dispatch("acp_close_session", _args, _scenario, _state) do
-      {:ok, %{worker_session_id: "worker-security-fixture", status: "closed"}}
-    end
-
-    defp dispatch("coding_workspace_release", args, _scenario, _state) do
-      {:ok,
-       %{
-         workspace_id: "ws_security_fixture",
-         status: "retained",
-         mode: args["mode"],
-         active: false
-       }}
-    end
-
-    defp dispatch("git_pr", _args, _scenario, _state) do
-      {:ok, %{url: "https://example.test/pr/1", number: 1, draft: true}}
-    end
-
-    defp dispatch(name, _args, _scenario, _state), do: {:error, "unexpected action: #{name}"}
 
     defp review_payload(tier, args) do
       feedback = %{
@@ -413,7 +420,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert review_args["workspace_id"] == "ws_security_fixture"
     assert review_args["commit_hash"] == "commit-1"
     assert review_args["validation_profile"] == "security_regression"
-    assert review_args["review_cycle"] == "1"
+    assert review_args["review_cycle"] == 1
     assert review_args["finding_ledger"] == %{}
     assert review_args["delta_diff"] == ""
     assert review_args["delta_files"] == []
@@ -478,7 +485,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
              ]
 
       [first_review, second_review] = Enum.map(reviews, &elem(&1, 1))
-      assert first_review["review_cycle"] == "1"
+      assert first_review["review_cycle"] == 1
       assert second_review["review_cycle"] == 2
       assert second_review["prior_candidate_commit"] == "commit-1"
       assert second_review["finding_ledger"]["review_cycle"] == 1
