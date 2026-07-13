@@ -379,3 +379,17 @@ action in `Arbor.Actions` is not enough: compiler fixtures, executable profile m
 graph tests can retain the old static module set and fail with `referenced_action_missing` before
 semantic analysis. Search action names across production manifests and test catalogs whenever a
 reviewed subgraph changes its exec action.
+
+**DOT `constant` transforms emit strings, even when the expression looks numeric or boolean.** If
+the context or downstream contract requires a typed JSON value, put it in a JSON object and extract
+it with `json_extract`, or normalize it at the action boundary. A fake executor that accepts the
+serialized string can hide a production constructor failure, so executable pipeline fixtures must
+exercise the real request/contract constructor for typed action inputs (found 2026-07-12 with
+`review_cycle`).
+
+**A semantic retry ceiling must pin the whole counter dataflow.** Checking only category/total gate
+conditions does not prove that an admitted retry increments the shared total: a rewired edge or
+mutated transform can skip the total counter and preserve every gate node. Pin counter
+initialization and writer attributes, exact category-to-total increment chains, and prompt/dispatch
+routing; mutation tests must remove or bypass each increment and fail before execution (found
+2026-07-12 in coding review convergence preflight).
