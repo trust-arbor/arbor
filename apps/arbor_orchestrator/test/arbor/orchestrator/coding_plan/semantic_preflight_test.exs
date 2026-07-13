@@ -677,7 +677,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       inject_edge(
         ctx.template_source,
         "status_approval_denied -> close_worker",
-        "status_approval_denied -> prep_release_mode [condition=\"context.bypass_close=true\"]"
+        "status_approval_denied -> prep_release_mode_retain [condition=\"context.bypass_close=true\"]"
       )
 
     assert_semantic_error(
@@ -1178,6 +1178,47 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              SemanticPreflight.validate(cycled, profile["semantic_policy"],
                review_profile: "binding"
              )
+  end
+
+  test "workspace cleanup topology cannot bypass or swap the reviewed retention policy", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      update_in(
+        graph.nodes["prep_release_mode_retain"].attrs,
+        &Map.put(&1, "expression", "remove")
+      ),
+      %{
+        graph
+        | edges:
+            Enum.map(graph.edges, fn edge ->
+              if edge.from == "route_release_mode" and edge.to == "prep_release_mode_retain" and
+                   edge.attrs["condition"] == "context.status=validation_failed" do
+                %{edge | to: "prep_release_mode_remove"}
+              else
+                edge
+              end
+            end)
+      },
+      add_edge(graph, "close_worker", "release_workspace", "context.bypass=true")
+    ]
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               SemanticPreflight.validate(mutated, profile["semantic_policy"],
+                 review_profile: "binding"
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] in [
+                 "workspace_cleanup_node_mismatch",
+                 "workspace_cleanup_topology_mismatch",
+                 "all_path_violation"
+               ]
+             end)
+    end
   end
 
   test "recovery graph pins status refresh, dynamic session binding, hard close, and continuity edges",

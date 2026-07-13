@@ -117,6 +117,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
             load_committed_change
             route_review
             check_review_total_budget
+            route_release_mode
+            route_success_workspace_retention
+            release_workspace_only
           ] do
         assert node in default["required_nodes"]
         assert node in security["required_nodes"]

@@ -46,13 +46,19 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     load_committed_change
                     open_worker
                     open_recovery_worker
+                    prep_release_mode_only
+                    prep_release_mode_remove
+                    prep_release_mode_retain
                     release_workspace
+                    release_workspace_only
                     retry_recovered_send
+                    route_release_mode
                     review_change
                     route_after_commit
                     route_commit_interaction
                     route_recovery_continuity
                     route_review
+                    route_success_workspace_retention
                     status_approval_denied
                     acp_session_status
                     copy_recovery_pending_prompt

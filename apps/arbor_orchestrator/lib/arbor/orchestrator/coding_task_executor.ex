@@ -244,7 +244,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
              {:ok, result} <-
                adapt_result(engine_result, started_at, Map.fetch!(plan.worker, "provider")) do
-          {:ok, Map.put(result, "artifacts", artifacts)}
+          {:ok,
+           Map.put(result, "artifacts", attach_workspace_release_artifact(artifacts, result))}
         end
       after
         # The broker monitors this run process, but normal terminal outcomes
@@ -951,6 +952,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "timeout" => plan.budgets["wall_clock_ms"],
       "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
       "open_pr" => bool_string(plan.output["draft_pr"]),
+      "retain_workspace" => bool_string(plan.output["retain_workspace"]),
       "submit_review" => bool_string(plan.review_profile != "none")
     }
 
@@ -1655,6 +1657,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "workspace_release_status",
       clean_metric_status(metric_context_value(clean_context, "release", "status"))
     )
+    |> maybe_put_metric(
+      "workspace_expires_at",
+      workspace_release_expires_at(clean_context)
+    )
   end
 
   defp completed_node_ids(engine_result) do
@@ -1927,6 +1933,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "approval_request_id" => context_get(context, "approval_request_id"),
       "approval_note" => context_get(context, "approval_note")
     }
+    |> Map.merge(workspace_release_projection(context))
     |> reject_nil_values()
   end
 
@@ -1939,8 +1946,49 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "worker_session_id" => context_get(context, "worker_session_id"),
       "worker_provider_session_id" => context_get(context, "worker_provider_session_id")
     }
+    |> Map.merge(workspace_release_projection(context))
     |> reject_nil_values()
   end
+
+  defp attach_workspace_release_artifact(artifacts, result) do
+    case Map.take(result, ["workspace_release_status", "workspace_expires_at"]) do
+      release when map_size(release) == 0 ->
+        artifacts
+
+      release ->
+        Map.put(artifacts, "workspace_release", release)
+    end
+  end
+
+  defp workspace_release_projection(context) do
+    status = clean_metric_status(context_get(context, "release.status"))
+
+    %{}
+    |> maybe_put_metric("workspace_release_status", status)
+    |> maybe_put_metric("workspace_expires_at", workspace_release_expires_at(context, status))
+  end
+
+  defp workspace_release_expires_at(context) do
+    workspace_release_expires_at(
+      context,
+      clean_metric_status(metric_context_value(context, "release", "status"))
+    )
+  end
+
+  defp workspace_release_expires_at(context, "retained") do
+    case metric_context_value(context, "release", "expires_at") do
+      value when is_binary(value) ->
+        case DateTime.from_iso8601(value) do
+          {:ok, expires_at, _offset} -> DateTime.to_iso8601(expires_at)
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp workspace_release_expires_at(_context, _status), do: nil
 
   defp extract_review(context) do
     cond do

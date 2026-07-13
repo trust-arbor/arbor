@@ -160,6 +160,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_forbidden_denial_bypass_attrs(graph)
         |> check_worker_continuity_bindings(graph, worker_continuity)
         |> check_worker_recovery_bindings(graph, policy, worker_continuity)
+        |> check_workspace_cleanup_topology(graph)
         |> check_profile_bindings(graph, policy, review_profile)
         |> check_reachability_and_dominance(graph, policy, review_profile)
         |> Enum.sort_by(&error_sort_key/1)
@@ -878,6 +879,144 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   @rework_exhaustion_status "status_rework_exhausted"
   @rework_dispatch_node "reset_worker_turn_protocol_retry_count"
   @rework_dispatch_target "implement"
+
+  @workspace_cleanup_node_attrs %{
+    "prep_release_mode_only" => %{
+      "type" => "transform",
+      "transform" => "constant",
+      "expression" => "retain",
+      "output_key" => "mode"
+    },
+    "prep_release_mode_remove" => %{
+      "type" => "transform",
+      "transform" => "constant",
+      "expression" => "remove",
+      "output_key" => "mode"
+    },
+    "prep_release_mode_retain" => %{
+      "type" => "transform",
+      "transform" => "constant",
+      "expression" => "retain",
+      "output_key" => "mode"
+    },
+    "release_workspace" => %{
+      "type" => "exec",
+      "target" => "action",
+      "action" => "coding_workspace_release",
+      "context_keys" => "workspace_id,mode",
+      "output_prefix" => "release",
+      "max_retries" => "0"
+    },
+    "release_workspace_only" => %{
+      "type" => "exec",
+      "target" => "action",
+      "action" => "coding_workspace_release",
+      "context_keys" => "workspace_id,mode",
+      "output_prefix" => "release",
+      "max_retries" => "0"
+    },
+    "route_release_mode" => %{"type" => "branch", "shape" => "diamond", "fan_out" => false},
+    "route_success_workspace_retention" => %{
+      "type" => "branch",
+      "shape" => "diamond",
+      "fan_out" => false
+    }
+  }
+
+  @workspace_cleanup_outgoing %{
+    "close_worker" => [
+      {"route_release_mode", "outcome=fail"},
+      {"route_release_mode", "outcome=success"}
+    ],
+    "open_worker" => [
+      {"hoist_worker_session_id", "outcome=success"},
+      {"prep_release_mode_only", "outcome=fail"}
+    ],
+    "prep_release_mode_only" => [{"release_workspace_only", nil}],
+    "prep_release_mode_remove" => [{"release_workspace", nil}],
+    "prep_release_mode_retain" => [{"release_workspace", nil}],
+    "release_workspace" => [{"done", nil}],
+    "release_workspace_only" => [{"status_pipeline_error", nil}],
+    "route_release_mode" => [
+      {"prep_release_mode_remove", "context.status=declined"},
+      {"prep_release_mode_remove", "context.status=no_changes"},
+      {"prep_release_mode_retain", "context.status=approval_denied"},
+      {"prep_release_mode_retain", "context.status=pipeline_error"},
+      {"prep_release_mode_retain", "context.status=pr_failed"},
+      {"prep_release_mode_retain", "context.status=review_failed"},
+      {"prep_release_mode_retain", "context.status=review_rejected"},
+      {"prep_release_mode_retain", "context.status=rework_exhausted"},
+      {"prep_release_mode_retain", "context.status=validation_failed"},
+      {"route_success_workspace_retention", "context.status=change_committed"},
+      {"route_success_workspace_retention", "context.status=human_review_required"},
+      {"route_success_workspace_retention", "context.status=pr_created"}
+    ],
+    "route_success_workspace_retention" => [
+      {"prep_release_mode_remove", "context.retain_workspace=false"},
+      {"prep_release_mode_retain", "context.retain_workspace=true"}
+    ],
+    "status_pipeline_error" => [{"done", nil}]
+  }
+
+  defp check_workspace_cleanup_topology(errors, graph) do
+    errors =
+      Enum.reduce(@workspace_cleanup_node_attrs, errors, fn {node_id, expected}, acc ->
+        case Map.fetch(graph.nodes, node_id) do
+          {:ok, node} when is_map(node.attrs) ->
+            actual = Map.take(node.attrs, Map.keys(expected))
+
+            if actual == expected do
+              acc
+            else
+              [
+                error("workspace_cleanup_node_mismatch", node_id, %{
+                  "expected" => expected,
+                  "actual" => actual
+                })
+                | acc
+              ]
+            end
+
+          _other ->
+            [error("workspace_cleanup_node_mismatch", node_id, %{"expected" => expected}) | acc]
+        end
+      end)
+
+    errors =
+      Enum.reduce(@workspace_cleanup_outgoing, errors, fn {node_id, expected}, acc ->
+        actual =
+          graph
+          |> Graph.outgoing_edges(node_id)
+          |> Enum.map(&{&1.to, edge_condition(&1)})
+          |> Enum.sort()
+
+        if actual == Enum.sort(expected) do
+          acc
+        else
+          [
+            error("workspace_cleanup_topology_mismatch", node_id, %{
+              "expected" => Enum.map(Enum.sort(expected), &edge_binding_to_json/1),
+              "actual" => Enum.map(actual, &edge_binding_to_json/1)
+            })
+            | acc
+          ]
+        end
+      end)
+
+    errors
+    |> require_all_paths_through(
+      graph,
+      "close_worker",
+      "release_workspace",
+      "workspace_cleanup_release"
+    )
+    |> require_all_paths_through(
+      graph,
+      "prep_release_mode_only",
+      "release_workspace_only",
+      "workspace_cleanup_release_only"
+    )
+  end
 
   @precommit_abort_origins %{
     "status_declined" => "route_worker_status",

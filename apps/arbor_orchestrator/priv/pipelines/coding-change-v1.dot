@@ -27,6 +27,8 @@
 //   worker_provider_session_id
 //                        - provider conversation ID suitable for a later
 //                          authorized plan's worker.resume_session_id
+//   retain_workspace     - canonical "true"/"false" plan output policy for
+//                          successful workspace retention
 //   branch / commit_hash - reviewable branch tip when produced
 //   validation_rework_count / review_rework_count / operator_rework_count
 //                        / total_rework_count
@@ -40,11 +42,14 @@
 // Worker output contract (acp_send_message text): pure JSON
 //   {"status":"implemented"|"declined","summary":"..."}
 //
-// Resource policy: every terminal path that acquired a workspace releases it
-// in mode=retain (never remove reused worktrees). Worker sessions are closed
-// when opened; if close fails, release still runs. Registry owner-death
-// cleanup remains defense in depth, not the only happy-path cleanup.
-// Cancellation cleanup remains Phase 2.
+// Resource policy: every terminal path that acquired a workspace releases it.
+// Declined/no-change terminals remove; failures retain under the registry TTL;
+// successful changes, PRs, and human handoffs retain only when the reviewed
+// plan's retain_workspace=true. Release enforces ownership, so reused paths
+// are never physically removed. Worker sessions are closed when opened; close
+// success and failure both pass through exactly one cleanup-mode decision.
+// Registry owner-death and cancellation cleanup remain immediate defense in
+// depth outside this graph.
 //
 // Does NOT call coding_produce_reviewable_change.
 //
@@ -1121,10 +1126,29 @@ digraph CodingChangeV1 {
     max_retries="0"
   ]
 
-  prep_release_mode [
+  route_release_mode [
+    type="branch",
+    shape=diamond,
+    fan_out=false
+  ]
+
+  route_success_workspace_retention [
+    type="branch",
+    shape=diamond,
+    fan_out=false
+  ]
+
+  prep_release_mode_retain [
     type="transform",
     transform="constant",
     expression="retain",
+    output_key="mode"
+  ]
+
+  prep_release_mode_remove [
+    type="transform",
+    transform="constant",
+    expression="remove",
     output_key="mode"
   ]
 
@@ -1137,7 +1161,8 @@ digraph CodingChangeV1 {
     max_retries="0"
   ]
 
-  // Release without close (worker never opened)
+  // Release without close (worker never opened). This is a failure terminal,
+  // so preserve the invocation-owned worktree for the registry TTL.
   prep_release_mode_only [
     type="transform",
     transform="constant",
@@ -1430,8 +1455,29 @@ digraph CodingChangeV1 {
   open_draft_pr -> status_pr_created [condition="outcome=success"]
   status_pr_created -> close_worker
 
-  // Shared cleanup tail (worker opened): close may fail; release still runs
-  close_worker -> prep_release_mode [condition="outcome=success"]
-  close_worker -> prep_release_mode [condition="outcome=fail"]
-  prep_release_mode -> release_workspace -> done
+  // Shared cleanup tail (worker opened): close may fail; both outcomes make
+  // one deterministic decision. Retain on failures, remove aborted/no-change
+  // work, and let the reviewed plan decide successful handoff/publication.
+  close_worker -> route_release_mode [condition="outcome=success"]
+  close_worker -> route_release_mode [condition="outcome=fail"]
+
+  route_release_mode -> prep_release_mode_remove [condition="context.status=declined"]
+  route_release_mode -> prep_release_mode_remove [condition="context.status=no_changes"]
+
+  route_release_mode -> prep_release_mode_retain [condition="context.status=validation_failed"]
+  route_release_mode -> prep_release_mode_retain [condition="context.status=rework_exhausted"]
+  route_release_mode -> prep_release_mode_retain [condition="context.status=approval_denied"]
+  route_release_mode -> prep_release_mode_retain [condition="context.status=review_rejected"]
+  route_release_mode -> prep_release_mode_retain [condition="context.status=review_failed"]
+  route_release_mode -> prep_release_mode_retain [condition="context.status=pr_failed"]
+  route_release_mode -> prep_release_mode_retain [condition="context.status=pipeline_error"]
+
+  route_release_mode -> route_success_workspace_retention [condition="context.status=change_committed"]
+  route_release_mode -> route_success_workspace_retention [condition="context.status=pr_created"]
+  route_release_mode -> route_success_workspace_retention [condition="context.status=human_review_required"]
+  route_success_workspace_retention -> prep_release_mode_retain [condition="context.retain_workspace=true"]
+  route_success_workspace_retention -> prep_release_mode_remove [condition="context.retain_workspace=false"]
+
+  prep_release_mode_retain -> release_workspace -> done
+  prep_release_mode_remove -> release_workspace
 }

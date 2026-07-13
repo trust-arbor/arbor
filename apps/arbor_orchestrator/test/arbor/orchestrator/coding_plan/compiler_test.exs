@@ -176,6 +176,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert compilation.initial_values["model"] == "grok-code"
     assert compilation.initial_values["submit_review"] == "true"
     assert compilation.initial_values["open_pr"] == "false"
+    assert compilation.initial_values["retain_workspace"] == "true"
     assert compilation.initial_values["timeout"] == 900_000
     assert compilation.initial_values["inactivity_timeout_ms"] == 300_000
 

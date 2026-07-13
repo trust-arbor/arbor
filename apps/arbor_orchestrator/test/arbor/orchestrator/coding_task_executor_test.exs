@@ -1777,7 +1777,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
          }), :put, "model", "redirected-model"},
         {valid_direct_task(), :put, "test_paths", ["test/unexpected_test.exs"]},
         {valid_direct_task(), :put, "branch_name", "feature/unexpected"},
-        {valid_direct_task(), :put, "model", "unexpected-model"}
+        {valid_direct_task(), :put, "model", "unexpected-model"},
+        {valid_direct_task(), :put, "retain_workspace", "false"}
       ]
 
       for {task, operation, key, value} <- cases do
@@ -1965,6 +1966,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         },
         "worker_msg.usage" => %{"input_tokens" => 25, "output_tokens" => 5},
         "release.status" => "retained",
+        "release.expires_at" => "2026-07-12T12:00:00Z",
         "metrics" => %{"execution_path" => "forged", "validation_attempts" => 99},
         "acp_agent" => "forged-agent",
         "worker_provider" => "forged-provider"
@@ -2009,6 +2011,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert metrics["context_tokens"] == 4_096
       assert metrics["worker_close_status"] == "closed"
       assert metrics["workspace_release_status"] == "retained"
+      assert metrics["workspace_expires_at"] == "2026-07-12T12:00:00Z"
+      assert result["workspace_release_status"] == "retained"
+      assert result["workspace_expires_at"] == "2026-07-12T12:00:00Z"
+
+      assert result["artifacts"]["workspace_release"] == %{
+               "workspace_release_status" => "retained",
+               "workspace_expires_at" => "2026-07-12T12:00:00Z"
+             }
+
       assert is_integer(metrics["wall_clock_ms"])
       assert metrics["wall_clock_ms"] >= 0
       assert {:ok, _encoded} = Jason.encode(result)

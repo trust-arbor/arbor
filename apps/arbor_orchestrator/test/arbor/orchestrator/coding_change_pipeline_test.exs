@@ -221,13 +221,21 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "coding_workspace_release" ->
           mode = Map.get(args, "mode") || Map.get(args, :mode) || "retain"
 
-          {:ok,
-           %{
-             workspace_id: "ws_fixture_1",
-             status: "retained",
-             mode: mode,
-             active: false
-           }}
+          result = %{
+            workspace_id: "ws_fixture_1",
+            status: if(mode == "retain", do: "retained", else: "removed"),
+            mode: mode,
+            active: false
+          }
+
+          result =
+            if mode == "retain" do
+              Map.put(result, :expires_at, "2026-07-12T12:00:00Z")
+            else
+              result
+            end
+
+          {:ok, result}
 
         other ->
           {:error, "unexpected action in fixture: #{other}"}
@@ -806,6 +814,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "timeout" => 900_000,
         "inactivity_timeout_ms" => 300_000,
         "open_pr" => "false",
+        "retain_workspace" => "true",
         "submit_review" => "true",
         "session.agent_id" => "agent_fixture",
         "session.task_id" => "task_fixture"
@@ -873,10 +882,14 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       |> Enum.filter(fn {name, _} -> name == "coding_workspace_release" end)
       |> Enum.map(fn {_, args} -> args end)
 
-    assert Enum.any?(release_args, fn args ->
-             mode = args["mode"] || args[:mode]
-             mode in ["retain", nil]
-           end)
+    assert length(release_args) == 1
+  end
+
+  defp assert_release_mode(calls, expected_mode) do
+    assert {"coding_workspace_release", args} =
+             Enum.find(calls, fn {name, _args} -> name == "coding_workspace_release" end)
+
+    assert args["mode"] == expected_mode
   end
 
   defp assert_released(calls) do
@@ -951,7 +964,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       end
     end
 
-    test "acquire precedes mutation and cleanup uses retain release" do
+    test "acquire precedes mutation and cleanup branches through the reviewed retention policy" do
       graph = load_graph()
       assert graph.nodes["acquire_workspace"]
       assert graph.nodes["release_workspace"]
@@ -959,6 +972,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       release = graph.nodes["release_workspace"]
       assert release.attrs["action"] == "coding_workspace_release"
+      assert graph.nodes["route_release_mode"].attrs["fan_out"] == false
+      assert graph.nodes["route_success_workspace_retention"].attrs["fan_out"] == false
 
       # Validation is top-level mix_compile (not nested shell)
       validate = graph.nodes["validate"]
@@ -1011,7 +1026,37 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   # ---------------------------------------------------------------------------
 
   describe "terminal path fixtures" do
-    test "declined closes worker and retains workspace" do
+    for {scenario, status, overrides, retain_mode, remove_mode} <- [
+          {:declined, "declined", %{}, "remove", "remove"},
+          {:no_changes, "no_changes", %{}, "remove", "remove"},
+          {:validation_failed, "validation_failed", %{}, "retain", "retain"},
+          {:review_requires_rework, "rework_exhausted", %{}, "retain", "retain"},
+          {:commit_approval_denied, "approval_denied", %{}, "retain", "retain"},
+          {:review_rejected, "review_rejected", %{}, "retain", "retain"},
+          {:review_failed, "review_failed", %{}, "retain", "retain"},
+          {:pr_failed, "pr_failed", %{"open_pr" => "true"}, "retain", "retain"},
+          {:implement_hard_fail, "pipeline_error", %{}, "retain", "retain"},
+          {:worker_open_failed, "pipeline_error", %{}, "retain", "retain"},
+          {:change_committed, "change_committed", %{}, "retain", "remove"},
+          {:pr_created, "pr_created", %{"open_pr" => "true"}, "retain", "remove"},
+          {:human_review_required, "human_review_required", %{}, "retain", "remove"}
+        ] do
+      test "#{scenario} release mode follows retain_workspace" do
+        for {retain_workspace, expected_mode} <- [
+              {"true", unquote(retain_mode)},
+              {"false", unquote(remove_mode)}
+            ] do
+          initial =
+            Map.put(unquote(Macro.escape(overrides)), "retain_workspace", retain_workspace)
+
+          assert {{:ok, result}, calls} = run_fixture(unquote(scenario), initial)
+          assert result.context["status"] == unquote(status)
+          assert_release_mode(calls, expected_mode)
+        end
+      end
+    end
+
+    test "declined closes worker and removes workspace" do
       assert {{:ok, result}, calls} = run_fixture(:declined)
       assert result.context["status"] == "declined"
       assert_closed_and_released(calls)
