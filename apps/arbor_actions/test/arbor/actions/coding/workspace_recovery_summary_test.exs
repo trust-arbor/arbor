@@ -167,6 +167,20 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
       assert prompt =~ "[truncated]"
       assert byte_size(prompt) <= 24_576
 
+      assert %{"truncated" => true, "preview" => validation_preview} =
+               prompt
+               |> tagged_value("validation_feedback_json")
+               |> Jason.decode!()
+
+      assert validation_preview =~ ~s({"message":"vvv)
+
+      assert %{"truncated" => true, "preview" => review_preview} =
+               prompt
+               |> tagged_value("review_feedback_json")
+               |> Jason.decode!()
+
+      assert review_preview =~ ~s({"message":"rrr)
+
       release(lease.workspace_id)
     end
 
@@ -235,5 +249,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
   defp git!(path, args) do
     {output, 0} = System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
     String.trim(output)
+  end
+
+  defp tagged_value(prompt, tag) do
+    pattern = ~r/<#{tag}>\n(.*?)\n<\/#{tag}>/s
+    [_, value] = Regex.run(pattern, prompt)
+    value
   end
 end

@@ -134,7 +134,7 @@ defmodule Arbor.Actions.Coding.Workspace.RecoverySummary do
     with true <- String.valid?(json),
          {:ok, decoded} <- Jason.decode(json),
          {:ok, canonical} <- Jason.encode(decoded) do
-      {:ok, bounded_text(canonical, @max_feedback_bytes)}
+      {:ok, bounded_feedback_json(canonical)}
     else
       _other -> {:error, error}
     end
@@ -406,6 +406,32 @@ defmodule Arbor.Actions.Coding.Workspace.RecoverySummary do
     suffix = "...[truncated]"
     prefix_bytes = max(max_bytes - byte_size(suffix), 0)
     utf8_prefix(value, prefix_bytes) <> suffix
+  end
+
+  defp bounded_feedback_json(canonical) when byte_size(canonical) <= @max_feedback_bytes,
+    do: canonical
+
+  defp bounded_feedback_json(canonical) do
+    envelope = %{
+      "original_bytes" => byte_size(canonical),
+      "preview" => "",
+      "truncated" => true
+    }
+
+    fit_feedback_preview(canonical, envelope, min(byte_size(canonical), @max_feedback_bytes))
+  end
+
+  defp fit_feedback_preview(canonical, envelope, preview_bytes) do
+    preview = utf8_prefix(canonical, preview_bytes)
+    encoded = Jason.encode!(Map.put(envelope, "preview", preview))
+
+    if byte_size(encoded) <= @max_feedback_bytes do
+      encoded
+    else
+      overflow = byte_size(encoded) - @max_feedback_bytes
+      next_bytes = max(preview_bytes - max(overflow, 1), 0)
+      fit_feedback_preview(canonical, envelope, next_bytes)
+    end
   end
 
   defp utf8_prefix(_value, 0), do: ""
