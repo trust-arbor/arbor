@@ -1649,6 +1649,37 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
           Process.sleep(:infinity)
         end)
 
+      # Register cleanup immediately so assertion failure cannot leak the
+      # registered dummy or leave the supervisor stack in a partial state.
+      on_exit(fn ->
+        if Process.alive?(dummy) do
+          ref = Process.monitor(dummy)
+          Process.exit(dummy, :kill)
+
+          receive do
+            {:DOWN, ^ref, :process, ^dummy, _} -> :ok
+          after
+            1_000 -> :ok
+          end
+        end
+
+        # Drop a still-registered name if the process is already dead but the
+        # registration somehow remains (defensive; normally unregister-on-exit).
+        case Process.whereis(SigningAuthorityBroker) do
+          ^dummy ->
+            try do
+              Process.unregister(SigningAuthorityBroker)
+            rescue
+              ArgumentError -> :ok
+            end
+
+          _ ->
+            :ok
+        end
+
+        ensure_broker_started()
+      end)
+
       assert_receive :registered, 1_000
       refute is_pid(Process.whereis(SigningAuthorityStateOwner))
       assert Process.whereis(SigningAuthorityBroker) == dummy
@@ -1656,12 +1687,6 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       assert_raise ExUnit.AssertionError, ~r/partial signing authority stack/, fn ->
         ensure_broker_started()
       end
-
-      ref = Process.monitor(dummy)
-      Process.exit(dummy, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^dummy, _}, 1_000
-      # Restore a healthy matched pair for subsequent tests / on_exit.
-      assert :ok = ensure_broker_started()
     end
   end
 

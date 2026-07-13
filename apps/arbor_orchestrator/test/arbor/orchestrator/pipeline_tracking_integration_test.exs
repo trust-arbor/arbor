@@ -26,6 +26,18 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
 
   @ets_table :arbor_pipeline_runs
 
+  # Far-future timestamps keep owned list_recent fixtures inside the facade's
+  # global sort+limit bound without clearing the shared table.
+  @owned_recent_old_finished_at ~U[2999-12-31 23:58:00Z]
+  @owned_recent_new_finished_at ~U[2999-12-31 23:59:00Z]
+  @owned_recent_limit_base ~U[2999-12-31 23:50:00Z]
+
+  # Static test-only statuses for exact count_by_status assertions independent
+  # of foreign shared rows that may use real :running/:completed/:failed.
+  @count_status_running :__pt_fixture_count_running__
+  @count_status_completed :__pt_fixture_count_completed__
+  @count_status_failed :__pt_fixture_count_failed__
+
   setup do
     ensure_pipeline_runs_table!()
 
@@ -184,83 +196,85 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
 
   describe "PipelineStatus.list_recent/1" do
     test "returns completed pipelines sorted by finished_at desc", %{run_prefix: prefix} do
-      _old_id =
+      # Far-future finished_at values keep owned fixtures inside list_recent/1's
+      # global sort bound even when the shared table already holds many rows.
+      # Never filter owned rows after a small limit — that can drop them first.
+      old_id =
         insert_ets_entry(owned_run_id(prefix, "old"), %{
           status: :completed,
-          finished_at: ~U[2026-04-12 10:00:00Z],
-          started_at: ~U[2026-04-12 09:59:00Z]
+          finished_at: @owned_recent_old_finished_at,
+          started_at: DateTime.add(@owned_recent_old_finished_at, -60, :second)
         })
 
       new_id =
         insert_ets_entry(owned_run_id(prefix, "new"), %{
           status: :completed,
-          finished_at: ~U[2026-04-12 11:00:00Z],
-          started_at: ~U[2026-04-12 10:59:00Z]
+          finished_at: @owned_recent_new_finished_at,
+          started_at: DateTime.add(@owned_recent_new_finished_at, -60, :second)
         })
 
-      recent =
-        PipelineStatus.list_recent(limit: 100)
-        |> Enum.filter(&owned_run?(&1.run_id, prefix))
+      recent = PipelineStatus.list_recent(limit: 2)
 
       assert length(recent) == 2
-      assert hd(recent).run_id == new_id
+      assert Enum.map(recent, & &1.run_id) == [new_id, old_id]
+      assert Enum.all?(recent, &owned_run?(&1.run_id, prefix))
     end
 
     test "respects limit option", %{run_prefix: prefix} do
-      for i <- 1..5 do
-        insert_ets_entry(owned_run_id(prefix, "limit_#{i}"), %{
-          status: :completed,
-          finished_at: DateTime.utc_now(),
-          started_at: DateTime.utc_now()
-        })
-      end
+      # Distinct far-future timestamps so owned order is deterministic and they
+      # occupy the head of the global sort regardless of foreign shared rows.
+      ids =
+        for i <- 1..5 do
+          finished_at = DateTime.add(@owned_recent_limit_base, i, :second)
 
-      owned_all =
-        PipelineStatus.list_recent(limit: 100)
-        |> Enum.filter(&owned_run?(&1.run_id, prefix))
+          insert_ets_entry(owned_run_id(prefix, "limit_#{i}"), %{
+            status: :completed,
+            finished_at: finished_at,
+            started_at: DateTime.add(finished_at, -60, :second)
+          })
+        end
 
-      assert length(owned_all) == 5
+      limited = PipelineStatus.list_recent(limit: 2)
+      assert length(limited) == 2
+      assert Enum.map(limited, & &1.run_id) == Enum.take(Enum.reverse(ids), 2)
 
-      # Facade-level limit still bounds the global result set.
-      assert length(PipelineStatus.list_recent(limit: 2)) == 2
+      head_five = PipelineStatus.list_recent(limit: 5)
+      assert length(head_five) == 5
+      assert Enum.map(head_five, & &1.run_id) == Enum.reverse(ids)
+      assert Enum.all?(head_five, &owned_run?(&1.run_id, prefix))
     end
   end
 
   describe "PipelineStatus.count_by_status/0" do
     test "groups and counts correctly", %{run_prefix: prefix} do
-      ids =
-        [
-          insert_ets_entry(owned_run_id(prefix, "r1"), %{
-            status: :running,
-            spawning_pid: self(),
-            started_at: DateTime.utc_now()
-          }),
-          insert_ets_entry(owned_run_id(prefix, "r2"), %{
-            status: :running,
-            spawning_pid: self(),
-            started_at: DateTime.utc_now()
-          }),
-          insert_ets_entry(owned_run_id(prefix, "c1"), %{
-            status: :completed,
-            started_at: DateTime.utc_now()
-          }),
-          insert_ets_entry(owned_run_id(prefix, "f1"), %{
-            status: :failed,
-            started_at: DateTime.utc_now()
-          })
-        ]
+      # Static test-only statuses so facade counts are exact and independent of
+      # foreign shared rows that may use :running/:completed/:failed.
+      _ids = [
+        insert_ets_entry(owned_run_id(prefix, "r1"), %{
+          status: @count_status_running,
+          spawning_pid: self(),
+          started_at: DateTime.utc_now()
+        }),
+        insert_ets_entry(owned_run_id(prefix, "r2"), %{
+          status: @count_status_running,
+          spawning_pid: self(),
+          started_at: DateTime.utc_now()
+        }),
+        insert_ets_entry(owned_run_id(prefix, "c1"), %{
+          status: @count_status_completed,
+          started_at: DateTime.utc_now()
+        }),
+        insert_ets_entry(owned_run_id(prefix, "f1"), %{
+          status: @count_status_failed,
+          started_at: DateTime.utc_now()
+        })
+      ]
 
-      # Assert only against this test's owned rows (shared table may hold others).
-      counts =
-        ids
-        |> Enum.map(&PipelineStatus.get/1)
-        |> Enum.reject(&is_nil/1)
-        |> Enum.group_by(& &1.status)
-        |> Map.new(fn {status, entries} -> {status, length(entries)} end)
+      counts = PipelineStatus.count_by_status()
 
-      assert counts[:running] == 2
-      assert counts[:completed] == 1
-      assert counts[:failed] == 1
+      assert counts[@count_status_running] == 2
+      assert counts[@count_status_completed] == 1
+      assert counts[@count_status_failed] == 1
     end
   end
 
@@ -320,6 +334,9 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
       owned_id = owned_run_id(prefix, "owned_only")
 
       insert_ets_entry(foreign_id, %{status: :completed, started_at: DateTime.utc_now()})
+      # Register foreign cleanup before any assertion so a failure cannot leak it.
+      on_exit(fn -> safe_delete_run(foreign_id) end)
+
       insert_ets_entry(owned_id, %{status: :completed, started_at: DateTime.utc_now()})
 
       assert [{^owned_id, _}] = :ets.lookup(@ets_table, owned_id)
@@ -330,9 +347,6 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
 
       assert :ets.lookup(@ets_table, owned_id) == []
       assert [{^foreign_id, _}] = :ets.lookup(@ets_table, foreign_id)
-
-      # Clean foreign row so we do not leak into other tests.
-      safe_delete_run(foreign_id)
     end
   end
 
