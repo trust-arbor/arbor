@@ -16,6 +16,38 @@ defmodule Arbor.Actions.Config do
     gitea: ["GITEA_TOKEN", "FORGEJO_TOKEN"]
   }
 
+  @workspace_retention_default_ms 24 * 60 * 60 * 1_000
+  @workspace_retention_min_ms 1_000
+  @workspace_retention_max_ms 7 * 24 * 60 * 60 * 1_000
+
+  @doc """
+  Return the bounded retained-workspace TTL.
+
+  The TTL is operator configuration only. Action parameters are deliberately
+  not consulted here, so an agent cannot extend a retained workspace lifetime.
+  Registry test servers may pass an explicit `:retention_ttl_ms` start option.
+  """
+  @spec workspace_retention_ttl_ms(keyword()) :: pos_integer()
+  def workspace_retention_ttl_ms(opts \\ []) do
+    configured =
+      Keyword.get(
+        opts,
+        :retention_ttl_ms,
+        Application.get_env(:arbor_actions, :workspace_retention_ttl_ms)
+      )
+
+    configured
+    |> normalize_positive_integer(@workspace_retention_default_ms)
+    |> min(@workspace_retention_max_ms)
+    |> max(@workspace_retention_min_ms)
+  end
+
+  @spec workspace_retention_min_ttl_ms() :: pos_integer()
+  def workspace_retention_min_ttl_ms, do: @workspace_retention_min_ms
+
+  @spec workspace_retention_max_ttl_ms() :: pos_integer()
+  def workspace_retention_max_ttl_ms, do: @workspace_retention_max_ms
+
   @spec get(map(), atom(), any()) :: any()
   def get(map, key, default \\ nil)
 
@@ -30,6 +62,11 @@ defmodule Arbor.Actions.Config do
   end
 
   def get(_map, _key, default), do: default
+
+  defp normalize_positive_integer(value, _default) when is_integer(value) and value > 0,
+    do: value
+
+  defp normalize_positive_integer(_value, default), do: default
 
   @doc """
   Public AI facade module used by ACP (and similar) actions.
