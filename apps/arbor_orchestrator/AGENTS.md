@@ -95,10 +95,7 @@ Use the `type` attribute to invoke meta-handlers:
 | `pipeline.run` | Execute a sub-pipeline with context isolation |
 | `pipeline.validate` | Parse and lint a DOT source from context |
 | `file.write` | Write context data to a file on disk |
-| `eval.dataset` | Load a JSONL dataset into context |
-| `eval.run` | Run subject against samples, apply graders |
-| `eval.aggregate` | Compute metrics over eval results |
-| `eval.report` | Format and output eval report |
+| `exec` + `target="action"` + `eval_pipeline.*` | Canonical eval stages (load/run/aggregate/persist/report) |
 
 ### Node Attributes
 

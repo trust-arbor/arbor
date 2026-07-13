@@ -3,14 +3,17 @@ defmodule Mix.Tasks.Arbor.Pipeline.Eval do
   @moduledoc """
   Executes an evaluation pipeline defined in a .dot file against a JSONL dataset.
 
-  An eval pipeline orchestrates dataset loading, execution against a subject system,
-  grading results, and aggregating metrics. The pipeline is defined as a directed graph
-  where nodes specify operations like:
+  Canonical eval pipelines use `type="exec" target="action"` nodes that invoke
+  the registered `eval_pipeline.*` actions:
 
-    - `eval.dataset` — loads JSONL samples
-    - `eval.run` — applies graders to results
-    - `eval.aggregate` — computes metrics
-    - `eval.report` — formats output
+    - `eval_pipeline.load_dataset` — loads JSONL samples
+    - `eval_pipeline.run_eval` — runs a symbolic subject + graders
+    - `eval_pipeline.aggregate` — computes metrics
+    - `eval_pipeline.persist` — optional durable run record
+    - `eval_pipeline.report` — formats output
+
+  Pipeline outputs land under stable exec node keys such as
+  `exec.run_eval.results` and `exec.aggregate.metrics`.
 
   ## Usage
 
@@ -21,12 +24,16 @@ defmodule Mix.Tasks.Arbor.Pipeline.Eval do
 
   ## Options
 
-    - `--dataset <path>` — Override dataset path from pipeline (relative to workdir)
-    - `--output <path>` — Override output path from pipeline
+    - `--dataset <path>` — Override dataset path (relative paths resolve under workdir)
+    - `--output <path>` — Override report output path (relative paths resolve under workdir)
     - `--workdir <dir>` — Working directory for relative paths (default: current directory)
     - `--limit <n>` — Limit dataset to first N samples
     - `--shuffle` — Randomize sample order
     - `--seed <n>` — Seed for shuffle reproducibility
+
+  CLI overrides are passed as JSON-clean Engine `initial_values` under the
+  `eval.*` namespace (for example `eval.path`, `eval.output_path`). Pipelines
+  consume them via `context_keys` leaf projection into action params.
   """
 
   use Mix.Task
@@ -75,7 +82,6 @@ defmodule Mix.Tasks.Arbor.Pipeline.Eval do
         success("Evaluation pipeline completed successfully!")
         info("  Nodes completed: #{length(result.completed_nodes)}")
 
-        # Try to extract and display eval summary if available
         case extract_eval_summary(result) do
           nil -> :ok
           summary -> display_eval_summary(summary)
@@ -87,70 +93,72 @@ defmodule Mix.Tasks.Arbor.Pipeline.Eval do
     end
   end
 
-  defp build_run_opts(opts) do
-    run_opts = []
+  @doc false
+  def build_run_opts(opts) when is_list(opts) do
+    workdir = resolve_workdir(Keyword.get(opts, :workdir))
 
-    # Add workdir if provided
     run_opts =
-      case Keyword.get(opts, :workdir) do
-        nil -> run_opts
-        workdir -> [{:workdir, workdir} | run_opts]
-      end
+      [
+        workdir: workdir,
+        on_event: &print_event/1
+      ]
 
-    # Add on_event callback for progress display
-    run_opts = [{:on_event, &print_event/1} | run_opts]
+    initial_values = build_initial_values(opts, workdir)
 
-    # Add context updates for dataset/output overrides
-    context_updates =
-      []
-      |> maybe_add_dataset_override(Keyword.get(opts, :dataset))
-      |> maybe_add_output_override(Keyword.get(opts, :output))
-      |> maybe_add_limit_override(Keyword.get(opts, :limit))
-      |> maybe_add_shuffle_override(Keyword.get(opts, :shuffle))
-      |> maybe_add_seed_override(Keyword.get(opts, :seed))
-
-    case context_updates do
-      [] -> run_opts
-      updates -> [{:context_updates, updates} | run_opts]
+    if map_size(initial_values) == 0 do
+      run_opts
+    else
+      [{:initial_values, initial_values} | run_opts]
     end
   end
 
-  defp maybe_add_dataset_override(updates, nil), do: updates
-
-  defp maybe_add_dataset_override(updates, dataset_path) do
-    # Store override for eval.dataset handler to use
-    [{:eval_dataset_override, dataset_path} | updates]
+  @doc false
+  def build_initial_values(opts, workdir) when is_list(opts) and is_binary(workdir) do
+    %{}
+    |> maybe_put_path("eval.path", Keyword.get(opts, :dataset), workdir)
+    |> maybe_put_path("eval.output_path", Keyword.get(opts, :output), workdir)
+    |> maybe_put_limit(Keyword.get(opts, :limit))
+    |> maybe_put_shuffle(Keyword.get(opts, :shuffle))
+    |> maybe_put_seed(Keyword.get(opts, :seed))
   end
 
-  defp maybe_add_output_override(updates, nil), do: updates
+  defp resolve_workdir(nil), do: File.cwd!()
+  defp resolve_workdir(""), do: File.cwd!()
+  defp resolve_workdir(workdir) when is_binary(workdir), do: Path.expand(workdir)
 
-  defp maybe_add_output_override(updates, output_path) do
-    # Store override for eval.report handler to use
-    [{:eval_output_override, output_path} | updates]
+  defp maybe_put_path(values, _key, nil, _workdir), do: values
+  defp maybe_put_path(values, _key, "", _workdir), do: values
+
+  defp maybe_put_path(values, key, path, workdir) when is_binary(path) do
+    Map.put(values, key, resolve_under_workdir(path, workdir))
   end
 
-  defp maybe_add_limit_override(updates, nil), do: updates
+  defp resolve_under_workdir(path, workdir) do
+    if Path.type(path) == :absolute do
+      Path.expand(path)
+    else
+      Path.expand(path, workdir)
+    end
+  end
 
-  defp maybe_add_limit_override(updates, limit_str) do
+  defp maybe_put_limit(values, nil), do: values
+
+  defp maybe_put_limit(values, limit_str) when is_binary(limit_str) do
     case Integer.parse(limit_str) do
-      {n, _} -> [{:eval_limit, n} | updates]
-      :error -> updates
+      {n, _} when n >= 0 -> Map.put(values, "eval.limit", n)
+      _ -> values
     end
   end
 
-  defp maybe_add_shuffle_override(updates, nil), do: updates
-  defp maybe_add_shuffle_override(updates, false), do: updates
+  defp maybe_put_shuffle(values, true), do: Map.put(values, "eval.shuffle", true)
+  defp maybe_put_shuffle(values, _), do: values
 
-  defp maybe_add_shuffle_override(updates, true) do
-    [{:eval_shuffle, true} | updates]
-  end
+  defp maybe_put_seed(values, nil), do: values
 
-  defp maybe_add_seed_override(updates, nil), do: updates
-
-  defp maybe_add_seed_override(updates, seed_str) do
+  defp maybe_put_seed(values, seed_str) when is_binary(seed_str) do
     case Integer.parse(seed_str) do
-      {n, _} -> [{:eval_seed, n} | updates]
-      :error -> updates
+      {n, _} when n >= 0 -> Map.put(values, "eval.seed", n)
+      _ -> values
     end
   end
 
@@ -176,34 +184,68 @@ defmodule Mix.Tasks.Arbor.Pipeline.Eval do
 
   defp print_event(_), do: :ok
 
-  defp extract_eval_summary(result) do
-    # Look for eval.run results in context
-    context = result.context || %{}
+  @doc false
+  def extract_eval_summary(result) do
+    context = context_map(result)
 
-    # Find the first eval.run result set
-    eval_results =
+    results =
       Enum.find_value(context, fn
-        {"eval.results." <> _rest, results} when is_list(results) -> results
-        _ -> nil
+        {"exec." <> rest, value} when is_list(value) ->
+          if String.ends_with?(rest, ".results"), do: value, else: nil
+
+        _ ->
+          nil
       end)
 
-    case eval_results do
+    metrics =
+      Enum.find_value(context, fn
+        {"exec." <> rest, value} when is_map(value) ->
+          if String.ends_with?(rest, ".metrics"), do: value, else: nil
+
+        _ ->
+          nil
+      end)
+
+    case results do
       nil ->
         nil
 
-      results ->
-        total = length(results)
-        passed = Enum.count(results, & &1["passed"])
+      list ->
+        total = length(list)
+        passed = Enum.count(list, &result_passed?/1)
         failed = total - passed
+
+        accuracy =
+          cond do
+            is_map(metrics) and is_number(Map.get(metrics, "accuracy")) ->
+              Map.get(metrics, "accuracy")
+
+            is_map(metrics) and is_number(Map.get(metrics, :accuracy)) ->
+              Map.get(metrics, :accuracy)
+
+            total > 0 ->
+              passed / total
+
+            true ->
+              0.0
+          end
 
         %{
           total: total,
           passed: passed,
           failed: failed,
-          accuracy: if(total > 0, do: passed / total, else: 0.0)
+          accuracy: accuracy * 1.0
         }
     end
   end
+
+  defp context_map(%{context: %{} = context}), do: context
+  defp context_map(%{"context" => %{} = context}), do: context
+  defp context_map(_), do: %{}
+
+  defp result_passed?(%{"passed" => true}), do: true
+  defp result_passed?(%{passed: true}), do: true
+  defp result_passed?(_), do: false
 
   defp display_eval_summary(%{total: total, passed: passed, failed: failed, accuracy: accuracy}) do
     info("")

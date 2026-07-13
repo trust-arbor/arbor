@@ -16,7 +16,13 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     - `target` — execution target: "tool" (default), "shell", "action", "function"
     - `action` — action name (required when target="action"), e.g. "eval_pipeline.load_dataset"
     - `arg.*` / `param.*` — action parameters extracted from attrs
-    - `context_keys` — comma-separated context keys to merge as action params
+    - `context_keys` — comma-separated context keys whose values are merged as
+      action params. Namespaced keys (e.g. `exec.load_dataset.dataset`) are
+      normalized to the last segment (`dataset`) so they match flat Jido schema
+      keys. Already-flat keys are preserved. Duplicate normalized parameter
+      names fail closed before execution. Per-parameter taint is keyed by the
+      same flat action parameter names while still reading provenance from the
+      exact source context keys.
     - All attributes from the delegated handler are supported
   """
 
@@ -137,69 +143,76 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
             }
         end
 
-      action_args = build_action_args(node.id, node.attrs, context)
-
-      output_prefix = Map.get(node.attrs, "output_prefix")
-
       # Preserve the aggregate taint for operation-level authorization, egress,
       # and telemetry while also carrying each runtime parameter's exact label
       # to the action enforcement boundary. Static attr args are author-written;
       # only context_keys values can be runtime-tainted.
       context_keys = consumed_context_keys(node.attrs)
       input_taint = Context.worst_taint(context, context_keys)
+      output_prefix = Map.get(node.attrs, "output_prefix")
 
-      executor_opts =
-        [
-          agent_id: agent_id,
-          caller_id: caller_id,
-          author_id: author_id,
-          task_id: task_id,
-          session_id: session_id,
-          taint: input_taint
-        ]
-        |> maybe_put_action_signer(opts)
-        |> maybe_put_param_taint(context, context_keys)
-        |> maybe_put_execution_binding(authority)
-        |> maybe_put_nested_engine_controls(opts, authority)
-        |> maybe_put_approval_timeout(opts)
+      case build_action_args(node.id, node.attrs, context) do
+        {:ok, action_args, param_taint} ->
+          executor_opts =
+            [
+              agent_id: agent_id,
+              caller_id: caller_id,
+              author_id: author_id,
+              task_id: task_id,
+              session_id: session_id,
+              taint: input_taint
+            ]
+            |> maybe_put_action_signer(opts)
+            |> maybe_put_param_taint(param_taint, context_keys)
+            |> maybe_put_execution_binding(authority)
+            |> maybe_put_nested_engine_controls(opts, authority)
+            |> maybe_put_approval_timeout(opts)
 
-      try do
-        case executor.execute(action_name, action_args, workdir, executor_opts) do
-          {:ok, result} ->
-            %Outcome{
-              status: :success,
-              notes: "Action #{action_name} executed",
-              context_updates:
-                flatten_context_updates(node.id, result)
-                |> maybe_add_prefixed_keys(node.id, result, output_prefix),
-              # Provenance (Phase 1): if this action is an ingress (e.g. web
-              # fetch -> :untrusted, or a foreign-path file read), label its
-              # output keys so downstream nodes that consume them are gated at
-              # control params. Params let path-based actions decide provenance.
-              output_taint: action_output_taint(executor, action_name, action_args)
-            }
+          try do
+            case executor.execute(action_name, action_args, workdir, executor_opts) do
+              {:ok, result} ->
+                %Outcome{
+                  status: :success,
+                  notes: "Action #{action_name} executed",
+                  context_updates:
+                    flatten_context_updates(node.id, result)
+                    |> maybe_add_prefixed_keys(node.id, result, output_prefix),
+                  # Provenance (Phase 1): if this action is an ingress (e.g. web
+                  # fetch -> :untrusted, or a foreign-path file read), label its
+                  # output keys so downstream nodes that consume them are gated at
+                  # control params. Params let path-based actions decide provenance.
+                  output_taint: action_output_taint(executor, action_name, action_args)
+                }
 
-          {:error, reason} ->
-            %Outcome{
-              status: :fail,
-              failure_reason: "Action #{action_name} failed: #{reason}"
-            }
+              {:error, reason} ->
+                %Outcome{
+                  status: :fail,
+                  failure_reason: "Action #{action_name} failed: #{reason}"
+                }
 
-          other ->
-            # No control-protocol projection: unexpected tuples (including legacy
-            # {:control, _}) fail closed so denial can never become success via
-            # an author-controlled handler attribute.
-            %Outcome{
-              status: :fail,
-              failure_reason:
-                "Action #{action_name} returned unsupported result: #{inspect(other)}"
-            }
-        end
-      catch
-        :exit, reason ->
+              other ->
+                # No control-protocol projection: unexpected tuples (including legacy
+                # {:control, _}) fail closed so denial can never become success via
+                # an author-controlled handler attribute.
+                %Outcome{
+                  status: :fail,
+                  failure_reason:
+                    "Action #{action_name} returned unsupported result: #{inspect(other)}"
+                }
+            end
+          catch
+            :exit, reason ->
+              %Outcome{
+                status: :fail,
+                failure_reason: "Action #{action_name} process error: #{inspect(reason)}"
+              }
+          end
+
+        {:error, reason} ->
           %Outcome{
             status: :fail,
-            failure_reason: "Action #{action_name} process error: #{inspect(reason)}"
+            failure_reason:
+              "Action #{action_name} context_keys invalid: #{format_context_keys_error(reason)}"
           }
       end
     else
@@ -252,49 +265,29 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   end
 
   # Build action args from both attr-prefixed values AND context keys.
+  #
+  # Context keys are looked up by their full source name (so namespaced
+  # pipeline outputs like `exec.load_dataset.dataset` resolve), then inserted
+  # under the flat last-segment action parameter name (`dataset`) so
+  # ActionsExecutor schema atomization can match Jido keys. Per-parameter
+  # taint follows the same flat keys while provenance still comes from each
+  # exact source key. Duplicate normalized parameter names fail closed.
   defp build_action_args(node_id, attrs, context) do
-    # 1. Collect arg.*/param.* prefixed attrs
     attr_args = parse_attr_args(node_id, attrs)
+    source_keys = consumed_context_keys(attrs)
 
-    # 2. If context_keys attr is set, merge context values as params
-    context_args =
-      case Map.get(attrs, "context_keys") do
-        nil ->
-          %{}
+    case resolve_context_params(node_id, source_keys, context, attr_args) do
+      {:ok, context_args, param_taint} ->
+        {:ok, Map.merge(attr_args, context_args), param_taint}
 
-        keys_csv ->
-          keys_csv
-          |> String.split(",")
-          |> Enum.map(&String.trim/1)
-          |> Enum.reject(&(&1 == ""))
-          |> Enum.reduce(%{}, fn key, acc ->
-            case Context.get(context, key) do
-              nil ->
-                # Silent param loss is the bug: action runs with a
-                # partial param set and the operator gets no signal.
-                # Warn so the missing key is visible in logs even
-                # when the action's eventual error doesn't point here.
-                Logger.warning(
-                  "[ExecHandler] #{node_id}: context_keys references " <>
-                    "\"#{key}\" but no such key in context; param will " <>
-                    "be missing from action call"
-                )
-
-                acc
-
-              value ->
-                Map.put(acc, key, value)
-            end
-          end)
-      end
-
-    Map.merge(attr_args, context_args)
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   # The context keys whose values are interpolated into this action's params.
   # These are the only runtime-tainted inputs (static arg.*/param.* attrs are
-  # author-written and trusted). Mirrors the context_keys parsing in
-  # build_action_args/3.
+  # author-written and trusted).
   defp consumed_context_keys(attrs) do
     case Map.get(attrs, "context_keys") do
       nil ->
@@ -308,19 +301,68 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     end
   end
 
-  defp maybe_put_param_taint(opts, _context, []), do: opts
+  defp resolve_context_params(node_id, source_keys, context, attr_args) do
+    Enum.reduce_while(source_keys, {:ok, %{}, %{}, MapSet.new()}, fn source_key,
+                                                                     {:ok, args, taints, seen} ->
+      param_name = action_param_name(source_key)
 
-  defp maybe_put_param_taint(opts, context, context_keys) do
-    param_taint =
-      Enum.reduce(context_keys, %{}, fn key, acc ->
-        case Context.get(context, key) do
-          nil -> acc
-          _value -> Map.put(acc, key, Context.taint_label(context, key))
+      if MapSet.member?(seen, param_name) do
+        {:halt, {:error, {:duplicate_context_param, param_name, source_key}}}
+      else
+        seen = MapSet.put(seen, param_name)
+
+        case Context.get(context, source_key) do
+          nil ->
+            # Silent param loss is the bug: action runs with a
+            # partial param set and the operator gets no signal.
+            # Skip the warning when a static arg.*/param.* already
+            # supplies this flat parameter (optional CLI overrides).
+            unless Map.has_key?(attr_args, param_name) do
+              Logger.warning(
+                "[ExecHandler] #{node_id}: context_keys references " <>
+                  "\"#{source_key}\" but no such key in context; param " <>
+                  "\"#{param_name}\" will be missing from action call"
+              )
+            end
+
+            {:cont, {:ok, args, taints, seen}}
+
+          value ->
+            taint = Context.taint_label(context, source_key)
+
+            {:cont,
+             {:ok, Map.put(args, param_name, value), Map.put(taints, param_name, taint), seen}}
         end
-      end)
+      end
+    end)
+    |> case do
+      {:ok, args, taints, _seen} -> {:ok, args, taints}
+      {:error, _reason} = error -> error
+    end
+  end
 
+  # Map a consumed context key to the flat action parameter name.
+  # Already-flat keys pass through; namespaced pipeline keys keep the leaf.
+  # Uses only string splits — never converts untrusted strings to atoms.
+  defp action_param_name(context_key) when is_binary(context_key) do
+    case String.split(context_key, ".") do
+      [single] -> single
+      parts -> List.last(parts)
+    end
+  end
+
+  defp maybe_put_param_taint(opts, _param_taint, []), do: opts
+
+  defp maybe_put_param_taint(opts, param_taint, _context_keys) do
     Keyword.put(opts, :param_taint, param_taint)
   end
+
+  defp format_context_keys_error({:duplicate_context_param, param_name, source_key}) do
+    "duplicate action parameter #{inspect(param_name)} from context key #{inspect(source_key)}; " <>
+      "each context_keys entry must normalize to a distinct flat parameter name"
+  end
+
+  defp format_context_keys_error(reason), do: inspect(reason)
 
   defp maybe_put_execution_binding(opts, %RunAuthorization{} = authority) do
     opts

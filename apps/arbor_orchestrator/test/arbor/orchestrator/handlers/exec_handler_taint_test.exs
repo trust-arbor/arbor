@@ -166,6 +166,76 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       assert %TaintStruct{sanitizations: 0} = Keyword.fetch!(exec_opts, :taint)
     end
 
+    test "security regression: namespaced context keys map to flat action params with source taint" do
+      dataset = [%{"id" => "s1", "input" => "def foo, do: :ok"}]
+      dataset_taint = %TaintStruct{level: :untrusted, sanitizations: 0b00000010}
+
+      context =
+        %Context{values: %{"exec.load_dataset.dataset" => dataset}}
+        |> Context.record_output_taint(["exec.load_dataset.dataset"], dataset_taint)
+
+      node =
+        action_node(%{
+          "action" => "eval_pipeline.run_eval",
+          "context_keys" => "exec.load_dataset.dataset",
+          "param.graders" => "compile_check"
+        })
+
+      outcome = ExecHandler.execute(node, context, graph(), opts())
+      assert outcome.status == :success
+
+      assert_received {:stub_execute, "eval_pipeline.run_eval", args, _workdir, exec_opts}
+
+      assert Map.fetch!(args, "dataset") == dataset
+      refute Map.has_key?(args, "exec.load_dataset.dataset")
+      assert Map.fetch!(args, "graders") == "compile_check"
+
+      assert %{"dataset" => %TaintStruct{level: :untrusted, sanitizations: 0b00000010}} =
+               Keyword.fetch!(exec_opts, :param_taint)
+
+      refute Map.has_key?(Keyword.fetch!(exec_opts, :param_taint), "exec.load_dataset.dataset")
+      assert Keyword.get(exec_opts, :taint).level == :untrusted
+    end
+
+    test "already-flat context keys remain unchanged" do
+      context = %Context{values: %{"dataset" => [%{"id" => "flat"}], "results" => []}}
+
+      node =
+        action_node(%{
+          "action" => "eval_pipeline.aggregate",
+          "context_keys" => "dataset,results"
+        })
+
+      ExecHandler.execute(node, context, graph(), opts())
+
+      assert_received {:stub_execute, "eval_pipeline.aggregate", args, _workdir, _opts}
+      assert args["dataset"] == [%{"id" => "flat"}]
+      assert args["results"] == []
+    end
+
+    test "duplicate normalized context params fail closed before execution" do
+      context =
+        %Context{
+          values: %{
+            "dataset" => [%{"id" => "a"}],
+            "exec.load_dataset.dataset" => [%{"id" => "b"}]
+          }
+        }
+
+      node =
+        action_node(%{
+          "action" => "eval_pipeline.run_eval",
+          "context_keys" => "dataset,exec.load_dataset.dataset"
+        })
+
+      outcome = ExecHandler.execute(node, context, graph(), opts())
+
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "duplicate action parameter"
+      assert outcome.failure_reason =~ "dataset"
+      refute_received {:stub_execute, _, _, _, _}
+    end
+
     test "static attr args carry no taint (author-written, not runtime input)" do
       context = %Context{values: %{}}
       node = action_node(%{"action" => "shell.execute", "arg.command" => "ls"})
