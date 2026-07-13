@@ -27,7 +27,11 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
     with true <-
            is_integer(max_output_bytes) and max_output_bytes > 0 and
              max_output_bytes <= @max_configured_output_bytes do
-      execute(["-C", workdir] ++ @neutral_config ++ args, timeout_ms, max_output_bytes)
+      execute(
+        ["--no-replace-objects", "-C", workdir] ++ @neutral_config ++ args,
+        timeout_ms,
+        max_output_bytes
+      )
     else
       _other -> {:error, "git_invalid_request"}
     end
@@ -39,7 +43,8 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
     case Arbor.Shell.execute_direct("git", args,
            sandbox: :none,
            timeout: timeout_ms,
-           max_output_bytes: max_output_bytes
+           max_output_bytes: max_output_bytes,
+           env: %{"GIT_NO_REPLACE_OBJECTS" => "1"}
          ) do
       {:ok, %{timed_out: true}} ->
         {:error, "git_timeout:#{timeout_ms}"}

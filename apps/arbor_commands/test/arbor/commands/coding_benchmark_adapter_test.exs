@@ -110,6 +110,25 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     def run(_request), do: :ok
   end
 
+  defmodule HiddenUntrackedVerifier do
+    @moduledoc false
+
+    def run(%{"executor_path" => "pipeline", "workdir" => workdir}) do
+      git!(workdir, ["config", "--local", "status.showUntrackedFiles", "no"])
+      File.write!(Path.join(workdir, "hidden-untracked.txt"), "must be detected\n")
+      :ok
+    end
+
+    def run(_request), do: :ok
+
+    defp git!(workdir, args) do
+      case System.cmd("git", ["-C", workdir | args], stderr_to_stdout: true) do
+        {_output, 0} -> :ok
+        {output, status} -> raise "git failed (#{status}): #{output}"
+      end
+    end
+  end
+
   defmodule ArtifactSwapVerifier do
     @moduledoc false
 
@@ -166,6 +185,17 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       send(observer, {:status_only_pipeline_started, self(), principal_id, task, context})
       Process.sleep(:infinity)
     end
+
+    def cancel_task(principal_id, context),
+      do: Arbor.Orchestrator.cancel_coding_task(principal_id, context)
+  end
+
+  defmodule LateWritingPipelineExecutor do
+    @moduledoc false
+    alias Arbor.Commands.CodingBenchmarkAdapterTest, as: TestSupport
+
+    def run(principal_id, task, context),
+      do: TestSupport.allocate_late_writer_and_hang(principal_id, task, context)
 
     def cancel_task(principal_id, context),
       do: Arbor.Orchestrator.cancel_coding_task(principal_id, context)
@@ -279,6 +309,56 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
 
     assert {:ok, scope} = Enum.find(results, &match?({:ok, _scope}, &1))
     assert File.dir?(scope.artifact_root)
+  end
+
+  test "artifact allocation rollback preserves pre-existing roots and removes its control lease" do
+    requests = benchmark_requests!()
+    assert {:ok, runtime} = Runtime.load()
+    assert {:ok, preview} = Adapter.verification_scope(requests.legacy, runtime)
+    File.mkdir!(preview.artifact_root)
+    sentinel = Path.join(preview.artifact_root, "foreign")
+    File.write!(sentinel, "untouched")
+
+    assert {:error, {:benchmark_setup_error, :artifact_task_root_exists}} =
+             Adapter.execution_scope(requests.legacy, runtime)
+
+    assert File.read!(sentinel) == "untouched"
+    refute File.exists?(Path.join(runtime.artifact_root, ".benchmark-leases"))
+  end
+
+  test "security regression: post-allocation control swaps roll back only the owned root" do
+    requests = benchmark_requests!()
+    assert {:ok, runtime} = Runtime.load()
+    assert {:ok, preview} = Adapter.verification_scope(requests.legacy, runtime)
+    handler_id = "coding-benchmark-allocation-swap-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:arbor, :commands, :coding_benchmark, :artifact_root_allocated],
+      fn _event, _measurements, %{control_path: control_path}, _config ->
+        File.rm!(control_path)
+        File.mkdir!(control_path)
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert {:error,
+            {:benchmark_setup_error,
+             {:artifact_allocation_rollback_failed, :artifact_lease_control_rollback_failed}}} =
+             Adapter.execution_scope(requests.legacy, runtime)
+
+    refute File.exists?(preview.artifact_root)
+
+    control_path =
+      Path.join([
+        runtime.artifact_root,
+        ".benchmark-leases",
+        Path.basename(preview.artifact_root) <> ".json"
+      ])
+
+    assert File.dir?(control_path)
   end
 
   test "request workdirs must have the harness-owned pair topology" do
@@ -476,6 +556,18 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     scenario = production_scenario!()
     install_leased_executors()
     Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, first} = run_production_scenario(scenario)
+    assert {:ok, second} = run_production_scenario(scenario)
+    assert first["summary"]["equivalent_pairs"] == 1
+    assert second["summary"]["equivalent_pairs"] == 1
+    assert File.ls!(scenario.artifact_root) == []
+  end
+
+  test "worker-writable marker tampering cannot alter external lease ownership" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :lease_marker_tamper)
 
     assert {:ok, first} = run_production_scenario(scenario)
     assert {:ok, second} = run_production_scenario(scenario)
@@ -704,6 +796,40 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     end
   end
 
+  test "security regression: executor config cannot hide untracked files from final attestation" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, report} =
+             run_production_scenario(scenario,
+               verifiers: %{"scripted_objective" => HiddenUntrackedVerifier}
+             )
+
+    pipeline = row(report, "pipeline")
+    assert pipeline["terminal_status"] == "worktree_verification_failed"
+    assert pipeline["terminal_reason"] == "final_branch_or_commit_attestation_failed"
+  end
+
+  test "security regression: replacement refs cannot forge physical commit ancestry" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :replacement_ancestry)
+
+    assert {:ok, report} = run_production_scenario(scenario)
+
+    for executor <- [:legacy, :pipeline] do
+      assert_receive {:replacement_ancestry_observed, ^executor, physical, replacement}
+      refute physical == replacement
+    end
+
+    for executor <- ~w(legacy pipeline) do
+      result = row(report, executor)
+      assert result["terminal_status"] == "worktree_verification_failed"
+      assert result["terminal_reason"] == "final_branch_or_commit_attestation_failed"
+    end
+  end
+
   test "descendant-spawning Git commands fail closed through the public shell facade" do
     assert {:error, reason} =
              Git.run(File.cwd!(), ["daemon", "--reuseaddr", "--base-path=.", "."], 50)
@@ -738,7 +864,10 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
 
     timed_out = row(report, "legacy")
     assert timed_out["terminal_status"] == "executor_timeout"
-    assert timed_out["terminal_reason"] == "execution_timeout:1000"
+
+    assert timed_out["terminal_reason"] ==
+             "execution_timeout:1000;artifact_lease_retained:unconfirmed_worker_cleanup"
+
     assert timed_out["objective_verifier"]["status"] == "failed"
 
     assert timed_out["cancellation_observations"]["status"] == "unsupported"
@@ -853,6 +982,72 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     assert timed_out["cancellation_observations"]["cleanup"]["status"] == "unverified"
   end
 
+  test "unconfirmed timeout retains artifact lease against late writers and identical reruns" do
+    scenario = production_scenario!(250, 50)
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_executor_module,
+      LeasedLegacyExecutor
+    )
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_pipeline_executor_module,
+      LateWritingPipelineExecutor
+    )
+
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+    Application.put_env(:arbor_orchestrator, :pipeline_status_module, CapturingPipelineStatus)
+
+    assert {:ok, first} = run_production_scenario(scenario)
+    assert_receive {:late_writer_started, worker, artifact_root, task_id}
+    assert_receive {:pipeline_mark_abandoned, ^task_id}, 1_000
+    assert_receive {:late_writer_finished, ^worker, late_path}, 2_000
+    assert late_path == Path.join(artifact_root, "late-write.txt")
+    assert File.read!(late_path) == "late write\n"
+
+    timed_out = row(first, "pipeline")
+    assert timed_out["terminal_status"] == "executor_timeout"
+    assert timed_out["cancellation_observations"]["cleanup"]["status"] == "unverified"
+    assert timed_out["terminal_reason"] =~ "artifact_lease_retained:unconfirmed_worker_cleanup"
+
+    assert {:ok, second} = run_production_scenario(scenario)
+    refute_receive {:late_writer_started, _worker, ^artifact_root, _task_id}, 100
+    second_pipeline = row(second, "pipeline")
+    refute second_pipeline["terminal_status"] == "change_committed"
+    assert second_pipeline["terminal_reason"] =~ "artifact_task_root_exists"
+    assert File.read!(late_path) == "late write\n"
+  end
+
+  test "external lease-control tampering is surfaced and retained" do
+    scenario = production_scenario!()
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+    handler_id = "coding-benchmark-control-tamper-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:arbor, :commands, :coding_benchmark, :artifact_chunk_read],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.pass == 1 and metadata.offset == 0 and
+             Path.basename(metadata.path) == "coding-pipeline.dot" do
+          lease_directory = Path.join(scenario.artifact_root, ".benchmark-leases")
+          [control_file] = File.ls!(lease_directory)
+          File.write!(Path.join(lease_directory, control_file), "{}")
+        end
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    assert {:ok, report} = run_production_scenario(scenario)
+    pipeline = row(report, "pipeline")
+    assert pipeline["terminal_status"] == "artifact_cleanup_failed"
+    assert pipeline["terminal_reason"] =~ "artifact_lease_cleanup_failed:lease_state:corrupt"
+    assert File.exists?(scenario.artifact_root)
+  end
+
   @doc false
   def capture(executor, principal_id, task, context) do
     observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
@@ -879,6 +1074,12 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
 
       :unrelated_commit ->
         leased_result(executor, principal_id, task, context, :valid, :unrelated)
+
+      :replacement_ancestry ->
+        leased_result(executor, principal_id, task, context, :valid, :replacement)
+
+      :lease_marker_tamper ->
+        leased_result(executor, principal_id, task, context, :lease_marker_tamper)
 
       :missing_worktree ->
         production_result(executor, principal_id, task, context, nil, %{}, nil)
@@ -913,6 +1114,25 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     end)
 
     send(observer, {:external_resource_allocated, resource_pid, resource_path, task_id})
+    Process.sleep(:infinity)
+  end
+
+  @doc false
+  def allocate_late_writer_and_hang(_principal_id, _task, %{"task_id" => task_id}) do
+    observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+
+    artifact_root =
+      Path.join(Arbor.Orchestrator.coding_pipeline_logs_root(), "task-" <> sha256(task_id))
+
+    worker =
+      spawn(fn ->
+        Process.sleep(500)
+        late_path = Path.join(artifact_root, "late-write.txt")
+        File.write!(late_path, "late write\n")
+        send(observer, {:late_writer_finished, self(), late_path})
+      end)
+
+    send(observer, {:late_writer_started, worker, artifact_root, task_id})
     Process.sleep(:infinity)
   end
 
@@ -1120,7 +1340,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     git!(worktree, ["add", "--", "result.txt"])
     commit!(worktree, "benchmark result")
 
-    if commit_mode == :unrelated do
+    if commit_mode in [:unrelated, :replacement] do
       git!(worktree, ["checkout", "--quiet", "--orphan", task["branch_name"] <> "-orphan"])
       git!(worktree, ["rm", "-rf", "--quiet", "."])
       File.write!(Path.join(worktree, "result.txt"), "completed:happy\n")
@@ -1128,14 +1348,40 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       commit!(worktree, "unrelated benchmark result")
       git!(worktree, ["branch", "-M", task["branch_name"]])
       observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
-      commit_line = git!(worktree, ["rev-list", "--parents", "-n", "1", "HEAD"])
-      send(observer, {:unrelated_commit_observed, executor, commit_line})
+
+      if commit_mode == :unrelated do
+        commit_line = git!(worktree, ["rev-list", "--parents", "-n", "1", "HEAD"])
+        send(observer, {:unrelated_commit_observed, executor, commit_line})
+      else
+        physical = git!(worktree, ["rev-parse", "HEAD"])
+
+        replacement =
+          git!(worktree, [
+            "-c",
+            "user.name=Arbor Benchmark",
+            "-c",
+            "user.email=benchmark@arbor.local",
+            "commit-tree",
+            "#{physical}^{tree}",
+            "-p",
+            task["base_ref"],
+            "-m",
+            "forged replacement ancestry"
+          ])
+
+        git!(worktree, ["replace", physical, replacement])
+        send(observer, {:replacement_ancestry_observed, executor, physical, replacement})
+      end
     end
 
     {artifacts, artifact_root} =
       if executor == :pipeline,
         do: production_artifacts(task, context, artifact_mode),
         else: {%{}, nil}
+
+    if artifact_mode == :lease_marker_tamper and is_binary(artifact_root) do
+      File.write!(Path.join(artifact_root, ".benchmark-lease"), "forged worker marker")
+    end
 
     production_result(executor, principal_id, task, context, worktree, artifacts, artifact_root)
   end

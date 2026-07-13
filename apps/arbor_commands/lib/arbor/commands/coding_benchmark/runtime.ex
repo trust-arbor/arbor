@@ -13,6 +13,8 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   @max_timeout_ms 86_400_000
   @max_cancellation_timeout_ms 30_000
   @broad_root_paths ["/", Path.expand("~")]
+  @lease_schema "arbor.coding_benchmark.artifact_lease.v1"
+  @lease_directory ".benchmark-leases"
 
   @type config :: %{
           workspace_root: String.t(),
@@ -303,25 +305,53 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     if path_within?(path, root), do: :ok, else: setup_error(reason)
   end
 
-  @doc "Release an exact benchmark artifact lease without following replacement symlinks."
+  @doc "Return true only when the external control record owns the exact artifact root inode."
+  @spec artifact_lease_owned?(String.t(), String.t(), config()) :: boolean()
+  def artifact_lease_owned?(path, lease, config)
+      when is_binary(path) and is_binary(lease) do
+    artifact_lease_state(path, lease, config) == :owned
+  end
+
+  def artifact_lease_owned?(_path, _lease, _config), do: false
+
+  @doc "Classify lease ownership without mutating either the root or control record."
+  @spec artifact_lease_state(String.t(), String.t(), config()) ::
+          :owned | :foreign | :absent | :corrupt | :unmanaged
+  def artifact_lease_state(path, lease, config)
+      when is_binary(path) and is_binary(lease) do
+    with {:ok, control_path} <- lease_control_path(path, config) do
+      case File.lstat(control_path) do
+        {:error, :enoent} -> if File.exists?(path), do: :unmanaged, else: :absent
+        {:ok, %{type: :regular}} -> classify_lease_record(control_path, path, lease)
+        _other -> :corrupt
+      end
+    else
+      _other -> :corrupt
+    end
+  end
+
+  def artifact_lease_state(_path, _lease, _config), do: :corrupt
+
+  @doc "Release an exact benchmark artifact lease without trusting worker-writable metadata."
   @spec release_artifact_root(String.t(), String.t(), config()) :: :ok | {:error, term()}
   def release_artifact_root(path, lease, config)
       when is_binary(path) and is_binary(lease) do
-    marker = Path.join(path, ".benchmark-lease")
     quarantine = Path.join(config.artifact_root, ".release-" <> sha256(lease))
 
-    with {:ok, ^path} <- SafePath.resolve_within(path, config.artifact_root),
-         {:ok, %{type: :directory}} <- File.lstat(path),
-         {:ok, %{type: :regular}} <- File.lstat(marker),
-         {:ok, ^lease} <- File.read(marker),
+    with {:ok, record} <- owned_lease_record(path, lease, config),
+         {:ok, control_path} <- lease_control_path(path, config),
          {:error, :enoent} <- File.lstat(quarantine),
          :ok <- File.rename(path, quarantine),
          {:ok, stat} <- File.lstat(quarantine),
-         true <- stat.type in [:directory, :symlink],
-         {:ok, _removed} <- File.rm_rf(quarantine) do
+         true <- same_root_identity?(stat, record),
+         {:ok, _removed} <- File.rm_rf(quarantine),
+         :ok <- remove_owned_control(control_path, lease),
+         :ok <- remove_empty_lease_directory(config) do
       :ok
     else
-      _other -> {:error, :artifact_lease_not_owned}
+      {:error, reason} -> {:error, reason}
+      false -> {:error, :artifact_root_identity_changed}
+      _other -> {:error, :artifact_release_failed}
     end
   end
 
@@ -332,12 +362,10 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     digest = sha256(task_id)
 
     with {:ok, root} <- SafePath.safe_join(artifact_root, "task-" <> digest),
-         :ok <- create_exclusive_artifact_root(root),
-         :ok <- write_lease_marker(root, lease),
-         {:ok, real_root} <- SafePath.resolve_real(root),
-         {:ok, ^real_root} <- SafePath.resolve_within(real_root, artifact_root),
-         true <- Path.dirname(real_root) == artifact_root do
-      {:ok, real_root}
+         {:ok, control_path} <- lease_control_path(root, %{artifact_root: artifact_root}),
+         :ok <- ensure_lease_directory(artifact_root),
+         {:ok, control_identity} <- create_lease_control(control_path, lease) do
+      finish_artifact_allocation(root, control_path, control_identity, lease, artifact_root)
     else
       {:error, {:benchmark_setup_error, _reason}} = error -> error
       {:error, reason} -> setup_error({:invalid_artifact_task_root, reason})
@@ -346,12 +374,127 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     end
   end
 
-  defp write_lease_marker(root, lease) do
-    marker = Path.join(root, ".benchmark-lease")
+  defp finish_artifact_allocation(root, control_path, control_identity, lease, artifact_root) do
+    case create_exclusive_artifact_root(root) do
+      {:ok, identity} ->
+        emit_artifact_root_allocated(root, control_path)
 
-    case File.open(marker, [:write, :binary, :exclusive], fn io -> IO.binwrite(io, lease) end) do
-      {:ok, :ok} -> :ok
-      _other -> setup_error(:artifact_lease_marker_failed)
+        result =
+          with :ok <- write_lease_record(control_path, lease, root, identity),
+               {:ok, real_root} <- SafePath.resolve_real(root),
+               {:ok, ^real_root} <- SafePath.resolve_within(real_root, artifact_root),
+               true <- Path.dirname(real_root) == artifact_root do
+            {:ok, real_root}
+          else
+            false -> setup_error({:invalid_artifact_task_root, :outside_artifact_root})
+            {:error, {:benchmark_setup_error, _reason}} = error -> error
+            {:error, reason} -> setup_error({:invalid_artifact_task_root, reason})
+            _other -> setup_error({:invalid_artifact_task_root, :revalidation_failed})
+          end
+
+        allocation_result(
+          result,
+          root,
+          identity,
+          control_path,
+          control_identity,
+          lease,
+          artifact_root
+        )
+
+      {:error, _reason} = error ->
+        allocation_result(
+          error,
+          nil,
+          nil,
+          control_path,
+          control_identity,
+          lease,
+          artifact_root
+        )
+    end
+  end
+
+  defp emit_artifact_root_allocated(root, control_path) do
+    :telemetry.execute(
+      [:arbor, :commands, :coding_benchmark, :artifact_root_allocated],
+      %{count: 1},
+      %{control_path: control_path, root: root}
+    )
+
+    :ok
+  end
+
+  defp allocation_result(
+         {:ok, _root} = success,
+         _path,
+         _identity,
+         _control,
+         _control_identity,
+         _lease,
+         _artifact
+       ),
+       do: success
+
+  defp allocation_result(
+         error,
+         root,
+         identity,
+         control_path,
+         control_identity,
+         lease,
+         artifact_root
+       ) do
+    case rollback_allocation(
+           root,
+           identity,
+           control_path,
+           control_identity,
+           lease,
+           artifact_root
+         ) do
+      :ok ->
+        error
+
+      {:error, rollback_reason} ->
+        setup_error({:artifact_allocation_rollback_failed, rollback_reason})
+    end
+  end
+
+  defp create_lease_control(path, lease) do
+    content = Jason.encode!(%{"lease" => lease, "state" => "allocating"})
+
+    case File.open(path, [:write, :binary, :exclusive], fn io ->
+           with {:ok, info} <- :file.read_file_info(io, time: :posix),
+                stat = File.Stat.from_record(info),
+                true <- stat.type == :regular,
+                identity = root_identity(stat),
+                :ok <- IO.binwrite(io, content) do
+             {:ok, identity}
+           else
+             _other -> {:error, :control_file_attestation_failed}
+           end
+         end) do
+      {:ok, {:ok, identity}} ->
+        {:ok, identity}
+
+      {:ok, {:error, reason}} ->
+        case File.rm(path) do
+          :ok ->
+            setup_error({:artifact_lease_control_create_failed, reason})
+
+          {:error, rollback_reason} ->
+            setup_error({:artifact_lease_control_rollback_failed, rollback_reason})
+        end
+
+      {:error, :eexist} ->
+        setup_error(:artifact_task_root_exists)
+
+      {:error, reason} ->
+        setup_error({:artifact_lease_control_create_failed, reason})
+
+      _other ->
+        setup_error(:artifact_lease_control_create_failed)
     end
   end
 
@@ -359,9 +502,14 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     case File.mkdir(path) do
       :ok ->
         case File.lstat(path) do
-          {:ok, %{type: :directory}} -> :ok
-          {:ok, _stat} -> setup_error(:unsafe_artifact_task_root)
-          {:error, reason} -> setup_error({:artifact_task_root_lstat_failed, reason})
+          {:ok, %{type: :directory} = stat} ->
+            {:ok, root_identity(stat)}
+
+          {:ok, _stat} ->
+            rollback_unattested_artifact_root(path, :unsafe_artifact_task_root)
+
+          {:error, reason} ->
+            rollback_unattested_artifact_root(path, {:artifact_task_root_lstat_failed, reason})
         end
 
       {:error, :eexist} ->
@@ -369,6 +517,186 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
 
       {:error, reason} ->
         setup_error({:artifact_task_root_create_failed, reason})
+    end
+  end
+
+  defp rollback_unattested_artifact_root(path, reason) do
+    case File.rmdir(path) do
+      :ok ->
+        setup_error(reason)
+
+      {:error, rollback_reason} ->
+        setup_error({:artifact_root_rollback_failed, reason, rollback_reason})
+    end
+  end
+
+  defp write_lease_record(control_path, lease, root, identity) do
+    record =
+      Map.merge(identity, %{
+        "lease" => lease,
+        "root" => root,
+        "schema" => @lease_schema
+      })
+
+    with {:ok, %{type: :regular}} <- File.lstat(control_path),
+         {:ok, current} <- File.read(control_path),
+         {:ok, %{"lease" => ^lease, "state" => "allocating"}} <- Jason.decode(current),
+         {:ok, encoded} <- Jason.encode(record),
+         :ok <- File.write(control_path, encoded, [:write, :binary]) do
+      :ok
+    else
+      _other -> setup_error(:artifact_lease_control_write_failed)
+    end
+  end
+
+  defp owned_lease_record(path, lease, config) do
+    with {:ok, ^path} <- SafePath.resolve_within(path, config.artifact_root),
+         true <- Path.dirname(path) == config.artifact_root,
+         {:ok, control_path} <- lease_control_path(path, config),
+         {:ok, %{type: :regular}} <- File.lstat(control_path),
+         {:ok, encoded} <- File.read(control_path),
+         {:ok, record} <- Jason.decode(encoded),
+         true <- valid_lease_record?(record, path, lease),
+         {:ok, %{type: :directory} = stat} <- File.lstat(path),
+         true <- same_root_identity?(stat, record) do
+      {:ok, record}
+    else
+      _other -> {:error, :artifact_lease_not_owned}
+    end
+  end
+
+  defp classify_lease_record(control_path, path, lease) do
+    with {:ok, encoded} <- File.read(control_path),
+         {:ok, record} <- Jason.decode(encoded),
+         true <- valid_lease_record_shape?(record, path) do
+      cond do
+        record["lease"] != lease -> :foreign
+        root_matches_record?(path, record) -> :owned
+        true -> :corrupt
+      end
+    else
+      _other -> :corrupt
+    end
+  end
+
+  defp root_matches_record?(path, record) do
+    case File.lstat(path) do
+      {:ok, %{type: :directory} = stat} -> same_root_identity?(stat, record)
+      _other -> false
+    end
+  end
+
+  defp valid_lease_record?(record, path, lease) do
+    valid_lease_record_shape?(record, path) and record["lease"] == lease
+  end
+
+  defp valid_lease_record_shape?(record, path) do
+    is_map(record) and record["schema"] == @lease_schema and record["root"] == path and
+      is_binary(record["lease"]) and
+      Enum.all?(
+        ~w(inode major_device minor_device),
+        &(is_integer(record[&1]) and record[&1] >= 0)
+      )
+  end
+
+  defp root_identity(stat) do
+    %{
+      "inode" => stat.inode,
+      "major_device" => stat.major_device,
+      "minor_device" => stat.minor_device
+    }
+  end
+
+  defp same_root_identity?(stat, record) do
+    stat.type == :directory and stat.inode == record["inode"] and
+      stat.major_device == record["major_device"] and
+      stat.minor_device == record["minor_device"]
+  end
+
+  defp lease_control_path(root, config) do
+    with {:ok, directory} <- SafePath.safe_join(config.artifact_root, @lease_directory),
+         {:ok, control} <- SafePath.safe_join(directory, Path.basename(root) <> ".json") do
+      {:ok, control}
+    end
+  end
+
+  defp ensure_lease_directory(artifact_root) do
+    path = Path.join(artifact_root, @lease_directory)
+
+    with :ok <- ensure_directory(path),
+         {:ok, %{type: :directory}} <- File.lstat(path),
+         {:ok, ^path} <- SafePath.resolve_real(path),
+         :ok <- File.chmod(path, 0o700) do
+      :ok
+    else
+      _other -> setup_error(:artifact_lease_directory_failed)
+    end
+  end
+
+  defp rollback_allocation(
+         root,
+         identity,
+         control_path,
+         control_identity,
+         _lease,
+         artifact_root
+       ) do
+    root_result = rollback_owned_empty_root(root, identity)
+    control_result = remove_control_identity(control_path, control_identity)
+    directory_result = remove_empty_lease_directory(%{artifact_root: artifact_root})
+
+    case Enum.find([root_result, control_result, directory_result], &match?({:error, _}, &1)) do
+      nil -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp remove_control_identity(control_path, identity) do
+    with {:ok, stat} <- File.lstat(control_path),
+         true <- stat.type == :regular and same_file_identity?(stat, identity),
+         :ok <- File.rm(control_path) do
+      :ok
+    else
+      _other -> {:error, :artifact_lease_control_rollback_failed}
+    end
+  end
+
+  defp rollback_owned_empty_root(nil, nil), do: :ok
+
+  defp rollback_owned_empty_root(root, identity) do
+    with {:ok, stat} <- File.lstat(root),
+         true <- same_root_identity?(stat, identity),
+         :ok <- File.rmdir(root) do
+      :ok
+    else
+      _other -> {:error, :artifact_root_rollback_failed}
+    end
+  end
+
+  defp remove_owned_control(control_path, lease) do
+    with {:ok, %{type: :regular}} <- File.lstat(control_path),
+         {:ok, encoded} <- File.read(control_path),
+         {:ok, %{"lease" => ^lease}} <- Jason.decode(encoded),
+         :ok <- File.rm(control_path) do
+      :ok
+    else
+      _other -> {:error, :artifact_lease_control_remove_failed}
+    end
+  end
+
+  defp same_file_identity?(stat, identity) do
+    stat.inode == identity["inode"] and stat.major_device == identity["major_device"] and
+      stat.minor_device == identity["minor_device"]
+  end
+
+  defp remove_empty_lease_directory(config) do
+    path = Path.join(config.artifact_root, @lease_directory)
+
+    case File.rmdir(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, :enotempty} -> :ok
+      {:error, reason} -> {:error, {:artifact_lease_directory_remove_failed, reason}}
     end
   end
 

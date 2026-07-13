@@ -869,34 +869,19 @@ defmodule Arbor.Commands.CodingBenchmark do
 
     case verification_context(callback, request, runtime) do
       {:ok, verification} ->
-        try do
-          measurement = safely(fn -> measure_execution(runtime, executor, callback, request) end)
+        measurement = safely(fn -> measure_execution(runtime, executor, callback, request) end)
 
-          case measurement do
-            {:returned, {wall_clock_ms, outcome}}
-            when is_integer(wall_clock_ms) and wall_clock_ms >= 0 ->
-              build_execution(
-                executor,
-                pair,
-                request,
-                outcome,
-                wall_clock_ms,
-                runtime,
-                verification
-              )
+        execution =
+          measured_execution(
+            measurement,
+            executor,
+            pair,
+            request,
+            runtime,
+            verification
+          )
 
-            {:returned, _invalid} ->
-              execution_failure(executor, pair, "measurement_failed", "invalid_measurement")
-
-            {:raised, reason} ->
-              execution_failure(executor, pair, "measurement_failed", reason)
-
-            {:caught, reason} ->
-              execution_failure(executor, pair, "measurement_failed", reason)
-          end
-        after
-          release_artifact_lease(verification, runtime.benchmark)
-        end
+        finalize_artifact_lease(execution, measurement, verification, runtime.benchmark)
 
       {:error, {:benchmark_setup_error, reason}} ->
         execution_failure(executor, pair, "benchmark_setup_failed", reason)
@@ -933,13 +918,115 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp release_artifact_lease(%{artifact_lease: lease, trusted_artifact_root: root}, benchmark)
-       when is_binary(lease) do
-    _ = Runtime.release_artifact_root(root, lease, benchmark)
-    :ok
+  defp measured_execution(
+         {:returned, {wall_clock_ms, outcome}},
+         executor,
+         pair,
+         request,
+         runtime,
+         verification
+       )
+       when is_integer(wall_clock_ms) and wall_clock_ms >= 0 do
+    build_execution(
+      executor,
+      pair,
+      request,
+      outcome,
+      wall_clock_ms,
+      runtime,
+      verification
+    )
   end
 
-  defp release_artifact_lease(_verification, _benchmark), do: :ok
+  defp measured_execution(
+         {:returned, _invalid},
+         executor,
+         pair,
+         _request,
+         _runtime,
+         _verification
+       ),
+       do: execution_failure(executor, pair, "measurement_failed", "invalid_measurement")
+
+  defp measured_execution({:raised, reason}, executor, pair, _request, _runtime, _verification),
+    do: execution_failure(executor, pair, "measurement_failed", reason)
+
+  defp measured_execution({:caught, reason}, executor, pair, _request, _runtime, _verification),
+    do: execution_failure(executor, pair, "measurement_failed", reason)
+
+  defp finalize_artifact_lease(
+         execution,
+         measurement,
+         %{artifact_lease: lease, trusted_artifact_root: root},
+         benchmark
+       )
+       when is_binary(lease) do
+    case Runtime.artifact_lease_state(root, lease, benchmark) do
+      :owned -> finalize_owned_artifact_lease(execution, measurement, root, lease, benchmark)
+      :foreign -> execution
+      :absent -> execution
+      state -> finalize_invalid_artifact_lease(execution, measurement, state)
+    end
+  end
+
+  defp finalize_artifact_lease(execution, _measurement, _verification, _benchmark), do: execution
+
+  defp finalize_invalid_artifact_lease(execution, measurement, state) do
+    if artifact_release_allowed?(measurement) do
+      artifact_cleanup_failure(execution, "lease_state:#{state}")
+    else
+      record_artifact_lease_retention(execution, "lease_state:#{state}")
+    end
+  end
+
+  defp finalize_owned_artifact_lease(execution, measurement, root, lease, benchmark) do
+    if artifact_release_allowed?(measurement) do
+      case Runtime.release_artifact_root(root, lease, benchmark) do
+        :ok -> execution
+        {:error, reason} -> artifact_cleanup_failure(execution, reason)
+      end
+    else
+      record_artifact_lease_retention(execution, "unconfirmed_worker_cleanup")
+    end
+  end
+
+  defp artifact_release_allowed?(
+         {:returned,
+          {_wall_clock_ms,
+           {:timed_out, _timeout_ms,
+            %{
+              "cancellation" => %{
+                "worker_terminated" => true,
+                "cleanup_completed" => true
+              },
+              "cleanup" => %{"resources_cleaned" => true}
+            }}}}
+       ),
+       do: true
+
+  defp artifact_release_allowed?({:returned, {_wall_clock_ms, {:timed_out, _, _}}}), do: false
+  defp artifact_release_allowed?(_measurement), do: true
+
+  defp record_artifact_lease_retention(%{row: row} = execution, reason) do
+    terminal_reason = row["terminal_reason"] || "artifact_lease_retained"
+
+    row =
+      Map.put(row, "terminal_reason", terminal_reason <> ";artifact_lease_retained:" <> reason)
+
+    %{execution | row: row}
+  end
+
+  defp artifact_cleanup_failure(%{row: row} = execution, reason) do
+    verification = Map.put(row["artifact_hash_verification"], "status", "failed")
+
+    row =
+      row
+      |> Map.put("artifact_hash_verification", verification)
+      |> Map.put("terminal_reason", "artifact_lease_cleanup_failed:#{reason_string(reason)}")
+      |> Map.put("terminal_status", "artifact_cleanup_failed")
+
+    %{execution | projection: nil, row: row}
+  end
 
   defp measure(fun) do
     {microseconds, result} = :timer.tc(fun)
@@ -1614,7 +1701,11 @@ defmodule Arbor.Commands.CodingBenchmark do
              verification.git_timeout_ms
            ),
          {:ok, ""} <-
-           git_output(worktree, ["status", "--porcelain=v1"], verification.git_timeout_ms) do
+           git_output(
+             worktree,
+             ["status", "--porcelain=v1", "--untracked-files=all"],
+             verification.git_timeout_ms
+           ) do
       :ok
     else
       _other -> {:error, "final_branch_or_commit_attestation_failed"}
