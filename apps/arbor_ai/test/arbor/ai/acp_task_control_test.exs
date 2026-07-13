@@ -212,7 +212,6 @@ defmodule Arbor.AI.AcpTaskControlTest do
 
   test "security regression: queued follow-ups retain the initial prompt deadline" do
     session = start_session()
-    session_ref = Process.monitor(session)
     caller = Task.async(fn -> AcpSession.send_message(session, "initial", timeout: 80) end)
 
     assert_receive {:prompt_started, initial_worker, client, "same-session", "initial"}
@@ -226,7 +225,10 @@ defmodule Arbor.AI.AcpTaskControlTest do
 
     assert {:ok, {:error, :timeout}} = Task.yield(caller, 60)
     assert_receive {:cancelled, ^client, "same-session"}
-    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
+    assert Process.alive?(session)
+
+    assert %{status: :recovery_required, session_id: "same-session"} =
+             AcpSession.status(session)
   end
 
   test "ready sessions defer controls and invalid controls do not enter the queue" do
@@ -476,7 +478,6 @@ defmodule Arbor.AI.AcpTaskControlTest do
   test "follow-up timeout leaves active delivery unknown and marks waiting controls not delivered" do
     subscribe_to_task_control_signals()
     session = start_session()
-    session_ref = Process.monitor(session)
     caller = Task.async(fn -> AcpSession.send_message(session, "initial", timeout: 1_000) end)
 
     assert_receive {:prompt_started, initial_worker, client, "same-session", "initial"}
@@ -496,8 +497,18 @@ defmodule Arbor.AI.AcpTaskControlTest do
 
     assert {:error, :timeout} = Task.await(caller)
     assert_receive {:cancelled, ^client, "same-session"}
-    assert_receive {:disconnected, ^client}
-    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
+    refute_receive {:disconnected, ^client}, 50
+    assert Process.alive?(session)
+
+    assert %{status: :recovery_required, session_id: "same-session"} =
+             AcpSession.status(session)
+
+    assert {:error, {:not_ready, :recovery_required}} =
+             AcpSession.deliver_task_control(
+               session,
+               control("timeout-after-recovery", "must-not-run")
+             )
+
     refute_receive {:prompt_started, _worker, _client, "same-session", "follow-waiting"}, 50
 
     assert_durable_control_signal(

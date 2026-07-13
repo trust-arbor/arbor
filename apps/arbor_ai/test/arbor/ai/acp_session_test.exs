@@ -6,6 +6,8 @@ defmodule Arbor.AI.AcpSessionTest do
 
   alias Arbor.AI.AcpSession
   alias Arbor.AI.AcpSession.Config
+  alias Arbor.AI.AcpManaged
+  alias Arbor.AI.AcpManaged.SessionRegistry
 
   @moduletag :fast
 
@@ -378,19 +380,81 @@ defmodule Arbor.AI.AcpSessionTest do
 
   describe "AcpSession prompt timeout behavior" do
     @tag timeout: 1_000
-    test "security regression: silent prompt aborts on inactivity and tears the session down" do
+    test "security regression: inactivity timeout preserves the handle in recovery until close" do
       install_fake_progress_client(30)
 
       {:ok, session} = start_fake_progress_session()
       ref = Process.monitor(session)
 
+      registry = :"acp_recovery_registry_#{System.unique_integer([:positive])}"
+      start_supervised!({SessionRegistry, name: registry})
+
+      assert {:ok, registered} =
+               SessionRegistry.register(
+                 %{
+                   session_pid: session,
+                   session_module: AcpSession,
+                   provider: :test,
+                   session_id: "fake-session",
+                   status: :ready,
+                   pooled: false,
+                   return_to_pool: false
+                 },
+                 server: registry
+               )
+
       assert {:error, :inactivity_timeout} = AcpSession.send_message(session, "stall")
 
-      assert_receive {:fake_prompt_started, _worker, "stall", opts}
+      assert_receive {:fake_prompt_started, worker, "stall", opts}
       assert Keyword.get(opts, :timeout) in 1..120_000
       assert_receive {:fake_cancel, "fake-session"}
+      refute Process.alive?(worker)
+      refute_receive {:fake_disconnect, _client}, 50
+      refute_receive {:DOWN, ^ref, :process, ^session, _reason}, 50
+
+      assert Process.alive?(session)
+
+      assert %{status: :recovery_required, session_id: "fake-session"} =
+               AcpSession.status(session)
+
+      assert {:ok, resolved} =
+               SessionRegistry.resolve(registered.worker_session_id, server: registry)
+
+      assert resolved.session_pid == session
+
+      assert {:ok, managed_status} =
+               AcpManaged.session_status(registered.worker_session_id, server: registry)
+
+      assert managed_status.status == "recovery_required"
+      assert managed_status.session_id == "fake-session"
+      refute Map.has_key?(managed_status, :client)
+      refute Map.has_key?(managed_status, :opts)
+
+      assert {:error, {:not_ready, :recovery_required}} =
+               AcpSession.send_message(session, "must-not-run")
+
+      assert {:error, {:not_ready, :recovery_required}} =
+               AcpSession.create_session(session)
+
+      send(
+        session,
+        {:acp_session_update, "fake-session",
+         %{"sessionUpdate" => "agent_message_chunk", "content" => %{"text" => "late"}}}
+      )
+
+      _ = AcpSession.status(session)
+      assert :sys.get_state(session).accumulated_text == ""
+      refute_receive {:fake_prompt_started, _worker, "must-not-run", _opts}, 50
+
+      assert {:ok, closed} =
+               SessionRegistry.close(registered.worker_session_id, server: registry)
+
+      assert closed.status == "closed"
       assert_receive {:fake_disconnect, _client}
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
+
+      assert {:error, :not_found} =
+               SessionRegistry.resolve(registered.worker_session_id, server: registry)
     end
 
     @tag timeout: 1_000
@@ -422,9 +486,17 @@ defmodule Arbor.AI.AcpSessionTest do
                  inactivity_timeout_ms: 200
                )
 
-      assert_receive {:fake_prompt_started, _worker, "progress_forever", opts}
+      assert_receive {:fake_prompt_started, worker, "progress_forever", opts}
       assert Keyword.get(opts, :timeout) in 1..50
       assert_receive {:fake_cancel, "fake-session"}
+      refute Process.alive?(worker)
+      refute_receive {:fake_disconnect, _client}, 50
+      refute_receive {:DOWN, ^ref, :process, ^session, _reason}, 50
+
+      assert %{status: :recovery_required, session_id: "fake-session"} =
+               AcpSession.status(session)
+
+      assert :ok = AcpSession.close(session)
       assert_receive {:fake_disconnect, _client}
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
     end
@@ -527,9 +599,9 @@ defmodule Arbor.AI.AcpSessionTest do
       refute Process.alive?(callback_worker)
     end
 
-    @tag timeout: 1_000
+    @tag timeout: 7_000
     test "security regression: non-returning stream callback cannot wedge the session" do
-      install_fake_progress_client(200)
+      install_fake_progress_client(10_000)
       test_pid = self()
 
       {:ok, session} =
@@ -546,13 +618,13 @@ defmodule Arbor.AI.AcpSessionTest do
 
       assert {:error, reason} =
                AcpSession.send_message(session, "steady_progress",
-                 timeout: 60,
-                 inactivity_timeout_ms: 200
+                 timeout: 10_000,
+                 inactivity_timeout_ms: 10_000
                )
 
-      assert reason in [:timeout, :stream_callback_timeout]
+      assert reason == :stream_callback_timeout
       assert_receive {:stream_callback_stalled, callback_worker}, 200
-      assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}, 300
+      assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}, 5_500
       refute Process.alive?(callback_worker)
     end
 
