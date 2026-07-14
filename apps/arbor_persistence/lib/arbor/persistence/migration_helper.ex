@@ -21,19 +21,106 @@ defmodule Arbor.Persistence.MigrationHelper do
           end
         end
       end
+
+  ## Additive column changes
+
+  Ecto's `add_if_not_exists/3` and `remove_if_exists/2` are **not** implemented
+  by `ecto_sqlite3` — they raise `ArgumentError: Not supported by SQLite3`
+  (the adapter only translates plain `:add` / `:remove` alter subcommands).
+
+  Prefer `add_column_if_not_exists/4` and `remove_column_if_exists/3` from this
+  module. They probe schema existence on the active migration repo and only
+  emit plain `add` / `remove` commands SQLite can execute, while remaining
+  safe on Postgres partial-upgrade schemas.
   """
 
   @doc "Returns true if the current repo uses the Postgres adapter."
   def postgres? do
-    # Use Application.get_env at runtime to avoid compile-time type warnings
-    # from the Elixir compiler (which knows the concrete adapter type).
-    Application.get_env(:arbor_persistence, :repo_adapter, Ecto.Adapters.Postgres) ==
-      Ecto.Adapters.Postgres
+    adapter() == Ecto.Adapters.Postgres
   end
 
   @doc "Returns true if the current repo uses the SQLite3 adapter."
   def sqlite? do
-    not postgres?()
+    adapter() == Ecto.Adapters.SQLite3
+  end
+
+  @doc """
+  Returns true when `column` already exists on `table` for the active migration repo.
+
+  Accepts atom or string table/column names. Must be called inside a running
+  Ecto migration (uses `Ecto.Migration.repo/0`).
+  """
+  def column_exists?(table, column) do
+    table_name = normalize_identifier!(table, "table")
+    column_name = normalize_identifier!(column, "column")
+    repo = Ecto.Migration.repo()
+
+    case repo.__adapter__() do
+      Ecto.Adapters.Postgres ->
+        postgres_column_exists?(repo, table_name, column_name)
+
+      Ecto.Adapters.SQLite3 ->
+        sqlite_column_exists?(repo, table_name, column_name)
+
+      other ->
+        raise ArgumentError,
+              "MigrationHelper.column_exists?/2 does not support adapter #{inspect(other)}"
+    end
+  end
+
+  @doc """
+  Adds `column` to `table` when it is not already present.
+
+  Unlike Ecto's `add_if_not_exists/3`, this works on SQLite by issuing a plain
+  `add` only after a schema probe. On Postgres the probe also avoids relying
+  solely on adapter IF NOT EXISTS translation when the column is already there.
+  """
+  defmacro add_column_if_not_exists(table, column, type, opts \\ []) do
+    quote do
+      table = unquote(table)
+      column = unquote(column)
+      type = unquote(type)
+      opts = unquote(opts)
+
+      unless Arbor.Persistence.MigrationHelper.column_exists?(table, column) do
+        alter table(table) do
+          add(column, type, opts)
+        end
+      end
+    end
+  end
+
+  @doc """
+  Removes `column` from `table` when it is present.
+
+  Unlike Ecto's `remove_if_exists/2`, this works on SQLite by issuing a plain
+  `remove` only after a schema probe.
+  """
+  defmacro remove_column_if_exists(table, column) do
+    quote do
+      table = unquote(table)
+      column = unquote(column)
+
+      if Arbor.Persistence.MigrationHelper.column_exists?(table, column) do
+        alter table(table) do
+          remove(column)
+        end
+      end
+    end
+  end
+
+  defmacro remove_column_if_exists(table, column, type) do
+    quote do
+      table = unquote(table)
+      column = unquote(column)
+      type = unquote(type)
+
+      if Arbor.Persistence.MigrationHelper.column_exists?(table, column) do
+        alter table(table) do
+          remove(column, type)
+        end
+      end
+    end
   end
 
   @doc "Returns a NOW() fragment appropriate for the current adapter."
@@ -70,4 +157,84 @@ defmodule Arbor.Persistence.MigrationHelper do
       end
     end
   end
+
+  defp adapter do
+    case migration_adapter() do
+      nil ->
+        Application.get_env(:arbor_persistence, :repo_adapter, Ecto.Adapters.Postgres)
+
+      adapter ->
+        adapter
+    end
+  end
+
+  defp migration_adapter do
+    case Process.get(:ecto_migration) do
+      %{runner: _} ->
+        try do
+          Ecto.Migration.repo().__adapter__()
+        rescue
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp postgres_column_exists?(repo, table_name, column_name) do
+    %{rows: [[exists]]} =
+      repo.query!(
+        """
+        SELECT EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = ANY (current_schemas(false))
+            AND table_name = $1
+            AND column_name = $2
+        )
+        """,
+        [table_name, column_name]
+      )
+
+    truthy?(exists)
+  end
+
+  defp sqlite_column_exists?(repo, table_name, column_name) do
+    # pragma_table_info requires a table identifier; migration-owned names only.
+    %{rows: [[count]]} =
+      repo.query!(
+        "SELECT COUNT(*) FROM pragma_table_info('#{table_name}') WHERE name = ?",
+        [column_name]
+      )
+
+    count > 0
+  end
+
+  defp normalize_identifier!(value, label) do
+    name =
+      case value do
+        atom when is_atom(atom) ->
+          Atom.to_string(atom)
+
+        binary when is_binary(binary) ->
+          binary
+
+        other ->
+          raise ArgumentError,
+                "expected #{label} name to be atom or string, got: #{inspect(other)}"
+      end
+
+    unless Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*$/, name) do
+      raise ArgumentError, "invalid migration #{label} identifier: #{inspect(name)}"
+    end
+
+    name
+  end
+
+  defp truthy?(true), do: true
+  defp truthy?(1), do: true
+  defp truthy?("t"), do: true
+  defp truthy?("true"), do: true
+  defp truthy?(_), do: false
 end

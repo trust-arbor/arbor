@@ -12,15 +12,17 @@ defmodule Arbor.Persistence.Repo.Migrations.RecordsGenerationAndNamespaceKeyIden
 
   Logical `id` remains the primary key and is no longer derived from namespace/key.
   Existing rows keep their current ids; generation defaults to 1 for live rows.
+
+  Column adds use MigrationHelper's adapter-aware helpers rather than Ecto's
+  `add_if_not_exists/3`, which ecto_sqlite3 does not translate (raises
+  "Not supported by SQLite3" on a fresh SQLite migration chain).
   """
   use Ecto.Migration
   import Arbor.Persistence.MigrationHelper
 
   def up do
-    alter table(:records) do
-      add_if_not_exists(:generation, :bigint, null: false, default: 1)
-      add_if_not_exists(:deleted_at, :utc_datetime_usec)
-    end
+    add_column_if_not_exists(:records, :generation, :bigint, null: false, default: 1)
+    add_column_if_not_exists(:records, :deleted_at, :utc_datetime_usec)
 
     # Physical identity: true (namespace, key). May already exist on DBs that
     # never applied 20260625000001; create_if_not_exists is additive either way.
@@ -66,9 +68,7 @@ defmodule Arbor.Persistence.Repo.Migrations.RecordsGenerationAndNamespaceKeyIden
 
     # Keep the unique index on down — removing it would re-introduce delimiter
     # collisions. Generation/deleted_at columns are dropped.
-    alter table(:records) do
-      remove_if_exists(:deleted_at, :utc_datetime_usec)
-      remove_if_exists(:generation, :bigint)
-    end
+    remove_column_if_exists(:records, :deleted_at, :utc_datetime_usec)
+    remove_column_if_exists(:records, :generation, :bigint)
   end
 end
