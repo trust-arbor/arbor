@@ -279,7 +279,82 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCoreTest do
 
       refute Map.has_key?(shown, "entries")
       refute Map.has_key?(shown, :entries)
+      refute Map.has_key?(shown, "provisioning")
+      refute Map.has_key?(shown, "status")
+      refute Map.has_key?(shown, "mode")
       assert Jason.encode!(shown)
+    end
+
+    test "normalize_compact_receipt/1 accepts atom and string keys matching show/1" do
+      assert {:ok, state} = LinuxDependencyBaselineCore.new(build_input(fixture_entries()))
+      shown = LinuxDependencyBaselineCore.show(state)
+
+      assert {:ok, ^shown} = LinuxDependencyBaselineCore.normalize_compact_receipt(shown)
+
+      atom_receipt = %{
+        schema: "1",
+        platform: "linux/arm64",
+        image_index_digest: @index_digest,
+        image_manifest_digest: @manifest_digest,
+        mix_lock_digest: @mix_lock_hex,
+        baseline_tree_digest: state.baseline_tree_digest,
+        toolchain: %{
+          erlang: @erlang_version,
+          elixir: @elixir_version
+        },
+        entry_count: 5,
+        total_bytes: 142
+      }
+
+      assert {:ok, ^shown} = LinuxDependencyBaselineCore.normalize_compact_receipt(atom_receipt)
+    end
+
+    test "normalize_compact_receipt/1 fails closed on malformed, unknown, duplicate data" do
+      assert {:ok, state} = LinuxDependencyBaselineCore.new(build_input(fixture_entries()))
+      shown = LinuxDependencyBaselineCore.show(state)
+
+      assert {:error, :invalid_compact_receipt} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt("nope")
+
+      assert {:error, :unsupported_schema} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(
+                 Map.put(shown, "schema", "2")
+               )
+
+      assert {:error, :unsupported_platform} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(
+                 Map.put(shown, "platform", "linux/amd64")
+               )
+
+      assert {:error, :invalid_toolchain_erlang} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(
+                 put_in(shown, ["toolchain", "erlang"], "bad@version")
+               )
+
+      assert {:error, {:invalid, :entry_count}} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(
+                 Map.put(shown, "entry_count", "5")
+               )
+
+      assert {:error, {:unsupported_keys, :compact_receipt}} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(
+                 Map.put(shown, "provisioning", %{"status" => "ready", "mode" => "read_only"})
+               )
+
+      assert {:error, {:unsupported_keys, :compact_receipt}} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(
+                 Map.put(shown, "status", "ready")
+               )
+
+      dual = Map.put(shown, :schema, "1")
+
+      assert {:error, {:duplicate_key_alias, :compact_receipt, :schema}} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(dual)
+
+      assert {:error, :missing_entry_count} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(
+                 Map.delete(shown, "entry_count")
+               )
     end
 
     test "accepts string-keyed request, manifest, toolchain, and entries" do

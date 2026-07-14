@@ -191,7 +191,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
   @doc """
   Convert validated state to a compact JSON-clean attestation (no inventory).
 
-  A receipt is evidence only — never executable authority.
+  A receipt is evidence only — never executable authority. It does not claim
+  filesystem materialization or provisioning readiness.
   """
   @spec show(state()) :: map()
   def show(%{
@@ -207,6 +208,69 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
       })
       when is_binary(schema) and is_binary(platform) and is_integer(entry_count) and
              is_integer(total_bytes) do
+    compact_receipt_map(%{
+      schema: schema,
+      platform: platform,
+      image_index_digest: image_index_digest,
+      image_manifest_digest: image_manifest_digest,
+      mix_lock_digest: mix_lock_digest,
+      baseline_tree_digest: baseline_tree_digest,
+      toolchain: %{erlang: erlang, elixir: elixir},
+      entry_count: entry_count,
+      total_bytes: total_bytes
+    })
+  end
+
+  @doc """
+  Validate and normalize a compact baseline receipt matching `show/1`.
+
+  Structure only: closed keys, duplicate-alias rejection, field bounds, and the
+  same schema/platform/digest/toolchain/count validation used for manifests.
+  Does **not** prove startup-authority provenance, inventory tree-digest binding,
+  or filesystem provisioning/readiness.
+
+  The returned map is the canonical JSON-clean compact receipt shape and is
+  **evidence**, never executable authority.
+  """
+  @spec normalize_compact_receipt(term()) :: {:ok, map()} | {:error, term()}
+  def normalize_compact_receipt(input) when is_map(input) do
+    with :ok <-
+           validate_closed_keys(
+             input,
+             @allowed_manifest_keys,
+             @logical_manifest_keys,
+             :compact_receipt
+           ),
+         {:ok, normalized} <- normalize_manifest(input) do
+      {:ok, compact_receipt_map(normalized)}
+    end
+  end
+
+  def normalize_compact_receipt(_), do: {:error, :invalid_compact_receipt}
+
+  @doc """
+  Return the normalized, bytewise-sorted inventory for a later materializer shell.
+
+  Explicitly named so callers do not treat `show/1` receipts as materialization
+  plans. Evidence only — not executable authority. Does not claim provisioning
+  readiness; the imperative materializer owns that after filesystem verification.
+  """
+  @spec materialization_entries(state()) :: [entry()]
+  def materialization_entries(%{entries: entries}) when is_list(entries), do: entries
+
+  # --- Manifest / compact receipt ---
+
+  defp compact_receipt_map(%{
+         schema: schema,
+         platform: platform,
+         image_index_digest: image_index_digest,
+         image_manifest_digest: image_manifest_digest,
+         mix_lock_digest: mix_lock_digest,
+         baseline_tree_digest: baseline_tree_digest,
+         toolchain: %{erlang: erlang, elixir: elixir},
+         entry_count: entry_count,
+         total_bytes: total_bytes
+       }) do
     %{
       "schema" => schema,
       "platform" => platform,
@@ -222,18 +286,6 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
       "total_bytes" => total_bytes
     }
   end
-
-  @doc """
-  Return the normalized, bytewise-sorted inventory for a later materializer shell.
-
-  Explicitly named so callers do not treat `show/1` receipts as materialization
-  plans. Evidence only — not executable authority. Does not claim provisioning
-  readiness; the imperative materializer owns that after filesystem verification.
-  """
-  @spec materialization_entries(state()) :: [entry()]
-  def materialization_entries(%{entries: entries}) when is_list(entries), do: entries
-
-  # --- Manifest ---
 
   defp normalize_manifest(manifest) do
     with {:ok, schema} <- fetch_schema(manifest),

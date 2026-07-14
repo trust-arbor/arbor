@@ -318,15 +318,18 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       variants: [@valid_vminit_arm64_variant]
     },
     dependency_baseline: %{
+      schema: "1",
+      platform: "linux/arm64",
       image_index_digest: @index_digest,
       image_manifest_digest: @manifest_digest,
       mix_lock_digest: @mix_lock_hex,
       baseline_tree_digest: @tree_hex,
-      platform: "linux/arm64",
-      provisioning: %{
-        status: "ready",
-        mode: "read_only"
-      }
+      toolchain: %{
+        erlang: @erlang_version,
+        elixir: @elixir_version
+      },
+      entry_count: 1,
+      total_bytes: 0
     },
     control_plane: @control_plane_evidence
   }
@@ -395,13 +398,15 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert receipt.toolchain == %{erlang: @erlang_version, elixir: @elixir_version}
 
       assert receipt.dependency_baseline == %{
+               schema: "1",
+               platform: "linux/arm64",
                image_index_digest: @index_digest,
                image_manifest_digest: @manifest_digest,
                mix_lock_digest: @mix_lock_hex,
                baseline_tree_digest: @tree_hex,
-               platform: "linux/arm64",
-               status: "ready",
-               mode: "read_only"
+               toolchain: %{erlang: @erlang_version, elixir: @elixir_version},
+               entry_count: 1,
+               total_bytes: 0
              }
 
       shown = AppleContainerAdmissionCore.show(receipt)
@@ -423,6 +428,29 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       refute Map.has_key?(shown["image"], "raw")
       assert shown["toolchain"]["erlang"] == @erlang_version
       assert shown["toolchain"]["elixir"] == @elixir_version
+
+      assert shown["dependency_baseline"] == %{
+               "schema" => "1",
+               "platform" => "linux/arm64",
+               "image_index_digest" => @index_digest,
+               "image_manifest_digest" => @manifest_digest,
+               "mix_lock_digest" => @mix_lock_hex,
+               "baseline_tree_digest" => @tree_hex,
+               "toolchain" => %{
+                 "erlang" => @erlang_version,
+                 "elixir" => @elixir_version
+               },
+               "entry_count" => 1,
+               "total_bytes" => 0
+             }
+
+      # Compact baseline attestation — never provisioning/status/mode claims.
+      refute Map.has_key?(shown["dependency_baseline"], "provisioning")
+      refute Map.has_key?(shown["dependency_baseline"], "status")
+      refute Map.has_key?(shown["dependency_baseline"], "mode")
+      refute Map.has_key?(receipt.dependency_baseline, :provisioning)
+      refute Map.has_key?(receipt.dependency_baseline, :status)
+      refute Map.has_key?(receipt.dependency_baseline, :mode)
       assert shown["control_plane"]["admitted"] == true
       assert shown["control_plane"]["app_root"] == @app_root
       assert shown["control_plane"]["cli"]["sha256"] == @cli_sha
@@ -536,12 +564,18 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
             ]
           },
           "dependency_baseline" => %{
+            "schema" => "1",
+            "platform" => "linux/arm64",
             "image_index_digest" => @index_digest,
             "image_manifest_digest" => @manifest_digest,
             "mix_lock_digest" => @mix_lock_hex,
             "baseline_tree_digest" => @tree_hex,
-            "platform" => "linux/arm64",
-            "provisioning" => %{"status" => "ready", "mode" => "read_only"}
+            "toolchain" => %{
+              "erlang" => @erlang_version,
+              "elixir" => @elixir_version
+            },
+            "entry_count" => 1,
+            "total_bytes" => 0
           },
           "control_plane" => control_plane
         }
@@ -556,6 +590,10 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert receipt.control_plane.apiserver.version == "1.1.2"
       assert receipt.image.execution_reference == @workload_execution_ref
       assert receipt.vminit.execution_reference == @vminit_execution_ref
+      assert receipt.dependency_baseline.schema == "1"
+      assert receipt.dependency_baseline.toolchain.elixir == @elixir_version
+      refute Map.has_key?(receipt.dependency_baseline, :status)
+      refute Map.has_key?(receipt.dependency_baseline, :mode)
     end
 
     test "exports fixed platform authority constants" do
@@ -1595,13 +1633,14 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       end
     end
 
-    test "requires linux/arm64 ready read-only provisioning; rejects macOS deps snapshot" do
+    test "requires linux/arm64 compact baseline platform; rejects macOS/host snapshots" do
       for platform <- ["macos", "darwin", "macos/arm64", "darwin/arm64", "linux/amd64"] do
         input = put_in(@valid_input, [:evidence, :dependency_baseline, :platform], platform)
 
         assert match?(
                  {:error, reason}
                  when reason in [
+                        :unsupported_platform,
                         :macos_deps_snapshot_rejected,
                         :baseline_platform_mismatch
                       ],
@@ -1609,20 +1648,108 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
                ),
                "expected rejection for baseline platform=#{inspect(platform)}"
       end
+    end
+
+    test "binds baseline toolchain to policy toolchain" do
+      input =
+        put_in(@valid_input, [:evidence, :dependency_baseline, :toolchain, :erlang], "27.0")
+
+      assert {:error, :baseline_toolchain_mismatch} = admit(input)
 
       input =
-        put_in(@valid_input, [:evidence, :dependency_baseline, :provisioning, :status], "pending")
+        put_in(@valid_input, [:evidence, :dependency_baseline, :toolchain, :elixir], "1.18.0")
 
-      assert {:error, :baseline_not_ready} = admit(input)
+      assert {:error, :baseline_toolchain_mismatch} = admit(input)
+    end
 
-      input =
+    test "rejects malformed compact baseline schema, counts, duplicates, and unknown keys" do
+      assert {:error, :unsupported_schema} =
+               admit(put_in(@valid_input, [:evidence, :dependency_baseline, :schema], "2"))
+
+      assert {:error, {:invalid, :entry_count}} =
+               admit(
+                 put_in(
+                   @valid_input,
+                   [:evidence, :dependency_baseline, :entry_count],
+                   "1"
+                 )
+               )
+
+      assert {:error, {:negative, :total_bytes}} =
+               admit(
+                 put_in(
+                   @valid_input,
+                   [:evidence, :dependency_baseline, :total_bytes],
+                   -1
+                 )
+               )
+
+      dual =
         put_in(
           @valid_input,
-          [:evidence, :dependency_baseline, :provisioning, :mode],
-          "read_write"
+          [:evidence, :dependency_baseline],
+          Map.put(@valid_evidence.dependency_baseline, "schema", "1")
         )
 
-      assert {:error, :baseline_not_read_only} = admit(input)
+      assert {:error, {:duplicate_key_alias, :compact_receipt, :schema}} = admit(dual)
+
+      assert {:error, {:unsupported_keys, :compact_receipt}} =
+               admit(
+                 put_in(
+                   @valid_input,
+                   [:evidence, :dependency_baseline],
+                   Map.put(@valid_evidence.dependency_baseline, :extra, true)
+                 )
+               )
+    end
+
+    @tag :security_regression
+    test "security regression: legacy provisioning ready/read_only map cannot confer readiness" do
+      # Caller-supplied provisioning claims are no longer an accepted surface.
+      # Aggregate admission attests only the compact baseline receipt.
+      legacy_ready = %{
+        schema: "1",
+        platform: "linux/arm64",
+        image_index_digest: @index_digest,
+        image_manifest_digest: @manifest_digest,
+        mix_lock_digest: @mix_lock_hex,
+        baseline_tree_digest: @tree_hex,
+        toolchain: %{
+          erlang: @erlang_version,
+          elixir: @elixir_version
+        },
+        entry_count: 1,
+        total_bytes: 0,
+        provisioning: %{
+          status: "ready",
+          mode: "read_only"
+        }
+      }
+
+      input = put_in(@valid_input, [:evidence, :dependency_baseline], legacy_ready)
+
+      assert {:error, {:unsupported_keys, :compact_receipt}} = admit(input)
+      refute match?({:ok, _}, admit(input))
+
+      # Status/mode alone (legacy receipt projection) also fail closed.
+      status_mode_only = %{
+        image_index_digest: @index_digest,
+        image_manifest_digest: @manifest_digest,
+        mix_lock_digest: @mix_lock_hex,
+        baseline_tree_digest: @tree_hex,
+        platform: "linux/arm64",
+        status: "ready",
+        mode: "read_only"
+      }
+
+      input = put_in(@valid_input, [:evidence, :dependency_baseline], status_mode_only)
+      assert {:error, {:unsupported_keys, :compact_receipt}} = admit(input)
+
+      assert {:ok, receipt} = admit(@valid_input)
+      shown = AppleContainerAdmissionCore.show(receipt)
+      refute Map.has_key?(shown["dependency_baseline"], "provisioning")
+      refute Map.has_key?(shown["dependency_baseline"], "status")
+      refute Map.has_key?(shown["dependency_baseline"], "mode")
     end
 
     test "rejects non-hex digests and oversized/invalid UTF-8 policy digests" do
@@ -1636,6 +1763,60 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
 
       assert {:error, :invalid_utf8} =
                admit(put_in(@valid_input, [:policy, :mix_lock_digest], @invalid_utf8))
+    end
+  end
+
+  describe "execution_references/1 preflight" do
+    test "aliases exactly match admission receipt aliases" do
+      assert {:ok, refs} = AppleContainerAdmissionCore.execution_references(@valid_policy)
+      assert {:ok, receipt} = admit(@valid_input)
+
+      assert refs.image.reference == receipt.image.reference
+      assert refs.image.execution_reference == receipt.image.execution_reference
+      assert refs.image.index_digest == receipt.image.index_digest
+      assert refs.image.manifest_digest == receipt.image.manifest_digest
+
+      assert refs.vminit.reference == receipt.vminit.reference
+      assert refs.vminit.execution_reference == receipt.vminit.execution_reference
+      assert refs.vminit.index_digest == receipt.vminit.index_digest
+      assert refs.vminit.manifest_digest == receipt.vminit.manifest_digest
+
+      assert refs.image.execution_reference == @workload_execution_ref
+      assert refs.vminit.execution_reference == @vminit_execution_ref
+    end
+
+    test "accepts string-keyed policy and rejects unknown/malformed policy" do
+      string_policy = %{
+        "image" => @image,
+        "manifest_digest" => @manifest_digest,
+        "vminit_image" => @vminit_image,
+        "vminit_manifest_digest" => @vminit_manifest_digest,
+        "env" => @env,
+        "labels" => @labels,
+        "mix_lock_digest" => @mix_lock_hex,
+        "baseline_tree_digest" => @tree_hex,
+        "toolchain" => %{
+          "erlang" => @erlang_version,
+          "elixir" => @elixir_version
+        }
+      }
+
+      assert {:ok, refs} = AppleContainerAdmissionCore.execution_references(string_policy)
+      assert refs.image.execution_reference == @workload_execution_ref
+
+      assert {:error, {:unsupported_keys, :policy}} =
+               AppleContainerAdmissionCore.execution_references(
+                 Map.put(@valid_policy, :extra, true)
+               )
+
+      assert {:error, :missing_image} =
+               AppleContainerAdmissionCore.execution_references(Map.delete(@valid_policy, :image))
+
+      assert {:error, :invalid_policy} =
+               AppleContainerAdmissionCore.execution_references("nope")
+
+      assert {:error, :invalid_policy} =
+               AppleContainerAdmissionCore.execution_references([])
     end
   end
 
@@ -1729,7 +1910,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
                  )
                )
 
-      assert {:error, :baseline_platform_too_long} =
+      assert {:error, :platform_too_long} =
                admit(
                  put_in(
                    @valid_input,

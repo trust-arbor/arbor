@@ -24,6 +24,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   """
 
   alias Arbor.Shell.AppleContainerControlPlaneAdmissionCore, as: ControlPlane
+  alias Arbor.Shell.LinuxDependencyBaselineCore
 
   # --- Fixed platform authority (not caller-configurable) ---
 
@@ -187,24 +188,9 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
                                "labels"
                              ])
 
-  @logical_baseline_keys [
-    :image_index_digest,
-    :image_manifest_digest,
-    :mix_lock_digest,
-    :baseline_tree_digest,
-    :platform,
-    :provisioning
-  ]
-  @allowed_baseline_keys MapSet.new(
-                           @logical_baseline_keys ++
-                             Enum.map(@logical_baseline_keys, &Atom.to_string/1)
-                         )
-
-  @logical_provisioning_keys [:status, :mode]
-  @allowed_provisioning_keys MapSet.new(
-                               @logical_provisioning_keys ++
-                                 Enum.map(@logical_provisioning_keys, &Atom.to_string/1)
-                             )
+  # dependency_baseline evidence is the compact receipt from
+  # LinuxDependencyBaselineCore.show/1 / normalize_compact_receipt/1.
+  # Closed-key validation lives in that core (no provisioning/status/mode).
 
   # --- Bounds ---
 
@@ -282,13 +268,30 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
           },
           toolchain: %{erlang: String.t(), elixir: String.t()},
           dependency_baseline: %{
+            schema: String.t(),
+            platform: String.t(),
             image_index_digest: String.t(),
             image_manifest_digest: String.t(),
             mix_lock_digest: String.t(),
             baseline_tree_digest: String.t(),
-            platform: String.t(),
-            status: String.t(),
-            mode: String.t()
+            toolchain: %{erlang: String.t(), elixir: String.t()},
+            entry_count: non_neg_integer(),
+            total_bytes: non_neg_integer()
+          }
+        }
+
+  @type execution_references :: %{
+          image: %{
+            reference: String.t(),
+            execution_reference: String.t(),
+            index_digest: String.t(),
+            manifest_digest: String.t()
+          },
+          vminit: %{
+            reference: String.t(),
+            execution_reference: String.t(),
+            index_digest: String.t(),
+            manifest_digest: String.t()
           }
         }
 
@@ -319,15 +322,13 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
          {:ok, evidence} <-
            fetch_required_map(input, :evidence, :missing_evidence, :invalid_evidence),
          :ok <-
-           validate_closed_keys(policy, @allowed_policy_keys, @logical_policy_keys, :policy),
-         :ok <-
            validate_closed_keys(
              evidence,
              @allowed_evidence_keys,
              @logical_evidence_keys,
              :evidence
            ),
-         {:ok, normalized_policy} <- normalize_policy(policy),
+         {:ok, normalized_policy} <- normalize_closed_policy(policy),
          {:ok, host_platform} <- fetch_host_platform(evidence),
          {:ok, runtime} <- fetch_runtime(evidence),
          {:ok, service} <- fetch_service_status(evidence),
@@ -392,6 +393,39 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   def new(_input, _control_plane_bindings), do: {:error, :invalid_request}
 
   @doc """
+  Pure preflight: derive normalized workload/vminit execution aliases from the
+  closed operator policy map.
+
+  Reuses the same closed-policy normalization path as `new/2` so local execution
+  references cannot drift from admission receipts. Accepts policy only (not a
+  full request). Performs no IO, config, env, process, or authority checks.
+  """
+  @spec execution_references(term()) :: {:ok, execution_references()} | {:error, term()}
+  def execution_references(policy) when is_map(policy) do
+    with {:ok, normalized} <- normalize_closed_policy(policy) do
+      {:ok,
+       %{
+         image: %{
+           reference: normalized.image,
+           execution_reference: derive_execution_alias(:workload, normalized.index_digest),
+           index_digest: normalized.index_digest,
+           manifest_digest: normalized.manifest_digest
+         },
+         vminit: %{
+           reference: normalized.vminit_image,
+           execution_reference: derive_execution_alias(:vminit, normalized.vminit_index_digest),
+           index_digest: normalized.vminit_index_digest,
+           manifest_digest: normalized.vminit_manifest_digest
+         }
+       }}
+    end
+  rescue
+    _ -> {:error, :invalid_policy}
+  end
+
+  def execution_references(_), do: {:error, :invalid_policy}
+
+  @doc """
   Convert an admission receipt to a JSON-clean map (no raw command output).
   """
   @spec show(receipt()) :: map()
@@ -440,13 +474,18 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
         "elixir" => receipt.toolchain.elixir
       },
       "dependency_baseline" => %{
+        "schema" => receipt.dependency_baseline.schema,
+        "platform" => receipt.dependency_baseline.platform,
         "image_index_digest" => receipt.dependency_baseline.image_index_digest,
         "image_manifest_digest" => receipt.dependency_baseline.image_manifest_digest,
         "mix_lock_digest" => receipt.dependency_baseline.mix_lock_digest,
         "baseline_tree_digest" => receipt.dependency_baseline.baseline_tree_digest,
-        "platform" => receipt.dependency_baseline.platform,
-        "status" => receipt.dependency_baseline.status,
-        "mode" => receipt.dependency_baseline.mode
+        "toolchain" => %{
+          "erlang" => receipt.dependency_baseline.toolchain.erlang,
+          "elixir" => receipt.dependency_baseline.toolchain.elixir
+        },
+        "entry_count" => receipt.dependency_baseline.entry_count,
+        "total_bytes" => receipt.dependency_baseline.total_bytes
       }
     }
   end
@@ -476,6 +515,15 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   def guest_platform, do: @guest_platform
 
   # --- Field extraction ---
+
+  # Shared closed-policy path for new/2 and execution_references/1 so derived
+  # local aliases cannot drift from admission receipts.
+  defp normalize_closed_policy(policy) do
+    with :ok <- validate_closed_keys(policy, @allowed_policy_keys, @logical_policy_keys, :policy),
+         {:ok, normalized} <- normalize_policy(policy) do
+      {:ok, normalized}
+    end
+  end
 
   defp normalize_policy(policy) do
     with {:ok, image} <- fetch_policy_image(policy),
@@ -1258,6 +1306,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     )
   end
 
+  # Compact baseline receipt only — structure via LinuxDependencyBaselineCore.
+  # Provenance still comes from the startup authority; result is evidence only.
   defp fetch_dependency_baseline(evidence) do
     with {:ok, baseline} <-
            fetch_required_map(
@@ -1266,88 +1316,21 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
              :missing_dependency_baseline,
              :invalid_dependency_baseline
            ),
-         :ok <-
-           validate_closed_keys(
-             baseline,
-             @allowed_baseline_keys,
-             @logical_baseline_keys,
-             :dependency_baseline
-           ),
-         {:ok, image_index_digest} <-
-           fetch_digest_field(
-             baseline,
-             :image_index_digest,
-             :missing_baseline_image_index_digest,
-             :invalid_baseline_image_index_digest
-           ),
-         {:ok, image_manifest_digest} <-
-           fetch_digest_field(
-             baseline,
-             :image_manifest_digest,
-             :missing_baseline_image_manifest_digest,
-             :invalid_baseline_image_manifest_digest
-           ),
-         {:ok, mix_lock_digest} <-
-           fetch_hex64_field(
-             baseline,
-             :mix_lock_digest,
-             :missing_baseline_mix_lock_digest
-           ),
-         {:ok, baseline_tree_digest} <-
-           fetch_hex64_field(
-             baseline,
-             :baseline_tree_digest,
-             :missing_baseline_tree_digest
-           ),
-         {:ok, platform} <-
-           require_bounded_binary_field(
-             baseline,
-             :platform,
-             @max_version_bytes,
-             :missing_baseline_platform,
-             :invalid_baseline_platform,
-             :baseline_platform_too_long
-           ),
-         {:ok, provisioning} <-
-           fetch_required_map(
-             baseline,
-             :provisioning,
-             :missing_baseline_provisioning,
-             :invalid_baseline_provisioning
-           ),
-         :ok <-
-           validate_closed_keys(
-             provisioning,
-             @allowed_provisioning_keys,
-             @logical_provisioning_keys,
-             :baseline_provisioning
-           ),
-         {:ok, prov_status} <-
-           require_bounded_binary_field(
-             provisioning,
-             :status,
-             @max_status_bytes,
-             :missing_provisioning_status,
-             :invalid_provisioning_status,
-             :provisioning_status_too_long
-           ),
-         {:ok, prov_mode} <-
-           require_bounded_binary_field(
-             provisioning,
-             :mode,
-             @max_status_bytes,
-             :missing_provisioning_mode,
-             :invalid_provisioning_mode,
-             :provisioning_mode_too_long
-           ) do
+         {:ok, compact} <- LinuxDependencyBaselineCore.normalize_compact_receipt(baseline) do
       {:ok,
        %{
-         image_index_digest: image_index_digest,
-         image_manifest_digest: image_manifest_digest,
-         mix_lock_digest: mix_lock_digest,
-         baseline_tree_digest: baseline_tree_digest,
-         platform: platform,
-         provisioning: %{status: prov_status, mode: prov_mode}
+         schema: compact["schema"],
+         platform: compact["platform"],
+         image_index_digest: compact["image_index_digest"],
+         image_manifest_digest: compact["image_manifest_digest"],
+         mix_lock_digest: compact["mix_lock_digest"],
+         baseline_tree_digest: compact["baseline_tree_digest"],
+         toolchain: %{
+           erlang: compact["toolchain"]["erlang"],
+           elixir: compact["toolchain"]["elixir"]
+         },
+         entry_count: compact["entry_count"],
+         total_bytes: compact["total_bytes"]
        }}
     end
   end
@@ -1683,48 +1666,51 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     end
   end
 
+  # Bind the startup-authority compact baseline receipt to the workload image
+  # and every corresponding policy field. Baseline is workload-only; no
+  # provisioning/status/mode claims and no materialization readiness.
   defp validate_dependency_baseline(policy, baseline, image_fields) do
-    with :ok <- require_valid_utf8(baseline.platform),
-         :ok <- require_valid_utf8(baseline.provisioning.status),
-         :ok <- require_valid_utf8(baseline.provisioning.mode) do
-      cond do
-        # Never accept a macOS host deps snapshot as a Linux image baseline.
-        baseline.platform in ["macos", "darwin", "macos/arm64", "darwin/arm64", "macos/aarch64"] ->
-          {:error, :macos_deps_snapshot_rejected}
+    cond do
+      # Defense in depth: compact normalizer already requires linux/arm64.
+      # Never accept a macOS host deps snapshot as a Linux image baseline.
+      baseline.platform in ["macos", "darwin", "macos/arm64", "darwin/arm64", "macos/aarch64"] ->
+        {:error, :macos_deps_snapshot_rejected}
 
-        baseline.platform != @guest_platform ->
-          {:error, :baseline_platform_mismatch}
+      baseline.platform != @guest_platform ->
+        {:error, :baseline_platform_mismatch}
 
-        baseline.image_index_digest != image_fields.index_digest ->
-          {:error, :baseline_image_index_mismatch}
+      baseline.image_index_digest != image_fields.index_digest ->
+        {:error, :baseline_image_index_mismatch}
 
-        baseline.image_manifest_digest != image_fields.manifest_digest ->
-          {:error, :baseline_image_manifest_mismatch}
+      baseline.image_manifest_digest != image_fields.manifest_digest ->
+        {:error, :baseline_image_manifest_mismatch}
 
-        baseline.mix_lock_digest != policy.mix_lock_digest ->
-          {:error, :baseline_mix_lock_digest_mismatch}
+      baseline.mix_lock_digest != policy.mix_lock_digest ->
+        {:error, :baseline_mix_lock_digest_mismatch}
 
-        baseline.baseline_tree_digest != policy.baseline_tree_digest ->
-          {:error, :baseline_tree_digest_mismatch}
+      baseline.baseline_tree_digest != policy.baseline_tree_digest ->
+        {:error, :baseline_tree_digest_mismatch}
 
-        baseline.provisioning.status != "ready" ->
-          {:error, :baseline_not_ready}
+      baseline.toolchain.erlang != policy.toolchain.erlang or
+          baseline.toolchain.elixir != policy.toolchain.elixir ->
+        {:error, :baseline_toolchain_mismatch}
 
-        baseline.provisioning.mode != "read_only" ->
-          {:error, :baseline_not_read_only}
-
-        true ->
-          {:ok,
-           %{
-             image_index_digest: baseline.image_index_digest,
-             image_manifest_digest: baseline.image_manifest_digest,
-             mix_lock_digest: baseline.mix_lock_digest,
-             baseline_tree_digest: baseline.baseline_tree_digest,
-             platform: @guest_platform,
-             status: "ready",
-             mode: "read_only"
-           }}
-      end
+      true ->
+        {:ok,
+         %{
+           schema: baseline.schema,
+           platform: @guest_platform,
+           image_index_digest: baseline.image_index_digest,
+           image_manifest_digest: baseline.image_manifest_digest,
+           mix_lock_digest: baseline.mix_lock_digest,
+           baseline_tree_digest: baseline.baseline_tree_digest,
+           toolchain: %{
+             erlang: baseline.toolchain.erlang,
+             elixir: baseline.toolchain.elixir
+           },
+           entry_count: baseline.entry_count,
+           total_bytes: baseline.total_bytes
+         }}
     end
   end
 
