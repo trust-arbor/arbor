@@ -81,6 +81,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
              }
 
       assert plan.resource_limits == %{cpus: "1", memory: "2G"}
+      assert plan.lifecycle.preflight_order == [:verify_absent]
       assert plan.lifecycle.start_order == [:create, :start]
       assert plan.lifecycle.terminal_order == [:force_stop, :delete, :verify_absent]
 
@@ -170,13 +171,16 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert plan.argv.delete == [
                "/usr/local/bin/container",
                "delete",
+               "--force",
                @name
              ]
 
       assert plan.argv.verify_absent == [
                "/usr/local/bin/container",
-               "inspect",
-               @name
+               "list",
+               "--all",
+               "--format",
+               "json"
              ]
 
       # Host runtime roots are provenance only — never mounted.
@@ -925,15 +929,32 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     test "cleanup argv targets only the exact unit name" do
       assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
 
-      for key <- [:force_stop, :delete, :verify_absent] do
+      for key <- [:force_stop, :delete] do
         argv = Map.fetch!(plan.argv, key)
         assert @name in argv
-        refute "--all" in argv
         refute "-a" in argv
         refute Enum.any?(argv, &String.contains?(&1, "*"))
         # Exact ID only — no filter expressions.
         refute Enum.any?(argv, &String.contains?(&1, "name="))
       end
+
+      assert plan.argv.delete == [
+               "/usr/local/bin/container",
+               "delete",
+               "--force",
+               @name
+             ]
+
+      # Positive absence uses list --all JSON (unit match is pure-core side).
+      assert plan.argv.verify_absent == [
+               "/usr/local/bin/container",
+               "list",
+               "--all",
+               "--format",
+               "json"
+             ]
+
+      refute @name in plan.argv.verify_absent
 
       # Delete is not --rm create; create never carries --rm.
       refute "--rm" in plan.argv.create
@@ -1112,12 +1133,12 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     joined = Enum.join(all_argv, " ")
 
     # Exact argv tokens (short flags like -p must not substring-match --platform).
+    # `--all` is allowed only on the closed verify_absent list command.
     forbidden_exact = [
       "-p",
       "-a",
       "--rm",
       "--remove",
-      "--all",
       "--publish",
       "--ssh",
       "--env-file",
@@ -1129,6 +1150,15 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       refute token in all_argv,
              "forbidden token #{inspect(token)} present in argv: #{joined}"
     end
+
+    non_list_argv =
+      plan.argv
+      |> Map.drop([:verify_absent])
+      |> Map.values()
+      |> List.flatten()
+
+    refute "--all" in non_list_argv,
+           "--all is only permitted on verify_absent list argv: #{joined}"
 
     # Composite / substring forms that are never exact tokens in a well-formed plan.
     forbidden_substrings = [

@@ -165,6 +165,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
           mounts: [mount_plan()],
           env: [{String.t(), String.t()}],
           lifecycle: %{
+            preflight_order: [:verify_absent],
             start_order: [:create | :start],
             terminal_order: [:force_stop | :delete | :verify_absent]
           },
@@ -222,6 +223,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
         mounts: mounts,
         env: env,
         lifecycle: %{
+          preflight_order: [:verify_absent],
           start_order: [:create, :start],
           terminal_order: [:force_stop, :delete, :verify_absent]
         },
@@ -274,6 +276,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
         end),
       "env" => Enum.map(plan.env, fn {k, v} -> %{"key" => k, "value" => v} end),
       "lifecycle" => %{
+        "preflight_order" => Enum.map(plan.lifecycle.preflight_order, &Atom.to_string/1),
         "start_order" => Enum.map(plan.lifecycle.start_order, &Atom.to_string/1),
         "terminal_order" => Enum.map(plan.lifecycle.terminal_order, &Atom.to_string/1)
       },
@@ -1100,8 +1103,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       create: create,
       start: [@runtime_executable, "start", "--attach", name],
       force_stop: [@runtime_executable, "kill", "--signal", "KILL", name],
-      delete: [@runtime_executable, "delete", name],
-      verify_absent: [@runtime_executable, "inspect", name]
+      # Force-delete owns exact unit ID only — never broad cleanup.
+      delete: [@runtime_executable, "delete", "--force", name],
+      # Positive absence uses successful `list --all --format json` and matches
+      # configuration.id in the pure unit lifecycle core (not inspect failure).
+      verify_absent: [@runtime_executable, "list", "--all", "--format", "json"]
     }
   end
 
