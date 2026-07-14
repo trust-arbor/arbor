@@ -559,26 +559,12 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   # ===========================================================================
 
   defp cleanup_stale_pipelines(_state) do
-    # Primary: clean up via PipelineStatus Facade (ETS-backed)
+    # Canonical: abandon active runs for this session via PipelineStatus.
     if Code.ensure_loaded?(Arbor.Orchestrator.PipelineStatus) do
       try do
         Arbor.Orchestrator.PipelineStatus.list_active()
         |> Enum.each(fn entry ->
           Arbor.Orchestrator.PipelineStatus.mark_abandoned(entry.run_id)
-        end)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
-
-    # Legacy: also clean up in the JobRegistry BufferedStore
-    if Code.ensure_loaded?(Arbor.Orchestrator.JobRegistry) do
-      try do
-        Arbor.Orchestrator.JobRegistry.list_stale_heartbeats()
-        |> Enum.each(fn entry ->
-          Arbor.Orchestrator.JobRegistry.mark_abandoned(entry.run_id)
         end)
       rescue
         _ -> :ok

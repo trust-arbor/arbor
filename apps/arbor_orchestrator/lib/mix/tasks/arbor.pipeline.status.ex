@@ -4,19 +4,19 @@ defmodule Mix.Tasks.Arbor.Pipeline.Status do
 
   ## Usage
 
-      mix arbor.pipeline.status          # Read from JobRegistry
+      mix arbor.pipeline.status          # Read from PipelineStatus (canonical)
       mix arbor.pipeline.status --scan   # Scan checkpoint files instead
       mix arbor.pipeline.status --json   # Output as JSON
 
   ## Options
 
-    * `--scan` - Scan /tmp checkpoint files instead of reading from registry
+    * `--scan` - Scan /tmp checkpoint files instead of reading from lifecycle store
     * `--json` - Output as JSON
   """
 
   use Mix.Task
 
-  alias Arbor.Orchestrator.JobRegistry
+  alias Arbor.Orchestrator.PipelineStatus
 
   import Arbor.Orchestrator.Mix.Helpers
 
@@ -39,12 +39,20 @@ defmodule Mix.Tasks.Arbor.Pipeline.Status do
   # ===========================================================================
 
   defp read_registry(opts) do
-    active = JobRegistry.list_active()
-    recent = JobRegistry.list_recent()
+    active = PipelineStatus.list_active()
+    recent = PipelineStatus.list_recent(limit: 50)
+    durability = PipelineStatus.durability_status()
 
     if opts[:json] do
-      output_json(%{active: active, recent: recent})
+      output_json(%{active: active, recent: recent, durability: durability})
     else
+      unless durability.durable do
+        info(
+          "Note: lifecycle durability mode=#{durability.mode} " <>
+            "(not claimed durable across restart).\n"
+        )
+      end
+
       output_tables(active, recent)
     end
   end

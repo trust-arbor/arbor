@@ -16,7 +16,12 @@ defmodule Arbor.Persistence.QueryableStore.AgentTest do
     test "put and get a record", %{name: name} do
       record = Record.new("user:1", %{name: "Alice"})
       assert :ok = QSAgent.put("user:1", record, name: name)
-      assert {:ok, ^record} = QSAgent.get("user:1", name: name)
+      assert {:ok, stored} = QSAgent.get("user:1", name: name)
+      assert stored.key == "user:1"
+      assert stored.data == %{name: "Alice"}
+      # Backend advances generation+revision on successful put
+      assert stored.generation == 1
+      assert stored.revision == 1
     end
 
     test "returns not_found for missing key", %{name: name} do

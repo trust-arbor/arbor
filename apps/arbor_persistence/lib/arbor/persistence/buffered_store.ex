@@ -36,6 +36,7 @@ defmodule Arbor.Persistence.BufferedStore do
   require Logger
 
   alias Arbor.Contracts.Persistence.{Filter, Record}
+  alias Arbor.Persistence.Store.Revision
 
   @behaviour Arbor.Contracts.Persistence.Store
 
@@ -45,8 +46,14 @@ defmodule Arbor.Persistence.BufferedStore do
 
   @impl true
   def put(key, value, opts \\ []) do
-    store = store_name!(opts)
-    GenServer.call(store, {:put, key, value})
+    # Structured Records must bind physical store key == Record.key.
+    # Reject before any ETS/backend mutation (same invariant as Store.ETS/Agent).
+    if Revision.key_mismatch?(key, value) do
+      {:error, :key_mismatch}
+    else
+      store = store_name!(opts)
+      GenServer.call(store, {:put, key, value})
+    end
   end
 
   @impl true
@@ -133,6 +140,13 @@ defmodule Arbor.Persistence.BufferedStore do
     end
   end
 
+  # Buffered/async stores cannot preserve synchronous linearizable CAS across
+  # the cache + durable backend boundary. Do not implement compare_and_swap/4;
+  # the facade reports {:error, :unsupported}.
+
+  @impl true
+  def durability_class(_opts), do: :process_lifetime
+
   # ===========================================================================
   # GenServer start
   # ===========================================================================
@@ -218,10 +232,16 @@ defmodule Arbor.Persistence.BufferedStore do
 
   @impl true
   def handle_call({:put, key, value}, _from, state) do
-    :ets.insert(state.table, {key, value})
-    backend_put(state, key, value)
-    emit_distributed_signal(state, :cache_put, key)
-    {:reply, :ok, state}
+    # Defense in depth: client put/3 already rejects mismatches; never mutate
+    # the cache-authoritative ETS table or durable backend on key mismatch.
+    if Revision.key_mismatch?(key, value) do
+      {:reply, {:error, :key_mismatch}, state}
+    else
+      :ets.insert(state.table, {key, value})
+      backend_put(state, key, value)
+      emit_distributed_signal(state, :cache_put, key)
+      {:reply, :ok, state}
+    end
   end
 
   @impl true

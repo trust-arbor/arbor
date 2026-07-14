@@ -11,20 +11,19 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
   - PID liveness check detects dead spawning processes
   - Staleness detection works
 
-  Shared `:arbor_pipeline_runs` is application-owned. Tests never clear the
-  whole table: each test uses a collision-resistant run_id prefix, asserts
-  only against its own rows, and deletes only those owned rows on cleanup.
+  Hot lifecycle state is owned by RunJournal. Tests never touch ETS:
+  each test uses a collision-resistant run_id prefix, asserts only against
+  its own rows, and deletes via PipelineStatus.delete/1 on cleanup.
   """
 
   use ExUnit.Case, async: false
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.PipelineStatus
+  alias Arbor.Orchestrator.RunJournal
   alias Arbor.Orchestrator.RunState.Core, as: RunState
 
   @moduletag :integration
-
-  @ets_table :arbor_pipeline_runs
 
   # Far-future timestamps keep owned list_recent fixtures inside the facade's
   # global sort+limit bound without clearing the shared table.
@@ -32,16 +31,8 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
   @owned_recent_new_finished_at ~U[2999-12-31 23:59:00Z]
   @owned_recent_limit_base ~U[2999-12-31 23:50:00Z]
 
-  # Static test-only statuses for exact count_by_status assertions independent
-  # of foreign shared rows that may use real :running/:completed/:failed.
-  @count_status_running :__pt_fixture_count_running__
-  @count_status_completed :__pt_fixture_count_completed__
-  @count_status_failed :__pt_fixture_count_failed__
-
   setup do
-    ensure_pipeline_runs_table!()
-
-    # Collision-resistant ownership prefix — never wipe shared table contents.
+    # Collision-resistant ownership prefix — never wipe shared journal contents.
     run_prefix = "pt_#{System.unique_integer([:positive, :monotonic])}_"
 
     on_exit(fn ->
@@ -87,21 +78,21 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
   end
 
   # ===========================================================================
-  # ETS integration
+  # Journal integration via PipelineStatus
   # ===========================================================================
 
-  describe "ETS write/read via sync_run_state" do
-    test "Engine.run writes RunState to ETS on pipeline start and completion", %{
+  describe "lifecycle write/read via PipelineStatus" do
+    test "Engine.run writes RunState through journal on start and completion", %{
       run_prefix: prefix
     } do
       graph = build_minimal_graph()
       run_id = owned_run_id(prefix, "ets_write")
 
-      assert :ets.lookup(@ets_table, run_id) == []
+      assert PipelineStatus.get(run_id) == nil
 
       {:ok, _result} = Engine.run(graph, run_id: run_id)
 
-      [{^run_id, entry}] = :ets.lookup(@ets_table, run_id)
+      entry = PipelineStatus.get(run_id)
       assert entry.status == :completed
       assert entry.graph_id == "MinimalTest"
       assert entry.run_id == run_id
@@ -109,13 +100,13 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
       assert entry.last_ets_sync != nil
     end
 
-    test "Engine.run tracks node-level progress in ETS", %{run_prefix: prefix} do
+    test "Engine.run tracks node-level progress in journal", %{run_prefix: prefix} do
       graph = build_two_node_graph()
       run_id = owned_run_id(prefix, "node_tracking")
 
       {:ok, _result} = Engine.run(graph, run_id: run_id)
 
-      [{^run_id, entry}] = :ets.lookup(@ets_table, run_id)
+      entry = PipelineStatus.get(run_id)
 
       assert entry.status == :completed
       assert entry.completed_count >= 1
@@ -174,6 +165,16 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
       # Direct get should show :interrupted
       entry = PipelineStatus.get(orphan_id)
       assert entry.status == :interrupted
+
+      # Liveness correction must persist and remain visible to recovery listing
+      interrupted =
+        PipelineStatus.list_interrupted()
+        |> Enum.filter(&owned_run?(&1.run_id, prefix))
+
+      assert Enum.any?(interrupted, &(&1.run_id == orphan_id))
+
+      stored = PipelineStatus.get(orphan_id)
+      assert stored.status == :interrupted
     end
 
     test "returns running pipelines when spawning_pid is alive", %{run_prefix: prefix} do
@@ -247,34 +248,45 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
 
   describe "PipelineStatus.count_by_status/0" do
     test "groups and counts correctly", %{run_prefix: prefix} do
-      # Static test-only statuses so facade counts are exact and independent of
-      # foreign shared rows that may use :running/:completed/:failed.
-      _ids = [
+      # Whitelisted lifecycle statuses only. Assert owned rows via get/1 and
+      # that the global facade groups them (counts may include foreign rows).
+      r1 =
         insert_ets_entry(owned_run_id(prefix, "r1"), %{
-          status: @count_status_running,
+          status: :running,
           spawning_pid: self(),
-          started_at: DateTime.utc_now()
-        }),
-        insert_ets_entry(owned_run_id(prefix, "r2"), %{
-          status: @count_status_running,
-          spawning_pid: self(),
-          started_at: DateTime.utc_now()
-        }),
-        insert_ets_entry(owned_run_id(prefix, "c1"), %{
-          status: @count_status_completed,
-          started_at: DateTime.utc_now()
-        }),
-        insert_ets_entry(owned_run_id(prefix, "f1"), %{
-          status: @count_status_failed,
           started_at: DateTime.utc_now()
         })
-      ]
+
+      r2 =
+        insert_ets_entry(owned_run_id(prefix, "r2"), %{
+          status: :running,
+          spawning_pid: self(),
+          started_at: DateTime.utc_now()
+        })
+
+      c1 =
+        insert_ets_entry(owned_run_id(prefix, "c1"), %{
+          status: :completed,
+          finished_at: DateTime.utc_now(),
+          started_at: DateTime.utc_now()
+        })
+
+      f1 =
+        insert_ets_entry(owned_run_id(prefix, "f1"), %{
+          status: :failed,
+          finished_at: DateTime.utc_now(),
+          started_at: DateTime.utc_now()
+        })
+
+      assert PipelineStatus.get(r1).status == :running
+      assert PipelineStatus.get(r2).status == :running
+      assert PipelineStatus.get(c1).status == :completed
+      assert PipelineStatus.get(f1).status == :failed
 
       counts = PipelineStatus.count_by_status()
-
-      assert counts[@count_status_running] == 2
-      assert counts[@count_status_completed] == 1
-      assert counts[@count_status_failed] == 1
+      assert counts[:running] >= 2
+      assert counts[:completed] >= 1
+      assert counts[:failed] >= 1
     end
   end
 
@@ -339,38 +351,20 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
 
       insert_ets_entry(owned_id, %{status: :completed, started_at: DateTime.utc_now()})
 
-      assert [{^owned_id, _}] = :ets.lookup(@ets_table, owned_id)
-      assert [{^foreign_id, _}] = :ets.lookup(@ets_table, foreign_id)
+      assert PipelineStatus.get(owned_id)
+      assert PipelineStatus.get(foreign_id)
 
       # Simulate on_exit ownership cleanup for this prefix only.
       delete_owned_pipeline_runs(prefix)
 
-      assert :ets.lookup(@ets_table, owned_id) == []
-      assert [{^foreign_id, _}] = :ets.lookup(@ets_table, foreign_id)
+      assert PipelineStatus.get(owned_id) == nil
+      assert PipelineStatus.get(foreign_id)
     end
   end
 
   # ===========================================================================
   # Helpers
   # ===========================================================================
-
-  defp ensure_pipeline_runs_table! do
-    try do
-      :ets.new(@ets_table, [
-        :set,
-        :public,
-        :named_table,
-        read_concurrency: true,
-        write_concurrency: true
-      ])
-
-      :ok
-    rescue
-      ArgumentError ->
-        # Table already exists (previous test or live application owner) — leave it.
-        :ok
-    end
-  end
 
   defp owned_run_id(prefix, label) when is_binary(prefix) and is_binary(label) do
     prefix <> label
@@ -384,32 +378,22 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
 
   defp delete_owned_pipeline_runs(prefix) when is_binary(prefix) do
     try do
-      case :ets.info(@ets_table) do
-        :undefined ->
-          :ok
-
-        _ ->
-          for {key, _entry} <- :ets.tab2list(@ets_table),
-              is_binary(key) and String.starts_with?(key, prefix) do
-            :ets.delete(@ets_table, key)
-          end
-
-          :ok
+      for entry <- RunJournal.list_raw(),
+          is_binary(entry.run_id) and String.starts_with?(entry.run_id, prefix) do
+        _ = PipelineStatus.delete(entry.run_id)
       end
+
+      :ok
     rescue
       _ -> :ok
+    catch
+      :exit, _ -> :ok
     end
   end
 
   defp safe_delete_run(run_id) when is_binary(run_id) do
-    try do
-      case :ets.info(@ets_table) do
-        :undefined -> :ok
-        _ -> :ets.delete(@ets_table, run_id)
-      end
-    rescue
-      _ -> :ok
-    end
+    _ = PipelineStatus.delete(run_id)
+    :ok
   end
 
   defp insert_ets_entry(run_id, attrs) do
@@ -424,7 +408,7 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
         completed_nodes: [],
         current_node: nil,
         node_durations: %{},
-        started_at: nil,
+        started_at: DateTime.utc_now(),
         finished_at: nil,
         duration_ms: nil,
         failure_reason: nil,
@@ -436,7 +420,8 @@ defmodule Arbor.Orchestrator.PipelineTrackingIntegrationTest do
       }
       |> Map.merge(attrs)
 
-    :ets.insert(@ets_table, {run_id, entry})
+    # Canonical boundary — never write ETS directly.
+    PipelineStatus.put(entry)
     run_id
   end
 

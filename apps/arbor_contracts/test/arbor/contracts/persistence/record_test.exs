@@ -12,9 +12,17 @@ defmodule Arbor.Contracts.Persistence.RecordTest do
       assert record.key == "user:123"
       assert record.data == %{}
       assert record.metadata == %{}
+      assert record.revision == 0
+      assert record.generation == 0
       assert String.starts_with?(record.id, "rec_")
       assert %DateTime{} = record.inserted_at
       assert %DateTime{} = record.updated_at
+    end
+
+    test "accepts optional revision and generation without forcing backend semantics" do
+      record = Record.new("k", %{}, revision: 7, generation: 3)
+      assert record.revision == 7
+      assert record.generation == 3
     end
 
     test "creates record with data" do
@@ -31,11 +39,14 @@ defmodule Arbor.Contracts.Persistence.RecordTest do
 
   describe "update/3" do
     test "updates data and bumps updated_at" do
-      record = Record.new("k", %{a: 1})
+      record = Record.new("k", %{a: 1}, revision: 3, generation: 2)
       # small sleep to ensure timestamp differs
       updated = Record.update(record, %{a: 2, b: 3})
       assert updated.data == %{a: 2, b: 3}
       assert updated.key == "k"
+      # Pure update preserves fencing tokens; backends advance on put/CAS
+      assert updated.revision == 3
+      assert updated.generation == 2
       assert DateTime.compare(updated.updated_at, record.inserted_at) in [:gt, :eq]
     end
 

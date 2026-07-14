@@ -4,9 +4,8 @@ defmodule Arbor.Orchestrator.HeartbeatRefresherTest do
   that keeps a pipeline's heartbeat fresh during long-blocking calls
   (long reasoning LLMs, HITL approval waits, etc.).
 
-  Stubs `JobRegistry.touch_heartbeat/1` via process-dictionary
-  inspection so we can observe how many times the ticker fires
-  without needing a real JobRegistry GenServer.
+  Exercises `PipelineStatus.touch_heartbeat/1` through the refresher.
+  Journal/ticker failures are swallowed so the wrapped fun still returns.
   """
 
   use ExUnit.Case, async: false
@@ -48,8 +47,8 @@ defmodule Arbor.Orchestrator.HeartbeatRefresherTest do
       Process.sleep(50)
 
       # Find any orphan ticker processes by enumerating running
-      # processes that are sleeping on JobRegistry.touch_heartbeat —
-      # we don't expect any. (Proxy check: no orphan refresher Tasks.)
+      # processes still in tick_loop — we don't expect any.
+
       orphans =
         Process.list()
         |> Enum.filter(fn pid ->
@@ -66,10 +65,9 @@ defmodule Arbor.Orchestrator.HeartbeatRefresherTest do
       assert orphans == [], "orphan ticker(s) survived after exception: #{inspect(orphans)}"
     end
 
-    test "fun returns even when JobRegistry isn't running" do
-      # The ticker rescues + catches errors from JobRegistry.touch_heartbeat.
-      # In a test env without the JobRegistry GenServer, ticks should
-      # silently fail, fun should still return its value.
+    test "fun returns even when touch_heartbeat errors are swallowed" do
+      # The ticker rescues + catches errors from PipelineStatus.touch_heartbeat.
+      # Ticks should silently fail if the journal is unavailable; fun still returns.
       result =
         HeartbeatRefresher.with_heartbeat_refresh(
           "test_run_no_registry",

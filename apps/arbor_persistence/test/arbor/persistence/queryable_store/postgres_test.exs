@@ -26,7 +26,8 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
   # flipped the Repo to `:manual` globally.)
   use Arbor.Persistence.DatabaseCase, async: false
 
-  alias Arbor.Persistence.{Filter, Record}
+  alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Persistence.Filter
   alias Arbor.Persistence.QueryableStore.Postgres
   alias Arbor.Persistence.Schemas.Record, as: RecordSchema
 
@@ -375,6 +376,8 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
       assert attrs.key == "test-key"
       assert attrs.data == %{"data" => "value"}
       assert attrs.metadata == %{"source" => "test"}
+      assert attrs.revision == 0
+      assert attrs.generation == 0
     end
 
     test "to_record/1 converts schema to Record" do
@@ -386,6 +389,8 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
         key: "my-key",
         data: %{"field" => "value"},
         metadata: %{"meta" => true},
+        generation: 3,
+        revision: 4,
         inserted_at: now,
         updated_at: now
       }
@@ -396,71 +401,249 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
       assert record.key == "my-key"
       assert record.data == %{"field" => "value"}
       assert record.metadata == %{"meta" => true}
+      assert record.generation == 3
+      assert record.revision == 4
       assert record.inserted_at == now
       assert record.updated_at == now
+    end
+
+    test "changeset rejects negative revision" do
+      cs =
+        RecordSchema.changeset(%RecordSchema{}, %{
+          id: "rec_neg",
+          namespace: "ns",
+          key: "k",
+          revision: -1
+        })
+
+      refute cs.valid?
+      assert %{revision: _} = errors_on(cs)
     end
   end
 
   # ===========================================================================
-  # Regression: spurious records_pkey violation under upsert (the dual-index race)
-  #
-  # The `records` table once carried TWO redundant unique constraints: the pkey
-  # `id` (= `namespace:key`) AND `records_namespace_key_index` UNIQUE on
-  # `(namespace, key)`. The upsert arbitrated only `(namespace, key)`, so a fresh
-  # INSERT could surface a violation on the *non-arbiter* pkey index — which the
-  # changeset did not declare, so Ecto raised `Ecto.ConstraintError` instead of
-  # returning `{:error, changeset}`. The fix collapses to `id` as the sole arbiter
-  # (`conflict_target: [:id]`) + declares the pkey constraint.
-  #
-  # This reproduces the raise DETERMINISTICALLY (no timing race): seed a row whose
-  # pkey equals what the next `put` computes, but whose `(namespace, key)` differs.
-  # PRE-FIX: ON CONFLICT(namespace,key) misses → INSERT → pkey collision → raise.
-  # POST-FIX: ON CONFLICT(id) hits → DO UPDATE → no raise.
+  # Revision + generation + linearizable CAS (recovery fencing)
   # ===========================================================================
 
-  describe "records_pkey upsert regression (dual-index race)" do
-    test "put does not raise when computed id collides with a row of a different (namespace, key)",
-         %{} do
-      namespace = "regress_ns"
-      dup_key = "dup"
-      colliding_id = "#{namespace}:#{dup_key}"
+  describe "revision advancement on put" do
+    test "first put sets generation/revision to 1 and subsequent puts advance revision",
+         %{name: name} do
+      assert :ok =
+               Postgres.put("rev-key", Record.new("rev-key", %{"n" => 1}), name: name, repo: Repo)
 
-      # Seed row R directly: its pkey equals what put(namespace, dup_key) will
-      # compute, but its (namespace, key) is DIFFERENT — so an upsert arbitrating
-      # on (namespace, key) won't find it and will attempt an INSERT.
-      now = DateTime.utc_now()
+      assert {:ok, %Record{generation: 1, revision: 1, data: %{"n" => 1}} = first} =
+               Postgres.get("rev-key", name: name, repo: Repo)
 
-      {:ok, _seeded} =
-        %RecordSchema{}
-        |> RecordSchema.changeset(%{
-          id: colliding_id,
-          namespace: namespace,
-          key: "a-different-key",
-          data: %{"seed" => true},
-          metadata: %{},
-          inserted_at: now,
-          updated_at: now
-        })
-        |> Repo.insert()
+      logical_id = first.id
 
-      # put computes id = "regress_ns:dup" == colliding_id. PRE-FIX this raises
-      # records_pkey (rescued into {:error, {:put_failed, %Ecto.ConstraintError{}}});
-      # POST-FIX it resolves via ON CONFLICT(id) and returns :ok.
-      record = Record.new(dup_key, %{"version" => 1})
-      result = Postgres.put(dup_key, record, name: namespace, repo: Repo)
+      assert :ok =
+               Postgres.put(
+                 "rev-key",
+                 Record.new("rev-key", %{"n" => 2}, revision: 0, generation: 0),
+                 name: name,
+                 repo: Repo
+               )
 
-      assert result == :ok,
-             "expected upsert to resolve via ON CONFLICT(id), got: #{inspect(result)}"
+      assert {:ok, %Record{id: ^logical_id, generation: 1, revision: 2, data: %{"n" => 2}}} =
+               Postgres.get("rev-key", name: name, repo: Repo)
+    end
+  end
 
-      # The upsert resolved on the pkey `id`, so it UPDATED the seed row (which
-      # owns that id) rather than inserting a colliding one. Fetch by id directly
-      # to confirm the data was written and no duplicate row was created.
-      fetched = Repo.get(RecordSchema, colliding_id)
-      assert fetched != nil
-      assert fetched.data == %{"version" => 1}
-      assert Repo.aggregate(RecordSchema, :count, :id) == 1
+  describe "identity and delimiter collision" do
+    test "(\"a\",\"b:c\") and (\"a:b\",\"c\") coexist under true namespace/key identity" do
+      assert :ok =
+               Postgres.put("b:c", Record.new("b:c", %{"pair" => "a/b:c"}),
+                 name: "a",
+                 repo: Repo
+               )
+
+      assert :ok =
+               Postgres.put("c", Record.new("c", %{"pair" => "a:b/c"}),
+                 name: "a:b",
+                 repo: Repo
+               )
+
+      assert {:ok, %Record{data: %{"pair" => "a/b:c"}, key: "b:c"}} =
+               Postgres.get("b:c", name: "a", repo: Repo)
+
+      assert {:ok, %Record{data: %{"pair" => "a:b/c"}, key: "c"}} =
+               Postgres.get("c", name: "a:b", repo: Repo)
+
+      # Under the retired "#{namespace}:#{key}" scheme both would share "a:b:c".
+      refute Repo.get_by(RecordSchema, id: "a:b:c")
     end
 
+    test "put rejects Record.key != store key", %{name: name} do
+      assert {:error, :key_mismatch} =
+               Postgres.put("store-key", Record.new("other-key", %{}), name: name, repo: Repo)
+    end
+
+    test "put preserves logical id across update", %{name: name} do
+      first = Record.new("k", %{"n" => 1}, id: "rec_logical_pg")
+      assert :ok = Postgres.put("k", first, name: name, repo: Repo)
+
+      second = Record.new("k", %{"n" => 2}, id: "rec_other_id")
+      assert :ok = Postgres.put("k", second, name: name, repo: Repo)
+
+      assert {:ok, %Record{id: "rec_logical_pg", generation: 1, revision: 2}} =
+               Postgres.get("k", name: name, repo: Repo)
+    end
+  end
+
+  describe "ABA generation tombstones" do
+    test "delete/reinsert advances generation; stale CAS conflicts", %{name: name} do
+      assert :ok =
+               Postgres.put("aba", Record.new("aba", %{"n" => 1}), name: name, repo: Repo)
+
+      assert {:ok, %Record{generation: 1, revision: 1} = gen1} =
+               Postgres.get("aba", name: name, repo: Repo)
+
+      assert :ok = Postgres.delete("aba", name: name, repo: Repo)
+      assert {:error, :not_found} = Postgres.get("aba", name: name, repo: Repo)
+
+      assert :ok =
+               Postgres.put("aba", Record.new("aba", %{"n" => 2}), name: name, repo: Repo)
+
+      assert {:ok, %Record{generation: 2, revision: 1}} =
+               Postgres.get("aba", name: name, repo: Repo)
+
+      assert {:error, :conflict} =
+               Postgres.compare_and_swap(
+                 "aba",
+                 {:value, gen1},
+                 Record.new("aba", %{"n" => 99}),
+                 name: name,
+                 repo: Repo
+               )
+    end
+
+    test "put resurrection resets inserted_at; live update preserves it", %{name: name} do
+      assert :ok =
+               Postgres.put("ins-put", Record.new("ins-put", %{"n" => 1}), name: name, repo: Repo)
+
+      assert {:ok, %Record{inserted_at: original_inserted} = first} =
+               Postgres.get("ins-put", name: name, repo: Repo)
+
+      # Live update must preserve original inserted_at
+      Process.sleep(5)
+
+      assert :ok =
+               Postgres.put("ins-put", Record.new("ins-put", %{"n" => 2}), name: name, repo: Repo)
+
+      assert {:ok, %Record{generation: 1, revision: 2, inserted_at: live_inserted}} =
+               Postgres.get("ins-put", name: name, repo: Repo)
+
+      assert DateTime.compare(live_inserted, original_inserted) == :eq
+
+      assert :ok = Postgres.delete("ins-put", name: name, repo: Repo)
+      Process.sleep(5)
+
+      assert :ok =
+               Postgres.put("ins-put", Record.new("ins-put", %{"n" => 3}), name: name, repo: Repo)
+
+      assert {:ok, %Record{generation: 2, revision: 1, inserted_at: resurrected_inserted}} =
+               Postgres.get("ins-put", name: name, repo: Repo)
+
+      assert DateTime.compare(resurrected_inserted, original_inserted) == :gt,
+             "put-resurrection must reset inserted_at (got #{inspect(resurrected_inserted)} vs original #{inspect(original_inserted)}; first=#{inspect(first)})"
+    end
+  end
+
+  describe "compare_and_swap recovery fencing" do
+    test "not_found CAS inserts once", %{name: name} do
+      rec = Record.new("cas-nf", %{"x" => 1})
+
+      assert {:ok, %Record{generation: 1, revision: 1, data: %{"x" => 1}}} =
+               Postgres.compare_and_swap("cas-nf", :not_found, rec, name: name, repo: Repo)
+
+      assert {:error, :conflict} =
+               Postgres.compare_and_swap("cas-nf", :not_found, rec, name: name, repo: Repo)
+    end
+
+    test "expected generation+revision CAS advances and returns stored record", %{name: name} do
+      assert :ok =
+               Postgres.put("cas-rev", Record.new("cas-rev", %{"v" => 1}), name: name, repo: Repo)
+
+      assert {:ok, observed} = Postgres.get("cas-rev", name: name, repo: Repo)
+
+      assert {:ok, %Record{generation: 1, revision: 2, data: %{"v" => 2}} = stored} =
+               Postgres.compare_and_swap(
+                 "cas-rev",
+                 {:value, observed},
+                 Record.new("cas-rev", %{"v" => 2}),
+                 name: name,
+                 repo: Repo
+               )
+
+      assert stored.revision == 2
+      assert stored.generation == 1
+
+      assert {:error, :conflict} =
+               Postgres.compare_and_swap(
+                 "cas-rev",
+                 {:value, observed},
+                 Record.new("cas-rev", %{"v" => 3}),
+                 name: name,
+                 repo: Repo
+               )
+    end
+
+    test "insert-CAS resurrection resets inserted_at", %{name: name} do
+      rec = Record.new("cas-ins", %{"x" => 1})
+
+      assert {:ok, %Record{generation: 1, revision: 1}} =
+               Postgres.compare_and_swap("cas-ins", :not_found, rec, name: name, repo: Repo)
+
+      # Re-read via get so timestamps match RecordSchema conversion (DateTime).
+      assert {:ok, %Record{inserted_at: original_inserted}} =
+               Postgres.get("cas-ins", name: name, repo: Repo)
+
+      assert :ok = Postgres.delete("cas-ins", name: name, repo: Repo)
+      Process.sleep(5)
+
+      resurrected = Record.new("cas-ins", %{"x" => 2})
+
+      assert {:ok, %Record{generation: 2, revision: 1}} =
+               Postgres.compare_and_swap("cas-ins", :not_found, resurrected,
+                 name: name,
+                 repo: Repo
+               )
+
+      assert {:ok, %Record{generation: 2, revision: 1, inserted_at: new_inserted}} =
+               Postgres.get("cas-ins", name: name, repo: Repo)
+
+      assert DateTime.compare(new_inserted, original_inserted) == :gt,
+             "insert-CAS resurrection must reset inserted_at"
+    end
+
+    test "CAS rejects expected Record from another physical key", %{name: name} do
+      assert :ok =
+               Postgres.put("cas-key", Record.new("cas-key", %{"n" => 1}), name: name, repo: Repo)
+
+      assert {:ok, %Record{generation: 1, revision: 1} = observed} =
+               Postgres.get("cas-key", name: name, repo: Repo)
+
+      expected_other_key = %{observed | key: "other-key"}
+
+      assert {:error, :key_mismatch} =
+               Postgres.compare_and_swap(
+                 "cas-key",
+                 {:value, expected_other_key},
+                 Record.new("cas-key", %{"n" => 99}),
+                 name: name,
+                 repo: Repo
+               )
+
+      assert {:ok, %Record{generation: 1, revision: 1, data: %{"n" => 1}}} =
+               Postgres.get("cas-key", name: name, repo: Repo)
+    end
+
+    test "durability_class is node_restart" do
+      assert Postgres.durability_class([]) == :node_restart
+    end
+  end
+
+  describe "concurrent upserts (shared sandbox)" do
     test "N concurrent upserts of the same fresh (namespace, key) all succeed", %{} do
       namespace = "regress_concurrent_ns"
       key = "hot-key"
@@ -478,9 +661,18 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
       assert Enum.all?(results, &(&1 == :ok)),
              "expected all concurrent upserts to succeed, got: #{inspect(results)}"
 
-      # Exactly one row should exist for this (namespace, key).
       {:ok, keys} = Postgres.list(name: namespace, repo: Repo)
       assert keys == [key]
     end
+  end
+
+  # Shared-sandbox concurrent CAS is intentionally NOT the one-winner proof —
+  # see PostgresConcurrentCASTest which uses independent DB sessions.
+  defp errors_on(changeset) do
+    Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->
+      Regex.replace(~r"%{(\w+)}", msg, fn _, key ->
+        opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+      end)
+    end)
   end
 end

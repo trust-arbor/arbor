@@ -5,7 +5,20 @@ defmodule Arbor.Persistence.Schemas.Record do
   Maps to the `records` table. All domains share this single table,
   differentiated by the `namespace` column (e.g., "jobs", "mailbox", "sessions").
 
-  Provides conversion to/from `Arbor.Persistence.Record` structs.
+  Provides conversion to/from `Arbor.Contracts.Persistence.Record` structs.
+
+  ## Identity
+
+  - **Logical id** — primary key `id` is the Record's logical id (`rec_…`),
+    preserved independently of storage location.
+  - **Physical identity** — unique `(namespace, key)`. Lookups and CAS bind to
+    those columns, never a concatenated `namespace:key` string.
+
+  ## Fencing
+
+  `generation` and `revision` are backend-maintained and non-negative. Callers
+  cannot roll them backward. Soft-delete uses `deleted_at` as a generation
+  tombstone so delete/reinsert cannot revive a stale CAS.
   """
 
   use Ecto.Schema
@@ -22,12 +35,15 @@ defmodule Arbor.Persistence.Schemas.Record do
     field(:key, :string)
     field(:data, :map, default: %{})
     field(:metadata, :map, default: %{})
+    field(:generation, :integer, default: 0)
+    field(:revision, :integer, default: 0)
+    field(:deleted_at, :utc_datetime_usec)
 
     timestamps()
   end
 
   @required_fields [:id, :namespace, :key]
-  @optional_fields [:data, :metadata]
+  @optional_fields [:data, :metadata, :generation, :revision, :deleted_at]
 
   @doc """
   Create a changeset for inserting or updating a record.
@@ -37,17 +53,14 @@ defmodule Arbor.Persistence.Schemas.Record do
     schema
     |> cast(attrs, @required_fields ++ @optional_fields)
     |> validate_required(@required_fields)
-    # `id` (the pkey) is the sole unique arbiter for upserts. Declaring its
-    # constraint ensures a residual pkey conflict returns `{:error, changeset}`
-    # instead of raising `Ecto.ConstraintError`. The `(namespace, key)` unique
-    # constraint is kept for backward-compat with any deployment that still has
-    # the legacy index (dropped in migration 20260625000001).
+    |> validate_number(:revision, greater_than_or_equal_to: 0)
+    |> validate_number(:generation, greater_than_or_equal_to: 0)
     |> unique_constraint(:id, name: "records_pkey")
-    |> unique_constraint([:namespace, :key])
+    |> unique_constraint([:namespace, :key], name: "records_namespace_key_index")
   end
 
   @doc """
-  Convert an `Arbor.Persistence.Record` struct to schema attrs map,
+  Convert an `Arbor.Contracts.Persistence.Record` struct to schema attrs map,
   including the namespace for table scoping.
   """
   @spec from_record(Record.t(), String.t()) :: map()
@@ -57,12 +70,14 @@ defmodule Arbor.Persistence.Schemas.Record do
       namespace: namespace,
       key: record.key,
       data: record.data || %{},
-      metadata: record.metadata || %{}
+      metadata: record.metadata || %{},
+      generation: max(record.generation || 0, 0),
+      revision: max(record.revision || 0, 0)
     }
   end
 
   @doc """
-  Convert a schema struct back to an `Arbor.Persistence.Record`.
+  Convert a schema struct back to an `Arbor.Contracts.Persistence.Record`.
   """
   @spec to_record(%__MODULE__{}) :: Record.t()
   def to_record(%__MODULE__{} = schema) do
@@ -71,6 +86,8 @@ defmodule Arbor.Persistence.Schemas.Record do
       key: schema.key,
       data: schema.data || %{},
       metadata: schema.metadata || %{},
+      generation: schema.generation || 0,
+      revision: schema.revision || 0,
       inserted_at: schema.inserted_at,
       updated_at: schema.updated_at
     }

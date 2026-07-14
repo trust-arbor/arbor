@@ -150,18 +150,76 @@ defmodule Arbor.Orchestrator.Engine do
     dot_source_path = Keyword.get(opts, :dot_source_path)
 
     # Initialize process-local lifecycle tracking via RunState CRC core.
-    # This is the Engine's own tracking — no external GenServer dependency.
+    # On resume, seed progress from the claimed/current journal record so we
+    # never publish a blank running row over completed_count/nodes/durations
+    # before the checkpoint is loaded.
+    #
+    # Fresh admission + initial lifecycle publication are one atomic
+    # RunJournal owner operation (no TOCTOU get-then-put). Resume/recovery
+    # revalidates :recovering claim + execution_principal at the journal.
     run_state =
-      Arbor.Orchestrator.RunState.Core.new(run_id, graph.id, map_size(graph.nodes),
-        now: pipeline_started_at_dt,
-        pipeline_id: Keyword.get(opts, :pipeline_id, run_id),
-        owner_node: Kernel.node(),
-        source_node: Keyword.get(opts, :source_node, Kernel.node()),
-        spawning_pid: Keyword.get(opts, :spawning_pid)
+      seed_run_state(
+        run_id,
+        graph,
+        opts,
+        pipeline_started_at_dt
       )
 
-    sync_run_state(run_id, run_state)
+    lifecycle_meta =
+      lifecycle_meta_from_opts(opts, logs_root, graph_hash, dot_source_path)
+      |> put_execution_principal_meta(opts, run_authorization)
 
+    admission = if resume_or_recovery?(opts), do: :resume, else: :fresh
+
+    case admit_and_sync_run_state(run_state, lifecycle_meta, admission) do
+      :ok ->
+        # Catch recoverable raise/throw/exit. Terminalization always uses the
+        # journal's latest progress (atomic finalize), not a stale lexical RunState.
+        try do
+          execute_prepared_pipeline(
+            graph,
+            run_authorization,
+            opts,
+            logs_root,
+            max_steps,
+            pipeline_started_at,
+            run_id,
+            run_state,
+            lifecycle_meta,
+            graph_hash,
+            dot_source_path
+          )
+        rescue
+          e ->
+            fail_engine_exception(run_state, run_id, opts, lifecycle_meta, pipeline_started_at, e)
+        catch
+          :throw, value ->
+            fail_engine_throw(run_state, run_id, opts, lifecycle_meta, pipeline_started_at, value)
+
+          # All exits settle — including :normal, :shutdown, and {:shutdown, _}.
+          # Filtering those out strands :running records when a handler/link exits cleanly.
+          :exit, reason ->
+            fail_engine_exit(run_state, run_id, opts, lifecycle_meta, pipeline_started_at, reason)
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp execute_prepared_pipeline(
+         graph,
+         run_authorization,
+         opts,
+         logs_root,
+         max_steps,
+         pipeline_started_at,
+         run_id,
+         run_state,
+         lifecycle_meta,
+         graph_hash,
+         dot_source_path
+       ) do
     :ok = write_manifest(graph, logs_root, run_id)
 
     emit(
@@ -184,18 +242,32 @@ defmodule Arbor.Orchestrator.Engine do
         final_outcome = last_id && Map.get(outcomes, last_id)
         duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
 
-        emit(opts, Event.pipeline_completed(completed, duration_ms))
-        Checkpoint.cleanup(run_id)
+        case finalize_terminal(
+               run_state,
+               run_id,
+               :completed,
+               nil,
+               duration_ms,
+               opts,
+               lifecycle_meta,
+               completed_nodes: completed
+             ) do
+          :ok ->
+            Checkpoint.cleanup(run_id)
 
-        {:ok,
-         %{
-           run_id: run_id,
-           final_outcome: final_outcome,
-           completed_nodes: completed,
-           context: Context.snapshot(context),
-           taint: Context.taint_map(context),
-           node_durations: %{}
-         }}
+            {:ok,
+             %{
+               run_id: run_id,
+               final_outcome: final_outcome,
+               completed_nodes: completed,
+               context: Context.snapshot(context),
+               taint: Context.taint_map(context),
+               node_durations: %{}
+             }}
+
+          {:error, reason} ->
+            {:error, {:lifecycle_finalize_failed, reason}}
+        end
 
       {:ok, state} ->
         tracking =
@@ -212,6 +284,11 @@ defmodule Arbor.Orchestrator.Engine do
           tracking
           |> Map.put(:pending_intents, Map.get(state, :pending_intents, %{}))
           |> Map.put(:execution_digests, Map.get(state, :execution_digests, %{}))
+
+        # Fold checkpoint-completed progress into process-local RunState and journal
+        # so resume never drops completed_count/nodes after load.
+        run_state =
+          seed_run_state_from_checkpoint(run_state, state, run_id, lifecycle_meta)
 
         engine_state = %State{
           graph: graph,
@@ -231,14 +308,108 @@ defmodule Arbor.Orchestrator.Engine do
           run_authorization: run_authorization
         }
 
-        loop(engine_state)
+        safe_loop(engine_state)
 
       {:error, reason} = error ->
-        duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
-        emit(opts, Event.pipeline_failed(reason, duration_ms))
-        error
+        # Pre-execution resume/recovery failures (checkpoint load, HMAC,
+        # capability/auth, identity) must not be terminalized here — the outer
+        # claim owner (public resume / RecoveryCoordinator) classifies and
+        # settles exactly once (retryable → :interrupted, corruption → :failed).
+        if resume_or_recovery?(opts) and pre_execution_resume_failure?(reason) do
+          error
+        else
+          duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+
+          case finalize_terminal(
+                 run_state,
+                 run_id,
+                 :failed,
+                 reason,
+                 duration_ms,
+                 opts,
+                 lifecycle_meta
+               ) do
+            :ok -> error
+            {:error, finalize_reason} -> {:error, {:lifecycle_finalize_failed, finalize_reason}}
+          end
+        end
     end
   end
+
+  # Each loop iteration catches recoverable failures against the *current* State
+  # so late exceptions finalize current progress, not the initial RunState.
+  defp safe_loop(%State{} = state) do
+    try do
+      loop(state)
+    rescue
+      e ->
+        fail_from_engine_state(state, {:engine_exception, Exception.message(e)})
+    catch
+      :throw, value ->
+        fail_from_engine_state(state, {:engine_throw, inspect(value)})
+
+      # Settle every exit reason — :normal/:shutdown/{:shutdown,_} must not
+      # leave a seeded run stranded in :running/:recovering.
+      :exit, reason ->
+        fail_from_engine_state(state, {:engine_exit, classify_exit_reason(reason)})
+    end
+  end
+
+  defp fail_from_engine_state(%State{} = state, reason) do
+    duration_ms = System.monotonic_time(:millisecond) - state.pipeline_started_at
+    run_id = Keyword.get(state.opts, :run_id)
+
+    case finalize_terminal(
+           state.run_state,
+           run_id,
+           :failed,
+           reason,
+           duration_ms,
+           state.opts,
+           lifecycle_meta_from_state(state)
+         ) do
+      :ok -> {:error, reason}
+      {:error, finalize_reason} -> {:error, {:lifecycle_finalize_failed, finalize_reason}}
+    end
+  end
+
+  defp fail_engine_exception(run_state, run_id, opts, lifecycle_meta, started_at, e) do
+    reason = {:engine_exception, Exception.message(e)}
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+
+    case finalize_terminal(run_state, run_id, :failed, reason, duration_ms, opts, lifecycle_meta) do
+      :ok -> {:error, reason}
+      {:error, finalize_reason} -> {:error, {:lifecycle_finalize_failed, finalize_reason}}
+    end
+  end
+
+  defp fail_engine_throw(run_state, run_id, opts, lifecycle_meta, started_at, value) do
+    reason = {:engine_throw, inspect(value)}
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+
+    case finalize_terminal(run_state, run_id, :failed, reason, duration_ms, opts, lifecycle_meta) do
+      :ok -> {:error, reason}
+      {:error, finalize_reason} -> {:error, {:lifecycle_finalize_failed, finalize_reason}}
+    end
+  end
+
+  defp fail_engine_exit(run_state, run_id, opts, lifecycle_meta, started_at, exit_reason) do
+    reason = {:engine_exit, classify_exit_reason(exit_reason)}
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+
+    case finalize_terminal(run_state, run_id, :failed, reason, duration_ms, opts, lifecycle_meta) do
+      :ok -> {:error, reason}
+      {:error, finalize_reason} -> {:error, {:lifecycle_finalize_failed, finalize_reason}}
+    end
+  end
+
+  # Bound exit terms before they enter failure_reason / durable metadata.
+  defp classify_exit_reason(:normal), do: "normal"
+  defp classify_exit_reason(:shutdown), do: "shutdown"
+  defp classify_exit_reason({:shutdown, reason}), do: {"shutdown", classify_exit_reason(reason)}
+  defp classify_exit_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp classify_exit_reason(reason) when is_binary(reason), do: reason
+  defp classify_exit_reason(reason), do: inspect(reason, limit: 20, printable_limit: 200)
 
   defp initial_state(graph, logs_root, opts) do
     if Keyword.get(opts, :resume, false) or Keyword.has_key?(opts, :resume_from) do
@@ -400,11 +571,30 @@ defmodule Arbor.Orchestrator.Engine do
   defp parse_status("skipped"), do: :skipped
   defp parse_status(_), do: :success
 
-  defp loop(%State{max_steps: max_steps, opts: opts, pipeline_started_at: pipeline_started_at})
+  defp loop(
+         %State{
+           max_steps: max_steps,
+           opts: opts,
+           pipeline_started_at: pipeline_started_at,
+           run_state: run_state
+         } = state
+       )
        when max_steps <= 0 do
     duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
-    emit(opts, Event.pipeline_failed(:max_steps_exceeded, duration_ms))
-    {:error, :max_steps_exceeded}
+    run_id = Keyword.get(opts, :run_id)
+
+    case finalize_terminal(
+           run_state,
+           run_id,
+           :failed,
+           :max_steps_exceeded,
+           duration_ms,
+           opts,
+           lifecycle_meta_from_state(state)
+         ) do
+      :ok -> {:error, :max_steps_exceeded}
+      {:error, reason} -> {:error, {:lifecycle_finalize_failed, reason}}
+    end
   end
 
   # Heartbeat interval for distributed liveness detection (30 seconds)
@@ -506,11 +696,17 @@ defmodule Arbor.Orchestrator.Engine do
       emit(state.opts, Event.stage_started(node.id))
       emit(state.opts, Event.fidelity_resolved(node.id, fidelity.mode, fidelity.thread_id))
 
-      # Update RunState with node_started + sync to ETS
+      # Update RunState with node_started + sync via PipelineStatus
       run_state =
         if state.run_state do
           rs = Arbor.Orchestrator.RunState.Core.node_started(state.run_state, node.id)
-          sync_run_state(Keyword.get(state.opts, :run_id), rs)
+
+          sync_run_state(
+            Keyword.get(state.opts, :run_id),
+            rs,
+            lifecycle_meta_from_state(state)
+          )
+
           rs
         else
           state.run_state
@@ -570,9 +766,8 @@ defmodule Arbor.Orchestrator.Engine do
       # heartbeats at the top of each loop iteration — between nodes — so a
       # single multi-minute node would let the heartbeat go stale, and
       # RecoveryCoordinator would spam warnings every 30s. The ticker below
-      # refreshes BOTH the legacy JobRegistry and the ETS PipelineStatus
-      # entry while the handler runs; it's killed as soon as the call
-      # returns.
+      # refreshes the canonical PipelineStatus/RunJournal entry while the
+      # handler runs; it's killed as soon as the call returns.
       {outcome, retries} =
         with_in_call_heartbeat(Keyword.get(state.opts, :run_id), fn ->
           Executor.execute_with_retry(
@@ -609,11 +804,17 @@ defmodule Arbor.Orchestrator.Engine do
       outcomes = Map.put(state.outcomes, node.id, outcome)
       stage_duration = System.monotonic_time(:millisecond) - stage_started_at
 
-      # Update RunState with node_completed + sync to ETS
+      # Update RunState with node_completed + sync via PipelineStatus
       run_state =
         if run_state do
           rs = Arbor.Orchestrator.RunState.Core.node_completed(run_state, node.id, stage_duration)
-          sync_run_state(Keyword.get(state.opts, :run_id), rs)
+
+          sync_run_state(
+            Keyword.get(state.opts, :run_id),
+            rs,
+            lifecycle_meta_from_state(state)
+          )
+
           rs
         else
           run_state
@@ -695,7 +896,7 @@ defmodule Arbor.Orchestrator.Engine do
           {next_id, next_edge, remaining} ->
             emit(state.opts, Event.fan_out_branch_resuming(next_id, length(remaining)))
 
-            loop(%{
+            safe_loop(%{
               state
               | node_id: next_id,
                 incoming_edge: next_edge,
@@ -710,12 +911,29 @@ defmodule Arbor.Orchestrator.Engine do
       {:ok, retry_target} ->
         emit(state.opts, Event.goal_gate_retrying(retry_target))
 
-        loop(%{state | node_id: retry_target, incoming_edge: nil, max_steps: state.max_steps - 1})
+        safe_loop(%{
+          state
+          | node_id: retry_target,
+            incoming_edge: nil,
+            max_steps: state.max_steps - 1
+        })
 
       {:error, reason} ->
         duration_ms = System.monotonic_time(:millisecond) - state.pipeline_started_at
-        emit(state.opts, Event.pipeline_failed(reason, duration_ms))
-        {:error, reason}
+        run_id = Keyword.get(state.opts, :run_id)
+
+        case finalize_terminal(
+               state.run_state,
+               run_id,
+               :failed,
+               reason,
+               duration_ms,
+               state.opts,
+               lifecycle_meta_from_state(state)
+             ) do
+          :ok -> {:error, reason}
+          {:error, finalize_reason} -> {:error, {:lifecycle_finalize_failed, finalize_reason}}
+        end
     end
   end
 
@@ -724,27 +942,33 @@ defmodule Arbor.Orchestrator.Engine do
     duration_ms = System.monotonic_time(:millisecond) - state.pipeline_started_at
     run_id = Keyword.get(state.opts, :run_id)
 
-    # Update RunState to :completed and sync to ETS
-    if state.run_state do
-      alias Arbor.Orchestrator.RunState.Core, as: RS
-      completed_state = RS.mark_completed(state.run_state, duration_ms, now: DateTime.utc_now())
-      sync_run_state(run_id, completed_state)
+    case finalize_terminal(
+           state.run_state,
+           run_id,
+           :completed,
+           nil,
+           duration_ms,
+           state.opts,
+           lifecycle_meta_from_state(state),
+           completed_nodes: ordered
+         ) do
+      :ok ->
+        # Clean up checkpoint from durable store (no longer needed)
+        if run_id, do: Checkpoint.cleanup(run_id)
+
+        {:ok,
+         %{
+           run_id: run_id,
+           final_outcome: outcome,
+           completed_nodes: ordered,
+           context: Context.snapshot(state.context),
+           taint: Context.taint_map(state.context),
+           node_durations: state.tracking.node_durations
+         }}
+
+      {:error, reason} ->
+        {:error, {:lifecycle_finalize_failed, reason}}
     end
-
-    emit(state.opts, Event.pipeline_completed(ordered, duration_ms))
-
-    # Clean up checkpoint from durable store (no longer needed)
-    if run_id, do: Checkpoint.cleanup(run_id)
-
-    {:ok,
-     %{
-       run_id: run_id,
-       final_outcome: outcome,
-       completed_nodes: ordered,
-       context: Context.snapshot(state.context),
-       taint: Context.taint_map(state.context),
-       node_durations: state.tracking.node_durations
-     }}
   end
 
   # Restart the pipeline from a target node with a fresh log directory.
@@ -755,7 +979,7 @@ defmodule Arbor.Orchestrator.Engine do
     File.mkdir_p!(new_logs_root)
     :ok = write_manifest(state.graph, new_logs_root)
 
-    loop(%{
+    safe_loop(%{
       state
       | node_id: target_node_id,
         incoming_edge: nil,
@@ -797,32 +1021,21 @@ defmodule Arbor.Orchestrator.Engine do
     last = Map.get(state.tracking, :last_heartbeat_touch, 0)
 
     if now_mono - last >= @heartbeat_interval_ms do
-      # Update RunState heartbeat + sync to ETS (new path)
       run_state =
         if state.run_state do
           rs =
             Arbor.Orchestrator.RunState.Core.touch_heartbeat(state.run_state, DateTime.utc_now())
 
-          sync_run_state(Keyword.get(state.opts, :run_id), rs)
+          sync_run_state(
+            Keyword.get(state.opts, :run_id),
+            rs,
+            lifecycle_meta_from_state(state)
+          )
+
           rs
         else
           state.run_state
         end
-
-      # Also touch the legacy JobRegistry for backward compatibility
-      # during the migration period. Can be removed once the
-      # RecoveryCoordinator fully migrates to PipelineStatus.
-      run_id = Keyword.get(state.opts, :run_id)
-
-      if run_id do
-        try do
-          Arbor.Orchestrator.JobRegistry.touch_heartbeat(run_id)
-        rescue
-          _ -> :ok
-        catch
-          :exit, _ -> :ok
-        end
-      end
 
       tracking = Map.put(state.tracking, :last_heartbeat_touch, now_mono)
       %{state | tracking: tracking, run_state: run_state}
@@ -880,7 +1093,7 @@ defmodule Arbor.Orchestrator.Engine do
         # No preferred target -- check pending for ready nodes
         case Router.find_next_ready(new_pending, state.graph, state.completed) do
           {next_id, next_edge, remaining} ->
-            loop(%{
+            safe_loop(%{
               updated_state
               | node_id: next_id,
                 incoming_edge: next_edge,
@@ -904,7 +1117,12 @@ defmodule Arbor.Orchestrator.Engine do
         Router.all_predecessors_complete?(state.graph, target_id, state.completed)
 
     if fan_in_ready do
-      loop(%{state | node_id: target_id, incoming_edge: edge, max_steps: state.max_steps - 1})
+      safe_loop(%{
+        state
+        | node_id: target_id,
+          incoming_edge: edge,
+          max_steps: state.max_steps - 1
+      })
     else
       # Target not ready -- add to pending and find next ready node
       waiting_for =
@@ -919,7 +1137,7 @@ defmodule Arbor.Orchestrator.Engine do
 
       case Router.find_next_ready(all_pending, state.graph, state.completed) do
         {next_id, next_edge, remaining} ->
-          loop(%{
+          safe_loop(%{
             state
             | node_id: next_id,
               incoming_edge: next_edge,
@@ -1089,10 +1307,9 @@ defmodule Arbor.Orchestrator.Engine do
     EventEmitter.emit(pipeline_id, event, opts)
   end
 
-  # Write the RunState to the shared ETS table for dashboard/Facade visibility.
-  # Non-blocking: if the write fails (ETS table gone, process exit), the Engine
-  # continues executing. Dashboard goes stale; agent keeps thinking.
-  # This is the "graceful degradation" model the council recommended.
+  # Sync RunState through the canonical PipelineStatus/RunJournal boundary.
+  # Non-blocking: if the journal is unavailable, Engine continues executing.
+  # Dashboard goes stale; agent keeps thinking (graceful degradation).
   @doc false
   # Test-only thin wrappers around the private heartbeat helpers. Lets
   # `EngineInCallHeartbeatTest` exercise the refresh mechanics without
@@ -1133,28 +1350,8 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   defp touch_in_call_heartbeat(run_id) do
-    # Legacy JobRegistry path.
     try do
-      Arbor.Orchestrator.JobRegistry.touch_heartbeat(run_id)
-    rescue
-      _ -> :ok
-    catch
-      :exit, _ -> :ok
-    end
-
-    # New ETS PipelineStatus path. We read the current entry, stamp a fresh
-    # last_ets_sync, and re-insert. The race vs. an engine write at the
-    # tail of execute_with_retry is small (single-digit ms) and the next
-    # loop iteration's maybe_touch_heartbeat will re-sync regardless.
-    try do
-      case :ets.lookup(:arbor_pipeline_runs, run_id) do
-        [{^run_id, entry}] when is_map(entry) ->
-          refreshed = Map.put(entry, :last_ets_sync, DateTime.utc_now())
-          :ets.insert(:arbor_pipeline_runs, {run_id, refreshed})
-
-        _ ->
-          :ok
-      end
+      Arbor.Orchestrator.PipelineStatus.touch_heartbeat(run_id)
     rescue
       _ -> :ok
     catch
@@ -1162,16 +1359,299 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  defp sync_run_state(run_id, %Arbor.Orchestrator.RunState.Core{} = run_state) do
+  # Atomic terminal transition via RunJournal.finalize/5.
+  # Uses the latest stored Record for progress (not a stale lexical RunState).
+  # Emits a terminal event only on a fresh `:transitioned` result.
+  # Does not swallow durable/unavailable failures.
+  defp finalize_terminal(
+         run_state,
+         run_id,
+         status,
+         reason,
+         duration_ms,
+         opts,
+         meta,
+         event_opts \\ []
+       )
+
+  defp finalize_terminal(
+         _run_state,
+         nil,
+         _status,
+         _reason,
+         _duration_ms,
+         _opts,
+         _meta,
+         _event_opts
+       ),
+       do: :ok
+
+  defp finalize_terminal(run_state, run_id, status, reason, duration_ms, opts, meta, event_opts)
+       when is_binary(run_id) do
+    meta =
+      meta
+      |> Map.new()
+      |> Map.merge(progress_meta_from_run_state(run_state))
+      |> Map.merge(progress_meta_from_event_opts(event_opts))
+
+    case Arbor.Orchestrator.PipelineStatus.finalize(
+           run_id,
+           status,
+           reason,
+           duration_ms,
+           meta
+         ) do
+      {:ok, :transitioned, _record} ->
+        case status do
+          :completed ->
+            completed = Keyword.get(event_opts, :completed_nodes, [])
+            emit(opts, Event.pipeline_completed(completed, duration_ms))
+
+          :failed ->
+            emit(opts, Event.pipeline_failed(reason, duration_ms))
+
+          _ ->
+            :ok
+        end
+
+        :ok
+
+      {:ok, :already_terminal, _record} ->
+        # Same terminal status — idempotent success, no second event.
+        :ok
+
+      {:error, {:terminal_conflict, existing, requested}} ->
+        # Conflicting terminal state — never report contradictory success.
+        {:error, {:terminal_conflict, existing, requested}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resume_or_recovery?(opts) do
+    Keyword.get(opts, :resume, false) or Keyword.has_key?(opts, :resume_from) or
+      Keyword.get(opts, :recovery, false)
+  end
+
+  # Atomic admit + initial lifecycle publication at the journal owner.
+  # Maps journal errors to Engine public shapes (no silent overwrite).
+  defp admit_and_sync_run_state(%Arbor.Orchestrator.RunState.Core{} = run_state, meta, admission)
+       when admission in [:fresh, :resume] do
     now = DateTime.utc_now()
     synced = Arbor.Orchestrator.RunState.Core.mark_synced(run_state, now)
-    entry = Arbor.Orchestrator.RunState.Core.to_ets_entry(synced)
-    :ets.insert(:arbor_pipeline_runs, {run_id, entry})
-    :ok
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
+
+    case Arbor.Orchestrator.PipelineStatus.admit_and_put_run_state(synced, meta,
+           admission: admission
+         ) do
+      :ok ->
+        :ok
+
+      {:error, :journal_unavailable} ->
+        {:error, :journal_unavailable}
+
+      {:error, {:already_terminal, status}} ->
+        {:error, {:already_terminal, status}}
+
+      {:error, {:run_id_in_use, status}} ->
+        {:error, {:run_id_in_use, status}}
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, {:invalid_resume_status, status}} ->
+        {:error, {:invalid_resume_status, status}}
+
+      {:error, :execution_principal_mismatch} ->
+        {:error, :execution_principal_mismatch}
+
+      {:error, reason} ->
+        # Initial lifecycle publish failed — do not pretend the run is tracked.
+        {:error, {:lifecycle_write_failed, reason}}
+    end
+  end
+
+  defp put_execution_principal_meta(meta, opts, run_authorization) when is_map(meta) do
+    principal =
+      execution_principal_from_opts(opts) ||
+        execution_principal_from_auth(run_authorization) ||
+        Map.get(meta, :execution_principal)
+
+    if is_binary(principal) and principal != "" do
+      Map.put(meta, :execution_principal, principal)
+    else
+      meta
+    end
+  end
+
+  # Failures that occur before the execution loop starts on a resume path.
+  # Outer claim owner settles these; Engine must not mark :failed first.
+  # Explicit typed match only — no string-contains atom heuristics.
+  # Retryable vs structural-corrupt classification lives in the outer settler.
+  defp pre_execution_resume_failure?(reason) do
+    case reason do
+      # Retryable credential / backend unavailability
+      :identity_required_for_resume -> true
+      :authentication_unavailable -> true
+      :checkpoint_not_found -> true
+      :checkpoint_hmac_invalid -> true
+      :checkpoint_hmac_missing -> true
+      :invalid_signing_authority -> true
+      :mixed_signing_credentials -> true
+      {:unauthorized_resume, _} -> true
+      {:checkpoint_load_failed, _} -> true
+      {:checkpoint_hmac_derivation_failed, _} -> true
+      {:capability_revalidation_failed, _} -> true
+      {:indeterminate_intents, _} -> true
+      # Structurally corrupt checkpoint / graph state (still pre-exec; outer
+      # settler marks :failed rather than reopening arbitrary terminals)
+      :checkpoint_current_node_missing -> true
+      {:checkpoint_invalid, _} -> true
+      :checkpoint_corrupt -> true
+      {:checkpoint_corrupt, _} -> true
+      _ -> false
+    end
+  end
+
+  defp progress_meta_from_run_state(%Arbor.Orchestrator.RunState.Core{} = rs) do
+    %{
+      completed_count: rs.completed_count,
+      completed_nodes: Enum.reverse(rs.completed_nodes || []),
+      node_durations: rs.node_durations || %{},
+      total_nodes: rs.total_nodes,
+      graph_id: rs.graph_id,
+      pipeline_id: rs.pipeline_id,
+      started_at: rs.started_at,
+      spawning_pid: rs.spawning_pid
+    }
+  end
+
+  defp progress_meta_from_run_state(_), do: %{}
+
+  defp progress_meta_from_event_opts(event_opts) when is_list(event_opts) do
+    case Keyword.get(event_opts, :completed_nodes) do
+      nodes when is_list(nodes) and nodes != [] ->
+        %{completed_nodes: nodes, completed_count: length(nodes)}
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp progress_meta_from_event_opts(_), do: %{}
+
+  defp seed_run_state(run_id, graph, opts, pipeline_started_at_dt) do
+    base =
+      Arbor.Orchestrator.RunState.Core.new(run_id, graph.id, map_size(graph.nodes),
+        now: pipeline_started_at_dt,
+        pipeline_id: Keyword.get(opts, :pipeline_id, run_id),
+        owner_node: Kernel.node(),
+        source_node: Keyword.get(opts, :source_node, Kernel.node()),
+        spawning_pid: Keyword.get(opts, :spawning_pid)
+      )
+
+    resuming? =
+      Keyword.get(opts, :resume, false) or Keyword.has_key?(opts, :resume_from) or
+        Keyword.get(opts, :recovery, false)
+
+    if resuming? do
+      case Arbor.Orchestrator.PipelineStatus.get_record(run_id) do
+        %Arbor.Orchestrator.RunLifecycle.Record{} = record ->
+          %{
+            base
+            | completed_count: record.completed_count || 0,
+              completed_nodes: Enum.reverse(record.completed_nodes || []),
+              node_durations: record.node_durations || %{},
+              current_node: record.current_node,
+              started_at: record.started_at || base.started_at,
+              status: :running
+          }
+
+        _ ->
+          base
+      end
+    else
+      base
+    end
+  end
+
+  defp seed_run_state_from_checkpoint(run_state, state, run_id, lifecycle_meta) do
+    completed = state.completed_nodes || []
+
+    if length(completed) > (run_state.completed_count || 0) do
+      # RunState stores completed_nodes newest-first (see Core.node_completed).
+      rs = %{
+        run_state
+        | completed_count: length(completed),
+          completed_nodes: Enum.reverse(completed)
+      }
+
+      _ = sync_run_state(run_id, rs, lifecycle_meta)
+      rs
+    else
+      run_state
+    end
+  end
+
+  defp lifecycle_meta_from_opts(opts, logs_root, graph_hash, dot_source_path) do
+    %{
+      logs_root: logs_root,
+      graph_hash: graph_hash,
+      dot_source_path: dot_source_path,
+      execution_principal: execution_principal_from_opts(opts),
+      origin_trust_zone: Keyword.get(opts, :origin_trust_zone),
+      spawning_pid: Keyword.get(opts, :spawning_pid)
+    }
+  end
+
+  defp lifecycle_meta_from_state(%State{} = state) do
+    opts = state.opts || []
+
+    %{
+      logs_root: state.logs_root,
+      graph_hash: Keyword.get(opts, :graph_hash),
+      dot_source_path: Keyword.get(opts, :dot_source_path),
+      execution_principal:
+        execution_principal_from_opts(opts) ||
+          execution_principal_from_auth(state.run_authorization),
+      origin_trust_zone: Keyword.get(opts, :origin_trust_zone),
+      spawning_pid: Keyword.get(opts, :spawning_pid)
+    }
+  end
+
+  defp execution_principal_from_opts(opts) when is_list(opts) do
+    case Keyword.get(opts, :execution_principal) do
+      principal when is_binary(principal) and principal != "" ->
+        principal
+
+      _ ->
+        execution_principal_from_auth(Keyword.get(opts, :run_authorization))
+    end
+  end
+
+  defp execution_principal_from_opts(_), do: nil
+
+  defp execution_principal_from_auth(%RunAuthorization{execution_principal: principal})
+       when is_binary(principal) and principal != "",
+       do: principal
+
+  defp execution_principal_from_auth(_), do: nil
+
+  # Surfaces lifecycle write errors — callers decide whether to fail closed.
+  # Does not swallow durable failures as `:ok`.
+  #
+  # Node-progress / heartbeat sync is best-effort relative to terminal
+  # finalization: write errors are returned to callers and must be observed,
+  # but L1/L2 does not claim durable-first completion of every mid-run
+  # progress tick (that remains L3 work when a fenced durable backend lands).
+  defp sync_run_state(_run_id, %Arbor.Orchestrator.RunState.Core{} = run_state, meta) do
+    now = DateTime.utc_now()
+    synced = Arbor.Orchestrator.RunState.Core.mark_synced(run_state, now)
+
+    case Arbor.Orchestrator.PipelineStatus.put_run_state(synced, meta) do
+      :ok -> :ok
+      {:error, _} = err -> err
+    end
   end
 
   # Resume requires identity. Without it, we can't verify the
