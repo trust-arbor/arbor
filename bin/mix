@@ -7,6 +7,12 @@
 # code fails on the system-default OTP. See CLAUDE.md "Applied Learning":
 # both Erlang AND Elixir must be pinned.
 #
+# Contained mode (ARBOR_MIX_CONTAINED=1):
+#   Used only by Arbor.Actions.Mix for schema-bounded validation. Bypasses
+#   global mise config and uses ARBOR_ERLANG_ROOT / ARBOR_ELIXIR_ROOT derived
+#   by the already-loaded Arbor runtime. Ordinary developer invocations leave
+#   ARBOR_MIX_CONTAINED unset and keep the mise path below.
+#
 # Usage (from anywhere within the repo — mise searches parent dirs for
 # `.tool-versions`):
 #
@@ -22,6 +28,26 @@
 # wrapper only activates when invoked explicitly as `./bin/mix`.
 
 set -e
+
+if [ "${ARBOR_MIX_CONTAINED:-}" = "1" ]; then
+  if [ -z "${ARBOR_ERLANG_ROOT:-}" ] || [ -z "${ARBOR_ELIXIR_ROOT:-}" ]; then
+    echo "bin/mix: contained mode requires ARBOR_ERLANG_ROOT and ARBOR_ELIXIR_ROOT" >&2
+    exit 127
+  fi
+
+  if [ ! -x "${ARBOR_ERLANG_ROOT}/bin/erl" ]; then
+    echo "bin/mix: ARBOR_ERLANG_ROOT is not an executable Erlang root: ${ARBOR_ERLANG_ROOT}" >&2
+    exit 127
+  fi
+
+  if [ ! -x "${ARBOR_ELIXIR_ROOT}/bin/mix" ]; then
+    echo "bin/mix: ARBOR_ELIXIR_ROOT is not an executable Elixir root: ${ARBOR_ELIXIR_ROOT}" >&2
+    exit 127
+  fi
+
+  export PATH="${ARBOR_ERLANG_ROOT}/bin:${ARBOR_ELIXIR_ROOT}/bin:${PATH:-}"
+  exec "${ARBOR_ELIXIR_ROOT}/bin/mix" "$@"
+fi
 
 if ! command -v mise >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/mise" ]; then
   echo "bin/mix: mise not found in PATH or ~/.local/bin/" >&2

@@ -46,7 +46,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          {:ok, app_defs} <- Parser.parse_many(sources),
          {:ok, graph} <- Core.build_graph(app_defs),
          {:ok, selection} <- Core.select(changed_files, graph),
-         {:ok, checks} <- run_checks(worktree_path, selection, input.timeout) do
+         {:ok, checks} <-
+           MixAction.with_validation_resource(input.workspace_id, context, fn resource ->
+             run_checks(worktree_path, selection, input.timeout, resource)
+           end) do
       evidence =
         Core.show(%{
           selection: selection,
@@ -161,15 +164,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp run_checks(worktree_path, selection, timeout) do
-    compile = run_compile(worktree_path, timeout)
+  defp run_checks(worktree_path, selection, timeout, resource) do
+    compile = run_compile(worktree_path, timeout, resource)
 
     if compile["passed"] do
-      xref = run_xref(worktree_path, timeout)
+      xref = run_xref(worktree_path, timeout, resource)
 
       test =
         if xref["passed"] do
-          run_tests(worktree_path, selection.test_paths, timeout)
+          run_tests(worktree_path, selection.test_paths, timeout, resource)
         else
           Core.skipped_check("xref_failed")
         end
@@ -185,8 +188,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp run_compile(path, timeout) do
-    case run_mix(path, ["compile", "--warnings-as-errors"], timeout: timeout) do
+  defp run_compile(path, timeout, resource) do
+    case run_mix(path, ["compile", "--warnings-as-errors"],
+           timeout: timeout,
+           validation_resource: resource
+         ) do
       {:ok, result} ->
         Core.completed_check(Core.feedback_from_result(result))
 
@@ -195,10 +201,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp run_xref(path, timeout) do
+  defp run_xref(path, timeout, resource) do
     # Evidence only — do not pass --fail-above; this repository has baseline
     # compile-connected cycles. Zero-cycle validation is not claimed.
-    case run_mix(path, ["xref", "graph"], timeout: timeout) do
+    case run_mix(path, ["xref", "graph"], timeout: timeout, validation_resource: resource) do
       {:ok, result} ->
         exit_code = Map.get(result, :exit_code) || Map.get(result, "exit_code")
 
@@ -211,11 +217,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp run_tests(_path, [], _timeout) do
+  defp run_tests(_path, [], _timeout, _resource) do
     Core.empty_pass_check("no_affected_app_tests")
   end
 
-  defp run_tests(path, test_paths, timeout) when is_list(test_paths) do
+  defp run_tests(path, test_paths, timeout, resource) when is_list(test_paths) do
     # Only pass existing test directories so mix does not fail on missing paths
     # for apps that declare no tests yet. Preserve selection order.
     existing =
@@ -226,11 +232,16 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     else
       # One shared absolute monotonic deadline for the whole test stage — not N× timeout.
       deadline = monotonic_ms() + timeout
-      run_tests_sequential(path, existing, deadline, [])
+      run_tests_sequential(path, existing, deadline, resource, [])
     end
   end
 
-  defp run_tests_sequential(worktree_path, remaining_paths, deadline, acc) do
+  # Public test seam keeps the 3-arity form without a validation resource.
+  defp run_tests(path, test_paths, timeout) when is_list(test_paths) do
+    run_tests(path, test_paths, timeout, nil)
+  end
+
+  defp run_tests_sequential(worktree_path, remaining_paths, deadline, resource, acc) do
     # Shared deadline checked before every child (including the first).
     remaining_ms = deadline - monotonic_ms()
 
@@ -244,7 +255,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         Core.aggregate_test_check(Enum.reverse([Core.budget_exhausted_result(path) | acc]))
 
       {:run, path, budget_ms, rest} ->
-        case run_mix(worktree_path, ["test", path], timeout: budget_ms) do
+        mix_opts =
+          [timeout: budget_ms]
+          |> then(fn opts ->
+            if resource, do: Keyword.put(opts, :validation_resource, resource), else: opts
+          end)
+
+        case run_mix(worktree_path, ["test", path], mix_opts) do
           {:ok, result} ->
             # Re-check shared deadline immediately after every child, including the final one.
             remaining_after = deadline - monotonic_ms()
@@ -259,7 +276,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             # Stop after first failed/timed-out app — overall result is failed.
             # Prior successful children remain in the aggregate evidence.
             if app_result.passed do
-              run_tests_sequential(worktree_path, rest, deadline, [app_result | acc])
+              run_tests_sequential(worktree_path, rest, deadline, resource, [app_result | acc])
             else
               Core.aggregate_test_check(Enum.reverse([app_result | acc]))
             end

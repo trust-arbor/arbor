@@ -107,14 +107,24 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           candidate_commit: String.t() | nil,
           base_commit: String.t(),
           root_path: String.t(),
+          # Private staging parent (0700). Exact stage_path child is created
+          # exclusively by SecurityRegression.Shell.stage_sources/2.
+          stage_parent_path: String.t(),
           stage_path: String.t(),
+          candidate_runtime_path: String.t(),
+          candidate_home_path: String.t(),
+          candidate_tmp_path: String.t(),
           candidate_build_path: String.t(),
           candidate_deps_path: String.t(),
+          candidate_runner_path: String.t(),
+          candidate_result_path: String.t(),
+          base_runtime_path: String.t(),
+          base_home_path: String.t(),
+          base_tmp_path: String.t(),
           base_build_path: String.t(),
           base_deps_path: String.t(),
           base_worktree_path: String.t(),
-          runner_path: String.t(),
-          candidate_result_path: String.t(),
+          base_runner_path: String.t(),
           base_result_path: String.t(),
           snapshot_created: boolean()
         }
@@ -183,6 +193,36 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   def acquire_validation_resource(workspace_id, opts \\ %{}) when is_binary(workspace_id) do
     {server_opts, caller} = split_caller_opts(opts)
     call({:acquire_validation_resource, workspace_id, caller}, server_opts)
+  end
+
+  @doc """
+  Snapshot a dependency tree into a private destination for Mix isolation.
+
+  Shared by validation-resource setup and non-workspace Mix ephemeral isolation.
+  Destination top boundary is forced to mode `0o700` after creation/snapshot.
+  """
+  @default_snapshot_max_entries 50_000
+  @default_snapshot_max_bytes 512 * 1024 * 1024
+  @default_snapshot_max_depth 48
+
+  @spec snapshot_dependency_tree(String.t(), String.t()) :: :ok | {:error, term()}
+  def snapshot_dependency_tree(repo_path, destination)
+      when is_binary(repo_path) and is_binary(destination) do
+    snapshot_dependency_tree(repo_path, destination, [])
+  end
+
+  @spec snapshot_dependency_tree(String.t(), String.t(), keyword() | map()) ::
+          :ok | {:error, term()}
+  def snapshot_dependency_tree(repo_path, destination, opts)
+      when is_binary(repo_path) and is_binary(destination) and is_list(opts) do
+    with :ok <- snapshot_dependencies(repo_path, destination, opts),
+         :ok <- ensure_private_directory(destination) do
+      :ok
+    end
+  end
+
+  def snapshot_dependency_tree(repo_path, destination, opts) when is_map(opts) do
+    snapshot_dependency_tree(repo_path, destination, Map.to_list(opts))
   end
 
   @doc false
@@ -732,7 +772,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
            nil,
            caller.force_dependency_snapshot_failure,
            caller.cleanup_failures,
-           caller.force_partial_cleanup_failure_once
+           caller.force_partial_cleanup_failure_once,
+           setup_opts_from_caller(caller)
          ) do
       {:ok, resource, state} -> {:reply, {:ok, validation_resource_view(resource)}, state}
       {:error, reason, state} -> {:reply, {:error, reason}, state}
@@ -748,7 +789,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       material.candidate_commit,
       caller.force_dependency_snapshot_failure,
       caller.cleanup_failures,
-      caller.force_partial_cleanup_failure_once
+      caller.force_partial_cleanup_failure_once,
+      setup_opts_from_caller(caller)
     )
   end
 
@@ -759,7 +801,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          candidate_commit,
          force_dependency_snapshot_failure,
          cleanup_failures,
-         force_partial_cleanup_failure_once
+         force_partial_cleanup_failure_once,
+         setup_opts
        ) do
     owner_ref = Process.monitor(owner_pid)
 
@@ -776,7 +819,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             cleanup_failures
           )
 
-        case setup_validation_resource(resource, force_dependency_snapshot_failure) do
+        case setup_validation_resource(
+               resource,
+               force_dependency_snapshot_failure,
+               setup_opts
+             ) do
           {:ok, resource} ->
             {:ok, resource, put_validation_resource(state, resource)}
 
@@ -816,6 +863,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          candidate_commit,
          cleanup_failures
        ) do
+    candidate_runtime = Path.join(root_path, "candidate-runtime")
+    base_runtime = Path.join(root_path, "base-runtime")
+    stage_parent = Path.join(root_path, "staging")
+
     %{
       resource_id: resource_id,
       workspace_id: lease.workspace_id,
@@ -830,29 +881,166 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       candidate_commit: candidate_commit,
       base_commit: lease.base_commit,
       root_path: root_path,
-      stage_path: Path.join(root_path, "staged"),
-      candidate_build_path: Path.join(root_path, "build-candidate"),
-      candidate_deps_path: Path.join(root_path, "deps-candidate"),
-      base_build_path: Path.join(root_path, "build-base"),
-      base_deps_path: Path.join(root_path, "deps-base"),
+      # Parent is private/owned; exact stage_path child is created exclusively by
+      # SecurityRegression.Shell.stage_sources/2 (must not pre-exist).
+      stage_parent_path: stage_parent,
+      stage_path: Path.join(stage_parent, "tests"),
+      candidate_runtime_path: candidate_runtime,
+      candidate_home_path: Path.join(candidate_runtime, "home"),
+      candidate_tmp_path: Path.join(candidate_runtime, "tmp"),
+      candidate_build_path: Path.join(candidate_runtime, "build"),
+      candidate_deps_path: Path.join(candidate_runtime, "deps"),
+      candidate_runner_path: Path.join(candidate_runtime, "runner.exs"),
+      candidate_result_path: Path.join(candidate_runtime, "result.etf"),
+      base_runtime_path: base_runtime,
+      base_home_path: Path.join(base_runtime, "home"),
+      base_tmp_path: Path.join(base_runtime, "tmp"),
+      base_build_path: Path.join(base_runtime, "build"),
+      base_deps_path: Path.join(base_runtime, "deps"),
       base_worktree_path: Path.join(root_path, "base"),
-      runner_path: Path.join(root_path, "runner.exs"),
-      candidate_result_path: Path.join(root_path, "candidate-result.etf"),
-      base_result_path: Path.join(root_path, "base-result.etf"),
+      base_runner_path: Path.join(base_runtime, "runner.exs"),
+      base_result_path: Path.join(base_runtime, "result.etf"),
+      # Candidate-leg aliases for existing callers.
+      home_path: Path.join(candidate_runtime, "home"),
+      tmp_path: Path.join(candidate_runtime, "tmp"),
+      runner_path: Path.join(candidate_runtime, "runner.exs"),
       snapshot_created: false,
       setup_status: :active,
       cleanup_failures_remaining: cleanup_failures
     }
   end
 
-  defp setup_validation_resource(resource, force_dependency_snapshot_failure) do
-    with {:ok, _candidate_path} <-
+  defp setup_validation_resource(resource, force_dependency_snapshot_failure, setup_opts) do
+    snapshot_opts = snapshot_opts_from(setup_opts)
+
+    with :ok <- check_deadline(setup_opts),
+         :ok <- create_private_validation_directories(resource),
+         :ok <- check_deadline(setup_opts),
+         {:ok, _candidate_path} <-
            create_candidate_snapshot_from_resource(resource),
+         :ok <- check_deadline(setup_opts),
          :ok <- maybe_force_dependency_snapshot_failure(force_dependency_snapshot_failure),
          :ok <-
-           snapshot_dependencies(resource.repo_path, resource.candidate_deps_path),
-         :ok <- snapshot_dependencies(resource.repo_path, resource.base_deps_path) do
+           snapshot_dependency_tree(
+             resource.repo_path,
+             resource.candidate_deps_path,
+             snapshot_opts
+           ),
+         :ok <- check_deadline(setup_opts),
+         :ok <-
+           snapshot_dependency_tree(resource.repo_path, resource.base_deps_path, snapshot_opts),
+         :ok <- force_private_top_boundaries(resource) do
       {:ok, resource}
+    end
+  end
+
+  defp snapshot_opts_from(opts) when is_list(opts) do
+    bounds = Keyword.get(opts, :snapshot_bounds) || %{}
+
+    [
+      deadline_ms: Keyword.get(opts, :deadline_ms) || Map.get(opts[:caller] || %{}, :deadline_ms),
+      max_entries:
+        Map.get(bounds, :max_entries) || Map.get(bounds, "max_entries") ||
+          @default_snapshot_max_entries,
+      max_bytes:
+        Map.get(bounds, :max_bytes) || Map.get(bounds, "max_bytes") ||
+          @default_snapshot_max_bytes,
+      max_depth:
+        Map.get(bounds, :max_depth) || Map.get(bounds, "max_depth") ||
+          @default_snapshot_max_depth
+    ]
+  end
+
+  defp snapshot_opts_from(opts) when is_map(opts) do
+    snapshot_opts_from(Map.to_list(opts))
+  end
+
+  defp setup_opts_from_caller(caller) when is_map(caller) do
+    [
+      deadline_ms: Map.get(caller, :deadline_ms) || Map.get(caller, "deadline_ms"),
+      snapshot_bounds:
+        Map.get(caller, :snapshot_bounds) || Map.get(caller, "snapshot_bounds") || %{}
+    ]
+  end
+
+  defp setup_opts_from_caller(_), do: []
+
+  defp create_private_validation_directories(resource) do
+    # Independent per-revision private roots (0700). Do NOT create stage_path —
+    # stage_sources/2 creates that exact child exclusively. Only its parent.
+    private_dirs = [
+      resource.stage_parent_path,
+      resource.candidate_runtime_path,
+      resource.candidate_home_path,
+      resource.candidate_tmp_path,
+      resource.candidate_build_path,
+      resource.candidate_deps_path,
+      resource.base_runtime_path,
+      resource.base_home_path,
+      resource.base_tmp_path,
+      resource.base_build_path,
+      resource.base_deps_path
+    ]
+
+    Enum.reduce_while(private_dirs, :ok, fn path, :ok ->
+      case ensure_private_directory(path) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp force_private_top_boundaries(resource) do
+    Enum.reduce_while(
+      [
+        resource.root_path,
+        resource.stage_parent_path,
+        resource.candidate_runtime_path,
+        resource.candidate_home_path,
+        resource.candidate_tmp_path,
+        resource.candidate_build_path,
+        resource.candidate_deps_path,
+        resource.base_runtime_path,
+        resource.base_home_path,
+        resource.base_tmp_path,
+        resource.base_build_path,
+        resource.base_deps_path
+      ],
+      :ok,
+      fn path, :ok ->
+        case File.chmod(path, 0o700) do
+          :ok ->
+            {:cont, :ok}
+
+          {:error, reason} ->
+            {:halt, {:error, {:validation_private_dir_chmod_failed, path, reason}}}
+        end
+      end
+    )
+  end
+
+  defp ensure_private_directory(path) when is_binary(path) do
+    case File.mkdir(path) do
+      :ok ->
+        case File.chmod(path, 0o700) do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:validation_private_dir_chmod_failed, path, reason}}
+        end
+
+      {:error, :eexist} ->
+        case File.lstat(path) do
+          {:ok, %File.Stat{type: :directory}} ->
+            case File.chmod(path, 0o700) do
+              :ok -> :ok
+              {:error, reason} -> {:error, {:validation_private_dir_chmod_failed, path, reason}}
+            end
+
+          _ ->
+            {:error, {:validation_private_dir_invalid, path}}
+        end
+
+      {:error, reason} ->
+        {:error, {:validation_private_dir_create_failed, path, reason}}
     end
   end
 
@@ -879,18 +1067,26 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp snapshot_dependencies(repo_path, destination) do
+  defp snapshot_dependencies(repo_path, destination, opts) do
     source = Path.join(repo_path, "deps")
 
     cond do
       not File.dir?(source) ->
-        File.mkdir(destination)
+        ensure_private_directory(destination)
 
       true ->
-        with :ok <- copy_dependency_tree(source, destination),
-             :ok <- verify_snapshot_symlinks(destination) do
+        _ = if File.dir?(destination), do: :ok, else: File.mkdir(destination)
+
+        with :ok <- check_deadline(opts),
+             :ok <- prepare_destination_for_copy(destination),
+             :ok <- copy_dependency_tree(source, destination, opts),
+             :ok <- check_deadline(opts),
+             :ok <- verify_snapshot_symlinks(destination),
+             :ok <- File.chmod(destination, 0o700) do
           :ok
         else
+          {:error, :operation_deadline_exceeded} = error -> error
+          {:error, :snapshot_bounds_exceeded} = error -> error
           _ -> {:error, :dependency_snapshot_failed}
         end
     end
@@ -898,63 +1094,495 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     _ -> {:error, :dependency_snapshot_failed}
   end
 
-  defp maybe_force_dependency_snapshot_failure(true), do: {:error, :dependency_snapshot_failed}
-  defp maybe_force_dependency_snapshot_failure(_), do: :ok
+  defp prepare_destination_for_copy(destination) do
+    case File.ls(destination) do
+      {:ok, []} ->
+        case File.rmdir(destination) do
+          :ok -> :ok
+          {:error, :enoent} -> :ok
+          other -> other
+        end
 
-  defp copy_dependency_tree(source, destination) do
-    with {:ok, %File.Stat{type: :directory} = stat} <- File.lstat(source),
-         {:ok, source_root} <- canonical_existing_path(source),
-         :ok <- File.mkdir(destination),
-         :ok <- File.chmod(destination, permission_bits(stat.mode)),
-         :ok <- copy_dependency_children(source_root, source, destination) do
-      :ok
-    else
-      other -> {:error, {:copy_dependency_tree_failed, other}}
+      {:ok, _} ->
+        {:error, :destination_not_empty}
+
+      {:error, :enoent} ->
+        :ok
+
+      other ->
+        other
     end
   end
 
-  defp copy_dependency_children(source_root, source, destination) do
-    source
-    |> File.ls!()
-    |> Enum.reduce_while(:ok, fn name, :ok ->
-      source_path = Path.join(source, name)
-      destination_path = Path.join(destination, name)
+  defp maybe_force_dependency_snapshot_failure(true), do: {:error, :dependency_snapshot_failed}
+  defp maybe_force_dependency_snapshot_failure(_), do: :ok
 
-      case File.lstat(source_path) do
-        {:ok, %File.Stat{type: :directory} = stat} ->
-          with :ok <- File.mkdir(destination_path),
-               :ok <- File.chmod(destination_path, permission_bits(stat.mode)),
-               :ok <- copy_dependency_children(source_root, source_path, destination_path) do
-            {:cont, :ok}
+  @snapshot_copy_chunk 65_536
+
+  defp copy_dependency_tree(source, destination, opts) do
+    budget = %{
+      entries: 0,
+      bytes: 0,
+      max_entries: Keyword.get(opts, :max_entries, @default_snapshot_max_entries),
+      max_bytes: Keyword.get(opts, :max_bytes, @default_snapshot_max_bytes),
+      max_depth: Keyword.get(opts, :max_depth, @default_snapshot_max_depth),
+      deadline_ms: Keyword.get(opts, :deadline_ms)
+    }
+
+    result =
+      with {:ok, %File.Stat{type: :directory}} <- File.lstat(source, time: :posix),
+           {:ok, source_root} <- canonical_existing_path(source),
+           :ok <- File.mkdir(destination),
+           :ok <- File.chmod(destination, 0o700),
+           {:ok, _budget} <-
+             copy_dependency_children(source_root, source, destination, budget, 0) do
+        :ok
+      else
+        {:error, :operation_deadline_exceeded} = error -> error
+        {:error, :snapshot_bounds_exceeded} = error -> error
+        other -> {:error, {:copy_dependency_tree_failed, other}}
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, _} = error ->
+        _ = File.rm_rf(destination)
+        error
+    end
+  end
+
+  defp copy_dependency_children(source_root, source, destination, budget, depth) do
+    if depth > budget.max_depth do
+      {:error, :snapshot_bounds_exceeded}
+    else
+      case check_deadline(deadline_ms: budget.deadline_ms) do
+        :ok ->
+          do_copy_dependency_children(source_root, source, destination, budget, depth)
+
+        error ->
+          error
+      end
+    end
+  end
+
+  # Bounded directory walk: fail closed as soon as the entry budget would be
+  # exceeded rather than fully processing an unbounded listing. Erlang's
+  # list_dir still materializes one directory's names; we cap by length before
+  # recursion and process only up to the remaining entry budget.
+  #
+  # Residual stdlib race limitation: Elixir/Erlang File APIs do not expose
+  # openat(2)/O_NOFOLLOW directory file-descriptor traversal. Walks therefore
+  # re-resolve path strings between list_dir and each child open. We capture
+  # directory identity + canonical-within-root before listing, recheck after
+  # listing, recheck before each child, and recheck again after the final
+  # child. Any mismatch fails closed. This reduces but cannot eliminate
+  # TOCTOU against a concurrent renamer between the recheck and the next
+  # path-based open while openat-style traversal is unavailable in the stdlib.
+  # Path and descriptor stats use `time: :posix` so mode/mtime/ctime compare
+  # as integers; posix times remain second-resolution on this stack.
+  defp do_copy_dependency_children(source_root, source, destination, budget, depth) do
+    remaining_entries = budget.max_entries - budget.entries
+
+    if remaining_entries <= 0 do
+      {:error, :snapshot_bounds_exceeded}
+    else
+      with {:ok, %File.Stat{type: :directory} = before_dir} <-
+             File.lstat(source, time: :posix),
+           {:ok, before_canon} <- canonical_existing_path(source),
+           true <- path_within?(before_canon, source_root),
+           before_identity <- snapshot_dir_identity(before_dir),
+           {:ok, name_chars} <- :file.list_dir(String.to_charlist(source)),
+           {:ok, %File.Stat{type: :directory} = after_dir} <-
+             File.lstat(source, time: :posix),
+           true <- snapshot_dir_identity(after_dir) == before_identity,
+           {:ok, after_canon} <- canonical_existing_path(source),
+           true <- after_canon == before_canon,
+           true <- path_within?(after_canon, source_root) do
+        if length(name_chars) > remaining_entries do
+          {:error, :snapshot_bounds_exceeded}
+        else
+          names =
+            name_chars
+            |> Enum.take(min(length(name_chars), remaining_entries + 1))
+            |> Enum.map(&List.to_string/1)
+
+          if length(names) > remaining_entries do
+            {:error, :snapshot_bounds_exceeded}
           else
-            other -> {:halt, {:error, {:dependency_directory_copy_failed, other}}}
-          end
+            reduce_result =
+              Enum.reduce_while(names, {:ok, budget}, fn name, {:ok, acc} ->
+                with {:ok, %File.Stat{type: :directory} = mid_dir} <-
+                       File.lstat(source, time: :posix),
+                     true <- snapshot_dir_identity(mid_dir) == before_identity,
+                     {:ok, mid_canon} <- canonical_existing_path(source),
+                     true <- mid_canon == before_canon do
+                  case copy_one_dependency_child(
+                         source_root,
+                         source,
+                         destination,
+                         name,
+                         acc,
+                         depth
+                       ) do
+                    {:ok, next} -> {:cont, {:ok, next}}
+                    {:error, _} = error -> {:halt, error}
+                  end
+                else
+                  false ->
+                    {:halt, {:error, :snapshot_directory_identity_changed}}
 
-        {:ok, %File.Stat{type: :regular} = stat} ->
-          case File.copy(source_path, destination_path) do
-            {:ok, _bytes} ->
-              case File.chmod(destination_path, permission_bits(stat.mode)) do
-                :ok -> {:cont, :ok}
-                other -> {:halt, {:error, {:dependency_file_mode_failed, other}}}
-              end
+                  {:error, reason} ->
+                    {:halt, {:error, reason}}
 
-            other ->
-              {:halt, {:error, {:dependency_file_copy_failed, other}}}
-          end
+                  other ->
+                    {:halt, {:error, {:dependency_directory_recheck_failed, other}}}
+                end
+              end)
 
-        {:ok, %File.Stat{type: :symlink}} ->
-          case copy_dependency_symlink(source_root, source_path, destination_path) do
-            :ok -> {:cont, :ok}
-            other -> {:halt, {:error, {:dependency_symlink_copy_failed, other}}}
+            # Post-final-child recheck: the per-child guard only runs *before*
+            # each child; after the last child we must revalidate identity and
+            # canonical-within-root once more before accepting the budget.
+            case reduce_result do
+              {:ok, final_budget} ->
+                recheck_dependency_directory_after_children(
+                  source_root,
+                  source,
+                  before_identity,
+                  before_canon,
+                  final_budget
+                )
+
+              {:error, _} = error ->
+                error
+            end
           end
+        end
+      else
+        false ->
+          {:error, :snapshot_directory_identity_changed}
+
+        {:error, reason} ->
+          {:error, {:dependency_list_failed, reason}}
 
         other ->
-          {:halt, {:error, {:dependency_stat_failed, other}}}
+          {:error, {:dependency_list_failed, other}}
       end
-    end)
+    end
   rescue
     _ -> {:error, :dependency_snapshot_failed}
   end
+
+  defp recheck_dependency_directory_after_children(
+         source_root,
+         source,
+         before_identity,
+         before_canon,
+         final_budget
+       ) do
+    with :ok <- check_deadline(deadline_ms: final_budget.deadline_ms),
+         {:ok, %File.Stat{type: :directory} = final_dir} <-
+           File.lstat(source, time: :posix),
+         true <- snapshot_dir_identity(final_dir) == before_identity,
+         {:ok, final_canon} <- canonical_existing_path(source),
+         true <- final_canon == before_canon,
+         true <- path_within?(final_canon, source_root) do
+      {:ok, final_budget}
+    else
+      false ->
+        {:error, :snapshot_directory_identity_changed}
+
+      {:error, :operation_deadline_exceeded} = error ->
+        error
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:dependency_directory_recheck_failed, other}}
+    end
+  end
+
+  defp copy_one_dependency_child(source_root, source, destination, name, budget, depth) do
+    with :ok <- check_deadline(deadline_ms: budget.deadline_ms),
+         true <- budget.entries < budget.max_entries || {:error, :snapshot_bounds_exceeded} do
+      source_path = Path.join(source, name)
+      destination_path = Path.join(destination, name)
+      budget = %{budget | entries: budget.entries + 1}
+
+      case File.lstat(source_path, time: :posix) do
+        {:ok, %File.Stat{type: :directory} = stat} ->
+          with :ok <- File.mkdir(destination_path),
+               :ok <- File.chmod(destination_path, permission_bits(stat.mode)),
+               {:ok, next} <-
+                 copy_dependency_children(
+                   source_root,
+                   source_path,
+                   destination_path,
+                   budget,
+                   depth + 1
+                 ) do
+            {:ok, next}
+          else
+            {:error, _} = error -> error
+            other -> {:error, {:dependency_directory_copy_failed, other}}
+          end
+
+        {:ok, %File.Stat{type: :regular} = before_stat} ->
+          copy_regular_file_bounded(source_path, destination_path, before_stat, budget)
+
+        {:ok, %File.Stat{type: :symlink}} ->
+          case copy_dependency_symlink(source_root, source_path, destination_path) do
+            :ok -> {:ok, budget}
+            other -> {:error, {:dependency_symlink_copy_failed, other}}
+          end
+
+        other ->
+          {:error, {:dependency_stat_failed, other}}
+      end
+    end
+  end
+
+  defp copy_regular_file_bounded(source_path, destination_path, before_stat, budget) do
+    size = max(before_stat.size || 0, 0)
+
+    cond do
+      budget.bytes + size > budget.max_bytes ->
+        {:error, :snapshot_bounds_exceeded}
+
+      true ->
+        case check_deadline(deadline_ms: budget.deadline_ms) do
+          :ok ->
+            do_copy_regular_file_bounded(source_path, destination_path, before_stat, budget, size)
+
+          error ->
+            error
+        end
+    end
+  end
+
+  defp do_copy_regular_file_bounded(source_path, destination_path, before_stat, budget, size) do
+    # Open once; validate identity from the opened descriptor (not a post-open
+    # path lstat), copy in bounded chunks, and close every descriptor on every
+    # outcome.
+    case :file.open(String.to_charlist(source_path), [:read, :raw, :binary]) do
+      {:ok, src} ->
+        try do
+          copy_opened_dependency_file(
+            src,
+            source_path,
+            destination_path,
+            before_stat,
+            budget,
+            size
+          )
+        after
+          _ = :file.close(src)
+        end
+
+      other ->
+        _ = File.rm(destination_path)
+        {:error, {:dependency_file_copy_failed, other}}
+    end
+  rescue
+    _ ->
+      _ = File.rm(destination_path)
+      {:error, :dependency_snapshot_failed}
+  end
+
+  defp copy_opened_dependency_file(src, _source_path, destination_path, before_stat, budget, size) do
+    with {:ok, %File.Stat{type: :regular} = opened_stat} <- descriptor_file_stat(src),
+         true <- snapshot_file_identity(before_stat) == snapshot_file_identity(opened_stat),
+         true <- opened_stat.size == size,
+         {:ok, dst} <-
+           :file.open(String.to_charlist(destination_path), [
+             :write,
+             :raw,
+             :binary,
+             :exclusive
+           ]) do
+      try do
+        with {:ok, copied} <-
+               copy_file_chunks(
+                 src,
+                 dst,
+                 size,
+                 budget.bytes,
+                 budget.max_bytes,
+                 budget.deadline_ms
+               ),
+             {:ok, %File.Stat{type: :regular} = after_stat} <- descriptor_file_stat(src),
+             true <- snapshot_file_identity(before_stat) == snapshot_file_identity(after_stat),
+             true <- after_stat.size == size,
+             :ok <- File.chmod(destination_path, permission_bits(before_stat.mode)) do
+          {:ok, %{budget | bytes: budget.bytes + copied}}
+        else
+          false ->
+            _ = File.rm(destination_path)
+            {:error, :snapshot_source_identity_changed}
+
+          {:error, :operation_deadline_exceeded} = error ->
+            _ = File.rm(destination_path)
+            error
+
+          {:error, :snapshot_bounds_exceeded} = error ->
+            _ = File.rm(destination_path)
+            error
+
+          other ->
+            _ = File.rm(destination_path)
+            {:error, {:dependency_file_copy_failed, other}}
+        end
+      after
+        _ = :file.close(dst)
+      end
+    else
+      false ->
+        _ = File.rm(destination_path)
+        {:error, :snapshot_source_identity_changed}
+
+      {:error, reason} ->
+        _ = File.rm(destination_path)
+        {:error, {:dependency_file_copy_failed, reason}}
+
+      other ->
+        _ = File.rm(destination_path)
+        {:error, {:dependency_file_copy_failed, other}}
+    end
+  end
+
+  defp descriptor_file_stat(io_device) do
+    case :file.read_file_info(io_device, time: :posix) do
+      {:ok, info} -> {:ok, File.Stat.from_record(info)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Directory identity for walk TOCTOU checks. Requires `time: :posix` on the
+  # path lstat so mtime/ctime are integers comparable to any descriptor stats.
+  # Residual: second-resolution times + no openat(2) in the stdlib.
+  defp snapshot_dir_identity(%File.Stat{} = stat) do
+    {
+      snapshot_device_id(stat),
+      Map.get(stat, :minor_device),
+      stat.inode,
+      stat.type,
+      stat.mode,
+      stat.mtime,
+      stat.ctime
+    }
+  end
+
+  defp copy_file_chunks(src, dst, expected_size, bytes_so_far, max_bytes, deadline_ms) do
+    copy_file_chunks_loop(src, dst, expected_size, 0, bytes_so_far, max_bytes, deadline_ms)
+  end
+
+  defp copy_file_chunks_loop(
+         _src,
+         _dst,
+         expected_size,
+         copied,
+         _bytes_so_far,
+         _max_bytes,
+         _deadline
+       )
+       when copied == expected_size do
+    {:ok, copied}
+  end
+
+  defp copy_file_chunks_loop(
+         src,
+         dst,
+         expected_size,
+         copied,
+         bytes_so_far,
+         max_bytes,
+         deadline_ms
+       ) do
+    with :ok <- check_deadline(deadline_ms: deadline_ms),
+         true <- bytes_so_far + copied <= max_bytes || {:error, :snapshot_bounds_exceeded} do
+      to_read = min(@snapshot_copy_chunk, expected_size - copied)
+
+      case :file.read(src, to_read) do
+        {:ok, data} when is_binary(data) and byte_size(data) > 0 ->
+          case :file.write(dst, data) do
+            :ok ->
+              copy_file_chunks_loop(
+                src,
+                dst,
+                expected_size,
+                copied + byte_size(data),
+                bytes_so_far,
+                max_bytes,
+                deadline_ms
+              )
+
+            other ->
+              {:error, {:dependency_file_write_failed, other}}
+          end
+
+        :eof when copied == expected_size ->
+          {:ok, copied}
+
+        :eof ->
+          # Growing or truncated mid-read — fail closed.
+          {:error, :snapshot_source_size_changed}
+
+        other ->
+          {:error, {:dependency_file_read_failed, other}}
+      end
+    end
+  end
+
+  # Stable identity across path lstat and descriptor fstat. Path lstat and
+  # descriptor read_file_info must both use `time: :posix` so mtime/ctime
+  # compare as integers. Includes mode/mtime/ctime in addition to
+  # device/inode/size/type.
+  #
+  # Residual limitation: no openat(2) in stdlib; posix times are second-
+  # resolution, so same-second metadata-preserving replacement is not a full
+  # hostile-runtime guarantee.
+  defp snapshot_file_identity(%File.Stat{} = stat) do
+    {
+      snapshot_device_id(stat),
+      Map.get(stat, :minor_device),
+      stat.inode,
+      stat.size,
+      stat.type,
+      stat.mode,
+      stat.mtime,
+      stat.ctime
+    }
+  end
+
+  defp snapshot_device_id(%File.Stat{} = stat) do
+    Map.get(stat, :major_device) || Map.get(stat, :device)
+  end
+
+  defp check_deadline(opts) when is_list(opts) do
+    deadline =
+      Keyword.get(opts, :deadline_ms) || Keyword.get(opts, :deadline)
+
+    case deadline do
+      nil ->
+        :ok
+
+      ms when is_integer(ms) ->
+        if System.monotonic_time(:millisecond) < ms,
+          do: :ok,
+          else: {:error, :operation_deadline_exceeded}
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp check_deadline(opts) when is_map(opts) do
+    check_deadline(Map.to_list(opts))
+  end
+
+  defp check_deadline(_), do: :ok
 
   defp copy_dependency_symlink(source_root, source_path, destination_path) do
     with {:ok, target} <- File.read_link(source_path),
@@ -1227,6 +1855,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp validation_resource_view(resource) do
+    candidate_home =
+      Map.get(resource, :candidate_home_path) || Map.get(resource, :home_path)
+
+    candidate_tmp = Map.get(resource, :candidate_tmp_path) || Map.get(resource, :tmp_path)
+
+    candidate_runner =
+      Map.get(resource, :candidate_runner_path) || Map.get(resource, :runner_path)
+
     %{
       resource_id: resource.resource_id,
       workspace_id: resource.workspace_id,
@@ -1235,15 +1871,26 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       candidate_commit: resource.candidate_commit,
       base_commit: resource.base_commit,
       root_path: resource.root_path,
+      stage_parent_path: Map.get(resource, :stage_parent_path),
       stage_path: resource.stage_path,
+      candidate_runtime_path: Map.get(resource, :candidate_runtime_path),
+      candidate_home_path: candidate_home,
+      candidate_tmp_path: candidate_tmp,
       candidate_build_path: resource.candidate_build_path,
       candidate_deps_path: resource.candidate_deps_path,
+      candidate_runner_path: candidate_runner,
+      candidate_result_path: resource.candidate_result_path,
+      base_runtime_path: Map.get(resource, :base_runtime_path),
+      base_home_path: Map.get(resource, :base_home_path),
+      base_tmp_path: Map.get(resource, :base_tmp_path),
       base_build_path: resource.base_build_path,
       base_deps_path: resource.base_deps_path,
       base_worktree_path: resource.base_worktree_path,
-      runner_path: resource.runner_path,
-      candidate_result_path: resource.candidate_result_path,
+      base_runner_path: Map.get(resource, :base_runner_path),
       base_result_path: resource.base_result_path,
+      home_path: candidate_home,
+      tmp_path: candidate_tmp,
+      runner_path: candidate_runner,
       snapshot_created: resource.snapshot_created,
       setup_status: Atom.to_string(resource.setup_status),
       active: true
@@ -1258,13 +1905,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp create_validation_root(workspace_id, attempts) do
     token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
     workspace_hash = sha256(workspace_id) |> binary_part(0, 12)
-    resource_id = "security_regression_" <> token
+    resource_id = "validation_" <> token
 
     with {:ok, tmp_root} <- SafePath.resolve_real(System.tmp_dir!()) do
       root_path =
         Path.join(
           tmp_root,
-          "arbor-security-regression-#{workspace_hash}-#{token}"
+          "arbor-validation-#{workspace_hash}-#{token}"
         )
 
       case File.mkdir(root_path) do
@@ -1616,7 +2263,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           Keyword.get(opts, :force_cleanup_failure_once)
         ),
       force_partial_cleanup_failure_once:
-        Keyword.get(opts, :force_partial_cleanup_failure_once) == true
+        Keyword.get(opts, :force_partial_cleanup_failure_once) == true,
+      deadline_ms: Keyword.get(opts, :deadline_ms),
+      snapshot_bounds: Keyword.get(opts, :snapshot_bounds) || %{}
     }
 
     {server_opts, caller}
@@ -1652,7 +2301,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         ),
       force_partial_cleanup_failure_once:
         Map.get(opts, :force_partial_cleanup_failure_once) == true ||
-          Map.get(opts, "force_partial_cleanup_failure_once") == true
+          Map.get(opts, "force_partial_cleanup_failure_once") == true,
+      deadline_ms: Map.get(opts, :deadline_ms) || Map.get(opts, "deadline_ms"),
+      snapshot_bounds: Map.get(opts, :snapshot_bounds) || Map.get(opts, "snapshot_bounds") || %{}
     }
 
     {server, caller}

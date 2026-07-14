@@ -79,9 +79,7 @@ defmodule Arbor.Actions.CodingTest do
                    base_ref: base_branch,
                    branch_name: "test/coding-agent",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: [
-                     "./bin/mix test apps/arbor_actions/test/arbor/actions/coding_test.exs"
-                   ],
+                   validation_commands: ["true"],
                    pr_title: "",
                    submit_review: false
                  },
@@ -114,7 +112,7 @@ defmodule Arbor.Actions.CodingTest do
 
       assert_receive {:validation, validation_params}
       assert validation_params.cwd == result.worktree_path
-      assert validation_params.command =~ "./bin/mix test"
+      assert validation_params.command == "true"
 
       refute_received {:unexpected_pr, _}
     end
@@ -166,9 +164,7 @@ defmodule Arbor.Actions.CodingTest do
                    base_ref: base_branch,
                    branch_name: "test/coding-handle-first",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: [
-                     "./bin/mix test apps/arbor_actions/test/arbor/actions/coding_test.exs"
-                   ],
+                   validation_commands: ["true"],
                    pr_title: "",
                    submit_review: false
                  },
@@ -236,6 +232,61 @@ defmodule Arbor.Actions.CodingTest do
       assert_receive {:mix_compile_validation, validation_params}
       assert validation_params.path == result.worktree_path
       assert validation_params.warnings_as_errors == true
+      assert validation_params.timeout == 300_000
+
+      refute_received {:unexpected_shell_validation, _}
+    end
+
+    test "routes requested mix test validation through schema-bounded Mix action",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+      test_path = "apps/arbor_actions/test/arbor/actions/coding_test.exs"
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        MixActions.Test, params, _context ->
+          send(parent, {:mix_test_validation, params})
+          {:ok, %{exit_code: 0, stdout: "tested\n", stderr: ""}}
+
+        Shell.Execute, params, _context ->
+          send(parent, {:unexpected_shell_validation, params})
+          {:ok, %{exit_code: 0, stdout: "shell\n", stderr: ""}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/explicit-mix-test-validation",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["./bin/mix test #{test_path}"],
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "change_committed"
+
+      assert_receive {:mix_test_validation, validation_params}
+      assert validation_params.path == result.worktree_path
+      assert validation_params.test_paths == [test_path]
+      assert is_binary(validation_params.workspace_id)
       assert validation_params.timeout == 300_000
 
       refute_received {:unexpected_shell_validation, _}
@@ -340,6 +391,91 @@ defmodule Arbor.Actions.CodingTest do
       assert start_params.cwd == result.worktree_path
     end
 
+    test "security regression: public ProduceReviewableChange fails closed on source mutation after candidate creation",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
+      # Acquire-base commit: worktree HEAD must remain here if mutation blocks commit.
+      base_commit = git!(repo, ["rev-parse", "HEAD"])
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, params, _context ->
+          # Mutate the would-be commit tree during validation (public flow).
+          File.write!(
+            Path.join(params.cwd, "feature.txt"),
+            "mutated-by-validation-command\n"
+          )
+
+          send(parent, {:validation_mutated, params.cwd})
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        Git.Commit, params, _context ->
+          send(parent, {:unexpected_commit, params})
+          {:ok, %{commit_hash: "deadbeef", message: params[:message] || "x"}}
+
+        Git.PR, params, _context ->
+          send(parent, {:unexpected_pr, params})
+          {:ok, %{url: "https://example.test/pr/unexpected"}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   base_ref: base_branch,
+                   branch_name: "test/validation-tree-mutated",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["true"],
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      # Exact public status — not a weaker "not success" that can pass when an
+      # unrelated earlier failure short-circuits the mutation path.
+      assert result.status == "validation_failed"
+
+      # Do not use `||` for `passed` — `false || other` discards the intentional false.
+      assert Enum.any?(List.wrap(result.validation), fn
+               %{command: "validation_tree_binding", passed: false} -> true
+               %{"command" => "validation_tree_binding", "passed" => false} -> true
+               _ -> false
+             end),
+             "expected failed validation_tree_binding entry, got: #{inspect(result.validation)}"
+
+      refute Map.has_key?(result, :commit)
+      refute Map.has_key?(result, :commit_hash)
+      refute Map.has_key?(result, :pr_url)
+
+      assert_receive {:validation_mutated, worktree_path}
+      assert is_binary(worktree_path)
+      assert result.worktree_path == worktree_path
+
+      # Branch/worktree HEAD must remain the acquire base (no commit/PR).
+      assert git!(result.worktree_path, ["rev-parse", "HEAD"]) == base_commit
+      assert git!(repo, ["rev-parse", "refs/heads/test/validation-tree-mutated"]) == base_commit
+
+      refute_received {:unexpected_commit, _}
+      refute_received {:unexpected_pr, _}
+    end
+
     test "opens a draft PR through the platform-agnostic git action when requested",
          %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
@@ -376,7 +512,7 @@ defmodule Arbor.Actions.CodingTest do
                    repo_path: repo,
                    branch_name: "test/coding-agent-pr",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: ["./bin/mix test"],
+                   validation_commands: ["true"],
                    pr_title: "Add feature file",
                    open_pr: true,
                    submit_review: false
@@ -395,7 +531,9 @@ defmodule Arbor.Actions.CodingTest do
       assert pr_params.body =~ "Human review and merge are required."
     end
 
-    test "retries reuse one requested branch and reset to one review commit", %{tmp_dir: tmp_dir} do
+    test "repeated runs reactivate the retained workspace and preserve the prior commit", %{
+      tmp_dir: tmp_dir
+    } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       base_branch = git!(repo, ["branch", "--show-current"])
       parent = self()
@@ -456,7 +594,13 @@ defmodule Arbor.Actions.CodingTest do
                "test/idempotent-coding-agent"
 
       assert git!(second.worktree_path, ["rev-list", "--count", "HEAD", "^#{base_branch}"]) ==
-               "1"
+               "2"
+
+      assert git!(second.worktree_path, [
+               "rev-list",
+               "--count",
+               "#{first.commit}..#{second.commit}"
+             ]) == "1"
 
       assert File.read!(Path.join(second.worktree_path, "feature.txt")) == "implemented 2\n"
       assert_receive {:pr, %{branch: "test/idempotent-coding-agent"}}
@@ -528,7 +672,7 @@ defmodule Arbor.Actions.CodingTest do
                    repo_path: repo,
                    branch_name: "test/coding-agent-review",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: ["./bin/mix test"]
+                   validation_commands: ["true"]
                  },
                  %{action_runner: runner, agent_id: "agent_coder"}
                )
@@ -608,7 +752,7 @@ defmodule Arbor.Actions.CodingTest do
                    repo_path: repo,
                    branch_name: "test/coding-agent-human-review",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: ["./bin/mix test"],
+                   validation_commands: ["true"],
                    submit_review: true,
                    open_pr: true
                  },
@@ -680,7 +824,7 @@ defmodule Arbor.Actions.CodingTest do
                    repo_path: repo,
                    branch_name: "test/coding-agent-human-review-required",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: ["./bin/mix test"],
+                   validation_commands: ["true"],
                    submit_review: true,
                    open_pr: false
                  },
@@ -742,7 +886,7 @@ defmodule Arbor.Actions.CodingTest do
                    repo_path: repo,
                    branch_name: "test/coding-agent-review-failed",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: ["./bin/mix test"],
+                   validation_commands: ["true"],
                    submit_review: true,
                    open_pr: true
                  },
@@ -801,7 +945,7 @@ defmodule Arbor.Actions.CodingTest do
                    repo_path: repo,
                    branch_name: "test/coding-agent-pr-failed",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: ["./bin/mix test"],
+                   validation_commands: ["true"],
                    pr_title: "Add feature file",
                    open_pr: true,
                    submit_review: false
@@ -882,7 +1026,7 @@ defmodule Arbor.Actions.CodingTest do
                      repo_path: repo,
                      branch_name: branch,
                      worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                     validation_commands: ["./bin/mix test"],
+                     validation_commands: ["true"],
                      submit_review: true,
                      open_pr: true
                    },
@@ -1073,13 +1217,13 @@ defmodule Arbor.Actions.CodingTest do
                    base_ref: base_branch,
                    branch_name: "test/validation-fails",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: ["./bin/mix test"]
+                   validation_commands: ["false"]
                  },
                  %{action_runner: runner}
                )
 
       assert result.status == "validation_failed"
-      assert [%{command: "./bin/mix test", passed: false}] = result.validation
+      assert [%{command: "false", passed: false}] = result.validation
 
       assert git!(result.worktree_path, ["rev-list", "--count", "HEAD", "^#{base_branch}"]) ==
                "0"
@@ -1319,7 +1463,7 @@ defmodule Arbor.Actions.CodingTest do
                    repo_path: repo,
                    branch_name: "test/validation-output-limit-label",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: ["mix test"],
+                   validation_commands: ["true"],
                    submit_review: false
                  },
                  %{action_runner: runner}
@@ -1389,7 +1533,7 @@ defmodule Arbor.Actions.CodingTest do
                    repo_path: repo,
                    branch_name: "test/validation-generic-kill-label",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
-                   validation_commands: ["mix test"],
+                   validation_commands: ["true"],
                    submit_review: false
                  },
                  %{action_runner: runner}

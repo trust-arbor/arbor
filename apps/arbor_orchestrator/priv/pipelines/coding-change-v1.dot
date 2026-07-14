@@ -512,7 +512,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="mix_compile",
-    context_keys="path",
+    context_keys="path,workspace_id",
     param.warnings_as_errors="true",
     output_prefix="validation",
     max_retries="0"
