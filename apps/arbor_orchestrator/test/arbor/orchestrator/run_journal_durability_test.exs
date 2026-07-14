@@ -2,6 +2,9 @@ defmodule Arbor.Orchestrator.RunJournalDurabilityTest.ControllableStore do
   @moduledoc false
   use GenServer
 
+  # Store contract: durability_class/1 only. Arity-0 is neither required nor used.
+  def durability_class(_opts), do: :process_lifetime
+
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.start_link(__MODULE__, opts, name: name)
@@ -938,5 +941,436 @@ defmodule Arbor.Orchestrator.RunJournalDurabilityTest do
     assert st.durable == false
     assert st.durability_class == :process_lifetime
     assert st.fenced_claim == false
+  end
+
+  describe "durability_class ceiling/intersection table" do
+    # Code-owned capability via durability_class/1; configured :durability_class
+    # is a ceiling only — never elevation. Order:
+    # volatile < process_lifetime < application_restart < node_restart
+
+    defmodule CapabilityStore do
+      @moduledoc false
+      use GenServer
+
+      def start_link(opts) do
+        name = Keyword.fetch!(opts, :name)
+        class = Keyword.get(opts, :class, :process_lifetime)
+        GenServer.start_link(__MODULE__, class, name: name)
+      end
+
+      def durability_class(opts) do
+        name = Keyword.fetch!(opts, :name)
+        GenServer.call(name, :durability_class)
+      end
+
+      def put(key, value, opts) do
+        GenServer.call(Keyword.fetch!(opts, :name), {:put, key, value})
+      end
+
+      def get(key, opts) do
+        GenServer.call(Keyword.fetch!(opts, :name), {:get, key})
+      end
+
+      def list(opts) do
+        GenServer.call(Keyword.fetch!(opts, :name), :list)
+      end
+
+      def delete(key, opts) do
+        GenServer.call(Keyword.fetch!(opts, :name), {:delete, key})
+      end
+
+      @impl true
+      def init(class), do: {:ok, %{class: class, data: %{}}}
+
+      @impl true
+      def handle_call(:durability_class, _from, state), do: {:reply, state.class, state}
+
+      def handle_call({:put, key, value}, _from, state) do
+        {:reply, :ok, %{state | data: Map.put(state.data, key, value)}}
+      end
+
+      def handle_call({:get, key}, _from, state) do
+        case Map.fetch(state.data, key) do
+          {:ok, v} -> {:reply, {:ok, v}, state}
+          :error -> {:reply, {:error, :not_found}, state}
+        end
+      end
+
+      def handle_call(:list, _from, state), do: {:reply, {:ok, Map.keys(state.data)}, state}
+
+      def handle_call({:delete, key}, _from, state) do
+        {:reply, :ok, %{state | data: Map.delete(state.data, key)}}
+      end
+    end
+
+    defmodule ArityZeroOnlyStore do
+      @moduledoc false
+      # Proves arity-0 durability_class is neither required nor used.
+      use GenServer
+
+      def durability_class, do: :node_restart
+
+      def start_link(opts) do
+        name = Keyword.fetch!(opts, :name)
+        GenServer.start_link(__MODULE__, %{}, name: name)
+      end
+
+      def put(key, value, opts) do
+        GenServer.call(Keyword.fetch!(opts, :name), {:put, key, value})
+      end
+
+      def get(key, opts) do
+        GenServer.call(Keyword.fetch!(opts, :name), {:get, key})
+      end
+
+      def list(opts) do
+        GenServer.call(Keyword.fetch!(opts, :name), :list)
+      end
+
+      def delete(key, opts) do
+        GenServer.call(Keyword.fetch!(opts, :name), {:delete, key})
+      end
+
+      @impl true
+      def init(_), do: {:ok, %{data: %{}}}
+
+      @impl true
+      def handle_call({:put, key, value}, _from, state) do
+        {:reply, :ok, %{state | data: Map.put(state.data, key, value)}}
+      end
+
+      def handle_call({:get, key}, _from, state) do
+        case Map.fetch(state.data, key) do
+          {:ok, v} -> {:reply, {:ok, v}, state}
+          :error -> {:reply, {:error, :not_found}, state}
+        end
+      end
+
+      def handle_call(:list, _from, state), do: {:reply, {:ok, Map.keys(state.data)}, state}
+
+      def handle_call({:delete, key}, _from, state) do
+        {:reply, :ok, %{state | data: Map.delete(state.data, key)}}
+      end
+    end
+
+    defp start_class_journal(backend, store_opts, journal_opts) do
+      suffix = System.unique_integer([:positive, :monotonic])
+      store_name = :"rj_cap_store_#{suffix}"
+      journal_name = :"rj_cap_journal_#{suffix}"
+      ets_table = :"rj_cap_hot_#{suffix}"
+
+      # Unique child ids — module-default id collides when starting multiple
+      # CapabilityStore fixtures in one test.
+      {:ok, _} =
+        start_supervised(%{
+          id: store_name,
+          start: {backend, :start_link, [Keyword.put(store_opts, :name, store_name)]}
+        })
+
+      {:ok, _} =
+        start_supervised(%{
+          id: journal_name,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_name,
+                 ets_table: ets_table,
+                 backend: backend,
+                 store_name: store_name,
+                 start_store: false
+               ] ++ journal_opts
+             ]}
+        })
+
+      {journal_name, store_name}
+    end
+
+    test "no configured ceiling uses backend capability" do
+      {j, _} = start_class_journal(CapabilityStore, [class: :node_restart], [])
+      assert RunJournal.durability_status(server: j).durability_class == :node_restart
+
+      {j2, _} = start_class_journal(CapabilityStore, [class: :application_restart], [])
+      assert RunJournal.durability_status(server: j2).durability_class == :application_restart
+    end
+
+    test "lower ceiling lowers effective class" do
+      {j, _} =
+        start_class_journal(CapabilityStore, [class: :node_restart],
+          durability_class: :application_restart
+        )
+
+      assert RunJournal.durability_status(server: j).durability_class == :application_restart
+
+      {j2, _} =
+        start_class_journal(CapabilityStore, [class: :node_restart],
+          durability_class: :process_lifetime
+        )
+
+      st = RunJournal.durability_status(server: j2)
+      assert st.durability_class == :process_lifetime
+      assert st.durable == false
+    end
+
+    test "higher ceiling cannot elevate backend capability" do
+      {j, _} =
+        start_class_journal(CapabilityStore, [class: :process_lifetime],
+          durability_class: :node_restart
+        )
+
+      st = RunJournal.durability_status(server: j)
+      assert st.durability_class == :process_lifetime
+      assert st.durable == false
+
+      {j2, _} =
+        start_class_journal(CapabilityStore, [class: :application_restart],
+          durability_class: :node_restart
+        )
+
+      assert RunJournal.durability_status(server: j2).durability_class == :application_restart
+    end
+
+    test "unsupported or invalid capability fails closed to process_lifetime" do
+      # ControllableStore has durability_class/1 → process_lifetime; ceiling
+      # cannot raise it.
+      {j, _} =
+        start_class_journal(ControllableStore, [], durability_class: :node_restart)
+
+      assert RunJournal.durability_status(server: j).durability_class == :process_lifetime
+
+      # Arity-0 only → Persistence.supports_durability_class? is false → process_lifetime
+      {j2, _} =
+        start_class_journal(ArityZeroOnlyStore, [], durability_class: :node_restart)
+
+      st = RunJournal.durability_status(server: j2)
+      assert st.durability_class == :process_lifetime
+      assert st.durable == false
+      refute function_exported?(ArityZeroOnlyStore, :durability_class, 1)
+      assert function_exported?(ArityZeroOnlyStore, :durability_class, 0)
+
+      # Invalid declared capability value
+      {j3, _} = start_class_journal(CapabilityStore, [class: :not_a_class], [])
+      assert RunJournal.durability_status(server: j3).durability_class == :process_lifetime
+    end
+
+    test "explicit :volatile capability is preserved; ceiling may only lower" do
+      # No ceiling — preserve code-owned :volatile exactly.
+      {j, _} = start_class_journal(CapabilityStore, [class: :volatile], [])
+      st = RunJournal.durability_status(server: j)
+      assert st.durability_class == :volatile
+      assert st.durable == false
+
+      # Equal ceiling leaves capability unchanged.
+      {j_eq, _} =
+        start_class_journal(CapabilityStore, [class: :volatile], durability_class: :volatile)
+
+      assert RunJournal.durability_status(server: j_eq).durability_class == :volatile
+
+      # Higher ceiling cannot elevate :volatile.
+      {j_hi, _} =
+        start_class_journal(CapabilityStore, [class: :volatile], durability_class: :node_restart)
+
+      st_hi = RunJournal.durability_status(server: j_hi)
+      assert st_hi.durability_class == :volatile
+      assert st_hi.durable == false
+
+      # Lower/equal relative to a higher capability still works with volatile
+      # as the lower bound of the ordering.
+      {j_pl, _} =
+        start_class_journal(CapabilityStore, [class: :process_lifetime],
+          durability_class: :volatile
+        )
+
+      assert RunJournal.durability_status(server: j_pl).durability_class == :volatile
+    end
+
+    test "nil backend is volatile; ETS-only journal is not crash-durable" do
+      suffix = System.unique_integer([:positive, :monotonic])
+      journal_name = :"rj_vol_journal_#{suffix}"
+      ets_table = :"rj_vol_hot_#{suffix}"
+
+      {:ok, _} =
+        start_supervised({RunJournal, name: journal_name, ets_table: ets_table, backend: nil})
+
+      st = RunJournal.durability_status(server: journal_name)
+      assert st.durability_class == :volatile
+      assert st.durable == false
+    end
+  end
+
+  describe "backend_opts reach every Persistence facade op" do
+    defmodule SentinelOptsStore do
+      @moduledoc false
+      use GenServer
+
+      @sentinel_key :opts_sentinel
+      @sentinel_value :backend_opts_required
+
+      def durability_class(opts) do
+        require_sentinel!(opts)
+        :process_lifetime
+      end
+
+      def start_link(opts) do
+        name = Keyword.fetch!(opts, :name)
+        GenServer.start_link(__MODULE__, %{}, name: name)
+      end
+
+      def put(key, value, opts) do
+        require_sentinel!(opts)
+        GenServer.call(Keyword.fetch!(opts, :name), {:put, key, value})
+      end
+
+      def get(key, opts) do
+        require_sentinel!(opts)
+        GenServer.call(Keyword.fetch!(opts, :name), {:get, key})
+      end
+
+      def list(opts) do
+        require_sentinel!(opts)
+        GenServer.call(Keyword.fetch!(opts, :name), :list)
+      end
+
+      def delete(key, opts) do
+        require_sentinel!(opts)
+        GenServer.call(Keyword.fetch!(opts, :name), {:delete, key})
+      end
+
+      @impl true
+      def init(_), do: {:ok, %{data: %{}}}
+
+      @impl true
+      def handle_call({:put, key, value}, _from, state) do
+        {:reply, :ok, %{state | data: Map.put(state.data, key, value)}}
+      end
+
+      def handle_call({:get, key}, _from, state) do
+        case Map.fetch(state.data, key) do
+          {:ok, v} -> {:reply, {:ok, v}, state}
+          :error -> {:reply, {:error, :not_found}, state}
+        end
+      end
+
+      def handle_call(:list, _from, state), do: {:reply, {:ok, Map.keys(state.data)}, state}
+
+      def handle_call({:delete, key}, _from, state) do
+        {:reply, :ok, %{state | data: Map.delete(state.data, key)}}
+      end
+
+      defp require_sentinel!(opts) do
+        unless Keyword.get(opts, @sentinel_key) == @sentinel_value do
+          raise ArgumentError,
+                "backend_opts sentinel missing or wrong: got #{inspect(Keyword.get(opts, @sentinel_key))}"
+        end
+
+        :ok
+      end
+    end
+
+    test "sentinel backend_opts are required on class/list/get/put/delete and restart" do
+      suffix = System.unique_integer([:positive, :monotonic])
+      store_name = :"rj_sent_store_#{suffix}"
+      journal_name = :"rj_sent_journal_#{suffix}"
+      ets_table = :"rj_sent_hot_#{suffix}"
+      run_id = "sentinel_run_#{suffix}"
+      backend_opts = [opts_sentinel: :backend_opts_required]
+
+      {:ok, _} =
+        start_supervised(%{
+          id: store_name,
+          start: {SentinelOptsStore, :start_link, [[name: store_name]]}
+        })
+
+      # Missing sentinel fails closed during init (durability_class and/or list probe).
+      assert {:error, _reason} =
+               start_supervised(%{
+                 id: :"#{journal_name}_bad",
+                 start:
+                   {RunJournal, :start_link,
+                    [
+                      [
+                        name: :"#{journal_name}_bad",
+                        ets_table: :"#{ets_table}_bad",
+                        backend: SentinelOptsStore,
+                        store_name: store_name,
+                        start_store: false
+                      ]
+                    ]}
+               })
+
+      {:ok, journal} =
+        start_supervised(%{
+          id: journal_name,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_name,
+                 ets_table: ets_table,
+                 backend: SentinelOptsStore,
+                 store_name: store_name,
+                 start_store: false,
+                 backend_opts: backend_opts
+               ]
+             ]}
+        })
+
+      # durability_class/1 already ran with sentinel during init.
+      st = RunJournal.durability_status(server: journal_name)
+      assert st.durability_class == :process_lifetime
+      assert st.durable == false
+
+      now = DateTime.utc_now()
+
+      record = %Record{
+        run_id: run_id,
+        pipeline_id: run_id,
+        status: :running,
+        started_at: now,
+        last_heartbeat: now,
+        owner_node: node(),
+        execution_principal: "agent_sentinel_#{suffix}"
+      }
+
+      # put through Persistence facade with backend_opts
+      assert :ok = RunJournal.put(record, server: journal_name)
+
+      assert {:ok, %Record{status: :running}} =
+               RunJournal.get_record(run_id, server: journal_name)
+
+      # delete uses Persistence.delete with backend_opts
+      assert :ok = RunJournal.delete(run_id, server: journal_name)
+      assert {:error, :not_found} = RunJournal.get_record(run_id, server: journal_name)
+
+      # Re-put for rehydrate proof
+      assert :ok = RunJournal.put(record, server: journal_name)
+
+      :ok = stop_supervised(journal_name)
+      assert :ets.info(ets_table) == :undefined
+
+      # Restart rehydrates via list + get with the same backend_opts.
+      {:ok, _journal2} =
+        start_supervised(%{
+          id: journal_name,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_name,
+                 ets_table: ets_table,
+                 backend: SentinelOptsStore,
+                 store_name: store_name,
+                 start_store: false,
+                 backend_opts: backend_opts
+               ]
+             ]}
+        })
+
+      assert {:ok, %Record{run_id: ^run_id, status: :interrupted}} =
+               RunJournal.get_record(run_id, server: journal_name)
+
+      # Keep dialyzer/unused quiet if stop was partial
+      _ = journal
+    end
   end
 end

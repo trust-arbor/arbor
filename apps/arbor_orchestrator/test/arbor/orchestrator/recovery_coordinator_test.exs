@@ -2,7 +2,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest.AppRestartStore do
   @moduledoc false
   use GenServer
 
-  def durability_class, do: :application_restart
+  # Store contract: durability_class/1 only (arity-0 is neither required nor used).
+  def durability_class(_opts), do: :application_restart
 
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
@@ -292,6 +293,161 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       assert String.starts_with?(logs_root, root)
       {:ok, real_injected} = Arbor.Common.SafePath.resolve_real(injected)
       assert root == real_injected or String.starts_with?(root, real_injected)
+    end
+
+    test "custom journal_opts server discovers and mutates only that journal" do
+      alias Arbor.Orchestrator.PipelineStatus
+      alias Arbor.Orchestrator.RunLifecycle.Record
+
+      suffix = System.unique_integer([:positive, :monotonic])
+      store_name = :"rc_custom_store_#{suffix}"
+      journal_name = :"rc_custom_journal_#{suffix}"
+      ets_table = :"rc_custom_hot_#{suffix}"
+      coord_name = :"rc_custom_coord_#{suffix}"
+      # Same run_id in both journals — proves which journal the coordinator mutates.
+      shared_run = "shared_run_#{suffix}"
+      other_global = "global_only_#{suffix}"
+      dead_owner = :"dead_owner@nohost_#{suffix}"
+
+      on_exit(fn ->
+        RunJournal.delete(shared_run)
+        RunJournal.delete(other_global)
+      end)
+
+      {:ok, _} = start_supervised({AppRestartStore, name: store_name})
+
+      {:ok, _} =
+        start_supervised(%{
+          id: journal_name,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_name,
+                 ets_table: ets_table,
+                 backend: AppRestartStore,
+                 store_name: store_name,
+                 durability_class: :application_restart,
+                 start_store: false
+               ]
+             ]}
+        })
+
+      now = DateTime.utc_now()
+
+      # spawning_pid: nil so PID liveness does not auto-correct before nodedown.
+      custom_record = %Record{
+        run_id: shared_run,
+        pipeline_id: shared_run,
+        status: :running,
+        started_at: now,
+        last_heartbeat: now,
+        owner_node: dead_owner,
+        spawning_pid: nil,
+        execution_principal: "agent_custom_#{suffix}"
+      }
+
+      global_record = %Record{
+        run_id: shared_run,
+        pipeline_id: shared_run,
+        status: :running,
+        started_at: now,
+        last_heartbeat: now,
+        owner_node: dead_owner,
+        spawning_pid: nil,
+        execution_principal: "agent_global_#{suffix}"
+      }
+
+      assert :ok = RunJournal.put(custom_record, server: journal_name)
+      assert :ok = RunJournal.put(global_record)
+
+      # Precondition: both journals hold the same run_id as running.
+      assert {:ok, %Record{status: :running, owner_node: ^dead_owner}} =
+               RunJournal.get_record(shared_run, server: journal_name)
+
+      assert {:ok, %Record{status: :running, owner_node: ^dead_owner}} =
+               RunJournal.get_record(shared_run)
+
+      recovery_root = Path.join(System.tmp_dir!(), "rc_custom_root_#{suffix}")
+      File.mkdir_p!(recovery_root)
+      on_exit(fn -> File.rm_rf(recovery_root) end)
+
+      {:ok, coord_pid} =
+        start_supervised(%{
+          id: coord_name,
+          start:
+            {RecoveryCoordinator, :start_link,
+             [
+               [
+                 name: coord_name,
+                 enabled: true,
+                 journal_opts: [server: journal_name],
+                 recovery_root: recovery_root,
+                 # Delay auto-discovery; we drive the coordinator explicitly.
+                 delay_ms: 60_000,
+                 # Discovery + mark only — no resume slots.
+                 max_concurrent: 0
+               ]
+             ]}
+        })
+
+      st = RecoveryCoordinator.status(coord_name)
+      assert st.automatic_recovery == true
+      assert st.durability_class == :application_restart
+      assert st.pending == 0
+
+      # Coordinator itself discovers by owner and mutates only the injected journal.
+      send(coord_pid, {:nodedown, dead_owner})
+
+      assert_eventually(fn ->
+        match?(
+          {:ok, %Record{status: :interrupted}},
+          RunJournal.get_record(shared_run, server: journal_name)
+        )
+      end)
+
+      assert {:ok, %Record{status: :interrupted, run_id: ^shared_run}} =
+               RunJournal.get_record(shared_run, server: journal_name)
+
+      # Global journal remains untouched (same run_id still running there).
+      assert {:ok, %Record{status: :running, run_id: ^shared_run}} =
+               RunJournal.get_record(shared_run)
+
+      # recover_next with max_concurrent: 0 leaves pending after nodedown enqueue.
+      assert_eventually(fn ->
+        RecoveryCoordinator.status(coord_name).pending >= 1
+      end)
+
+      pending_status = RecoveryCoordinator.status(coord_name)
+      assert pending_status.pending >= 1
+      assert pending_status.recovering == 0
+
+      # Explicit interrupted discovery also targets only the custom journal.
+      send(coord_pid, :discover_interrupted)
+
+      assert_eventually(fn ->
+        RecoveryCoordinator.status(coord_name).pending >= 1
+      end)
+
+      # Isolation still holds for claim: global run is not in custom journal
+      # under a different id, and custom-only claim path does not touch global.
+      assert :ok =
+               RunJournal.put(%Record{
+                 run_id: other_global,
+                 pipeline_id: other_global,
+                 status: :interrupted,
+                 started_at: now,
+                 last_heartbeat: now,
+                 owner_node: node(),
+                 execution_principal: "agent_global_only_#{suffix}"
+               })
+
+      assert {:error, :not_found} =
+               PipelineStatus.claim_for_recovery_record(other_global, node(),
+                 server: journal_name
+               )
+
+      assert {:ok, %Record{status: :interrupted}} = RunJournal.get_record(other_global)
     end
   end
 
@@ -1057,6 +1213,19 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       refute match?({:error, {:run_id_in_use, _}}, result)
       refute match?({:error, :execution_principal_mismatch}, result)
       refute match?({:error, {:invalid_resume_status, _}}, result)
+    end
+  end
+
+  defp assert_eventually(fun, attempts \\ 50)
+
+  defp assert_eventually(fun, 0), do: assert(fun.())
+
+  defp assert_eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      assert_eventually(fun, attempts - 1)
     end
   end
 end

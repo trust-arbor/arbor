@@ -51,25 +51,27 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   # ===========================================================================
 
   @doc "Put a lifecycle map or Record through the journal."
-  @spec put(Record.t() | map()) :: :ok | {:error, term()}
-  def put(record_or_map), do: RunJournal.put(record_or_map)
+  @spec put(Record.t() | map(), keyword()) :: :ok | {:error, term()}
+  def put(record_or_map, opts \\ []), do: RunJournal.put(record_or_map, opts)
 
   @doc """
   Sync process-local RunState into the canonical store.
 
   Optional meta keys: `:logs_root`, `:graph_hash`, `:dot_source_path`,
   `:origin_trust_zone`, `:spawning_pid`.
+
+  Journal target opts (e.g. `server:`) may be passed as the third argument.
   """
-  @spec put_run_state(RunState.t(), map() | keyword()) :: :ok | {:error, term()}
-  def put_run_state(%RunState{} = state, meta \\ %{}) do
-    RunJournal.put_run_state(state, meta)
+  @spec put_run_state(RunState.t(), map() | keyword(), keyword()) :: :ok | {:error, term()}
+  def put_run_state(%RunState{} = state, meta \\ %{}, opts \\ []) do
+    RunJournal.put_run_state(state, meta, opts)
   end
 
   @doc """
   Atomically admit a run_id and publish the initial lifecycle snapshot.
 
   See `RunJournal.admit_and_put_run_state/3`. Option `:admission` is
-  `:fresh` (default) or `:resume`.
+  `:fresh` (default) or `:resume`. Journal target opts may include `server:`.
   """
   @spec admit_and_put_run_state(RunState.t(), map() | keyword(), keyword()) ::
           :ok | {:error, term()}
@@ -78,30 +80,31 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   end
 
   @doc "Refresh heartbeat / last_ets_sync for a running pipeline."
-  @spec touch_heartbeat(String.t()) :: :ok | {:error, term()}
-  def touch_heartbeat(run_id) when is_binary(run_id) do
-    RunJournal.touch_heartbeat(run_id)
+  @spec touch_heartbeat(String.t(), keyword()) :: :ok | {:error, term()}
+  def touch_heartbeat(run_id, opts \\ []) when is_binary(run_id) do
+    RunJournal.touch_heartbeat(run_id, nil, opts)
   end
 
   @doc "Mark a pipeline interrupted (eligible for recovery)."
-  @spec mark_interrupted(String.t()) :: :ok | {:error, term()}
-  def mark_interrupted(run_id), do: RunJournal.mark_interrupted(run_id)
+  @spec mark_interrupted(String.t(), keyword()) :: :ok | {:error, term()}
+  def mark_interrupted(run_id, opts \\ []), do: RunJournal.mark_interrupted(run_id, opts)
 
   @doc """
   Mark a pipeline as abandoned.
 
   Used by RecoveryCoordinator and Session/task cancel cleanup.
+  Optional journal target opts (e.g. `server:`) select a non-default journal.
   """
-  @spec mark_abandoned(String.t()) :: :ok | {:error, term()}
-  def mark_abandoned(run_id), do: RunJournal.mark_abandoned(run_id)
+  @spec mark_abandoned(String.t(), keyword()) :: :ok | {:error, term()}
+  def mark_abandoned(run_id, opts \\ []), do: RunJournal.mark_abandoned(run_id, opts)
 
   @doc "Mark a pipeline as recovering (resume in progress). Prefer claim_for_recovery/2."
-  @spec mark_recovering(String.t()) :: :ok | {:error, term()}
-  def mark_recovering(run_id), do: RunJournal.mark_recovering(run_id)
+  @spec mark_recovering(String.t(), keyword()) :: :ok | {:error, term()}
+  def mark_recovering(run_id, opts \\ []), do: RunJournal.mark_recovering(run_id, opts)
 
   @doc "Mark recovery/execution failed with a bounded reason."
-  @spec mark_failed(String.t(), term()) :: :ok | {:error, term()}
-  def mark_failed(run_id, reason), do: RunJournal.mark_failed(run_id, reason)
+  @spec mark_failed(String.t(), term(), keyword()) :: :ok | {:error, term()}
+  def mark_failed(run_id, reason, opts \\ []), do: RunJournal.mark_failed(run_id, reason, opts)
 
   @doc """
   Atomic nonterminal → terminal transition via RunJournal.
@@ -109,11 +112,18 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   See `RunJournal.finalize/5`. Returns transitioned vs already_terminal
   (same status) or `{:error, {:terminal_conflict, existing, requested}}`.
   """
-  @spec finalize(String.t(), atom(), term(), non_neg_integer() | nil, map() | keyword()) ::
+  @spec finalize(
+          String.t(),
+          atom(),
+          term(),
+          non_neg_integer() | nil,
+          map() | keyword(),
+          keyword()
+        ) ::
           {:ok, :transitioned | :already_terminal, Record.t()} | {:error, term()}
-  def finalize(run_id, status, reason, duration_ms, metadata \\ %{})
+  def finalize(run_id, status, reason, duration_ms, metadata \\ %{}, opts \\ [])
       when is_binary(run_id) and is_atom(status) do
-    RunJournal.finalize(run_id, status, reason, duration_ms, metadata)
+    RunJournal.finalize(run_id, status, reason, duration_ms, metadata, opts)
   end
 
   @doc """
@@ -121,28 +131,31 @@ defmodule Arbor.Orchestrator.PipelineStatus do
 
   Only `:interrupted` records are claimable — consistent with public resume.
   Returns `{:ok, public_map}` or `{:error, reason}`.
+
+  Optional journal target opts (e.g. `server:`) select a non-default journal.
   """
-  @spec claim_for_recovery(String.t(), node()) :: {:ok, map()} | {:error, term()}
-  def claim_for_recovery(run_id, claiming_node \\ Kernel.node()) do
-    case RunJournal.claim_for_recovery(run_id, claiming_node) do
+  @spec claim_for_recovery(String.t(), node(), keyword()) :: {:ok, map()} | {:error, term()}
+  def claim_for_recovery(run_id, claiming_node \\ Kernel.node(), opts \\ []) do
+    case RunJournal.claim_for_recovery(run_id, claiming_node, opts) do
       {:ok, %Record{} = record} -> {:ok, Adapter.to_public_map(record)}
       {:error, _} = err -> err
     end
   end
 
   @doc "Typed claim returning `Record`."
-  @spec claim_for_recovery_record(String.t(), node()) :: {:ok, Record.t()} | {:error, term()}
-  def claim_for_recovery_record(run_id, claiming_node \\ Kernel.node()) do
-    RunJournal.claim_for_recovery(run_id, claiming_node)
+  @spec claim_for_recovery_record(String.t(), node(), keyword()) ::
+          {:ok, Record.t()} | {:error, term()}
+  def claim_for_recovery_record(run_id, claiming_node \\ Kernel.node(), opts \\ []) do
+    RunJournal.claim_for_recovery(run_id, claiming_node, opts)
   end
 
   @doc "Explicit durability diagnostics for operators and tests."
-  @spec durability_status() :: map()
-  def durability_status, do: RunJournal.durability_status()
+  @spec durability_status(keyword()) :: map()
+  def durability_status(opts \\ []), do: RunJournal.durability_status(opts)
 
   @doc "Delete a lifecycle entry via the journal (tests/ops)."
-  @spec delete(String.t()) :: :ok | {:error, term()}
-  def delete(run_id), do: RunJournal.delete(run_id)
+  @spec delete(String.t(), keyword()) :: :ok | {:error, term()}
+  def delete(run_id, opts \\ []), do: RunJournal.delete(run_id, opts)
 
   # ===========================================================================
   # Reads
@@ -157,12 +170,14 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   """
   @spec list_active(keyword()) :: [map()]
   def list_active(opts \\ []) do
-    case RunJournal.list_records() do
+    journal_opts = journal_target_opts(opts)
+
+    case RunJournal.list_records(journal_opts) do
       {:ok, records} ->
         records
         |> Enum.map(&Adapter.to_public_map/1)
         |> Enum.filter(fn entry -> entry.status in [:running, :suspended, :degraded] end)
-        |> Enum.map(&apply_liveness_check/1)
+        |> Enum.map(&apply_liveness_check(&1, journal_opts))
         |> Enum.filter(fn entry -> entry.status in [:running, :suspended, :degraded] end)
         |> maybe_filter_principal(opts)
         |> Enum.sort_by(& &1.started_at, {:desc, DateTime})
@@ -197,11 +212,13 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   @spec list_interrupted_records(keyword()) ::
           {:ok, [Record.t()]} | {:error, :journal_unavailable | term()}
   def list_interrupted_records(opts \\ []) do
-    case RunJournal.list_records() do
+    journal_opts = journal_target_opts(opts)
+
+    case RunJournal.list_records(journal_opts) do
       {:ok, records} ->
         list =
           records
-          |> Enum.map(&apply_liveness_check_record/1)
+          |> Enum.map(&apply_liveness_check_record(&1, journal_opts))
           |> Enum.filter(fn %Record{status: status} -> status == :interrupted end)
           |> maybe_filter_principal_records(opts)
           |> Enum.sort_by(& &1.started_at, {:desc, DateTime})
@@ -218,12 +235,15 @@ defmodule Arbor.Orchestrator.PipelineStatus do
 
   Options:
   - `:limit` — max entries to return (default 50)
+  - `:server` — optional non-default RunJournal server
   """
   @spec list_recent(keyword()) :: [map()]
   def list_recent(opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
+    journal_opts = journal_target_opts(opts)
 
-    RunJournal.list_raw()
+    journal_opts
+    |> RunJournal.list_raw()
     |> Enum.filter(fn entry -> entry.status in [:completed, :failed, :abandoned] end)
     |> Enum.sort_by(& &1.finished_at, {:desc, DateTime})
     |> Enum.take(limit)
@@ -236,11 +256,13 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   Applies PID liveness correction (persisted). Returns `nil` if not found.
   Public map is **not** JSON-clean (may contain DateTime/atoms/PID).
   """
-  @spec get(String.t()) :: map() | nil
-  def get(run_id) when is_binary(run_id) do
-    case RunJournal.get_raw(run_id) do
+  @spec get(String.t(), keyword()) :: map() | nil
+  def get(run_id, opts \\ []) when is_binary(run_id) do
+    journal_opts = journal_target_opts(opts)
+
+    case RunJournal.get_raw(run_id, journal_opts) do
       nil -> nil
-      entry -> apply_liveness_check(entry)
+      entry -> apply_liveness_check(entry, journal_opts)
     end
   end
 
@@ -249,11 +271,13 @@ defmodule Arbor.Orchestrator.PipelineStatus do
 
   Returns `Record`, `nil` when not found, or `{:error, :journal_unavailable}`.
   """
-  @spec get_record(String.t()) :: Record.t() | nil | {:error, :journal_unavailable}
-  def get_record(run_id) when is_binary(run_id) do
-    case RunJournal.get_record(run_id) do
+  @spec get_record(String.t(), keyword()) :: Record.t() | nil | {:error, :journal_unavailable}
+  def get_record(run_id, opts \\ []) when is_binary(run_id) do
+    journal_opts = journal_target_opts(opts)
+
+    case RunJournal.get_record(run_id, journal_opts) do
       {:ok, %Record{} = record} ->
-        apply_liveness_check_record(record)
+        apply_liveness_check_record(record, journal_opts)
 
       {:error, :not_found} ->
         nil
@@ -267,19 +291,22 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   end
 
   @doc "Count pipelines by status (after liveness correction)."
-  @spec count_by_status() :: %{atom() => non_neg_integer()}
-  def count_by_status do
-    RunJournal.list_raw()
-    |> Enum.map(&apply_liveness_check/1)
+  @spec count_by_status(keyword()) :: %{atom() => non_neg_integer()}
+  def count_by_status(opts \\ []) do
+    journal_opts = journal_target_opts(opts)
+
+    journal_opts
+    |> RunJournal.list_raw()
+    |> Enum.map(&apply_liveness_check(&1, journal_opts))
     |> Enum.group_by(& &1.status)
     |> Enum.map(fn {status, entries} -> {status, length(entries)} end)
     |> Map.new()
   end
 
   @doc "Check if a specific run_id exists and is active."
-  @spec active?(String.t()) :: boolean()
-  def active?(run_id) do
-    case get(run_id) do
+  @spec active?(String.t(), keyword()) :: boolean()
+  def active?(run_id, opts \\ []) do
+    case get(run_id, opts) do
       %{status: status} -> status in [:running, :suspended, :degraded]
       nil -> false
     end
@@ -288,32 +315,34 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   @doc """
   List pipelines whose heartbeat is older than `max_age_ms`.
 
-  Accepts optional `now` for deterministic testing.
+  Accepts optional `now` for deterministic testing and optional journal
+  target opts (`server:`).
   """
   @spec list_stale_heartbeats(non_neg_integer()) :: [map()]
   def list_stale_heartbeats(max_age_ms \\ 90_000) do
     list_stale_heartbeats(max_age_ms, DateTime.utc_now())
   end
 
-  @spec list_stale_heartbeats(non_neg_integer(), DateTime.t()) :: [map()]
-  def list_stale_heartbeats(max_age_ms, %DateTime{} = now) do
-    case list_stale_heartbeat_records(max_age_ms, now) do
+  @spec list_stale_heartbeats(non_neg_integer(), DateTime.t(), keyword()) :: [map()]
+  def list_stale_heartbeats(max_age_ms, %DateTime{} = now, opts \\ []) do
+    case list_stale_heartbeat_records(max_age_ms, now, opts) do
       {:ok, records} -> Enum.map(records, &Adapter.to_public_map/1)
       {:error, _} -> []
     end
   end
 
   @doc "Typed stale-heartbeat list. Returns `{:ok, records}` or journal error."
-  @spec list_stale_heartbeat_records(non_neg_integer(), DateTime.t()) ::
+  @spec list_stale_heartbeat_records(non_neg_integer(), DateTime.t(), keyword()) ::
           {:ok, [Record.t()]} | {:error, term()}
-  def list_stale_heartbeat_records(max_age_ms, %DateTime{} = now) do
+  def list_stale_heartbeat_records(max_age_ms, %DateTime{} = now, opts \\ []) do
     cutoff = DateTime.add(now, -max_age_ms, :millisecond)
+    journal_opts = journal_target_opts(opts)
 
-    case RunJournal.list_records() do
+    case RunJournal.list_records(journal_opts) do
       {:ok, records} ->
         list =
           records
-          |> Enum.map(&apply_liveness_check_record/1)
+          |> Enum.map(&apply_liveness_check_record(&1, journal_opts))
           |> Enum.filter(fn %Record{} = entry ->
             entry.status == :running and
               entry.last_heartbeat != nil and
@@ -328,21 +357,22 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   end
 
   @doc "List running/interrupted entries owned by a node (for nodedown recovery)."
-  @spec list_by_owner(node() | String.t()) :: [map()]
-  def list_by_owner(node_name) do
-    list_by_owner_records(node_name)
+  @spec list_by_owner(node() | String.t(), keyword()) :: [map()]
+  def list_by_owner(node_name, opts \\ []) do
+    list_by_owner_records(node_name, opts)
     |> Enum.map(&Adapter.to_public_map/1)
   end
 
   @doc "Typed list by owner."
-  @spec list_by_owner_records(node() | String.t()) :: [Record.t()]
-  def list_by_owner_records(node_name) do
+  @spec list_by_owner_records(node() | String.t(), keyword()) :: [Record.t()]
+  def list_by_owner_records(node_name, opts \\ []) do
     node_str = to_string(node_name)
+    journal_opts = journal_target_opts(opts)
 
-    case RunJournal.list_records() do
+    case RunJournal.list_records(journal_opts) do
       {:ok, records} ->
         records
-        |> Enum.map(&apply_liveness_check_record/1)
+        |> Enum.map(&apply_liveness_check_record(&1, journal_opts))
         |> Enum.filter(fn %Record{} = entry ->
           entry.status in [:running, :interrupted] and
             to_string(entry.owner_node) == node_str
@@ -371,13 +401,21 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   # PID liveness correction (persists only on proven :dead)
   # ===========================================================================
 
-  defp apply_liveness_check_record(%Record{} = record) do
-    public = apply_liveness_check(Adapter.to_public_map(record))
+  # Journal target keys that select a non-default RunJournal server.
+  # Principal filters and other read options stay outside this set.
+  defp journal_target_opts(opts) when is_list(opts) do
+    Keyword.take(opts, [:server])
+  end
+
+  defp journal_target_opts(_), do: []
+
+  defp apply_liveness_check_record(%Record{} = record, journal_opts) do
+    public = apply_liveness_check(Adapter.to_public_map(record), journal_opts)
 
     # Prefer reloading from journal after persist so we stay Record-typed
     # without inventing fields from a partial public map.
     if public.status == :interrupted and record.status == :running do
-      case RunJournal.get_record(record.run_id) do
+      case RunJournal.get_record(record.run_id, journal_opts) do
         {:ok, %Record{} = updated} -> updated
         _ -> %Record{record | status: :interrupted}
       end
@@ -386,14 +424,14 @@ defmodule Arbor.Orchestrator.PipelineStatus do
     end
   end
 
-  defp apply_liveness_check(%{status: :running, spawning_pid: pid} = entry)
+  defp apply_liveness_check(%{status: :running, spawning_pid: pid} = entry, journal_opts)
        when is_pid(pid) do
     case process_liveness(pid) do
       :alive ->
         entry
 
       :dead ->
-        case RunJournal.persist_interrupted(entry.run_id) do
+        case RunJournal.persist_interrupted(entry.run_id, journal_opts) do
           %{} = updated -> updated
           nil -> %{entry | status: :interrupted}
         end
@@ -404,7 +442,7 @@ defmodule Arbor.Orchestrator.PipelineStatus do
     end
   end
 
-  defp apply_liveness_check(entry), do: entry
+  defp apply_liveness_check(entry, _journal_opts), do: entry
 
   @doc false
   @spec process_liveness(pid()) :: :alive | :dead | :unknown

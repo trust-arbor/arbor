@@ -21,7 +21,7 @@ defmodule Arbor.Orchestrator.RunJournal do
     (ETS-backed stores, Agent, async buffers). **Not** a crash-durable automatic
     recovery store; process death loses this class of data.
   - `:application_restart` — survives journal restart against the same live
-    backend process (must be declared via backend `durability_class/0`
+    backend process (must be declared via backend `durability_class/1`
     capability intersection; never inferred for ETS/Agent/buffer, no force flag)
   - `:node_restart` — survives full node restart (L4 durable backends only)
 
@@ -317,8 +317,11 @@ defmodule Arbor.Orchestrator.RunJournal do
     backend = Keyword.get(opts, :backend)
     store_name = Keyword.get(opts, :store_name, @default_store_name)
     collection = Keyword.get(opts, :collection, @default_collection)
+    # Call options for the Persistence facade (name is injected by the facade).
+    # Distinct from :store_child_opts, which are only for supervisor start_link.
+    backend_opts = Keyword.get(opts, :backend_opts, [])
 
-    durability_class = resolve_durability_class(backend, opts)
+    durability_class = resolve_durability_class(backend, store_name, backend_opts, opts)
 
     durable_mode =
       if is_nil(backend) do
@@ -335,6 +338,7 @@ defmodule Arbor.Orchestrator.RunJournal do
       backend: backend,
       store_name: store_name,
       collection: collection,
+      backend_opts: backend_opts,
       durable_error: nil,
       last_write_error: nil,
       local_node: Keyword.get(opts, :local_node, Kernel.node())
@@ -343,7 +347,7 @@ defmodule Arbor.Orchestrator.RunJournal do
     # Configured backends are a separate supervisor child. Probe via the
     # Persistence facade and fail closed if the backend is not observable —
     # never start a journal with a silently empty hot view when backed.
-    with :ok <- maybe_ensure_backend_ready(backend, store_name, opts),
+    with :ok <- maybe_ensure_backend_ready(backend, store_name, backend_opts),
          {:ok, state} <- maybe_reload_from_durable(state) do
       {:ok, state}
     else
@@ -675,14 +679,11 @@ defmodule Arbor.Orchestrator.RunJournal do
 
   defp create_hot_table!(_), do: :ets.new(:run_journal_hot, [:set, :private])
 
-  defp maybe_ensure_backend_ready(nil, _store_name, _opts), do: :ok
+  defp maybe_ensure_backend_ready(nil, _store_name, _backend_opts), do: :ok
 
-  defp maybe_ensure_backend_ready(backend, store_name, opts) when is_atom(backend) do
-    # `allow_missing_backend` is intentionally rejected for durable mode —
-    # a configured backend must be observable or startup fails closed.
-    _ = opts
-
-    case probe_backend(backend, store_name) do
+  defp maybe_ensure_backend_ready(backend, store_name, backend_opts) when is_atom(backend) do
+    # A configured backend must be observable or startup fails closed.
+    case probe_backend(backend, store_name, backend_opts) do
       :ok ->
         :ok
 
@@ -691,13 +692,13 @@ defmodule Arbor.Orchestrator.RunJournal do
     end
   end
 
-  defp maybe_ensure_backend_ready(backend, store_name, _opts) do
+  defp maybe_ensure_backend_ready(backend, store_name, _backend_opts) do
     {:error, {:invalid_durable_backend, backend, store_name}}
   end
 
   # Observe the separately supervised backend through the Persistence facade only.
-  defp probe_backend(backend, store_name) do
-    case Arbor.Persistence.list(store_name, backend) do
+  defp probe_backend(backend, store_name, backend_opts) do
+    case Arbor.Persistence.list(store_name, backend, backend_opts) do
       {:ok, keys} when is_list(keys) ->
         :ok
 
@@ -1124,7 +1125,8 @@ defmodule Arbor.Orchestrator.RunJournal do
                state.store_name,
                state.backend,
                record.run_id,
-               persistence_record
+               persistence_record,
+               state.backend_opts || []
              ) do
           :ok ->
             {:ok, %{state | last_write_error: nil, durable_error: nil, durable_mode: :backed}}
@@ -1175,7 +1177,9 @@ defmodule Arbor.Orchestrator.RunJournal do
          %{backend: backend, store_name: store_name, durable_mode: mode} = state
        )
        when not is_nil(backend) and mode in [:backed, :degraded] do
-    case Arbor.Persistence.delete(store_name, backend, run_id) do
+    backend_opts = Map.get(state, :backend_opts, [])
+
+    case Arbor.Persistence.delete(store_name, backend, run_id, backend_opts) do
       :ok ->
         {:ok, %{state | last_write_error: nil, durable_error: nil, durable_mode: :backed}}
 
@@ -1214,9 +1218,11 @@ defmodule Arbor.Orchestrator.RunJournal do
 
   defp maybe_durable_delete(_run_id, state), do: {:ok, state}
 
-  defp durable_list_keys(%{backend: backend, store_name: store_name})
+  defp durable_list_keys(%{backend: backend, store_name: store_name} = state)
        when not is_nil(backend) do
-    case Arbor.Persistence.list(store_name, backend) do
+    backend_opts = Map.get(state, :backend_opts, [])
+
+    case Arbor.Persistence.list(store_name, backend, backend_opts) do
       {:ok, keys} when is_list(keys) ->
         {:ok, keys}
 
@@ -1236,9 +1242,11 @@ defmodule Arbor.Orchestrator.RunJournal do
 
   defp durable_list_keys(_), do: {:ok, []}
 
-  defp durable_get(key, %{backend: backend, store_name: store_name})
+  defp durable_get(key, %{backend: backend, store_name: store_name} = state)
        when not is_nil(backend) do
-    case Arbor.Persistence.get(store_name, backend, key) do
+    backend_opts = Map.get(state, :backend_opts, [])
+
+    case Arbor.Persistence.get(store_name, backend, key, backend_opts) do
       {:ok, %PersistenceRecord{data: data}} when is_map(data) ->
         {:ok, data}
 
@@ -1323,50 +1331,67 @@ defmodule Arbor.Orchestrator.RunJournal do
   defp durable_class?(_), do: false
 
   # Honest durability: no module-name heuristics, no force flags.
-  # Unknown backends default to process_lifetime / non-durable.
-  # Application/node-restart is reported only when explicit config intersects
-  # a code-owned backend capability (`durability_class/0`). Until the Persistence
-  # CAS slice attests that capability, intersection yields process_lifetime.
-  defp resolve_durability_class(nil, _opts), do: :volatile
+  # Capability is code-owned via the public Persistence facade
+  # (`durability_class/1` on the Store contract). Optional configured
+  # `:durability_class` is a ceiling/intersection only — never elevation:
+  #   volatile < process_lifetime < application_restart < node_restart
+  # Explicit valid capabilities (including :volatile) are preserved exactly,
+  # then intersected with any configured ceiling. Unsupported/malformed
+  # capabilities fail closed to :process_lifetime (never elevated).
+  @durability_rank %{
+    volatile: 0,
+    process_lifetime: 1,
+    application_restart: 2,
+    node_restart: 3
+  }
 
-  defp resolve_durability_class(backend, opts) when is_atom(backend) do
-    explicit = Keyword.get(opts, :durability_class)
-    capability = backend_durability_capability(backend)
+  defp resolve_durability_class(nil, _store_name, _backend_opts, _opts), do: :volatile
 
-    case {explicit, capability} do
-      {class, class} when class in [:application_restart, :node_restart] ->
+  defp resolve_durability_class(backend, store_name, backend_opts, opts) when is_atom(backend) do
+    capability = backend_durability_capability(store_name, backend, backend_opts)
+    ceiling = Keyword.get(opts, :durability_class)
+
+    case ceiling do
+      nil ->
+        capability
+
+      class when is_map_key(@durability_rank, class) ->
+        intersect_durability_class(capability, class)
+
+      _invalid ->
+        # Invalid configured ceiling fails closed: cannot raise capability.
+        intersect_durability_class(capability, :process_lifetime)
+    end
+  end
+
+  defp resolve_durability_class(_, _store_name, _backend_opts, _opts), do: :volatile
+
+  defp backend_durability_capability(store_name, backend, backend_opts)
+       when is_atom(backend) do
+    case Arbor.Persistence.durability_class(store_name, backend, backend_opts) do
+      {:ok, class} when is_map_key(@durability_rank, class) ->
+        # Preserve code-owned capability exactly (including :volatile).
         class
 
-      {class, _} when class in [:volatile, :process_lifetime] ->
-        class
+      {:ok, _invalid} ->
+        :process_lifetime
 
-      {_, class} when class in [:volatile, :process_lifetime] ->
-        class
+      {:error, :unsupported} ->
+        :process_lifetime
 
-      _ ->
+      {:error, _} ->
         :process_lifetime
     end
   end
 
-  defp resolve_durability_class(_, _), do: :volatile
+  defp backend_durability_capability(_store_name, _backend, _backend_opts), do: :process_lifetime
 
-  defp backend_durability_capability(backend) when is_atom(backend) do
-    _ = Code.ensure_loaded(backend)
+  defp intersect_durability_class(a, b) do
+    rank_a = Map.fetch!(@durability_rank, a)
+    rank_b = Map.fetch!(@durability_rank, b)
 
-    if function_exported?(backend, :durability_class, 0) do
-      case backend.durability_class() do
-        class when class in [:volatile, :process_lifetime, :application_restart, :node_restart] ->
-          class
-
-        _ ->
-          :process_lifetime
-      end
-    else
-      :process_lifetime
-    end
+    if rank_a <= rank_b, do: a, else: b
   end
-
-  defp backend_durability_capability(_), do: :process_lifetime
 
   defp hot_insert(table, %Record{} = record) do
     true = :ets.insert(table, {record.run_id, record})

@@ -120,6 +120,30 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
       assert {:ok, ^r2} = BufferedStore.get("key1", name: name)
     end
+
+    test "security regression: put rejects Record physical-key mismatch and does not mutate",
+         %{name: name} do
+      # Physical store key must equal Record.key. A mismatched Record must not
+      # land in the cache-authoritative ETS table (or any backend).
+      mismatched = Record.new("other-key", %{"secret" => true})
+
+      assert {:error, :key_mismatch} =
+               BufferedStore.put("k", mismatched, name: name)
+
+      assert {:error, :not_found} = BufferedStore.get("k", name: name)
+      assert {:ok, []} = BufferedStore.list(name: name)
+
+      # Valid put still round-trips the exact caller value (cache-authoritative).
+      valid = Record.new("k", %{"ok" => true})
+      assert :ok = BufferedStore.put("k", valid, name: name)
+      assert {:ok, ^valid} = BufferedStore.get("k", name: name)
+
+      # A later mismatch still must not overwrite the valid entry.
+      assert {:error, :key_mismatch} =
+               BufferedStore.put("k", mismatched, name: name)
+
+      assert {:ok, ^valid} = BufferedStore.get("k", name: name)
+    end
   end
 
   describe "query operations" do
@@ -217,6 +241,17 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       # Backend has it
       backend_data = Agent.get(agent, & &1)
       assert Map.has_key?(backend_data, "key1")
+    end
+
+    test "security regression: key_mismatch does not mutate ETS or backend",
+         %{name: name, backend_agent: agent} do
+      mismatched = Record.new("other", %{"v" => 1})
+
+      assert {:error, :key_mismatch} =
+               BufferedStore.put("key1", mismatched, name: name)
+
+      assert {:error, :not_found} = BufferedStore.get("key1", name: name)
+      assert Agent.get(agent, & &1) == %{}
     end
 
     test "delete removes from both ETS and backend", %{name: name, backend_agent: agent} do

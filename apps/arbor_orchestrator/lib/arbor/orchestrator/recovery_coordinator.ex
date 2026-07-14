@@ -222,7 +222,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   @impl true
   def handle_info(:discover_interrupted, state) do
     if automatic_recovery_active?(state) do
-      interrupted = list_interrupted_for_recovery()
+      interrupted = list_interrupted_for_recovery(journal_opts(state))
 
       if interrupted == [] do
         Logger.debug("[RecoveryCoordinator] No interrupted pipelines found")
@@ -405,7 +405,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         "[RecoveryCoordinator] Node #{dead_node} went down, scanning for orphaned pipelines"
       )
 
-      orphaned = list_by_owner_for_recovery(dead_node)
+      jopts = journal_opts(state)
+      orphaned = list_by_owner_for_recovery(dead_node, jopts)
 
       if orphaned != [] do
         Logger.info(
@@ -415,7 +416,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         # Only mark interrupted here; atomic claim happens in attempt_recovery.
         pending_orphans =
           Enum.map(orphaned, fn candidate ->
-            mark_interrupted_entry(candidate)
+            mark_interrupted_entry(candidate, jopts)
             %Record{} = rec = candidate.record
             %{candidate | record: %{rec | status: :interrupted}}
           end)
@@ -440,9 +441,10 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   def handle_info(:check_stale_heartbeats, state) do
     if automatic_recovery_active?(state) do
       now = DateTime.utc_now()
+      jopts = journal_opts(state)
 
       current_stale =
-        case PipelineStatus.list_stale_heartbeat_records(@stale_heartbeat_ms, now) do
+        case PipelineStatus.list_stale_heartbeat_records(@stale_heartbeat_ms, now, jopts) do
           {:ok, records} ->
             Enum.map(records, fn %Record{} = r -> %{record: r, source: :current} end)
 
@@ -472,7 +474,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
             owner_connected = MapSet.member?(connected, entry.owner_node)
 
             if not owner_connected do
-              mark_interrupted_entry(candidate)
+              mark_interrupted_entry(candidate, jopts)
 
               [
                 %{
@@ -492,7 +494,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
               cond do
                 entry.spawning_pid != nil and not spawner_alive ->
-                  mark_abandoned_entry(candidate)
+                  mark_abandoned_entry(candidate, jopts)
 
                   Logger.info(
                     "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
@@ -500,7 +502,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                   )
 
                 (entry.completed_count || 0) == 0 and age_ms > @zero_progress_abandon_ms ->
-                  mark_abandoned_entry(candidate)
+                  mark_abandoned_entry(candidate, jopts)
 
                   Logger.info(
                     "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
@@ -555,6 +557,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   # Candidate is always `%{record: %Record{}, source: :current | :legacy}`.
 
   defp attempt_recovery(%{record: %Record{}, source: _} = candidate, state) do
+    jopts = journal_opts(state)
+
     # Auth material before claim — never claim without resume credentials.
     case resolve_resume_options(candidate.record, state) do
       {:error, :authentication_unavailable} = err ->
@@ -564,7 +568,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         {:error, reason}
 
       {:ok, resume_opts} ->
-        case attempt_claim(candidate) do
+        case attempt_claim(candidate, jopts) do
           {:ok, claimed} ->
             # Every post-claim exit must settle exactly once (interrupted or failed).
             try do
@@ -585,7 +589,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                 {:error, reason} ->
                   settle_or_report(
                     %{run_id: claimed.record.run_id, source: claimed.source},
-                    reason
+                    reason,
+                    jopts
                   )
               end
             rescue
@@ -594,7 +599,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
                 settle_or_report(
                   %{run_id: claimed.record.run_id, source: claimed.source},
-                  reason
+                  reason,
+                  jopts
                 )
             catch
               :throw, value ->
@@ -602,7 +608,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
                 settle_or_report(
                   %{run_id: claimed.record.run_id, source: claimed.source},
-                  reason
+                  reason,
+                  jopts
                 )
 
               # Every post-claim exit settles — :normal/:shutdown/{:shutdown,_} included.
@@ -611,7 +618,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
                 settle_or_report(
                   %{run_id: claimed.record.run_id, source: claimed.source},
-                  reason
+                  reason,
+                  jopts
                 )
             end
 
@@ -1122,7 +1130,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
-  defp attempt_claim(%{record: %Record{} = entry, source: source}) do
+  defp attempt_claim(%{record: %Record{} = entry, source: source}, journal_opts) do
     key = entry.run_id
 
     my_zone = resolve_trust_zone()
@@ -1138,7 +1146,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
       {:error, :trust_zone_violation}
     else
       if am_i_leader?() do
-        case claim_entry(key, source) do
+        case claim_entry(key, source, journal_opts) do
           {:ok, %Record{} = claimed} ->
             Logger.info("[RecoveryCoordinator] Claimed pipeline #{key} for recovery")
             {:ok, %{record: claimed, source: source}}
@@ -1158,15 +1166,17 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   # Canonical + legacy discovery (typed Records only)
   # ---------------------------------------------------------------------------
 
-  defp list_interrupted_for_recovery do
+  defp journal_opts(%{journal_opts: opts}) when is_list(opts), do: opts
+  defp journal_opts(_), do: []
+
+  defp list_interrupted_for_recovery(journal_opts) do
     # Recovery must distinguish journal unavailability from empty.
     # Never fall through to legacy state during a journal outage.
-    case Arbor.Orchestrator.RunJournal.list_records() do
+    # Always target the coordinator's configured journal (custom server: when set).
+    case PipelineStatus.list_interrupted_records(journal_opts) do
       {:ok, records} ->
         current =
-          records
-          |> Enum.filter(fn %Record{status: status} -> status == :interrupted end)
-          |> Enum.map(fn %Record{} = r -> %{record: r, source: :current} end)
+          Enum.map(records, fn %Record{} = r -> %{record: r, source: :current} end)
 
         current_ids = MapSet.new(current, & &1.record.run_id)
 
@@ -1187,17 +1197,14 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
-  defp list_by_owner_for_recovery(node_name) do
-    case Arbor.Orchestrator.RunJournal.list_records() do
-      {:ok, records} ->
-        node_str = to_string(node_name)
-
+  defp list_by_owner_for_recovery(node_name, journal_opts) do
+    # Probe the configured journal first so outages refuse legacy fall-through
+    # (list_by_owner_records degrades to [] for dashboard callers).
+    case RunJournal.list_records(journal_opts) do
+      {:ok, _} ->
         current =
-          records
-          |> Enum.filter(fn %Record{} = entry ->
-            entry.status in [:running, :interrupted] and
-              to_string(entry.owner_node) == node_str
-          end)
+          node_name
+          |> PipelineStatus.list_by_owner_records(journal_opts)
           |> Enum.map(fn %Record{} = r -> %{record: r, source: :current} end)
 
         current_ids = MapSet.new(current, & &1.record.run_id)
@@ -1229,35 +1236,35 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   defp classify_recovery_exit(reason) when is_binary(reason), do: reason
   defp classify_recovery_exit(reason), do: inspect(reason, limit: 20, printable_limit: 200)
 
-  defp claim_entry(key, :current) do
-    PipelineStatus.claim_for_recovery_record(key)
+  defp claim_entry(key, :current, journal_opts) do
+    PipelineStatus.claim_for_recovery_record(key, Kernel.node(), journal_opts)
   end
 
-  defp claim_entry(key, :legacy) do
+  defp claim_entry(key, :legacy, _journal_opts) do
     LegacyJobAdapter.claim_for_recovery(key)
   end
 
-  defp claim_entry(key, _) do
-    case PipelineStatus.claim_for_recovery_record(key) do
+  defp claim_entry(key, _, journal_opts) do
+    case PipelineStatus.claim_for_recovery_record(key, Kernel.node(), journal_opts) do
       {:ok, _} = ok -> ok
       {:error, :not_found} -> LegacyJobAdapter.claim_for_recovery(key)
       other -> other
     end
   end
 
-  defp mark_interrupted_entry(%{record: %Record{run_id: key}, source: source}) do
+  defp mark_interrupted_entry(%{record: %Record{run_id: key}, source: source}, journal_opts) do
     if source == :legacy do
       LegacyJobAdapter.mark_interrupted(key)
     else
-      PipelineStatus.mark_interrupted(key)
+      PipelineStatus.mark_interrupted(key, journal_opts)
     end
   end
 
-  defp mark_abandoned_entry(%{record: %Record{run_id: key}, source: source}) do
+  defp mark_abandoned_entry(%{record: %Record{run_id: key}, source: source}, journal_opts) do
     if source == :legacy do
       LegacyJobAdapter.mark_abandoned(key)
     else
-      PipelineStatus.mark_abandoned(key)
+      PipelineStatus.mark_abandoned(key, journal_opts)
     end
   end
 
@@ -1265,8 +1272,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   # Prefer recoverable :interrupted; use :failed only for terminal non-retryable
   # graph identity/source / structural checkpoint corruption.
   # Never reopen an already-failed record. Settlement failures are retained.
-  defp settle_or_report(meta, reason) do
-    case settle_recovery_failure(meta, reason) do
+  defp settle_or_report(meta, reason, journal_opts) do
+    case settle_recovery_failure(meta, reason, journal_opts) do
       :ok ->
         {:error, reason}
 
@@ -1284,8 +1291,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
-  defp settle_recovery_failure(%{run_id: run_id, source: source}, reason) do
-    case current_status(run_id, source) do
+  defp settle_recovery_failure(%{run_id: run_id, source: source}, reason, journal_opts) do
+    case current_status(run_id, source, journal_opts) do
       status when status in [:completed, :failed, :abandoned] ->
         {:ok, :already_terminal, status}
 
@@ -1295,9 +1302,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
       _ ->
         result =
           if non_retryable_recovery_error?(reason) do
-            mark_failed_entry(run_id, source, reason)
+            mark_failed_entry(run_id, source, reason, journal_opts)
           else
-            mark_interrupted_by_source(run_id, source)
+            mark_interrupted_by_source(run_id, source, journal_opts)
           end
 
         case result do
@@ -1309,7 +1316,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   end
 
   defp apply_settlement(state, meta, reason) do
-    case settle_recovery_failure(meta, reason) do
+    jopts = journal_opts(state)
+
+    case settle_recovery_failure(meta, reason, jopts) do
       :ok ->
         state
 
@@ -1336,6 +1345,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   defp retry_failed_settlements(state) do
     failures = Map.get(state, :settlement_failures, [])
+    jopts = journal_opts(state)
 
     if failures == [] do
       state
@@ -1344,7 +1354,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         Enum.reduce(failures, [], fn failure, keep ->
           meta = %{run_id: failure.run_id, source: failure.source}
 
-          case settle_recovery_failure(meta, failure.reason) do
+          case settle_recovery_failure(meta, failure.reason, jopts) do
             :ok ->
               keep
 
@@ -1366,29 +1376,32 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
-  defp current_status(run_id, :legacy) do
+  defp current_status(run_id, :legacy, _journal_opts) do
     case LegacyJobAdapter.get(run_id) do
       %Record{status: status} -> status
       _ -> nil
     end
   end
 
-  defp current_status(run_id, _) do
-    case PipelineStatus.get_record(run_id) do
+  defp current_status(run_id, _, journal_opts) do
+    case PipelineStatus.get_record(run_id, journal_opts) do
       %Record{status: status} -> status
       _ -> nil
     end
   end
 
-  defp mark_interrupted_by_source(run_id, :legacy), do: LegacyJobAdapter.mark_interrupted(run_id)
-  defp mark_interrupted_by_source(run_id, _), do: PipelineStatus.mark_interrupted(run_id)
+  defp mark_interrupted_by_source(run_id, :legacy, _journal_opts),
+    do: LegacyJobAdapter.mark_interrupted(run_id)
 
-  defp mark_failed_entry(run_id, :legacy, _reason) do
+  defp mark_interrupted_by_source(run_id, _, journal_opts),
+    do: PipelineStatus.mark_interrupted(run_id, journal_opts)
+
+  defp mark_failed_entry(run_id, :legacy, _reason, _journal_opts) do
     LegacyJobAdapter.mark_abandoned(run_id)
   end
 
-  defp mark_failed_entry(run_id, _, reason) do
-    PipelineStatus.mark_failed(run_id, reason)
+  defp mark_failed_entry(run_id, _, reason, journal_opts) do
+    PipelineStatus.mark_failed(run_id, reason, journal_opts)
   end
 
   # Explicit typed classification (no string-contains heuristics).
