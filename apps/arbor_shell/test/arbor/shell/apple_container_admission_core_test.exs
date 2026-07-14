@@ -57,12 +57,15 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     }
   }
 
+  # Realistic container 1.1.0 linux/arm64 projection includes OCI variant "v8"
+  # on both selected platform and selected config maps.
   @valid_arm64_variant %{
     digest: @manifest_digest,
-    platform: %{os: "linux", architecture: "arm64"},
+    platform: %{os: "linux", architecture: "arm64", variant: "v8"},
     config: %{
       os: "linux",
       architecture: "arm64",
+      variant: "v8",
       config: %{
         "Env" => @env,
         "Labels" => @labels
@@ -404,6 +407,65 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
 
       assert {:error, {:duplicate_key_alias, :variant_config, :variant}} =
                AppleContainerAdmissionCore.new(dual_variant_config)
+    end
+
+    test "rejects every duplicate descriptor media-type representation" do
+      base_descriptor = @valid_evidence.image_inspect.configuration.descriptor
+      media = "application/vnd.docker.distribution.manifest.list.v2+json"
+
+      # Same-spelling snake atom + string.
+      dual_snake =
+        base_descriptor
+        |> Map.delete(:mediaType)
+        |> Map.merge(%{"media_type" => media, media_type: media})
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :configuration, :descriptor],
+          dual_snake
+        )
+
+      assert {:error, {:duplicate_key_alias, :descriptor, :media_type}} =
+               AppleContainerAdmissionCore.new(input)
+
+      # Same-spelling camel atom + string.
+      dual_camel =
+        %{
+          "mediaType" => media,
+          digest: @index_digest,
+          size: 772,
+          mediaType: media
+        }
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :configuration, :descriptor],
+          dual_camel
+        )
+
+      assert {:error, {:duplicate_key_alias, :descriptor, :media_type}} =
+               AppleContainerAdmissionCore.new(input)
+
+      # Cross-spelling snake + camel.
+      dual_cross =
+        %{
+          digest: @index_digest,
+          size: 772,
+          media_type: media,
+          mediaType: media
+        }
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :configuration, :descriptor],
+          dual_cross
+        )
+
+      assert {:error, {:duplicate_key_alias, :descriptor, :media_type}} =
+               AppleContainerAdmissionCore.new(input)
     end
 
     test "rejects policy callbacks/modules and unknown policy keys" do
@@ -760,6 +822,108 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
 
       input = put_in(@valid_input, [:evidence, :image_inspect, :variants], [variant])
       assert {:error, :variant_config_platform_mismatch} = AppleContainerAdmissionCore.new(input)
+    end
+
+    test "normalizes OCI arm64 variant v8 and rejects unsupported or malformed variants" do
+      # Positive path fixture already projects platform+config variant "v8".
+      assert {:ok, _receipt} = AppleContainerAdmissionCore.new(@valid_input)
+
+      # Absence of optional variant remains accepted (OCI field is optional).
+      without_variant = %{
+        digest: @manifest_digest,
+        platform: %{os: "linux", architecture: "arm64"},
+        config: %{
+          os: "linux",
+          architecture: "arm64",
+          config: %{"Env" => @env, "Labels" => @labels}
+        }
+      }
+
+      input = put_in(@valid_input, [:evidence, :image_inspect, :variants], [without_variant])
+      assert {:ok, _} = AppleContainerAdmissionCore.new(input)
+
+      # Platform-only or config-only "v8" is accepted.
+      platform_only =
+        without_variant
+        |> put_in([:platform, :variant], "v8")
+
+      input = put_in(@valid_input, [:evidence, :image_inspect, :variants], [platform_only])
+      assert {:ok, _} = AppleContainerAdmissionCore.new(input)
+
+      config_only =
+        without_variant
+        |> put_in([:config, :variant], "v8")
+
+      input = put_in(@valid_input, [:evidence, :image_inspect, :variants], [config_only])
+      assert {:ok, _} = AppleContainerAdmissionCore.new(input)
+
+      # Unsupported but safe token on selected arm64.
+      for path <- [[:platform, :variant], [:config, :variant]] do
+        variant = put_in(@valid_arm64_variant, path, "v9")
+        input = put_in(@valid_input, [:evidence, :image_inspect, :variants], [variant])
+
+        assert {:error, :unsupported_arm64_variant} = AppleContainerAdmissionCore.new(input),
+               "expected unsupported_arm64_variant for #{inspect(path)}=v9"
+      end
+
+      # Non-binary variant values fail closed during normalization.
+      for path <- [[:platform, :variant], [:config, :variant]] do
+        variant = put_in(@valid_arm64_variant, path, :v8)
+        input = put_in(@valid_input, [:evidence, :image_inspect, :variants], [variant])
+
+        assert {:error, :invalid_variant} = AppleContainerAdmissionCore.new(input),
+               "expected invalid_variant for non-binary at #{inspect(path)}"
+      end
+
+      # Oversized variant values fail closed during normalization.
+      oversized = String.duplicate("v", 64)
+
+      for path <- [[:platform, :variant], [:config, :variant]] do
+        variant = put_in(@valid_arm64_variant, path, oversized)
+        input = put_in(@valid_input, [:evidence, :image_inspect, :variants], [variant])
+
+        assert {:error, :variant_too_long} = AppleContainerAdmissionCore.new(input),
+               "expected variant_too_long for #{inspect(path)}"
+      end
+
+      # Non-selected variants are still bounded/normalized (not ignored).
+      amd64_oversized = %{
+        digest: "sha256:#{@other_hex}",
+        platform: %{os: "linux", architecture: "amd64", variant: oversized},
+        config: %{
+          os: "linux",
+          architecture: "amd64",
+          config: %{"Env" => @env, "Labels" => @labels}
+        }
+      }
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :variants],
+          [@valid_arm64_variant, amd64_oversized]
+        )
+
+      assert {:error, :variant_too_long} = AppleContainerAdmissionCore.new(input)
+
+      amd64_non_binary = %{
+        digest: "sha256:#{@other_hex}",
+        platform: %{os: "linux", architecture: "amd64", variant: 8},
+        config: %{
+          os: "linux",
+          architecture: "amd64",
+          config: %{"Env" => @env, "Labels" => @labels}
+        }
+      }
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :variants],
+          [@valid_arm64_variant, amd64_non_binary]
+        )
+
+      assert {:error, :invalid_variant} = AppleContainerAdmissionCore.new(input)
     end
 
     test "requires fixed attestation labels bound to toolchain and digests" do

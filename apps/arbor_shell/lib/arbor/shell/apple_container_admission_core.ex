@@ -213,11 +213,13 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   @max_label_value_bytes 1_024
   @max_variants 16
   @max_media_type_bytes 256
+  @max_oci_variant_bytes 32
   @max_apiserver_version_bytes 256
   @max_name_bytes 512
   @max_signing_field_bytes 1_024
   @max_status_bytes 64
   @max_descriptor_size 1_073_741_824
+  @required_arm64_variant "v8"
 
   # Fully-qualified immutable image: registry hostname (must contain a '.') + repository path + digest.
   @image_re ~r/\A([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+)@sha256:([0-9a-f]{64})\z/
@@ -888,6 +890,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
              :invalid_variant_architecture,
              :variant_architecture_too_long
            ),
+         {:ok, platform_variant} <- fetch_optional_oci_variant(platform),
          {:ok, config} <-
            fetch_required_map(variant, :config, :missing_variant_config, :invalid_variant_config),
          :ok <- validate_variant_config_keys(config),
@@ -909,6 +912,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
              :invalid_variant_config_architecture,
              :variant_config_architecture_too_long
            ),
+         {:ok, config_variant} <- fetch_optional_oci_variant(config),
          {:ok, image_config} <-
            fetch_required_map(
              config,
@@ -922,14 +926,34 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
       {:ok,
        %{
          digest: digest,
-         platform: %{os: platform_os, architecture: platform_arch},
+         platform: %{os: platform_os, architecture: platform_arch, variant: platform_variant},
          config: %{
            os: config_os,
            architecture: config_arch,
+           variant: config_variant,
            env: env,
            labels: labels
          }
        }}
+    end
+  end
+
+  # Optional OCI platform/config "variant" (e.g. arm64 "v8"). Absent stays nil;
+  # present values are small, valid UTF-8, control/whitespace-free binaries only.
+  defp fetch_optional_oci_variant(map) when is_map(map) do
+    case get_field(map, :variant) do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) ->
+        with :ok <- bounded_string(value, @max_oci_variant_bytes, :variant_too_long),
+             :ok <- require_valid_utf8(value),
+             :ok <- reject_control_or_whitespace(value, :unsafe_variant) do
+          {:ok, value}
+        end
+
+      _other ->
+        {:error, :invalid_variant}
     end
   end
 
@@ -1203,6 +1227,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
           case select_linux_arm64_variant(image_inspect.variants, policy.manifest_digest) do
             {:ok, variant} ->
               with :ok <- validate_variant_nested_platform(variant),
+                   :ok <- validate_selected_arm64_variants(variant),
                    :ok <- validate_env_match(variant.config.env, policy.env),
                    :ok <- validate_labels_match(variant.config.labels, policy.labels) do
                 {:ok,
@@ -1250,6 +1275,20 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
       :ok
     else
       {:error, :variant_config_platform_mismatch}
+    end
+  end
+
+  # Selected linux/arm64 may omit OCI variant (field is optional). Any declared
+  # platform/config variant must be exactly "v8" for Apple container 1.1.0 arm64.
+  defp validate_selected_arm64_variants(variant) do
+    declared =
+      [variant.platform.variant, variant.config.variant]
+      |> Enum.reject(&is_nil/1)
+
+    if Enum.all?(declared, &(&1 == @required_arm64_variant)) do
+      :ok
+    else
+      {:error, :unsupported_arm64_variant}
     end
   end
 
@@ -1360,38 +1399,42 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
       keys = Map.keys(descriptor)
 
       if Enum.all?(keys, &MapSet.member?(@allowed_descriptor_keys, &1)) do
-        # Reject dual media_type / mediaType aliases.
-        has_snake? =
-          Map.has_key?(descriptor, :media_type) or Map.has_key?(descriptor, "media_type")
+        # Reject every duplicate logical media-type representation before fetch:
+        # same-spelling atom/string pairs and snake-vs-camel cross aliases.
+        with :ok <- reject_duplicate_media_type_aliases(descriptor),
+             :ok <- reject_duplicate_key_aliases(keys, [:digest, :size], :descriptor) do
+          required =
+            Map.has_key?(descriptor, :digest) or Map.has_key?(descriptor, "digest")
 
-        has_camel? = Map.has_key?(descriptor, :mediaType) or Map.has_key?(descriptor, "mediaType")
+          size_present =
+            Map.has_key?(descriptor, :size) or Map.has_key?(descriptor, "size")
 
-        cond do
-          has_snake? and has_camel? ->
-            {:error, {:duplicate_key_alias, :descriptor, :media_type}}
+          media_present =
+            Map.has_key?(descriptor, :media_type) or
+              Map.has_key?(descriptor, "media_type") or
+              Map.has_key?(descriptor, :mediaType) or
+              Map.has_key?(descriptor, "mediaType")
 
-          true ->
-            logical = [:digest, :size]
-
-            with :ok <- reject_duplicate_key_aliases(keys, logical, :descriptor) do
-              required =
-                Map.has_key?(descriptor, :digest) or Map.has_key?(descriptor, "digest")
-
-              size_present =
-                Map.has_key?(descriptor, :size) or Map.has_key?(descriptor, "size")
-
-              media_present = has_snake? or has_camel?
-
-              if required and size_present and media_present do
-                :ok
-              else
-                {:error, :partial_image_descriptor}
-              end
-            end
+          if required and size_present and media_present do
+            :ok
+          else
+            {:error, :partial_image_descriptor}
+          end
         end
       else
         {:error, {:unsupported_keys, :descriptor}}
       end
+    end
+  end
+
+  defp reject_duplicate_media_type_aliases(descriptor) when is_map(descriptor) do
+    media_keys = [:media_type, "media_type", :mediaType, "mediaType"]
+    present = Enum.count(media_keys, &Map.has_key?(descriptor, &1))
+
+    if present > 1 do
+      {:error, {:duplicate_key_alias, :descriptor, :media_type}}
+    else
+      :ok
     end
   end
 
