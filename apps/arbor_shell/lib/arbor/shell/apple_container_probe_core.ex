@@ -1102,9 +1102,6 @@ defmodule Arbor.Shell.AppleContainerProbeCore do
       {:ok, 0.1} ->
         {:ok, "0.1"}
 
-      {:ok, value} when is_binary(value) and value == "0.1" ->
-        {:ok, "0.1"}
-
       {:ok, _other} ->
         {:error, :invalid_plugin_toml_version}
 

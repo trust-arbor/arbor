@@ -391,6 +391,11 @@ defmodule Arbor.Shell.AppleContainerProbeCoreTest do
 
       assert {:error, :plugin_services_config_mismatch} =
                Core.project(%{input | runtime_plugin_config_toml: bad_service})
+
+      quoted_version = String.replace(@plugin_toml, "version = 0.1", ~s(version = "0.1"))
+
+      assert {:error, :invalid_plugin_toml_version} =
+               Core.project(%{input | runtime_plugin_config_toml: quoted_version})
     end
 
     test "rejects malformed image arrays descriptors and config", %{input: input} do
