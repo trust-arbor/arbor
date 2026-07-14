@@ -10,6 +10,11 @@ Supervisor.start_child(
   {Arbor.Shell.AppleContainerControlPlaneAuthority, []}
 )
 
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  {Arbor.Shell.LinuxDependencyBaselineAuthority, []}
+)
+
 Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, []})
 
 Supervisor.start_child(

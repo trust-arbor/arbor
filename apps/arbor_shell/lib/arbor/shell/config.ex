@@ -4,7 +4,7 @@ defmodule Arbor.Shell.Config do
 
   Reads only Application environment values for this library. Performs no
   filesystem IO and never falls back to HOME, the current user, or service
-  output when resolving Apple Container locators.
+  output when resolving Apple Container or Linux dependency-baseline locators.
   """
 
   @app :arbor_shell
@@ -15,6 +15,15 @@ defmodule Arbor.Shell.Config do
                                   @logical_apple_container_keys ++
                                     Enum.map(@logical_apple_container_keys, &Atom.to_string/1)
                                 )
+
+  @logical_linux_dependency_baseline_keys [:source_root, :manifest_path]
+  @allowed_linux_dependency_baseline_keys MapSet.new(
+                                            @logical_linux_dependency_baseline_keys ++
+                                              Enum.map(
+                                                @logical_linux_dependency_baseline_keys,
+                                                &Atom.to_string/1
+                                              )
+                                          )
 
   @type apple_container_config :: %{
           kernel_path: String.t(),
@@ -30,6 +39,21 @@ defmodule Arbor.Shell.Config do
           | :missing_app_root
           | {:invalid_kernel_path, atom()}
           | {:invalid_app_root, atom()}
+
+  @type linux_dependency_baseline_config :: %{
+          source_root: String.t(),
+          manifest_path: String.t()
+        }
+
+  @type linux_dependency_baseline_error ::
+          :linux_dependency_baseline_config_absent
+          | :linux_dependency_baseline_config_malformed
+          | :unknown_linux_dependency_baseline_config_key
+          | :duplicate_linux_dependency_baseline_config_key
+          | :missing_source_root
+          | :missing_manifest_path
+          | {:invalid_source_root, atom()}
+          | {:invalid_manifest_path, atom()}
 
   @doc """
   Read and validate the closed Apple Container operator locator config.
@@ -47,6 +71,26 @@ defmodule Arbor.Shell.Config do
 
       config ->
         normalize_apple_container(config)
+    end
+  end
+
+  @doc """
+  Read and validate the closed Linux dependency-baseline operator locator config.
+
+  Accepts only `source_root` and `manifest_path` as absolute, lexically
+  canonical path strings. Rejects identities, bindings, evidence, digests,
+  readiness overrides, destination selection, and module injection.
+  """
+  @spec linux_dependency_baseline() ::
+          {:ok, linux_dependency_baseline_config()}
+          | {:error, linux_dependency_baseline_error()}
+  def linux_dependency_baseline do
+    case Application.get_env(@app, :linux_dependency_baseline) do
+      nil ->
+        {:error, :linux_dependency_baseline_config_absent}
+
+      config ->
+        normalize_linux_dependency_baseline(config)
     end
   end
 
@@ -107,6 +151,80 @@ defmodule Arbor.Shell.Config do
            required_path(acc, :kernel_path, :missing_kernel_path, :invalid_kernel_path),
          {:ok, app_root} <- required_path(acc, :app_root, :missing_app_root, :invalid_app_root) do
       {:ok, %{kernel_path: kernel_path, app_root: app_root}}
+    end
+  end
+
+  defp normalize_linux_dependency_baseline(config) when is_list(config) do
+    if Keyword.keyword?(config) do
+      config
+      |> Enum.reduce_while(
+        {:ok, %{}, MapSet.new()},
+        &accumulate_linux_dependency_baseline_pair/2
+      )
+      |> finish_linux_dependency_baseline()
+    else
+      {:error, :linux_dependency_baseline_config_malformed}
+    end
+  end
+
+  defp normalize_linux_dependency_baseline(config) when is_map(config) do
+    config
+    |> Map.to_list()
+    |> Enum.reduce_while(
+      {:ok, %{}, MapSet.new()},
+      &accumulate_linux_dependency_baseline_pair/2
+    )
+    |> finish_linux_dependency_baseline()
+  end
+
+  defp normalize_linux_dependency_baseline(_config),
+    do: {:error, :linux_dependency_baseline_config_malformed}
+
+  defp accumulate_linux_dependency_baseline_pair({key, value}, {:ok, acc, seen}) do
+    case normalize_linux_dependency_baseline_key(key) do
+      {:ok, logical} ->
+        if MapSet.member?(seen, logical) do
+          {:halt, {:error, :duplicate_linux_dependency_baseline_config_key}}
+        else
+          {:cont, {:ok, Map.put(acc, logical, value), MapSet.put(seen, logical)}}
+        end
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
+    end
+  end
+
+  defp normalize_linux_dependency_baseline_key(key) when is_atom(key) or is_binary(key) do
+    if MapSet.member?(@allowed_linux_dependency_baseline_keys, key) do
+      logical =
+        case key do
+          atom when is_atom(atom) -> atom
+          "source_root" -> :source_root
+          "manifest_path" -> :manifest_path
+        end
+
+      {:ok, logical}
+    else
+      {:error, :unknown_linux_dependency_baseline_config_key}
+    end
+  end
+
+  defp normalize_linux_dependency_baseline_key(_key),
+    do: {:error, :linux_dependency_baseline_config_malformed}
+
+  defp finish_linux_dependency_baseline({:error, reason}), do: {:error, reason}
+
+  defp finish_linux_dependency_baseline({:ok, acc, _seen}) do
+    with {:ok, source_root} <-
+           required_path(acc, :source_root, :missing_source_root, :invalid_source_root),
+         {:ok, manifest_path} <-
+           required_path(
+             acc,
+             :manifest_path,
+             :missing_manifest_path,
+             :invalid_manifest_path
+           ) do
+      {:ok, %{source_root: source_root, manifest_path: manifest_path}}
     end
   end
 
