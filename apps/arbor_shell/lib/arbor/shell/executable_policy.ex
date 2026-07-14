@@ -3,9 +3,7 @@ defmodule Arbor.Shell.ExecutablePolicy do
 
   use GenServer
 
-  import Bitwise
-
-  @max_symlinks 40
+  alias Arbor.Shell.TrustedPath
 
   defmodule Executable do
     @moduledoc false
@@ -196,7 +194,7 @@ defmodule Arbor.Shell.ExecutablePolicy do
   end
 
   defp resolve_absolute(command, state) do
-    with {:ok, canonical} <- canonical_path(command) do
+    with {:ok, canonical} <- TrustedPath.canonicalize_absolute(command) do
       case Map.get(state.executables_by_path, canonical) do
         %Executable{} = executable ->
           {:ok, executable}
@@ -238,129 +236,45 @@ defmodule Arbor.Shell.ExecutablePolicy do
   end
 
   defp executable_identity(candidate, name) do
-    with {:ok, canonical} <- canonical_path(candidate),
-         true <- Path.type(canonical) == :absolute,
-         :ok <- trusted_path_chain(canonical),
-         {:ok, %File.Stat{} = stat} <- File.stat(canonical, time: :posix),
-         true <- stat.type == :regular,
-         true <- executable_mode?(stat.mode),
-         true <- trusted_file?(stat),
-         {:ok, contents} <- File.read(canonical),
-         {:ok, %File.Stat{} = after_stat} <- File.stat(canonical, time: :posix),
-         true <- stable_stat?(stat, after_stat) do
-      {:ok,
-       %Executable{
-         name: name,
-         path: canonical,
-         device: stat.major_device,
-         inode: stat.inode,
-         size: stat.size,
-         mtime: stat.mtime,
-         ctime: stat.ctime,
-         mode: stat.mode,
-         sha256: :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
-       }}
-    else
-      _ -> {:error, :executable_not_found}
+    case TrustedPath.pin_root_owned_regular_file(candidate, executable: true) do
+      {:ok, %TrustedPath.Identity{} = identity} ->
+        {:ok,
+         %Executable{
+           name: name,
+           path: identity.path,
+           device: identity.device,
+           inode: identity.inode,
+           size: identity.size,
+           mtime: identity.mtime,
+           ctime: identity.ctime,
+           mode: identity.mode,
+           sha256: identity.sha256
+         }}
+
+      {:error, _reason} ->
+        {:error, :executable_not_found}
     end
   end
 
-  defp stable_stat?(left, right) do
-    Map.take(left, [:type, :size, :mode, :major_device, :inode, :mtime, :ctime]) ==
-      Map.take(right, [:type, :size, :mode, :major_device, :inode, :mtime, :ctime])
-  end
-
-  defp executable_mode?(mode), do: (mode &&& 0o111) != 0
-
-  # Agent processes share the service account's filesystem authority. A
-  # user-owned PATH directory is therefore mutable by the same principal and
-  # cannot anchor an executable identity. Root ownership plus no group/other
-  # write permission leaves replacement under operator authority only.
-  defp trusted_file?(%File.Stat{uid: 0, mode: mode}), do: (mode &&& 0o022) == 0
-  defp trusted_file?(_stat), do: false
-
-  defp trusted_directory(path) do
-    with {:ok, canonical} <- canonical_path(path),
-         :ok <- trusted_path_chain(canonical),
-         {:ok, %File.Stat{type: :directory, uid: 0, mode: mode}} <-
-           File.stat(canonical, time: :posix),
-         true <- (mode &&& 0o022) == 0 do
-      {:ok, canonical}
-    else
-      _ -> {:error, :untrusted_executable_directory}
-    end
-  end
-
-  defp trusted_path_chain(path) do
-    path
-    |> Path.dirname()
-    |> directory_chain()
-    |> Enum.reduce_while(:ok, fn directory, :ok ->
-      case File.stat(directory, time: :posix) do
-        {:ok, %File.Stat{type: :directory, uid: 0, mode: mode}} when (mode &&& 0o022) == 0 ->
-          {:cont, :ok}
-
-        _other ->
-          {:halt, {:error, :untrusted_executable_directory}}
+  # Relative PATH entries are expanded against the service CWD at policy
+  # construction, matching historical resolve behavior, then pinned only when
+  # the resulting absolute directory is root-owned and not group/other writable.
+  defp trusted_directory(path) when is_binary(path) do
+    absolute =
+      case Path.type(path) do
+        :absolute -> path
+        _ -> Path.expand(path)
       end
-    end)
+
+    case TrustedPath.pin_root_owned_directory(absolute) do
+      {:ok, %TrustedPath.Identity{path: canonical}} -> {:ok, canonical}
+      {:error, _reason} -> {:error, :untrusted_executable_directory}
+    end
   end
 
-  defp directory_chain(path) do
-    path
-    |> Path.split()
-    |> Enum.reduce({[], "/"}, fn
-      "/", {directories, current} ->
-        {directories, current}
-
-      part, {directories, current} ->
-        next = Path.join(current, part)
-        {[next | directories], next}
-    end)
-    |> elem(0)
-    |> then(&["/" | Enum.reverse(&1)])
-    |> Enum.uniq()
-  end
+  defp trusted_directory(_path), do: {:error, :untrusted_executable_directory}
 
   defp identity(executable) do
     Map.take(executable, [:device, :inode, :size, :mtime, :ctime, :mode, :sha256])
-  end
-
-  defp canonical_path(path), do: resolve_links(Path.expand(path), 0)
-
-  defp resolve_links(_path, count) when count > @max_symlinks,
-    do: {:error, :too_many_symlinks}
-
-  defp resolve_links(path, count) do
-    parts = Path.split(path)
-    walk_parts(parts, "/", count)
-  end
-
-  defp walk_parts([], current, _count), do: {:ok, Path.expand(current)}
-
-  defp walk_parts([part | rest], current, count) when part in ["/", ""] do
-    walk_parts(rest, current, count)
-  end
-
-  defp walk_parts([part | rest], current, count) do
-    candidate = Path.join(current, part)
-
-    case File.lstat(candidate) do
-      {:ok, %File.Stat{type: :symlink}} ->
-        with {:ok, target} <- File.read_link(candidate) do
-          target =
-            if Path.type(target) == :absolute,
-              do: target,
-              else: Path.expand(target, Path.dirname(candidate))
-
-          resolve_links(Path.join([target | rest]), count + 1)
-        end
-
-      {:ok, _stat} ->
-        walk_parts(rest, candidate, count)
-
-      {:error, reason} ->
-        {:error, reason}
-    end
   end
 end
