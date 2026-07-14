@@ -248,7 +248,12 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
             designated_requirement: String.t(),
             codesign_verified: true
           },
-          service: %{status: String.t(), install_root: String.t()},
+          service: %{
+            status: String.t(),
+            install_root: String.t(),
+            app_root: String.t(),
+            log_root_configured: false
+          },
           control_plane: ControlPlane.receipt(),
           image: %{
             reference: String.t(),
@@ -375,7 +380,9 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
         },
         service: %{
           status: child_receipt.service.status,
-          install_root: child_receipt.service.install_root
+          install_root: child_receipt.service.install_root,
+          app_root: child_receipt.service.app_root,
+          log_root_configured: false
         },
         control_plane: child_receipt,
         image: image_fields,
@@ -450,7 +457,9 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
       },
       "service" => %{
         "status" => receipt.service.status,
-        "install_root" => receipt.service.install_root
+        "install_root" => receipt.service.install_root,
+        "app_root" => receipt.service.app_root,
+        "log_root_configured" => false
       },
       "control_plane" => ControlPlane.show(receipt.control_plane),
       "image" => %{

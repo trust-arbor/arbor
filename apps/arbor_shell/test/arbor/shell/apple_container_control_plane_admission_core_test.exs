@@ -105,6 +105,8 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
       assert receipt.service == %{
                status: "running",
                install_root: "/usr/local/",
+               app_root: @app_root,
+               log_root_configured: false,
                corroborated: true
              }
 
@@ -147,6 +149,9 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
       assert shown["kernel"]["path"] == @kernel_path
       assert shown["kernel"]["sha256"] == @kernel_sha
       assert shown["service"]["corroborated"] == true
+      assert shown["service"]["app_root"] == @app_root
+      assert shown["service"]["log_root_configured"] == false
+      refute Map.has_key?(shown["service"], "log_root")
       refute Map.has_key?(shown, "stdout")
       refute Map.has_key?(shown, "raw")
       assert Jason.encode!(shown)
@@ -649,9 +654,91 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
             "CONTAINER_APP_ROOT" => bad_root,
             "CONTAINER_INSTALL_ROOT" => "/usr/local"
           })
+          |> put_in([:service_status, :app_root], bad_root)
 
         assert {:error, _reason} = Core.new(bad_bindings, bad_evidence)
       end
+    end
+  end
+
+  describe "service status app_root and log_root" do
+    test "rejects service app_root that does not match startup-bound app_root", %{
+      bindings: bindings,
+      evidence: evidence
+    } do
+      evidence =
+        put_in(evidence, [:service_status, :app_root], @app_root <> "-other")
+
+      assert {:error, :service_app_root_mismatch} = Core.new(bindings, evidence)
+    end
+
+    test "rejects missing service log_root rather than treating absence as nil", %{
+      bindings: bindings,
+      evidence: evidence
+    } do
+      missing_atom =
+        update_in(evidence, [:service_status], &Map.delete(&1, :log_root))
+
+      assert {:error, :missing_service_log_root} = Core.new(bindings, missing_atom)
+
+      # String-keyed surface must also fail closed when the key is absent.
+      missing_string =
+        update_in(evidence, [:service_status], fn service ->
+          service
+          |> Map.delete(:log_root)
+          |> Map.delete("log_root")
+          |> stringify_keys()
+          |> Map.delete("log_root")
+        end)
+
+      assert {:error, :missing_service_log_root} = Core.new(bindings, missing_string)
+    end
+
+    @tag :security_regression
+    test "security regression: nonnil service logRoot cannot be dropped and admitted", %{
+      bindings: bindings,
+      evidence: evidence
+    } do
+      secret_log_root = "/Users/arbor/Library/Logs/com.apple.container"
+
+      evidence =
+        put_in(evidence, [:service_status, :log_root], secret_log_root)
+
+      assert {:error, :service_log_root_forbidden} = Core.new(bindings, evidence)
+      refute match?({:ok, _}, Core.new(bindings, evidence))
+
+      # Dropping the non-nil field must also fail closed (missing), never admit.
+      dropped = update_in(evidence, [:service_status], &Map.delete(&1, :log_root))
+      assert {:error, :missing_service_log_root} = Core.new(bindings, dropped)
+      refute match?({:ok, _}, Core.new(bindings, dropped))
+
+      # Explicit nil is the only admitted form; receipt never exposes a path.
+      admitted_evidence = put_in(evidence, [:service_status, :log_root], nil)
+      assert {:ok, receipt} = Core.new(bindings, admitted_evidence)
+      assert receipt.service.log_root_configured == false
+      assert receipt.service.app_root == @app_root
+      shown = Core.show(receipt)
+      assert shown["service"]["log_root_configured"] == false
+      refute Map.has_key?(shown["service"], "log_root")
+      refute inspect(shown) =~ secret_log_root
+      refute inspect(receipt) =~ secret_log_root
+    end
+
+    test "accepts string-keyed service_status app_root and explicit nil log_root", %{
+      bindings: bindings,
+      evidence: evidence
+    } do
+      service =
+        evidence.service_status
+        |> Map.delete(:app_root)
+        |> Map.delete(:log_root)
+        |> Map.put("app_root", @app_root)
+        |> Map.put("log_root", nil)
+
+      evidence = Map.put(evidence, :service_status, service)
+      assert {:ok, receipt} = Core.new(bindings, evidence)
+      assert receipt.service.app_root == @app_root
+      assert receipt.service.log_root_configured == false
     end
   end
 
@@ -844,7 +931,9 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
         status: "running",
         install_root: "/usr/local/",
         apiserver_version: @version,
-        apiserver_build: "release"
+        apiserver_build: "release",
+        app_root: @app_root,
+        log_root: nil
       },
       runtime_plugin: %{
         identity: bindings.runtime_plugin_identity,

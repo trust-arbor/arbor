@@ -182,11 +182,25 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       },
       launchd: %{
         label: "com.apple.container.apiserver",
+        path: @app_root <> "/apiserver/apiserver.plist",
+        type: "LaunchAgent",
+        state: "running",
         program: "/usr/local/bin/container-apiserver",
         argv: ["/usr/local/bin/container-apiserver", "start"],
         environment: %{
           "CONTAINER_APP_ROOT" => @app_root,
-          "CONTAINER_INSTALL_ROOT" => "/usr/local"
+          "CONTAINER_INSTALL_ROOT" => "/usr/local",
+          "XPC_SERVICE_NAME" => "com.apple.container.apiserver",
+          "OSLogRateLimit" => "64"
+        },
+        inherited_environment: %{
+          "HOME" => "/Users/arbor",
+          "TMPDIR" => "/var/folders/xx/user-secret/T/",
+          "PATH" => "/usr/bin:/bin",
+          "XPC_FLAGS" => "0x0"
+        },
+        default_environment: %{
+          "PATH" => "/usr/bin:/bin:/usr/sbin:/sbin"
         }
       }
     },
@@ -194,7 +208,9 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       status: "running",
       install_root: "/usr/local/",
       apiserver_version: @version,
-      apiserver_build: "release"
+      apiserver_build: "release",
+      app_root: @app_root,
+      log_root: nil
     },
     runtime_plugin: %{
       identity: @plugin_identity,
@@ -362,7 +378,13 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
                codesign_verified: true
              }
 
-      assert receipt.service == %{status: "running", install_root: "/usr/local/"}
+      assert receipt.service == %{
+               status: "running",
+               install_root: "/usr/local/",
+               app_root: @app_root,
+               log_root_configured: false
+             }
+
       assert receipt.control_plane.admitted == true
       assert receipt.control_plane.app_root == @app_root
       assert receipt.control_plane.cli.sha256 == @cli_sha
@@ -371,11 +393,27 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert receipt.control_plane.runtime_plugin.sha256 == @plugin_sha
       assert receipt.control_plane.kernel.sha256 == @kernel_sha
       assert receipt.control_plane.service.corroborated == true
+      assert receipt.control_plane.service.app_root == @app_root
+      assert receipt.control_plane.service.log_root_configured == false
 
-      assert receipt.control_plane.apiserver.launchd.environment == %{
-               "CONTAINER_APP_ROOT" => @app_root,
-               "CONTAINER_INSTALL_ROOT" => "/usr/local"
+      assert receipt.control_plane.apiserver.launchd == %{
+               label: "com.apple.container.apiserver",
+               path: @app_root <> "/apiserver/apiserver.plist",
+               type: "LaunchAgent",
+               state: "running",
+               program: "/usr/local/bin/container-apiserver",
+               argv: ["/usr/local/bin/container-apiserver", "start"],
+               environment: %{
+                 "CONTAINER_APP_ROOT" => @app_root,
+                 "CONTAINER_INSTALL_ROOT" => "/usr/local"
+               },
+               inherited_environment_checked: true,
+               default_environment_checked: true,
+               proxy_free: true
              }
+
+      refute Map.has_key?(receipt.control_plane.apiserver.launchd, :inherited_environment)
+      refute Map.has_key?(receipt.control_plane.apiserver.launchd, :default_environment)
 
       assert receipt.image == %{
                reference: @image,
@@ -459,7 +497,41 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert shown["control_plane"]["runtime_plugin"]["sha256"] == @plugin_sha
       assert shown["control_plane"]["kernel"]["sha256"] == @kernel_sha
       assert shown["control_plane"]["service"]["corroborated"] == true
-      assert is_map(shown["control_plane"]["apiserver"]["launchd"])
+      assert shown["control_plane"]["service"]["app_root"] == @app_root
+      assert shown["control_plane"]["service"]["log_root_configured"] == false
+      refute Map.has_key?(shown["control_plane"]["service"], "log_root")
+      assert shown["service"]["app_root"] == @app_root
+      assert shown["service"]["log_root_configured"] == false
+      refute Map.has_key?(shown["service"], "log_root")
+
+      child_shown = ControlPlane.show(receipt.control_plane)
+      assert shown["control_plane"] == child_shown
+
+      assert shown["control_plane"]["apiserver"]["launchd"]["path"] ==
+               @app_root <> "/apiserver/apiserver.plist"
+
+      assert shown["control_plane"]["apiserver"]["launchd"]["type"] == "LaunchAgent"
+      assert shown["control_plane"]["apiserver"]["launchd"]["state"] == "running"
+
+      assert shown["control_plane"]["apiserver"]["launchd"]["environment"] == %{
+               "CONTAINER_APP_ROOT" => @app_root,
+               "CONTAINER_INSTALL_ROOT" => "/usr/local"
+             }
+
+      refute Map.has_key?(shown["control_plane"]["apiserver"]["launchd"], "inherited_environment")
+      refute Map.has_key?(shown["control_plane"]["apiserver"]["launchd"], "default_environment")
+
+      refute Map.has_key?(
+               shown["control_plane"]["apiserver"]["launchd"]["environment"],
+               "XPC_SERVICE_NAME"
+             )
+
+      refute Map.has_key?(
+               shown["control_plane"]["apiserver"]["launchd"]["environment"],
+               "OSLogRateLimit"
+             )
+
+      refute inspect(shown) =~ "user-secret"
       # No raw command output / oversized blobs in the receipt surface.
       refute Map.has_key?(shown, "stdout")
       refute Map.has_key?(shown, "raw")
@@ -471,6 +543,68 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert {:ok, b} = admit(@valid_input)
       assert a == b
       assert AppleContainerAdmissionCore.show(a) == AppleContainerAdmissionCore.show(b)
+    end
+
+    test "propagates control-plane service app_root and log_root_configured through aggregate receipt" do
+      assert {:ok, receipt} = admit(@valid_input)
+      assert receipt.service.app_root == @app_root
+      assert receipt.service.log_root_configured == false
+      assert receipt.control_plane.service.app_root == @app_root
+      assert receipt.control_plane.service.log_root_configured == false
+
+      shown = AppleContainerAdmissionCore.show(receipt)
+      assert shown["service"]["app_root"] == @app_root
+      assert shown["service"]["log_root_configured"] == false
+      assert shown["control_plane"]["service"]["app_root"] == @app_root
+      assert shown["control_plane"]["service"]["log_root_configured"] == false
+      refute Map.has_key?(shown["service"], "log_root")
+      refute Map.has_key?(shown["control_plane"]["service"], "log_root")
+    end
+
+    test "aggregate fails closed when nested control-plane service app_root mismatches binding" do
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :control_plane, :service_status, :app_root],
+          @app_root <> "-evil"
+        )
+
+      assert {:error, :service_app_root_mismatch} = admit(input)
+    end
+
+    test "aggregate fails closed when nested control-plane service log_root is missing" do
+      input =
+        update_in(
+          @valid_input,
+          [:evidence, :control_plane, :service_status],
+          &Map.delete(&1, :log_root)
+        )
+
+      assert {:error, :missing_service_log_root} = admit(input)
+    end
+
+    @tag :security_regression
+    test "security regression: aggregate does not admit nested nonnil service logRoot" do
+      secret = "/private/tmp/container-logs-evil"
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :control_plane, :service_status, :log_root],
+          secret
+        )
+
+      assert {:error, :service_log_root_forbidden} = admit(input)
+      refute match?({:ok, _}, admit(input))
+
+      dropped =
+        update_in(
+          input,
+          [:evidence, :control_plane, :service_status],
+          &Map.delete(&1, :log_root)
+        )
+
+      assert {:error, :missing_service_log_root} = admit(dropped)
     end
 
     test "accepts string-keyed policy and evidence maps" do
@@ -577,7 +711,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
             "entry_count" => 1,
             "total_bytes" => 0
           },
-          "control_plane" => control_plane
+          "control_plane" => stringify_control_plane(control_plane)
         }
       }
 
@@ -588,6 +722,10 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert receipt.runtime.executable_sha256 == @executable_sha256
       assert receipt.toolchain.erlang == @erlang_version
       assert receipt.control_plane.apiserver.version == "1.1.2"
+      assert receipt.control_plane.service.app_root == @app_root
+      assert receipt.control_plane.service.log_root_configured == false
+      assert receipt.service.app_root == @app_root
+      assert receipt.service.log_root_configured == false
       assert receipt.image.execution_reference == @workload_execution_ref
       assert receipt.vminit.execution_reference == @vminit_execution_ref
       assert receipt.dependency_baseline.schema == "1"
@@ -2105,5 +2243,56 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
   # Local helper: ordinary aggregate tests use startup bindings via new/2.
   defp admit(input, bindings \\ @control_plane_bindings) do
     AppleContainerAdmissionCore.new(input, bindings)
+  end
+
+  defp stringify_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+      {key, value} -> {key, value}
+    end)
+  end
+
+  # String-key the closed control-plane surface (including launchd/env sections)
+  # while preserving Identity structs and string-keyed environment maps.
+  defp stringify_control_plane(control_plane) when is_map(control_plane) do
+    control_plane
+    |> stringify_keys()
+    |> Map.new(fn
+      {"cli" = k, v} ->
+        {k, stringify_keys(Map.update!(v, :signing, &stringify_keys/1))}
+
+      {"apiserver" = k, v} ->
+        {k,
+         v
+         |> Map.update!(:signing, &stringify_keys/1)
+         |> Map.update!(:launchd, &stringify_keys/1)
+         |> stringify_keys()}
+
+      {"service_status" = k, v} ->
+        {k, stringify_keys(v)}
+
+      {"runtime_plugin" = k, v} ->
+        {k,
+         v
+         |> Map.update!(:signing, &stringify_keys/1)
+         |> Map.update!(:config, fn config ->
+           config
+           |> Map.update!(:services_config, fn sc ->
+             sc
+             |> Map.update!(:services, fn services ->
+               Enum.map(services, &stringify_keys/1)
+             end)
+             |> stringify_keys()
+           end)
+           |> stringify_keys()
+         end)
+         |> stringify_keys()}
+
+      {"user_plugin_root" = k, v} ->
+        {k, stringify_keys(v)}
+
+      other ->
+        other
+    end)
   end
 end

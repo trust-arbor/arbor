@@ -86,7 +86,14 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
                               Enum.map(@logical_apiserver_keys, &Atom.to_string/1)
                           )
 
-  @logical_service_keys [:status, :install_root, :apiserver_version, :apiserver_build]
+  @logical_service_keys [
+    :status,
+    :install_root,
+    :apiserver_version,
+    :apiserver_build,
+    :app_root,
+    :log_root
+  ]
   @allowed_service_keys MapSet.new(
                           @logical_service_keys ++
                             Enum.map(@logical_service_keys, &Atom.to_string/1)
@@ -304,7 +311,8 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
            validate_service_corroboration(
              normalized_evidence.service_status,
              api_version,
-             normalized_evidence.apiserver.build
+             normalized_evidence.apiserver.build,
+             normalized_bindings.app_root
            ) do
       receipt = build_receipt(normalized_bindings, normalized_evidence, cli_version, api_version)
       {:ok, receipt}
@@ -337,6 +345,8 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
       "service" => %{
         "status" => receipt.service.status,
         "install_root" => receipt.service.install_root,
+        "app_root" => receipt.service.app_root,
+        "log_root_configured" => false,
         "corroborated" => true
       }
     }
@@ -570,14 +580,51 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
              :missing_service_apiserver_build,
              :invalid_service_apiserver_build,
              :service_apiserver_build_too_long
-           ) do
+           ),
+         {:ok, app_root} <-
+           require_bounded_binary_field(
+             service,
+             :app_root,
+             @max_path_bytes,
+             :missing_service_app_root,
+             :invalid_service_app_root,
+             :service_app_root_too_long
+           ),
+         {:ok, log_root} <- fetch_required_nil_log_root(service) do
       {:ok,
        %{
          status: status,
          install_root: install_root,
          apiserver_version: apiserver_version,
-         apiserver_build: apiserver_build
+         apiserver_build: apiserver_build,
+         app_root: app_root,
+         log_root: log_root
        }}
+    end
+  end
+
+  # log_root must be explicitly present and nil. A missing key fails closed as
+  # missing (never treated as nil). Any non-nil value is forbidden; rejected
+  # path text is not retained.
+  defp fetch_required_nil_log_root(service) when is_map(service) do
+    atom_key = :log_root
+    string_key = "log_root"
+
+    cond do
+      Map.has_key?(service, atom_key) ->
+        case Map.fetch!(service, atom_key) do
+          nil -> {:ok, nil}
+          _other -> {:error, :service_log_root_forbidden}
+        end
+
+      Map.has_key?(service, string_key) ->
+        case Map.fetch!(service, string_key) do
+          nil -> {:ok, nil}
+          _other -> {:error, :service_log_root_forbidden}
+        end
+
+      true ->
+        {:error, :missing_service_log_root}
     end
   end
 
@@ -1386,13 +1433,21 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
     end
   end
 
-  # Service status corroborates the already-validated signed API version/build.
-  # It never establishes version authority and must not track the CLI alone.
-  defp validate_service_corroboration(service, signed_api_version, signed_api_build) do
+  # Service status corroborates the already-validated signed API version/build
+  # and the owner-bound app root. It never establishes path/signing/version
+  # authority and must not track the CLI alone. A non-nil log root is forbidden
+  # (Apple propagates CONTAINER_LOG_ROOT into plugin environments).
+  defp validate_service_corroboration(
+         service,
+         signed_api_version,
+         signed_api_build,
+         bound_app_root
+       ) do
     with :ok <- require_valid_utf8(service.status),
          :ok <- require_valid_utf8(service.install_root),
          :ok <- require_valid_utf8(service.apiserver_version),
-         :ok <- require_valid_utf8(service.apiserver_build) do
+         :ok <- require_valid_utf8(service.apiserver_build),
+         :ok <- require_valid_utf8(service.app_root) do
       cond do
         service.status != "running" ->
           {:error, :service_not_running}
@@ -1405,6 +1460,12 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
 
         service.apiserver_build != signed_api_build ->
           {:error, :service_apiserver_build_mismatch}
+
+        service.app_root != bound_app_root ->
+          {:error, :service_app_root_mismatch}
+
+        not is_nil(service.log_root) ->
+          {:error, :service_log_root_forbidden}
 
         true ->
           :ok
@@ -1485,6 +1546,8 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
       service: %{
         status: "running",
         install_root: @install_root,
+        app_root: bindings.app_root,
+        log_root_configured: false,
         corroborated: true
       }
     }
