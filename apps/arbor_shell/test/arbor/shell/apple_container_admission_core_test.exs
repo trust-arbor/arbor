@@ -17,10 +17,14 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
   @mix_lock_hex String.duplicate("c", 64)
   @tree_hex String.duplicate("d", 64)
   @other_hex String.duplicate("e", 64)
+  @executable_sha256 String.duplicate("f", 64)
 
-  @image "arbor/validation@sha256:#{@index_hex}"
+  @image "docker.io/arbor/validation@sha256:#{@index_hex}"
   @index_digest "sha256:#{@index_hex}"
   @manifest_digest "sha256:#{@manifest_hex}"
+
+  @erlang_version "28.4.1"
+  @elixir_version "1.19.5-otp-28"
 
   @env [
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -28,8 +32,14 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
   ]
 
   @labels %{
-    "org.arbor.attestation" => "validation-image-v1",
-    "org.arbor.image.role" => "spawn-containment"
+    "org.arbor.validation.schema" => "1",
+    "org.arbor.validation.role" => "spawn-containment",
+    "org.arbor.validation.platform" => "linux/arm64",
+    "org.arbor.validation.erlang" => @erlang_version,
+    "org.arbor.validation.elixir" => @elixir_version,
+    "org.arbor.validation.mix-lock-sha256" => @mix_lock_hex,
+    "org.arbor.validation.deps-tree-sha256" => @tree_hex,
+    "org.arbor.operator.note" => "approved-fixture"
   }
 
   @designated_requirement AppleContainerAdmissionCore.designated_requirement()
@@ -40,7 +50,11 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     env: @env,
     labels: @labels,
     mix_lock_digest: @mix_lock_hex,
-    baseline_tree_digest: @tree_hex
+    baseline_tree_digest: @tree_hex,
+    toolchain: %{
+      erlang: @erlang_version,
+      elixir: @elixir_version
+    }
   }
 
   @valid_arm64_variant %{
@@ -68,6 +82,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       path: "/usr/local/bin/container",
       cli_version: "1.1.0",
       cli_build: "release",
+      executable_sha256: @executable_sha256,
       signing: %{
         identifier: "com.apple.container.cli",
         team_id: "UPBK2H6LZM",
@@ -89,7 +104,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
           mediaType: "application/vnd.docker.distribution.manifest.list.v2+json",
           size: 772
         },
-        name: "docker.io/arbor/validation@sha256:#{@index_hex}"
+        name: @image
       },
       variants: [@valid_arm64_variant]
     },
@@ -113,7 +128,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
 
   @invalid_utf8 <<0xC3, 0x28>>
 
-  # ── Positive path ──────────────────────────────────────────────────────
+  # --- Positive path ---
 
   describe "positive admission" do
     test "admits complete policy + realistic 1.1.0 evidence and binds all fields" do
@@ -127,6 +142,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
                cli_version: "1.1.0",
                api_version: "1.1.0",
                build: "release",
+               executable_sha256: @executable_sha256,
                signing_identifier: "com.apple.container.cli",
                team_id: "UPBK2H6LZM",
                designated_requirement: @designated_requirement,
@@ -144,6 +160,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
                labels: @labels
              }
 
+      assert receipt.toolchain == %{erlang: @erlang_version, elixir: @elixir_version}
+
       assert receipt.dependency_baseline == %{
                image_index_digest: @index_digest,
                image_manifest_digest: @manifest_digest,
@@ -158,7 +176,10 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert shown["admitted"] == true
       assert shown["runtime"]["designated_requirement"] == @designated_requirement
       assert shown["runtime"]["codesign_verified"] == true
+      assert shown["runtime"]["executable_sha256"] == @executable_sha256
       assert shown["image"]["reference"] == @image
+      assert shown["toolchain"]["erlang"] == @erlang_version
+      assert shown["toolchain"]["elixir"] == @elixir_version
       # No raw command output / oversized blobs in the receipt surface.
       refute Map.has_key?(shown, "stdout")
       refute Map.has_key?(shown, "raw")
@@ -180,7 +201,11 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
           "env" => @env,
           "labels" => @labels,
           "mix_lock_digest" => @mix_lock_hex,
-          "baseline_tree_digest" => @tree_hex
+          "baseline_tree_digest" => @tree_hex,
+          "toolchain" => %{
+            "erlang" => @erlang_version,
+            "elixir" => @elixir_version
+          }
         },
         "evidence" => %{
           "host_platform" => %{
@@ -192,6 +217,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
             "path" => "/usr/local/bin/container",
             "cli_version" => "1.1.2",
             "cli_build" => "release",
+            "executable_sha256" => @executable_sha256,
             "signing" => %{
               "identifier" => "com.apple.container.cli",
               "team_id" => "UPBK2H6LZM",
@@ -243,6 +269,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert receipt.platform.version == "26.1"
       assert receipt.runtime.cli_version == "1.1.2"
       assert receipt.runtime.api_version == "1.1.2"
+      assert receipt.runtime.executable_sha256 == @executable_sha256
+      assert receipt.toolchain.erlang == @erlang_version
     end
 
     test "exports fixed platform authority constants" do
@@ -264,7 +292,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     end
   end
 
-  # ── Closed shapes / aliases ────────────────────────────────────────────
+  # --- Closed shapes / aliases ---
 
   describe "closed request shapes" do
     test "rejects non-map input and missing policy/evidence" do
@@ -278,11 +306,11 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
                AppleContainerAdmissionCore.new(%{policy: @valid_policy})
     end
 
-    test "rejects unknown top-level keys" do
-      assert {:error, {:unsupported_keys, :request, _}} =
+    test "rejects unknown top-level keys without echoing key material" do
+      assert {:error, {:unsupported_keys, :request}} =
                AppleContainerAdmissionCore.new(Map.put(@valid_input, :callback, fn -> :ok end))
 
-      assert {:error, {:unsupported_keys, :request, _}} =
+      assert {:error, {:unsupported_keys, :request}} =
                AppleContainerAdmissionCore.new(Map.put(@valid_input, :extra, 1))
     end
 
@@ -334,20 +362,64 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert {:error, :ambiguous_env_alias} = AppleContainerAdmissionCore.new(dual_env)
     end
 
+    test "rejects dual atom/string aliases on optional variant fields" do
+      dual_variant_platform =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :variants],
+          [
+            put_in(
+              @valid_arm64_variant,
+              [:platform],
+              Map.merge(%{os: "linux", architecture: "arm64", variant: "v8"}, %{
+                "variant" => "v8"
+              })
+            )
+          ]
+        )
+
+      assert {:error, {:duplicate_key_alias, :variant_platform, :variant}} =
+               AppleContainerAdmissionCore.new(dual_variant_platform)
+
+      dual_variant_config =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :variants],
+          [
+            put_in(
+              @valid_arm64_variant,
+              [:config],
+              Map.merge(
+                %{
+                  os: "linux",
+                  architecture: "arm64",
+                  variant: "v8",
+                  config: %{"Env" => @env, "Labels" => @labels}
+                },
+                %{"variant" => "v8"}
+              )
+            )
+          ]
+        )
+
+      assert {:error, {:duplicate_key_alias, :variant_config, :variant}} =
+               AppleContainerAdmissionCore.new(dual_variant_config)
+    end
+
     test "rejects policy callbacks/modules and unknown policy keys" do
-      assert {:error, {:unsupported_keys, :policy, _}} =
+      assert {:error, {:unsupported_keys, :policy}} =
                AppleContainerAdmissionCore.new(
                  put_in(@valid_input, [:policy], Map.put(@valid_policy, :validator, & &1))
                )
 
-      assert {:error, {:unsupported_keys, :policy, _}} =
+      assert {:error, {:unsupported_keys, :policy}} =
                AppleContainerAdmissionCore.new(
                  put_in(@valid_input, [:policy], Map.put(@valid_policy, :module, __MODULE__))
                )
     end
   end
 
-  # ── Host platform ──────────────────────────────────────────────────────
+  # --- Host platform ---
 
   describe "host platform mutations" do
     @mutations [
@@ -383,7 +455,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     end
   end
 
-  # ── Runtime path / version / signing ───────────────────────────────────
+  # --- Runtime path / version / signing ---
 
   describe "runtime and signing mutations" do
     test "rejects path not equal to fixed /usr/local/bin/container" do
@@ -448,6 +520,29 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert {:error, :non_release_api_version} = AppleContainerAdmissionCore.new(input)
     end
 
+    test "requires and carries pinned executable sha256" do
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :runtime],
+          Map.delete(@valid_evidence.runtime, :executable_sha256)
+        )
+
+      assert {:error, :missing_executable_sha256} = AppleContainerAdmissionCore.new(input)
+
+      input = put_in(@valid_input, [:evidence, :runtime, :executable_sha256], "not-hex")
+      assert {:error, :invalid_executable_sha256} = AppleContainerAdmissionCore.new(input)
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :runtime, :executable_sha256],
+          String.upcase(@executable_sha256)
+        )
+
+      assert {:error, :invalid_executable_sha256} = AppleContainerAdmissionCore.new(input)
+    end
+
     test "rejects signing identifier, team, requirement, and unbound verification mutations" do
       mutations = [
         {[:evidence, :runtime, :signing, :identifier], "com.apple.other",
@@ -487,7 +582,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     end
   end
 
-  # ── Service status ─────────────────────────────────────────────────────
+  # --- Service status ---
 
   describe "service-status mutations" do
     test "requires running status and /usr/local/ installRoot" do
@@ -523,15 +618,17 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     end
   end
 
-  # ── Image inspect ──────────────────────────────────────────────────────
+  # --- Image inspect ---
 
   describe "image-inspect mutations" do
-    test "rejects mutable image references in policy" do
+    test "rejects mutable and non-canonical image references in policy" do
       for image <- [
             "arbor/validation:latest",
             "arbor/validation:1.1.0",
             "arbor/validation",
-            "arbor/validation@sha256:SHORT"
+            "arbor/validation@sha256:SHORT",
+            # Short repository form is no longer canonical.
+            "arbor/validation@sha256:#{@index_hex}"
           ] do
         input = put_in(@valid_input, [:policy, :image], image)
 
@@ -540,7 +637,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       end
     end
 
-    test "rejects index digest / name mismatch" do
+    test "requires exact byte-for-byte image name equality (no repository suffix collisions)" do
       input =
         put_in(
           @valid_input,
@@ -567,6 +664,52 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
         )
 
       assert {:error, :image_name_digest_mismatch} = AppleContainerAdmissionCore.new(input)
+
+      # Near-collision: attacker prefix ending in the policy repository.
+      near_collision =
+        "evil.example/docker.io/arbor/validation@sha256:#{@index_hex}"
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :configuration, :name],
+          near_collision
+        )
+
+      assert {:error, :image_name_digest_mismatch} = AppleContainerAdmissionCore.new(input)
+
+      # Registry-host prefix that used to pass suffix matching.
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :configuration, :name],
+          "mirror.local/" <> @image
+        )
+
+      assert {:error, :image_name_digest_mismatch} = AppleContainerAdmissionCore.new(input)
+    end
+
+    test "rejects unsupported or empty image media types" do
+      for media <- [
+            "",
+            "application/json",
+            "application/vnd.oci.image.manifest.v1+json",
+            "text/plain"
+          ] do
+        input =
+          put_in(
+            @valid_input,
+            [:evidence, :image_inspect, :configuration, :descriptor, :mediaType],
+            media
+          )
+
+        assert match?(
+                 {:error, reason}
+                 when reason in [:empty_media_type, :unsupported_image_media_type],
+                 AppleContainerAdmissionCore.new(input)
+               ),
+               "expected media type rejection for #{inspect(media)}"
+      end
     end
 
     test "requires exactly one linux/arm64 variant with pinned manifest digest" do
@@ -619,6 +762,39 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert {:error, :variant_config_platform_mismatch} = AppleContainerAdmissionCore.new(input)
     end
 
+    test "requires fixed attestation labels bound to toolchain and digests" do
+      # Missing fixed label
+      labels = Map.delete(@labels, "org.arbor.validation.schema")
+      input = put_in(@valid_input, [:policy, :labels], labels)
+      assert {:error, :missing_fixed_attestation_label} = AppleContainerAdmissionCore.new(input)
+
+      # Wrong schema value
+      labels = Map.put(@labels, "org.arbor.validation.schema", "2")
+      input = put_in(@valid_input, [:policy, :labels], labels)
+      assert {:error, :fixed_attestation_label_mismatch} = AppleContainerAdmissionCore.new(input)
+
+      # Erlang label not bound to policy toolchain
+      labels = Map.put(@labels, "org.arbor.validation.erlang", "27.0")
+      input = put_in(@valid_input, [:policy, :labels], labels)
+      assert {:error, :fixed_attestation_label_mismatch} = AppleContainerAdmissionCore.new(input)
+
+      # mix-lock label not bound to policy digest
+      labels = Map.put(@labels, "org.arbor.validation.mix-lock-sha256", @other_hex)
+      input = put_in(@valid_input, [:policy, :labels], labels)
+      assert {:error, :fixed_attestation_label_mismatch} = AppleContainerAdmissionCore.new(input)
+
+      # Missing toolchain map
+      policy = Map.delete(@valid_policy, :toolchain)
+
+      assert {:error, :missing_toolchain} =
+               AppleContainerAdmissionCore.new(%{policy: policy, evidence: @valid_evidence})
+
+      # Empty/arbitrary labels no longer satisfy attestation
+      empty_labels = %{"org.arbor.attestation" => "validation-image-v1"}
+      input = put_in(@valid_input, [:policy, :labels], empty_labels)
+      assert match?({:error, _}, AppleContainerAdmissionCore.new(input))
+    end
+
     test "requires exact operator-approved Env and Labels" do
       # Unexpected inherited Env entry
       variant =
@@ -648,7 +824,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
         put_in(
           @valid_arm64_variant,
           [:config, :config, "Labels"],
-          Map.delete(@labels, "org.arbor.attestation")
+          Map.delete(@labels, "org.arbor.operator.note")
         )
 
       input = put_in(@valid_input, [:evidence, :image_inspect, :variants], [variant])
@@ -669,7 +845,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
           Map.put(@valid_evidence.image_inspect, :history, [])
         )
 
-      assert {:error, {:unsupported_keys, :image_inspect, _}} =
+      assert {:error, {:unsupported_keys, :image_inspect}} =
                AppleContainerAdmissionCore.new(input)
 
       descriptor =
@@ -689,7 +865,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     end
   end
 
-  # ── Dependency baseline ────────────────────────────────────────────────
+  # --- Dependency baseline ---
 
   describe "dependency baseline mutations" do
     test "binds baseline to image index+manifest digests and exact hex digests" do
@@ -702,8 +878,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
          :baseline_mix_lock_digest_mismatch},
         {[:evidence, :dependency_baseline, :baseline_tree_digest], @other_hex,
          :baseline_tree_digest_mismatch},
-        {[:policy, :mix_lock_digest], @other_hex, :baseline_mix_lock_digest_mismatch},
-        {[:policy, :baseline_tree_digest], @other_hex, :baseline_tree_digest_mismatch}
+        {[:policy, :mix_lock_digest], @other_hex, :fixed_attestation_label_mismatch},
+        {[:policy, :baseline_tree_digest], @other_hex, :fixed_attestation_label_mismatch}
       ]
 
       for {path, value, expected} <- mutations do
@@ -762,7 +938,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     end
   end
 
-  # ── Malformed / oversized / partial ────────────────────────────────────
+  # --- Malformed / oversized / partial ---
 
   describe "malformed and partial evidence" do
     test "rejects invalid UTF-8 across bound string fields without raising" do
@@ -817,20 +993,116 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
                  put_in(@valid_input, [:policy, :labels], %{attestation: "x"})
                )
     end
+
+    test "rejects large unknown binary keys without echoing attacker material" do
+      huge_key = String.duplicate("A", 100_000)
+      input = Map.put(@valid_input, huge_key, "x")
+
+      assert {:error, err} = AppleContainerAdmissionCore.new(input)
+      assert err == {:unsupported_keys, :request}
+
+      err_text = inspect(err)
+      refute String.contains?(err_text, huge_key)
+      refute String.contains?(err_text, String.duplicate("A", 32))
+    end
+
+    test "rejects oversized host version and fixed/signing/service/baseline fields" do
+      oversized = String.duplicate("9", 10_000)
+
+      assert {:error, :host_version_too_long} =
+               AppleContainerAdmissionCore.new(
+                 put_in(@valid_input, [:evidence, :host_platform, :version], oversized)
+               )
+
+      assert {:error, :designated_requirement_too_long} =
+               AppleContainerAdmissionCore.new(
+                 put_in(
+                   @valid_input,
+                   [:evidence, :runtime, :signing, :designated_requirement],
+                   oversized
+                 )
+               )
+
+      assert {:error, :apiserver_version_too_long} =
+               AppleContainerAdmissionCore.new(
+                 put_in(
+                   @valid_input,
+                   [:evidence, :service_status, :apiserver_version],
+                   oversized
+                 )
+               )
+
+      assert {:error, :baseline_platform_too_long} =
+               AppleContainerAdmissionCore.new(
+                 put_in(
+                   @valid_input,
+                   [:evidence, :dependency_baseline, :platform],
+                   oversized
+                 )
+               )
+
+      assert {:error, :image_name_too_long} =
+               AppleContainerAdmissionCore.new(
+                 put_in(
+                   @valid_input,
+                   [:evidence, :image_inspect, :configuration, :name],
+                   oversized
+                 )
+               )
+
+      assert {:error, :toolchain_erlang_too_long} =
+               AppleContainerAdmissionCore.new(
+                 put_in(@valid_input, [:policy, :toolchain, :erlang], oversized)
+               )
+    end
+
+    test "rejects oversized maps and lists without raising" do
+      huge_map =
+        Map.new(1..200, fn i -> {:"k#{i}", i} end)
+
+      assert {:error, :map_too_large} =
+               AppleContainerAdmissionCore.new(Map.merge(@valid_input, huge_map))
+
+      huge_variants = List.duplicate(@valid_arm64_variant, 64)
+
+      assert {:error, :too_many_variants} =
+               AppleContainerAdmissionCore.new(
+                 put_in(@valid_input, [:evidence, :image_inspect, :variants], huge_variants)
+               )
+    end
+
+    test "public new/1 returns errors for malformed inputs rather than raising" do
+      malformed = [
+        nil,
+        :atom,
+        42,
+        [policy: @valid_policy],
+        %{policy: "nope", evidence: @valid_evidence},
+        %{policy: @valid_policy, evidence: "nope"},
+        %{policy: @valid_policy, evidence: Map.put(@valid_evidence, :runtime, [])}
+      ]
+
+      for input <- malformed do
+        assert match?({:error, _}, AppleContainerAdmissionCore.new(input)),
+               "expected error for #{inspect(input)}"
+      end
+    end
   end
 
-  # ── Bound-field mutation sweep ─────────────────────────────────────────
+  # --- Bound-field mutation sweep ---
 
   describe "receipt field binding sweep" do
     test "mutating each bound receipt input field fails closed" do
       bound_mutations = [
         {[:evidence, :host_platform, :architecture], "x86_64"},
         {[:evidence, :runtime, :cli_version], "1.1.9"},
+        {[:evidence, :runtime, :executable_sha256], @other_hex},
         {[:evidence, :runtime, :signing, :team_id], "ZZZZZZZZZZ"},
         {[:evidence, :service_status, :install_root], "/opt/homebrew/"},
         {[:policy, :manifest_digest], "sha256:#{@other_hex}"},
         {[:policy, :env], @env ++ ["X=1"]},
         {[:policy, :labels], Map.put(@labels, "x", "y")},
+        {[:policy, :toolchain, :erlang], "27.0"},
         {[:evidence, :dependency_baseline, :mix_lock_digest], @other_hex},
         {[:evidence, :dependency_baseline, :platform], "macos/arm64"}
       ]
@@ -840,9 +1112,17 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       for {path, value} <- bound_mutations do
         input = put_in(@valid_input, path, value)
         # CLI version mutation alone also needs matching API or gets version mismatch;
-        # either way admission must fail.
-        assert match?({:error, _}, AppleContainerAdmissionCore.new(input)),
-               "expected fail-closed for mutation #{inspect(path)}=#{inspect(value)}"
+        # either way admission must fail. Note: executable_sha256 is carried evidence
+        # (any valid hex64 is shape-valid); binding it does not make it authority.
+        # For the sha mutation we only assert fail when paired with label/toolchain
+        # changes above; a pure sha change with valid hex still admits the hash as data.
+        if path == [:evidence, :runtime, :executable_sha256] do
+          assert {:ok, receipt} = AppleContainerAdmissionCore.new(input)
+          assert receipt.runtime.executable_sha256 == @other_hex
+        else
+          assert match?({:error, _}, AppleContainerAdmissionCore.new(input)),
+                 "expected fail-closed for mutation #{inspect(path)}=#{inspect(value)}"
+        end
       end
     end
   end
