@@ -68,6 +68,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   @logical_policy_keys [
     :image,
     :manifest_digest,
+    :vminit_image,
+    :vminit_manifest_digest,
     :env,
     :labels,
     :mix_lock_digest,
@@ -89,6 +91,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     :runtime,
     :service_status,
     :image_inspect,
+    :vminit_image_inspect,
     :dependency_baseline,
     :control_plane
   ]
@@ -227,6 +230,12 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   @max_descriptor_size 1_073_741_824
   @required_arm64_variant "v8"
 
+  # Deterministic local-only execution aliases (derived from index digests;
+  # never accepted as independent policy source references).
+  @local_alias_registry "127.0.0.1:0"
+  @workload_alias_repository "arbor/workload"
+  @vminit_alias_repository "arbor/vminit"
+
   # Fully-qualified immutable image: registry hostname with at least one '.'
   # (optionally :port) + repository path + digest. Hosts without a dot
   # (e.g. registry/arbor/...) are default-registry-ambiguous and rejected.
@@ -257,11 +266,19 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
           control_plane: ControlPlane.receipt(),
           image: %{
             reference: String.t(),
+            execution_reference: String.t(),
             index_digest: String.t(),
             manifest_digest: String.t(),
             platform: String.t(),
             env: [String.t()],
             labels: %{optional(String.t()) => String.t()}
+          },
+          vminit: %{
+            reference: String.t(),
+            execution_reference: String.t(),
+            index_digest: String.t(),
+            manifest_digest: String.t(),
+            platform: String.t()
           },
           toolchain: %{erlang: String.t(), elixir: String.t()},
           dependency_baseline: %{
@@ -316,11 +333,13 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
          {:ok, service} <- fetch_service_status(evidence),
          {:ok, control_plane_evidence} <- fetch_control_plane_evidence(evidence),
          {:ok, image_inspect} <- fetch_image_inspect(evidence),
+         {:ok, vminit_image_inspect} <- fetch_vminit_image_inspect(evidence),
          {:ok, baseline} <- fetch_dependency_baseline(evidence),
          :ok <- validate_host_platform(host_platform),
          {:ok, cli_version, api_version, executable_sha256} <-
            validate_runtime_and_service(runtime, service),
-         {:ok, image_fields} <- validate_image(normalized_policy, image_inspect),
+         {:ok, image_fields} <- validate_workload_image(normalized_policy, image_inspect),
+         {:ok, vminit_fields} <- validate_vminit_image(normalized_policy, vminit_image_inspect),
          {:ok, baseline_fields} <-
            validate_dependency_baseline(normalized_policy, baseline, image_fields),
          {:ok, child_receipt} <- ControlPlane.new(control_plane_bindings, control_plane_evidence),
@@ -359,6 +378,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
         },
         control_plane: child_receipt,
         image: image_fields,
+        vminit: vminit_fields,
         toolchain: normalized_policy.toolchain,
         dependency_baseline: baseline_fields
       }
@@ -401,11 +421,19 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
       "control_plane" => ControlPlane.show(receipt.control_plane),
       "image" => %{
         "reference" => receipt.image.reference,
+        "execution_reference" => receipt.image.execution_reference,
         "index_digest" => receipt.image.index_digest,
         "manifest_digest" => receipt.image.manifest_digest,
         "platform" => receipt.image.platform,
         "env" => receipt.image.env,
         "labels" => receipt.image.labels
+      },
+      "vminit" => %{
+        "reference" => receipt.vminit.reference,
+        "execution_reference" => receipt.vminit.execution_reference,
+        "index_digest" => receipt.vminit.index_digest,
+        "manifest_digest" => receipt.vminit.manifest_digest,
+        "platform" => receipt.vminit.platform
       },
       "toolchain" => %{
         "erlang" => receipt.toolchain.erlang,
@@ -452,6 +480,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   defp normalize_policy(policy) do
     with {:ok, image} <- fetch_policy_image(policy),
          {:ok, manifest_digest} <- fetch_policy_manifest_digest(policy),
+         {:ok, vminit_image} <- fetch_policy_vminit_image(policy),
+         {:ok, vminit_manifest_digest} <- fetch_policy_vminit_manifest_digest(policy),
          {:ok, env} <- fetch_policy_env(policy),
          {:ok, labels} <- fetch_policy_labels(policy),
          {:ok, mix_lock_digest} <-
@@ -466,24 +496,40 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
              mix_lock_digest,
              baseline_tree_digest
            ) do
-      {:ok,
-       %{
-         image: image,
-         index_digest: "sha256:" <> image_digest(image),
-         manifest_digest: manifest_digest,
-         env: env,
-         labels: labels,
-         mix_lock_digest: mix_lock_digest,
-         baseline_tree_digest: baseline_tree_digest,
-         toolchain: toolchain
-       }}
+      index_digest = "sha256:" <> image_digest(image)
+      vminit_index_digest = "sha256:" <> image_digest(vminit_image)
+
+      with :ok <-
+             validate_distinct_workload_vminit(
+               image,
+               index_digest,
+               manifest_digest,
+               vminit_image,
+               vminit_index_digest,
+               vminit_manifest_digest
+             ) do
+        {:ok,
+         %{
+           image: image,
+           index_digest: index_digest,
+           manifest_digest: manifest_digest,
+           vminit_image: vminit_image,
+           vminit_index_digest: vminit_index_digest,
+           vminit_manifest_digest: vminit_manifest_digest,
+           env: env,
+           labels: labels,
+           mix_lock_digest: mix_lock_digest,
+           baseline_tree_digest: baseline_tree_digest,
+           toolchain: toolchain
+         }}
+      end
     end
   end
 
   defp fetch_policy_image(policy) do
     case get_field(policy, :image) do
       nil -> {:error, :missing_image}
-      image -> validate_immutable_image(image)
+      image -> validate_external_source_image(image, :invalid_image)
     end
   end
 
@@ -491,6 +537,57 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     case get_field(policy, :manifest_digest) do
       nil -> {:error, :missing_manifest_digest}
       digest -> validate_digest(digest, :invalid_manifest_digest)
+    end
+  end
+
+  defp fetch_policy_vminit_image(policy) do
+    case get_field(policy, :vminit_image) do
+      nil -> {:error, :missing_vminit_image}
+      image -> validate_external_source_image(image, :invalid_vminit_image)
+    end
+  end
+
+  defp fetch_policy_vminit_manifest_digest(policy) do
+    case get_field(policy, :vminit_manifest_digest) do
+      nil -> {:error, :missing_vminit_manifest_digest}
+      digest -> validate_digest(digest, :invalid_vminit_manifest_digest)
+    end
+  end
+
+  # Source refs, index digests, and selected manifests for workload vs vminit
+  # must be pairwise distinct so one image cannot satisfy both roles.
+  defp validate_distinct_workload_vminit(
+         image,
+         index_digest,
+         manifest_digest,
+         vminit_image,
+         vminit_index_digest,
+         vminit_manifest_digest
+       ) do
+    cond do
+      image == vminit_image ->
+        {:error, :workload_vminit_image_collision}
+
+      index_digest == vminit_index_digest ->
+        {:error, :workload_vminit_index_collision}
+
+      manifest_digest == vminit_manifest_digest ->
+        {:error, :workload_vminit_manifest_collision}
+
+      index_digest == manifest_digest ->
+        {:error, :workload_index_manifest_collision}
+
+      vminit_index_digest == vminit_manifest_digest ->
+        {:error, :vminit_index_manifest_collision}
+
+      index_digest == vminit_manifest_digest ->
+        {:error, :workload_vminit_digest_collision}
+
+      manifest_digest == vminit_index_digest ->
+        {:error, :workload_vminit_digest_collision}
+
+      true ->
+        :ok
     end
   end
 
@@ -800,40 +897,50 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   end
 
   defp fetch_image_inspect(evidence) do
+    fetch_role_image_inspect(evidence, :image_inspect, :workload)
+  end
+
+  defp fetch_vminit_image_inspect(evidence) do
+    fetch_role_image_inspect(evidence, :vminit_image_inspect, :vminit)
+  end
+
+  # Workload and vminit inspect share the closed configuration/variants surface.
+  # Role only selects missing/invalid error atoms and variant config semantics.
+  defp fetch_role_image_inspect(evidence, evidence_key, role)
+       when role in [:workload, :vminit] do
+    {scope, missing_inspect, invalid_inspect, missing_config, invalid_config, missing_descriptor,
+     invalid_descriptor, missing_name, invalid_name, name_too_long, missing_variants,
+     invalid_variants, too_many_variants} = inspect_error_atoms(role)
+
     with {:ok, inspect} <-
-           fetch_required_map(
-             evidence,
-             :image_inspect,
-             :missing_image_inspect,
-             :invalid_image_inspect
-           ),
+           fetch_required_map(evidence, evidence_key, missing_inspect, invalid_inspect),
          :ok <-
            validate_closed_keys(
              inspect,
              @allowed_image_inspect_keys,
              @logical_image_inspect_keys,
-             :image_inspect
+             scope
            ),
          {:ok, configuration} <-
            fetch_required_map(
              inspect,
              :configuration,
-             :missing_image_configuration,
-             :invalid_image_configuration
+             missing_config,
+             invalid_config
            ),
          :ok <-
            validate_closed_keys(
              configuration,
              @allowed_configuration_keys,
              @logical_configuration_keys,
-             :image_configuration
+             configuration_scope(role)
            ),
          {:ok, descriptor} <-
            fetch_required_map(
              configuration,
              :descriptor,
-             :missing_image_descriptor,
-             :invalid_image_descriptor
+             missing_descriptor,
+             invalid_descriptor
            ),
          :ok <- validate_descriptor_keys(descriptor),
          {:ok, digest} <- fetch_descriptor_digest(descriptor),
@@ -844,11 +951,18 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
              configuration,
              :name,
              @max_name_bytes,
-             :missing_image_name,
-             :invalid_image_name,
-             :image_name_too_long
+             missing_name,
+             invalid_name,
+             name_too_long
            ),
-         {:ok, variants} <- fetch_variants(inspect) do
+         {:ok, variants} <-
+           fetch_variants(
+             inspect,
+             role,
+             missing_variants,
+             invalid_variants,
+             too_many_variants
+           ) do
       {:ok,
        %{
          configuration: %{
@@ -860,23 +974,41 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     end
   end
 
-  defp fetch_variants(inspect) do
+  defp inspect_error_atoms(:workload) do
+    {:image_inspect, :missing_image_inspect, :invalid_image_inspect, :missing_image_configuration,
+     :invalid_image_configuration, :missing_image_descriptor, :invalid_image_descriptor,
+     :missing_image_name, :invalid_image_name, :image_name_too_long, :missing_variants,
+     :invalid_variants, :too_many_variants}
+  end
+
+  defp inspect_error_atoms(:vminit) do
+    {:vminit_image_inspect, :missing_vminit_image_inspect, :invalid_vminit_image_inspect,
+     :missing_vminit_image_configuration, :invalid_vminit_image_configuration,
+     :missing_vminit_image_descriptor, :invalid_vminit_image_descriptor,
+     :missing_vminit_image_name, :invalid_vminit_image_name, :vminit_image_name_too_long,
+     :missing_vminit_variants, :invalid_vminit_variants, :too_many_vminit_variants}
+  end
+
+  defp configuration_scope(:workload), do: :image_configuration
+  defp configuration_scope(:vminit), do: :vminit_image_configuration
+
+  defp fetch_variants(inspect, role, missing_variants, invalid_variants, too_many_variants) do
     case get_field(inspect, :variants) do
       nil ->
-        {:error, :missing_variants}
+        {:error, missing_variants}
 
       variants when is_list(variants) ->
         case take_bounded(variants, @max_variants) do
           :too_many ->
-            {:error, :too_many_variants}
+            {:error, too_many_variants}
 
           {:ok, []} ->
-            {:error, :missing_variants}
+            {:error, missing_variants}
 
           {:ok, bounded} ->
             if Enum.all?(bounded, &is_map/1) do
               Enum.reduce_while(bounded, {:ok, []}, fn variant, {:ok, acc} ->
-                case normalize_variant(variant) do
+                case normalize_variant(variant, role) do
                   {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
                   {:error, reason} -> {:halt, {:error, reason}}
                 end
@@ -886,16 +1018,16 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
                 error -> error
               end
             else
-              {:error, :invalid_variants}
+              {:error, invalid_variants}
             end
         end
 
       _other ->
-        {:error, :invalid_variants}
+        {:error, invalid_variants}
     end
   end
 
-  defp normalize_variant(variant) when is_map(variant) do
+  defp normalize_variant(variant, role) when is_map(variant) and role in [:workload, :vminit] do
     with :ok <-
            validate_closed_keys(variant, @allowed_variant_keys, @logical_variant_keys, :variant),
          {:ok, digest} <- fetch_variant_digest(variant),
@@ -948,7 +1080,29 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
              :variant_config_architecture_too_long
            ),
          {:ok, config_variant} <- fetch_optional_oci_variant(config),
-         {:ok, image_config} <-
+         {:ok, role_config} <- normalize_variant_role_config(config, role) do
+      {:ok,
+       %{
+         digest: digest,
+         platform: %{os: platform_os, architecture: platform_arch, variant: platform_variant},
+         config:
+           Map.merge(
+             %{
+               os: config_os,
+               architecture: config_arch,
+               variant: config_variant
+             },
+             role_config
+           )
+       }}
+    end
+  end
+
+  # Workload variants carry exact Env/Labels for attestation match.
+  # Vminit variants only need platform/digest evidence; nested image config is
+  # optional bounded digest evidence and is never workload-attested.
+  defp normalize_variant_role_config(config, :workload) do
+    with {:ok, image_config} <-
            fetch_required_map(
              config,
              :config,
@@ -958,18 +1112,64 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
          :ok <- validate_image_config_keys(image_config),
          {:ok, env} <- fetch_image_config_env(image_config),
          {:ok, labels} <- fetch_image_config_labels(image_config) do
-      {:ok,
-       %{
-         digest: digest,
-         platform: %{os: platform_os, architecture: platform_arch, variant: platform_variant},
-         config: %{
-           os: config_os,
-           architecture: config_arch,
-           variant: config_variant,
-           env: env,
-           labels: labels
-         }
-       }}
+      {:ok, %{env: env, labels: labels}}
+    end
+  end
+
+  defp normalize_variant_role_config(config, :vminit) do
+    case get_field(config, :config) do
+      nil ->
+        {:ok, %{}}
+
+      image_config when is_map(image_config) ->
+        with :ok <- validate_image_config_keys(image_config),
+             :ok <- validate_optional_vminit_image_config(image_config) do
+          {:ok, %{}}
+        end
+
+      _other ->
+        {:error, :invalid_image_config}
+    end
+  end
+
+  # If a vminit inspect carries Env/Labels, accept only closed/bounded shapes
+  # as evidence; never match them against workload attestation policy.
+  defp validate_optional_vminit_image_config(image_config) do
+    with :ok <- maybe_validate_optional_env(image_config),
+         :ok <- maybe_validate_optional_labels(image_config) do
+      :ok
+    end
+  end
+
+  defp maybe_validate_optional_env(image_config) do
+    case fetch_env_or_labels_field(image_config, :Env, :env) do
+      :missing ->
+        :ok
+
+      :ambiguous ->
+        {:error, :ambiguous_env_alias}
+
+      {:ok, env} ->
+        case validate_env_list(env, :invalid_image_env) do
+          {:ok, _} -> :ok
+          error -> error
+        end
+    end
+  end
+
+  defp maybe_validate_optional_labels(image_config) do
+    case fetch_env_or_labels_field(image_config, :Labels, :labels) do
+      :missing ->
+        :ok
+
+      :ambiguous ->
+        {:error, :ambiguous_labels_alias}
+
+      {:ok, labels} ->
+        case validate_labels_map(labels, :invalid_image_labels) do
+          {:ok, _} -> :ok
+          error -> error
+        end
     end
   end
 
@@ -1299,55 +1499,131 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     end
   end
 
-  defp validate_image(policy, image_inspect) do
-    with :ok <- require_valid_utf8(image_inspect.configuration.name),
+  # Workload alias inspect: name must equal the derived local execution alias;
+  # source reference stays on policy/receipt only. Env/labels remain attested.
+  defp validate_workload_image(policy, image_inspect) do
+    execution_reference = derive_execution_alias(:workload, policy.index_digest)
+
+    with :ok <-
+           validate_role_inspect_surface(
+             image_inspect,
+             policy.index_digest,
+             execution_reference,
+             :image_index_digest_mismatch,
+             :image_name_digest_mismatch,
+             :unsupported_image_media_type
+           ),
+         {:ok, variant} <-
+           select_linux_arm64_variant(
+             image_inspect.variants,
+             policy.manifest_digest,
+             :linux_arm64_variant_missing,
+             :duplicate_linux_arm64_variants,
+             :manifest_digest_mismatch
+           ),
+         :ok <- validate_variant_nested_platform(variant),
+         :ok <- validate_selected_arm64_variants(variant),
+         :ok <- validate_env_match(variant.config.env, policy.env),
+         :ok <- validate_labels_match(variant.config.labels, policy.labels) do
+      {:ok,
+       %{
+         reference: policy.image,
+         execution_reference: execution_reference,
+         index_digest: policy.index_digest,
+         manifest_digest: policy.manifest_digest,
+         platform: @guest_platform,
+         env: policy.env,
+         labels: policy.labels
+       }}
+    end
+  end
+
+  # Vminit alias inspect: same closed alias/descriptor/platform surface as
+  # workload, but config is only bounded evidence (no Env/Labels attestation).
+  defp validate_vminit_image(policy, vminit_inspect) do
+    execution_reference = derive_execution_alias(:vminit, policy.vminit_index_digest)
+
+    with :ok <-
+           validate_role_inspect_surface(
+             vminit_inspect,
+             policy.vminit_index_digest,
+             execution_reference,
+             :vminit_index_digest_mismatch,
+             :vminit_name_digest_mismatch,
+             :unsupported_vminit_media_type
+           ),
+         {:ok, variant} <-
+           select_linux_arm64_variant(
+             vminit_inspect.variants,
+             policy.vminit_manifest_digest,
+             :vminit_linux_arm64_variant_missing,
+             :duplicate_vminit_linux_arm64_variants,
+             :vminit_manifest_digest_mismatch
+           ),
+         :ok <- validate_variant_nested_platform(variant),
+         :ok <- validate_selected_arm64_variants(variant) do
+      {:ok,
+       %{
+         reference: policy.vminit_image,
+         execution_reference: execution_reference,
+         index_digest: policy.vminit_index_digest,
+         manifest_digest: policy.vminit_manifest_digest,
+         platform: @guest_platform
+       }}
+    end
+  end
+
+  defp validate_role_inspect_surface(
+         inspect,
+         expected_index_digest,
+         expected_execution_reference,
+         index_mismatch,
+         name_mismatch,
+         unsupported_media
+       ) do
+    with :ok <- require_valid_utf8(inspect.configuration.name),
          :ok <-
            bounded_string(
-             image_inspect.configuration.descriptor.media_type,
+             inspect.configuration.descriptor.media_type,
              @max_media_type_bytes,
              :media_type_too_long
            ),
-         :ok <- validate_descriptor_size(image_inspect.configuration.descriptor.size) do
-      index_digest = image_inspect.configuration.descriptor.digest
-      name = image_inspect.configuration.name
-      media_type = image_inspect.configuration.descriptor.media_type
+         :ok <- validate_descriptor_size(inspect.configuration.descriptor.size) do
+      index_digest = inspect.configuration.descriptor.digest
+      name = inspect.configuration.name
+      media_type = inspect.configuration.descriptor.media_type
 
       cond do
         not MapSet.member?(@allowed_media_types, media_type) ->
-          {:error, :unsupported_image_media_type}
+          {:error, unsupported_media}
 
-        index_digest != policy.index_digest ->
-          {:error, :image_index_digest_mismatch}
+        index_digest != expected_index_digest ->
+          {:error, index_mismatch}
 
-        not name_matches_immutable_image?(name, policy.image) ->
-          {:error, :image_name_digest_mismatch}
+        name != expected_execution_reference ->
+          {:error, name_mismatch}
 
         true ->
-          case select_linux_arm64_variant(image_inspect.variants, policy.manifest_digest) do
-            {:ok, variant} ->
-              with :ok <- validate_variant_nested_platform(variant),
-                   :ok <- validate_selected_arm64_variants(variant),
-                   :ok <- validate_env_match(variant.config.env, policy.env),
-                   :ok <- validate_labels_match(variant.config.labels, policy.labels) do
-                {:ok,
-                 %{
-                   reference: policy.image,
-                   index_digest: policy.index_digest,
-                   manifest_digest: policy.manifest_digest,
-                   platform: @guest_platform,
-                   env: policy.env,
-                   labels: policy.labels
-                 }}
-              end
-
-            {:error, reason} ->
-              {:error, reason}
-          end
+          :ok
       end
     end
   end
 
-  defp select_linux_arm64_variant(variants, expected_manifest_digest) do
+  defp derive_execution_alias(:workload, index_digest) when is_binary(index_digest) do
+    @local_alias_registry <> "/" <> @workload_alias_repository <> "@" <> index_digest
+  end
+
+  defp derive_execution_alias(:vminit, index_digest) when is_binary(index_digest) do
+    @local_alias_registry <> "/" <> @vminit_alias_repository <> "@" <> index_digest
+  end
+
+  defp select_linux_arm64_variant(
+         variants,
+         expected_manifest_digest,
+         missing,
+         duplicate,
+         digest_mismatch
+       ) do
     arm64 =
       Enum.filter(variants, fn variant ->
         variant.platform.os == "linux" and variant.platform.architecture == @required_arch
@@ -1355,14 +1631,14 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
 
     case arm64 do
       [] ->
-        {:error, :linux_arm64_variant_missing}
+        {:error, missing}
 
       [_one, _two | _] ->
-        {:error, :duplicate_linux_arm64_variants}
+        {:error, duplicate}
 
       [variant] ->
         if variant.digest != expected_manifest_digest do
-          {:error, :manifest_digest_mismatch}
+          {:error, digest_mismatch}
         else
           {:ok, variant}
         end
@@ -1683,6 +1959,29 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     end
   end
 
+  # Operator policy source images must be external fully-qualified digests.
+  # Local execution aliases are derived from index digests and never admitted
+  # as independent policy fields.
+  defp validate_external_source_image(image, invalid)
+       when is_binary(image) and is_atom(invalid) do
+    case validate_immutable_image(image) do
+      {:ok, image} ->
+        if local_execution_alias?(image) do
+          {:error, :local_alias_not_policy}
+        else
+          {:ok, image}
+        end
+
+      {:error, :invalid_image} ->
+        {:error, invalid}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp validate_external_source_image(_, invalid), do: {:error, invalid}
+
   defp validate_immutable_image(image) when is_binary(image) do
     with :ok <- bounded_string(image, @max_image_bytes, :image_too_long),
          :ok <- require_valid_utf8(image) do
@@ -1720,6 +2019,10 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
 
   defp validate_immutable_image(_), do: {:error, :invalid_image}
 
+  defp local_execution_alias?(image) when is_binary(image) do
+    String.starts_with?(image, @local_alias_registry <> "/")
+  end
+
   # Require a registry hostname containing '.' so short repo-only refs are rejected.
   defp fully_qualified_repository?(repository) when is_binary(repository) do
     case String.split(repository, "/", parts: 2) do
@@ -1736,13 +2039,6 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
       [^image, _repo, digest] -> digest
     end
   end
-
-  # Exact byte-for-byte equality only. No suffix/substring matching.
-  defp name_matches_immutable_image?(name, policy_image) when is_binary(name) do
-    name == policy_image
-  end
-
-  defp name_matches_immutable_image?(_, _), do: false
 
   defp validate_digest(digest, invalid) when is_binary(digest) do
     with :ok <- bounded_string(digest, 7 + @max_digest_hex, invalid),

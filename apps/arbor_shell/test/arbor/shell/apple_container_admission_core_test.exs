@@ -20,6 +20,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
   @mix_lock_hex String.duplicate("c", 64)
   @tree_hex String.duplicate("d", 64)
   @other_hex String.duplicate("e", 64)
+  @vminit_index_hex String.duplicate("f0", 32)
+  @vminit_manifest_hex String.duplicate("f1", 32)
 
   # CLI identity SHA is the aggregate executable authority; must match bindings.
   # Use letter-containing hex so String.upcase/1 is a distinct invalid form.
@@ -33,6 +35,12 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
   @image "docker.io/arbor/validation@sha256:#{@index_hex}"
   @index_digest "sha256:#{@index_hex}"
   @manifest_digest "sha256:#{@manifest_hex}"
+  @workload_execution_ref "127.0.0.1:0/arbor/workload@sha256:#{@index_hex}"
+
+  @vminit_image "docker.io/arbor/vminit@sha256:#{@vminit_index_hex}"
+  @vminit_index_digest "sha256:#{@vminit_index_hex}"
+  @vminit_manifest_digest "sha256:#{@vminit_manifest_hex}"
+  @vminit_execution_ref "127.0.0.1:0/arbor/vminit@sha256:#{@vminit_index_hex}"
 
   @erlang_version "28.4.1"
   @elixir_version "1.19.5-otp-28"
@@ -220,6 +228,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
   @valid_policy %{
     image: @image,
     manifest_digest: @manifest_digest,
+    vminit_image: @vminit_image,
+    vminit_manifest_digest: @vminit_manifest_digest,
     env: @env,
     labels: @labels,
     mix_lock_digest: @mix_lock_hex,
@@ -246,8 +256,20 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     }
   }
 
+  # Vminit selected manifest: platform/digest evidence only (no workload Env/Labels).
+  @valid_vminit_arm64_variant %{
+    digest: @vminit_manifest_digest,
+    platform: %{os: "linux", architecture: "arm64", variant: "v8"},
+    config: %{
+      os: "linux",
+      architecture: "arm64",
+      variant: "v8"
+    }
+  }
+
   # Realistic container 1.1.0 service-status + image-inspect shape (projected
   # to the closed evidence surface the pure core admits), plus nested control-plane.
+  # image_inspect / vminit_image_inspect names are derived local execution aliases.
   @valid_evidence %{
     host_platform: %{
       os: "macos",
@@ -280,9 +302,20 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
           mediaType: "application/vnd.docker.distribution.manifest.list.v2+json",
           size: 772
         },
-        name: @image
+        name: @workload_execution_ref
       },
       variants: [@valid_arm64_variant]
+    },
+    vminit_image_inspect: %{
+      configuration: %{
+        descriptor: %{
+          digest: @vminit_index_digest,
+          mediaType: "application/vnd.oci.image.index.v1+json",
+          size: 512
+        },
+        name: @vminit_execution_ref
+      },
+      variants: [@valid_vminit_arm64_variant]
     },
     dependency_baseline: %{
       image_index_digest: @index_digest,
@@ -343,11 +376,20 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
 
       assert receipt.image == %{
                reference: @image,
+               execution_reference: @workload_execution_ref,
                index_digest: @index_digest,
                manifest_digest: @manifest_digest,
                platform: "linux/arm64",
                env: @env,
                labels: @labels
+             }
+
+      assert receipt.vminit == %{
+               reference: @vminit_image,
+               execution_reference: @vminit_execution_ref,
+               index_digest: @vminit_index_digest,
+               manifest_digest: @vminit_manifest_digest,
+               platform: "linux/arm64"
              }
 
       assert receipt.toolchain == %{erlang: @erlang_version, elixir: @elixir_version}
@@ -368,6 +410,17 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert shown["runtime"]["codesign_verified"] == true
       assert shown["runtime"]["executable_sha256"] == @executable_sha256
       assert shown["image"]["reference"] == @image
+      assert shown["image"]["execution_reference"] == @workload_execution_ref
+      assert shown["vminit"]["reference"] == @vminit_image
+      assert shown["vminit"]["execution_reference"] == @vminit_execution_ref
+      assert shown["vminit"]["index_digest"] == @vminit_index_digest
+      assert shown["vminit"]["manifest_digest"] == @vminit_manifest_digest
+      assert shown["vminit"]["platform"] == "linux/arm64"
+      # Receipt exposes only normalized fields — no raw inspect blobs / config.
+      refute Map.has_key?(shown["vminit"], "env")
+      refute Map.has_key?(shown["vminit"], "labels")
+      refute Map.has_key?(shown["vminit"], "config")
+      refute Map.has_key?(shown["image"], "raw")
       assert shown["toolchain"]["erlang"] == @erlang_version
       assert shown["toolchain"]["elixir"] == @elixir_version
       assert shown["control_plane"]["admitted"] == true
@@ -403,6 +456,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
         "policy" => %{
           "image" => @image,
           "manifest_digest" => @manifest_digest,
+          "vminit_image" => @vminit_image,
+          "vminit_manifest_digest" => @vminit_manifest_digest,
           "env" => @env,
           "labels" => @labels,
           "mix_lock_digest" => @mix_lock_hex,
@@ -445,7 +500,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
                 "media_type" => "application/vnd.oci.image.index.v1+json",
                 "size" => 1024
               },
-              "name" => @image
+              "name" => @workload_execution_ref
             },
             "variants" => [
               %{
@@ -455,6 +510,27 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
                   "os" => "linux",
                   "architecture" => "arm64",
                   "config" => %{"Env" => @env, "Labels" => @labels}
+                }
+              }
+            ]
+          },
+          "vminit_image_inspect" => %{
+            "configuration" => %{
+              "descriptor" => %{
+                "digest" => @vminit_index_digest,
+                "media_type" => "application/vnd.docker.distribution.manifest.list.v2+json",
+                "size" => 400
+              },
+              "name" => @vminit_execution_ref
+            },
+            "variants" => [
+              %{
+                "digest" => @vminit_manifest_digest,
+                "platform" => %{"os" => "linux", "architecture" => "arm64", "variant" => "v8"},
+                "config" => %{
+                  "os" => "linux",
+                  "architecture" => "arm64",
+                  "variant" => "v8"
                 }
               }
             ]
@@ -478,6 +554,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       assert receipt.runtime.executable_sha256 == @executable_sha256
       assert receipt.toolchain.erlang == @erlang_version
       assert receipt.control_plane.apiserver.version == "1.1.2"
+      assert receipt.image.execution_reference == @workload_execution_ref
+      assert receipt.vminit.execution_reference == @vminit_execution_ref
     end
 
     test "exports fixed platform authority constants" do
@@ -917,10 +995,11 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
       # Positive fully-qualified form remains accepted (fixture uses docker.io/...).
       assert {:ok, receipt} = admit(@valid_input)
       assert receipt.image.reference == @image
+      assert receipt.image.execution_reference == @workload_execution_ref
       assert String.starts_with?(@image, "docker.io/")
     end
 
-    test "requires exact byte-for-byte image name equality (no repository suffix collisions)" do
+    test "requires inspect name to equal derived local execution alias (not source ref)" do
       input =
         put_in(
           @valid_input,
@@ -929,6 +1008,16 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
         )
 
       assert {:error, :image_index_digest_mismatch} = admit(input)
+
+      # Source reference is policy-only; inspect must present the local alias.
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :image_inspect, :configuration, :name],
+          @image
+        )
+
+      assert {:error, :image_name_digest_mismatch} = admit(input)
 
       input =
         put_in(
@@ -943,14 +1032,14 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
         put_in(
           @valid_input,
           [:evidence, :image_inspect, :configuration, :name],
-          "docker.io/arbor/validation@sha256:#{@other_hex}"
+          "127.0.0.1:0/arbor/workload@sha256:#{@other_hex}"
         )
 
       assert {:error, :image_name_digest_mismatch} = admit(input)
 
-      # Near-collision: attacker prefix ending in the policy repository.
+      # Near-collision: attacker prefix ending in the alias repository.
       near_collision =
-        "evil.example/docker.io/arbor/validation@sha256:#{@index_hex}"
+        "evil.example/127.0.0.1:0/arbor/workload@sha256:#{@index_hex}"
 
       input =
         put_in(
@@ -961,12 +1050,12 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
 
       assert {:error, :image_name_digest_mismatch} = admit(input)
 
-      # Registry-host prefix that used to pass suffix matching.
+      # Wrong role alias with correct digest.
       input =
         put_in(
           @valid_input,
           [:evidence, :image_inspect, :configuration, :name],
-          "mirror.local/" <> @image
+          "127.0.0.1:0/arbor/vminit@sha256:#{@index_hex}"
         )
 
       assert {:error, :image_name_digest_mismatch} = admit(input)
@@ -1250,6 +1339,237 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     end
   end
 
+  # --- Vminit + local execution aliases ---
+
+  describe "vminit and local-alias contract" do
+    test "rejects missing or unknown vminit policy/evidence keys" do
+      assert {:error, :missing_vminit_image} =
+               admit(%{
+                 policy: Map.delete(@valid_policy, :vminit_image),
+                 evidence: @valid_evidence
+               })
+
+      assert {:error, :missing_vminit_manifest_digest} =
+               admit(%{
+                 policy: Map.delete(@valid_policy, :vminit_manifest_digest),
+                 evidence: @valid_evidence
+               })
+
+      assert {:error, :missing_vminit_image_inspect} =
+               admit(%{
+                 policy: @valid_policy,
+                 evidence: Map.delete(@valid_evidence, :vminit_image_inspect)
+               })
+
+      assert {:error, {:unsupported_keys, :policy}} =
+               admit(
+                 put_in(
+                   @valid_input,
+                   [:policy],
+                   Map.put(@valid_policy, :workload_execution_reference, @workload_execution_ref)
+                 )
+               )
+
+      assert {:error, {:unsupported_keys, :evidence}} =
+               admit(
+                 put_in(
+                   @valid_input,
+                   [:evidence],
+                   Map.put(@valid_evidence, :extra_inspect, %{})
+                 )
+               )
+
+      assert {:error, {:duplicate_key_alias, :policy, :vminit_image}} =
+               admit(
+                 put_in(
+                   @valid_input,
+                   [:policy],
+                   Map.merge(@valid_policy, %{"vminit_image" => @vminit_image})
+                 )
+               )
+
+      assert {:error, {:duplicate_key_alias, :evidence, :vminit_image_inspect}} =
+               admit(
+                 put_in(
+                   @valid_input,
+                   [:evidence],
+                   Map.put(
+                     @valid_evidence,
+                     "vminit_image_inspect",
+                     @valid_evidence.vminit_image_inspect
+                   )
+                 )
+               )
+    end
+
+    test "rejects mutable, ambiguous, uppercase, and local-alias vminit policy sources" do
+      for image <- [
+            "arbor/vminit:latest",
+            "arbor/vminit",
+            "registry/arbor/vminit@sha256:#{@vminit_index_hex}",
+            "docker.io/arbor/vminit@sha256:#{String.upcase(@vminit_index_hex)}",
+            @vminit_execution_ref,
+            "127.0.0.1:0/arbor/vminit@sha256:#{@vminit_index_hex}"
+          ] do
+        input = put_in(@valid_input, [:policy, :vminit_image], image)
+
+        assert match?({:error, _}, admit(input)),
+               "expected rejection for vminit_image=#{inspect(image)}"
+      end
+
+      assert {:error, :local_alias_not_policy} =
+               admit(put_in(@valid_input, [:policy, :image], @workload_execution_ref))
+
+      assert {:error, :local_alias_not_policy} =
+               admit(put_in(@valid_input, [:policy, :vminit_image], @vminit_execution_ref))
+    end
+
+    test "rejects vminit alias/descriptor/platform/manifest mismatches" do
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :vminit_image_inspect, :configuration, :name],
+          @vminit_image
+        )
+
+      assert {:error, :vminit_name_digest_mismatch} = admit(input)
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :vminit_image_inspect, :configuration, :name],
+          @workload_execution_ref
+        )
+
+      assert {:error, :vminit_name_digest_mismatch} = admit(input)
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :vminit_image_inspect, :configuration, :descriptor, :digest],
+          @index_digest
+        )
+
+      assert {:error, :vminit_index_digest_mismatch} = admit(input)
+
+      wrong_manifest =
+        put_in(@valid_vminit_arm64_variant, [:digest], @manifest_digest)
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :vminit_image_inspect, :variants],
+          [wrong_manifest]
+        )
+
+      assert {:error, :vminit_manifest_digest_mismatch} = admit(input)
+
+      amd64 = %{
+        digest: @vminit_manifest_digest,
+        platform: %{os: "linux", architecture: "amd64"},
+        config: %{os: "linux", architecture: "amd64"}
+      }
+
+      input =
+        put_in(@valid_input, [:evidence, :vminit_image_inspect, :variants], [amd64])
+
+      assert {:error, :vminit_linux_arm64_variant_missing} = admit(input)
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :vminit_image_inspect, :variants],
+          [
+            @valid_vminit_arm64_variant,
+            Map.put(@valid_vminit_arm64_variant, :digest, "sha256:#{@other_hex}")
+          ]
+        )
+
+      assert {:error, :duplicate_vminit_linux_arm64_variants} = admit(input)
+
+      bad_platform =
+        @valid_vminit_arm64_variant
+        |> put_in([:config, :os], "windows")
+
+      input =
+        put_in(@valid_input, [:evidence, :vminit_image_inspect, :variants], [bad_platform])
+
+      assert {:error, :variant_config_platform_mismatch} = admit(input)
+    end
+
+    test "does not require workload Env/Labels attestation on vminit inspect" do
+      # Nested vminit config with unrelated Env/Labels is bounded evidence only.
+      variant =
+        put_in(
+          @valid_vminit_arm64_variant,
+          [:config, :config],
+          %{"Env" => ["UNRELATED=1"], "Labels" => %{"role" => "vminit"}}
+        )
+
+      input =
+        put_in(@valid_input, [:evidence, :vminit_image_inspect, :variants], [variant])
+
+      assert {:ok, receipt} = admit(input)
+      refute Map.has_key?(receipt.vminit, :env)
+      refute Map.has_key?(receipt.vminit, :labels)
+    end
+
+    test "rejects workload/vminit source, index, and manifest collisions" do
+      assert {:error, :workload_vminit_image_collision} =
+               admit(put_in(@valid_input, [:policy, :vminit_image], @image))
+
+      assert {:error, :workload_vminit_index_collision} =
+               admit(
+                 put_in(
+                   @valid_input,
+                   [:policy, :vminit_image],
+                   "docker.io/arbor/vminit@sha256:#{@index_hex}"
+                 )
+               )
+
+      assert {:error, :workload_vminit_manifest_collision} =
+               admit(put_in(@valid_input, [:policy, :vminit_manifest_digest], @manifest_digest))
+
+      assert {:error, :workload_index_manifest_collision} =
+               admit(put_in(@valid_input, [:policy, :manifest_digest], @index_digest))
+
+      assert {:error, :vminit_index_manifest_collision} =
+               admit(
+                 put_in(
+                   @valid_input,
+                   [:policy, :vminit_manifest_digest],
+                   @vminit_index_digest
+                 )
+               )
+    end
+
+    test "baseline remains bound only to workload digests, not vminit" do
+      # Vminit digests must not be accepted as the workload baseline binding.
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :dependency_baseline, :image_index_digest],
+          @vminit_index_digest
+        )
+
+      assert {:error, :baseline_image_index_mismatch} = admit(input)
+
+      input =
+        put_in(
+          @valid_input,
+          [:evidence, :dependency_baseline, :image_manifest_digest],
+          @vminit_manifest_digest
+        )
+
+      assert {:error, :baseline_image_manifest_mismatch} = admit(input)
+
+      assert {:ok, receipt} = admit(@valid_input)
+      assert receipt.dependency_baseline.image_index_digest == @index_digest
+      assert receipt.dependency_baseline.image_manifest_digest == @manifest_digest
+      refute receipt.dependency_baseline.image_index_digest == @vminit_index_digest
+    end
+  end
+
   # --- Dependency baseline ---
 
   describe "dependency baseline mutations" do
@@ -1343,6 +1663,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
             :runtime,
             :service_status,
             :image_inspect,
+            :vminit_image_inspect,
             :dependency_baseline,
             :control_plane
           ] do
