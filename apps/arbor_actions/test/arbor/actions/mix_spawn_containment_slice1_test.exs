@@ -348,6 +348,129 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     end
   end
 
+  @tag :security_regression
+  test "security regression: revision runtime parents are never projected", %{tmp_dir: tmp_dir} do
+    fixture = leased_fixture(tmp_dir)
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    try do
+      # Runtime parents remain lifecycle-owned directories with Actions artifacts.
+      assert File.dir?(resource.candidate_runtime_path)
+      assert File.dir?(resource.base_runtime_path)
+
+      assert resource.candidate_runner_path ==
+               Path.join(resource.candidate_runtime_path, "runner.exs")
+
+      assert resource.candidate_result_path ==
+               Path.join(resource.candidate_runtime_path, "result.etf")
+
+      assert resource.base_runner_path == Path.join(resource.base_runtime_path, "runner.exs")
+      assert resource.base_result_path == Path.join(resource.base_runtime_path, "result.etf")
+
+      assert {:ok, candidate} = MixAction.projections_for_resource(resource, :candidate)
+      assert {:ok, base} = MixAction.projections_for_resource(resource, :base)
+
+      for {projections, revision, runtime, home, tmp, build, deps, worktree, runner, result} <- [
+            {candidate, "candidate", resource.candidate_runtime_path,
+             resource.candidate_home_path, resource.candidate_tmp_path,
+             resource.candidate_build_path, resource.candidate_deps_path, resource.candidate_path,
+             resource.candidate_runner_path, resource.candidate_result_path},
+            {base, "base", resource.base_runtime_path, resource.base_home_path,
+             resource.base_tmp_path, resource.base_build_path, resource.base_deps_path,
+             resource.base_worktree_path, resource.base_runner_path, resource.base_result_path}
+          ] do
+        assert projections.revision == revision
+
+        # Runtime parent must not appear as any projected path (RW or RO).
+        all_paths =
+          Enum.map(projections.read_write ++ projections.read_only, & &1["path"])
+
+        refute runtime in all_paths
+        refute Enum.any?(projections.read_write, &(&1["purpose"] == "runtime"))
+        refute Enum.any?(projections.read_only, &(&1["purpose"] == "runtime"))
+
+        by_purpose =
+          Map.new(projections.read_write, fn entry ->
+            {entry["purpose"], entry}
+          end)
+
+        assert by_purpose["worktree"] == %{
+                 "path" => worktree,
+                 "mode" => "read_write",
+                 "purpose" => "worktree"
+               }
+
+        assert by_purpose["home"] == %{
+                 "path" => home,
+                 "mode" => "read_write",
+                 "purpose" => "home"
+               }
+
+        assert by_purpose["tmp"] == %{
+                 "path" => tmp,
+                 "mode" => "read_write",
+                 "purpose" => "tmp"
+               }
+
+        assert by_purpose["build"] == %{
+                 "path" => build,
+                 "mode" => "read_write",
+                 "purpose" => "build"
+               }
+
+        assert by_purpose["deps"] == %{
+                 "path" => deps,
+                 "mode" => "read_write",
+                 "purpose" => "deps"
+               }
+
+        # Typed children live under the runtime parent; parent itself is not projected.
+        assert String.starts_with?(home, runtime <> "/")
+        assert String.starts_with?(tmp, runtime <> "/")
+        assert String.starts_with?(build, runtime <> "/")
+        assert String.starts_with?(runner, runtime <> "/")
+        assert String.starts_with?(result, runtime <> "/")
+
+        # No projected RW ancestor may cover runner/result (would expose Actions artifacts).
+        for entry <- projections.read_write do
+          path = entry["path"]
+          refute path == runtime
+          refute path_equals_or_contains?(path, runner)
+          refute path_equals_or_contains?(path, result)
+        end
+
+        # Only the five intended RW purposes.
+        assert MapSet.new(Map.keys(by_purpose)) ==
+                 MapSet.new(["worktree", "home", "tmp", "build", "deps"])
+      end
+
+      # Candidate/base isolation: no RW path grants both revisions.
+      cand_rw = Enum.map(candidate.read_write, & &1["path"])
+      base_rw = Enum.map(base.read_write, & &1["path"])
+
+      for c <- cand_rw, b <- base_rw do
+        refute path_equals_or_contains?(c, b)
+        refute path_equals_or_contains?(b, c)
+      end
+
+      refute resource.candidate_runtime_path in cand_rw
+      refute resource.base_runtime_path in base_rw
+      refute resource.candidate_runtime_path in base_rw
+      refute resource.base_runtime_path in cand_rw
+    after
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release_validation_resource(
+                 resource.resource_id,
+                 fixture.context
+               )
+    end
+  end
+
   test "run_mix binds cwd to validation revision worktree", %{tmp_dir: tmp_dir} do
     fixture = leased_fixture(tmp_dir)
     foreign = create_tiny_project(Path.join(tmp_dir, "foreign"))

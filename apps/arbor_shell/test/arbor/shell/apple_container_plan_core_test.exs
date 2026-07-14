@@ -29,7 +29,6 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     tmp: "/private/tmp/arbor-val/tmp",
     build: "/private/tmp/arbor-val/build",
     deps: "/private/tmp/arbor-val/deps",
-    runtime: "/private/tmp/arbor-val/runtime",
     mix_wrapper: "/private/tmp/arbor-val/bin/mix"
   }
 
@@ -125,8 +124,6 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  "--mount",
                  "type=bind,source=/private/tmp/arbor-val/deps,target=/arbor/deps",
                  "--mount",
-                 "type=bind,source=/private/tmp/arbor-val/runtime,target=/arbor/runtime",
-                 "--mount",
                  "type=bind,source=/private/tmp/arbor-val/bin/mix,target=/arbor/bin/mix,readonly",
                  "--workdir",
                  "/workspace",
@@ -204,7 +201,6 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                "/arbor/tmp",
                "/arbor/build",
                "/arbor/deps",
-               "/arbor/runtime",
                "/arbor/bin/mix"
              ]
 
@@ -214,9 +210,13 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                :read_write,
                :read_write,
                :read_write,
-               :read_write,
                :read_only
              ]
+
+      # Runtime parent is not a mount purpose — only typed children + worktree/deps/wrapper.
+      refute Enum.any?(plan.mounts, &(&1.purpose == :runtime))
+      refute Enum.any?(plan.mounts, &(&1.guest_path == "/arbor/runtime"))
+      refute Map.has_key?(plan.projections, :runtime)
 
       refute_forbidden_tokens(plan)
     end
@@ -256,7 +256,6 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
           "tmp" => @projections.tmp,
           "build" => @projections.build,
           "deps" => @projections.deps,
-          "runtime" => @projections.runtime,
           "mix_wrapper" => @projections.mix_wrapper
         },
         "host_runtime_roots" => %{
@@ -649,7 +648,6 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                :tmp,
                :build,
                :deps,
-               :runtime,
                :mix_wrapper
              ]
 
@@ -704,7 +702,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
         {{:tmp, "/tmp/foo/../tmp"}, :dot_segment},
         {{:build, "/tmp//double"}, :non_canonical_path},
         {{:deps, "/tmp/deps/"}, :trailing_slash},
-        {{:runtime, "/tmp/run\0time"}, :nul_byte},
+        {{:home, "/tmp/ho\0me"}, :nul_byte},
         {{:mix_wrapper, "/tmp/mix\nwrapper"}, :control_char},
         {{:worktree, "/tmp/work tree"}, :whitespace_in_path}
       ]
@@ -810,6 +808,91 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested_build))
 
       assert MapSet.new([g, h]) == MapSet.new([:tmp, :build])
+
+      # Every actual mount source pair remains subject to overlap rejection.
+      mount_purposes = [:worktree, :home, :tmp, :build, :deps, :mix_wrapper]
+
+      for parent <- mount_purposes, child <- mount_purposes, parent != child do
+        nested =
+          @projections
+          |> Map.put(parent, "/private/tmp/arbor-val/overlap-parent")
+          |> Map.put(child, "/private/tmp/arbor-val/overlap-parent/child")
+
+        assert {:error, {:overlapping_projection_paths, x, y}} =
+                 AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested))
+
+        assert MapSet.new([x, y]) == MapSet.new([parent, child])
+      end
+    end
+
+    @tag :security_regression
+    test "rejects extra runtime projection key and common runtime parent of home/tmp/build" do
+      # Runtime is not a projection purpose: extra key fails closed.
+      with_runtime = Map.put(@projections, :runtime, "/private/tmp/arbor-val/runtime")
+
+      assert {:error, :unsupported_projection_keys} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, with_runtime))
+
+      with_runtime_string =
+        @projections
+        |> Map.new(fn {k, v} -> {Atom.to_string(k), v} end)
+        |> Map.put("runtime", "/private/tmp/arbor-val/runtime")
+
+      assert {:error, :unsupported_projection_keys} =
+               AppleContainerPlanCore.new(
+                 Map.put(@valid_request, :projections, with_runtime_string)
+               )
+
+      # No mount source may be the common parent of home/tmp/build (runtime parent shape).
+      # Using worktree as that parent would expose runner/result-style siblings if present.
+      common_parent = "/private/tmp/arbor-val/revision-runtime"
+
+      parent_as_worktree =
+        @projections
+        |> Map.put(:worktree, common_parent)
+        |> Map.put(:home, common_parent <> "/home")
+        |> Map.put(:tmp, common_parent <> "/tmp")
+        |> Map.put(:build, common_parent <> "/build")
+
+      assert {:error, {:overlapping_projection_paths, a, b}} =
+               AppleContainerPlanCore.new(
+                 Map.put(@valid_request, :projections, parent_as_worktree)
+               )
+
+      assert MapSet.new([a, b])
+             |> MapSet.intersection(MapSet.new([:worktree, :home, :tmp, :build]))
+             |> MapSet.size() == 2
+
+      # Same common parent assigned to deps (also an RW mount source).
+      parent_as_deps =
+        @projections
+        |> Map.put(:deps, common_parent)
+        |> Map.put(:home, common_parent <> "/home")
+        |> Map.put(:tmp, common_parent <> "/tmp")
+        |> Map.put(:build, common_parent <> "/build")
+
+      assert {:error, {:overlapping_projection_paths, c, d}} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, parent_as_deps))
+
+      assert MapSet.new([c, d])
+             |> MapSet.intersection(MapSet.new([:deps, :home, :tmp, :build]))
+             |> MapSet.size() == 2
+
+      # Successful plan never mounts a path that is an ancestor of home+tmp+build.
+      assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+      mount_sources = Enum.map(plan.mounts, & &1.host_path)
+
+      for source <- mount_sources do
+        children = [@projections.home, @projections.tmp, @projections.build]
+
+        ancestor_of_all? =
+          Enum.all?(children, fn child ->
+            child == source or String.starts_with?(child, source <> "/")
+          end)
+
+        refute ancestor_of_all?,
+               "mount source #{inspect(source)} must not be common parent of home/tmp/build"
+      end
     end
 
     @tag :security_regression
@@ -1078,7 +1161,6 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                {:tmp, "/arbor/tmp", :read_write},
                {:build, "/arbor/build", :read_write},
                {:deps, "/arbor/deps", :read_write},
-               {:runtime, "/arbor/runtime", :read_write},
                {:mix_wrapper, "/arbor/bin/mix", :read_only}
              ]
 

@@ -46,13 +46,14 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   # Required host projections and their fixed guest targets / modes.
   # Host Erlang/Elixir roots are provenance-only and are intentionally absent.
+  # Revision runtime parents (owner of home/tmp/build + runner/result) are
+  # cleanup ownership only — never a guest mount purpose.
   @projection_specs [
     {:worktree, "/workspace", :read_write},
     {:home, "/arbor/home", :read_write},
     {:tmp, "/arbor/tmp", :read_write},
     {:build, "/arbor/build", :read_write},
     {:deps, "/arbor/deps", :read_write},
-    {:runtime, "/arbor/runtime", :read_write},
     {:mix_wrapper, "/arbor/bin/mix", :read_only}
   ]
 
@@ -118,7 +119,6 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
           tmp: host_path(),
           build: host_path(),
           deps: host_path(),
-          runtime: host_path(),
           mix_wrapper: host_path()
         }
 

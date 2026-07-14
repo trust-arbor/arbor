@@ -535,6 +535,11 @@ defmodule Arbor.Actions.Mix do
   Read-only projections cover trusted runtime roots and the closed Mix wrapper.
   Read-write projections are revision-private only — never the validation root,
   never the opposite revision, never shared staged evidence.
+
+  The revision runtime parent (`candidate_runtime_path` / `base_runtime_path`)
+  remains lifecycle/cleanup ownership only: it is never projected. Guest mounts
+  receive the typed children (home, tmp, build) plus worktree and deps, so
+  Actions-owned runner/result artifacts under the runtime parent stay unmounted.
   """
   @spec projections_for_resource(map()) ::
           {:ok, %{read_only: [map()], read_write: [map()]}} | {:error, term()}
@@ -557,14 +562,16 @@ defmodule Arbor.Actions.Mix do
         projection(wrapper, :read_only, :mix_wrapper)
       ]
 
+      # Never project the runtime parent: it owns runner/result plus home/tmp/build.
+      # Mount only the typed children and worktree/deps so guest code cannot reach
+      # Actions-owned artifacts or create ancestor/descendant mount overlap.
       read_write =
         [
           {paths.worktree_path, :worktree},
           {paths.home_path, :home},
           {paths.tmp_path, :tmp},
           {paths.build_path, :build},
-          {paths.deps_path, :deps},
-          {paths.runtime_path, :runtime}
+          {paths.deps_path, :deps}
         ]
         |> Enum.reject(fn {path, _} -> is_nil(path) or path == "" end)
         |> Enum.map(fn {path, purpose} -> projection(path, :read_write, purpose) end)
