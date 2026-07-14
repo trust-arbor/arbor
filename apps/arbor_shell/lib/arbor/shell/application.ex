@@ -62,6 +62,9 @@ defmodule Arbor.Shell.Application do
       {Arbor.Shell.ExecutablePolicy, executable_policy_opts},
       {Arbor.Shell.AppleContainerControlPlaneAuthority, authority_opts},
       {Arbor.Shell.LinuxDependencyBaselineAuthority, authority_opts},
+      # Temporary materialization workers. Authority failure rest_for_one-stops
+      # this supervisor (and every later execution owner) before replacement.
+      Arbor.Shell.LinuxDependencyBaselineMaterializer.supervisor_child_spec(),
       {Arbor.Shell.ExecutionRegistry, []},
       {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
     ]

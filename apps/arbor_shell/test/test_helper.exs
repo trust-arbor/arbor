@@ -15,6 +15,11 @@ Supervisor.start_child(
   {Arbor.Shell.LinuxDependencyBaselineAuthority, []}
 )
 
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  Arbor.Shell.LinuxDependencyBaselineMaterializer.supervisor_child_spec()
+)
+
 Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, []})
 
 Supervisor.start_child(

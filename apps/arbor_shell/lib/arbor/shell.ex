@@ -442,6 +442,43 @@ defmodule Arbor.Shell do
     do: {:error, {:spawn_backend_unavailable, :production_backend_missing}}
 
   @doc """
+  Acquire a Shell-owned Linux dependency-baseline materialization lease.
+
+  **Trusted system API only.** Accepts only a positive deadline budget in
+  milliseconds — never caller paths, source roots, manifests, plans, modules,
+  callbacks, readiness flags, or destination names. Shell exclusively creates a
+  private candidate/base pair from the startup-pinned baseline authority.
+
+  Returns an opaque lease (required for release; live caller-bound) plus a
+  JSON-clean view with `candidate_path`, `base_path`, a bounded evidence-only
+  receipt, and a narrow `verified_copy` fact when both destinations passed
+  descriptor-bound verification. The receipt grants no execution authority and
+  does not claim provisioning readiness.
+  """
+  @spec acquire_linux_dependency_baseline_lease(pos_integer()) ::
+          {:ok, term(), map()} | {:error, term()}
+  def acquire_linux_dependency_baseline_lease(deadline_ms)
+      when is_integer(deadline_ms) and deadline_ms > 0 do
+    Arbor.Shell.LinuxDependencyBaselineMaterializer.acquire(deadline_ms)
+  end
+
+  def acquire_linux_dependency_baseline_lease(_deadline_ms),
+    do: {:error, :invalid_deadline}
+
+  @doc """
+  Release a Linux dependency-baseline materialization lease.
+
+  **Trusted system API only.** Requires the same live caller process that
+  acquired the lease. A copied opaque token alone is not authority. Cleanup
+  failure is enforcing and retryable — success is returned only after the
+  private root is proven absent.
+  """
+  @spec release_linux_dependency_baseline_lease(term()) :: :ok | {:error, term()}
+  def release_linux_dependency_baseline_lease(lease) do
+    Arbor.Shell.LinuxDependencyBaselineMaterializer.release(lease)
+  end
+
+  @doc """
   Redacted public status of the Apple Container control-plane authority owner.
 
   Returns an ordinary JSON-clean map with state/reason/platform labels only.
