@@ -6,6 +6,17 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   argv plans as data only. It performs no IO, process execution, filesystem
   access, environment reads, or application config reads.
 
+  Request fields `:image` and `:init_image` are **local execution aliases**
+  only — never provisioning authority and never externally routable registry
+  references. Admitted forms are exact:
+
+    * workload: `127.0.0.1:0/arbor/workload@sha256:<64 lowercase hex>`
+    * init:     `127.0.0.1:0/arbor/vminit@sha256:<64 lowercase hex>`
+
+  The non-connectable loopback sink (`127.0.0.1:0`) plus fixed `--scheme https`
+  makes a missing alias fail locally instead of pulling. Operator provisioning
+  that materializes those aliases is outside this pure planner.
+
   The production `Arbor.Shell.execute_spawn_capable/3` facade remains fail-closed
   until a later imperative adapter interprets these plans.
   """
@@ -27,6 +38,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @guest_mix_wrapper "/arbor/bin/mix"
   @guest_erlang_root "/usr/local/lib/erlang"
   @guest_elixir_root "/usr/local"
+
+  # Local-only execution alias sinks. Port 0 is non-connectable; these strings
+  # name operator-provisioned local store entries, not pull destinations.
+  @workload_execution_alias_prefix "127.0.0.1:0/arbor/workload@sha256:"
+  @init_execution_alias_prefix "127.0.0.1:0/arbor/vminit@sha256:"
 
   # Required host projections and their fixed guest targets / modes.
   # Host Erlang/Elixir roots are provenance-only and are intentionally absent.
@@ -53,6 +69,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   # Logical top-level fields (atom form). String aliases are accepted only when
   # the atom form is absent — never both.
+  # `:image` / `:init_image` carry local execution aliases (not provisioning refs).
   @logical_request_keys [
     :image,
     :init_image,
@@ -76,7 +93,6 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @max_image_bytes 512
   @max_command_args 256
   @max_command_arg_bytes 4_096
-  @max_repository_bytes 255
 
   # Characters that alter Apple Container's comma-delimited --mount mini-language
   # when interpolated into source= values. Comma separates mount fields; equals
@@ -85,13 +101,16 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   # Conservative DNS-like unit name for exact-ID lifecycle cleanup.
   @name_re ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/
-  # Fully-qualified immutable image:
-  # registry-host-with-at-least-one-dot[:port]/repository/path@sha256:<64 lowercase hex>
-  # Rejects default-registry-ambiguous forms such as registry/arbor/... or arbor/....
-  @image_re ~r/\A([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+)@sha256:([0-9a-f]{64})\z/
+  # Exact local execution aliases only (closed host/port/repo/role + digest).
+  @workload_execution_alias_re ~r/\A127\.0\.0\.1:0\/arbor\/workload@sha256:([0-9a-f]{64})\z/
+  @init_execution_alias_re ~r/\A127\.0\.0\.1:0\/arbor\/vminit@sha256:([0-9a-f]{64})\z/
+  @digest_hex_re ~r/\A[0-9a-f]{64}\z/
 
   @type mix_env :: String.t()
   @type host_path :: String.t()
+  # Local execution alias strings — never externally routable provisioning refs.
+  @type workload_execution_alias :: String.t()
+  @type init_execution_alias :: String.t()
 
   @type projections :: %{
           worktree: host_path(),
@@ -127,8 +146,10 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @type plan :: %{
           runtime_executable: String.t(),
           unit_name: String.t(),
-          image: String.t(),
-          init_image: String.t(),
+          # Local workload execution alias (`127.0.0.1:0/arbor/workload@sha256:...`).
+          image: workload_execution_alias(),
+          # Local vminit execution alias (`127.0.0.1:0/arbor/vminit@sha256:...`).
+          init_image: init_execution_alias(),
           kernel_path: host_path(),
           platform: String.t(),
           runtime_handler: String.t(),
@@ -155,15 +176,19 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   Returns `{:ok, plan}` with deterministic argv for create, start/attach,
   force-stop, delete, and exact-ID absence verification. Fails closed on any
-  mutable image, unsafe name, non-canonical projection, open environment, or
-  attempt to control guest targets / network / extra flags.
+  non-local execution alias, mutable tag, unsafe name, non-canonical
+  projection, open environment, or attempt to control guest targets / network /
+  extra flags.
+
+  Create argv embeds only the admitted local execution aliases — never an
+  externally routable provisioning reference.
   """
   @spec new(map()) :: {:ok, plan()} | {:error, term()}
   def new(request) when is_map(request) do
     with :ok <- validate_request_keys(request),
          {:ok, image} <- fetch_image(request),
          {:ok, init_image} <- fetch_init_image(request),
-         :ok <- reject_identical_images(image, init_image),
+         :ok <- reject_identical_execution_aliases(image, init_image),
          {:ok, name} <- fetch_name(request),
          {:ok, projections} <- fetch_projections(request),
          {:ok, kernel_path} <- fetch_kernel_path(request, projections),
@@ -211,6 +236,10 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   @doc """
   Convert a plan to a JSON-clean map for diagnostics (no secrets beyond plan data).
+
+  `"image"` / `"init_image"` are local execution aliases only — never
+  provisioning authority. `"image_kind"` / `"init_image_kind"` make that
+  invariant explicit for consumers.
   """
   @spec show(plan()) :: map()
   def show(%{argv: argv} = plan) when is_map(argv) do
@@ -218,7 +247,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       "runtime_executable" => plan.runtime_executable,
       "unit_name" => plan.unit_name,
       "image" => plan.image,
+      "image_kind" => "local_execution_alias",
       "init_image" => plan.init_image,
+      "init_image_kind" => "local_execution_alias",
       "kernel_path" => plan.kernel_path,
       "platform" => plan.platform,
       "runtime_handler" => plan.runtime_handler,
@@ -331,22 +362,36 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   defp fetch_image(request) do
     case get_field(request, :image) do
       nil -> {:error, :missing_image}
-      image -> validate_image(image)
+      image -> validate_workload_execution_alias(image)
     end
   end
 
   defp fetch_init_image(request) do
     case get_field(request, :init_image) do
       nil -> {:error, :missing_init_image}
-      init_image -> validate_image(init_image)
+      init_image -> validate_init_execution_alias(init_image)
     end
   end
 
-  defp reject_identical_images(image, init_image) when image == init_image do
+  # Full alias strings must differ (roles differ) and index digests must differ
+  # so workload/vminit never resolve to the same content identity.
+  defp reject_identical_execution_aliases(image, init_image) when image == init_image do
     {:error, :identical_workload_and_init_images}
   end
 
-  defp reject_identical_images(_image, _init_image), do: :ok
+  defp reject_identical_execution_aliases(image, init_image) do
+    with {:ok, workload_digest} <- execution_alias_digest(image, :workload),
+         {:ok, init_digest} <- execution_alias_digest(init_image, :init) do
+      if workload_digest == init_digest do
+        {:error, :identical_workload_and_init_index_digests}
+      else
+        :ok
+      end
+    else
+      # Callers only reach this after role-specific validation succeeded.
+      _other -> {:error, :identical_workload_and_init_images}
+    end
+  end
 
   defp fetch_name(request) do
     case get_field(request, :name) do
@@ -413,59 +458,231 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   # ── Field validators ───────────────────────────────────────────────────
 
-  defp validate_image(image) when is_binary(image) do
-    with :ok <- require_valid_utf8(image) do
+  defp validate_workload_execution_alias(image) when is_binary(image) do
+    validate_execution_alias(image, :workload)
+  end
+
+  defp validate_workload_execution_alias(_), do: {:error, :invalid_image}
+
+  defp validate_init_execution_alias(init_image) when is_binary(init_image) do
+    validate_execution_alias(init_image, :init)
+  end
+
+  defp validate_init_execution_alias(_), do: {:error, :invalid_image}
+
+  # Admits only exact local execution aliases for the requested role. Never
+  # admits externally routable provisioning references (docker.io, ghcr.io, …).
+  defp validate_execution_alias(value, role)
+       when is_binary(value) and role in [:workload, :init] do
+    with :ok <- require_valid_utf8(value) do
       cond do
-        image == "" ->
+        value == "" ->
           {:error, :empty_image}
 
-        byte_size(image) > @max_image_bytes ->
+        byte_size(value) > @max_image_bytes ->
           {:error, :image_too_long}
 
-        has_control_or_whitespace?(image) ->
+        has_control_or_whitespace?(value) ->
           {:error, :unsafe_image}
 
-        option_shaped?(image) ->
+        option_shaped?(value) ->
           {:error, :option_shaped_image}
 
-        String.contains?(image, ":") and not String.contains?(image, "@sha256:") ->
-          {:error, :mutable_image_tag}
+        String.contains?(value, "?") or String.contains?(value, "#") ->
+          {:error, :malformed_image}
 
-        String.contains?(image, "@SHA256:") or String.contains?(image, "@Sha256:") ->
+        uppercase_digest_algorithm?(value) ->
           {:error, :uppercase_image_digest}
 
+        String.contains?(value, ":") and not String.contains?(value, "@sha256:") and
+          not String.contains?(value, "@SHA256:") and not String.contains?(value, "@Sha256:") ->
+          {:error, :mutable_image_tag}
+
         true ->
-          case Regex.run(@image_re, image) do
-            [^image, repository, digest] ->
-              if byte_size(repository) <= @max_repository_bytes and byte_size(digest) == 64 do
-                {:ok, image}
-              else
-                {:error, :malformed_image}
-              end
+          case match_exact_execution_alias(value, role) do
+            {:ok, _digest} ->
+              {:ok, value}
 
-            _other ->
-              if String.contains?(image, "@sha256:") do
-                digest_part = image |> String.split("@sha256:", parts: 2) |> List.last()
+            :wrong_role ->
+              {:error, :wrong_execution_alias_role}
 
-                cond do
-                  digest_part != String.downcase(digest_part) ->
-                    {:error, :uppercase_image_digest}
+            :uppercase_digest ->
+              {:error, :uppercase_image_digest}
 
-                  not Regex.match?(~r/\A[0-9a-f]{64}\z/, digest_part) ->
-                    {:error, :malformed_image_digest}
+            :malformed_digest ->
+              {:error, :malformed_image_digest}
 
-                  true ->
-                    {:error, :malformed_image}
-                end
-              else
-                {:error, :mutable_image_tag}
-              end
+            :not_local_alias ->
+              classify_non_local_execution_alias(value)
           end
       end
     end
   end
 
-  defp validate_image(_), do: {:error, :invalid_image}
+  defp match_exact_execution_alias(value, :workload) do
+    case Regex.run(@workload_execution_alias_re, value) do
+      [^value, digest] ->
+        {:ok, digest}
+
+      _other ->
+        classify_near_miss_execution_alias(value, :workload)
+    end
+  end
+
+  defp match_exact_execution_alias(value, :init) do
+    case Regex.run(@init_execution_alias_re, value) do
+      [^value, digest] ->
+        {:ok, digest}
+
+      _other ->
+        classify_near_miss_execution_alias(value, :init)
+    end
+  end
+
+  defp classify_near_miss_execution_alias(value, role) do
+    other_role = if role == :workload, do: :init, else: :workload
+
+    cond do
+      exact_execution_alias_role?(value, other_role) ->
+        :wrong_role
+
+      local_sink_prefix?(value) ->
+        classify_local_sink_digest_failure(value)
+
+      true ->
+        :not_local_alias
+    end
+  end
+
+  defp exact_execution_alias_role?(value, :workload) do
+    match?([^value, _digest], Regex.run(@workload_execution_alias_re, value))
+  end
+
+  defp exact_execution_alias_role?(value, :init) do
+    match?([^value, _digest], Regex.run(@init_execution_alias_re, value))
+  end
+
+  defp local_sink_prefix?(value) when is_binary(value) do
+    String.starts_with?(value, "127.0.0.1:0/")
+  end
+
+  defp classify_local_sink_digest_failure(value) do
+    case split_sha256_digest(value) do
+      {:ok, digest} ->
+        cond do
+          digest != String.downcase(digest) ->
+            :uppercase_digest
+
+          not Regex.match?(@digest_hex_re, digest) ->
+            :malformed_digest
+
+          true ->
+            # Host/port/repo/role deviation under the local sink.
+            :not_local_alias
+        end
+
+      :error ->
+        if String.contains?(value, "@sha256:") do
+          :malformed_digest
+        else
+          :not_local_alias
+        end
+    end
+  end
+
+  defp classify_non_local_execution_alias(value) when is_binary(value) do
+    cond do
+      # Explicit external / default-registry / ambiguous provisioning forms.
+      external_provisioning_reference?(value) ->
+        {:error, :external_provisioning_reference}
+
+      String.contains?(value, "@sha256:") ->
+        digest = value |> String.split("@sha256:", parts: 2) |> List.last()
+
+        cond do
+          digest != String.downcase(digest) ->
+            {:error, :uppercase_image_digest}
+
+          not Regex.match?(@digest_hex_re, digest) ->
+            {:error, :malformed_image_digest}
+
+          true ->
+            {:error, :not_local_execution_alias}
+        end
+
+      String.contains?(value, ":") ->
+        {:error, :mutable_image_tag}
+
+      true ->
+        {:error, :not_local_execution_alias}
+    end
+  end
+
+  defp external_provisioning_reference?(value) when is_binary(value) do
+    # Any host other than the exact non-connectable local sink is provisioning.
+    cond do
+      String.starts_with?(value, @workload_execution_alias_prefix) ->
+        false
+
+      String.starts_with?(value, @init_execution_alias_prefix) ->
+        false
+
+      String.contains?(value, "://") ->
+        true
+
+      String.starts_with?(value, "docker.io/") ->
+        true
+
+      String.starts_with?(value, "ghcr.io/") ->
+        true
+
+      String.starts_with?(value, "quay.io/") ->
+        true
+
+      String.starts_with?(value, "gcr.io/") ->
+        true
+
+      String.starts_with?(value, "registry.example.com") ->
+        true
+
+      String.starts_with?(value, "localhost/") ->
+        true
+
+      String.starts_with?(value, "127.0.0.1:") and not String.starts_with?(value, "127.0.0.1:0/") ->
+        true
+
+      Regex.match?(~r/\A[a-z0-9.-]+\.[a-z0-9.-]+(?::[0-9]+)?\//, value) ->
+        true
+
+      true ->
+        false
+    end
+  end
+
+  defp uppercase_digest_algorithm?(value) when is_binary(value) do
+    String.contains?(value, "@SHA256:") or String.contains?(value, "@Sha256:")
+  end
+
+  defp split_sha256_digest(value) when is_binary(value) do
+    case String.split(value, "@sha256:", parts: 2) do
+      [_prefix, digest] when digest != "" -> {:ok, digest}
+      _other -> :error
+    end
+  end
+
+  defp execution_alias_digest(value, :workload) do
+    case Regex.run(@workload_execution_alias_re, value) do
+      [^value, digest] -> {:ok, digest}
+      _other -> :error
+    end
+  end
+
+  defp execution_alias_digest(value, :init) do
+    case Regex.run(@init_execution_alias_re, value) do
+      [^value, digest] -> {:ok, digest}
+      _other -> :error
+    end
+  end
 
   defp validate_kernel_path(path) when is_binary(path) do
     case validate_absolute_canonical_path(path) do
@@ -835,13 +1052,16 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   defp build_argv(name, image, init_image, kernel_path, mounts, env, command_args) do
     # Force the reviewed wrapper via --entrypoint independently of image
-    # metadata. After the image token, append only caller command_args — never
-    # a second /arbor/bin/mix positional token.
+    # metadata. After the local workload execution-alias token, append only
+    # caller command_args — never a second /arbor/bin/mix positional token.
     #
     # Infrastructure flags (--platform/--runtime/--kernel/--init-image/--scheme/
     # --network/--no-dns) are fixed or validated closed fields; they appear before
-    # mounts and the workload image so create management options are never
+    # mounts and the workload alias so create management options are never
     # reinterpreted as init-process arguments after the image token.
+    #
+    # `image` / `init_image` are already proven local execution aliases — never
+    # external provisioning references.
     create =
       [
         @runtime_executable,

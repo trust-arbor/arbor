@@ -4,6 +4,9 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
   Slice 2A only: validates immutable argv plans as data. Does not wire
   `Arbor.Shell.execute_spawn_capable/3` (still production_backend_missing).
+
+  `:image` / `:init_image` are local execution aliases under the non-connectable
+  sink `127.0.0.1:0/...@sha256:...` — never externally routable provisioning refs.
   """
 
   use ExUnit.Case, async: true
@@ -15,8 +18,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
   @digest String.duplicate("a", 64)
   @init_digest String.duplicate("b", 64)
-  @image "docker.io/arbor/validation@sha256:#{@digest}"
-  @init_image "docker.io/arbor/vminit@sha256:#{@init_digest}"
+  @image "127.0.0.1:0/arbor/workload@sha256:#{@digest}"
+  @init_image "127.0.0.1:0/arbor/vminit@sha256:#{@init_digest}"
   @kernel_path "/usr/local/share/container/kernels/default.kernel"
   @name "arbor-val-unit01"
 
@@ -221,12 +224,14 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert AppleContainerPlanCore.show(a) == AppleContainerPlanCore.show(b)
     end
 
-    test "show exposes JSON-clean infrastructure fields" do
+    test "show exposes JSON-clean infrastructure fields as local execution aliases" do
       assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
       shown = AppleContainerPlanCore.show(plan)
 
       assert shown["image"] == @image
+      assert shown["image_kind"] == "local_execution_alias"
       assert shown["init_image"] == @init_image
+      assert shown["init_image_kind"] == "local_execution_alias"
       assert shown["kernel_path"] == @kernel_path
       assert shown["platform"] == "linux/arm64"
       assert shown["runtime_handler"] == "container-runtime-linux"
@@ -308,10 +313,13 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
     @tag :security_regression
     test "rejects atom+string aliases when values differ" do
+      other_workload = "127.0.0.1:0/arbor/workload@sha256:#{String.duplicate("c", 64)}"
+      other_init = "127.0.0.1:0/arbor/vminit@sha256:#{String.duplicate("d", 64)}"
+
       request =
         @valid_request
         |> Map.put(:image, @image)
-        |> Map.put("image", "ghcr.io/other/image@sha256:#{@digest}")
+        |> Map.put("image", other_workload)
 
       assert {:error, {:duplicate_request_key_alias, :image}} =
                AppleContainerPlanCore.new(request)
@@ -319,7 +327,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       request =
         @valid_request
         |> Map.put(:init_image, @init_image)
-        |> Map.put("init_image", "ghcr.io/other/vminit@sha256:#{@init_digest}")
+        |> Map.put("init_image", other_init)
 
       assert {:error, {:duplicate_request_key_alias, :init_image}} =
                AppleContainerPlanCore.new(request)
@@ -403,27 +411,102 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     end
   end
 
+  describe "local execution alias admission" do
+    @tag :security_regression
+    test "admits only exact workload and vminit local execution aliases" do
+      assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+      assert plan.image == @image
+      assert plan.init_image == @init_image
+      assert @image in plan.argv.create
+      assert @init_image in plan.argv.create
+
+      # Wrong role under the local sink.
+      assert {:error, :wrong_execution_alias_role} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :image, @init_image))
+
+      assert {:error, :wrong_execution_alias_role} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :init_image, @image))
+    end
+
+    @tag :security_regression
+    test "rejects equal workload/vminit index digests even when roles differ" do
+      same_digest = String.duplicate("e", 64)
+      workload = "127.0.0.1:0/arbor/workload@sha256:#{same_digest}"
+      init = "127.0.0.1:0/arbor/vminit@sha256:#{same_digest}"
+
+      request =
+        @valid_request
+        |> Map.put(:image, workload)
+        |> Map.put(:init_image, init)
+
+      assert {:error, :identical_workload_and_init_index_digests} =
+               AppleContainerPlanCore.new(request)
+    end
+
+    @tag :security_regression
+    test "create argv never contains external provisioning references" do
+      assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+      create = plan.argv.create
+      joined = Enum.join(create, " ")
+      all_tokens = plan.argv |> Map.values() |> List.flatten()
+
+      refute_external_provisioning_refs(create)
+      refute_external_provisioning_refs(all_tokens)
+
+      # Digest-bearing tokens must be exactly the two local execution aliases.
+      digest_tokens = Enum.filter(all_tokens, &String.contains?(&1, "@sha256:"))
+      assert Enum.sort(digest_tokens) == Enum.sort([@image, @init_image])
+
+      # Workload alias is the sole post-entrypoint image token; init is only
+      # under --init-image.
+      init_idx = Enum.find_index(create, &(&1 == "--init-image"))
+      assert is_integer(init_idx)
+      assert Enum.at(create, init_idx + 1) == @init_image
+
+      ep_idx = Enum.find_index(create, &(&1 == "--entrypoint"))
+      assert Enum.at(create, ep_idx + 2) == @image
+
+      refute String.contains?(joined, "docker.io")
+      refute String.contains?(joined, "ghcr.io")
+      refute String.contains?(joined, "registry.example.com")
+      refute String.contains?(joined, "quay.io")
+      refute String.contains?(joined, "gcr.io")
+    end
+  end
+
   describe "image rejection" do
     @tag :security_regression
-    test "table: tag-only, mutable, uppercase, malformed, ambiguous, option-shaped images" do
+    test "table: tag-only, external, wrong host/port/repo/role, uppercase, malformed, option-shaped" do
       cases = [
         {"alpine:latest", :mutable_image_tag},
         {"docker.io/arbor/validation:v1", :mutable_image_tag},
         {"docker.io/arbor/validation", :mutable_image_tag},
-        {"arbor/validation@sha256:#{@digest}", :malformed_image},
-        {"registry/arbor/image@sha256:#{@digest}", :malformed_image},
-        {"localhost/arbor/image@sha256:#{@digest}", :malformed_image},
-        {"docker.io/arbor/validation@sha256:#{String.upcase(@digest)}", :uppercase_image_digest},
-        {"docker.io/arbor/validation@SHA256:#{@digest}", :uppercase_image_digest},
-        {"docker.io/arbor/validation@sha256:abcd", :malformed_image_digest},
-        {"docker.io/arbor/validation@sha256:#{String.duplicate("g", 64)}",
+        {"docker.io/arbor/workload@sha256:#{@digest}", :external_provisioning_reference},
+        {"ghcr.io/arbor/workload@sha256:#{@digest}", :external_provisioning_reference},
+        {"registry.example.com:5000/arbor/workload@sha256:#{@digest}",
+         :external_provisioning_reference},
+        {"quay.io/arbor/workload@sha256:#{@digest}", :external_provisioning_reference},
+        {"localhost/arbor/workload@sha256:#{@digest}", :external_provisioning_reference},
+        {"127.0.0.1:1/arbor/workload@sha256:#{@digest}", :external_provisioning_reference},
+        {"127.0.0.1/arbor/workload@sha256:#{@digest}", :not_local_execution_alias},
+        {"127.0.0.1:0/arbor/validation@sha256:#{@digest}", :not_local_execution_alias},
+        {"127.0.0.1:0/other/workload@sha256:#{@digest}", :not_local_execution_alias},
+        {"127.0.0.1:0/arbor/workload:latest", :mutable_image_tag},
+        {"127.0.0.1:0/arbor/workload@sha256:#{String.upcase(@digest)}", :uppercase_image_digest},
+        {"127.0.0.1:0/arbor/workload@SHA256:#{@digest}", :uppercase_image_digest},
+        {"127.0.0.1:0/arbor/workload@sha256:abcd", :malformed_image_digest},
+        {"127.0.0.1:0/arbor/workload@sha256:#{String.duplicate("g", 64)}",
          :malformed_image_digest},
-        {"docker.io/arbor/validation@sha256:#{String.duplicate("a", 63)}",
+        {"127.0.0.1:0/arbor/workload@sha256:#{String.duplicate("a", 63)}",
          :malformed_image_digest},
-        {"docker.io/arbor/validation@sha256:#{String.duplicate("a", 65)}",
+        {"127.0.0.1:0/arbor/workload@sha256:#{String.duplicate("a", 65)}",
          :malformed_image_digest},
-        {"docker.io/arbor/validation @sha256:#{@digest}", :unsafe_image},
-        {"docker.io/arbor/validation@sha256:#{@digest}\n", :unsafe_image},
+        {"127.0.0.1:0/arbor/workload@sha256:#{@digest}?pull=1", :malformed_image},
+        {"127.0.0.1:0/arbor/workload@sha256:#{@digest}#frag", :malformed_image},
+        {"arbor/workload@sha256:#{@digest}", :not_local_execution_alias},
+        {"registry/arbor/workload@sha256:#{@digest}", :not_local_execution_alias},
+        {"127.0.0.1:0/arbor/workload @sha256:#{@digest}", :unsafe_image},
+        {"127.0.0.1:0/arbor/workload@sha256:#{@digest}\n", :unsafe_image},
         {"--pull", :option_shaped_image},
         {"-e", :option_shaped_image},
         {"", :empty_image}
@@ -443,39 +526,64 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                    :unsafe_image,
                    :option_shaped_image,
                    :empty_image,
-                   :invalid_image
+                   :invalid_image,
+                   :not_local_execution_alias,
+                   :external_provisioning_reference,
+                   :wrong_execution_alias_role
                  ],
                "image=#{inspect(image)} got #{inspect(reason)}, expected ~#{inspect(expected)}"
       end
     end
 
     @tag :security_regression
-    test "accepts fully-qualified registry host with optional port" do
-      image = "registry.example.com:5000/arbor/validation@sha256:#{@digest}"
+    test "rejects externally routable fully-qualified provisioning references" do
+      external_refs = [
+        "registry.example.com:5000/arbor/validation@sha256:#{@digest}",
+        "docker.io/arbor/validation@sha256:#{@digest}",
+        "ghcr.io/other/image@sha256:#{@digest}",
+        "https://registry.example.com/arbor/workload@sha256:#{@digest}"
+      ]
 
-      assert {:ok, plan} =
-               AppleContainerPlanCore.new(Map.put(@valid_request, :image, image))
+      for image <- external_refs do
+        assert {:error, reason} =
+                 AppleContainerPlanCore.new(Map.put(@valid_request, :image, image))
 
-      assert plan.image == image
-      assert image in plan.argv.create
+        assert reason in [
+                 :external_provisioning_reference,
+                 :not_local_execution_alias,
+                 :malformed_image
+               ],
+               "image=#{inspect(image)} got #{inspect(reason)}"
+
+        # Failure happens before argv construction — no plan, no leak into argv.
+        refute match?(
+                 {:ok, _},
+                 AppleContainerPlanCore.new(Map.put(@valid_request, :image, image))
+               )
+      end
     end
   end
 
   describe "init image rejection" do
     @tag :security_regression
-    test "requires distinct fully-qualified immutable init image" do
+    test "requires distinct local vminit execution alias" do
       assert {:error, :missing_init_image} =
                AppleContainerPlanCore.new(Map.delete(@valid_request, :init_image))
 
-      assert {:error, :identical_workload_and_init_images} =
+      # Workload alias is the wrong role for init_image.
+      assert {:error, :wrong_execution_alias_role} =
                AppleContainerPlanCore.new(Map.put(@valid_request, :init_image, @image))
 
       cases = [
         {"alpine:latest", :mutable_image_tag},
-        {"arbor/vminit@sha256:#{@init_digest}", :malformed_image},
-        {"registry/arbor/vminit@sha256:#{@init_digest}", :malformed_image},
-        {"docker.io/arbor/vminit@sha256:#{String.upcase(@init_digest)}", :uppercase_image_digest},
-        {"docker.io/arbor/vminit@sha256:abcd", :malformed_image_digest},
+        {"arbor/vminit@sha256:#{@init_digest}", :not_local_execution_alias},
+        {"registry/arbor/vminit@sha256:#{@init_digest}", :not_local_execution_alias},
+        {"docker.io/arbor/vminit@sha256:#{@init_digest}", :external_provisioning_reference},
+        {"127.0.0.1:0/arbor/vminit@sha256:#{String.upcase(@init_digest)}",
+         :uppercase_image_digest},
+        {"127.0.0.1:0/arbor/vminit@sha256:abcd", :malformed_image_digest},
+        {"127.0.0.1:0/arbor/workload@sha256:#{@init_digest}", :wrong_execution_alias_role},
+        {"127.0.0.1:0/arbor/vminit@sha256:#{@init_digest}?x=1", :malformed_image},
         {"", :empty_image}
       ]
 
@@ -965,11 +1073,41 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
   # ── Helpers ────────────────────────────────────────────────────────────
 
+  defp refute_external_provisioning_refs(tokens) when is_list(tokens) do
+    for token <- tokens do
+      refute String.starts_with?(token, "docker.io/"),
+             "external docker.io ref in argv: #{inspect(token)}"
+
+      refute String.starts_with?(token, "ghcr.io/"),
+             "external ghcr.io ref in argv: #{inspect(token)}"
+
+      refute String.starts_with?(token, "quay.io/"),
+             "external quay.io ref in argv: #{inspect(token)}"
+
+      refute String.starts_with?(token, "gcr.io/"),
+             "external gcr.io ref in argv: #{inspect(token)}"
+
+      refute String.starts_with?(token, "registry.example.com"),
+             "external registry.example.com ref in argv: #{inspect(token)}"
+
+      refute String.contains?(token, "://"),
+             "scheme-bearing provisioning ref in argv: #{inspect(token)}"
+
+      # Local sink with wrong port is also provisioning, not an admitted alias.
+      if String.starts_with?(token, "127.0.0.1:") do
+        assert token == @image or token == @init_image,
+               "non-admitted loopback ref in argv: #{inspect(token)}"
+      end
+    end
+  end
+
   defp refute_forbidden_tokens(plan) do
     all_argv =
       plan.argv
       |> Map.values()
       |> List.flatten()
+
+    refute_external_provisioning_refs(all_argv)
 
     joined = Enum.join(all_argv, " ")
 
