@@ -29,7 +29,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   isolated build directories, and detached base worktree are monitored against
   both the invoking process and the parent workspace owner. Normal release,
   validation-process death, workspace-owner death, and workspace removal all
-  clean those resources.
+  clean those resources. Dependency trees are materialized through the public
+  `Arbor.Shell` Linux baseline lease API; the opaque lease stays private to the
+  registry's validation_resource record and is never projected in public views.
 
   ## Review snapshots
 
@@ -115,17 +117,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           candidate_home_path: String.t(),
           candidate_tmp_path: String.t(),
           candidate_build_path: String.t(),
-          candidate_deps_path: String.t(),
+          candidate_deps_path: String.t() | nil,
           candidate_runner_path: String.t(),
           candidate_result_path: String.t(),
           base_runtime_path: String.t(),
           base_home_path: String.t(),
           base_tmp_path: String.t(),
           base_build_path: String.t(),
-          base_deps_path: String.t(),
+          base_deps_path: String.t() | nil,
           base_worktree_path: String.t(),
           base_runner_path: String.t(),
           base_result_path: String.t(),
+          # Opaque Shell dependency-baseline lease. Process-private only —
+          # never projected through validation_resource_view/1.
+          dependency_lease: term() | nil,
+          dependency_receipt: map() | nil,
+          dependency_verified_copy: boolean() | nil,
           snapshot_created: boolean()
         }
 
@@ -193,24 +200,6 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   def acquire_validation_resource(workspace_id, opts \\ %{}) when is_binary(workspace_id) do
     {server_opts, caller} = split_caller_opts(opts)
     call({:acquire_validation_resource, workspace_id, caller}, server_opts)
-  end
-
-  @default_snapshot_max_entries 50_000
-  @default_snapshot_max_bytes 512 * 1024 * 1024
-  @default_snapshot_max_depth 48
-
-  @spec snapshot_dependency_tree(String.t(), String.t(), keyword() | map()) ::
-          :ok | {:error, term()}
-  defp snapshot_dependency_tree(repo_path, destination, opts)
-       when is_binary(repo_path) and is_binary(destination) and is_list(opts) do
-    with :ok <- snapshot_dependencies(repo_path, destination, opts),
-         :ok <- ensure_private_directory(destination) do
-      :ok
-    end
-  end
-
-  defp snapshot_dependency_tree(repo_path, destination, opts) when is_map(opts) do
-    snapshot_dependency_tree(repo_path, destination, Map.to_list(opts))
   end
 
   @doc false
@@ -385,12 +374,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
        attestation_by_workspace: %{},
        attestation_states: %{},
        review_snapshots: %{},
-       review_snapshots_by_workspace: %{}
+       review_snapshots_by_workspace: %{},
+       linux_dependency_baseline_materializer: dependency_baseline_materializer_from_opts(opts)
      }}
   end
 
   defp server_opts(opts) when is_list(opts), do: opts
   defp server_opts(_opts), do: []
+
+  defp dependency_baseline_materializer_from_opts(opts) when is_list(opts) do
+    case Keyword.get(server_opts(opts), :linux_dependency_baseline_materializer) do
+      mod when is_atom(mod) and not is_nil(mod) -> mod
+      _ -> Arbor.Shell
+    end
+  end
+
+  defp dependency_baseline_materializer_from_opts(_opts), do: Arbor.Shell
 
   @impl true
   def handle_call({:acquire, attrs}, {owner_pid, _tag}, state) do
@@ -793,6 +792,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          setup_opts
        ) do
     owner_ref = Process.monitor(owner_pid)
+    materializer = state.linux_dependency_baseline_materializer
 
     case create_validation_root(lease.workspace_id) do
       {:ok, resource_id, root_path} ->
@@ -810,10 +810,21 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         case setup_validation_resource(
                resource,
                force_dependency_snapshot_failure,
-               setup_opts
+               setup_opts,
+               materializer
              ) do
           {:ok, resource} ->
             {:ok, resource, put_validation_resource(state, resource)}
+
+          {:error, {:cleanup_required, reason, dep_lease}} ->
+            handle_dependency_cleanup_required(
+              state,
+              resource,
+              materializer,
+              dep_lease,
+              reason,
+              force_partial_cleanup_failure_once
+            )
 
           {:error, reason} ->
             case rollback_partial_validation_resource(
@@ -839,6 +850,53 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:error, reason} ->
         Process.demonitor(owner_ref, [:flush])
         {:error, reason}
+    end
+  end
+
+  defp handle_dependency_cleanup_required(
+         state,
+         resource,
+         materializer,
+         dep_lease,
+         reason,
+         force_partial_cleanup_failure_once
+       ) do
+    # Registry owns the lease: attempt Shell release immediately so failures
+    # never leave an untracked Shell root. Release only from this process.
+    case release_dependency_baseline_lease(materializer, dep_lease) do
+      :ok ->
+        resource = %{resource | dependency_lease: nil}
+
+        case rollback_partial_validation_resource(
+               resource,
+               force_partial_cleanup_failure_once
+             ) do
+          :ok ->
+            Process.demonitor(resource.owner_ref, [:flush])
+            {:error, reason}
+
+          {:error, _cleanup_reason} ->
+            resource = %{
+              resource
+              | setup_status: :setup_failed,
+                cleanup_failures_remaining: 0,
+                dependency_lease: nil
+            }
+
+            {:error, :validation_resource_setup_failed_cleanup_retained,
+             put_validation_resource(state, resource)}
+        end
+
+      {:error, _release_reason} ->
+        resource = %{
+          resource
+          | setup_status: :setup_failed,
+            cleanup_failures_remaining: 0,
+            dependency_lease: dep_lease
+        }
+
+        {:error, :validation_resource_setup_failed_cleanup_retained,
+         put_validation_resource(state, resource)}
     end
   end
 
@@ -877,14 +935,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       candidate_home_path: Path.join(candidate_runtime, "home"),
       candidate_tmp_path: Path.join(candidate_runtime, "tmp"),
       candidate_build_path: Path.join(candidate_runtime, "build"),
-      candidate_deps_path: Path.join(candidate_runtime, "deps"),
+      # Filled from Shell baseline lease view after successful acquire.
+      candidate_deps_path: nil,
       candidate_runner_path: Path.join(candidate_runtime, "runner.exs"),
       candidate_result_path: Path.join(candidate_runtime, "result.etf"),
       base_runtime_path: base_runtime,
       base_home_path: Path.join(base_runtime, "home"),
       base_tmp_path: Path.join(base_runtime, "tmp"),
       base_build_path: Path.join(base_runtime, "build"),
-      base_deps_path: Path.join(base_runtime, "deps"),
+      base_deps_path: nil,
       base_worktree_path: Path.join(root_path, "base"),
       base_runner_path: Path.join(base_runtime, "runner.exs"),
       base_result_path: Path.join(base_runtime, "result.etf"),
@@ -892,62 +951,68 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       home_path: Path.join(candidate_runtime, "home"),
       tmp_path: Path.join(candidate_runtime, "tmp"),
       runner_path: Path.join(candidate_runtime, "runner.exs"),
+      dependency_lease: nil,
+      dependency_receipt: nil,
+      dependency_verified_copy: nil,
       snapshot_created: false,
       setup_status: :active,
       cleanup_failures_remaining: cleanup_failures
     }
   end
 
-  defp setup_validation_resource(resource, force_dependency_snapshot_failure, setup_opts) do
-    snapshot_opts = snapshot_opts_from(setup_opts)
+  # Absolute monotonic deadline default when caller omits one (relative budget).
+  @default_dependency_lease_deadline_ms 120_000
+  # Shell facade accepts at most this relative deadline.
+  @max_dependency_lease_deadline_ms 3_600_000
+  @max_dependency_receipt_bytes 16_384
 
+  defp setup_validation_resource(
+         resource,
+         force_dependency_snapshot_failure,
+         setup_opts,
+         materializer
+       ) do
+    # Ordering is load-bearing: Actions-owned private dirs and any detached
+    # candidate worktree are created and forced private *before* the Shell
+    # lease is acquired, so no later filesystem setup can lose the lease.
     with :ok <- check_deadline(setup_opts),
          :ok <- create_private_validation_directories(resource),
          :ok <- check_deadline(setup_opts),
-         {:ok, _candidate_path} <-
-           create_candidate_snapshot_from_resource(resource),
+         {:ok, _candidate_path} <- create_candidate_snapshot_from_resource(resource),
          :ok <- check_deadline(setup_opts),
+         :ok <- force_private_top_boundaries(resource),
          :ok <- maybe_force_dependency_snapshot_failure(force_dependency_snapshot_failure),
-         :ok <-
-           snapshot_dependency_tree(
-             resource.repo_path,
-             resource.candidate_deps_path,
-             snapshot_opts
-           ),
          :ok <- check_deadline(setup_opts),
-         :ok <-
-           snapshot_dependency_tree(resource.repo_path, resource.base_deps_path, snapshot_opts),
-         :ok <- force_private_top_boundaries(resource) do
-      {:ok, resource}
+         {:ok, remaining_ms} <- remaining_shell_deadline_ms(setup_opts) do
+      case acquire_dependency_baseline_lease(materializer, remaining_ms) do
+        {:ok, dep_lease, view} ->
+          case admit_dependency_baseline_view(view) do
+            {:ok, admitted} ->
+              # Pure merge only — no further fallible setup after acquire.
+              {:ok, merge_dependency_baseline(resource, dep_lease, admitted)}
+
+            {:error, reason} ->
+              case release_dependency_baseline_lease(materializer, dep_lease) do
+                :ok ->
+                  {:error, reason}
+
+                {:error, _} ->
+                  {:error, {:cleanup_required, reason, dep_lease}}
+              end
+          end
+
+        {:error, {:cleanup_required, reason, dep_lease}} ->
+          {:error, {:cleanup_required, reason, dep_lease}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
-  end
-
-  defp snapshot_opts_from(opts) when is_list(opts) do
-    bounds = Keyword.get(opts, :snapshot_bounds) || %{}
-
-    [
-      deadline_ms: Keyword.get(opts, :deadline_ms) || Map.get(opts[:caller] || %{}, :deadline_ms),
-      max_entries:
-        Map.get(bounds, :max_entries) || Map.get(bounds, "max_entries") ||
-          @default_snapshot_max_entries,
-      max_bytes:
-        Map.get(bounds, :max_bytes) || Map.get(bounds, "max_bytes") ||
-          @default_snapshot_max_bytes,
-      max_depth:
-        Map.get(bounds, :max_depth) || Map.get(bounds, "max_depth") ||
-          @default_snapshot_max_depth
-    ]
-  end
-
-  defp snapshot_opts_from(opts) when is_map(opts) do
-    snapshot_opts_from(Map.to_list(opts))
   end
 
   defp setup_opts_from_caller(caller) when is_map(caller) do
     [
-      deadline_ms: Map.get(caller, :deadline_ms) || Map.get(caller, "deadline_ms"),
-      snapshot_bounds:
-        Map.get(caller, :snapshot_bounds) || Map.get(caller, "snapshot_bounds") || %{}
+      deadline_ms: Map.get(caller, :deadline_ms) || Map.get(caller, "deadline_ms")
     ]
   end
 
@@ -956,18 +1021,18 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp create_private_validation_directories(resource) do
     # Independent per-revision private roots (0700). Do NOT create stage_path —
     # stage_sources/2 creates that exact child exclusively. Only its parent.
+    # Candidate/base deps live under the Shell-owned baseline lease root and are
+    # intentionally not created under the Actions validation root.
     private_dirs = [
       resource.stage_parent_path,
       resource.candidate_runtime_path,
       resource.candidate_home_path,
       resource.candidate_tmp_path,
       resource.candidate_build_path,
-      resource.candidate_deps_path,
       resource.base_runtime_path,
       resource.base_home_path,
       resource.base_tmp_path,
-      resource.base_build_path,
-      resource.base_deps_path
+      resource.base_build_path
     ]
 
     Enum.reduce_while(private_dirs, :ok, fn path, :ok ->
@@ -987,12 +1052,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         resource.candidate_home_path,
         resource.candidate_tmp_path,
         resource.candidate_build_path,
-        resource.candidate_deps_path,
         resource.base_runtime_path,
         resource.base_home_path,
         resource.base_tmp_path,
-        resource.base_build_path,
-        resource.base_deps_path
+        resource.base_build_path
       ],
       :ok,
       fn path, :ok ->
@@ -1036,7 +1099,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     do: {:error, :injected_partial_cleanup_failure}
 
   defp rollback_partial_validation_resource(resource, false),
-    do: cleanup_validation_resource_files(resource)
+    do: cleanup_actions_owned_validation_files(resource)
 
   defp create_candidate_snapshot_from_resource(%{candidate_commit: nil} = resource),
     do: {:ok, resource.candidate_path}
@@ -1055,497 +1118,166 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp snapshot_dependencies(repo_path, destination, opts) do
-    source = Path.join(repo_path, "deps")
-
-    cond do
-      not File.dir?(source) ->
-        ensure_private_directory(destination)
-
-      true ->
-        _ = if File.dir?(destination), do: :ok, else: File.mkdir(destination)
-
-        with :ok <- check_deadline(opts),
-             :ok <- prepare_destination_for_copy(destination),
-             :ok <- copy_dependency_tree(source, destination, opts),
-             :ok <- check_deadline(opts),
-             :ok <- verify_snapshot_symlinks(destination),
-             :ok <- File.chmod(destination, 0o700) do
-          :ok
-        else
-          {:error, :operation_deadline_exceeded} = error -> error
-          {:error, :snapshot_bounds_exceeded} = error -> error
-          _ -> {:error, :dependency_snapshot_failed}
-        end
-    end
-  rescue
-    _ -> {:error, :dependency_snapshot_failed}
-  end
-
-  defp prepare_destination_for_copy(destination) do
-    case File.ls(destination) do
-      {:ok, []} ->
-        case File.rmdir(destination) do
-          :ok -> :ok
-          {:error, :enoent} -> :ok
-          other -> other
-        end
-
-      {:ok, _} ->
-        {:error, :destination_not_empty}
-
-      {:error, :enoent} ->
-        :ok
-
-      other ->
-        other
-    end
-  end
-
   defp maybe_force_dependency_snapshot_failure(true), do: {:error, :dependency_snapshot_failed}
   defp maybe_force_dependency_snapshot_failure(_), do: :ok
 
-  @snapshot_copy_chunk 65_536
+  defp remaining_shell_deadline_ms(opts) when is_list(opts) do
+    deadline = Keyword.get(opts, :deadline_ms) || Keyword.get(opts, :deadline)
 
-  defp copy_dependency_tree(source, destination, opts) do
-    budget = %{
-      entries: 0,
-      bytes: 0,
-      max_entries: Keyword.get(opts, :max_entries, @default_snapshot_max_entries),
-      max_bytes: Keyword.get(opts, :max_bytes, @default_snapshot_max_bytes),
-      max_depth: Keyword.get(opts, :max_depth, @default_snapshot_max_depth),
-      deadline_ms: Keyword.get(opts, :deadline_ms)
-    }
+    case deadline do
+      nil ->
+        {:ok, @default_dependency_lease_deadline_ms}
 
-    result =
-      with {:ok, %File.Stat{type: :directory}} <- File.lstat(source, time: :posix),
-           {:ok, source_root} <- canonical_existing_path(source),
-           :ok <- File.mkdir(destination),
-           :ok <- File.chmod(destination, 0o700),
-           {:ok, _budget} <-
-             copy_dependency_children(source_root, source, destination, budget, 0) do
-        :ok
-      else
-        {:error, :operation_deadline_exceeded} = error -> error
-        {:error, :snapshot_bounds_exceeded} = error -> error
-        other -> {:error, {:copy_dependency_tree_failed, other}}
-      end
+      ms when is_integer(ms) ->
+        remaining = ms - System.monotonic_time(:millisecond)
 
-    case result do
-      :ok ->
-        :ok
+        cond do
+          remaining <= 0 ->
+            {:error, :operation_deadline_exceeded}
 
-      {:error, _} = error ->
-        _ = File.rm_rf(destination)
-        error
-    end
-  end
+          remaining > @max_dependency_lease_deadline_ms ->
+            {:ok, @max_dependency_lease_deadline_ms}
 
-  defp copy_dependency_children(source_root, source, destination, budget, depth) do
-    if depth > budget.max_depth do
-      {:error, :snapshot_bounds_exceeded}
-    else
-      case check_deadline(deadline_ms: budget.deadline_ms) do
-        :ok ->
-          do_copy_dependency_children(source_root, source, destination, budget, depth)
-
-        error ->
-          error
-      end
-    end
-  end
-
-  # Bounded directory walk: fail closed as soon as the entry budget would be
-  # exceeded rather than fully processing an unbounded listing. Erlang's
-  # list_dir still materializes one directory's names; we cap by length before
-  # recursion and process only up to the remaining entry budget.
-  #
-  # Residual stdlib race limitation: Elixir/Erlang File APIs do not expose
-  # openat(2)/O_NOFOLLOW directory file-descriptor traversal. Walks therefore
-  # re-resolve path strings between list_dir and each child open. We capture
-  # directory identity + canonical-within-root before listing, recheck after
-  # listing, recheck before each child, and recheck again after the final
-  # child. Any mismatch fails closed. This reduces but cannot eliminate
-  # TOCTOU against a concurrent renamer between the recheck and the next
-  # path-based open while openat-style traversal is unavailable in the stdlib.
-  # Path and descriptor stats use `time: :posix` so mode/mtime/ctime compare
-  # as integers; posix times remain second-resolution on this stack.
-  defp do_copy_dependency_children(source_root, source, destination, budget, depth) do
-    remaining_entries = budget.max_entries - budget.entries
-
-    if remaining_entries <= 0 do
-      {:error, :snapshot_bounds_exceeded}
-    else
-      with {:ok, %File.Stat{type: :directory} = before_dir} <-
-             File.lstat(source, time: :posix),
-           {:ok, before_canon} <- canonical_existing_path(source),
-           true <- path_within?(before_canon, source_root),
-           before_identity <- snapshot_dir_identity(before_dir),
-           {:ok, name_chars} <- :file.list_dir(String.to_charlist(source)),
-           {:ok, %File.Stat{type: :directory} = after_dir} <-
-             File.lstat(source, time: :posix),
-           true <- snapshot_dir_identity(after_dir) == before_identity,
-           {:ok, after_canon} <- canonical_existing_path(source),
-           true <- after_canon == before_canon,
-           true <- path_within?(after_canon, source_root) do
-        if length(name_chars) > remaining_entries do
-          {:error, :snapshot_bounds_exceeded}
-        else
-          names =
-            name_chars
-            |> Enum.take(min(length(name_chars), remaining_entries + 1))
-            |> Enum.map(&List.to_string/1)
-
-          if length(names) > remaining_entries do
-            {:error, :snapshot_bounds_exceeded}
-          else
-            reduce_result =
-              Enum.reduce_while(names, {:ok, budget}, fn name, {:ok, acc} ->
-                with {:ok, %File.Stat{type: :directory} = mid_dir} <-
-                       File.lstat(source, time: :posix),
-                     true <- snapshot_dir_identity(mid_dir) == before_identity,
-                     {:ok, mid_canon} <- canonical_existing_path(source),
-                     true <- mid_canon == before_canon do
-                  case copy_one_dependency_child(
-                         source_root,
-                         source,
-                         destination,
-                         name,
-                         acc,
-                         depth
-                       ) do
-                    {:ok, next} -> {:cont, {:ok, next}}
-                    {:error, _} = error -> {:halt, error}
-                  end
-                else
-                  false ->
-                    {:halt, {:error, :snapshot_directory_identity_changed}}
-
-                  {:error, reason} ->
-                    {:halt, {:error, reason}}
-
-                  other ->
-                    {:halt, {:error, {:dependency_directory_recheck_failed, other}}}
-                end
-              end)
-
-            # Post-final-child recheck: the per-child guard only runs *before*
-            # each child; after the last child we must revalidate identity and
-            # canonical-within-root once more before accepting the budget.
-            case reduce_result do
-              {:ok, final_budget} ->
-                recheck_dependency_directory_after_children(
-                  source_root,
-                  source,
-                  before_identity,
-                  before_canon,
-                  final_budget
-                )
-
-              {:error, _} = error ->
-                error
-            end
-          end
+          true ->
+            {:ok, remaining}
         end
-      else
-        false ->
-          {:error, :snapshot_directory_identity_changed}
+
+      _ ->
+        {:error, :invalid_deadline}
+    end
+  end
+
+  defp remaining_shell_deadline_ms(opts) when is_map(opts) do
+    remaining_shell_deadline_ms(Map.to_list(opts))
+  end
+
+  defp remaining_shell_deadline_ms(_), do: {:ok, @default_dependency_lease_deadline_ms}
+
+  defp acquire_dependency_baseline_lease(materializer, remaining_ms)
+       when is_atom(materializer) and is_integer(remaining_ms) and remaining_ms > 0 do
+    try do
+      case materializer.acquire_linux_dependency_baseline_lease(remaining_ms) do
+        # Ownership transfers on any non-nil lease. View shape is admitted only
+        # after transfer so a malformed/non-map view cannot drop a live lease.
+        {:ok, lease, view} when not is_nil(lease) ->
+          {:ok, lease, view}
+
+        {:error, {:cleanup_required, reason, lease}} when not is_nil(lease) ->
+          {:error, {:cleanup_required, reason, lease}}
 
         {:error, reason} ->
-          {:error, {:dependency_list_failed, reason}}
+          {:error, reason}
 
-        other ->
-          {:error, {:dependency_list_failed, other}}
+        _other ->
+          {:error, :dependency_baseline_acquire_failed}
       end
+    rescue
+      _ -> {:error, :dependency_baseline_acquire_failed}
+    catch
+      :exit, _ -> {:error, :dependency_baseline_acquire_failed}
+      :throw, _ -> {:error, :dependency_baseline_acquire_failed}
     end
-  rescue
-    _ -> {:error, :dependency_snapshot_failed}
   end
 
-  defp recheck_dependency_directory_after_children(
-         source_root,
-         source,
-         before_identity,
-         before_canon,
-         final_budget
-       ) do
-    with :ok <- check_deadline(deadline_ms: final_budget.deadline_ms),
-         {:ok, %File.Stat{type: :directory} = final_dir} <-
-           File.lstat(source, time: :posix),
-         true <- snapshot_dir_identity(final_dir) == before_identity,
-         {:ok, final_canon} <- canonical_existing_path(source),
-         true <- final_canon == before_canon,
-         true <- path_within?(final_canon, source_root) do
-      {:ok, final_budget}
+  defp acquire_dependency_baseline_lease(_materializer, _remaining_ms),
+    do: {:error, :invalid_deadline}
+
+  defp release_dependency_baseline_lease(_materializer, nil), do: :ok
+
+  defp release_dependency_baseline_lease(materializer, lease) when is_atom(materializer) do
+    try do
+      case materializer.release_linux_dependency_baseline_lease(lease) do
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+        _other -> {:error, :dependency_baseline_release_failed}
+      end
+    rescue
+      _ -> {:error, :dependency_baseline_release_failed}
+    catch
+      :exit, _ -> {:error, :dependency_baseline_release_failed}
+      :throw, _ -> {:error, :dependency_baseline_release_failed}
+    end
+  end
+
+  defp release_dependency_baseline_lease(_materializer, _lease),
+    do: {:error, :dependency_baseline_release_failed}
+
+  defp admit_dependency_baseline_view(view) when is_map(view) do
+    candidate = Map.get(view, "candidate_path") || Map.get(view, :candidate_path)
+    base = Map.get(view, "base_path") || Map.get(view, :base_path)
+    receipt = Map.get(view, "receipt") || Map.get(view, :receipt)
+    verified = Map.get(view, "verified_copy") || Map.get(view, :verified_copy)
+
+    with true <- is_binary(candidate) and candidate != "",
+         true <- is_binary(base) and base != "",
+         true <- Path.type(candidate) == :absolute,
+         true <- Path.type(base) == :absolute,
+         true <- candidate != base,
+         true <- verified === true,
+         :ok <- validate_json_clean_receipt(receipt) do
+      {:ok,
+       %{
+         candidate_deps_path: candidate,
+         base_deps_path: base,
+         dependency_receipt: receipt,
+         dependency_verified_copy: true
+       }}
     else
-      false ->
-        {:error, :snapshot_directory_identity_changed}
-
-      {:error, :operation_deadline_exceeded} = error ->
-        error
-
-      {:error, reason} ->
-        {:error, reason}
-
-      other ->
-        {:error, {:dependency_directory_recheck_failed, other}}
+      _ -> {:error, :invalid_dependency_baseline_view}
     end
   end
 
-  defp copy_one_dependency_child(source_root, source, destination, name, budget, depth) do
-    with :ok <- check_deadline(deadline_ms: budget.deadline_ms),
-         true <- budget.entries < budget.max_entries || {:error, :snapshot_bounds_exceeded} do
-      source_path = Path.join(source, name)
-      destination_path = Path.join(destination, name)
-      budget = %{budget | entries: budget.entries + 1}
+  defp admit_dependency_baseline_view(_view), do: {:error, :invalid_dependency_baseline_view}
 
-      case File.lstat(source_path, time: :posix) do
-        {:ok, %File.Stat{type: :directory} = stat} ->
-          with :ok <- File.mkdir(destination_path),
-               :ok <- File.chmod(destination_path, permission_bits(stat.mode)),
-               {:ok, next} <-
-                 copy_dependency_children(
-                   source_root,
-                   source_path,
-                   destination_path,
-                   budget,
-                   depth + 1
-                 ) do
-            {:ok, next}
-          else
-            {:error, _} = error -> error
-            other -> {:error, {:dependency_directory_copy_failed, other}}
-          end
+  defp validate_json_clean_receipt(receipt) when is_map(receipt) do
+    # Closed-enough JSON-clean contract: encodeable, bounded, no rich terms.
+    # Evidence only — never treated as execution authority.
+    try do
+      case Jason.encode(receipt) do
+        {:ok, encoded} when byte_size(encoded) <= @max_dependency_receipt_bytes ->
+          if json_clean_term?(receipt), do: :ok, else: {:error, :invalid_dependency_receipt}
 
-        {:ok, %File.Stat{type: :regular} = before_stat} ->
-          copy_regular_file_bounded(source_path, destination_path, before_stat, budget)
+        {:ok, _too_large} ->
+          {:error, :invalid_dependency_receipt}
 
-        {:ok, %File.Stat{type: :symlink}} ->
-          case copy_dependency_symlink(source_root, source_path, destination_path) do
-            :ok -> {:ok, budget}
-            other -> {:error, {:dependency_symlink_copy_failed, other}}
-          end
-
-        other ->
-          {:error, {:dependency_stat_failed, other}}
+        {:error, _} ->
+          {:error, :invalid_dependency_receipt}
       end
+    rescue
+      _ -> {:error, :invalid_dependency_receipt}
     end
   end
 
-  defp copy_regular_file_bounded(source_path, destination_path, before_stat, budget) do
-    size = max(before_stat.size || 0, 0)
+  defp validate_json_clean_receipt(_), do: {:error, :invalid_dependency_receipt}
 
-    cond do
-      budget.bytes + size > budget.max_bytes ->
-        {:error, :snapshot_bounds_exceeded}
+  defp json_clean_term?(term)
+       when is_binary(term) or is_integer(term) or is_float(term) or is_boolean(term) or
+              is_nil(term),
+       do: true
 
-      true ->
-        case check_deadline(deadline_ms: budget.deadline_ms) do
-          :ok ->
-            do_copy_regular_file_bounded(source_path, destination_path, before_stat, budget, size)
+  defp json_clean_term?(term) when is_atom(term), do: true
 
-          error ->
-            error
-        end
-    end
+  defp json_clean_term?(list) when is_list(list),
+    do: Enum.all?(list, &json_clean_term?/1)
+
+  defp json_clean_term?(map) when is_map(map) do
+    Enum.all?(map, fn
+      {k, v} when is_binary(k) or is_atom(k) -> json_clean_term?(v)
+      _ -> false
+    end)
   end
 
-  defp do_copy_regular_file_bounded(source_path, destination_path, before_stat, budget, size) do
-    # Open once; validate identity from the opened descriptor (not a post-open
-    # path lstat), copy in bounded chunks, and close every descriptor on every
-    # outcome.
-    case :file.open(String.to_charlist(source_path), [:read, :raw, :binary]) do
-      {:ok, src} ->
-        try do
-          copy_opened_dependency_file(
-            src,
-            source_path,
-            destination_path,
-            before_stat,
-            budget,
-            size
-          )
-        after
-          _ = :file.close(src)
-        end
+  defp json_clean_term?(_), do: false
 
-      other ->
-        _ = File.rm(destination_path)
-        {:error, {:dependency_file_copy_failed, other}}
-    end
-  rescue
-    _ ->
-      _ = File.rm(destination_path)
-      {:error, :dependency_snapshot_failed}
-  end
-
-  defp copy_opened_dependency_file(src, _source_path, destination_path, before_stat, budget, size) do
-    with {:ok, %File.Stat{type: :regular} = opened_stat} <- descriptor_file_stat(src),
-         true <- snapshot_file_identity(before_stat) == snapshot_file_identity(opened_stat),
-         true <- opened_stat.size == size,
-         {:ok, dst} <-
-           :file.open(String.to_charlist(destination_path), [
-             :write,
-             :raw,
-             :binary,
-             :exclusive
-           ]) do
-      try do
-        with {:ok, copied} <-
-               copy_file_chunks(
-                 src,
-                 dst,
-                 size,
-                 budget.bytes,
-                 budget.max_bytes,
-                 budget.deadline_ms
-               ),
-             {:ok, %File.Stat{type: :regular} = after_stat} <- descriptor_file_stat(src),
-             true <- snapshot_file_identity(before_stat) == snapshot_file_identity(after_stat),
-             true <- after_stat.size == size,
-             :ok <- File.chmod(destination_path, permission_bits(before_stat.mode)) do
-          {:ok, %{budget | bytes: budget.bytes + copied}}
-        else
-          false ->
-            _ = File.rm(destination_path)
-            {:error, :snapshot_source_identity_changed}
-
-          {:error, :operation_deadline_exceeded} = error ->
-            _ = File.rm(destination_path)
-            error
-
-          {:error, :snapshot_bounds_exceeded} = error ->
-            _ = File.rm(destination_path)
-            error
-
-          other ->
-            _ = File.rm(destination_path)
-            {:error, {:dependency_file_copy_failed, other}}
-        end
-      after
-        _ = :file.close(dst)
-      end
-    else
-      false ->
-        _ = File.rm(destination_path)
-        {:error, :snapshot_source_identity_changed}
-
-      {:error, reason} ->
-        _ = File.rm(destination_path)
-        {:error, {:dependency_file_copy_failed, reason}}
-
-      other ->
-        _ = File.rm(destination_path)
-        {:error, {:dependency_file_copy_failed, other}}
-    end
-  end
-
-  defp descriptor_file_stat(io_device) do
-    case :file.read_file_info(io_device, time: :posix) do
-      {:ok, info} -> {:ok, File.Stat.from_record(info)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  # Directory identity for walk TOCTOU checks. Requires `time: :posix` on the
-  # path lstat so mtime/ctime are integers comparable to any descriptor stats.
-  # Residual: second-resolution times + no openat(2) in the stdlib.
-  defp snapshot_dir_identity(%File.Stat{} = stat) do
-    {
-      snapshot_device_id(stat),
-      Map.get(stat, :minor_device),
-      stat.inode,
-      stat.type,
-      stat.mode,
-      stat.mtime,
-      stat.ctime
+  defp merge_dependency_baseline(resource, dep_lease, admitted) do
+    %{
+      resource
+      | dependency_lease: dep_lease,
+        candidate_deps_path: admitted.candidate_deps_path,
+        base_deps_path: admitted.base_deps_path,
+        dependency_receipt: admitted.dependency_receipt,
+        dependency_verified_copy: admitted.dependency_verified_copy
     }
-  end
-
-  defp copy_file_chunks(src, dst, expected_size, bytes_so_far, max_bytes, deadline_ms) do
-    copy_file_chunks_loop(src, dst, expected_size, 0, bytes_so_far, max_bytes, deadline_ms)
-  end
-
-  defp copy_file_chunks_loop(
-         _src,
-         _dst,
-         expected_size,
-         copied,
-         _bytes_so_far,
-         _max_bytes,
-         _deadline
-       )
-       when copied == expected_size do
-    {:ok, copied}
-  end
-
-  defp copy_file_chunks_loop(
-         src,
-         dst,
-         expected_size,
-         copied,
-         bytes_so_far,
-         max_bytes,
-         deadline_ms
-       ) do
-    with :ok <- check_deadline(deadline_ms: deadline_ms),
-         true <- bytes_so_far + copied <= max_bytes || {:error, :snapshot_bounds_exceeded} do
-      to_read = min(@snapshot_copy_chunk, expected_size - copied)
-
-      case :file.read(src, to_read) do
-        {:ok, data} when is_binary(data) and byte_size(data) > 0 ->
-          case :file.write(dst, data) do
-            :ok ->
-              copy_file_chunks_loop(
-                src,
-                dst,
-                expected_size,
-                copied + byte_size(data),
-                bytes_so_far,
-                max_bytes,
-                deadline_ms
-              )
-
-            other ->
-              {:error, {:dependency_file_write_failed, other}}
-          end
-
-        :eof when copied == expected_size ->
-          {:ok, copied}
-
-        :eof ->
-          # Growing or truncated mid-read — fail closed.
-          {:error, :snapshot_source_size_changed}
-
-        other ->
-          {:error, {:dependency_file_read_failed, other}}
-      end
-    end
-  end
-
-  # Stable identity across path lstat and descriptor fstat. Path lstat and
-  # descriptor read_file_info must both use `time: :posix` so mtime/ctime
-  # compare as integers. Includes mode/mtime/ctime in addition to
-  # device/inode/size/type.
-  #
-  # Residual limitation: no openat(2) in stdlib; posix times are second-
-  # resolution, so same-second metadata-preserving replacement is not a full
-  # hostile-runtime guarantee.
-  defp snapshot_file_identity(%File.Stat{} = stat) do
-    {
-      snapshot_device_id(stat),
-      Map.get(stat, :minor_device),
-      stat.inode,
-      stat.size,
-      stat.type,
-      stat.mode,
-      stat.mtime,
-      stat.ctime
-    }
-  end
-
-  defp snapshot_device_id(%File.Stat{} = stat) do
-    Map.get(stat, :major_device) || Map.get(stat, :device)
   end
 
   defp check_deadline(opts) when is_list(opts) do
@@ -1562,7 +1294,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           else: {:error, :operation_deadline_exceeded}
 
       _ ->
-        :ok
+        {:error, :invalid_deadline}
     end
   end
 
@@ -1572,90 +1304,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp check_deadline(_), do: :ok
 
-  defp copy_dependency_symlink(source_root, source_path, destination_path) do
-    with {:ok, target} <- File.read_link(source_path),
-         {:ok, resolved_source} <-
-           canonical_existing_path(Path.expand(target, Path.dirname(source_path))),
-         true <- path_within?(resolved_source, source_root),
-         relative_source <- Path.relative_to(resolved_source, source_root),
-         destination_root <- snapshot_root_for(destination_path, source_path, source_root),
-         resolved_destination <- Path.join(destination_root, relative_source),
-         target_from_destination <-
-           Path.relative_to(resolved_destination, Path.dirname(destination_path)),
-         :ok <- File.ln_s(target_from_destination, destination_path) do
-      :ok
-    else
-      _ -> {:error, :dependency_snapshot_failed}
-    end
-  end
+  # Used by workspace acquire/release retained-identity checks. Not the retired
+  # host dependency snapshot walk.
+  defp canonical_existing_path(path) when is_binary(path) do
+    case SafePath.resolve_real(path) do
+      {:ok, resolved} ->
+        {:ok, resolved}
 
-  defp snapshot_root_for(destination_path, source_path, source_root) do
-    source_relative_parent =
-      Path.relative_to(Path.dirname(source_path), source_root)
-      |> Path.split()
-      |> Enum.reject(&(&1 == "."))
-
-    Enum.reduce(source_relative_parent, Path.dirname(destination_path), fn _segment, acc ->
-      Path.dirname(acc)
-    end)
-  end
-
-  defp verify_snapshot_symlinks(destination) do
-    verify_snapshot_children(destination, destination)
-  end
-
-  defp verify_snapshot_children(root, path) do
-    path
-    |> File.ls!()
-    |> Enum.reduce_while(:ok, fn name, :ok ->
-      child = Path.join(path, name)
-
-      case File.lstat(child) do
-        {:ok, %File.Stat{type: :directory}} ->
-          case verify_snapshot_children(root, child) do
-            :ok -> {:cont, :ok}
-            error -> {:halt, error}
-          end
-
-        {:ok, %File.Stat{type: :symlink}} ->
-          case File.read_link(child) do
-            {:ok, target} ->
-              if path_within?(Path.expand(target, Path.dirname(child)), root),
-                do: {:cont, :ok},
-                else: {:halt, {:error, :dependency_snapshot_failed}}
-
-            _ ->
-              {:halt, {:error, :dependency_snapshot_failed}}
-          end
-
-        {:ok, %File.Stat{type: :regular}} ->
-          {:cont, :ok}
-
-        _ ->
-          {:halt, {:error, :dependency_snapshot_failed}}
-      end
-    end)
-  rescue
-    _ -> {:error, :dependency_snapshot_failed}
-  end
-
-  defp path_within?(path, root) do
-    relative = Path.relative_to(Path.expand(path), Path.expand(root))
-
-    relative != ".." and not String.starts_with?(relative, "../") and
-      Path.type(relative) == :relative
-  end
-
-  defp canonical_existing_path(path) do
-    case System.cmd("realpath", [path], stderr_to_stdout: true) do
-      {resolved, 0} -> {:ok, String.trim(resolved)}
-      _ -> {:error, :dependency_snapshot_failed}
+      _ ->
+        case System.cmd("realpath", [path], stderr_to_stdout: true) do
+          {resolved, 0} -> {:ok, String.trim(resolved)}
+          _ -> {:error, :path_resolve_failed}
+        end
     end
   rescue
-    _ -> {:error, :dependency_snapshot_failed}
+    _ -> {:error, :path_resolve_failed}
   end
-
-  defp permission_bits(mode) when is_integer(mode), do: Bitwise.band(mode, 0o777)
 
   defp perform_validation_snapshot_create(state, %{snapshot_created: true} = resource) do
     {:reply, {:ok, validation_resource_view(resource)}, state}
@@ -1776,33 +1440,82 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp attempt_validation_resource_cleanup(state, resource) do
-    case cleanup_validation_resource_files(resource) do
-      :ok -> {:ok, state}
-      {:error, _reason} -> {:error, state}
+    materializer = state.linux_dependency_baseline_materializer
+
+    # Phase 1: Actions-owned root + detached worktrees.
+    # Phase 2: Shell dependency-baseline lease release (idempotent after success).
+    case cleanup_actions_owned_validation_files(resource) do
+      :ok ->
+        case release_dependency_baseline_lease(
+               materializer,
+               Map.get(resource, :dependency_lease)
+             ) do
+          :ok ->
+            # Drop the opaque lease from the retained record only after proven release.
+            cleared = %{resource | dependency_lease: nil}
+
+            state = %{
+              state
+              | validation_resources:
+                  Map.put(state.validation_resources, resource.resource_id, cleared)
+            }
+
+            {:ok, state}
+
+          {:error, _reason} ->
+            # Actions root is gone but Shell lease remains — retain for retry.
+            {:error, state}
+        end
+
+      {:error, _reason} ->
+        # Keep resource + lease for explicit retry.
+        {:error, state}
     end
   end
 
-  defp cleanup_validation_resource_files(resource) do
-    if is_binary(resource.candidate_commit) do
-      _ = Workspace.remove_detached_worktree(resource.repo_path, resource.candidate_path)
-    end
-
-    _ =
-      Workspace.remove_detached_worktree(
-        resource.repo_path,
-        resource.base_worktree_path
-      )
-
-    _ = File.rm_rf(resource.root_path)
-
-    case File.lstat(resource.root_path) do
-      {:error, :enoent} -> :ok
-      _other -> {:error, :resource_root_still_exists}
+  defp cleanup_actions_owned_validation_files(resource) do
+    # Fail closed: never report Actions cleanup success (and thus never release
+    # the Shell dependency lease) unless every Actions-owned step succeeded.
+    with :ok <- cleanup_candidate_detached_worktree(resource),
+         :ok <- cleanup_base_detached_worktree(resource),
+         :ok <- cleanup_validation_root(resource) do
+      :ok
     end
   rescue
     _error -> {:error, :resource_cleanup_failed}
   catch
     :exit, _reason -> {:error, :resource_cleanup_failed}
+  end
+
+  defp cleanup_candidate_detached_worktree(resource) do
+    if is_binary(Map.get(resource, :candidate_commit)) do
+      Workspace.remove_detached_worktree(resource.repo_path, resource.candidate_path)
+    else
+      :ok
+    end
+  end
+
+  defp cleanup_base_detached_worktree(resource) do
+    Workspace.remove_detached_worktree(resource.repo_path, resource.base_worktree_path)
+  end
+
+  defp cleanup_validation_root(resource) do
+    root = resource.root_path
+
+    if is_binary(root) do
+      case File.rm_rf(root) do
+        {:ok, _paths} ->
+          case File.lstat(root) do
+            {:error, :enoent} -> :ok
+            _other -> {:error, :resource_root_still_exists}
+          end
+
+        {:error, reason, _path} ->
+          {:error, reason}
+      end
+    else
+      {:error, :invalid_resource_root}
+    end
   end
 
   defp put_validation_resource(state, resource) do
@@ -1851,6 +1564,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     candidate_runner =
       Map.get(resource, :candidate_runner_path) || Map.get(resource, :runner_path)
 
+    # JSON-clean only. Never include dependency_lease, token, worker, owner,
+    # private Shell root, or any other rich term from the opaque lease.
     %{
       resource_id: resource.resource_id,
       workspace_id: resource.workspace_id,
@@ -1879,6 +1594,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       home_path: candidate_home,
       tmp_path: candidate_tmp,
       runner_path: candidate_runner,
+      baseline_receipt: Map.get(resource, :dependency_receipt),
+      baseline_verified_copy: Map.get(resource, :dependency_verified_copy),
       snapshot_created: resource.snapshot_created,
       setup_status: Atom.to_string(resource.setup_status),
       active: true

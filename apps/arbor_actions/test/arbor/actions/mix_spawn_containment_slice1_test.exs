@@ -36,6 +36,11 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     :ok
   end
 
+  setup do
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+    :ok
+  end
+
   # ── Metadata construction (test-double shell; no platform claims) ──
 
   test "resolve_mix_wrapper returns exact executable identity from code roots" do
@@ -180,11 +185,15 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     end
   end
 
-  test "validation resource private dirs are 0700 including both deps; stage child absent",
+  test "validation resource private dirs are 0700; baseline deps private and distinct; stage child absent",
        %{tmp_dir: tmp_dir} do
     fixture = leased_fixture(tmp_dir)
+    host_secret = Arbor.Actions.TestLinuxBaselineMaterializer.host_secret_marker()
     File.mkdir_p!(Path.join(fixture.repo, "deps/internal"))
     File.write!(Path.join(fixture.repo, "deps/internal/x"), "x")
+    File.write!(Path.join(fixture.repo, "deps/HOST_SECRET"), host_secret)
+
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
 
     assert {:ok, resource} =
              WorkspaceLeaseRegistry.acquire_validation_resource(
@@ -205,16 +214,25 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
             resource.candidate_home_path,
             resource.candidate_tmp_path,
             resource.candidate_build_path,
-            resource.candidate_deps_path,
             resource.base_runtime_path,
             resource.base_home_path,
             resource.base_tmp_path,
-            resource.base_build_path,
-            resource.base_deps_path
+            resource.base_build_path
           ] do
         assert File.dir?(path), "missing private dir #{path}"
         assert private_dir?(path), "expected 0700 for #{path}"
       end
+
+      # Shell baseline deps: private, distinct, baseline marker present, host secret absent.
+      assert private_dir?(resource.candidate_deps_path)
+      assert private_dir?(resource.base_deps_path)
+      assert resource.candidate_deps_path != resource.base_deps_path
+
+      assert File.read!(Path.join(resource.candidate_deps_path, "MARKER")) ==
+               Arbor.Actions.TestLinuxBaselineMaterializer.baseline_marker()
+
+      refute File.exists?(Path.join(resource.candidate_deps_path, "HOST_SECRET"))
+      refute File.exists?(Path.join(resource.base_deps_path, "HOST_SECRET"))
     after
       assert {:ok, _} =
                WorkspaceLeaseRegistry.release_validation_resource(
@@ -528,24 +546,36 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     end)
   end
 
-  test "workspace-backed dependency snapshot is private and owned before spawn", %{
+  test "workspace-backed baseline deps are private Shell materializations before spawn", %{
     tmp_dir: tmp_dir
   } do
     fixture = leased_fixture(tmp_dir)
     create_tiny_project(fixture.lease.worktree_path)
+    host_secret = Arbor.Actions.TestLinuxBaselineMaterializer.host_secret_marker()
     File.mkdir_p!(Path.join(fixture.lease.worktree_path, "deps/hex_pkg"))
     File.write!(Path.join(fixture.lease.worktree_path, "deps/hex_pkg/file"), "content")
+    File.write!(Path.join(fixture.lease.worktree_path, "deps/HOST_SECRET"), host_secret)
     File.write!(Path.join(fixture.lease.worktree_path, "mix.lock"), "%{}\n")
     git!(fixture.lease.worktree_path, ["add", "-A"])
     git!(fixture.lease.worktree_path, ["commit", "-m", "with-deps"])
 
-    # Also place deps under repo_path used by snapshot (lease repo).
+    # Host repo deps must not be copied into the baseline materialization.
     File.mkdir_p!(Path.join(fixture.repo, "deps/hex_pkg"))
     File.write!(Path.join(fixture.repo, "deps/hex_pkg/file"), "content")
+    File.write!(Path.join(fixture.repo, "deps/HOST_SECRET"), host_secret)
+
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
 
     MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
       assert private_dir?(resource.candidate_deps_path)
-      assert "hex_pkg" in File.ls!(resource.candidate_deps_path)
+      assert private_dir?(resource.base_deps_path)
+      assert resource.candidate_deps_path != resource.base_deps_path
+
+      assert File.read!(Path.join(resource.candidate_deps_path, "MARKER")) ==
+               Arbor.Actions.TestLinuxBaselineMaterializer.baseline_marker()
+
+      refute "hex_pkg" in File.ls!(resource.candidate_deps_path)
+      refute File.exists?(Path.join(resource.candidate_deps_path, "HOST_SECRET"))
 
       assert {:ok, result} =
                MixAction.run_mix(resource.candidate_path, ["compile"],
@@ -561,7 +591,7 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     end)
   end
 
-  test "security regression: dependency snapshot helper is not an unscoped public API", %{
+  test "security regression: no caller-selected host snapshot or materializer destination API", %{
     tmp_dir: tmp_dir
   } do
     source = Path.join(tmp_dir, "unleased-source")
@@ -569,14 +599,21 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     File.mkdir_p!(Path.join(source, "deps/private_pkg"))
     File.write!(Path.join(source, "deps/private_pkg/secret"), "host-only material\n")
 
-    result =
-      try do
-        apply(WorkspaceLeaseRegistry, :snapshot_dependency_tree, [source, destination, []])
-      rescue
-        UndefinedFunctionError -> :not_exported
-      end
+    for fun <- [
+          :snapshot_dependency_tree,
+          :acquire_linux_dependency_baseline_lease,
+          :release_linux_dependency_baseline_lease
+        ] do
+      result =
+        try do
+          apply(WorkspaceLeaseRegistry, fun, [source, destination, []])
+        rescue
+          UndefinedFunctionError -> :not_exported
+        end
 
-    assert result == :not_exported
+      assert result == :not_exported
+    end
+
     refute File.exists?(destination)
   end
 

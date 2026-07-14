@@ -27,6 +27,11 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     :ok
   end
 
+  setup do
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+    :ok
+  end
+
   test "reviewed candidate-pass/base-fail evidence is detached, one-shot, and cleaned", %{
     tmp_dir: tmp_dir
   } do
@@ -62,18 +67,21 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
              )
   end
 
-  test "absolute source-internal dependency links are rewritten into private snapshots", %{
+  test "baseline deps are Shell-owned, distinct, private, and ignore host deps markers", %{
     tmp_dir: tmp_dir
   } do
     fixture = leased_project(tmp_dir, valid_module())
+    host_secret = Arbor.Actions.TestLinuxBaselineMaterializer.host_secret_marker()
+    baseline_marker = Arbor.Actions.TestLinuxBaselineMaterializer.baseline_marker()
+
+    # Host/repo deps carry a secret marker that must never appear in baseline trees.
     source_deps = Path.join(fixture.repo, "deps")
-    internal = Path.join(source_deps, "internal")
-    File.mkdir_p!(internal)
-    File.write!(Path.join(internal, "source"), "original")
-    helper = Path.join(source_deps, "build-helper")
-    File.write!(helper, "#!/bin/sh\nexit 0\n")
-    File.chmod!(helper, 0o755)
-    File.ln_s!(internal, Path.join(source_deps, "linked"))
+    File.mkdir_p!(source_deps)
+    File.write!(Path.join(source_deps, "HOST_SECRET"), host_secret)
+    File.mkdir_p!(Path.join(fixture.lease.worktree_path, "deps"))
+    File.write!(Path.join(fixture.lease.worktree_path, "deps/HOST_SECRET"), host_secret)
+
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
 
     assert {:ok, resource} =
              WorkspaceLeaseRegistry.acquire_validation_resource(
@@ -81,37 +89,54 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
                fixture.context
              )
 
-    candidate_link = Path.join(resource.candidate_deps_path, "linked")
-    base_link = Path.join(resource.base_deps_path, "linked")
+    try do
+      assert is_binary(resource.candidate_deps_path)
+      assert is_binary(resource.base_deps_path)
+      assert resource.candidate_deps_path != resource.base_deps_path
+      assert Path.type(resource.candidate_deps_path) == :absolute
+      assert Path.type(resource.base_deps_path) == :absolute
 
-    assert path_inside?(
-             Path.expand(File.read_link!(candidate_link), Path.dirname(candidate_link)),
-             resource.candidate_deps_path
-           )
+      # Deps need not live under the Actions validation root.
+      refute String.starts_with?(resource.candidate_deps_path, resource.root_path <> "/")
+      refute String.starts_with?(resource.base_deps_path, resource.root_path <> "/")
+      refute resource.candidate_deps_path == resource.root_path
+      refute resource.base_deps_path == resource.root_path
 
-    assert path_inside?(
-             Path.expand(File.read_link!(base_link), Path.dirname(base_link)),
-             resource.base_deps_path
-           )
+      assert private_dir?(resource.candidate_deps_path)
+      assert private_dir?(resource.base_deps_path)
 
-    assert Bitwise.band(
-             File.stat!(Path.join(resource.candidate_deps_path, "build-helper")).mode,
-             0o111
-           ) ==
-             0o111
+      assert File.read!(Path.join(resource.candidate_deps_path, "MARKER")) == baseline_marker
+      assert File.read!(Path.join(resource.base_deps_path, "MARKER")) == baseline_marker
 
-    File.write!(Path.join(candidate_link, "candidate-mutation"), "candidate")
-    refute File.exists?(Path.join(internal, "candidate-mutation"))
-    refute File.exists?(Path.join(base_link, "candidate-mutation"))
+      refute File.exists?(Path.join(resource.candidate_deps_path, "HOST_SECRET"))
+      refute File.exists?(Path.join(resource.base_deps_path, "HOST_SECRET"))
 
-    assert {:ok, _} =
-             WorkspaceLeaseRegistry.release_validation_resource(
-               resource.resource_id,
-               fixture.context
-             )
+      # Mutation isolation between candidate and base baseline trees.
+      File.write!(Path.join(resource.candidate_deps_path, "candidate-mutation"), "candidate")
+      refute File.exists?(Path.join(resource.base_deps_path, "candidate-mutation"))
+      refute File.exists?(Path.join(source_deps, "candidate-mutation"))
+
+      # Opaque lease never appears in the public view; receipt is JSON-clean evidence.
+      refute Map.has_key?(resource, :dependency_lease)
+      refute Map.has_key?(resource, "dependency_lease")
+      assert resource.baseline_verified_copy == true
+      assert is_map(resource.baseline_receipt)
+      assert {:ok, _} = Jason.encode(resource)
+
+      state = :sys.get_state(WorkspaceLeaseRegistry)
+      private = Map.fetch!(state.validation_resources, resource.resource_id)
+      assert private.dependency_lease != nil
+      refute inspect(resource) =~ inspect(private.dependency_lease)
+    after
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release_validation_resource(
+                 resource.resource_id,
+                 fixture.context
+               )
+    end
   end
 
-  test "validation resource paths canonicalize a symlinked temporary directory", %{
+  test "validation resource Actions paths canonicalize a symlinked temporary directory", %{
     tmp_dir: tmp_dir
   } do
     fixture = leased_project(tmp_dir, valid_module())
@@ -124,6 +149,8 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     System.put_env("TMPDIR", alias_tmp)
 
     try do
+      Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+
       assert {:ok, resource} =
                WorkspaceLeaseRegistry.acquire_validation_resource(
                  fixture.lease.workspace_id,
@@ -136,14 +163,20 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         assert resource.root_path == canonical_root
         assert Path.dirname(resource.root_path) == canonical_tmp
 
+        # Actions-owned runtime paths stay under the Actions validation root.
         for path <- [
               resource.candidate_build_path,
-              resource.candidate_deps_path,
               resource.base_build_path,
-              resource.base_deps_path
+              resource.candidate_home_path,
+              resource.base_home_path
             ] do
           assert path_inside?(path, resource.root_path)
         end
+
+        # Shell baseline deps are absolute and distinct; not required under root.
+        assert is_binary(resource.candidate_deps_path)
+        assert is_binary(resource.base_deps_path)
+        assert resource.candidate_deps_path != resource.base_deps_path
       after
         assert {:ok, _} =
                  WorkspaceLeaseRegistry.release_validation_resource(
@@ -156,6 +189,258 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         do: System.put_env("TMPDIR", previous_tmpdir),
         else: System.delete_env("TMPDIR")
     end
+  end
+
+  test "no caller-selected materializer, destination, or baseline plan API", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    destination = Path.join(tmp_dir, "attacker-destination")
+
+    # Caller cannot nominate materializer/destination/source/manifest/plan.
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+               |> Map.put(:linux_dependency_baseline_materializer, :attacker)
+               |> Map.put(:destination, destination)
+               |> Map.put(:source, destination)
+               |> Map.put(:manifest, destination)
+               |> Map.put(:plan, %{"kind" => "hostile"})
+             )
+
+    try do
+      refute File.exists?(destination)
+      assert is_binary(resource.candidate_deps_path)
+      # Still used the registry-wired test materializer, not caller opts.
+      assert File.read!(Path.join(resource.candidate_deps_path, "MARKER")) ==
+               Arbor.Actions.TestLinuxBaselineMaterializer.baseline_marker()
+    after
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release_validation_resource(
+                 resource.resource_id,
+                 fixture.context
+               )
+    end
+
+    for fun <- [
+          :snapshot_dependency_tree,
+          :acquire_linux_dependency_baseline_lease,
+          :release_linux_dependency_baseline_lease
+        ] do
+      result =
+        try do
+          apply(WorkspaceLeaseRegistry, fun, [[], [], []])
+        rescue
+          UndefinedFunctionError -> :not_exported
+        end
+
+      assert result == :not_exported
+    end
+  end
+
+  test "cleanup_required acquire releases immediately or retains for retry", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    before = validation_roots()
+
+    # Immediate successful release after cleanup_required → ordinary failure.
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+    Arbor.Actions.TestLinuxBaselineMaterializer.force_acquire(:cleanup_required)
+
+    assert {:error, :test_cleanup_required} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    assert validation_roots() == before
+
+    assert {:ok, []} =
+             WorkspaceLeaseRegistry.validation_resources(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    # cleanup_required + Shell release failure retains setup_failed with lease.
+    Arbor.Actions.TestLinuxBaselineMaterializer.force_acquire(:cleanup_required)
+    Arbor.Actions.TestLinuxBaselineMaterializer.force_release_failures(1)
+
+    assert {:error, :validation_resource_setup_failed_cleanup_retained} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    assert {:ok, [retained]} =
+             WorkspaceLeaseRegistry.validation_resources(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    assert retained.setup_status == "setup_failed"
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    private = Map.fetch!(state.validation_resources, retained.resource_id)
+    assert private.dependency_lease != nil
+
+    Arbor.Actions.TestLinuxBaselineMaterializer.force_release_failures(0)
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               retained.resource_id,
+               fixture.context
+             )
+  end
+
+  test "Shell release failure after Actions cleanup retains resource for retry", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    private = Map.fetch!(state.validation_resources, resource.resource_id)
+    lease_root = private.dependency_lease.root_path
+    assert is_binary(lease_root)
+    assert File.dir?(lease_root)
+
+    Arbor.Actions.TestLinuxBaselineMaterializer.force_release_failures(1)
+
+    assert {:error, :validation_resource_cleanup_failed} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+
+    # Actions root cleaned; Shell root retained until release succeeds.
+    refute File.exists?(resource.root_path)
+    assert File.dir?(lease_root)
+
+    assert {:ok, [retained]} =
+             WorkspaceLeaseRegistry.validation_resources(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    assert retained.resource_id == resource.resource_id
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+
+    refute File.exists?(lease_root)
+  end
+
+  test "non-map dependency baseline view fails closed and releases the live Shell lease", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+    before_validation = validation_roots()
+    before_baseline = baseline_roots()
+
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+    Arbor.Actions.TestLinuxBaselineMaterializer.force_acquire(:non_map_view)
+
+    assert {:error, :invalid_dependency_baseline_view} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    # Immediate successful cleanup leaves neither Actions root nor Shell baseline root.
+    assert validation_roots() == before_validation
+    assert baseline_roots() == before_baseline
+
+    assert {:ok, []} =
+             WorkspaceLeaseRegistry.validation_resources(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+  end
+
+  test "Actions-owned cleanup failure retains validation resource and Shell lease for retry", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    private = Map.fetch!(state.validation_resources, resource.resource_id)
+    lease_root = private.dependency_lease.root_path
+    original_base_worktree_path = private.base_worktree_path
+    assert is_binary(lease_root)
+    assert File.dir?(lease_root)
+    assert File.dir?(resource.root_path)
+
+    # An invalid retained locator makes the actual worktree cleanup helper fail.
+    # The prior implementation ignored that error, removed the root, and released
+    # the Shell lease anyway.
+    :sys.replace_state(WorkspaceLeaseRegistry, fn reg_state ->
+      current = Map.fetch!(reg_state.validation_resources, resource.resource_id)
+      updated = %{current | base_worktree_path: nil}
+
+      %{
+        reg_state
+        | validation_resources:
+            Map.put(reg_state.validation_resources, resource.resource_id, updated)
+      }
+    end)
+
+    try do
+      assert {:error, :validation_resource_cleanup_failed} =
+               WorkspaceLeaseRegistry.release_validation_resource(
+                 resource.resource_id,
+                 fixture.context
+               )
+
+      # Actions validation root and Shell lease both remain for retry.
+      assert File.dir?(resource.root_path)
+      assert File.dir?(lease_root)
+
+      state = :sys.get_state(WorkspaceLeaseRegistry)
+      private = Map.fetch!(state.validation_resources, resource.resource_id)
+      assert private.dependency_lease != nil
+      assert private.dependency_lease.root_path == lease_root
+
+      assert {:ok, [retained]} =
+               WorkspaceLeaseRegistry.validation_resources(
+                 fixture.lease.workspace_id,
+                 fixture.context
+               )
+
+      assert retained.resource_id == resource.resource_id
+    after
+      :sys.replace_state(WorkspaceLeaseRegistry, fn reg_state ->
+        current = Map.fetch!(reg_state.validation_resources, resource.resource_id)
+        restored = %{current | base_worktree_path: original_base_worktree_path}
+
+        %{
+          reg_state
+          | validation_resources:
+              Map.put(reg_state.validation_resources, resource.resource_id, restored)
+        }
+      end)
+    end
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+
+    refute File.exists?(resource.root_path)
+    refute File.exists?(lease_root)
   end
 
   test "validator accepts neither workspace_id nor test_paths and failed claim spawns no candidate code",
@@ -640,7 +925,13 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   } do
     repo = create_base_project(Path.join(tmp_dir, "owner-cleanup-repo"), valid_module())
     server = :"cleanup_owner_death_#{System.unique_integer([:positive])}"
-    start_supervised!({WorkspaceLeaseRegistry, name: server})
+
+    start_supervised!(
+      {WorkspaceLeaseRegistry,
+       name: server,
+       linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+    )
+
     task_id = "task-cleanup-owner-death"
     principal_id = "agent-cleanup-owner-death"
     recovery = %{server: server, task_id: task_id, principal_id: principal_id}
@@ -866,7 +1157,13 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   test "owner death removes its private attestation records", %{tmp_dir: tmp_dir} do
     repo = create_base_project(Path.join(tmp_dir, "owner-death-repo"), valid_module())
     server = :"attestation_owner_death_#{System.unique_integer([:positive])}"
-    start_supervised!({WorkspaceLeaseRegistry, name: server})
+
+    start_supervised!(
+      {WorkspaceLeaseRegistry,
+       name: server,
+       linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+    )
+
     task_id = "task-owner-death"
     principal_id = "agent-owner-death"
     parent = self()
@@ -1048,9 +1345,28 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     |> Enum.sort()
   end
 
+  defp baseline_roots do
+    System.tmp_dir!()
+    |> File.ls!()
+    |> Enum.filter(&String.starts_with?(&1, "arbor-test-linux-baseline-"))
+    |> Enum.sort()
+  end
+
   defp path_inside?(path, root) do
     relative = Path.relative_to(path, root)
-    relative != ".." and not String.starts_with?(relative, "../")
+
+    relative != ".." and not String.starts_with?(relative, "../") and
+      Path.type(relative) == :relative
+  end
+
+  defp private_dir?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :directory, mode: mode}} ->
+        Bitwise.band(mode, 0o777) == 0o700
+
+      _ ->
+        false
+    end
   end
 
   defp assert_eventually(fun, attempts \\ 100)

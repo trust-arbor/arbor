@@ -752,7 +752,12 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       # after new code is loaded: the two snapshot indexes are absent until touched.
       # Use a private named registry so concurrent async tests are not disturbed.
       server = :"hot_load_review_snap_#{System.unique_integer([:positive])}"
-      start_supervised!({WorkspaceLeaseRegistry, name: server})
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
 
       repo =
         create_git_repo(Path.join(tmp_dir, "hot_load_repo_#{System.unique_integer([:positive])}"))

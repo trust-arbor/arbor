@@ -549,7 +549,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
       # Private registry so the blocked create does not stall the shared app registry.
       server = :"workspace_lease_acquire_cancel_#{System.unique_integer([:positive])}"
-      start_supervised!({WorkspaceLeaseRegistry, name: server})
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
 
       create_fun = fn repo_path, branch_name, params ->
         send(parent, {:create_started, self()})
@@ -644,7 +649,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       worktree_base = Path.join(tmp_dir, "worktrees")
       workspace_id = "ws_post_create_fail_#{System.unique_integer([:positive])}"
       server = :"workspace_lease_post_create_#{System.unique_integer([:positive])}"
-      start_supervised!({WorkspaceLeaseRegistry, name: server})
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
 
       assert {:error, {:invalid, :base_commit}} =
                WorkspaceLeaseRegistry.acquire(

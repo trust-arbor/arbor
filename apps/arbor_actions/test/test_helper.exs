@@ -1,5 +1,45 @@
 # Add children to the empty app supervisors (start_children: false leaves them empty)
 # arbor_actions tests need shell, persistence, and signal processes
+
+# Test-only Linux baseline materializer Agent + shared WorkspaceLeaseRegistry
+# rewire. Production Application starts the registry with Arbor.Shell; tests
+# replace that child with the same module, configured only via start opts.
+_ = Arbor.Actions.TestLinuxBaselineMaterializer.start_link()
+
+case Supervisor.terminate_child(
+       Arbor.Actions.Supervisor,
+       Arbor.Actions.Coding.WorkspaceLeaseRegistry
+     ) do
+  :ok ->
+    _ =
+      Supervisor.delete_child(
+        Arbor.Actions.Supervisor,
+        Arbor.Actions.Coding.WorkspaceLeaseRegistry
+      )
+
+    {:ok, _} =
+      Supervisor.start_child(
+        Arbor.Actions.Supervisor,
+        {Arbor.Actions.Coding.WorkspaceLeaseRegistry,
+         [
+           linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
+         ]}
+      )
+
+  {:error, :not_found} ->
+    {:ok, _} =
+      Supervisor.start_child(
+        Arbor.Actions.Supervisor,
+        {Arbor.Actions.Coding.WorkspaceLeaseRegistry,
+         [
+           linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
+         ]}
+      )
+
+  other ->
+    IO.warn("Failed to rewire WorkspaceLeaseRegistry for tests: #{inspect(other)}")
+end
+
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
   {Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")}
