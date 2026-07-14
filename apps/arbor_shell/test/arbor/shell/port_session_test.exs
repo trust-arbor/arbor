@@ -1,5 +1,5 @@
 defmodule Arbor.Shell.PortSessionTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Shell.PortSession
 
@@ -70,7 +70,7 @@ defmodule Arbor.Shell.PortSessionTest do
 
   describe "timeout" do
     test "auto-terminates on timeout" do
-      {:ok, pid} = PortSession.start_link("sleep 60", stream_to: self(), timeout: 200)
+      {:ok, pid} = PortSession.start_link("sleep 60", stream_to: self(), timeout: 1_000)
       id = PortSession.get_id(pid)
 
       assert_receive {:port_exit, ^id, 137, _output}, 5_000
