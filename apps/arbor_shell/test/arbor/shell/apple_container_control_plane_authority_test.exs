@@ -605,6 +605,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
                Arbor.Shell.ExecutablePolicy,
                Arbor.Shell.AppleContainerControlPlaneAuthority,
                Arbor.Shell.LinuxDependencyBaselineAuthority,
+               Arbor.Shell.AppleContainerImagePolicyAuthority,
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
                Arbor.Shell.ExecutionRegistry,
                DynamicSupervisor
@@ -612,13 +613,17 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
 
       authority_child = Enum.at(children, 1)
       linux_child = Enum.at(children, 2)
-      materializer_sup = Enum.at(children, 3)
+      image_child = Enum.at(children, 3)
+      materializer_sup = Enum.at(children, 4)
 
       assert authority_child ==
                {Arbor.Shell.AppleContainerControlPlaneAuthority, [boot_epoch: boot_epoch]}
 
       assert linux_child ==
                {Arbor.Shell.LinuxDependencyBaselineAuthority, [boot_epoch: boot_epoch]}
+
+      assert image_child ==
+               {Arbor.Shell.AppleContainerImagePolicyAuthority, [boot_epoch: boot_epoch]}
 
       assert match?(
                %{id: Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor},
@@ -643,11 +648,13 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
         restore_global_authority_stack!()
         Authority.clear_boot_epoch(boot_epoch)
         Arbor.Shell.LinuxDependencyBaselineAuthority.clear_boot_epoch(boot_epoch)
+        Arbor.Shell.AppleContainerImagePolicyAuthority.clear_boot_epoch(boot_epoch)
       end)
 
       policy_before = Process.whereis(Arbor.Shell.ExecutablePolicy)
       authority_before = Process.whereis(Authority)
       linux_before = Process.whereis(Arbor.Shell.LinuxDependencyBaselineAuthority)
+      image_before = Process.whereis(Arbor.Shell.AppleContainerImagePolicyAuthority)
 
       materializer_before =
         Process.whereis(Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor)
@@ -664,6 +671,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
       session_ref = Process.monitor(session)
       authority_ref = Process.monitor(authority_before)
       linux_ref = Process.monitor(linux_before)
+      image_ref = Process.monitor(image_before)
       materializer_ref = Process.monitor(materializer_before)
       registry_ref = Process.monitor(registry_before)
       sessions_ref = Process.monitor(sessions_before)
@@ -676,6 +684,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
 
       assert_receive {:DOWN, ^authority_ref, :process, ^authority_before, _reason}
       assert_receive {:DOWN, ^linux_ref, :process, ^linux_before, :shutdown}
+      assert_receive {:DOWN, ^image_ref, :process, ^image_before, :shutdown}
       assert_receive {:DOWN, ^materializer_ref, :process, ^materializer_before, :shutdown}
       assert_receive {:DOWN, ^registry_ref, :process, ^registry_before, :shutdown}
       assert_receive {:DOWN, ^sessions_ref, :process, ^sessions_before, :shutdown}
@@ -684,6 +693,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
       assert eventually?(fn ->
                new_authority = Process.whereis(Authority)
                new_linux = Process.whereis(Arbor.Shell.LinuxDependencyBaselineAuthority)
+               new_image = Process.whereis(Arbor.Shell.AppleContainerImagePolicyAuthority)
 
                new_materializer =
                  Process.whereis(Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor)
@@ -693,6 +703,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
 
                is_pid(new_authority) and new_authority != authority_before and
                  is_pid(new_linux) and new_linux != linux_before and
+                 is_pid(new_image) and new_image != image_before and
                  is_pid(new_materializer) and new_materializer != materializer_before and
                  is_pid(new_registry) and new_registry != registry_before and
                  is_pid(new_sessions) and new_sessions != sessions_before
@@ -772,6 +783,12 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
         {Arbor.Shell.LinuxDependencyBaselineAuthority, []}
       )
 
+    {:ok, _image} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {Arbor.Shell.AppleContainerImagePolicyAuthority, []}
+      )
+
     {:ok, _materializer} =
       Supervisor.start_child(
         Arbor.Shell.Supervisor,
@@ -804,6 +821,12 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
         {Arbor.Shell.LinuxDependencyBaselineAuthority, []}
       )
 
+    {:ok, _image} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {Arbor.Shell.AppleContainerImagePolicyAuthority, []}
+      )
+
     {:ok, _materializer} =
       Supervisor.start_child(
         Arbor.Shell.Supervisor,
@@ -830,6 +853,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
           Arbor.Shell.PortSessionSupervisor,
           Arbor.Shell.ExecutionRegistry,
           Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
+          Arbor.Shell.AppleContainerImagePolicyAuthority,
           Arbor.Shell.LinuxDependencyBaselineAuthority,
           Authority
         ] do

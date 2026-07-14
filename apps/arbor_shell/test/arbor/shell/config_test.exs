@@ -6,15 +6,40 @@ defmodule Arbor.Shell.ConfigTest do
   @app :arbor_shell
   @key :apple_container
   @linux_key :linux_dependency_baseline
+  @image_key :apple_container_image_policy
+
+  @index_hex String.duplicate("a", 64)
+  @manifest_hex String.duplicate("b", 64)
+  @mix_lock_hex String.duplicate("c", 64)
+  @tree_hex String.duplicate("d", 64)
+  @vminit_index_hex String.duplicate("f0", 32)
+  @vminit_manifest_hex String.duplicate("f1", 32)
+
+  @valid_image_policy [
+    image: "docker.io/arbor/validation@sha256:#{@index_hex}",
+    manifest_digest: "sha256:#{@manifest_hex}",
+    vminit_image: "docker.io/arbor/vminit@sha256:#{@vminit_index_hex}",
+    vminit_manifest_digest: "sha256:#{@vminit_manifest_hex}",
+    env: ["PATH=/usr/bin", "ARBOR_VALIDATION=1"],
+    labels: %{
+      "org.arbor.validation.schema" => "1",
+      "org.arbor.validation.role" => "spawn-containment"
+    },
+    mix_lock_digest: @mix_lock_hex,
+    baseline_tree_digest: @tree_hex,
+    toolchain: [erlang: "28.4.1", elixir: "1.19.5-otp-28"]
+  ]
 
   setup do
     previous = Application.get_env(@app, @key)
     previous_linux = Application.get_env(@app, @linux_key)
+    previous_image = Application.get_env(@app, @image_key)
     previous_home = System.get_env("HOME")
 
     on_exit(fn ->
       restore_env(@key, previous)
       restore_env(@linux_key, previous_linux)
+      restore_env(@image_key, previous_image)
       restore_system_env("HOME", previous_home)
     end)
 
@@ -388,6 +413,141 @@ defmodule Arbor.Shell.ConfigTest do
 
       assert {:error, :linux_dependency_baseline_config_absent} =
                Config.linux_dependency_baseline()
+    end
+  end
+
+  describe "apple_container_image_policy/0" do
+    test "absent config is a stable error" do
+      Application.delete_env(@app, @image_key)
+
+      assert {:error, :apple_container_image_policy_config_absent} =
+               Config.apple_container_image_policy()
+    end
+
+    test "valid strict atom-keyed keyword policy" do
+      Application.put_env(@app, @image_key, @valid_image_policy)
+
+      assert {:ok, policy} = Config.apple_container_image_policy()
+      assert policy.image == "docker.io/arbor/validation@sha256:#{@index_hex}"
+      assert policy.manifest_digest == "sha256:#{@manifest_hex}"
+      assert policy.vminit_image == "docker.io/arbor/vminit@sha256:#{@vminit_index_hex}"
+      assert policy.vminit_manifest_digest == "sha256:#{@vminit_manifest_hex}"
+      assert policy.env == ["PATH=/usr/bin", "ARBOR_VALIDATION=1"]
+      assert policy.labels["org.arbor.validation.schema"] == "1"
+      assert policy.mix_lock_digest == @mix_lock_hex
+      assert policy.baseline_tree_digest == @tree_hex
+      assert policy.toolchain == %{erlang: "28.4.1", elixir: "1.19.5-otp-28"}
+    end
+
+    test "valid string-keyed map policy including string toolchain keys" do
+      Application.put_env(@app, @image_key, %{
+        "image" => "docker.io/arbor/validation@sha256:#{@index_hex}",
+        "manifest_digest" => "sha256:#{@manifest_hex}",
+        "vminit_image" => "docker.io/arbor/vminit@sha256:#{@vminit_index_hex}",
+        "vminit_manifest_digest" => "sha256:#{@vminit_manifest_hex}",
+        "env" => ["PATH=/usr/bin"],
+        "labels" => %{"org.arbor.validation.schema" => "1"},
+        "mix_lock_digest" => @mix_lock_hex,
+        "baseline_tree_digest" => @tree_hex,
+        "toolchain" => %{"erlang" => "28.4.1", "elixir" => "1.19.5-otp-28"}
+      })
+
+      assert {:ok, policy} = Config.apple_container_image_policy()
+      assert policy.toolchain.erlang == "28.4.1"
+      assert policy.toolchain.elixir == "1.19.5-otp-28"
+      assert policy.labels == %{"org.arbor.validation.schema" => "1"}
+    end
+
+    test "rejects unknown and authority-bearing keys" do
+      Application.put_env(
+        @app,
+        @image_key,
+        Keyword.put(@valid_image_policy, :execution_reference, "evil")
+      )
+
+      assert {:error, :unknown_apple_container_image_policy_config_key} =
+               Config.apple_container_image_policy()
+
+      for key <- [
+            :receipt,
+            :baseline_receipt,
+            :readiness,
+            :ready,
+            :module,
+            :config_callback,
+            :path,
+            :source_root
+          ] do
+        Application.put_env(
+          @app,
+          @image_key,
+          Keyword.put(@valid_image_policy, key, "attacker")
+        )
+
+        assert {:error, :unknown_apple_container_image_policy_config_key} =
+                 Config.apple_container_image_policy()
+      end
+    end
+
+    test "rejects duplicate logical keys across atom and string forms" do
+      Application.put_env(@app, @image_key, %{
+        :image => "docker.io/arbor/validation@sha256:#{@index_hex}",
+        "image" => "docker.io/arbor/other@sha256:#{@index_hex}",
+        :manifest_digest => "sha256:#{@manifest_hex}",
+        :vminit_image => "docker.io/arbor/vminit@sha256:#{@vminit_index_hex}",
+        :vminit_manifest_digest => "sha256:#{@vminit_manifest_hex}",
+        :env => ["PATH=/usr/bin"],
+        :labels => %{"k" => "v"},
+        :mix_lock_digest => @mix_lock_hex,
+        :baseline_tree_digest => @tree_hex,
+        :toolchain => %{erlang: "28.4.1", elixir: "1.19.5-otp-28"}
+      })
+
+      assert {:error, :duplicate_apple_container_image_policy_config_key} =
+               Config.apple_container_image_policy()
+    end
+
+    test "rejects missing required keys" do
+      Application.put_env(@app, @image_key, Keyword.delete(@valid_image_policy, :image))
+      assert {:error, :missing_image} = Config.apple_container_image_policy()
+
+      Application.put_env(@app, @image_key, Keyword.delete(@valid_image_policy, :toolchain))
+      assert {:error, :missing_toolchain} = Config.apple_container_image_policy()
+    end
+
+    test "rejects malformed containers, atom label keys, and oversized fields" do
+      Application.put_env(@app, @image_key, "not-a-map")
+
+      assert {:error, :apple_container_image_policy_config_malformed} =
+               Config.apple_container_image_policy()
+
+      Application.put_env(
+        @app,
+        @image_key,
+        Keyword.put(@valid_image_policy, :labels, %{atom_key: "v"})
+      )
+
+      assert {:error, :invalid_labels} = Config.apple_container_image_policy()
+
+      oversized = String.duplicate("a", 5_000)
+
+      Application.put_env(
+        @app,
+        @image_key,
+        Keyword.put(@valid_image_policy, :image, oversized)
+      )
+
+      assert {:error, :image_policy_string_too_long} = Config.apple_container_image_policy()
+
+      huge_env = Enum.map(1..100, fn i -> "K#{i}=v" end)
+
+      Application.put_env(
+        @app,
+        @image_key,
+        Keyword.put(@valid_image_policy, :env, huge_env)
+      )
+
+      assert {:error, :image_policy_env_too_large} = Config.apple_container_image_policy()
     end
   end
 

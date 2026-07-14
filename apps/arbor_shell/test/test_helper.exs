@@ -17,6 +17,11 @@ Supervisor.start_child(
 
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
+  {Arbor.Shell.AppleContainerImagePolicyAuthority, []}
+)
+
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
   Arbor.Shell.LinuxDependencyBaselineMaterializer.supervisor_child_spec()
 )
 
