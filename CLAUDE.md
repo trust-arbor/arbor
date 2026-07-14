@@ -242,11 +242,60 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 
 ## Applied Learning
 
+**Do not run Mix commands in the main worktree while a compiled DOT task is
+active.** Even a targeted test may recompile transitive modules on disk while
+the running server still has the previous BEAM loaded. A task whose execution
+manifest was already bound can then fail later with
+`execution_module_loaded_code_mismatch` / `handler_binding_mismatch`; if its
+retain node is rejected, owner-death cleanup can remove the dirty worktree.
+Use an isolated worktree for every Mix command while delegated pipelines are
+running, then hot-reload deliberately between tasks (found 2026-07-13 during
+Phase 6 spawn/lifecycle delegation).
+
 **LLM usage cost may be a nested breakdown map, not a number.** Logging and
 aggregation code must normalize a recognized numeric total before doing any
 arithmetic. A logging-only `:badarith` can otherwise turn a successful model
 response into an apparent provider failure (found 2026-07-13 in council
 perspective calls through `Arbor.Consensus.LLMBridge`).
+
+**A coding task's public result may omit the actionable validation failure.**
+The canonical task result can report only `validation_failed` and even an empty
+`files` list after retaining a real candidate. Read the task artifact's
+`validate/status.json` for the exact action failure before diagnosing or
+redispatching; for example, Phase 6 cross-app validation correctly recorded
+`{:spawn_backend_unavailable, :production_backend_missing}` only there (found
+2026-07-13 reviewing retained Grok candidates).
+
+**Test applications can be running while required children are deliberately
+absent.** `MIX_ENV=test` commonly starts an application supervisor with
+`start_children: false`; a direct diagnostic that needs a child such as
+`Arbor.Shell.ExecutionRegistry` must start that test-owned child explicitly.
+Checking only `Application.started_applications/0` can misdiagnose a missing
+child as a broken API (found 2026-07-13 during Phase 6 shell diagnostics).
+
+**Run Postgres-specific tests with the Postgres test adapter.** Arbor defaults
+to SQLite in `config/test.exs`, even for files whose module name says
+`Postgres`. Use `ARBOR_DB=postgres MIX_ENV=test`, migrate only the isolated test
+database, and then run the `:database` file. Enabling the tag under SQLite
+mostly proves dialect mismatch, not a Postgres regression (found 2026-07-13
+verifying the persistence CAS foundation).
+
+**Do not reuse a delegated worktree build across compile-time adapter modes.**
+`ARBOR_DB=postgres` compiles `:arbor_persistence, :repo_adapter` differently
+from the default SQLite test mode, and Mix will reject a later run whose runtime
+adapter no longer matches that retained build. Use a fresh named
+`MIX_BUILD_PATH` for each adapter mode (or explicitly keep `ARBOR_DB` identical)
+instead of treating a worker's `_build_*` directory as mode-agnostic (found
+2026-07-13 rerunning the lifecycle suite after Grok's Postgres validation).
+
+**One-shot stdin needs an explicit EOF, and tests must assert termination.**
+Writing bytes to a child pipe without closing the writer lets programs such as
+`cat` and `git hash-object --stdin` produce output and then wait forever. A test
+that asserts only captured output can therefore pass while every real call
+times out. One-shot execution must close stdin after its optional payload;
+interactive sessions must keep a separate open-input protocol, and regressions
+must assert normal terminal status as well as exact bytes (found 2026-07-13 in
+`Arbor.Shell.ProcessGroup`).
 
 **Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.
 
@@ -754,3 +803,33 @@ the current reviewed set is `default`, `security_regression`, `contract_change`,
 **Stable structured coding plans require a review-bearing profile and only their executable feature subset.** The compiled `coding_change` path rejects `review_profile: "none"` before workspace allocation. Use `human_required` when the local delegator will perform the binding review, or `binding` when the configured council should decide; do not use a no-review profile merely to save reviewer tokens. Also, contract-valid optional fields are not necessarily executable in v1: custom `rework.stop_conditions` currently fails preflight with `unsupported_v1_feature`, so omit it and use the compiled profile defaults until that feature is implemented (confirmed 2026-07-13 dispatching the eval DOT last-mile slice).
 
 **A Port `:env` option is an override list, not an empty environment.** Variables omitted from `Port.open/2` remain inherited from the Arbor VM, so passing only a pinned `PATH` still exposes ambient credentials to an authorized `printenv` child. Agent-facing sync, async, and streaming execution must force a shared deny-by-default environment that explicitly unsets inherited keys before adding the small internal allowlist; caller options and `sandbox: :none` must not disable it (found 2026-07-13 while designing the spawn-capable containment boundary).
+
+**Consume optional cross-library capabilities through the owning facade and its real contract.** A caller that probes an invented backend callback such as `backend.durability_class/0` can reject a valid Store implementation whose supported contract is exposed as `Arbor.Persistence.durability_class/3`. Check the facade and callback arity before adding capability detection, and keep backend options flowing through that facade (found 2026-07-13 reviewing durable engine lifecycle admission).
+
+**Injected storage identity must thread through every operation, not only capability probes.** Accepting `server:` or backend options for a durability check while later discovery, claim, settlement, or recovery calls silently use the global default creates a split-brain workflow. Carry one normalized store target through every read and mutation, and regress with a non-default store whose global peer contains conflicting data (found 2026-07-13 reviewing RunJournal recovery wiring).
+
+**Preserve a stalled delegated worktree before starting a replacement worker.** When an ACP run exits with useful uncommitted changes, use `git stash create` to capture the tracked work without altering the retained worker directory, then point a named preservation branch at that commit. A correction can start from the exact preserved state while the original workspace remains available for diagnosis and provider-session recovery (adopted 2026-07-13 after the spawn-containment R10 worker transport failed).
+
+**A structured coding dispatch has a closed two-level envelope.** The outer task contains only `kind: "coding_change"` and `plan`; execution policy such as workspace, worker, review, rework, budgets, and output belongs inside the versioned plan. Validate the plan against both `Arbor.Contracts.Coding.Plan` and the current compiler subset: a field may be contract-valid yet still fail preflight as `unsupported_v1_feature` (found 2026-07-13 re-dispatching the spawn-containment correction).
+
+**Containment tests that discover the reviewed Mix wrapper need a worktree-local build path.** Sharing `MIX_DEPS_PATH` into an isolated worktree is safe, but pointing `MIX_BUILD_PATH` outside the repo makes the loaded `arbor_actions` BEAM path lead to that external build root, so `Arbor.Actions.Mix.resolve_mix_wrapper/0` correctly cannot prove the repo-owned `bin/mix` identity and fails closed with `:mix_wrapper_unavailable`. For this suite, leave `_build` inside the isolated worktree and share only dependencies; an external build path is still appropriate for tests that do not intentionally derive a source/runtime root from loaded code (found 2026-07-13 while independently validating Spawn Containment Slice 1 R11).
+
+**Exclusive-create failure does not grant cleanup ownership.** If `File.mkdir/1` returns `:eexist`, the caller must reject or retry without deleting that path; an unconditional `after`/error cleanup can erase an attacker-created or concurrent invocation's directory even though this invocation never owned it. Carry an explicit created/owned identity into cleanup, verify that identity before removal where feasible, and regress a pre-existing path with a marker that must survive the fail-closed result (found 2026-07-13 probing the tree-binding private-root collision path).
+
+**A late identity observation cannot prove exclusive-create ownership.** After creating a cleanup root, capture its stable device/inode/type identity before doing work. If that first capture fails, leave the path in place and fail closed; recapturing an identity during cleanup can observe a replacement path and incorrectly authorize its deletion (found 2026-07-13 proving the tree-binding cleanup regression against its prior revision).
+
+**Apple `container` networking must request the reserved `none` network explicitly.** In `container` 1.1.0, omitting `--network` attaches the built-in `default` NAT network, while `--network none` is a reserved CLI value that sets the container's network attachments to an empty list. For spawn containment, require exactly `--network none` and prove the guest has no network interface; `--no-dns`, an omitted/empty option list, or an `--internal` network is a weaker policy (found 2026-07-13 while designing Spawn Containment Slice 2 against the official sources).
+
+**A public helper that accepts arbitrary paths is an authority surface.** Registry-internal filesystem machinery must stay private or require the same owner-issued lease/capability as its public workflow; module naming and `@doc false` do not prevent in-process candidate code from calling an exported function. Regress by invoking the former export and proving it cannot create the caller-selected destination (found 2026-07-13 reviewing the validation dependency snapshot helper).
+
+**Distribution readiness is not application readiness.** `mix arbor.start` currently reports success when the named BEAM responds to distribution pings, but a later umbrella application can still fail and tear the node down before Gateway binds. After every restart, poll `http://127.0.0.1:4000/health` and inspect the daemon log if the process exits; do not dispatch work from the startup banner alone (found 2026-07-13 recovering the Phase 6 delegator runtime).
+
+**A worktree changes relative durable-store identity.** Arbor Security's JSONFile backend resolves `.arbor/security` from the server process CWD, so a server launched from a disposable worktree sees a new empty identity/capability/signing-key universe even when it uses the normal master key. For an intentional recovery runtime, explicitly bind the canonical project security store before startup; do not weaken signed-request auth or recreate agent authority piecemeal (found 2026-07-13 recovering the Phase 6 delegator runtime).
+
+**Every persistence migration must run on every supported development adapter.** Arbor defaults to SQLite for zero-config development, and `ecto_sqlite3` rejects column `modify` operations that work on Postgres. A migration is not complete after a Postgres-only proof: run the full fresh-schema chain on both adapters, use adapter-specific DDL where necessary, and keep production-like data repair as a separate rehearsal (found 2026-07-13 when the records generation migration stopped a fresh SQLite runtime).
+
+**The coding `security_regression` profile treats `requested_paths` as test paths.** Its compiler requires a non-empty list containing only files ending in `_test.exs`; adding the source file produces `{:invalid_security_regression_paths, ...}` before workspace allocation. Use that profile for its specialized two-revision proof, not merely as a descriptive label for security-sensitive feature work. A feature slice that changes source plus adversarial tests should use an executable general profile and still prove the tests fail against the candidate parent where applicable (found 2026-07-14 while continuing the Apple Container planner).
+
+**Apple `container create` treats tokens after the image as init-process arguments.** A 1.1.0 live probe passed `--network default` after the immutable image while specifying `--network none` before it; `container inspect` recorded the former only in `initProcess.arguments` and kept `networks: []`. Keep every container-management option before the image and the fixed Mix arguments after it, and retain an exact argv test so future CLI/version changes cannot silently reinterpret command flags (verified 2026-07-14 while reviewing the Apple Container planner).
+
+**A Linux containment guest cannot reuse an unfiltered macOS dependency snapshot.** The validation lease currently copies the host `deps/` tree, which can contain Darwin artifacts such as `sqlite_vec/priv/.../vec0.dylib`; rebuilding a missing Linux artifact can then invoke a dependency downloader despite the intended offline contract. Provision an attested Linux-native dependency baseline keyed to the exact `mix.lock` and immutable image digests, clone it into each private writable lease, and keep image/dependency provisioning outside authorized no-network execution (found 2026-07-14 before wiring Apple Container admission).
