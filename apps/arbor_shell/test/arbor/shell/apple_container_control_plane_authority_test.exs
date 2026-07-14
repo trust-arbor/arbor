@@ -548,7 +548,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
                Shell.execute_spawn_capable("mix", ["test"], [])
     end
 
-    test "security regression: OTP diagnostics redact state, messages, reasons, and logs" do
+    test "security regression: OTP status and formatter redact state, messages, reasons, and logs" do
       put_valid_config()
 
       {:ok, pid} =
@@ -558,7 +558,6 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
           trusted_path: FakeTrustedPath
         )
 
-      :ok = :sys.log(pid, true)
       assert {:ok, bindings} = Authority.checkout_bindings(pid)
 
       rendered = pid |> :sys.get_status() |> inspect(limit: :infinity)
@@ -567,6 +566,20 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
       refute rendered =~ bindings.cli_identity.sha256
       refute rendered =~ "runtime_plugin_config_identity"
       assert rendered =~ "redacted"
+
+      formatted =
+        Authority.format_status(%{
+          message: {:checkout_bindings, bindings},
+          reason: {:failed, @app_root},
+          log: [{:reply, bindings}],
+          state: %{status: :pinned, reason: nil, bindings: bindings, boot_epoch: make_ref()}
+        })
+
+      assert formatted.message == :redacted
+      assert formatted.reason == :redacted
+      assert formatted.log == :redacted
+      refute inspect(formatted, limit: :infinity) =~ @app_root
+      refute inspect(formatted, limit: :infinity) =~ bindings.cli_identity.sha256
     end
 
     test "malformed registration names return typed errors before GenServer startup" do
