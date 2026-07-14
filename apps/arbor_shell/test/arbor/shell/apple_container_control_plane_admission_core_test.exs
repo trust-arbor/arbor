@@ -40,6 +40,15 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
   end
 
   describe "positive admission" do
+    test "exports fixed codesign identifier getters" do
+      assert Core.cli_identifier() == "com.apple.container.cli"
+      assert Core.apiserver_identifier() == "com.apple.container.apiserver"
+      assert Core.plugin_identifier() == "com.apple.container.container-runtime-linux"
+      assert is_binary(Core.cli_designated_requirement())
+      assert is_binary(Core.apiserver_designated_requirement())
+      assert is_binary(Core.plugin_designated_requirement())
+    end
+
     test "admits complete bindings + evidence and binds receipt/show fields", %{
       bindings: bindings,
       evidence: evidence

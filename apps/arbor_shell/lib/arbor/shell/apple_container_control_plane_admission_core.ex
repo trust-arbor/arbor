@@ -376,6 +376,18 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
   @spec team_id() :: String.t()
   def team_id, do: @team_id
 
+  @doc "Fixed codesign identifier for the container CLI."
+  @spec cli_identifier() :: String.t()
+  def cli_identifier, do: @cli_identifier
+
+  @doc "Fixed codesign identifier for the container API server."
+  @spec apiserver_identifier() :: String.t()
+  def apiserver_identifier, do: @apiserver_identifier
+
+  @doc "Fixed codesign identifier for the Linux runtime plugin."
+  @spec plugin_identifier() :: String.t()
+  def plugin_identifier, do: @plugin_identifier
+
   @doc "Fixed designated requirement for the container CLI."
   @spec cli_designated_requirement() :: String.t()
   def cli_designated_requirement, do: @cli_requirement
