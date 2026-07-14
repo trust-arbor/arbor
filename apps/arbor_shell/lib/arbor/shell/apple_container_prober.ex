@@ -6,8 +6,8 @@ defmodule Arbor.Shell.AppleContainerProber do
   through pure cores, and returns a normalized admitted receipt. Never wires
   `Arbor.Shell.execute_spawn_capable/3` and is not production spawn authority.
 
-  Production entry accepts only a positive deadline duration in milliseconds.
-  Narrow same-library test injection uses `probe_for_test/2`.
+  Production entry accepts only a positive deadline duration in milliseconds
+  up to 300_000. Narrow same-library test injection uses `probe_for_test/2`.
   """
 
   alias Arbor.Shell.AppleContainerAdmissionCore
@@ -27,12 +27,22 @@ defmodule Arbor.Shell.AppleContainerProber do
   @path_id "/usr/bin/id"
   @path_sw_vers "/usr/bin/sw_vers"
 
+  @fixed_executable_paths [
+    @path_container,
+    @path_codesign,
+    @path_launchctl,
+    @path_id,
+    @path_sw_vers
+  ]
+
   @cap_id 32
   @cap_sw_vers 64
   @cap_launchctl 65_536
   @cap_system_json 8_192
   @cap_image_json 262_144
   @cap_codesign 4_096
+
+  @uid_re ~r/\A[0-9]{1,10}\z/
 
   @allowed_test_keys MapSet.new([:runtime])
 
@@ -48,8 +58,8 @@ defmodule Arbor.Shell.AppleContainerProber do
   @doc """
   Probe and admit using production authorities and process runtime.
 
-  `deadline_ms` is a positive wall-clock budget converted to one absolute
-  monotonic deadline for every subprocess.
+  `deadline_ms` is a positive wall-clock budget (at most 300_000) converted to
+  one absolute monotonic deadline for every subprocess and non-process step.
   """
   @spec probe(term()) :: {:ok, map()} | {:error, term()}
   def probe(deadline_ms) when is_integer(deadline_ms) and deadline_ms > 0 do
@@ -86,7 +96,7 @@ defmodule Arbor.Shell.AppleContainerProber do
   end
 
   defp probe_pipeline(deadline_ms, runtime) do
-    with {:ok, budget_ms} <- clamp_deadline(deadline_ms),
+    with {:ok, budget_ms} <- validate_deadline(deadline_ms),
          state <- new_state(runtime, budget_ms),
          {:ok, state} <- resolve_all_executables(state),
          {:ok, bindings} <- checkout_bindings(state),
@@ -96,24 +106,29 @@ defmodule Arbor.Shell.AppleContainerProber do
          {:ok, refs} <- AppleContainerAdmissionCore.execution_references(policy),
          workload_alias <- refs.image.execution_reference,
          vminit_alias <- refs.vminit.execution_reference,
-         {:ok, state, uid} <- run_id(state),
+         # All three codesign verifications before any /usr/local/bin/container run.
+         {:ok, state, cli_signing} <- run_codesign(state, :cli, bindings),
+         {:ok, state, api_signing} <- run_codesign(state, :apiserver, bindings),
+         {:ok, state, plugin_signing} <- run_codesign(state, :plugin, bindings),
+         {:ok, state, uid_raw} <- run_id(state),
+         {:ok, uid} <- parse_uid_for_launchctl(uid_raw),
          {:ok, state, sw_vers} <- run_sw_vers(state),
          {:ok, state, launchctl} <- run_launchctl(state, uid),
          {:ok, state, version_json} <- run_system_version(state),
          {:ok, state, status_json} <- run_system_status(state),
-         {:ok, state, cli_signing} <- run_codesign(state, :cli, bindings),
-         {:ok, state, api_signing} <- run_codesign(state, :apiserver, bindings),
-         {:ok, state, plugin_signing} <- run_codesign(state, :plugin, bindings),
          {:ok, state, workload_json} <- run_image_inspect(state, workload_alias),
          {:ok, state, vminit_json} <- run_image_inspect(state, vminit_alias),
+         :ok <- ensure_deadline(state),
          {:ok, plugin_toml} <- read_plugin_config(state, bindings),
+         :ok <- ensure_deadline(state),
          :ok <- prove_user_plugin_absent(state),
+         :ok <- ensure_deadline(state),
          {:ok, arch} <- system_architecture(state),
          {:ok, projection} <-
            project_probe(%{
              system_architecture: arch,
              sw_vers_output: sw_vers,
-             uid_output: uid,
+             uid_output: uid_raw,
              launchctl_output: launchctl,
              system_version_json: version_json,
              system_status_json: status_json,
@@ -132,7 +147,8 @@ defmodule Arbor.Shell.AppleContainerProber do
              policy
            ),
          {:ok, admitted} <- AppleContainerAdmissionCore.new(admission_input, bindings),
-         :ok <- revalidate_end(state, bindings, policy, receipt) do
+         :ok <- revalidate_end(state, bindings, policy, receipt),
+         :ok <- ensure_deadline(state) do
       {:ok, AppleContainerAdmissionCore.show(admitted)}
     end
   end
@@ -150,17 +166,18 @@ defmodule Arbor.Shell.AppleContainerProber do
     }
   end
 
-  defp clamp_deadline(deadline_ms) when deadline_ms > @max_deadline_ms do
-    {:ok, @max_deadline_ms}
+  defp validate_deadline(deadline_ms)
+       when is_integer(deadline_ms) and deadline_ms > 0 and deadline_ms <= @max_deadline_ms do
+    {:ok, deadline_ms}
   end
 
-  defp clamp_deadline(deadline_ms) when deadline_ms > 0, do: {:ok, deadline_ms}
+  defp validate_deadline(_deadline_ms), do: {:error, :invalid_probe_deadline}
 
   # --- Resolves --------------------------------------------------------------
 
   defp resolve_all_executables(state) do
     Enum.reduce_while(
-      [@path_container, @path_codesign, @path_launchctl, @path_id, @path_sw_vers],
+      @fixed_executable_paths,
       {:ok, state},
       fn path, {:ok, acc} ->
         case acc.runtime.resolve_executable(path) do
@@ -258,8 +275,7 @@ defmodule Arbor.Shell.AppleContainerProber do
     end
   end
 
-  defp run_launchctl(state, uid_raw) when is_binary(uid_raw) do
-    uid = String.trim(uid_raw)
+  defp run_launchctl(state, uid) when is_binary(uid) do
     service = "gui/#{uid}/com.apple.container.apiserver"
 
     with {:ok, state, out} <-
@@ -267,6 +283,18 @@ defmodule Arbor.Shell.AppleContainerProber do
       {:ok, state, out}
     end
   end
+
+  defp parse_uid_for_launchctl(raw) when is_binary(raw) do
+    uid = String.trim(raw)
+
+    if Regex.match?(@uid_re, uid) do
+      {:ok, uid}
+    else
+      {:error, :invalid_uid_output}
+    end
+  end
+
+  defp parse_uid_for_launchctl(_raw), do: {:error, :invalid_uid_output}
 
   defp run_system_version(state) do
     with {:ok, state, out} <-
@@ -305,26 +333,9 @@ defmodule Arbor.Shell.AppleContainerProber do
   end
 
   defp run_codesign(state, role, bindings) do
-    {path, requirement, identifier} =
-      case role do
-        :cli ->
-          {ControlPlane.cli_path(), ControlPlane.cli_designated_requirement(),
-           ControlPlane.cli_identifier()}
-
-        :apiserver ->
-          {ControlPlane.apiserver_path(), ControlPlane.apiserver_designated_requirement(),
-           ControlPlane.apiserver_identifier()}
-
-        :plugin ->
-          {ControlPlane.plugin_path(), ControlPlane.plugin_designated_requirement(),
-           ControlPlane.plugin_identifier()}
-      end
-
-    _ = bindings
-
-    argv = ["--verify", "--strict", "--all-architectures", "-R=#{requirement}", path]
-
-    with {:ok, state, _out} <- run_cmd(state, @path_codesign, argv, @cap_codesign) do
+    with {:ok, path, requirement, identifier} <- role_codesign_target(role, bindings),
+         argv = ["--verify", "--strict", "--all-architectures", "-R=#{requirement}", path],
+         {:ok, state, _out} <- run_cmd(state, @path_codesign, argv, @cap_codesign) do
       signing = %{
         identifier: identifier,
         team_id: ControlPlane.team_id(),
@@ -335,40 +346,122 @@ defmodule Arbor.Shell.AppleContainerProber do
 
       {:ok, state, signing}
     else
+      {:error, {:role_path_mismatch, _} = reason} ->
+        {:error, reason}
+
+      {:error, :role_identity_missing} = err ->
+        err
+
+      {:error, :deadline_exhausted} = err ->
+        err
+
+      {:error, :output_budget_exhausted} = err ->
+        err
+
+      {:error, :executable_not_resolved} = err ->
+        err
+
       {:error, _reason} ->
         {:error, {:codesign_failed, role}}
     end
   end
 
-  defp run_cmd(state, path, args, cap) do
-    with :ok <- ensure_deadline(state),
-         %Executable{} = executable <- Map.get(state.resolves, path),
-         remaining_ms when remaining_ms > 0 <- remaining_timeout(state),
-         remaining_out when remaining_out > 0 <- state.remaining_output,
-         max_out <- min(cap, remaining_out),
-         opts <- [
-           cwd: "/",
-           clear_env: true,
-           timeout: remaining_ms,
-           max_output_bytes: max_out
-         ],
-         {:ok, result} <- state.runtime.run_bound(executable, args, opts),
-         :ok <- interpret_result(result),
-         {:ok, state} <- debit_output(state, result, path, args, opts) do
-      {:ok, state, Map.get(result, :stdout, "")}
-    else
-      nil ->
-        {:error, :executable_not_resolved}
+  defp role_codesign_target(:cli, bindings) do
+    role_path_and_requirement(
+      bindings,
+      :cli_identity,
+      ControlPlane.cli_path(),
+      ControlPlane.cli_designated_requirement(),
+      ControlPlane.cli_identifier(),
+      :cli
+    )
+  end
 
-      remaining when is_integer(remaining) and remaining <= 0 ->
-        if remaining == state.remaining_output do
-          {:error, :output_budget_exhausted}
-        else
-          {:error, :deadline_exhausted}
+  defp role_codesign_target(:apiserver, bindings) do
+    role_path_and_requirement(
+      bindings,
+      :apiserver_identity,
+      ControlPlane.apiserver_path(),
+      ControlPlane.apiserver_designated_requirement(),
+      ControlPlane.apiserver_identifier(),
+      :apiserver
+    )
+  end
+
+  defp role_codesign_target(:plugin, bindings) do
+    role_path_and_requirement(
+      bindings,
+      :runtime_plugin_identity,
+      ControlPlane.plugin_path(),
+      ControlPlane.plugin_designated_requirement(),
+      ControlPlane.plugin_identifier(),
+      :plugin
+    )
+  end
+
+  defp role_path_and_requirement(
+         bindings,
+         identity_key,
+         fixed_path,
+         requirement,
+         identifier,
+         role
+       ) do
+    case Map.get(bindings, identity_key) do
+      %Identity{path: path} when path == fixed_path ->
+        {:ok, fixed_path, requirement, identifier}
+
+      %Identity{} ->
+        {:error, {:role_path_mismatch, role}}
+
+      _other ->
+        {:error, :role_identity_missing}
+    end
+  end
+
+  defp run_cmd(state, path, args, cap) do
+    case ensure_deadline(state) do
+      :ok ->
+        case Map.fetch(state.resolves, path) do
+          {:ok, %Executable{} = executable} ->
+            remaining_ms = remaining_timeout(state)
+            remaining_out = state.remaining_output
+
+            cond do
+              remaining_ms <= 0 ->
+                {:error, :deadline_exhausted}
+
+              remaining_out <= 0 ->
+                {:error, :output_budget_exhausted}
+
+              true ->
+                max_out = min(cap, remaining_out)
+
+                opts = [
+                  cwd: "/",
+                  clear_env: true,
+                  timeout: remaining_ms,
+                  max_output_bytes: max_out
+                ]
+
+                case state.runtime.run_bound(executable, args, opts) do
+                  {:ok, result} ->
+                    with :ok <- interpret_result(result),
+                         {:ok, state} <- debit_output(state, result, path, args, opts) do
+                      {:ok, state, Map.get(result, :stdout, "")}
+                    end
+
+                  {:error, reason} ->
+                    {:error, bound_reason(reason, :probe_command_failed)}
+                end
+            end
+
+          :error ->
+            {:error, :executable_not_resolved}
         end
 
-      {:error, reason} ->
-        {:error, bound_reason(reason, :probe_command_failed)}
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -514,28 +607,47 @@ defmodule Arbor.Shell.AppleContainerProber do
   end
 
   defp revalidate_end(state, bindings, policy, receipt) do
-    with {:ok, bindings2} <- checkout_bindings(state),
+    with :ok <- ensure_deadline(state),
+         {:ok, bindings2} <- checkout_bindings(state),
+         :ok <- require_unchanged(bindings2, bindings, :control_plane_bindings_drift),
+         :ok <- ensure_deadline(state),
          {:ok, policy2} <- checkout_policy(state),
+         :ok <- require_unchanged(policy2, policy, :image_policy_drift),
+         :ok <- ensure_deadline(state),
          {:ok, receipt2} <- checkout_and_normalize_receipt(state),
-         true <- bindings2 === bindings,
-         true <- policy2 === policy,
-         true <- receipt2 === receipt,
-         :ok <- verify_all_executables(state) do
+         :ok <- require_unchanged(receipt2, receipt, :baseline_receipt_drift),
+         :ok <- ensure_deadline(state),
+         :ok <- verify_all_executables(state),
+         :ok <- ensure_deadline(state) do
       :ok
     else
-      false ->
-        {:error, :authority_drift}
-
       {:error, reason} ->
         {:error, bound_reason(reason, :authority_drift)}
     end
   end
 
+  defp require_unchanged(left, right, drift_reason) do
+    if left === right do
+      :ok
+    else
+      {:error, drift_reason}
+    end
+  end
+
   defp verify_all_executables(state) do
-    Enum.reduce_while(Map.values(state.resolves), :ok, fn executable, :ok ->
-      case state.runtime.verify_executable(executable) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, bound_reason(reason, :executable_drift)}}
+    Enum.reduce_while(@fixed_executable_paths, :ok, fn path, :ok ->
+      case Map.fetch(state.resolves, path) do
+        {:ok, %Executable{} = executable} ->
+          case state.runtime.verify_executable(executable) do
+            :ok ->
+              {:cont, :ok}
+
+            {:error, reason} ->
+              {:halt, {:error, bound_reason(reason, :executable_drift)}}
+          end
+
+        :error ->
+          {:halt, {:error, :executable_not_resolved}}
       end
     end)
   end

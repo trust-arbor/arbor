@@ -104,6 +104,7 @@ defmodule Arbor.Shell.AppleContainerProberTest do
 
     def reset do
       :persistent_term.put({__MODULE__, :mono}, 1_000_000)
+      :persistent_term.put({__MODULE__, :events}, [])
       :persistent_term.put({__MODULE__, :resolve_order}, [])
       :persistent_term.put({__MODULE__, :runs}, [])
       :persistent_term.put({__MODULE__, :mode}, :ok)
@@ -120,6 +121,11 @@ defmodule Arbor.Shell.AppleContainerProberTest do
       :persistent_term.put({__MODULE__, :plugin_mode}, :ok)
       :persistent_term.put({__MODULE__, :user_plugin_mode}, :ok)
       :persistent_term.put({__MODULE__, :callback_mode}, :ok)
+      :persistent_term.put({__MODULE__, :bindings_calls}, 0)
+      :persistent_term.put({__MODULE__, :policy_calls}, 0)
+      :persistent_term.put({__MODULE__, :plan_calls}, 0)
+      :persistent_term.put({__MODULE__, :advance_on}, %{})
+      :persistent_term.put({__MODULE__, :verify_order}, [])
     end
 
     def set_mode(mode), do: :persistent_term.put({__MODULE__, :mode}, mode)
@@ -141,16 +147,26 @@ defmodule Arbor.Shell.AppleContainerProberTest do
     def set_plugin_mode(m), do: :persistent_term.put({__MODULE__, :plugin_mode}, m)
     def set_user_plugin_mode(m), do: :persistent_term.put({__MODULE__, :user_plugin_mode}, m)
     def set_callback_mode(m), do: :persistent_term.put({__MODULE__, :callback_mode}, m)
+
+    def set_advance_on(op, ms) when is_atom(op) and is_integer(ms) and ms > 0 do
+      map = :persistent_term.get({__MODULE__, :advance_on}, %{})
+      :persistent_term.put({__MODULE__, :advance_on}, Map.put(map, op, ms))
+    end
+
     def advance_mono(ms), do: :persistent_term.put({__MODULE__, :mono}, monotonic_ms() + ms)
 
+    def events, do: :persistent_term.get({__MODULE__, :events}, [])
     def resolve_order, do: :persistent_term.get({__MODULE__, :resolve_order}, [])
     def runs, do: :persistent_term.get({__MODULE__, :runs}, [])
+    def verify_order, do: :persistent_term.get({__MODULE__, :verify_order}, [])
 
     def monotonic_ms, do: :persistent_term.get({__MODULE__, :mono}, 1_000_000)
     def system_architecture, do: ~c"aarch64-apple-darwin24.0.0"
 
     def resolve_executable(path) do
       maybe_callback()
+      maybe_advance(:resolve_executable)
+      log_event({:resolve, path})
       :persistent_term.put({__MODULE__, :resolve_order}, resolve_order() ++ [path])
       exes = :persistent_term.get({__MODULE__, :executables}, %{})
 
@@ -160,7 +176,11 @@ defmodule Arbor.Shell.AppleContainerProberTest do
       end
     end
 
-    def verify_executable(%Executable{}) do
+    def verify_executable(%Executable{} = exe) do
+      maybe_advance(:verify_executable)
+      log_event({:verify, exe.path})
+      :persistent_term.put({__MODULE__, :verify_order}, verify_order() ++ [exe.path])
+
       case :persistent_term.get({__MODULE__, :verify_exec_mode}, :ok) do
         :ok -> :ok
         :drift -> {:error, :executable_not_pinned}
@@ -170,6 +190,8 @@ defmodule Arbor.Shell.AppleContainerProberTest do
 
     def run_bound(%Executable{} = exe, args, opts) do
       maybe_callback()
+      maybe_advance(:run_bound)
+      log_event({:run, exe.path, args})
       entry = %{path: exe.path, args: args, opts: opts}
       :persistent_term.put({__MODULE__, :runs}, runs() ++ [entry])
 
@@ -184,10 +206,20 @@ defmodule Arbor.Shell.AppleContainerProberTest do
 
     def checkout_control_plane_bindings do
       maybe_callback()
+      n = :persistent_term.get({__MODULE__, :bindings_calls}, 0) + 1
+      :persistent_term.put({__MODULE__, :bindings_calls}, n)
+      log_event({:checkout_bindings, n})
+      maybe_advance_checkout(:checkout_bindings, n)
 
       case :persistent_term.get({__MODULE__, :checkout_bindings_mode}, :ok) do
         :ok ->
           {:ok, :persistent_term.get({__MODULE__, :bindings})}
+
+        :ok_then_drift when n == 1 ->
+          {:ok, :persistent_term.get({__MODULE__, :bindings})}
+
+        :ok_then_drift when n > 1 ->
+          {:ok, Map.put(:persistent_term.get({__MODULE__, :bindings}), :app_root, "/evil")}
 
         :drift ->
           {:ok, Map.put(:persistent_term.get({__MODULE__, :bindings}), :app_root, "/evil")}
@@ -208,10 +240,21 @@ defmodule Arbor.Shell.AppleContainerProberTest do
 
     def checkout_image_policy do
       maybe_callback()
+      n = :persistent_term.get({__MODULE__, :policy_calls}, 0) + 1
+      :persistent_term.put({__MODULE__, :policy_calls}, n)
+      log_event({:checkout_policy, n})
+      maybe_advance_checkout(:checkout_policy, n)
 
       case :persistent_term.get({__MODULE__, :checkout_policy_mode}, :ok) do
         :ok ->
           {:ok, :persistent_term.get({__MODULE__, :policy})}
+
+        :ok_then_drift when n == 1 ->
+          {:ok, :persistent_term.get({__MODULE__, :policy})}
+
+        :ok_then_drift when n > 1 ->
+          policy = :persistent_term.get({__MODULE__, :policy})
+          {:ok, Map.put(policy, :mix_lock_digest, String.duplicate("f", 64))}
 
         :drift ->
           policy = :persistent_term.get({__MODULE__, :policy})
@@ -224,10 +267,22 @@ defmodule Arbor.Shell.AppleContainerProberTest do
 
     def checkout_baseline_plan do
       maybe_callback()
+      n = :persistent_term.get({__MODULE__, :plan_calls}, 0) + 1
+      :persistent_term.put({__MODULE__, :plan_calls}, n)
+      log_event({:checkout_plan, n})
+      maybe_advance_checkout(:checkout_plan, n)
 
       case :persistent_term.get({__MODULE__, :checkout_plan_mode}, :ok) do
         :ok ->
           {:ok, :persistent_term.get({__MODULE__, :plan})}
+
+        :ok_then_drift when n == 1 ->
+          {:ok, :persistent_term.get({__MODULE__, :plan})}
+
+        :ok_then_drift when n > 1 ->
+          plan = :persistent_term.get({__MODULE__, :plan})
+          receipt = Map.put(plan["receipt"], "mix_lock_digest", String.duplicate("f", 64))
+          {:ok, Map.put(plan, "receipt", receipt)}
 
         :drift ->
           plan = :persistent_term.get({__MODULE__, :plan})
@@ -243,6 +298,9 @@ defmodule Arbor.Shell.AppleContainerProberTest do
     def verify_identity(_), do: {:error, :invalid_identity}
 
     def read_plugin_config(%Identity{} = identity) do
+      maybe_advance(:read_plugin_config)
+      log_event(:read_plugin_config)
+
       case :persistent_term.get({__MODULE__, :plugin_mode}, :ok) do
         :ok ->
           bytes =
@@ -255,8 +313,6 @@ defmodule Arbor.Shell.AppleContainerProberTest do
           if identity.sha256 == expected do
             {:ok, bytes}
           else
-            # When fixture sha is pinned independently, still return bytes if mode ok
-            # and identity was built from same content.
             {:ok, bytes}
           end
 
@@ -275,11 +331,58 @@ defmodule Arbor.Shell.AppleContainerProberTest do
     end
 
     def prove_user_plugin_root_absent do
+      maybe_advance(:prove_user_plugin_root_absent)
+      log_event(:prove_user_plugin_root_absent)
+
       case :persistent_term.get({__MODULE__, :user_plugin_mode}, :ok) do
         :ok -> :ok
         :present -> {:error, :user_plugin_root_present}
         :error -> {:error, :user_plugin_root_probe_failed}
       end
+    end
+
+    defp log_event(event) do
+      :persistent_term.put({__MODULE__, :events}, events() ++ [event])
+    end
+
+    defp maybe_advance(op) do
+      map = :persistent_term.get({__MODULE__, :advance_on}, %{})
+
+      case Map.get(map, op) do
+        ms when is_integer(ms) and ms > 0 ->
+          advance_mono(ms)
+          :ok
+
+        _ ->
+          :ok
+      end
+    end
+
+    defp maybe_advance_checkout(op, n) do
+      map = :persistent_term.get({__MODULE__, :advance_on}, %{})
+
+      case Map.get(map, op) do
+        {ms, after_n} when is_integer(ms) and is_integer(after_n) and n > after_n ->
+          advance_mono(ms)
+          :ok
+
+        ms when is_integer(ms) and ms > 0 and n == 1 ->
+          # first-call advance only when plain integer configured
+          advance_mono(ms)
+          :ok
+
+        ms when is_integer(ms) and ms > 0 ->
+          :ok
+
+        _ ->
+          :ok
+      end
+    end
+
+    def set_advance_on_after(op, ms, after_calls)
+        when is_atom(op) and is_integer(ms) and is_integer(after_calls) do
+      map = :persistent_term.get({__MODULE__, :advance_on}, %{})
+      :persistent_term.put({__MODULE__, :advance_on}, Map.put(map, op, {ms, after_calls}))
     end
 
     defp maybe_callback do
@@ -475,10 +578,18 @@ defmodule Arbor.Shell.AppleContainerProberTest do
       refute inspect(receipt) =~ "launchctl"
     end
 
-    test "resolves all five executables before first run and records exact argv order" do
+    test "one event log: five resolves before first run; three codesign before first container" do
       assert {:ok, _} = Prober.probe_for_test(30_000, runtime: FakeRuntime)
 
-      assert FakeRuntime.resolve_order() == [
+      events = FakeRuntime.events()
+
+      resolve_events =
+        Enum.filter(events, fn
+          {:resolve, _} -> true
+          _ -> false
+        end)
+
+      assert Enum.map(resolve_events, fn {:resolve, path} -> path end) == [
                "/usr/local/bin/container",
                "/usr/bin/codesign",
                "/bin/launchctl",
@@ -486,12 +597,42 @@ defmodule Arbor.Shell.AppleContainerProberTest do
                "/usr/bin/sw_vers"
              ]
 
-      runs = FakeRuntime.runs()
-      assert length(runs) >= 1
-      first_run_index = 0
-      # All resolves happen before any run (resolve_order recorded first).
-      assert length(FakeRuntime.resolve_order()) == 5
+      first_run_idx =
+        Enum.find_index(events, fn
+          {:run, _, _} -> true
+          _ -> false
+        end)
 
+      last_resolve_idx =
+        events
+        |> Enum.with_index()
+        |> Enum.filter(fn {ev, _} -> match?({:resolve, _}, ev) end)
+        |> List.last()
+        |> elem(1)
+
+      assert last_resolve_idx < first_run_idx
+
+      codesign_idxs =
+        events
+        |> Enum.with_index()
+        |> Enum.filter(fn
+          {{:run, "/usr/bin/codesign", _}, _} -> true
+          _ -> false
+        end)
+        |> Enum.map(&elem(&1, 1))
+
+      assert length(codesign_idxs) == 3
+
+      first_container_idx =
+        Enum.find_index(events, fn
+          {:run, "/usr/local/bin/container", _} -> true
+          _ -> false
+        end)
+
+      assert first_container_idx
+      assert Enum.max(codesign_idxs) < first_container_idx
+
+      runs = FakeRuntime.runs()
       paths_args = Enum.map(runs, fn r -> {r.path, r.args} end)
 
       assert {"/usr/bin/id", ["-u"]} in paths_args
@@ -513,11 +654,13 @@ defmodule Arbor.Shell.AppleContainerProberTest do
         assert Enum.any?(run.args, &String.starts_with?(&1, "-R="))
       end
 
-      # Runs order: id before container image inspect; resolves finished first.
-      id_idx = Enum.find_index(runs, &(&1.path == "/usr/bin/id"))
-      inspect_idx = Enum.find_index(runs, &(&1.args == ["image", "inspect", @workload_alias]))
-      assert id_idx < inspect_idx
-      assert first_run_index == 0
+      assert FakeRuntime.verify_order() == [
+               "/usr/local/bin/container",
+               "/usr/bin/codesign",
+               "/bin/launchctl",
+               "/usr/bin/id",
+               "/usr/bin/sw_vers"
+             ]
     end
 
     test "every run uses cwd root, clear_env, remaining timeout, and bounded output" do
@@ -554,42 +697,57 @@ defmodule Arbor.Shell.AppleContainerProberTest do
                Prober.probe_for_test(30_000, runtime: FakeRuntime)
     end
 
-    test "authority drift at end fails closed" do
-      FakeRuntime.set_checkout_bindings_mode(:ok)
+    test "role path mismatch against fixed ControlPlane path fails before codesign" do
+      bindings = :persistent_term.get({FakeRuntime, :bindings})
 
-      # After successful path, force second checkout to drift via counter in handler
-      calls = :atomics.new(1, signed: false)
+      bad =
+        put_in(bindings, [:cli_identity], %{
+          bindings.cli_identity
+          | path: "/tmp/evil-container"
+        })
 
-      FakeRuntime.set_run_handler(fn exe, args, opts ->
-        # default for all runs
-        apply(FakeRuntime, :run_bound_default_via_module, [exe, args, opts])
-      end)
+      FakeRuntime.set_bindings(bad)
 
-      # Simpler: mutate plan mode after first successful run by wrapping checkout
-      # Use plan drift mode after first checkout by using a custom handler that
-      # sets drift on second plan checkout — implement via process counter.
-      :persistent_term.put({FakeRuntime, :checkout_plan_mode}, :ok)
-
-      # Monkey-patch via run that triggers mid-probe is hard; test drift modes separately.
-      FakeRuntime.set_checkout_plan_mode(:drift)
-
-      # Drift on first plan checkout fails normalization/binding earlier or at end.
-      # For end drift: first checkouts ok, end revalidate drifts.
-      FakeRuntime.set_checkout_plan_mode(:ok)
+      # Match CLI uses executable path vs identity path — identity path drift fails match first.
+      # Force matching identity path on executable while keeping ControlPlane mismatch via
+      # apiserver role instead:
       FakeRuntime.reset()
       setup_defaults_after_reset()
+      bindings = :persistent_term.get({FakeRuntime, :bindings})
 
-      counter = :atomics.new(1, signed: false)
+      bad =
+        put_in(bindings, [:apiserver_identity], %{
+          bindings.apiserver_identity
+          | path: "/tmp/evil-apiserver"
+        })
 
-      # Intercept plan checkout by replacing mode function - use process dictionary via mode atom list
-      # Instead: set drift mode only works for all checkouts. Test mid-probe authority error:
-      FakeRuntime.set_checkout_bindings_mode(:error)
+      FakeRuntime.set_bindings(bad)
 
-      assert {:error, :control_plane_unavailable} =
+      assert {:error, {:role_path_mismatch, :apiserver}} =
                Prober.probe_for_test(30_000, runtime: FakeRuntime)
 
-      _ = calls
-      _ = counter
+      refute Enum.any?(FakeRuntime.runs(), &(&1.path == "/usr/local/bin/container"))
+    end
+
+    test "control-plane bindings drift at final revalidation fails closed" do
+      FakeRuntime.set_checkout_bindings_mode(:ok_then_drift)
+
+      assert {:error, :control_plane_bindings_drift} =
+               Prober.probe_for_test(30_000, runtime: FakeRuntime)
+    end
+
+    test "image policy drift at final revalidation fails closed" do
+      FakeRuntime.set_checkout_policy_mode(:ok_then_drift)
+
+      assert {:error, :image_policy_drift} =
+               Prober.probe_for_test(30_000, runtime: FakeRuntime)
+    end
+
+    test "compact baseline receipt drift at final revalidation fails closed" do
+      FakeRuntime.set_checkout_plan_mode(:ok_then_drift)
+
+      assert {:error, :baseline_receipt_drift} =
+               Prober.probe_for_test(30_000, runtime: FakeRuntime)
     end
 
     test "codesign failure fails closed" do
@@ -690,14 +848,14 @@ defmodule Arbor.Shell.AppleContainerProberTest do
       end
     end
 
-    test "deadline exhaustion fails closed" do
+    test "deadline exhaustion during process run fails closed" do
       FakeRuntime.set_run_handler(fn _exe, _args, _opts ->
         FakeRuntime.advance_mono(60_000)
 
         {:ok,
          %{
            exit_code: 0,
-           stdout: "501\n",
+           stdout: "",
            stderr: "",
            duration_ms: 1,
            timed_out: false,
@@ -709,16 +867,61 @@ defmodule Arbor.Shell.AppleContainerProberTest do
 
       assert {:error, reason} = Prober.probe_for_test(10, runtime: FakeRuntime)
 
-      assert reason in [
-               :deadline_exhausted,
-               :probe_timeout,
-               :probe_command_failed,
-               {:codesign_failed, :cli}
-             ]
+      assert reason == :deadline_exhausted
+    end
+
+    test "deadline exhaustion before plugin config IO fails closed" do
+      FakeRuntime.set_run_handler(fn exe, args, _opts ->
+        result = default_run_dispatch(exe.path, args)
+
+        if exe.path == "/usr/local/bin/container" and match?(["image", "inspect", _], args) and
+             String.contains?(List.last(args), "vminit") do
+          FakeRuntime.advance_mono(100_000)
+        end
+
+        result
+      end)
+
+      assert {:error, :deadline_exhausted} =
+               Prober.probe_for_test(1_000, runtime: FakeRuntime)
+
+      refute :read_plugin_config in FakeRuntime.events()
+    end
+
+    test "deadline exhaustion after plugin config IO fails closed" do
+      FakeRuntime.set_advance_on(:read_plugin_config, 100_000)
+
+      assert {:error, :deadline_exhausted} =
+               Prober.probe_for_test(1_000, runtime: FakeRuntime)
+
+      assert :read_plugin_config in FakeRuntime.events()
+      refute :prove_user_plugin_root_absent in FakeRuntime.events()
+    end
+
+    test "deadline exhaustion after user-plugin absence proof fails closed" do
+      FakeRuntime.set_advance_on(:prove_user_plugin_root_absent, 100_000)
+
+      assert {:error, :deadline_exhausted} =
+               Prober.probe_for_test(1_000, runtime: FakeRuntime)
+
+      assert :prove_user_plugin_root_absent in FakeRuntime.events()
+    end
+
+    test "deadline exhaustion during authority revalidation fails closed" do
+      FakeRuntime.set_advance_on_after(:checkout_bindings, 100_000, 1)
+
+      assert {:error, :deadline_exhausted} =
+               Prober.probe_for_test(1_000, runtime: FakeRuntime)
+    end
+
+    test "deadline exhaustion during executable revalidation fails closed" do
+      FakeRuntime.set_advance_on(:verify_executable, 100_000)
+
+      assert {:error, :deadline_exhausted} =
+               Prober.probe_for_test(1_000, runtime: FakeRuntime)
     end
 
     test "total output exhaustion fails closed" do
-      # Exceed the prober's global output budget (1 MiB).
       huge = String.duplicate("x", 1_048_576 + 64)
 
       FakeRuntime.set_run_handler(fn exe, args, _opts ->
@@ -741,6 +944,26 @@ defmodule Arbor.Shell.AppleContainerProberTest do
 
       assert {:error, reason} = Prober.probe_for_test(30_000, runtime: FakeRuntime)
       assert reason in [:output_budget_exhausted, :probe_command_failed]
+    end
+
+    test "invalid uid output is rejected before launchctl" do
+      FakeRuntime.set_run_handler(fn exe, args, _opts ->
+        case {exe.path, args} do
+          {"/usr/bin/id", ["-u"]} ->
+            ok("not-a-uid\n")
+
+          {"/usr/bin/codesign", _} ->
+            ok("")
+
+          _ ->
+            default_run_dispatch(exe.path, args)
+        end
+      end)
+
+      assert {:error, :invalid_uid_output} =
+               Prober.probe_for_test(30_000, runtime: FakeRuntime)
+
+      refute Enum.any?(FakeRuntime.runs(), &(&1.path == "/bin/launchctl"))
     end
 
     test "oversized plugin config and hash/identity drift fail closed" do
@@ -781,6 +1004,11 @@ defmodule Arbor.Shell.AppleContainerProberTest do
       assert {:error, :invalid_probe_deadline} = Prober.probe(0)
       assert {:error, :invalid_probe_deadline} = Prober.probe(-1)
       assert {:error, :invalid_probe_deadline} = Prober.probe("30")
+      assert {:error, :invalid_probe_deadline} = Prober.probe(300_001)
+
+      assert {:error, :invalid_probe_deadline} =
+               Prober.probe_for_test(300_001, runtime: FakeRuntime)
+
       assert {:error, :unknown_probe_test_option} = Prober.probe_for_test(1_000, foo: 1)
 
       assert {:error, :duplicate_probe_test_option} =
@@ -792,8 +1020,57 @@ defmodule Arbor.Shell.AppleContainerProberTest do
 
   describe "security regression" do
     @tag :security_regression
+    test "security regression: codesign completes for all three roles before first container run" do
+      assert {:ok, _} = Prober.probe_for_test(30_000, runtime: FakeRuntime)
+
+      events = FakeRuntime.events()
+
+      codesign_paths =
+        events
+        |> Enum.filter(fn
+          {:run, "/usr/bin/codesign", _args} -> true
+          _ -> false
+        end)
+        |> Enum.map(fn {:run, _, args} -> List.last(args) end)
+
+      assert codesign_paths == [
+               ControlPlane.cli_path(),
+               ControlPlane.apiserver_path(),
+               ControlPlane.plugin_path()
+             ]
+
+      first_container =
+        Enum.find_index(events, fn
+          {:run, "/usr/local/bin/container", _} -> true
+          _ -> false
+        end)
+
+      last_codesign =
+        events
+        |> Enum.with_index()
+        |> Enum.filter(fn
+          {{:run, "/usr/bin/codesign", _}, _} -> true
+          _ -> false
+        end)
+        |> List.last()
+        |> elem(1)
+
+      assert last_codesign < first_container
+
+      # CLI identity matched before any process run.
+      first_run =
+        Enum.find_index(events, fn
+          {:run, _, _} -> true
+          _ -> false
+        end)
+
+      assert first_run
+      # No container before codesign; first runs are codesign.
+      assert match?({:run, "/usr/bin/codesign", _}, Enum.at(events, first_run))
+    end
+
+    @tag :security_regression
     test "security regression: caller-nominated policy/path/executable/authority cannot enter production probe API" do
-      # Production API is arity-1 duration only.
       assert function_exported?(Prober, :probe, 1)
       refute function_exported?(Prober, :probe, 2)
 
@@ -804,7 +1081,6 @@ defmodule Arbor.Shell.AppleContainerProberTest do
       assert receipt["image"]["execution_reference"] == @workload_alias
       assert receipt["vminit"]["execution_reference"] == @vminit_alias
 
-      # Only derived local aliases were inspected.
       inspect_args =
         FakeRuntime.runs()
         |> Enum.filter(&(&1.path == "/usr/local/bin/container"))
@@ -848,8 +1124,6 @@ defmodule Arbor.Shell.AppleContainerProberTest do
   end
 
   defp default_run_dispatch(path, args) do
-    # Reuse FakeRuntime private defaults through a public-style call by temporarily
-    # clearing the handler is not possible; duplicate minimal dispatch:
     case {path, args} do
       {"/usr/bin/id", ["-u"]} ->
         ok("501\n")
