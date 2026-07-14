@@ -542,7 +542,8 @@ defmodule Arbor.Actions.Mix do
   Actions-owned runner/result artifacts under the runtime parent stay unmounted.
   """
   @spec projections_for_resource(map()) ::
-          {:ok, %{read_only: [map()], read_write: [map()]}} | {:error, term()}
+          {:ok, %{read_only: [map()], read_write: [map()], revision: String.t()}}
+          | {:error, term()}
   def projections_for_resource(resource) when is_map(resource) do
     projections_for_resource(resource, :candidate)
   end
@@ -550,7 +551,8 @@ defmodule Arbor.Actions.Mix do
   def projections_for_resource(_), do: {:error, :invalid_validation_resource}
 
   @spec projections_for_resource(map(), :candidate | :base) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, %{read_only: [map()], read_write: [map()], revision: String.t()}}
+          | {:error, term()}
   def projections_for_resource(resource, revision)
       when is_map(resource) and revision in [:candidate, :base] do
     with {:ok, wrapper} <- resolve_mix_wrapper(),
