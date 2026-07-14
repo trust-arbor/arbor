@@ -9,9 +9,6 @@ defmodule Arbor.Persistence.RecordsGenerationMigrationTest do
   use ExUnit.Case, async: false
 
   @moduletag capture_log: true
-  @moduletag :sqlite
-  @moduletag :database
-
   @migration_version 20_260_713_000_002
   @migration_module Arbor.Persistence.Repo.Migrations.RecordsGenerationAndNamespaceKeyIdentity
 

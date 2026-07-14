@@ -25,10 +25,10 @@ defmodule Arbor.Persistence.MigrationHelper do
   ## Additive column changes
 
   Ecto's `add_if_not_exists/3` and `remove_if_exists/2` are **not** implemented
-  by `ecto_sqlite3` — they raise `ArgumentError: Not supported by SQLite3`
+  by `ecto_sqlite3`; they raise `ArgumentError: Not supported by SQLite3`
   (the adapter only translates plain `:add` / `:remove` alter subcommands).
 
-  Prefer `add_column_if_not_exists/4` and `remove_column_if_exists/3` from this
+  Prefer `add_column_if_not_exists/4` and `remove_column_if_exists/2` from this
   module. They probe schema existence on the active migration repo and only
   emit plain `add` / `remove` commands SQLite can execute, while remaining
   safe on Postgres partial-upgrade schemas.
