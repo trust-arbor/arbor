@@ -662,6 +662,13 @@ the current reviewed set is `default`, `security_regression`, `contract_change`,
 
 **A failed outer coding task may still have produced a committed branch.** Pipeline timeout, worker protocol repair failure, or terminal-result transport can occur after the worker committed. Before redispatching or declaring work lost, inspect the requested branch and retained worktree for an immutable commit; review that snapshot independently of the outer task status (found 2026-07-11 recovering cross-app and benchmark corrections).
 
+**`arbor_dispatch_task.timeout` bounds the whole asynchronous task, not the MCP request.** A
+structured coding plan already carries its worker budget in `plan.budgets.wall_clock_ms` and
+`inactivity_timeout_ms`. Omit the outer dispatch timeout for coding work unless a deliberately
+shorter task-wide cancellation is intended; setting it to 120 seconds terminated Grok during its
+first implementation turn and cleanup removed the uncommitted worktree (found 2026-07-14 in
+`task_74626`).
+
 **Plain detached Git worktrees do not inherit ignored dependency directories.** A manually created proof worktree usually has no `deps/`, so an isolated `MIX_BUILD_PATH` alone fails before tests. Point `MIX_DEPS_PATH` at the trusted main checkout's dependency cache (while keeping the build path isolated), or create the same reviewed dependency links as the workspace manager (found 2026-07-11 running parent security proofs).
 
 **Derived summaries cannot replace independently recorded cleanup evidence.** If run-root cleanup is observed only while building a summary, later acceptance recomputation may incorrectly infer it from pair cleanup and let a coordinated summary rewrite forge success. Retain each security-relevant lifecycle observation outside caller-editable aggregates, require it in the closed report schema, and derive the summary from that evidence (found 2026-07-11 reviewing coding benchmark acceptance integrity).
