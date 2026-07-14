@@ -81,12 +81,21 @@ defmodule Arbor.Shell.TrustedPathTest do
       end
     end
 
-    test "rejects relative, NUL, and nonexistent paths with bounded atoms" do
+    test "rejects relative, malformed, overlong, and nonexistent paths with bounded atoms" do
       assert {:error, :relative_path} =
                TrustedPath.pin_root_owned_regular_file("bin/ls", executable: true)
 
       assert {:error, :invalid_path} =
                TrustedPath.pin_root_owned_regular_file("/bin/ls\0evil", executable: true)
+
+      assert {:error, :invalid_path} =
+               TrustedPath.pin_root_owned_regular_file(<<"/bin/", 255>>, executable: true)
+
+      assert {:error, :invalid_path} =
+               TrustedPath.pin_root_owned_regular_file(
+                 "/" <> String.duplicate("a", 4_096),
+                 executable: true
+               )
 
       assert {:error, :path_not_found} =
                TrustedPath.pin_root_owned_regular_file(
@@ -143,6 +152,14 @@ defmodule Arbor.Shell.TrustedPathTest do
       end
     end
 
+    test "rejects a root-owned directory writable by group or others" do
+      assert {:ok, canonical} = TrustedPath.canonicalize_absolute("/tmp")
+      assert {:ok, %File.Stat{uid: 0, mode: mode}} = File.stat(canonical, time: :posix)
+      assert Bitwise.band(mode, 0o022) != 0
+
+      assert {:error, :untrusted_path} = TrustedPath.pin_root_owned_directory("/tmp")
+    end
+
     test "rejects relative and nonexistent directories" do
       assert {:error, :relative_path} = TrustedPath.pin_root_owned_directory("usr/bin")
 
@@ -175,9 +192,13 @@ defmodule Arbor.Shell.TrustedPathTest do
       end
     end
 
-    test "rejects relative, NUL, and nonexistent inputs" do
+    test "rejects relative, malformed, overlong, and nonexistent inputs" do
       assert {:error, :relative_path} = TrustedPath.canonicalize_absolute("bin/ls")
       assert {:error, :invalid_path} = TrustedPath.canonicalize_absolute("/bin/\0ls")
+      assert {:error, :invalid_path} = TrustedPath.canonicalize_absolute(<<"/bin/", 255>>)
+
+      assert {:error, :invalid_path} =
+               TrustedPath.canonicalize_absolute("/" <> String.duplicate("a", 4_096))
 
       assert {:error, :path_not_found} =
                TrustedPath.canonicalize_absolute(

@@ -6,6 +6,7 @@ defmodule Arbor.Shell.TrustedPath do
   @max_symlinks 40
   @chunk_size 65_536
   @max_file_bytes 512 * 1024 * 1024
+  @max_path_bytes 4_096
 
   defmodule Identity do
     @moduledoc false
@@ -146,20 +147,22 @@ defmodule Arbor.Shell.TrustedPath do
   defp closed_executable_option(_opts), do: {:error, :malformed_options}
 
   defp validate_absolute_path(path) do
-    cond do
-      path == "" ->
-        {:error, :invalid_path}
-
-      String.contains?(path, <<0>>) ->
-        {:error, :invalid_path}
-
-      Path.type(path) != :absolute ->
-        {:error, :relative_path}
-
-      true ->
-        :ok
+    with :ok <- validate_path_text(path) do
+      if Path.type(path) == :absolute, do: :ok, else: {:error, :relative_path}
     end
   end
+
+  defp validate_path_text(path) when is_binary(path) do
+    cond do
+      path == "" -> {:error, :invalid_path}
+      byte_size(path) > @max_path_bytes -> {:error, :invalid_path}
+      not String.valid?(path) -> {:error, :invalid_path}
+      String.contains?(path, <<0>>) -> {:error, :invalid_path}
+      true -> :ok
+    end
+  end
+
+  defp validate_path_text(_path), do: {:error, :invalid_path}
 
   defp trusted_regular_stat(path, executable_required) do
     case File.stat(path, time: :posix) do
@@ -360,8 +363,10 @@ defmodule Arbor.Shell.TrustedPath do
     do: {:error, :too_many_symlinks}
 
   defp resolve_links(path, count) do
-    parts = Path.split(Path.expand(path))
-    walk_parts(parts, "/", count)
+    with :ok <- validate_absolute_path(path) do
+      parts = Path.split(Path.expand(path))
+      walk_parts(parts, "/", count)
+    end
   end
 
   defp walk_parts([], current, _count), do: {:ok, Path.expand(current)}
@@ -375,17 +380,17 @@ defmodule Arbor.Shell.TrustedPath do
 
     case File.lstat(candidate) do
       {:ok, %File.Stat{type: :symlink}} ->
-        case File.read_link(candidate) do
-          {:ok, target} ->
-            target =
-              if Path.type(target) == :absolute,
-                do: target,
-                else: Path.expand(target, Path.dirname(candidate))
+        with {:ok, target} <- File.read_link(candidate),
+             :ok <- validate_path_text(target) do
+          target =
+            if Path.type(target) == :absolute,
+              do: target,
+              else: Path.expand(target, Path.dirname(candidate))
 
-            resolve_links(Path.join([target | rest]), count + 1)
-
-          {:error, _reason} ->
-            {:error, :path_not_found}
+          resolve_links(Path.join([target | rest]), count + 1)
+        else
+          {:error, :invalid_path} -> {:error, :invalid_path}
+          {:error, _reason} -> {:error, :path_not_found}
         end
 
       {:ok, _stat} ->
