@@ -2,23 +2,28 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   @moduledoc """
   Pure Apple Container admission evidence validation.
 
-  This core consumes operator-owned immutable image/dependency policy plus
-  already-collected bounded evidence and returns either a compact admitted
-  receipt or a stable fail-closed error. It performs no IO, process execution,
-  filesystem access, environment reads, or application config reads.
+  This aggregate core consumes operator-owned immutable image/dependency policy
+  plus already-collected bounded evidence, composes the nested control-plane
+  admission decision, and returns either a compact admitted receipt or a stable
+  fail-closed error. It performs no IO, process execution, filesystem access,
+  environment reads, Application config reads, or TrustedPath disk verification.
 
   Fixed platform authority (macOS 26+/arm64, `/usr/local/bin/container`,
   CLI/API 1.1.x release line, Apple signing identity/requirement) lives inside
-  this module - never as caller options.
+  this module and the nested control-plane core - never as caller options.
 
-  Normalized-evidence contract: the later imperative prober owns exact JSON
-  decoding and key projection into this closed evidence surface. This pure
-  core owns all admission decisions over already-normalized evidence. Do not
-  treat a caller-provided receipt as executable authority.
+  Startup-owner control-plane bindings are required separately from probe
+  evidence. Nested `evidence.control_plane` is the closed probe surface accepted
+  by `AppleContainerControlPlaneAdmissionCore`. Legacy aggregate `runtime` and
+  `service_status` fields remain as corroborating compatibility evidence and
+  never establish authority over the signed control-plane receipt.
 
-  The production `Arbor.Shell.execute_spawn_capable/3` facade remains fail-closed
-  until a later imperative adapter interprets admitted receipts.
+  Do not treat a caller-provided receipt as executable authority. The production
+  `Arbor.Shell.execute_spawn_capable/3` facade remains fail-closed until a later
+  imperative adapter interprets admitted receipts.
   """
+
+  alias Arbor.Shell.AppleContainerControlPlaneAdmissionCore, as: ControlPlane
 
   # --- Fixed platform authority (not caller-configurable) ---
 
@@ -84,7 +89,8 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     :runtime,
     :service_status,
     :image_inspect,
-    :dependency_baseline
+    :dependency_baseline,
+    :control_plane
   ]
   @allowed_evidence_keys MapSet.new(
                            @logical_evidence_keys ++
@@ -248,6 +254,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
             codesign_verified: true
           },
           service: %{status: String.t(), install_root: String.t()},
+          control_plane: ControlPlane.receipt(),
           image: %{
             reference: String.t(),
             index_digest: String.t(),
@@ -269,15 +276,26 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
         }
 
   @doc """
-  Construct and validate an admission receipt from policy + bounded evidence.
+  Legacy single-argument constructor. Always fails closed.
 
-  Returns `{:ok, receipt}` only when every bound field proves the fixed platform
-  authority, exact immutable image selection, approved Env/Labels, and a Linux
-  dependency baseline. Fails closed on partial, oversized, malformed, or
-  mismatched evidence.
+  Control-plane startup bindings are required authority and cannot be omitted
+  or embedded in probe evidence. Call `new/2` with owner-issued bindings.
   """
-  @spec new(map()) :: {:ok, receipt()} | {:error, term()}
-  def new(input) when is_map(input) do
+  @spec new(term()) :: {:error, :control_plane_bindings_required}
+  def new(_input), do: {:error, :control_plane_bindings_required}
+
+  @doc """
+  Construct and validate an admission receipt from policy + bounded evidence
+  plus startup-owner control-plane bindings.
+
+  `control_plane_bindings` is owner-bound identity authority passed unchanged to
+  `ControlPlane.new/2`. Nested `evidence.control_plane` is the closed control-plane
+  probe surface. Returns `{:ok, receipt}` only when every aggregate bound field
+  and the nested control-plane admission succeed and are mutually consistent.
+  Fails closed on partial, oversized, malformed, or mismatched evidence.
+  """
+  @spec new(term(), term()) :: {:ok, receipt()} | {:error, term()}
+  def new(input, control_plane_bindings) when is_map(input) do
     with :ok <-
            validate_closed_keys(input, @allowed_request_keys, @logical_request_keys, :request),
          {:ok, policy} <- fetch_required_map(input, :policy, :missing_policy, :invalid_policy),
@@ -296,6 +314,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
          {:ok, host_platform} <- fetch_host_platform(evidence),
          {:ok, runtime} <- fetch_runtime(evidence),
          {:ok, service} <- fetch_service_status(evidence),
+         {:ok, control_plane_evidence} <- fetch_control_plane_evidence(evidence),
          {:ok, image_inspect} <- fetch_image_inspect(evidence),
          {:ok, baseline} <- fetch_dependency_baseline(evidence),
          :ok <- validate_host_platform(host_platform),
@@ -303,7 +322,17 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
            validate_runtime_and_service(runtime, service),
          {:ok, image_fields} <- validate_image(normalized_policy, image_inspect),
          {:ok, baseline_fields} <-
-           validate_dependency_baseline(normalized_policy, baseline, image_fields) do
+           validate_dependency_baseline(normalized_policy, baseline, image_fields),
+         {:ok, child_receipt} <- ControlPlane.new(control_plane_bindings, control_plane_evidence),
+         :ok <-
+           cross_check_control_plane(
+             runtime,
+             service,
+             cli_version,
+             api_version,
+             executable_sha256,
+             child_receipt
+           ) do
       receipt = %{
         admitted: true,
         platform: %{
@@ -311,21 +340,24 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
           version: host_platform.version,
           architecture: @required_arch
         },
+        # Runtime/service authority comes from the admitted control-plane child,
+        # not from unbound aggregate corroboration fields alone.
         runtime: %{
-          path: @runtime_path,
-          cli_version: cli_version,
-          api_version: api_version,
-          build: @required_build,
-          executable_sha256: executable_sha256,
-          signing_identifier: @signing_identifier,
-          team_id: @team_id,
-          designated_requirement: @designated_requirement,
+          path: child_receipt.cli.path,
+          cli_version: child_receipt.cli.version,
+          api_version: child_receipt.apiserver.version,
+          build: child_receipt.cli.build,
+          executable_sha256: child_receipt.cli.sha256,
+          signing_identifier: child_receipt.cli.signing_identifier,
+          team_id: child_receipt.cli.team_id,
+          designated_requirement: child_receipt.cli.designated_requirement,
           codesign_verified: true
         },
         service: %{
-          status: "running",
-          install_root: @install_root
+          status: child_receipt.service.status,
+          install_root: child_receipt.service.install_root
         },
+        control_plane: child_receipt,
         image: image_fields,
         toolchain: normalized_policy.toolchain,
         dependency_baseline: baseline_fields
@@ -337,7 +369,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     _ -> {:error, :invalid_request}
   end
 
-  def new(_), do: {:error, :invalid_request}
+  def new(_input, _control_plane_bindings), do: {:error, :invalid_request}
 
   @doc """
   Convert an admission receipt to a JSON-clean map (no raw command output).
@@ -366,6 +398,7 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
         "status" => receipt.service.status,
         "install_root" => receipt.service.install_root
       },
+      "control_plane" => ControlPlane.show(receipt.control_plane),
       "image" => %{
         "reference" => receipt.image.reference,
         "index_digest" => receipt.image.index_digest,
@@ -1014,6 +1047,17 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
     end
   end
 
+  # Nested control-plane evidence is passed through to ControlPlane unchanged.
+  # Do not accept a caller-provided child receipt as authority.
+  defp fetch_control_plane_evidence(evidence) do
+    fetch_required_map(
+      evidence,
+      :control_plane,
+      :missing_control_plane,
+      :invalid_control_plane
+    )
+  end
+
   defp fetch_dependency_baseline(evidence) do
     with {:ok, baseline} <-
            fetch_required_map(
@@ -1199,6 +1243,59 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
             end
           end
       end
+    end
+  end
+
+  # Cross-check legacy aggregate runtime/service corroboration against the
+  # admitted control-plane child. Aggregate fields never override signed child
+  # authority (path, version, build, SHA, signing identity, install root).
+  defp cross_check_control_plane(
+         runtime,
+         service,
+         cli_version,
+         api_version,
+         executable_sha256,
+         child
+       ) do
+    cond do
+      runtime.path != child.cli.path ->
+        {:error, :aggregate_runtime_path_mismatch}
+
+      runtime.cli_version != child.cli.version or cli_version != child.cli.version ->
+        {:error, :aggregate_cli_version_mismatch}
+
+      runtime.cli_build != child.cli.build or child.cli.build != @required_build ->
+        {:error, :aggregate_cli_build_mismatch}
+
+      executable_sha256 != child.cli.sha256 or
+          runtime.executable_sha256 != child.cli.sha256 ->
+        {:error, :aggregate_executable_sha256_mismatch}
+
+      runtime.signing.identifier != child.cli.signing_identifier ->
+        {:error, :aggregate_signing_identifier_mismatch}
+
+      runtime.signing.team_id != child.cli.team_id ->
+        {:error, :aggregate_signing_team_mismatch}
+
+      runtime.signing.designated_requirement != child.cli.designated_requirement ->
+        {:error, :aggregate_designated_requirement_mismatch}
+
+      # Signed API version is authoritative; service self-report + aggregate CLI
+      # must not override a different admitted child API version.
+      api_version != child.apiserver.version ->
+        {:error, :aggregate_api_version_mismatch}
+
+      service.apiserver_build != child.apiserver.build ->
+        {:error, :aggregate_api_build_mismatch}
+
+      service.status != child.service.status ->
+        {:error, :aggregate_service_status_mismatch}
+
+      service.install_root != child.service.install_root ->
+        {:error, :aggregate_install_root_mismatch}
+
+      true ->
+        :ok
     end
   end
 
