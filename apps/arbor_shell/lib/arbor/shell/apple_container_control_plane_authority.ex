@@ -15,8 +15,11 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
 
   alias Arbor.Shell.AppleContainerControlPlaneAdmissionCore, as: ControlPlane
   alias Arbor.Shell.Config
+  alias Arbor.Shell.StartupEpoch
   alias Arbor.Shell.TrustedPath
   alias Arbor.Shell.TrustedPath.Identity
+
+  @epoch_namespace __MODULE__
 
   @type status :: :unsupported | :unavailable | :pinned
 
@@ -94,8 +97,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
   @doc false
   @spec clear_boot_epoch(reference() | term()) :: :ok
   def clear_boot_epoch(boot_epoch) when is_reference(boot_epoch) do
-    :persistent_term.erase(boot_epoch_key(boot_epoch))
-    :ok
+    StartupEpoch.clear(@epoch_namespace, boot_epoch)
   end
 
   def clear_boot_epoch(_boot_epoch), do: :ok
@@ -144,7 +146,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
         {:reply, {:ok, Map.new(bindings)}, state}
 
       {:error, reason} ->
-        poison_boot_epoch(state.boot_epoch)
+        poison_epoch(state.boot_epoch)
 
         {:stop, {:control_plane_identity_drift, reason},
          {:error, {:control_plane_identity_drift, reason}}, state}
@@ -180,26 +182,22 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
       bindings: nil
     }
 
-    case boot_epoch_state(boot_epoch) do
+    case StartupEpoch.status(@epoch_namespace, boot_epoch) do
       :unbound ->
         base
         |> bootstrap_fresh(trusted_path)
-        |> seal_initial_boot_epoch()
+        |> persist_initial_epoch()
 
-      {:pinned, ^platform, expected_fingerprint} ->
-        repin_boot_epoch(base, trusted_path, expected_fingerprint)
+      :bound ->
+        repin_boot_epoch(base, trusted_path)
 
-      {:unsupported, ^platform} ->
+      {:sealed, :unsupported} ->
         %{base | status: :unsupported, reason: :unsupported_host}
 
-      {:unavailable, ^platform} ->
+      {:sealed, :unavailable} ->
         %{base | status: :unavailable, reason: :boot_epoch_unavailable}
 
       :poisoned ->
-        %{base | status: :unavailable, reason: :boot_epoch_poisoned}
-
-      _mismatched_epoch ->
-        poison_boot_epoch(boot_epoch)
         %{base | status: :unavailable, reason: :boot_epoch_poisoned}
     end
   end
@@ -212,35 +210,74 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
     end
   end
 
-  defp seal_initial_boot_epoch(%{boot_epoch: nil} = state), do: state
+  defp persist_initial_epoch(%{boot_epoch: nil} = state), do: state
 
-  defp seal_initial_boot_epoch(%{status: :pinned, bindings: bindings} = state) do
-    put_boot_epoch(state.boot_epoch, {:pinned, state.platform, binding_fingerprint(bindings)})
-    state
+  defp persist_initial_epoch(%{status: :pinned, bindings: bindings} = state) do
+    case StartupEpoch.bind(
+           @epoch_namespace,
+           state.boot_epoch,
+           epoch_bind_term(state.platform, bindings)
+         ) do
+      result when result in [:bound, :matched] ->
+        state
+
+      :poisoned ->
+        %{state | status: :unavailable, reason: :boot_epoch_poisoned, bindings: nil}
+
+      :sealed ->
+        poison_epoch(state.boot_epoch)
+        %{state | status: :unavailable, reason: :boot_epoch_poisoned, bindings: nil}
+    end
   end
 
-  defp seal_initial_boot_epoch(%{status: :unsupported} = state) do
-    put_boot_epoch(state.boot_epoch, {:unsupported, state.platform})
-    state
+  defp persist_initial_epoch(%{status: :unsupported} = state) do
+    case StartupEpoch.seal(@epoch_namespace, state.boot_epoch, :unsupported) do
+      :sealed ->
+        state
+
+      _other ->
+        poison_epoch(state.boot_epoch)
+        %{state | status: :unavailable, reason: :boot_epoch_poisoned}
+    end
   end
 
-  defp seal_initial_boot_epoch(%{status: :unavailable} = state) do
-    put_boot_epoch(state.boot_epoch, {:unavailable, state.platform})
-    state
+  defp persist_initial_epoch(%{status: :unavailable} = state) do
+    case StartupEpoch.seal(@epoch_namespace, state.boot_epoch, :unavailable) do
+      :sealed ->
+        state
+
+      _other ->
+        poison_epoch(state.boot_epoch)
+        %{state | status: :unavailable, reason: :boot_epoch_poisoned, bindings: nil}
+    end
   end
 
-  defp repin_boot_epoch(base, trusted_path, expected_fingerprint) do
+  defp repin_boot_epoch(base, trusted_path) do
     case pin_from_config(base, trusted_path) do
       %{status: :pinned, bindings: bindings} = state ->
-        if binding_fingerprint(bindings) == expected_fingerprint do
-          state
-        else
-          poison_boot_epoch(base.boot_epoch)
-          %{base | status: :unavailable, reason: :boot_epoch_poisoned}
+        case StartupEpoch.bind(
+               @epoch_namespace,
+               base.boot_epoch,
+               epoch_bind_term(base.platform, bindings)
+             ) do
+          :matched ->
+            state
+
+          :bound ->
+            # Unexpected unbound transition under a bound epoch — fail closed.
+            poison_epoch(base.boot_epoch)
+            %{base | status: :unavailable, reason: :boot_epoch_poisoned}
+
+          :poisoned ->
+            %{base | status: :unavailable, reason: :boot_epoch_poisoned}
+
+          :sealed ->
+            poison_epoch(base.boot_epoch)
+            %{base | status: :unavailable, reason: :boot_epoch_poisoned}
         end
 
       _unavailable ->
-        poison_boot_epoch(base.boot_epoch)
+        poison_epoch(base.boot_epoch)
         %{base | status: :unavailable, reason: :boot_epoch_poisoned}
     end
   end
@@ -505,25 +542,10 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
     if Map.has_key?(status, key), do: Map.put(status, key, :redacted), else: status
   end
 
-  defp boot_epoch_state(nil), do: :unbound
+  defp epoch_bind_term(platform, bindings), do: {platform, bindings}
 
-  defp boot_epoch_state(boot_epoch) do
-    :persistent_term.get(boot_epoch_key(boot_epoch), :unbound)
-  end
-
-  defp put_boot_epoch(boot_epoch, value) when is_reference(boot_epoch) do
-    :persistent_term.put(boot_epoch_key(boot_epoch), value)
-  end
-
-  defp poison_boot_epoch(nil), do: :ok
-  defp poison_boot_epoch(boot_epoch), do: put_boot_epoch(boot_epoch, :poisoned)
-
-  defp boot_epoch_key(boot_epoch), do: {__MODULE__, :boot_epoch, boot_epoch}
-
-  defp binding_fingerprint(bindings) do
-    bindings
-    |> :erlang.term_to_binary([:deterministic])
-    |> then(&:crypto.hash(:sha256, &1))
+  defp poison_epoch(boot_epoch) do
+    StartupEpoch.poison(@epoch_namespace, boot_epoch)
   end
 
   defp call(server, request) do
