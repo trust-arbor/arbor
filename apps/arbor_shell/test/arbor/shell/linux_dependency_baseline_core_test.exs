@@ -117,6 +117,57 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCoreTest do
     put_in(input, [:manifest, key], value)
   end
 
+  # --- Limits projection for imperative shells ---
+
+  describe "limits/0" do
+    test "exposes the fixed v1 inventory bounds without changing semantics" do
+      assert LinuxDependencyBaselineCore.limits() == %{
+               max_entries: 50_000,
+               max_total_bytes: 512 * 1024 * 1024,
+               max_path_bytes: 4_096,
+               max_component_bytes: 255,
+               max_path_depth: 48
+             }
+    end
+
+    test "limits match the existing too_many_entries and total_bytes_exceeded bounds" do
+      limits = LinuxDependencyBaselineCore.limits()
+
+      entries =
+        for i <- 1..(limits.max_entries + 1) do
+          dir("e#{i}")
+        end
+
+      assert {:error, :too_many_entries} =
+               LinuxDependencyBaselineCore.new(%{
+                 manifest:
+                   Map.merge(build_input([dir("x")]).manifest, %{
+                     entry_count: limits.max_entries + 1,
+                     total_bytes: 0,
+                     baseline_tree_digest: @other_hex
+                   }),
+                 entries: entries
+               })
+
+      entries = [
+        dir("pkg"),
+        file("pkg/big", size: limits.max_total_bytes, sha256: @content_hex),
+        file("pkg/extra", size: 1, sha256: @other_content_hex)
+      ]
+
+      assert {:error, :total_bytes_exceeded} =
+               LinuxDependencyBaselineCore.new(%{
+                 manifest:
+                   Map.merge(build_input([dir("x")]).manifest, %{
+                     entry_count: 3,
+                     total_bytes: limits.max_total_bytes + 1,
+                     baseline_tree_digest: @other_hex
+                   }),
+                 entries: entries
+               })
+    end
+  end
+
   # --- Positive path ---
 
   describe "positive validation" do

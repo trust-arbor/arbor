@@ -118,6 +118,24 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
           entries: [entry()]
         }
 
+  @doc false
+  @spec limits() :: %{
+          max_entries: pos_integer(),
+          max_total_bytes: pos_integer(),
+          max_path_bytes: pos_integer(),
+          max_component_bytes: pos_integer(),
+          max_path_depth: pos_integer()
+        }
+  def limits do
+    %{
+      max_entries: @max_entries,
+      max_total_bytes: @max_total_bytes,
+      max_path_bytes: @max_path_bytes,
+      max_component_bytes: @max_component_bytes,
+      max_path_depth: @max_path_depth
+    }
+  end
+
   @doc """
   Construct and validate a Linux dependency baseline from a closed document.
 
