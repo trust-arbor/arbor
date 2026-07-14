@@ -9,11 +9,13 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
 
   All functions are pure: plain data in/out. No File, System, Application,
   GenServer, ETS, process messaging, time, randomness, logging, or IO.
-  Deterministic `:crypto.hash/2` is the only crypto primitive used.
+  Deterministic incremental SHA-256 (`:crypto.hash_init/1`, `hash_update/2`,
+  `hash_final/1`) is the only crypto primitive used.
 
   A returned receipt is **evidence**, never executable authority. The production
   spawn backend and materializer remain separate imperative shells that must
-  re-verify and apply authority gates independently.
+  re-verify and apply authority gates independently. This core does not claim
+  filesystem materialization or offline provisioning readiness.
   """
 
   # --- Fixed v1 constants ---
@@ -116,15 +118,6 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
           entries: [entry()]
         }
 
-  @type dependency_baseline_evidence :: %{
-          image_index_digest: String.t(),
-          image_manifest_digest: String.t(),
-          mix_lock_digest: String.t(),
-          baseline_tree_digest: String.t(),
-          platform: String.t(),
-          provisioning: %{status: String.t(), mode: String.t()}
-        }
-
   @doc """
   Construct and validate a Linux dependency baseline from a closed document.
 
@@ -213,44 +206,14 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
   end
 
   @doc """
-  Project the dependency_baseline evidence shape used by
-  `Arbor.Shell.AppleContainerAdmissionCore`.
-
-  Returns a closed map with provisioning `%{status: "ready", mode: "offline"}`.
-  Evidence only — not executable authority.
-  """
-  @spec to_dependency_baseline_evidence(state()) :: dependency_baseline_evidence()
-  def to_dependency_baseline_evidence(%{
-        image_index_digest: image_index_digest,
-        image_manifest_digest: image_manifest_digest,
-        mix_lock_digest: mix_lock_digest,
-        baseline_tree_digest: baseline_tree_digest,
-        platform: platform
-      }) do
-    %{
-      image_index_digest: image_index_digest,
-      image_manifest_digest: image_manifest_digest,
-      mix_lock_digest: mix_lock_digest,
-      baseline_tree_digest: baseline_tree_digest,
-      platform: platform,
-      provisioning: %{status: "ready", mode: "offline"}
-    }
-  end
-
-  @doc """
   Return the normalized, bytewise-sorted inventory for a later materializer shell.
 
   Explicitly named so callers do not treat `show/1` receipts as materialization
-  plans. Evidence only — not executable authority.
+  plans. Evidence only — not executable authority. Does not claim provisioning
+  readiness; the imperative materializer owns that after filesystem verification.
   """
   @spec materialization_entries(state()) :: [entry()]
   def materialization_entries(%{entries: entries}) when is_list(entries), do: entries
-
-  @doc """
-  Alias for `materialization_entries/1` — sorted normalized inventory plan.
-  """
-  @spec sorted_entries(state()) :: [entry()]
-  def sorted_entries(state), do: materialization_entries(state)
 
   # --- Manifest ---
 
@@ -601,6 +564,11 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
   end
 
   # --- Tree structure ---
+  #
+  # Entries are processed in bytewise path order. Immediate parents therefore
+  # appear before children when present, so a single linear pass is enough:
+  # duplicate paths, missing parents, and file-as-parent conflicts (revealed when
+  # the child is examined) all fail closed without scanning the remaining list.
 
   defp validate_tree_structure(sorted_entries) do
     validate_tree_structure(sorted_entries, MapSet.new(), MapSet.new())
@@ -611,28 +579,21 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
   defp validate_tree_structure([entry | rest], directories, all_paths) do
     path = entry.path
 
-    cond do
-      MapSet.member?(all_paths, path) ->
-        {:error, :duplicate_path}
+    if MapSet.member?(all_paths, path) do
+      {:error, :duplicate_path}
+    else
+      with :ok <- require_parents(path, directories, all_paths) do
+        new_all = MapSet.put(all_paths, path)
 
-      true ->
-        with :ok <- require_parents(path, directories, all_paths) do
-          new_all = MapSet.put(all_paths, path)
-
-          new_dirs =
-            if entry.type == "directory" do
-              MapSet.put(directories, path)
-            else
-              directories
-            end
-
-          # A regular file must not be an ancestor of any later path.
-          if entry.type == "regular" and Enum.any?(rest, &path_is_descendant?(&1.path, path)) do
-            {:error, :file_descendant_conflict}
+        new_dirs =
+          if entry.type == "directory" do
+            MapSet.put(directories, path)
           else
-            validate_tree_structure(rest, new_dirs, new_all)
+            directories
           end
-        end
+
+        validate_tree_structure(rest, new_dirs, new_all)
+      end
     end
   end
 
@@ -647,6 +608,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
             :ok
 
           MapSet.member?(all_paths, parent) ->
+            # Parent exists but is a regular file (or other non-directory).
+            # Fail closed when the child reveals the conflict.
             {:error, :parent_not_directory}
 
           true ->
@@ -671,21 +634,21 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
     end
   end
 
-  defp path_is_descendant?(candidate, prefix) do
-    String.starts_with?(candidate, prefix <> "/")
-  end
-
   defp path_lte?(a, b) when is_binary(a) and is_binary(b), do: a <= b
 
   # --- Digests ---
 
+  # Incremental SHA-256 over the fixed v1 framing (domain tag then entry frames).
+  # Avoids quadratic binary concatenation at the 50_000-entry / 512 MiB bounds.
   defp compute_baseline_tree_digest(sorted_entries) do
-    binary =
-      Enum.reduce(sorted_entries, @domain_tag, fn entry, acc ->
-        acc <> frame_entry(entry)
+    hash_state =
+      Enum.reduce(sorted_entries, :crypto.hash_update(:crypto.hash_init(:sha256), @domain_tag), fn
+        entry, acc ->
+          :crypto.hash_update(acc, frame_entry(entry))
       end)
 
-    :crypto.hash(:sha256, binary)
+    hash_state
+    |> :crypto.hash_final()
     |> Base.encode16(case: :lower)
   end
 

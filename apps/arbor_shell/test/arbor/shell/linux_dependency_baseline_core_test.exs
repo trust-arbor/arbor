@@ -143,8 +143,52 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCoreTest do
                "hex_core/priv",
                "hex_core/priv/native.so"
              ]
+    end
 
-      assert LinuxDependencyBaselineCore.sorted_entries(state) == sorted
+    test "known-answer v1 tree digest for pkg + pkg/a" do
+      # Fixed KA independent of the local tree_digest/1 helper.
+      # directory "pkg"; regular "pkg/a" size 3; sha256 = 64×'1'; executable false
+      known_digest = "1d76d74bf0c8da43719360aed0b9de933169a3b5f0a2b0436a6e9d057bc22afc"
+      ones = String.duplicate("1", 64)
+
+      entries = [
+        %{path: "pkg", type: "directory"},
+        %{
+          path: "pkg/a",
+          type: "regular",
+          size: 3,
+          sha256: ones,
+          executable: false
+        }
+      ]
+
+      input = %{
+        manifest: %{
+          schema: "1",
+          platform: "linux/arm64",
+          image_index_digest: @index_digest,
+          image_manifest_digest: @manifest_digest,
+          mix_lock_digest: @mix_lock_hex,
+          baseline_tree_digest: known_digest,
+          toolchain: %{
+            erlang: @erlang_version,
+            elixir: @elixir_version
+          },
+          entry_count: 2,
+          total_bytes: 3
+        },
+        entries: entries
+      }
+
+      assert {:ok, state} = LinuxDependencyBaselineCore.new(input)
+      assert state.baseline_tree_digest == known_digest
+
+      refute match?(
+               {:ok, _},
+               LinuxDependencyBaselineCore.new(
+                 put_in(input, [:manifest, :baseline_tree_digest], String.duplicate("0", 64))
+               )
+             )
     end
 
     test "tree digest is deterministic and independent of input entry order" do
@@ -185,19 +229,6 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCoreTest do
       refute Map.has_key?(shown, "entries")
       refute Map.has_key?(shown, :entries)
       assert Jason.encode!(shown)
-    end
-
-    test "to_dependency_baseline_evidence/1 matches admission evidence shape" do
-      assert {:ok, state} = LinuxDependencyBaselineCore.new(build_input(fixture_entries()))
-
-      assert LinuxDependencyBaselineCore.to_dependency_baseline_evidence(state) == %{
-               image_index_digest: @index_digest,
-               image_manifest_digest: @manifest_digest,
-               mix_lock_digest: @mix_lock_hex,
-               baseline_tree_digest: state.baseline_tree_digest,
-               platform: "linux/arm64",
-               provisioning: %{status: "ready", mode: "offline"}
-             }
     end
 
     test "accepts string-keyed request, manifest, toolchain, and entries" do
@@ -612,14 +643,13 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCoreTest do
     end
 
     test "rejects parent that is a regular file (file/descendant conflict)" do
-      # Sorted processing detects the regular file before its descendant and
-      # reports the conflict at the file node.
+      # Linear sorted pass fails closed when the child reveals a non-directory parent.
       entries = [
         file("pkg", size: 1),
         file("pkg/nested", size: 1)
       ]
 
-      assert {:error, :file_descendant_conflict} =
+      assert {:error, :parent_not_directory} =
                LinuxDependencyBaselineCore.new(%{
                  build_input(entries)
                  | entries: entries,
@@ -648,14 +678,14 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCoreTest do
                })
     end
 
-    test "rejects file/descendant conflicts" do
+    test "rejects file/descendant conflicts via non-directory parent" do
       entries = [
         dir("root"),
         file("root/leaf", size: 1),
         dir("root/leaf/child")
       ]
 
-      assert {:error, :file_descendant_conflict} =
+      assert {:error, :parent_not_directory} =
                LinuxDependencyBaselineCore.new(%{
                  build_input([dir("root")])
                  | entries: entries,
