@@ -472,11 +472,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       assert File.exists?(Path.join(lease.worktree_path, "dirty.txt"))
       assert lease.ownership == "owned"
 
+      owner_ref = Process.monitor(owner)
       Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}, 2_000
 
-      assert_eventually(fn ->
-        refute File.dir?(lease.worktree_path)
-      end)
+      assert_eventually(
+        fn ->
+          assert {:error, :not_found} =
+                   Workspace.Inspect.run(%{workspace_id: lease.workspace_id}, %{})
+
+          refute File.dir?(lease.worktree_path)
+        end,
+        250
+      )
     end
 
     test "owner death preserves reused worktrees", %{tmp_dir: tmp_dir} do
