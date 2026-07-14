@@ -25,6 +25,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
           reason: atom() | nil,
           platform: atom(),
           trusted_path: module(),
+          boot_epoch: reference() | nil,
           bindings: map() | nil
         }
 
@@ -32,19 +33,20 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
           required(String.t()) => String.t() | nil
         }
 
-  @allowed_start_keys MapSet.new([:name, :trusted_path, :host_platform])
+  @allowed_start_keys MapSet.new([:name, :trusted_path, :host_platform, :boot_epoch])
 
   @doc """
   Start the control-plane authority owner.
 
-  Production callers must pass no authority-bearing options. Direct-start tests
-  may inject `:name`, `:trusted_path`, and/or `:host_platform` only.
+  Production callers pass only the application-generated `:boot_epoch` token.
+  Direct-start tests may additionally inject `:name`, `:trusted_path`, and/or
+  `:host_platform`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    opts = List.wrap(opts)
-    name = Keyword.get(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, name: name)
+    with {:ok, name} <- start_name(opts) do
+      GenServer.start_link(__MODULE__, opts, name: name)
+    end
   end
 
   @doc """
@@ -89,13 +91,23 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
     end
   end
 
+  @doc false
+  @spec clear_boot_epoch(reference() | term()) :: :ok
+  def clear_boot_epoch(boot_epoch) when is_reference(boot_epoch) do
+    :persistent_term.erase(boot_epoch_key(boot_epoch))
+    :ok
+  end
+
+  def clear_boot_epoch(_boot_epoch), do: :ok
+
   @impl true
   def init(opts) do
     case normalize_start_opts(opts) do
       {:ok, start_opts} ->
         platform = Map.fetch!(start_opts, :host_platform)
         trusted_path = Map.fetch!(start_opts, :trusted_path)
-        {:ok, bootstrap(platform, trusted_path)}
+        boot_epoch = Map.fetch!(start_opts, :boot_epoch)
+        {:ok, bootstrap(platform, trusted_path, boot_epoch)}
 
       {:error, reason} ->
         # Reject authority-bearing start injection without crashing the app:
@@ -106,6 +118,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
            reason: reason,
            platform: detect_host_platform(),
            trusted_path: TrustedPath,
+           boot_epoch: nil,
            bindings: nil
          }}
     end
@@ -131,6 +144,8 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
         {:reply, {:ok, Map.new(bindings)}, state}
 
       {:error, reason} ->
+        poison_boot_epoch(state.boot_epoch)
+
         {:stop, {:control_plane_identity_drift, reason},
          {:error, {:control_plane_identity_drift, reason}}, state}
     end
@@ -142,34 +157,91 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
 
   @impl true
   def format_status(status) when is_map(status) do
-    case Map.get(status, :state) do
-      state when is_map(state) ->
-        Map.put(status, :state, redact_state(state))
+    state = Map.get(status, :state, %{})
 
-      _other ->
-        status
-    end
+    status
+    |> Map.put(:message, :redacted)
+    |> Map.put(:state, redact_state(state))
+    |> redact_status_field(:reason)
+    |> redact_status_field(:log)
   end
 
   def format_status(status), do: status
 
   # --- Bootstrap -------------------------------------------------------------
 
-  defp bootstrap(platform, trusted_path) do
+  defp bootstrap(platform, trusted_path, boot_epoch) do
     base = %{
       status: :unavailable,
       reason: nil,
       platform: platform,
       trusted_path: trusted_path,
+      boot_epoch: boot_epoch,
       bindings: nil
     }
 
-    cond do
-      platform != :darwin_arm64 ->
+    case boot_epoch_state(boot_epoch) do
+      :unbound ->
+        base
+        |> bootstrap_fresh(trusted_path)
+        |> seal_initial_boot_epoch()
+
+      {:pinned, ^platform, expected_fingerprint} ->
+        repin_boot_epoch(base, trusted_path, expected_fingerprint)
+
+      {:unsupported, ^platform} ->
         %{base | status: :unsupported, reason: :unsupported_host}
 
-      true ->
-        pin_from_config(base, trusted_path)
+      {:unavailable, ^platform} ->
+        %{base | status: :unavailable, reason: :boot_epoch_unavailable}
+
+      :poisoned ->
+        %{base | status: :unavailable, reason: :boot_epoch_poisoned}
+
+      _mismatched_epoch ->
+        poison_boot_epoch(boot_epoch)
+        %{base | status: :unavailable, reason: :boot_epoch_poisoned}
+    end
+  end
+
+  defp bootstrap_fresh(base, trusted_path) do
+    if base.platform == :darwin_arm64 do
+      pin_from_config(base, trusted_path)
+    else
+      %{base | status: :unsupported, reason: :unsupported_host}
+    end
+  end
+
+  defp seal_initial_boot_epoch(%{boot_epoch: nil} = state), do: state
+
+  defp seal_initial_boot_epoch(%{status: :pinned, bindings: bindings} = state) do
+    put_boot_epoch(state.boot_epoch, {:pinned, state.platform, binding_fingerprint(bindings)})
+    state
+  end
+
+  defp seal_initial_boot_epoch(%{status: :unsupported} = state) do
+    put_boot_epoch(state.boot_epoch, {:unsupported, state.platform})
+    state
+  end
+
+  defp seal_initial_boot_epoch(%{status: :unavailable} = state) do
+    put_boot_epoch(state.boot_epoch, {:unavailable, state.platform})
+    state
+  end
+
+  defp repin_boot_epoch(base, trusted_path, expected_fingerprint) do
+    case pin_from_config(base, trusted_path) do
+      %{status: :pinned, bindings: bindings} = state ->
+        if binding_fingerprint(bindings) == expected_fingerprint do
+          state
+        else
+          poison_boot_epoch(base.boot_epoch)
+          %{base | status: :unavailable, reason: :boot_epoch_poisoned}
+        end
+
+      _unavailable ->
+        poison_boot_epoch(base.boot_epoch)
+        %{base | status: :unavailable, reason: :boot_epoch_poisoned}
     end
   end
 
@@ -317,16 +389,18 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
   defp default_start_opts do
     %{
       trusted_path: TrustedPath,
-      host_platform: detect_host_platform()
+      host_platform: detect_host_platform(),
+      boot_epoch: nil
     }
   end
 
-  defp normalize_start_value(:name, name)
-       when is_atom(name) or is_pid(name) or is_tuple(name) do
-    {:ok, name}
-  end
+  defp normalize_start_value(:name, name), do: validate_start_name(name)
 
-  defp normalize_start_value(:name, _name), do: {:error, :invalid_control_plane_authority_name}
+  defp normalize_start_value(:boot_epoch, boot_epoch) when is_reference(boot_epoch),
+    do: {:ok, boot_epoch}
+
+  defp normalize_start_value(:boot_epoch, _boot_epoch),
+    do: {:error, :invalid_control_plane_boot_epoch}
 
   defp normalize_start_value(:trusted_path, module) when is_atom(module) do
     {:ok, module}
@@ -341,6 +415,28 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
 
   defp normalize_start_value(:host_platform, _platform),
     do: {:error, :invalid_control_plane_host_platform}
+
+  defp start_name(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.get_values(opts, :name) do
+        [] -> {:ok, __MODULE__}
+        [name] -> validate_start_name(name)
+        _duplicates -> {:error, :duplicate_control_plane_authority_name}
+      end
+    else
+      {:error, :malformed_control_plane_authority_options}
+    end
+  end
+
+  defp start_name(_opts), do: {:error, :malformed_control_plane_authority_options}
+
+  defp validate_start_name(name) when is_atom(name), do: {:ok, name}
+  defp validate_start_name({:global, _term} = name), do: {:ok, name}
+
+  defp validate_start_name({:via, module, _term} = name) when is_atom(module),
+    do: {:ok, name}
+
+  defp validate_start_name(_name), do: {:error, :invalid_control_plane_authority_name}
 
   defp detect_host_platform do
     case {:os.type(), :erlang.system_info(:system_architecture)} do
@@ -395,11 +491,39 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthority do
   defp redact_state(state) when is_map(state) do
     %{
       status: Map.get(state, :status),
-      reason: Map.get(state, :reason),
+      reason: if(is_nil(Map.get(state, :reason)), do: nil, else: :redacted),
       platform: Map.get(state, :platform),
       trusted_path: Map.get(state, :trusted_path),
+      boot_epoch: if(is_reference(Map.get(state, :boot_epoch)), do: :redacted, else: nil),
       bindings: if(is_map(Map.get(state, :bindings)), do: :redacted, else: nil)
     }
+  end
+
+  defp redact_state(_state), do: :redacted
+
+  defp redact_status_field(status, key) do
+    if Map.has_key?(status, key), do: Map.put(status, key, :redacted), else: status
+  end
+
+  defp boot_epoch_state(nil), do: :unbound
+
+  defp boot_epoch_state(boot_epoch) do
+    :persistent_term.get(boot_epoch_key(boot_epoch), :unbound)
+  end
+
+  defp put_boot_epoch(boot_epoch, value) when is_reference(boot_epoch) do
+    :persistent_term.put(boot_epoch_key(boot_epoch), value)
+  end
+
+  defp poison_boot_epoch(nil), do: :ok
+  defp poison_boot_epoch(boot_epoch), do: put_boot_epoch(boot_epoch, :poisoned)
+
+  defp boot_epoch_key(boot_epoch), do: {__MODULE__, :boot_epoch, boot_epoch}
+
+  defp binding_fingerprint(bindings) do
+    bindings
+    |> :erlang.term_to_binary([:deterministic])
+    |> then(&:crypto.hash(:sha256, &1))
   end
 
   defp call(server, request) do

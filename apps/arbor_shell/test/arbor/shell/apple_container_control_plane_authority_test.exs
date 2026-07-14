@@ -415,6 +415,77 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
                       {:control_plane_identity_drift, :identity_mismatch}}
     end
 
+    test "security regression: drift poisons the boot epoch instead of accepting a new baseline" do
+      put_valid_config()
+      boot_epoch = make_ref()
+      pinning_name = unique_name()
+
+      {:ok, pid} =
+        start_authority(
+          name: pinning_name,
+          host_platform: :darwin_arm64,
+          trusted_path: FakeTrustedPath,
+          boot_epoch: boot_epoch
+        )
+
+      initial_pin_attempts = FakeTrustedPath.pin_attempts()
+      ref = Process.monitor(pid)
+      FakeTrustedPath.set_verify_mode(:drift)
+
+      assert {:error, {:control_plane_identity_drift, :identity_mismatch}} =
+               Authority.checkout_bindings(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid,
+                      {:control_plane_identity_drift, :identity_mismatch}}
+
+      FakeTrustedPath.set_verify_mode(:ok)
+
+      {:ok, restarted} =
+        start_authority(
+          name: unique_name(),
+          host_platform: :darwin_arm64,
+          trusted_path: FakeTrustedPath,
+          boot_epoch: boot_epoch
+        )
+
+      assert Authority.public_status(restarted) == %{
+               "state" => "unavailable",
+               "reason" => "boot_epoch_poisoned",
+               "platform" => "darwin_arm64"
+             }
+
+      assert {:error, :control_plane_unavailable} = Authority.checkout_bindings(restarted)
+      assert FakeTrustedPath.pin_attempts() == initial_pin_attempts
+    end
+
+    test "an initially unavailable boot epoch cannot become pinned after restart" do
+      boot_epoch = make_ref()
+      Application.delete_env(@app, @config_key)
+
+      {:ok, unavailable} =
+        start_authority(
+          name: unique_name(),
+          host_platform: :darwin_arm64,
+          trusted_path: FakeTrustedPath,
+          boot_epoch: boot_epoch
+        )
+
+      assert Authority.public_status(unavailable)["reason"] == "missing_config"
+      Process.exit(unavailable, :shutdown)
+      put_valid_config()
+
+      {:ok, restarted} =
+        start_authority(
+          name: unique_name(),
+          host_platform: :darwin_arm64,
+          trusted_path: FakeTrustedPath,
+          boot_epoch: boot_epoch
+        )
+
+      assert Authority.public_status(restarted)["reason"] == "boot_epoch_unavailable"
+      assert FakeTrustedPath.pin_attempts() == []
+    end
+
     test "returned checkout maps cannot mutate owner state" do
       put_valid_config()
 
@@ -477,8 +548,44 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
                Shell.execute_spawn_capable("mix", ["test"], [])
     end
 
+    test "security regression: OTP diagnostics redact state, messages, reasons, and logs" do
+      put_valid_config()
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          host_platform: :darwin_arm64,
+          trusted_path: FakeTrustedPath
+        )
+
+      :ok = :sys.log(pid, true)
+      assert {:ok, bindings} = Authority.checkout_bindings(pid)
+
+      rendered = pid |> :sys.get_status() |> inspect(limit: :infinity)
+
+      refute rendered =~ @app_root
+      refute rendered =~ bindings.cli_identity.sha256
+      refute rendered =~ "runtime_plugin_config_identity"
+      assert rendered =~ "redacted"
+    end
+
+    test "malformed registration names return typed errors before GenServer startup" do
+      assert {:error, :invalid_control_plane_authority_name} =
+               Authority.start_link(name: self())
+
+      assert {:error, :invalid_control_plane_authority_name} =
+               Authority.start_link(name: "not-a-registration-name")
+
+      assert {:error, :duplicate_control_plane_authority_name} =
+               Authority.start_link(name: unique_name(), name: unique_name())
+
+      assert {:error, :malformed_control_plane_authority_options} =
+               Authority.start_link(%{name: unique_name()})
+    end
+
     test "application production child order places authority after policy and before registry" do
-      children = Arbor.Shell.Application.production_children(startup_path: "/bin")
+      boot_epoch = make_ref()
+      children = Arbor.Shell.Application.production_children([startup_path: "/bin"], boot_epoch)
       modules = Enum.map(children, &child_module/1)
 
       assert modules == [
@@ -489,12 +596,79 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
              ]
 
       authority_child = Enum.at(children, 1)
-      assert authority_child == {Arbor.Shell.AppleContainerControlPlaneAuthority, []}
+
+      assert authority_child ==
+               {Arbor.Shell.AppleContainerControlPlaneAuthority, [boot_epoch: boot_epoch]}
+
+      assert Arbor.Shell.Application.supervisor_options() ==
+               [strategy: :rest_for_one, name: Arbor.Shell.Supervisor]
+    end
+
+    test "security regression: drift turns over downstream owners and stays poisoned" do
+      put_valid_config()
+      boot_epoch = make_ref()
+
+      replace_global_authority_stack!(
+        host_platform: :darwin_arm64,
+        trusted_path: FakeTrustedPath,
+        boot_epoch: boot_epoch
+      )
+
+      on_exit(fn ->
+        restore_global_authority_stack!()
+        Authority.clear_boot_epoch(boot_epoch)
+      end)
+
+      policy_before = Process.whereis(Arbor.Shell.ExecutablePolicy)
+      authority_before = Process.whereis(Authority)
+      registry_before = Process.whereis(Arbor.Shell.ExecutionRegistry)
+      sessions_before = Process.whereis(Arbor.Shell.PortSessionSupervisor)
+
+      {:ok, session} =
+        DynamicSupervisor.start_child(
+          Arbor.Shell.PortSessionSupervisor,
+          {Task, fn -> Process.sleep(:infinity) end}
+        )
+
+      session_ref = Process.monitor(session)
+      authority_ref = Process.monitor(authority_before)
+      registry_ref = Process.monitor(registry_before)
+      sessions_ref = Process.monitor(sessions_before)
+      initial_pin_attempts = FakeTrustedPath.pin_attempts()
+
+      FakeTrustedPath.set_verify_mode(:drift)
+
+      assert {:error, {:control_plane_identity_drift, :identity_mismatch}} =
+               Authority.checkout_bindings()
+
+      assert_receive {:DOWN, ^authority_ref, :process, ^authority_before, _reason}
+      assert_receive {:DOWN, ^registry_ref, :process, ^registry_before, :shutdown}
+      assert_receive {:DOWN, ^sessions_ref, :process, ^sessions_before, :shutdown}
+      assert_receive {:DOWN, ^session_ref, :process, ^session, :shutdown}
+
+      assert eventually?(fn ->
+               new_authority = Process.whereis(Authority)
+               new_registry = Process.whereis(Arbor.Shell.ExecutionRegistry)
+               new_sessions = Process.whereis(Arbor.Shell.PortSessionSupervisor)
+
+               is_pid(new_authority) and new_authority != authority_before and
+                 is_pid(new_registry) and new_registry != registry_before and
+                 is_pid(new_sessions) and new_sessions != sessions_before
+             end)
+
+      assert Process.whereis(Arbor.Shell.ExecutablePolicy) == policy_before
+      assert Authority.public_status()["reason"] == "boot_epoch_poisoned"
+      assert {:error, :control_plane_unavailable} = Authority.checkout_bindings()
+      assert FakeTrustedPath.pin_attempts() == initial_pin_attempts
     end
   end
 
   defp start_authority(opts) do
     name = Keyword.fetch!(opts, :name)
+
+    if boot_epoch = Keyword.get(opts, :boot_epoch) do
+      on_exit(fn -> Authority.clear_boot_epoch(boot_epoch) end)
+    end
 
     case Authority.start_link(opts) do
       {:ok, pid} ->
@@ -542,6 +716,85 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
 
   defp unique_name do
     :"apple_cp_authority_#{System.unique_integer([:positive])}"
+  end
+
+  defp replace_global_authority_stack!(authority_opts) do
+    remove_global_authority_stack!()
+
+    {:ok, _authority} =
+      Supervisor.start_child(Arbor.Shell.Supervisor, {Authority, authority_opts})
+
+    {:ok, _registry} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {Arbor.Shell.ExecutionRegistry, []}
+      )
+
+    {:ok, _sessions} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
+      )
+
+    :ok
+  end
+
+  defp restore_global_authority_stack! do
+    remove_global_authority_stack!()
+
+    {:ok, _authority} = Supervisor.start_child(Arbor.Shell.Supervisor, {Authority, []})
+
+    {:ok, _registry} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {Arbor.Shell.ExecutionRegistry, []}
+      )
+
+    {:ok, _sessions} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
+      )
+
+    :ok
+  end
+
+  defp remove_global_authority_stack! do
+    for child_id <- [
+          Arbor.Shell.PortSessionSupervisor,
+          Arbor.Shell.ExecutionRegistry,
+          Authority
+        ] do
+      case Supervisor.terminate_child(Arbor.Shell.Supervisor, child_id) do
+        :ok -> :ok
+        {:error, :not_found} -> :ok
+      end
+
+      case Supervisor.delete_child(Arbor.Shell.Supervisor, child_id) do
+        :ok -> :ok
+        {:error, :not_found} -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp eventually?(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually(fun, deadline)
+  end
+
+  defp do_eventually(fun, deadline) do
+    if fun.() do
+      true
+    else
+      if System.monotonic_time(:millisecond) < deadline do
+        Process.sleep(10)
+        do_eventually(fun, deadline)
+      else
+        false
+      end
+    end
   end
 
   defp child_module({module, _opts}) when is_atom(module), do: module
