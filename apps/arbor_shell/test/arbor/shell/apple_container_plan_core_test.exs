@@ -47,6 +47,9 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     command_args: ["test", "apps/arbor_shell/test/example_test.exs"]
   }
 
+  # Invalid UTF-8 binary (lone continuation byte) — must never raise.
+  @invalid_utf8 <<0xC3, 0x28>>
+
   describe "positive exact create plan" do
     test "builds full containment argv with fixed mounts, env, limits, and cleanup" do
       assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
@@ -118,8 +121,9 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  "ARBOR_ELIXIR_ROOT=/usr/local",
                  "--env",
                  "MIX_ENV=test",
-                 @image,
+                 "--entrypoint",
                  "/arbor/bin/mix",
+                 @image,
                  "test",
                  "apps/arbor_shell/test/example_test.exs"
                ]
@@ -234,6 +238,108 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     end
   end
 
+  describe "duplicate atom/string request key aliases" do
+    @tag :security_regression
+    test "rejects atom+string aliases even when values are identical" do
+      cases = [
+        :image,
+        :name,
+        :projections,
+        :host_runtime_roots,
+        :mix_env,
+        :command_args
+      ]
+
+      for atom_key <- cases do
+        string_key = Atom.to_string(atom_key)
+        value = Map.fetch!(@valid_request, atom_key)
+
+        request =
+          @valid_request
+          |> Map.put(atom_key, value)
+          |> Map.put(string_key, value)
+
+        assert {:error, {:duplicate_request_key_alias, ^atom_key}} =
+                 AppleContainerPlanCore.new(request),
+               "expected duplicate alias rejection for #{inspect(atom_key)}"
+      end
+    end
+
+    @tag :security_regression
+    test "rejects atom+string aliases when values differ" do
+      request =
+        @valid_request
+        |> Map.put(:image, @image)
+        |> Map.put("image", "other/image@sha256:#{@digest}")
+
+      assert {:error, {:duplicate_request_key_alias, :image}} =
+               AppleContainerPlanCore.new(request)
+    end
+  end
+
+  describe "invalid UTF-8 fail-closed" do
+    @tag :security_regression
+    test "table: every accepted textual input path rejects invalid UTF-8 without raising" do
+      cases = [
+        {:image, Map.put(@valid_request, :image, @invalid_utf8)},
+        {:name, Map.put(@valid_request, :name, @invalid_utf8)},
+        {:mix_env, Map.put(@valid_request, :mix_env, @invalid_utf8)},
+        {:command_args, Map.put(@valid_request, :command_args, ["test", @invalid_utf8])},
+        {:projection_worktree,
+         Map.put(
+           @valid_request,
+           :projections,
+           Map.put(@projections, :worktree, "/private/tmp/" <> @invalid_utf8)
+         )},
+        {:projection_mix_wrapper,
+         Map.put(
+           @valid_request,
+           :projections,
+           Map.put(@projections, :mix_wrapper, "/private/tmp/mix" <> @invalid_utf8)
+         )},
+        {:host_runtime_erlang,
+         Map.put(
+           @valid_request,
+           :host_runtime_roots,
+           %{
+             erlang: "/opt/erlang" <> @invalid_utf8,
+             elixir: @host_runtime_roots_valid.elixir
+           }
+         )},
+        {:host_runtime_elixir,
+         Map.put(
+           @valid_request,
+           :host_runtime_roots,
+           %{
+             erlang: @host_runtime_roots_valid.erlang,
+             elixir: "/opt/elixir" <> @invalid_utf8
+           }
+         )}
+      ]
+
+      for {label, request} <- cases do
+        result =
+          try do
+            AppleContainerPlanCore.new(request)
+          rescue
+            exception ->
+              flunk(
+                "invalid UTF-8 path #{inspect(label)} raised #{inspect(exception.__struct__)}: #{Exception.message(exception)}"
+              )
+          end
+
+        assert {:error, reason} = result,
+               "label=#{inspect(label)} expected error, got #{inspect(result)}"
+
+        assert reason == :invalid_utf8 or
+                 (is_tuple(reason) and
+                    elem(reason, 0) in [:invalid_projection, :invalid_host_runtime_root] and
+                    elem(reason, tuple_size(reason) - 1) == :invalid_utf8),
+               "label=#{inspect(label)} got #{inspect(reason)}, expected :invalid_utf8 envelope"
+      end
+    end
+  end
+
   describe "image rejection" do
     @tag :security_regression
     test "table: tag-only, mutable, uppercase, malformed, option-shaped images" do
@@ -341,6 +447,100 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       # Missing projections field entirely.
       assert {:error, :missing_projections} =
                AppleContainerPlanCore.new(Map.delete(@valid_request, :projections))
+    end
+
+    @tag :security_regression
+    test "rejects mount mini-language field delimiters in projection host paths" do
+      # Comma-delimited --mount field injection: source cannot inject target= or readonly.
+      injected =
+        "/private/tmp/arbor-val/evil,target=/evil,readonly"
+
+      projections = Map.put(@projections, :worktree, injected)
+
+      assert {:error, {:invalid_projection, :worktree, :mount_field_delimiter}} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, projections))
+
+      # Equals alone can re-key mount fields if a future renderer re-parses loosely.
+      eq_injected = "/private/tmp/arbor-val/path=target"
+
+      assert {:error, {:invalid_projection, :home, :mount_field_delimiter}} =
+               AppleContainerPlanCore.new(
+                 Map.put(
+                   @valid_request,
+                   :projections,
+                   Map.put(@projections, :home, eq_injected)
+                 )
+               )
+
+      # Prove a successful plan never embeds an injected target= from source material.
+      assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+      worktree_spec = Enum.find(plan.mounts, &(&1.purpose == :worktree)).mount_spec
+      assert worktree_spec == "type=bind,source=/private/tmp/arbor-val/worktree,target=/workspace"
+      refute String.contains?(worktree_spec, "target=/evil")
+    end
+
+    @tag :security_regression
+    test "rejects segment-aware ancestor/descendant projection overlaps in both orders" do
+      # Read/write worktree must never contain the read-only mix_wrapper source.
+      nested_wrapper =
+        Map.put(
+          @projections,
+          :mix_wrapper,
+          @projections.worktree <> "/bin/mix"
+        )
+
+      assert {:error, {:overlapping_projection_paths, a, b}} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested_wrapper))
+
+      assert MapSet.new([a, b]) == MapSet.new([:worktree, :mix_wrapper])
+
+      # Reverse order of nesting: worktree under home (both read/write — must not nest).
+      nested_worktree =
+        @projections
+        |> Map.put(:home, "/private/tmp/arbor-val/base")
+        |> Map.put(:worktree, "/private/tmp/arbor-val/base/worktree")
+
+      assert {:error, {:overlapping_projection_paths, c, d}} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested_worktree))
+
+      assert MapSet.new([c, d]) == MapSet.new([:home, :worktree])
+
+      # Read/write roots must not nest either direction (tmp under build).
+      nested_tmp =
+        @projections
+        |> Map.put(:build, "/private/tmp/arbor-val/build-root")
+        |> Map.put(:tmp, "/private/tmp/arbor-val/build-root/tmp")
+
+      assert {:error, {:overlapping_projection_paths, e, f}} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested_tmp))
+
+      assert MapSet.new([e, f]) == MapSet.new([:build, :tmp])
+
+      # Opposite nesting direction (build under tmp).
+      nested_build =
+        @projections
+        |> Map.put(:tmp, "/private/tmp/arbor-val/tmp-root")
+        |> Map.put(:build, "/private/tmp/arbor-val/tmp-root/build")
+
+      assert {:error, {:overlapping_projection_paths, g, h}} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested_build))
+
+      assert MapSet.new([g, h]) == MapSet.new([:tmp, :build])
+    end
+
+    @tag :security_regression
+    test "allows sibling path-prefix non-overlap (not raw String.starts_with?)" do
+      # /.../work and /.../worktree share a string prefix but not a path segment ancestor.
+      sibling =
+        @projections
+        |> Map.put(:worktree, "/private/tmp/arbor-val/work")
+        |> Map.put(:home, "/private/tmp/arbor-val/worktree")
+
+      assert {:ok, plan} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, sibling))
+
+      assert plan.projections.worktree == "/private/tmp/arbor-val/work"
+      assert plan.projections.home == "/private/tmp/arbor-val/worktree"
     end
 
     test "rejects caller-controlled guest targets / mount mode weakening keys" do
@@ -464,7 +664,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     end
   end
 
-  describe "command args" do
+  describe "command args and entrypoint" do
     test "rejects control characters and non-list args" do
       assert {:error, :unsafe_command_arg} =
                AppleContainerPlanCore.new(
@@ -478,11 +678,37 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                AppleContainerPlanCore.new(Map.put(@valid_request, :command_args, [:test]))
     end
 
-    test "command always begins with fixed guest mix wrapper after image" do
+    test "forces reviewed wrapper via --entrypoint; image followed only by command_args" do
       assert {:ok, plan} = AppleContainerPlanCore.new(Map.put(@valid_request, :command_args, []))
       create = plan.argv.create
+
+      ep_idx = Enum.find_index(create, &(&1 == "--entrypoint"))
+      assert is_integer(ep_idx)
+      assert Enum.at(create, ep_idx + 1) == "/arbor/bin/mix"
+
       image_index = Enum.find_index(create, &(&1 == @image))
-      assert Enum.at(create, image_index + 1) == "/arbor/bin/mix"
+      assert is_integer(image_index)
+      assert image_index == ep_idx + 2
+
+      # After the image token: only caller command_args (empty here).
+      assert Enum.drop(create, image_index + 1) == []
+
+      # Exactly one /arbor/bin/mix token (entrypoint value), never a second post-image token.
+      assert Enum.count(create, &(&1 == "/arbor/bin/mix")) == 1
+    end
+
+    test "appends only caller command_args after image" do
+      assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+      create = plan.argv.create
+      image_index = Enum.find_index(create, &(&1 == @image))
+
+      assert Enum.drop(create, image_index) == [
+               @image,
+               "test",
+               "apps/arbor_shell/test/example_test.exs"
+             ]
+
+      refute Enum.at(create, image_index + 1) == "/arbor/bin/mix"
     end
   end
 

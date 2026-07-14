@@ -44,21 +44,22 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   # Only MIX_ENV is caller-selectable, and only from this closed set.
   @allowed_mix_envs MapSet.new(["dev", "test", "prod"])
 
+  # Logical top-level fields (atom form). String aliases are accepted only when
+  # the atom form is absent — never both.
+  @logical_request_keys [
+    :image,
+    :name,
+    :projections,
+    :host_runtime_roots,
+    :mix_env,
+    :command_args
+  ]
+
   # Closed request surface — any other key fails closed.
-  @allowed_request_keys MapSet.new([
-                          :image,
-                          :name,
-                          :projections,
-                          :host_runtime_roots,
-                          :mix_env,
-                          :command_args,
-                          "image",
-                          "name",
-                          "projections",
-                          "host_runtime_roots",
-                          "mix_env",
-                          "command_args"
-                        ])
+  @allowed_request_keys MapSet.new(
+                          @logical_request_keys ++
+                            Enum.map(@logical_request_keys, &Atom.to_string/1)
+                        )
 
   @max_name_bytes 63
   @min_name_bytes 2
@@ -67,6 +68,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @max_command_args 256
   @max_command_arg_bytes 4_096
   @max_repository_bytes 255
+
+  # Characters that alter Apple Container's comma-delimited --mount mini-language
+  # when interpolated into source= values. Comma separates mount fields; equals
+  # separates field keys from values.
+  @mount_field_delimiters [",", "="]
 
   # Conservative DNS-like unit name for exact-ID lifecycle cleanup.
   @name_re ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/
@@ -246,6 +252,13 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   defp validate_request_keys(request) do
     keys = Map.keys(request)
 
+    with :ok <- reject_unknown_request_keys(keys),
+         :ok <- reject_duplicate_request_key_aliases(keys) do
+      :ok
+    end
+  end
+
+  defp reject_unknown_request_keys(keys) do
     if Enum.all?(keys, &MapSet.member?(@allowed_request_keys, &1)) do
       :ok
     else
@@ -257,6 +270,21 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
       {:error, {:unsupported_request_keys, unknown}}
     end
+  end
+
+  defp reject_duplicate_request_key_aliases(keys) do
+    key_set = MapSet.new(keys)
+
+    Enum.reduce_while(@logical_request_keys, :ok, fn atom_key, :ok ->
+      has_atom? = MapSet.member?(key_set, atom_key)
+      has_string? = MapSet.member?(key_set, Atom.to_string(atom_key))
+
+      if has_atom? and has_string? do
+        {:halt, {:error, {:duplicate_request_key_alias, atom_key}}}
+      else
+        {:cont, :ok}
+      end
+    end)
   end
 
   defp fetch_image(request) do
@@ -310,88 +338,95 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   end
 
   defp get_field(map, key) when is_atom(key) do
-    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+    case Map.fetch(map, key) do
+      {:ok, value} -> value
+      :error -> Map.get(map, Atom.to_string(key))
+    end
   end
 
   # ── Field validators ───────────────────────────────────────────────────
 
   defp validate_image(image) when is_binary(image) do
-    cond do
-      image == "" ->
-        {:error, :empty_image}
+    with :ok <- require_valid_utf8(image) do
+      cond do
+        image == "" ->
+          {:error, :empty_image}
 
-      byte_size(image) > @max_image_bytes ->
-        {:error, :image_too_long}
+        byte_size(image) > @max_image_bytes ->
+          {:error, :image_too_long}
 
-      has_control_or_whitespace?(image) ->
-        {:error, :unsafe_image}
+        has_control_or_whitespace?(image) ->
+          {:error, :unsafe_image}
 
-      option_shaped?(image) ->
-        {:error, :option_shaped_image}
+        option_shaped?(image) ->
+          {:error, :option_shaped_image}
 
-      String.contains?(image, ":") and not String.contains?(image, "@sha256:") ->
-        {:error, :mutable_image_tag}
+        String.contains?(image, ":") and not String.contains?(image, "@sha256:") ->
+          {:error, :mutable_image_tag}
 
-      String.contains?(image, "@SHA256:") or String.contains?(image, "@Sha256:") ->
-        {:error, :uppercase_image_digest}
+        String.contains?(image, "@SHA256:") or String.contains?(image, "@Sha256:") ->
+          {:error, :uppercase_image_digest}
 
-      true ->
-        case Regex.run(@image_re, image) do
-          [^image, repository, digest] ->
-            if byte_size(repository) <= @max_repository_bytes and byte_size(digest) == 64 do
-              {:ok, image}
-            else
-              {:error, :malformed_image}
-            end
-
-          _other ->
-            if String.contains?(image, "@sha256:") do
-              digest_part = image |> String.split("@sha256:", parts: 2) |> List.last()
-
-              cond do
-                digest_part != String.downcase(digest_part) ->
-                  {:error, :uppercase_image_digest}
-
-                not Regex.match?(~r/\A[0-9a-f]{64}\z/, digest_part) ->
-                  {:error, :malformed_image_digest}
-
-                true ->
-                  {:error, :malformed_image}
+        true ->
+          case Regex.run(@image_re, image) do
+            [^image, repository, digest] ->
+              if byte_size(repository) <= @max_repository_bytes and byte_size(digest) == 64 do
+                {:ok, image}
+              else
+                {:error, :malformed_image}
               end
-            else
-              {:error, :mutable_image_tag}
-            end
-        end
+
+            _other ->
+              if String.contains?(image, "@sha256:") do
+                digest_part = image |> String.split("@sha256:", parts: 2) |> List.last()
+
+                cond do
+                  digest_part != String.downcase(digest_part) ->
+                    {:error, :uppercase_image_digest}
+
+                  not Regex.match?(~r/\A[0-9a-f]{64}\z/, digest_part) ->
+                    {:error, :malformed_image_digest}
+
+                  true ->
+                    {:error, :malformed_image}
+                end
+              else
+                {:error, :mutable_image_tag}
+              end
+          end
+      end
     end
   end
 
   defp validate_image(_), do: {:error, :invalid_image}
 
   defp validate_name(name) when is_binary(name) do
-    cond do
-      name == "" ->
-        {:error, :empty_name}
+    with :ok <- require_valid_utf8(name) do
+      cond do
+        name == "" ->
+          {:error, :empty_name}
 
-      byte_size(name) < @min_name_bytes ->
-        {:error, :name_too_short}
+        byte_size(name) < @min_name_bytes ->
+          {:error, :name_too_short}
 
-      byte_size(name) > @max_name_bytes ->
-        {:error, :name_too_long}
+        byte_size(name) > @max_name_bytes ->
+          {:error, :name_too_long}
 
-      has_control_or_whitespace?(name) ->
-        {:error, :unsafe_name}
+        has_control_or_whitespace?(name) ->
+          {:error, :unsafe_name}
 
-      option_shaped?(name) ->
-        {:error, :option_shaped_name}
+        option_shaped?(name) ->
+          {:error, :option_shaped_name}
 
-      shell_like?(name) ->
-        {:error, :unsafe_name}
+        shell_like?(name) ->
+          {:error, :unsafe_name}
 
-      not Regex.match?(@name_re, name) ->
-        {:error, :unsafe_name}
+        not Regex.match?(@name_re, name) ->
+          {:error, :unsafe_name}
 
-      true ->
-        {:ok, name}
+        true ->
+          {:ok, name}
+      end
     end
   end
 
@@ -401,7 +436,8 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     with :ok <- validate_projection_keys(projections),
          {:ok, normalized} <- normalize_projections(projections),
          :ok <- validate_projection_paths(normalized),
-         :ok <- reject_duplicate_paths(normalized) do
+         :ok <- reject_duplicate_paths(normalized),
+         :ok <- reject_overlapping_paths(normalized) do
       {:ok, normalized}
     end
   end
@@ -444,7 +480,12 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   defp normalize_projections(projections) do
     normalized =
       Map.new(@projection_keys, fn key ->
-        value = Map.get(projections, key) || Map.get(projections, Atom.to_string(key))
+        value =
+          case Map.fetch(projections, key) do
+            {:ok, v} -> v
+            :error -> Map.get(projections, Atom.to_string(key))
+          end
+
         {key, value}
       end)
 
@@ -453,11 +494,26 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   defp validate_projection_paths(projections) do
     Enum.reduce_while(projections, :ok, fn {purpose, path}, :ok ->
-      case validate_absolute_canonical_path(path) do
+      case validate_projection_host_path(path) do
         {:ok, ^path} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, {:invalid_projection, purpose, reason}}}
       end
     end)
+  end
+
+  defp validate_projection_host_path(path) do
+    with {:ok, path} <- validate_absolute_canonical_path(path),
+         :ok <- reject_mount_field_delimiters(path) do
+      {:ok, path}
+    end
+  end
+
+  defp reject_mount_field_delimiters(path) when is_binary(path) do
+    if Enum.any?(@mount_field_delimiters, &binary_contains?(path, &1)) do
+      {:error, :mount_field_delimiter}
+    else
+      :ok
+    end
   end
 
   defp reject_duplicate_paths(projections) do
@@ -468,6 +524,39 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     else
       {:error, :duplicate_projection_paths}
     end
+  end
+
+  # Segment-aware ancestor/descendant rejection. Sibling path prefixes such as
+  # /tmp/work and /tmp/worktree do not overlap.
+  defp reject_overlapping_paths(projections) do
+    pairs =
+      projections
+      |> Enum.to_list()
+      |> combination_pairs()
+
+    Enum.reduce_while(pairs, :ok, fn {{purpose_a, path_a}, {purpose_b, path_b}}, :ok ->
+      if segment_path_overlap?(path_a, path_b) do
+        {:halt, {:error, {:overlapping_projection_paths, purpose_a, purpose_b}}}
+      else
+        {:cont, :ok}
+      end
+    end)
+  end
+
+  defp combination_pairs([]), do: []
+  defp combination_pairs([_]), do: []
+
+  defp combination_pairs([head | tail]) do
+    Enum.map(tail, &{head, &1}) ++ combination_pairs(tail)
+  end
+
+  defp segment_path_overlap?(path_a, path_b) when path_a == path_b, do: true
+
+  defp segment_path_overlap?(path_a, path_b) do
+    segments_a = Path.split(path_a)
+    segments_b = Path.split(path_b)
+
+    List.starts_with?(segments_a, segments_b) or List.starts_with?(segments_b, segments_a)
   end
 
   defp validate_host_runtime_roots(roots) when is_map(roots) do
@@ -496,8 +585,17 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
         {:error, :duplicate_host_runtime_root_keys}
 
       true ->
-        erlang = Map.get(roots, :erlang) || Map.get(roots, "erlang")
-        elixir = Map.get(roots, :elixir) || Map.get(roots, "elixir")
+        erlang =
+          case Map.fetch(roots, :erlang) do
+            {:ok, v} -> v
+            :error -> Map.get(roots, "erlang")
+          end
+
+        elixir =
+          case Map.fetch(roots, :elixir) do
+            {:ok, v} -> v
+            :error -> Map.get(roots, "elixir")
+          end
 
         with {:ok, erlang_path} <- validate_absolute_canonical_path(erlang),
              {:ok, elixir_path} <- validate_absolute_canonical_path(elixir) do
@@ -513,15 +611,17 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   end
 
   defp validate_mix_env(mix_env) when is_binary(mix_env) do
-    cond do
-      has_control_or_whitespace?(mix_env) ->
-        {:error, :unsafe_mix_env}
+    with :ok <- require_valid_utf8(mix_env) do
+      cond do
+        has_control_or_whitespace?(mix_env) ->
+          {:error, :unsafe_mix_env}
 
-      MapSet.member?(@allowed_mix_envs, mix_env) ->
-        {:ok, mix_env}
+        MapSet.member?(@allowed_mix_envs, mix_env) ->
+          {:ok, mix_env}
 
-      true ->
-        {:error, :disallowed_mix_env}
+        true ->
+          {:error, :disallowed_mix_env}
+      end
     end
   end
 
@@ -541,15 +641,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
       true ->
         Enum.reduce_while(args, {:ok, []}, fn arg, {:ok, acc} ->
-          cond do
-            byte_size(arg) > @max_command_arg_bytes ->
-              {:halt, {:error, :command_arg_too_long}}
-
-            has_control_char?(arg) or String.contains?(arg, <<0>>) ->
-              {:halt, {:error, :unsafe_command_arg}}
-
-            true ->
-              {:cont, {:ok, [arg | acc]}}
+          case validate_command_arg(arg) do
+            :ok -> {:cont, {:ok, [arg | acc]}}
+            {:error, reason} -> {:halt, {:error, reason}}
           end
         end)
         |> case do
@@ -559,37 +653,54 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     end
   end
 
+  defp validate_command_arg(arg) when is_binary(arg) do
+    with :ok <- require_valid_utf8(arg) do
+      cond do
+        byte_size(arg) > @max_command_arg_bytes ->
+          {:error, :command_arg_too_long}
+
+        has_control_char?(arg) or binary_contains?(arg, <<0>>) ->
+          {:error, :unsafe_command_arg}
+
+        true ->
+          :ok
+      end
+    end
+  end
+
   defp validate_absolute_canonical_path(path) when is_binary(path) do
-    cond do
-      path == "" ->
-        {:error, :empty_path}
+    with :ok <- require_valid_utf8(path) do
+      cond do
+        path == "" ->
+          {:error, :empty_path}
 
-      byte_size(path) > @max_path_bytes ->
-        {:error, :path_too_long}
+        byte_size(path) > @max_path_bytes ->
+          {:error, :path_too_long}
 
-      String.contains?(path, <<0>>) ->
-        {:error, :nul_byte}
+        binary_contains?(path, <<0>>) ->
+          {:error, :nul_byte}
 
-      has_control_char?(path) ->
-        {:error, :control_char}
+        has_control_char?(path) ->
+          {:error, :control_char}
 
-      has_whitespace?(path) ->
-        {:error, :whitespace_in_path}
+        has_whitespace?(path) ->
+          {:error, :whitespace_in_path}
 
-      not String.starts_with?(path, "/") ->
-        {:error, :relative_path}
+        not String.starts_with?(path, "/") ->
+          {:error, :relative_path}
 
-      String.contains?(path, "//") ->
-        {:error, :non_canonical_path}
+        String.contains?(path, "//") ->
+          {:error, :non_canonical_path}
 
-      path != "/" and String.ends_with?(path, "/") ->
-        {:error, :trailing_slash}
+        path != "/" and String.ends_with?(path, "/") ->
+          {:error, :trailing_slash}
 
-      Enum.any?(Path.split(path), &(&1 in [".", ".."])) ->
-        {:error, :dot_segment}
+        Enum.any?(Path.split(path), &(&1 in [".", ".."])) ->
+          {:error, :dot_segment}
 
-      true ->
-        {:ok, path}
+        true ->
+          {:ok, path}
+      end
     end
   end
 
@@ -636,6 +747,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   end
 
   defp build_argv(name, image, mounts, env, command_args) do
+    # Force the reviewed wrapper via --entrypoint independently of image
+    # metadata. After the image token, append only caller command_args — never
+    # a second /arbor/bin/mix positional token.
     create =
       [
         @runtime_executable,
@@ -656,7 +770,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       |> Kernel.++(mount_argv(mounts))
       |> Kernel.++(["--workdir", @guest_workdir])
       |> Kernel.++(env_argv(env))
-      |> Kernel.++([image, @guest_mix_wrapper])
+      |> Kernel.++(["--entrypoint", @guest_mix_wrapper, image])
       |> Kernel.++(command_args)
 
     %{
@@ -681,6 +795,15 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   end
 
   # ── Character / shape helpers ──────────────────────────────────────────
+
+  # Fail closed on invalid UTF-8 without raising (String.* can raise).
+  defp require_valid_utf8(value) when is_binary(value) do
+    if String.valid?(value) do
+      :ok
+    else
+      {:error, :invalid_utf8}
+    end
+  end
 
   defp option_shaped?(value) when is_binary(value) do
     String.starts_with?(value, "-")
@@ -714,20 +837,27 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   end
 
   defp has_control_or_whitespace?(value) when is_binary(value) do
-    has_control_char?(value) or has_whitespace?(value) or String.contains?(value, <<0>>)
+    has_control_char?(value) or has_whitespace?(value) or binary_contains?(value, <<0>>)
   end
 
   defp has_whitespace?(value) when is_binary(value) do
     String.match?(value, ~r/[[:space:]]/)
   end
 
+  # Byte-level ASCII control scan — does not raise on invalid UTF-8.
   defp has_control_char?(value) when is_binary(value) do
-    value
-    |> String.to_charlist()
-    |> Enum.any?(fn
-      c when c < 32 or c == 127 -> true
-      _ -> false
-    end)
+    has_control_char_bytes?(value)
+  end
+
+  defp has_control_char_bytes?(<<>>), do: false
+
+  defp has_control_char_bytes?(<<c, _rest::binary>>) when c < 32 or c == 127, do: true
+
+  defp has_control_char_bytes?(<<_c, rest::binary>>), do: has_control_char_bytes?(rest)
+
+  defp binary_contains?(haystack, needle)
+       when is_binary(haystack) and is_binary(needle) and needle != "" do
+    :binary.match(haystack, needle) != :nomatch
   end
 
   defp stringify_keys(map) when is_map(map) do
