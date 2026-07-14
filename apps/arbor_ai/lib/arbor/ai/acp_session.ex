@@ -2062,24 +2062,28 @@ defmodule Arbor.AI.AcpSession do
             timeout_prompt(:stream_callback_timeout, prompt, timers, new_state)
         end
 
-      {:acp_prompt_inactivity_timeout, ref, timer_ref}
+      # start_timer/3 delivers {:timeout, TRef, payload}; TRef is both the
+      # cancellable handle and the stale-timer discriminator.
+      {:timeout, timer_ref, {:acp_prompt_inactivity_timeout, ref}}
       when ref == prompt.ref and timer_ref == timers.inactivity_timer ->
         timeout_prompt(:inactivity_timeout, prompt, timers, state)
 
-      {:acp_prompt_inactivity_timeout, ref, _stale_timer_ref} when ref == prompt.ref ->
+      {:timeout, _stale_timer_ref, {:acp_prompt_inactivity_timeout, ref}}
+      when ref == prompt.ref ->
         await_prompt_result(prompt, timers, state)
 
-      {:acp_prompt_hard_timeout, ref, timer_ref}
+      {:timeout, timer_ref, {:acp_prompt_hard_timeout, ref}}
       when ref == prompt.ref and timer_ref == timers.hard_timer ->
         timeout_prompt(:timeout, prompt, timers, state)
 
-      {:acp_prompt_hard_timeout, ref, _stale_timer_ref} when ref == prompt.ref ->
+      {:timeout, _stale_timer_ref, {:acp_prompt_hard_timeout, ref}}
+      when ref == prompt.ref ->
         await_prompt_result(prompt, timers, state)
 
-      {:acp_prompt_inactivity_timeout, _stale_ref, _stale_timer_ref} ->
+      {:timeout, _stale_timer_ref, {:acp_prompt_inactivity_timeout, _stale_ref}} ->
         await_prompt_result(prompt, timers, state)
 
-      {:acp_prompt_hard_timeout, _stale_ref, _stale_timer_ref} ->
+      {:timeout, _stale_timer_ref, {:acp_prompt_hard_timeout, _stale_ref}} ->
         await_prompt_result(prompt, timers, state)
     end
   end
@@ -2407,9 +2411,10 @@ defmodule Arbor.AI.AcpSession do
   defp schedule_timer(:infinity, _message), do: nil
 
   defp schedule_timer(timeout_ms, {tag, prompt_ref}) when is_integer(timeout_ms) do
-    timer_ref = make_ref()
-    Process.send_after(self(), {tag, prompt_ref, timer_ref}, timeout_ms)
-    timer_ref
+    # Use start_timer/3 so the delivered message carries the same reference that
+    # Process.cancel_timer/1 accepts. A synthetic make_ref()/send_after pairing
+    # leaves live timers after "cancel" and floods stale inactivity messages.
+    :erlang.start_timer(timeout_ms, self(), {tag, prompt_ref})
   end
 
   defp maybe_reset_inactivity_timer(timers, prompt_ref, session_id, state, update) do
@@ -2436,8 +2441,21 @@ defmodule Arbor.AI.AcpSession do
 
   defp cancel_timer(nil), do: :ok
 
-  defp cancel_timer(timer_ref) do
-    Process.cancel_timer(timer_ref)
+  defp cancel_timer(timer_ref) when is_reference(timer_ref) do
+    case Process.cancel_timer(timer_ref) do
+      false ->
+        # Timer already fired (or never existed): non-blockingly drop the exact
+        # delivered message so completion races do not hit handle_info/2.
+        receive do
+          {:timeout, ^timer_ref, _payload} -> :ok
+        after
+          0 -> :ok
+        end
+
+      _remaining_ms ->
+        :ok
+    end
+
     :ok
   end
 

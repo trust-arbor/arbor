@@ -533,6 +533,53 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     @tag timeout: 1_000
+    test "security regression: completed prompt cancels real timer handles and flushes mailbox" do
+      # Layer-0 regression: synthetic make_ref() correlation tokens passed to
+      # Process.cancel_timer/1 leave live send_after timers. After a fast prompt
+      # succeeds, suspend the session before short hard/inactivity windows fire
+      # and prove no timeout messages remain in the GenServer mailbox.
+      install_fake_progress_client(40)
+
+      {:ok, session} = start_fake_progress_session()
+
+      on_exit(fn ->
+        if Process.alive?(session) do
+          try do
+            :sys.resume(session)
+          catch
+            :exit, _ -> :ok
+          end
+        end
+
+        safely_close_session(session)
+      end)
+
+      assert {:ok, %{"text" => "ok"}} =
+               AcpSession.send_message(session, "hello",
+                 timeout: 40,
+                 inactivity_timeout_ms: 30
+               )
+
+      # Freeze the session before either short timer would fire so delivered
+      # stale timeouts accumulate in the mailbox rather than handle_info/2.
+      :sys.suspend(session)
+      Process.sleep(80)
+
+      messages =
+        case Process.info(session, :messages) do
+          {:messages, msgs} when is_list(msgs) -> msgs
+          _other -> []
+        end
+
+      refute Enum.any?(messages, &prompt_timer_message?/1),
+             "expected cancelled prompt timers to leave no mailbox residue, got: #{inspect(messages)}"
+
+      :sys.resume(session)
+      assert Process.alive?(session)
+      assert :ok = AcpSession.close(session)
+    end
+
+    @tag timeout: 1_000
     test "explicit timeout is a hard wall-clock cap even while progress continues" do
       install_fake_progress_client(200)
 
@@ -877,6 +924,17 @@ defmodule Arbor.AI.AcpSessionTest do
   catch
     :exit, _reason -> :ok
   end
+
+  # Matches both the broken send_after correlation-token format and the
+  # fixed start_timer {:timeout, tref, payload} format.
+  defp prompt_timer_message?({:acp_prompt_inactivity_timeout, _ref, _timer_ref}), do: true
+  defp prompt_timer_message?({:acp_prompt_hard_timeout, _ref, _timer_ref}), do: true
+
+  defp prompt_timer_message?({:timeout, _timer_ref, {:acp_prompt_inactivity_timeout, _ref}}),
+    do: true
+
+  defp prompt_timer_message?({:timeout, _timer_ref, {:acp_prompt_hard_timeout, _ref}}), do: true
+  defp prompt_timer_message?(_other), do: false
 
   describe "Handler path validation (workspace_root set)" do
     alias Arbor.AI.AcpSession.Handler
