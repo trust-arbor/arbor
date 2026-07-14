@@ -561,6 +561,25 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     end)
   end
 
+  test "security regression: dependency snapshot helper is not an unscoped public API", %{
+    tmp_dir: tmp_dir
+  } do
+    source = Path.join(tmp_dir, "unleased-source")
+    destination = Path.join(tmp_dir, "attacker-selected-destination")
+    File.mkdir_p!(Path.join(source, "deps/private_pkg"))
+    File.write!(Path.join(source, "deps/private_pkg/secret"), "host-only material\n")
+
+    result =
+      try do
+        apply(WorkspaceLeaseRegistry, :snapshot_dependency_tree, [source, destination, []])
+      rescue
+        UndefinedFunctionError -> :not_exported
+      end
+
+    assert result == :not_exported
+    refute File.exists?(destination)
+  end
+
   test "security regression: TestMixShell mutation during execute returns validation_tree_mutated",
        %{tmp_dir: tmp_dir} do
     fixture = leased_fixture(tmp_dir)

@@ -195,33 +195,21 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     call({:acquire_validation_resource, workspace_id, caller}, server_opts)
   end
 
-  @doc """
-  Snapshot a dependency tree into a private destination for Mix isolation.
-
-  Shared by validation-resource setup and non-workspace Mix ephemeral isolation.
-  Destination top boundary is forced to mode `0o700` after creation/snapshot.
-  """
   @default_snapshot_max_entries 50_000
   @default_snapshot_max_bytes 512 * 1024 * 1024
   @default_snapshot_max_depth 48
 
-  @spec snapshot_dependency_tree(String.t(), String.t()) :: :ok | {:error, term()}
-  def snapshot_dependency_tree(repo_path, destination)
-      when is_binary(repo_path) and is_binary(destination) do
-    snapshot_dependency_tree(repo_path, destination, [])
-  end
-
   @spec snapshot_dependency_tree(String.t(), String.t(), keyword() | map()) ::
           :ok | {:error, term()}
-  def snapshot_dependency_tree(repo_path, destination, opts)
-      when is_binary(repo_path) and is_binary(destination) and is_list(opts) do
+  defp snapshot_dependency_tree(repo_path, destination, opts)
+       when is_binary(repo_path) and is_binary(destination) and is_list(opts) do
     with :ok <- snapshot_dependencies(repo_path, destination, opts),
          :ok <- ensure_private_directory(destination) do
       :ok
     end
   end
 
-  def snapshot_dependency_tree(repo_path, destination, opts) when is_map(opts) do
+  defp snapshot_dependency_tree(repo_path, destination, opts) when is_map(opts) do
     snapshot_dependency_tree(repo_path, destination, Map.to_list(opts))
   end
 
