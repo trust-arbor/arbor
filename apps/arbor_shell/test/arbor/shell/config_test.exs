@@ -8,7 +8,13 @@ defmodule Arbor.Shell.ConfigTest do
 
   setup do
     previous = Application.get_env(@app, @key)
-    on_exit(fn -> restore_env(previous) end)
+    previous_home = System.get_env("HOME")
+
+    on_exit(fn ->
+      restore_env(previous)
+      restore_system_env("HOME", previous_home)
+    end)
+
     :ok
   end
 
@@ -190,4 +196,7 @@ defmodule Arbor.Shell.ConfigTest do
 
   defp restore_env(nil), do: Application.delete_env(@app, @key)
   defp restore_env(value), do: Application.put_env(@app, @key, value)
+
+  defp restore_system_env(key, nil), do: System.delete_env(key)
+  defp restore_system_env(key, value), do: System.put_env(key, value)
 end

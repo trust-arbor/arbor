@@ -18,6 +18,8 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
 
     def reset do
       :persistent_term.put({__MODULE__, :pins}, [])
+      :persistent_term.put({__MODULE__, :verifications}, [])
+      :persistent_term.put({__MODULE__, :canonicalizations}, [])
       :persistent_term.put({__MODULE__, :verify_mode}, :ok)
       :persistent_term.put({__MODULE__, :identities}, %{})
       :persistent_term.put({__MODULE__, :app_root_mode}, :ok)
@@ -25,6 +27,19 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
 
     def pin_attempts do
       :persistent_term.get({__MODULE__, :pins}, [])
+    end
+
+    def verification_attempts do
+      :persistent_term.get({__MODULE__, :verifications}, [])
+    end
+
+    def canonicalization_attempts do
+      :persistent_term.get({__MODULE__, :canonicalizations}, [])
+    end
+
+    def reset_checkout_attempts do
+      :persistent_term.put({__MODULE__, :verifications}, [])
+      :persistent_term.put({__MODULE__, :canonicalizations}, [])
     end
 
     def set_verify_mode(mode) do
@@ -54,6 +69,11 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
     end
 
     def verify_pinned(%Identity{} = identity) do
+      :persistent_term.put(
+        {__MODULE__, :verifications},
+        verification_attempts() ++ [identity.path]
+      )
+
       case :persistent_term.get({__MODULE__, :verify_mode}, :ok) do
         :ok ->
           identities = :persistent_term.get({__MODULE__, :identities}, %{})
@@ -77,6 +97,11 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
     def verify_pinned(_identity), do: {:error, :invalid_identity}
 
     def canonicalize_absolute(path) when is_binary(path) do
+      :persistent_term.put(
+        {__MODULE__, :canonicalizations},
+        canonicalization_attempts() ++ [path]
+      )
+
       case :persistent_term.get({__MODULE__, :app_root_mode}, :ok) do
         :ok ->
           if Path.type(path) == :absolute, do: {:ok, path}, else: {:error, :relative_path}
@@ -346,8 +371,19 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
           trusted_path: FakeTrustedPath
         )
 
+      FakeTrustedPath.reset_checkout_attempts()
       assert {:ok, bindings} = Authority.checkout_bindings(pid)
       assert map_size(bindings) == 6
+
+      assert FakeTrustedPath.verification_attempts() == [
+               ControlPlane.cli_path(),
+               ControlPlane.apiserver_path(),
+               ControlPlane.plugin_path(),
+               ControlPlane.plugin_config_path(),
+               @kernel_path
+             ]
+
+      assert FakeTrustedPath.canonicalization_attempts() == [@app_root]
 
       ref = Process.monitor(pid)
       FakeTrustedPath.set_app_root_mode(:rewrite)
