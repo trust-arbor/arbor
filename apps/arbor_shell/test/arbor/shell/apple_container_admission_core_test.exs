@@ -690,13 +690,28 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
             "arbor/validation",
             "arbor/validation@sha256:SHORT",
             # Short repository form is no longer canonical.
-            "arbor/validation@sha256:#{@index_hex}"
+            "arbor/validation@sha256:#{@index_hex}",
+            # Default-registry-ambiguous host (no '.' in first segment).
+            "registry/arbor/validation@sha256:#{@index_hex}"
           ] do
         input = put_in(@valid_input, [:policy, :image], image)
 
         assert match?({:error, _}, AppleContainerAdmissionCore.new(input)),
                "expected rejection for image=#{inspect(image)}"
       end
+    end
+
+    @tag :security_regression
+    test "rejects default-registry-ambiguous host without a dot while accepting docker.io" do
+      ambiguous = "registry/arbor/validation@sha256:#{@index_hex}"
+      input = put_in(@valid_input, [:policy, :image], ambiguous)
+
+      assert {:error, :malformed_image} = AppleContainerAdmissionCore.new(input)
+
+      # Positive fully-qualified form remains accepted (fixture uses docker.io/...).
+      assert {:ok, receipt} = AppleContainerAdmissionCore.new(@valid_input)
+      assert receipt.image.reference == @image
+      assert String.starts_with?(@image, "docker.io/")
     end
 
     test "requires exact byte-for-byte image name equality (no repository suffix collisions)" do

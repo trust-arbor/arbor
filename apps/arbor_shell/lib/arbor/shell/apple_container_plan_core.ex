@@ -12,6 +12,13 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   @runtime_executable "/usr/local/bin/container"
 
+  # Fixed infrastructure selectors (not caller-configurable). Official Apple
+  # Container 1.1.0 accepts these as create options; user config otherwise
+  # supplies defaults for kernel/vminit, so Arbor makes them explicit.
+  @platform "linux/arm64"
+  @runtime_handler "container-runtime-linux"
+  @registry_scheme "https"
+
   # Fixed resource limits for deterministic, bounded validation units.
   @cpus "1"
   @memory "2G"
@@ -48,6 +55,8 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   # the atom form is absent — never both.
   @logical_request_keys [
     :image,
+    :init_image,
+    :kernel_path,
     :name,
     :projections,
     :host_runtime_roots,
@@ -76,8 +85,10 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   # Conservative DNS-like unit name for exact-ID lifecycle cleanup.
   @name_re ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/
-  # repository@sha256:<64 lowercase hex>
-  @image_re ~r/\A([a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*)@sha256:([0-9a-f]{64})\z/
+  # Fully-qualified immutable image:
+  # registry-host-with-at-least-one-dot[:port]/repository/path@sha256:<64 lowercase hex>
+  # Rejects default-registry-ambiguous forms such as registry/arbor/... or arbor/....
+  @image_re ~r/\A([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+)@sha256:([0-9a-f]{64})\z/
 
   @type mix_env :: String.t()
   @type host_path :: String.t()
@@ -117,6 +128,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
           runtime_executable: String.t(),
           unit_name: String.t(),
           image: String.t(),
+          init_image: String.t(),
+          kernel_path: host_path(),
+          platform: String.t(),
+          runtime_handler: String.t(),
+          registry_scheme: String.t(),
           mix_env: mix_env(),
           command_args: [String.t()],
           projections: projections(),
@@ -146,19 +162,27 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   def new(request) when is_map(request) do
     with :ok <- validate_request_keys(request),
          {:ok, image} <- fetch_image(request),
+         {:ok, init_image} <- fetch_init_image(request),
+         :ok <- reject_identical_images(image, init_image),
          {:ok, name} <- fetch_name(request),
          {:ok, projections} <- fetch_projections(request),
+         {:ok, kernel_path} <- fetch_kernel_path(request, projections),
          {:ok, host_runtime_roots} <- fetch_host_runtime_roots(request),
          {:ok, mix_env} <- fetch_mix_env(request),
          {:ok, command_args} <- fetch_command_args(request) do
       mounts = build_mounts(projections)
       env = build_env(mix_env)
-      argv = build_argv(name, image, mounts, env, command_args)
+      argv = build_argv(name, image, init_image, kernel_path, mounts, env, command_args)
 
       plan = %{
         runtime_executable: @runtime_executable,
         unit_name: name,
         image: image,
+        init_image: init_image,
+        kernel_path: kernel_path,
+        platform: @platform,
+        runtime_handler: @runtime_handler,
+        registry_scheme: @registry_scheme,
         mix_env: mix_env,
         command_args: command_args,
         projections: projections,
@@ -194,6 +218,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       "runtime_executable" => plan.runtime_executable,
       "unit_name" => plan.unit_name,
       "image" => plan.image,
+      "init_image" => plan.init_image,
+      "kernel_path" => plan.kernel_path,
+      "platform" => plan.platform,
+      "runtime_handler" => plan.runtime_handler,
+      "registry_scheme" => plan.registry_scheme,
       "mix_env" => plan.mix_env,
       "command_args" => plan.command_args,
       "projections" => stringify_keys(plan.projections),
@@ -242,6 +271,18 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @doc "Fixed resource limits applied to every create plan."
   @spec resource_limits() :: %{cpus: String.t(), memory: String.t()}
   def resource_limits, do: %{cpus: @cpus, memory: @memory}
+
+  @doc "Fixed guest platform selector applied to every create plan."
+  @spec platform() :: String.t()
+  def platform, do: @platform
+
+  @doc "Fixed container runtime handler applied to every create plan."
+  @spec runtime_handler() :: String.t()
+  def runtime_handler, do: @runtime_handler
+
+  @doc "Fixed registry scheme applied to every create plan."
+  @spec registry_scheme() :: String.t()
+  def registry_scheme, do: @registry_scheme
 
   @doc "Allowed MIX_ENV values callers may select."
   @spec allowed_mix_envs() :: [String.t()]
@@ -294,6 +335,19 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     end
   end
 
+  defp fetch_init_image(request) do
+    case get_field(request, :init_image) do
+      nil -> {:error, :missing_init_image}
+      init_image -> validate_image(init_image)
+    end
+  end
+
+  defp reject_identical_images(image, init_image) when image == init_image do
+    {:error, :identical_workload_and_init_images}
+  end
+
+  defp reject_identical_images(_image, _init_image), do: :ok
+
   defp fetch_name(request) do
     case get_field(request, :name) do
       nil -> {:error, :missing_name}
@@ -306,6 +360,19 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       nil -> {:error, :missing_projections}
       projections when is_map(projections) -> validate_projections(projections)
       _other -> {:error, :invalid_projections}
+    end
+  end
+
+  defp fetch_kernel_path(request, projections) do
+    case get_field(request, :kernel_path) do
+      nil ->
+        {:error, :missing_kernel_path}
+
+      path ->
+        with {:ok, path} <- validate_kernel_path(path),
+             :ok <- reject_kernel_projection_overlap(path, projections) do
+          {:ok, path}
+        end
     end
   end
 
@@ -399,6 +466,26 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   end
 
   defp validate_image(_), do: {:error, :invalid_image}
+
+  defp validate_kernel_path(path) when is_binary(path) do
+    case validate_absolute_canonical_path(path) do
+      {:ok, path} -> {:ok, path}
+      {:error, reason} -> {:error, {:invalid_kernel_path, reason}}
+    end
+  end
+
+  defp validate_kernel_path(_), do: {:error, {:invalid_kernel_path, :invalid_path}}
+
+  # Kernel must not sit under (or contain) any candidate-owned projection.
+  defp reject_kernel_projection_overlap(kernel_path, projections) do
+    Enum.reduce_while(projections, :ok, fn {purpose, path}, :ok ->
+      if segment_path_overlap?(kernel_path, path) do
+        {:halt, {:error, {:kernel_path_overlaps_projection, purpose}}}
+      else
+        {:cont, :ok}
+      end
+    end)
+  end
 
   defp validate_name(name) when is_binary(name) do
     with :ok <- require_valid_utf8(name) do
@@ -746,18 +833,34 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     ]
   end
 
-  defp build_argv(name, image, mounts, env, command_args) do
+  defp build_argv(name, image, init_image, kernel_path, mounts, env, command_args) do
     # Force the reviewed wrapper via --entrypoint independently of image
     # metadata. After the image token, append only caller command_args — never
     # a second /arbor/bin/mix positional token.
+    #
+    # Infrastructure flags (--platform/--runtime/--kernel/--init-image/--scheme/
+    # --network/--no-dns) are fixed or validated closed fields; they appear before
+    # mounts and the workload image so create management options are never
+    # reinterpreted as init-process arguments after the image token.
     create =
       [
         @runtime_executable,
         "create",
         "--name",
         name,
+        "--platform",
+        @platform,
+        "--runtime",
+        @runtime_handler,
+        "--kernel",
+        kernel_path,
+        "--init-image",
+        init_image,
+        "--scheme",
+        @registry_scheme,
         "--network",
         "none",
+        "--no-dns",
         "--init",
         "--read-only",
         "--cap-drop",

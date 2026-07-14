@@ -14,7 +14,10 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
   @moduletag :security_regression
 
   @digest String.duplicate("a", 64)
-  @image "arbor/validation@sha256:#{@digest}"
+  @init_digest String.duplicate("b", 64)
+  @image "docker.io/arbor/validation@sha256:#{@digest}"
+  @init_image "docker.io/arbor/vminit@sha256:#{@init_digest}"
+  @kernel_path "/usr/local/share/container/kernels/default.kernel"
   @name "arbor-val-unit01"
 
   @projections %{
@@ -40,6 +43,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
   @valid_request %{
     image: @image,
+    init_image: @init_image,
+    kernel_path: @kernel_path,
     name: @name,
     projections: @projections,
     host_runtime_roots: @host_runtime_roots_valid,
@@ -57,6 +62,11 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert plan.runtime_executable == "/usr/local/bin/container"
       assert plan.unit_name == @name
       assert plan.image == @image
+      assert plan.init_image == @init_image
+      assert plan.kernel_path == @kernel_path
+      assert plan.platform == "linux/arm64"
+      assert plan.runtime_handler == "container-runtime-linux"
+      assert plan.registry_scheme == "https"
       assert plan.mix_env == "test"
       assert plan.command_args == ["test", "apps/arbor_shell/test/example_test.exs"]
       assert plan.guest_workdir == "/workspace"
@@ -79,8 +89,19 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  "create",
                  "--name",
                  @name,
+                 "--platform",
+                 "linux/arm64",
+                 "--runtime",
+                 "container-runtime-linux",
+                 "--kernel",
+                 @kernel_path,
+                 "--init-image",
+                 @init_image,
+                 "--scheme",
+                 "https",
                  "--network",
                  "none",
+                 "--no-dns",
                  "--init",
                  "--read-only",
                  "--cap-drop",
@@ -200,9 +221,25 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert AppleContainerPlanCore.show(a) == AppleContainerPlanCore.show(b)
     end
 
+    test "show exposes JSON-clean infrastructure fields" do
+      assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+      shown = AppleContainerPlanCore.show(plan)
+
+      assert shown["image"] == @image
+      assert shown["init_image"] == @init_image
+      assert shown["kernel_path"] == @kernel_path
+      assert shown["platform"] == "linux/arm64"
+      assert shown["runtime_handler"] == "container-runtime-linux"
+      assert shown["registry_scheme"] == "https"
+      assert shown["argv"]["create"] == plan.argv.create
+      assert Jason.encode!(shown)
+    end
+
     test "accepts string-keyed request maps" do
       request = %{
         "image" => @image,
+        "init_image" => @init_image,
+        "kernel_path" => @kernel_path,
         "name" => @name,
         "projections" => %{
           "worktree" => @projections.worktree,
@@ -223,6 +260,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
       assert {:ok, plan} = AppleContainerPlanCore.new(request)
       assert plan.mix_env == "prod"
+      assert plan.init_image == @init_image
+      assert plan.kernel_path == @kernel_path
       assert Enum.take(plan.argv.create, -1) == ["compile"]
       assert "MIX_ENV=prod" in plan.argv.create
     end
@@ -243,6 +282,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     test "rejects atom+string aliases even when values are identical" do
       cases = [
         :image,
+        :init_image,
+        :kernel_path,
         :name,
         :projections,
         :host_runtime_roots,
@@ -270,9 +311,25 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       request =
         @valid_request
         |> Map.put(:image, @image)
-        |> Map.put("image", "other/image@sha256:#{@digest}")
+        |> Map.put("image", "ghcr.io/other/image@sha256:#{@digest}")
 
       assert {:error, {:duplicate_request_key_alias, :image}} =
+               AppleContainerPlanCore.new(request)
+
+      request =
+        @valid_request
+        |> Map.put(:init_image, @init_image)
+        |> Map.put("init_image", "ghcr.io/other/vminit@sha256:#{@init_digest}")
+
+      assert {:error, {:duplicate_request_key_alias, :init_image}} =
+               AppleContainerPlanCore.new(request)
+
+      request =
+        @valid_request
+        |> Map.put(:kernel_path, @kernel_path)
+        |> Map.put("kernel_path", "/other/kernel")
+
+      assert {:error, {:duplicate_request_key_alias, :kernel_path}} =
                AppleContainerPlanCore.new(request)
     end
   end
@@ -282,6 +339,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     test "table: every accepted textual input path rejects invalid UTF-8 without raising" do
       cases = [
         {:image, Map.put(@valid_request, :image, @invalid_utf8)},
+        {:init_image, Map.put(@valid_request, :init_image, @invalid_utf8)},
+        {:kernel_path, Map.put(@valid_request, :kernel_path, "/private/tmp/" <> @invalid_utf8)},
         {:name, Map.put(@valid_request, :name, @invalid_utf8)},
         {:mix_env, Map.put(@valid_request, :mix_env, @invalid_utf8)},
         {:command_args, Map.put(@valid_request, :command_args, ["test", @invalid_utf8])},
@@ -333,7 +392,11 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
         assert reason == :invalid_utf8 or
                  (is_tuple(reason) and
-                    elem(reason, 0) in [:invalid_projection, :invalid_host_runtime_root] and
+                    elem(reason, 0) in [
+                      :invalid_projection,
+                      :invalid_host_runtime_root,
+                      :invalid_kernel_path
+                    ] and
                     elem(reason, tuple_size(reason) - 1) == :invalid_utf8),
                "label=#{inspect(label)} got #{inspect(reason)}, expected :invalid_utf8 envelope"
       end
@@ -342,19 +405,25 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
   describe "image rejection" do
     @tag :security_regression
-    test "table: tag-only, mutable, uppercase, malformed, option-shaped images" do
+    test "table: tag-only, mutable, uppercase, malformed, ambiguous, option-shaped images" do
       cases = [
         {"alpine:latest", :mutable_image_tag},
-        {"arbor/validation:v1", :mutable_image_tag},
-        {"arbor/validation", :mutable_image_tag},
-        {"arbor/validation@sha256:#{String.upcase(@digest)}", :uppercase_image_digest},
-        {"arbor/validation@SHA256:#{@digest}", :uppercase_image_digest},
-        {"arbor/validation@sha256:abcd", :malformed_image_digest},
-        {"arbor/validation@sha256:#{String.duplicate("g", 64)}", :malformed_image_digest},
-        {"arbor/validation@sha256:#{String.duplicate("a", 63)}", :malformed_image_digest},
-        {"arbor/validation@sha256:#{String.duplicate("a", 65)}", :malformed_image_digest},
-        {"arbor/validation @sha256:#{@digest}", :unsafe_image},
-        {"arbor/validation@sha256:#{@digest}\n", :unsafe_image},
+        {"docker.io/arbor/validation:v1", :mutable_image_tag},
+        {"docker.io/arbor/validation", :mutable_image_tag},
+        {"arbor/validation@sha256:#{@digest}", :malformed_image},
+        {"registry/arbor/image@sha256:#{@digest}", :malformed_image},
+        {"localhost/arbor/image@sha256:#{@digest}", :malformed_image},
+        {"docker.io/arbor/validation@sha256:#{String.upcase(@digest)}", :uppercase_image_digest},
+        {"docker.io/arbor/validation@SHA256:#{@digest}", :uppercase_image_digest},
+        {"docker.io/arbor/validation@sha256:abcd", :malformed_image_digest},
+        {"docker.io/arbor/validation@sha256:#{String.duplicate("g", 64)}",
+         :malformed_image_digest},
+        {"docker.io/arbor/validation@sha256:#{String.duplicate("a", 63)}",
+         :malformed_image_digest},
+        {"docker.io/arbor/validation@sha256:#{String.duplicate("a", 65)}",
+         :malformed_image_digest},
+        {"docker.io/arbor/validation @sha256:#{@digest}", :unsafe_image},
+        {"docker.io/arbor/validation@sha256:#{@digest}\n", :unsafe_image},
         {"--pull", :option_shaped_image},
         {"-e", :option_shaped_image},
         {"", :empty_image}
@@ -378,6 +447,109 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  ],
                "image=#{inspect(image)} got #{inspect(reason)}, expected ~#{inspect(expected)}"
       end
+    end
+
+    @tag :security_regression
+    test "accepts fully-qualified registry host with optional port" do
+      image = "registry.example.com:5000/arbor/validation@sha256:#{@digest}"
+
+      assert {:ok, plan} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :image, image))
+
+      assert plan.image == image
+      assert image in plan.argv.create
+    end
+  end
+
+  describe "init image rejection" do
+    @tag :security_regression
+    test "requires distinct fully-qualified immutable init image" do
+      assert {:error, :missing_init_image} =
+               AppleContainerPlanCore.new(Map.delete(@valid_request, :init_image))
+
+      assert {:error, :identical_workload_and_init_images} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :init_image, @image))
+
+      cases = [
+        {"alpine:latest", :mutable_image_tag},
+        {"arbor/vminit@sha256:#{@init_digest}", :malformed_image},
+        {"registry/arbor/vminit@sha256:#{@init_digest}", :malformed_image},
+        {"docker.io/arbor/vminit@sha256:#{String.upcase(@init_digest)}", :uppercase_image_digest},
+        {"docker.io/arbor/vminit@sha256:abcd", :malformed_image_digest},
+        {"", :empty_image}
+      ]
+
+      for {init_image, expected} <- cases do
+        assert {:error, reason} =
+                 AppleContainerPlanCore.new(Map.put(@valid_request, :init_image, init_image))
+
+        assert reason == expected,
+               "init_image=#{inspect(init_image)} got #{inspect(reason)}, expected #{inspect(expected)}"
+      end
+    end
+  end
+
+  describe "kernel path rejection" do
+    @tag :security_regression
+    test "requires absolute canonical kernel path outside all projections" do
+      assert {:error, :missing_kernel_path} =
+               AppleContainerPlanCore.new(Map.delete(@valid_request, :kernel_path))
+
+      cases = [
+        {"relative/kernel", :relative_path},
+        {"/tmp/./kernel", :dot_segment},
+        {"/tmp/foo/../kernel", :dot_segment},
+        {"/tmp//kernel", :non_canonical_path},
+        {"/tmp/kernel/", :trailing_slash},
+        {"/tmp/ker\0nel", :nul_byte},
+        {"/tmp/ker\nnel", :control_char},
+        {"/tmp/ker nel", :whitespace_in_path},
+        {"", :empty_path}
+      ]
+
+      for {path, expected_reason} <- cases do
+        assert {:error, {:invalid_kernel_path, ^expected_reason}} =
+                 AppleContainerPlanCore.new(Map.put(@valid_request, :kernel_path, path)),
+               "kernel_path=#{inspect(path)} expected #{inspect(expected_reason)}"
+      end
+
+      # Equal to a projection host path.
+      assert {:error, {:kernel_path_overlaps_projection, :worktree}} =
+               AppleContainerPlanCore.new(
+                 Map.put(@valid_request, :kernel_path, @projections.worktree)
+               )
+
+      # Descendant of a candidate-owned projection.
+      under_worktree = @projections.worktree <> "/kernels/default"
+
+      assert {:error, {:kernel_path_overlaps_projection, :worktree}} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :kernel_path, under_worktree))
+
+      # Ancestor of a projection path must fail closed.
+      assert {:error, {:kernel_path_overlaps_projection, purpose}} =
+               AppleContainerPlanCore.new(
+                 Map.put(@valid_request, :kernel_path, "/private/tmp/arbor-val")
+               )
+
+      assert purpose in [
+               :worktree,
+               :home,
+               :tmp,
+               :build,
+               :deps,
+               :runtime,
+               :mix_wrapper
+             ]
+
+      # Sibling outside projections is accepted.
+      sibling = "/private/tmp/arbor-val-kernels/default.kernel"
+
+      assert {:ok, plan} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :kernel_path, sibling))
+
+      assert plan.kernel_path == sibling
+      assert "--kernel" in plan.argv.create
+      assert sibling in plan.argv.create
     end
   end
 
@@ -585,7 +757,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       end
     end
 
-    test "rejects forbidden network modes and publish/ssh/privileged request fields" do
+    @tag :security_regression
+    test "rejects caller overrides of platform/runtime/scheme/DNS/network and related flags" do
       for key <- [
             :network,
             :publish,
@@ -596,11 +769,47 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
             :cap_add,
             :read_only,
             :cpus,
-            :memory
+            :memory,
+            :platform,
+            :runtime,
+            :runtime_handler,
+            :scheme,
+            :registry_scheme,
+            :dns,
+            :no_dns,
+            :kernel,
+            :init
           ] do
         assert {:error, {:unsupported_request_keys, _}} =
-                 AppleContainerPlanCore.new(Map.put(@valid_request, key, "none"))
+                 AppleContainerPlanCore.new(Map.put(@valid_request, key, "attacker-value")),
+               "expected rejection for caller key #{inspect(key)}"
       end
+
+      # Successful plan hard-codes infrastructure; request cannot change them.
+      assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+      create = plan.argv.create
+
+      assert plan.platform == "linux/arm64"
+      assert plan.runtime_handler == "container-runtime-linux"
+      assert plan.registry_scheme == "https"
+
+      platform_idx = Enum.find_index(create, &(&1 == "--platform"))
+      runtime_idx = Enum.find_index(create, &(&1 == "--runtime"))
+      scheme_idx = Enum.find_index(create, &(&1 == "--scheme"))
+      network_idx = Enum.find_index(create, &(&1 == "--network"))
+
+      assert Enum.at(create, platform_idx + 1) == "linux/arm64"
+      assert Enum.at(create, runtime_idx + 1) == "container-runtime-linux"
+      assert Enum.at(create, scheme_idx + 1) == "https"
+      assert Enum.at(create, network_idx + 1) == "none"
+      assert "--no-dns" in create
+
+      # Only one of each management flag.
+      assert Enum.count(create, &(&1 == "--platform")) == 1
+      assert Enum.count(create, &(&1 == "--runtime")) == 1
+      assert Enum.count(create, &(&1 == "--scheme")) == 1
+      assert Enum.count(create, &(&1 == "--network")) == 1
+      assert Enum.count(create, &(&1 == "--no-dns")) == 1
     end
   end
 
@@ -695,6 +904,21 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
       # Exactly one /arbor/bin/mix token (entrypoint value), never a second post-image token.
       assert Enum.count(create, &(&1 == "/arbor/bin/mix")) == 1
+
+      # Infrastructure management options appear before the workload image.
+      for flag <- [
+            "--platform",
+            "--runtime",
+            "--kernel",
+            "--init-image",
+            "--scheme",
+            "--network",
+            "--no-dns"
+          ] do
+        flag_idx = Enum.find_index(create, &(&1 == flag))
+        assert is_integer(flag_idx)
+        assert flag_idx < image_index
+      end
     end
 
     test "appends only caller command_args after image" do
@@ -713,8 +937,11 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
   end
 
   describe "constants surface" do
-    test "exports fixed executable, guest mounts, and resource limits" do
+    test "exports fixed executable, guest mounts, infrastructure, and resource limits" do
       assert AppleContainerPlanCore.runtime_executable() == "/usr/local/bin/container"
+      assert AppleContainerPlanCore.platform() == "linux/arm64"
+      assert AppleContainerPlanCore.runtime_handler() == "container-runtime-linux"
+      assert AppleContainerPlanCore.registry_scheme() == "https"
 
       assert AppleContainerPlanCore.guest_mount_table() == [
                {:worktree, "/workspace", :read_write},
@@ -746,23 +973,34 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
     joined = Enum.join(all_argv, " ")
 
-    forbidden = [
+    # Exact argv tokens (short flags like -p must not substring-match --platform).
+    forbidden_exact = [
+      "-p",
+      "-a",
       "--rm",
       "--remove",
       "--all",
       "--publish",
-      "-p",
       "--ssh",
       "--env-file",
       "--privileged",
-      "--cap-add",
+      "--cap-add"
+    ]
+
+    for token <- forbidden_exact do
+      refute token in all_argv,
+             "forbidden token #{inspect(token)} present in argv: #{joined}"
+    end
+
+    # Composite / substring forms that are never exact tokens in a well-formed plan.
+    forbidden_substrings = [
       "--network=bridge",
       "--network=host",
       "network host",
       "network bridge"
     ]
 
-    for token <- forbidden do
+    for token <- forbidden_substrings do
       refute String.contains?(joined, token),
              "forbidden token #{inspect(token)} present in argv: #{joined}"
     end
@@ -772,6 +1010,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     net_idx = Enum.find_index(create, &(&1 == "--network"))
     assert is_integer(net_idx)
     assert Enum.at(create, net_idx + 1) == "none"
+    assert "--no-dns" in create
 
     # No arbitrary env values beyond the closed set.
     env_values =

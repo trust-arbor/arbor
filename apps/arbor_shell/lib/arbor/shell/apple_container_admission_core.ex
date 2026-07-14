@@ -221,8 +221,10 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   @max_descriptor_size 1_073_741_824
   @required_arm64_variant "v8"
 
-  # Fully-qualified immutable image: registry hostname (must contain a '.') + repository path + digest.
-  @image_re ~r/\A([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+)@sha256:([0-9a-f]{64})\z/
+  # Fully-qualified immutable image: registry hostname with at least one '.'
+  # (optionally :port) + repository path + digest. Hosts without a dot
+  # (e.g. registry/arbor/...) are default-registry-ambiguous and rejected.
+  @image_re ~r/\A([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+)@sha256:([0-9a-f]{64})\z/
   @digest_re ~r/\Asha256:([0-9a-f]{64})\z/
   @hex64_re ~r/\A[0-9a-f]{64}\z/
   @version_re ~r/\A(\d+)\.(\d+)\.(\d+)\z/
