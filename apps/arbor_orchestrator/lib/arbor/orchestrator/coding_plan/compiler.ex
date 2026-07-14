@@ -572,7 +572,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       with :ok <- require_action_attrs(attrs, "mix_compile") do
         {:ok,
          attrs
-         |> Map.put("context_keys", "path")
+         |> Map.put("context_keys", "path,workspace_id")
          |> Map.put("param.warnings_as_errors", true)}
       end
     end)

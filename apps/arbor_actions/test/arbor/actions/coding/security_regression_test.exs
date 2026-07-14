@@ -9,6 +9,24 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
   @moduletag :slow
 
+  setup_all do
+    # Production Shell fails closed for spawn_capable until a streaming control
+    # plane exists. These behavioral two-revision proofs need a trusted finite
+    # Mix fixture executor (TestMixShell), same seam as Mix action tests.
+    previous_shell_module = Application.get_env(:arbor_actions, :mix_shell_module)
+    Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Actions.TestMixShell)
+
+    on_exit(fn ->
+      if is_nil(previous_shell_module) do
+        Application.delete_env(:arbor_actions, :mix_shell_module)
+      else
+        Application.put_env(:arbor_actions, :mix_shell_module, previous_shell_module)
+      end
+    end)
+
+    :ok
+  end
+
   test "reviewed candidate-pass/base-fail evidence is detached, one-shot, and cleaned", %{
     tmp_dir: tmp_dir
   } do
@@ -1023,7 +1041,10 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   defp validation_roots do
     System.tmp_dir!()
     |> File.ls!()
-    |> Enum.filter(&String.starts_with?(&1, "arbor-security-regression-"))
+    |> Enum.filter(
+      &(String.starts_with?(&1, "arbor-validation-") or
+          String.starts_with?(&1, "arbor-security-regression-"))
+    )
     |> Enum.sort()
   end
 

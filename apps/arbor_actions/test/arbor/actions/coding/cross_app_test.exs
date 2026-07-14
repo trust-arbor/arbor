@@ -14,6 +14,19 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
       _pid -> :ok
     end
 
+    # Fixture Mix double for executable project code (same seam as Mix action /
+    # security-regression tests). Production Arbor.Shell remains fail-closed.
+    previous_shell = Application.get_env(:arbor_actions, :mix_shell_module)
+    Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Actions.TestMixShell)
+
+    on_exit(fn ->
+      if is_nil(previous_shell) do
+        Application.delete_env(:arbor_actions, :mix_shell_module)
+      else
+        Application.put_env(:arbor_actions, :mix_shell_module, previous_shell)
+      end
+    end)
+
     :ok
   end
 

@@ -1053,7 +1053,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.Mix.Compile,
         Arbor.Actions.Mix.Test,
         Arbor.Actions.Mix.Quality,
-        Arbor.Actions.Mix.Format
+        Arbor.Actions.Mix.Format,
+        Arbor.Actions.Mix.Xref
       ],
       tdd: [
         Arbor.Actions.TDD.BuildImplPrompt,
@@ -2040,6 +2041,7 @@ defmodule Arbor.Actions do
     Arbor.Actions.Mix.Test => "arbor://action/mix/test",
     Arbor.Actions.Mix.Quality => "arbor://action/mix/quality",
     Arbor.Actions.Mix.Format => "arbor://action/mix/format",
+    Arbor.Actions.Mix.Xref => "arbor://action/mix/xref",
 
     # TDD — pure data transforms (build prompt, record attempt). No
     # side effects, but still routed through the capability layer so

@@ -303,9 +303,17 @@ defmodule Arbor.Actions.Coding do
            workspace,
            commit_mode
          ) do
-      with {:ok, validations} <- run_validations(worktree_path, params, context),
+      validation_context = put_workspace_id_context(context, workspace)
+
+      with {:ok, before_binding} <-
+             Arbor.Actions.Mix.committable_tree_binding(worktree_path),
+           {:ok, validations} <- run_validations(worktree_path, params, validation_context),
+           {:ok, after_binding} <-
+             Arbor.Actions.Mix.committable_tree_binding(worktree_path),
+           :ok <- assert_validation_tree_stable(before_binding, after_binding),
            {:ok, commit} <-
-             resolve_reviewable_commit(repo_root, worktree_path, params, context, commit_mode) do
+             resolve_reviewable_commit(repo_root, worktree_path, params, context, commit_mode),
+           :ok <- assert_commit_matches_validated_tree(worktree_path, before_binding, commit) do
         result =
           finalize_committed_change(
             repo_root,
@@ -330,6 +338,29 @@ defmodule Arbor.Actions.Coding do
             branch: branch_name,
             acp_agent: selected_acp_agent(params),
             validation: validations,
+            response_text: response_text(response)
+          }
+
+          Actions.emit_completed(__MODULE__, result)
+          {:ok, result}
+
+        {:error, :validation_tree_mutated} ->
+          result = %{
+            status: "validation_failed",
+            repo_path: repo_root,
+            worktree_path: worktree_path,
+            branch: branch_name,
+            acp_agent: selected_acp_agent(params),
+            validation: [
+              %{
+                command: "validation_tree_binding",
+                passed: false,
+                exit_code: nil,
+                stdout: "",
+                stderr:
+                  "committable tree mutated during validation; refusing commit without re-validation"
+              }
+            ],
             response_text: response_text(response)
           }
 
@@ -512,7 +543,7 @@ defmodule Arbor.Actions.Coding do
       timeout =
         positive_timeout(get_param(params, :validation_timeout), @default_validation_timeout)
 
-      invocation = validation_invocation(worktree_path, command, timeout)
+      invocation = validation_invocation(worktree_path, command, timeout, context)
 
       case run_validation_invocation(invocation, context) do
         {:ok, result} when is_map(result) ->
@@ -533,11 +564,40 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
-    defp validation_invocation(worktree_path, command, timeout) do
-      case mix_action_invocation(worktree_path, command, timeout) do
+    defp validation_invocation(worktree_path, command, timeout, context) do
+      case mix_action_invocation(worktree_path, command, timeout, context) do
         {:ok, invocation} ->
           invocation
 
+        {:error, :workspace_id_required} ->
+          %{
+            kind: :missing_workspace,
+            error: :workspace_id_required,
+            resource_uri: "arbor://action/mix/compile"
+          }
+
+        {:error, :unsupported_mix_validation_command = reason} ->
+          %{
+            kind: :unsupported_mix,
+            error: reason,
+            resource_uri: "arbor://action/mix"
+          }
+
+        {:error, reason}
+        when reason in [
+               :invalid_mix_compile_args,
+               :invalid_mix_test_args,
+               :invalid_mix_format_args,
+               :invalid_mix_xref_args
+             ] ->
+          %{
+            kind: :unsupported_mix,
+            error: reason,
+            resource_uri: "arbor://action/mix"
+          }
+
+        # Non-mix commands may still use shell. Mix project-code commands never
+        # fall through here.
         :error ->
           params = %{command: command, cwd: worktree_path, timeout: timeout, sandbox: :basic}
 
@@ -551,19 +611,22 @@ defmodule Arbor.Actions.Coding do
     end
 
     # Prefer schema-bounded mix actions over raw shell for known mix tasks so
-    # capability/trust use arbor://action/mix/* (auto for coding agents) and so
-    # worktrees can share the host checkout's deps/_build via Mix.run_mix/3.
-    defp mix_action_invocation(worktree_path, command, timeout) do
+    # capability/trust use arbor://action/mix/* (auto for coding agents). Owner-
+    # issued workspace_id is mandatory. No Mix form that executes project code
+    # may fall back to Shell.Execute.
+    defp mix_action_invocation(worktree_path, command, timeout, context) do
       with {:ok, tokens} <- split_command(command),
            {:ok, mix_argv} <- mix_args(tokens) do
         case mix_argv do
           ["compile" | args] ->
-            with {:ok, parsed} <- parse_mix_compile_args(args) do
-              params =
-                parsed
-                |> Map.put(:path, worktree_path)
-                |> Map.put(:timeout, timeout)
-
+            with {:ok, parsed} <- parse_mix_compile_args(args),
+                 {:ok, params} <-
+                   require_workspace_id_params(
+                     parsed
+                     |> Map.put(:path, worktree_path)
+                     |> Map.put(:timeout, timeout),
+                     context
+                   ) do
               {:ok,
                %{
                  kind: :action,
@@ -571,28 +634,99 @@ defmodule Arbor.Actions.Coding do
                  params: params,
                  resource_uri: Actions.canonical_uri_for(MixActions.Compile, params)
                }}
+            else
+              :error -> {:error, :invalid_mix_compile_args}
+              {:error, _} = err -> err
             end
 
-          # Exact match only — trailing args (e.g. `mix quality --strict`) must
-          # not silently drop flags and run plain quality.
           ["quality"] ->
-            params = %{path: worktree_path, timeout: timeout}
+            with {:ok, params} <-
+                   require_workspace_id_params(
+                     %{path: worktree_path, timeout: timeout},
+                     context
+                   ) do
+              {:ok,
+               %{
+                 kind: :action,
+                 module: MixActions.Quality,
+                 params: params,
+                 resource_uri: Actions.canonical_uri_for(MixActions.Quality, params)
+               }}
+            end
 
-            {:ok,
-             %{
-               kind: :action,
-               module: MixActions.Quality,
-               params: params,
-               resource_uri: Actions.canonical_uri_for(MixActions.Quality, params)
-             }}
+          ["test" | args] ->
+            with {:ok, parsed} <- parse_mix_test_args(args),
+                 {:ok, params} <-
+                   require_workspace_id_params(
+                     parsed
+                     |> Map.put(:path, worktree_path)
+                     |> Map.put(:timeout, timeout),
+                     context
+                   ) do
+              {:ok,
+               %{
+                 kind: :action,
+                 module: MixActions.Test,
+                 params: params,
+                 resource_uri: Actions.canonical_uri_for(MixActions.Test, params)
+               }}
+            else
+              :error -> {:error, :invalid_mix_test_args}
+              {:error, _} = err -> err
+            end
 
-          # `mix test …` and non-exact quality forms stay on the shell path:
-          # free-form paths/flags that the schema-bounded mix actions do not
-          # fully model yet. Compile (and bare quality) share host deps/_build.
+          ["format" | args] ->
+            with {:ok, parsed} <- parse_mix_format_args(args),
+                 {:ok, params} <-
+                   require_workspace_id_params(
+                     parsed
+                     |> Map.put(:path, worktree_path)
+                     |> Map.put(:timeout, timeout),
+                     context
+                   ) do
+              {:ok,
+               %{
+                 kind: :action,
+                 module: MixActions.Format,
+                 params: params,
+                 resource_uri: Actions.canonical_uri_for(MixActions.Format, params)
+               }}
+            else
+              :error -> {:error, :invalid_mix_format_args}
+              {:error, _} = err -> err
+            end
+
+          ["xref" | args] ->
+            with {:ok, parsed} <- parse_mix_xref_args(args),
+                 {:ok, params} <-
+                   require_workspace_id_params(
+                     parsed
+                     |> Map.put(:path, worktree_path)
+                     |> Map.put(:timeout, timeout),
+                     context
+                   ) do
+              {:ok,
+               %{
+                 kind: :action,
+                 module: MixActions.Xref,
+                 params: params,
+                 resource_uri: Actions.canonical_uri_for(MixActions.Xref, params)
+               }}
+            else
+              :error -> {:error, :invalid_mix_xref_args}
+              {:error, _} = err -> err
+            end
+
+          # Recognized mix task name but unsupported form/flags — fail closed,
+          # never Shell.Execute.
+          [task | _] when is_binary(task) ->
+            {:error, :unsupported_mix_validation_command}
+
           _ ->
-            :error
+            {:error, :unsupported_mix_validation_command}
         end
       else
+        # Not a mix command at all.
         _ -> :error
       end
     end
@@ -614,6 +748,91 @@ defmodule Arbor.Actions.Coding do
     end
 
     defp mix_args(_tokens), do: :error
+
+    defp parse_mix_test_args(args) when is_list(args) do
+      # Only bounded flags the Mix.Test action models. Unsupported flags fail
+      # closed rather than falling through to Shell.Execute.
+      Enum.reduce_while(args, {:ok, %{test_paths: []}}, fn
+        "--only", {:ok, acc} ->
+          {:cont, {:ok, Map.put(acc, :_expect_only, true)}}
+
+        tag, {:ok, %{_expect_only: true} = acc} when is_binary(tag) ->
+          {:cont, {:ok, acc |> Map.delete(:_expect_only) |> Map.put(:tags, tag)}}
+
+        "--seed", {:ok, acc} ->
+          {:cont, {:ok, Map.put(acc, :_expect_seed, true)}}
+
+        seed, {:ok, %{_expect_seed: true} = acc} when is_binary(seed) ->
+          case Integer.parse(seed) do
+            {n, ""} when n >= 0 ->
+              {:cont, {:ok, acc |> Map.delete(:_expect_seed) |> Map.put(:seed, n)}}
+
+            _ ->
+              {:halt, :error}
+          end
+
+        "--", {:ok, acc} ->
+          {:cont, {:ok, Map.put(acc, :_paths, true)}}
+
+        path, {:ok, %{_paths: true} = acc} when is_binary(path) ->
+          paths = Map.get(acc, :test_paths, []) ++ [path]
+          {:cont, {:ok, Map.put(acc, :test_paths, paths)}}
+
+        path, {:ok, acc} when is_binary(path) ->
+          if String.starts_with?(path, "-") do
+            {:halt, :error}
+          else
+            paths = Map.get(acc, :test_paths, []) ++ [path]
+            {:cont, {:ok, Map.put(acc, :test_paths, paths)}}
+          end
+
+        _other, _acc ->
+          {:halt, :error}
+      end)
+      |> case do
+        {:ok, %{_expect_only: _}} -> :error
+        {:ok, %{_expect_seed: _}} -> :error
+        {:ok, acc} -> {:ok, Map.drop(acc, [:_paths, :_expect_only, :_expect_seed])}
+        :error -> :error
+      end
+    end
+
+    defp parse_mix_format_args(args) when is_list(args) do
+      Enum.reduce_while(args, {:ok, %{}}, fn
+        "--check-formatted", {:ok, acc} ->
+          {:cont, {:ok, Map.put(acc, :check_only, true)}}
+
+        "--", {:ok, acc} ->
+          {:cont, {:ok, Map.put(acc, :_files, true)}}
+
+        file, {:ok, %{_files: true} = acc} when is_binary(file) ->
+          files = Map.get(acc, :files, []) ++ [file]
+          {:cont, {:ok, Map.put(acc, :files, files)}}
+
+        _other, _acc ->
+          {:halt, :error}
+      end)
+      |> case do
+        {:ok, acc} -> {:ok, Map.drop(acc, [:_files])}
+        :error -> :error
+      end
+    end
+
+    defp parse_mix_xref_args(args) when is_list(args) do
+      case args do
+        [] ->
+          {:ok, %{}}
+
+        ["graph"] ->
+          {:ok, %{mode: "graph"}}
+
+        ["graph", "--format", format] when format in ["stats", "cycles", "linked"] ->
+          {:ok, %{mode: "graph", format: format}}
+
+        _ ->
+          :error
+      end
+    end
 
     defp parse_mix_compile_args(args) do
       Enum.reduce_while(args, {:ok, %{}}, fn
@@ -649,6 +868,14 @@ defmodule Arbor.Actions.Coding do
         true ->
           call_action(module, params, context)
       end
+    end
+
+    defp run_validation_invocation(%{kind: :missing_workspace, error: reason}, _context) do
+      {:error, reason}
+    end
+
+    defp run_validation_invocation(%{kind: :unsupported_mix, error: reason}, _context) do
+      {:error, reason}
     end
 
     defp run_validation_invocation(%{kind: :shell, module: module, params: params}, context) do
@@ -1455,5 +1682,50 @@ defmodule Arbor.Actions.Coding do
     defp put_if_present(map, _key, nil), do: map
     defp put_if_present(map, _key, []), do: map
     defp put_if_present(map, key, value), do: Map.put(map, key, value)
+
+    defp put_workspace_id_context(context, workspace) when is_map(context) do
+      case map_value(workspace, :workspace_id) do
+        id when is_binary(id) and id != "" -> Map.put(context, :workspace_id, id)
+        _ -> context
+      end
+    end
+
+    defp put_workspace_id_context(context, _workspace), do: context
+
+    defp require_workspace_id_params(params, context) when is_map(params) do
+      case map_value(context, :workspace_id) || map_value(params, :workspace_id) do
+        id when is_binary(id) and id != "" ->
+          {:ok, Map.put(params, :workspace_id, id)}
+
+        _ ->
+          {:error, :workspace_id_required}
+      end
+    end
+
+    defp require_workspace_id_params(_params, _context), do: {:error, :workspace_id_required}
+
+    defp assert_validation_tree_stable(%{tree_oid: before}, %{tree_oid: after_oid})
+         when before == after_oid,
+         do: :ok
+
+    defp assert_validation_tree_stable(_before, _after), do: {:error, :validation_tree_mutated}
+
+    # After commit/adopt, compare the **commit object's** tree OID (not the
+    # mutable worktree) with the pre-validation binding so an async writer
+    # restoring files cannot hide an unvalidated committed tree.
+    defp assert_commit_matches_validated_tree(worktree_path, %{tree_oid: expected}, commit) do
+      hash = map_value(commit, :commit_hash) || map_value(commit, "commit_hash")
+
+      with true <- is_binary(hash) and hash != "",
+           {:ok, tree_oid} <- Arbor.Actions.Mix.commit_tree_oid(worktree_path, hash) do
+        if tree_oid == expected, do: :ok, else: {:error, :validation_tree_mutated}
+      else
+        false -> {:error, :missing_commit_hash}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    defp assert_commit_matches_validated_tree(_worktree_path, _binding, _commit),
+      do: {:error, :validation_tree_mutated}
   end
 end

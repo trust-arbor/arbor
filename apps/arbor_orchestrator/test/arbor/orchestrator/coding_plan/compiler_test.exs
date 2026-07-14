@@ -308,7 +308,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     validate = node_attrs(parse!(compilation.dot_source), "validate")
 
     assert validate["action"] == "mix_compile"
-    assert validate["context_keys"] == "path"
+    assert validate["context_keys"] == "path,workspace_id"
     assert validate["param.warnings_as_errors"] == true
   end
 

@@ -124,7 +124,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
         with :ok <- verify_sources(resource.candidate_path, sources),
              :ok <-
                write_runner(
-                 resource.runner_path,
+                 revision_runner_path(resource, :candidate),
                  resource.candidate_result_path,
                  formatter_module_name(resource.resource_id)
                ) do
@@ -133,7 +133,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
               resource.candidate_path,
               resource.candidate_build_path,
               resource.candidate_result_path,
-              resource.runner_path,
+              revision_runner_path(resource, :candidate),
               input,
               resource
             )
@@ -212,7 +212,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
       :ok ->
         with :ok <-
                write_runner(
-                 snapshot.runner_path,
+                 revision_runner_path(snapshot, :base),
                  snapshot.base_result_path,
                  formatter_module_name(snapshot.resource_id)
                ) do
@@ -221,7 +221,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
               snapshot.base_worktree_path,
               snapshot.base_build_path,
               snapshot.base_result_path,
-              snapshot.runner_path,
+              revision_runner_path(snapshot, :base),
               input,
               snapshot
             )
@@ -252,12 +252,21 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     _ = File.rm(result_path)
 
     args = ["run", "--no-start", runner_path, "--" | input.test_paths]
+    revision = if root == resource.candidate_path, do: :candidate, else: :base
 
+    # Module-owned contained env always wins over any path-bearing keys. Pass
+    # MIX_ENV only on the safe surface; private HOME/TMP/build/deps come from
+    # the validation resource.
     opts = [
       timeout: input.timeout,
-      share_build_path: false,
-      env: isolated_mix_env(build_path, dependency_path_for(root, resource))
+      validation_resource: resource,
+      validation_revision: revision,
+      env: %{"MIX_ENV" => "test"}
     ]
+
+    # build_path / deps paths are derived from the resource revision — do not
+    # accept the local variables as caller env authority.
+    _ = {build_path, dependency_path_for(root, resource)}
 
     case MixAction.run_mix(root, args, opts) do
       {:ok, result} ->
@@ -291,19 +300,22 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
 
   # Candidate and base receive independent pre-candidate dependency snapshots.
   # The base leg must never consume a tree candidate code could have mutated.
-  defp isolated_mix_env(build_path, deps_path) do
-    %{
-      "MIX_BUILD_PATH" => build_path,
-      "MIX_BUILD_ROOT" => false,
-      "MIX_DEPS_PATH" => deps_path,
-      "MIX_ENV" => "test"
-    }
-  end
-
+  # Path-bearing Mix env is module-owned in Arbor.Actions.Mix; this helper is
+  # retained only for diagnostic pairing with local path variables.
   defp dependency_path_for(root, resource) do
     if root == resource.candidate_path,
       do: resource.candidate_deps_path,
       else: resource.base_deps_path
+  end
+
+  defp revision_runner_path(resource, :candidate) do
+    Map.get(resource, :candidate_runner_path) || Map.get(resource, :runner_path) ||
+      resource.runner_path
+  end
+
+  defp revision_runner_path(resource, :base) do
+    Map.get(resource, :base_runner_path) ||
+      Path.join(Map.get(resource, :base_runtime_path) || resource.root_path, "runner.exs")
   end
 
   defp stage_sources(resource, test_paths) do
