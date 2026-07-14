@@ -1006,7 +1006,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
          expected_path,
          executable_required
        ) do
-    with :ok <- require_valid_utf8(identity.path),
+    with :ok <- validate_identity_path_text(identity.path),
          :ok <- validate_identity_metadata(identity),
          :ok <- require_exact(identity.path, expected_path, :identity_path_mismatch),
          :ok <- require_exact(identity.type, :regular, :identity_not_regular_file),
@@ -1460,42 +1460,50 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
   defp validate_hex64(_, invalid), do: {:error, invalid}
 
   defp validate_absolute_canonical_path(path) when is_binary(path) do
-    with :ok <- require_valid_utf8(path) do
-      cond do
-        path == "" ->
-          {:error, :empty_path}
+    cond do
+      path == "" ->
+        {:error, :empty_path}
 
-        byte_size(path) > @max_path_bytes ->
-          {:error, :path_too_long}
+      byte_size(path) > @max_path_bytes ->
+        {:error, :path_too_long}
 
-        binary_contains?(path, <<0>>) ->
-          {:error, :nul_byte}
+      not String.valid?(path) ->
+        {:error, :invalid_utf8}
 
-        has_control_char?(path) ->
-          {:error, :control_char}
+      binary_contains?(path, <<0>>) ->
+        {:error, :nul_byte}
 
-        has_whitespace?(path) ->
-          {:error, :whitespace_in_path}
+      has_control_char?(path) ->
+        {:error, :control_char}
 
-        not String.starts_with?(path, "/") ->
-          {:error, :relative_path}
+      not String.starts_with?(path, "/") ->
+        {:error, :relative_path}
 
-        String.contains?(path, "//") ->
-          {:error, :non_canonical_path}
+      String.contains?(path, "//") ->
+        {:error, :non_canonical_path}
 
-        path != "/" and String.ends_with?(path, "/") ->
-          {:error, :trailing_slash}
+      path != "/" and String.ends_with?(path, "/") ->
+        {:error, :trailing_slash}
 
-        Enum.any?(Path.split(path), &(&1 in [".", ".."])) ->
-          {:error, :dot_segment}
+      Enum.any?(Path.split(path), &(&1 in [".", ".."])) ->
+        {:error, :dot_segment}
 
-        true ->
-          {:ok, path}
-      end
+      true ->
+        {:ok, path}
     end
   end
 
   defp validate_absolute_canonical_path(_), do: {:error, :invalid_path}
+
+  defp validate_identity_path_text(path) when is_binary(path) do
+    cond do
+      byte_size(path) > @max_path_bytes -> {:error, :identity_path_too_long}
+      not String.valid?(path) -> {:error, :invalid_utf8}
+      true -> :ok
+    end
+  end
+
+  defp validate_identity_path_text(_path), do: {:error, :invalid_identity_path}
 
   defp take_bounded(list, max) when is_list(list) and is_integer(max) and max >= 0 do
     take_bounded(list, max + 1, 0, [])

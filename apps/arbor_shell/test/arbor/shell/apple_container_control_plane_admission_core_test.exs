@@ -22,7 +22,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
   @kernel_sha String.duplicate("e", 64)
   @other_sha String.duplicate("f", 64)
 
-  @app_root "/Applications/Container.app/Contents"
+  @app_root "/Users/arbor/Library/Application Support/com.apple.container"
   @kernel_path "/usr/local/share/container/kernels/default.kernel"
   @version "1.1.0"
 
@@ -285,6 +285,20 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
         bad_evidence = %{evidence | kernel_identity: identity}
         assert {:error, _reason} = Core.new(bad_bindings, bad_evidence)
       end
+    end
+
+    test "bounds identity paths before text validation", %{
+      bindings: bindings,
+      evidence: evidence
+    } do
+      oversized = "/" <> String.duplicate("a", 4_096)
+      identity = %{bindings.cli_identity | path: oversized}
+
+      assert {:error, :identity_path_too_long} =
+               Core.new(
+                 %{bindings | cli_identity: identity},
+                 put_in(evidence, [:cli, :identity], identity)
+               )
     end
   end
 
