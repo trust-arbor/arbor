@@ -41,9 +41,39 @@ defmodule Arbor.Shell.ExecutablePolicy do
           executables_by_path: %{String.t() => Executable.t()}
         }
 
+  # Exact absolute paths for Apple read-only/control-plane probe commands.
+  # These are pinned individually — never by scanning their parent directories —
+  # so a standalone /usr/local/bin/container install is available even when
+  # /usr/local/bin is omitted from the service PATH, without authorizing siblings.
+  @apple_fixed_executable_paths [
+    "/usr/local/bin/container",
+    "/usr/bin/codesign",
+    "/bin/launchctl",
+    "/usr/bin/id",
+    "/usr/bin/sw_vers"
+  ]
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @doc false
+  @spec apple_fixed_executable_paths() :: [String.t()]
+  def apple_fixed_executable_paths, do: @apple_fixed_executable_paths
+
+  # Same-module test seam for merge/pin logic with temporary fixture paths.
+  # Production init always supplies `@apple_fixed_executable_paths` only —
+  # never Application env or caller-nominated fixed path lists.
+  @doc false
+  @spec __merge_fixed_executables_for_test__(
+          %{String.t() => Executable.t()},
+          %{String.t() => Executable.t()},
+          [String.t()]
+        ) :: {%{String.t() => Executable.t()}, %{String.t() => Executable.t()}}
+  def __merge_fixed_executables_for_test__(by_name, by_path, fixed_paths)
+      when is_map(by_name) and is_map(by_path) and is_list(fixed_paths) do
+    merge_fixed_executables(by_name, by_path, fixed_paths)
   end
 
   @spec resolve(String.t()) :: {:ok, Executable.t()} | {:error, term()}
@@ -128,6 +158,14 @@ defmodule Arbor.Shell.ExecutablePolicy do
       {:stop, :no_trusted_executable_paths}
     else
       {executables_by_name, executables_by_path} = pin_executables(search_paths)
+
+      # Exact fixed Apple control paths only — never from opts/Application env.
+      {executables_by_name, executables_by_path} =
+        merge_fixed_executables(
+          executables_by_name,
+          executables_by_path,
+          @apple_fixed_executable_paths
+        )
 
       {:ok,
        %{
@@ -233,6 +271,57 @@ defmodule Arbor.Shell.ExecutablePolicy do
         end
       end)
     end)
+  end
+
+  # Pin each exact fixed absolute path individually. Missing or untrusted
+  # paths are omitted so non-macOS / Homebrew-only hosts still start; the
+  # Apple probe fails closed later when resolve misses. Fixed basenames
+  # deterministically override PATH-discovered same-name entries.
+  defp merge_fixed_executables(by_name, by_path, fixed_paths)
+       when is_map(by_name) and is_map(by_path) and is_list(fixed_paths) do
+    Enum.reduce(fixed_paths, {by_name, by_path}, fn path, {names, paths} ->
+      case pin_fixed_executable(path) do
+        {:ok, %Executable{} = executable} ->
+          {
+            Map.put(names, executable.name, executable),
+            Map.put(paths, executable.path, executable)
+          }
+
+        {:error, _reason} ->
+          {names, paths}
+      end
+    end)
+  end
+
+  defp pin_fixed_executable(path) when is_binary(path) do
+    if Path.type(path) == :absolute do
+      name = Path.basename(path)
+
+      case executable_identity(path, name) do
+        {:ok, %Executable{path: pinned_path} = executable} ->
+          # Accept TrustedPath canonicalization when it names the same file.
+          if pinned_path == path or paths_equivalent?(path, pinned_path) do
+            {:ok, %{executable | name: name}}
+          else
+            {:error, :executable_not_found}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:error, :executable_not_found}
+    end
+  end
+
+  defp pin_fixed_executable(_path), do: {:error, :executable_not_found}
+
+  defp paths_equivalent?(left, right)
+       when is_binary(left) and is_binary(right) do
+    case {TrustedPath.canonicalize_absolute(left), TrustedPath.canonicalize_absolute(right)} do
+      {{:ok, a}, {:ok, b}} -> a == b
+      _ -> false
+    end
   end
 
   defp executable_identity(candidate, name) do
