@@ -441,6 +441,18 @@ defmodule Arbor.Shell do
   def execute_spawn_capable(_tool_name, _args, _opts \\ []),
     do: {:error, {:spawn_backend_unavailable, :production_backend_missing}}
 
+  @doc """
+  Redacted public status of the Apple Container control-plane authority owner.
+
+  Returns an ordinary JSON-clean map with state/reason/platform labels only.
+  Never exposes identity structs, digests, inode/device metadata, raw bindings,
+  configured app roots, or a checkout function.
+  """
+  @spec apple_container_control_plane_status() :: map()
+  def apple_container_control_plane_status do
+    Arbor.Shell.AppleContainerControlPlaneAuthority.public_status()
+  end
+
   # Observability only. `inspect/1` makes argv boundaries unambiguous; this
   # string is never parsed or passed to a process.
   defp direct_command_for_display(cmd, args) when is_binary(cmd) and is_list(args) do

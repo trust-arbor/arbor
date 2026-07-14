@@ -1,7 +1,13 @@
 # Add children to the empty app supervisor (start_children: false leaves it empty)
+# Order must match Arbor.Shell.Application.production_children/1 (rest_for_one).
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
   {Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")}
+)
+
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  {Arbor.Shell.AppleContainerControlPlaneAuthority, []}
 )
 
 Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, []})
