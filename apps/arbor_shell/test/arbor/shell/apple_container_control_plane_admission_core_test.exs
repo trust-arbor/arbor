@@ -66,12 +66,18 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
 
       assert receipt.apiserver.launchd == %{
                label: "com.apple.container.apiserver",
+               path: @app_root <> "/apiserver/apiserver.plist",
+               type: "LaunchAgent",
+               state: "running",
                program: Core.apiserver_path(),
                argv: [Core.apiserver_path(), "start"],
                environment: %{
                  "CONTAINER_APP_ROOT" => @app_root,
                  "CONTAINER_INSTALL_ROOT" => "/usr/local"
-               }
+               },
+               inherited_environment_checked: true,
+               default_environment_checked: true,
+               proxy_free: true
              }
 
       assert receipt.runtime_plugin.path == Core.plugin_path()
@@ -111,11 +117,23 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
       assert shown["apiserver"]["sha256"] == @api_sha
       assert shown["apiserver"]["launchd"]["program"] == Core.apiserver_path()
       assert shown["apiserver"]["launchd"]["argv"] == [Core.apiserver_path(), "start"]
+      assert shown["apiserver"]["launchd"]["path"] == @app_root <> "/apiserver/apiserver.plist"
+      assert shown["apiserver"]["launchd"]["type"] == "LaunchAgent"
+      assert shown["apiserver"]["launchd"]["state"] == "running"
 
       assert shown["apiserver"]["launchd"]["environment"] == %{
                "CONTAINER_APP_ROOT" => @app_root,
                "CONTAINER_INSTALL_ROOT" => "/usr/local"
              }
+
+      assert shown["apiserver"]["launchd"]["inherited_environment_checked"] == true
+      assert shown["apiserver"]["launchd"]["default_environment_checked"] == true
+      assert shown["apiserver"]["launchd"]["proxy_free"] == true
+      refute Map.has_key?(shown["apiserver"]["launchd"], "inherited_environment")
+      refute Map.has_key?(shown["apiserver"]["launchd"], "default_environment")
+      refute Map.has_key?(shown["apiserver"]["launchd"], "XPC_SERVICE_NAME")
+      refute Map.has_key?(shown["apiserver"]["launchd"]["environment"], "XPC_SERVICE_NAME")
+      refute Map.has_key?(shown["apiserver"]["launchd"]["environment"], "OSLogRateLimit")
 
       assert shown["runtime_plugin"]["path"] == Core.plugin_path()
       assert shown["runtime_plugin"]["sha256"] == @plugin_sha
@@ -361,7 +379,55 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
   end
 
   describe "launchd mutations" do
-    test "rejects label/program/argv/env proxy/debug/extra mutations", %{
+    test "admits realistic launchctl projection with system job keys and safe inherited/default env",
+         %{
+           bindings: bindings,
+           evidence: evidence
+         } do
+      launchd =
+        evidence.apiserver.launchd
+        |> Map.put(:environment, %{
+          "CONTAINER_APP_ROOT" => @app_root,
+          "CONTAINER_INSTALL_ROOT" => "/usr/local",
+          "XPC_SERVICE_NAME" => "com.apple.container.apiserver",
+          "OSLogRateLimit" => "64"
+        })
+        |> Map.put(:inherited_environment, %{
+          "HOME" => "/Users/arbor",
+          "TMPDIR" => "/var/folders/xx/secret/T/",
+          "PATH" => "/usr/bin:/bin",
+          "XPC_FLAGS" => "0x0"
+        })
+        |> Map.put(:default_environment, %{
+          "PATH" => "/usr/bin:/bin:/usr/sbin:/sbin"
+        })
+
+      evidence = put_in(evidence, [:apiserver, :launchd], launchd)
+      assert {:ok, receipt} = Core.new(bindings, evidence)
+
+      # Authority receipt keeps only safe job env; system keys and inherited values are redacted.
+      assert receipt.apiserver.launchd.environment == %{
+               "CONTAINER_APP_ROOT" => @app_root,
+               "CONTAINER_INSTALL_ROOT" => "/usr/local"
+             }
+
+      assert receipt.apiserver.launchd.inherited_environment_checked == true
+      assert receipt.apiserver.launchd.default_environment_checked == true
+      assert receipt.apiserver.launchd.proxy_free == true
+      refute Map.has_key?(receipt.apiserver.launchd, :inherited_environment)
+      refute Map.has_key?(receipt.apiserver.launchd, :default_environment)
+
+      shown = Core.show(receipt)
+      refute Map.has_key?(shown["apiserver"]["launchd"], "inherited_environment")
+      refute Map.has_key?(shown["apiserver"]["launchd"], "default_environment")
+      # Inherited TMPDIR secret path must not appear; app_root itself is authority data.
+      refute inspect(shown) =~ "secret"
+      refute inspect(shown) =~ "/var/folders/xx/secret"
+      refute inspect(receipt) =~ "secret"
+      refute inspect(receipt) =~ "XPC_FLAGS"
+    end
+
+    test "rejects label/path/type/state/program/argv mutations", %{
       bindings: bindings,
       evidence: evidence
     } do
@@ -370,6 +436,25 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
                  bindings,
                  put_in(evidence, [:apiserver, :launchd, :label], "com.evil.apiserver")
                )
+
+      assert {:error, :launchd_path_mismatch} =
+               Core.new(
+                 bindings,
+                 put_in(
+                   evidence,
+                   [:apiserver, :launchd, :path],
+                   "/tmp/evil/apiserver/apiserver.plist"
+                 )
+               )
+
+      assert {:error, :launchd_type_mismatch} =
+               Core.new(
+                 bindings,
+                 put_in(evidence, [:apiserver, :launchd, :type], "LaunchDaemon")
+               )
+
+      assert {:error, :launchd_state_mismatch} =
+               Core.new(bindings, put_in(evidence, [:apiserver, :launchd, :state], "not running"))
 
       assert {:error, :launchd_program_mismatch} =
                Core.new(
@@ -392,30 +477,51 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
                  bindings,
                  put_in(evidence, [:apiserver, :launchd, :argv], [Core.apiserver_path()])
                )
+    end
 
-      assert {:error, reason} =
+    test "accepts allowed launchd system job keys and rejects unknown job keys", %{
+      bindings: bindings,
+      evidence: evidence
+    } do
+      allowed =
+        put_in(evidence, [:apiserver, :launchd, :environment], %{
+          "CONTAINER_APP_ROOT" => @app_root,
+          "CONTAINER_INSTALL_ROOT" => "/usr/local",
+          "XPC_SERVICE_NAME" => "com.apple.container.apiserver",
+          "OSLogRateLimit" => "0"
+        })
+
+      assert {:ok, _} = Core.new(bindings, allowed)
+
+      assert {:error, :launchd_environment_mismatch} =
                Core.new(
                  bindings,
                  put_in(evidence, [:apiserver, :launchd, :environment], %{
                    "CONTAINER_APP_ROOT" => @app_root,
                    "CONTAINER_INSTALL_ROOT" => "/usr/local",
-                   "HTTP_PROXY" => "http://evil.test"
+                   "XPC_SERVICE_NAME" => "com.evil.service"
                  })
                )
 
-      assert reason in [:launchd_environment_forbidden, :launchd_environment_mismatch]
-
-      assert {:error, reason} =
+      assert {:error, :launchd_environment_mismatch} =
                Core.new(
                  bindings,
                  put_in(evidence, [:apiserver, :launchd, :environment], %{
                    "CONTAINER_APP_ROOT" => @app_root,
                    "CONTAINER_INSTALL_ROOT" => "/usr/local",
-                   "CONTAINER_LOG_ROOT" => "/tmp/logs"
+                   "OSLogRateLimit" => "not-a-number"
                  })
                )
 
-      assert reason in [:launchd_environment_forbidden, :launchd_environment_mismatch]
+      assert {:error, :launchd_environment_forbidden} =
+               Core.new(
+                 bindings,
+                 put_in(evidence, [:apiserver, :launchd, :environment], %{
+                   "CONTAINER_APP_ROOT" => @app_root,
+                   "CONTAINER_INSTALL_ROOT" => "/usr/local",
+                   "EXTRA_JOB_KEY" => "nope"
+                 })
+               )
 
       assert {:error, :launchd_environment_mismatch} =
                Core.new(
@@ -425,6 +531,103 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
                    "CONTAINER_INSTALL_ROOT" => "/usr/local"
                  })
                )
+    end
+
+    test "rejects proxy, unexpected CONTAINER_, and log-root keys in each environment section", %{
+      bindings: bindings,
+      evidence: evidence
+    } do
+      forbidden_cases = [
+        {:environment, "HTTP_PROXY", "http://evil.test"},
+        {:environment, "Https_Proxy", "http://evil.test"},
+        {:environment, "ALL_PROXY", "socks5://evil.test"},
+        {:environment, "no_proxy", "*"},
+        {:environment, "CONTAINER_LOG_ROOT", "/tmp/logs"},
+        {:environment, "CONTAINER_DEBUG", "1"},
+        {:inherited_environment, "http_proxy", "http://evil.test"},
+        {:inherited_environment, "HTTPS_PROXY", "http://evil.test"},
+        {:inherited_environment, "CONTAINER_FOO", "bar"},
+        {:inherited_environment, "container_log_root", "/tmp/logs"},
+        {:default_environment, "Http_Proxy", "http://evil.test"},
+        {:default_environment, "NO_PROXY", "evil.test"},
+        {:default_environment, "CONTAINER_INSTALL_ROOT_EXTRA", "/evil"},
+        {:default_environment, "MY_LOG_ROOT", "/tmp/logs"}
+      ]
+
+      for {section, key, value} <- forbidden_cases do
+        base = Map.fetch!(evidence.apiserver.launchd, section)
+        altered = Map.put(base, key, value)
+
+        assert {:error, reason} =
+                 Core.new(bindings, put_in(evidence, [:apiserver, :launchd, section], altered))
+
+        assert reason in [:launchd_environment_forbidden, :launchd_environment_mismatch],
+               "expected forbid for #{section}/#{key}, got #{inspect(reason)}"
+      end
+    end
+
+    @tag :security_regression
+    test "security regression: proxy in inherited or default environment cannot be dropped and admitted",
+         %{
+           bindings: bindings,
+           evidence: evidence
+         } do
+      # A parser that silently discarded inherited/default would admit this input.
+      # The pure core must reject before any section can be dropped from the receipt.
+      for {section, proxy_key} <- [
+            {:inherited_environment, "HTTP_PROXY"},
+            {:inherited_environment, "https_proxy"},
+            {:default_environment, "ALL_PROXY"},
+            {:default_environment, "No_Proxy"}
+          ] do
+        poisoned =
+          put_in(
+            evidence,
+            [:apiserver, :launchd, section],
+            Map.put(Map.fetch!(evidence.apiserver.launchd, section), proxy_key, "http://evil")
+          )
+
+        assert {:error, :launchd_environment_forbidden} = Core.new(bindings, poisoned)
+        refute match?({:ok, _}, Core.new(bindings, poisoned))
+      end
+    end
+
+    test "receipt redaction never exposes raw inherited or default environment values", %{
+      bindings: bindings,
+      evidence: evidence
+    } do
+      secret_socket = "/var/folders/xx/user-secret/T/com.apple.launchd.ABC/Listeners"
+
+      evidence =
+        put_in(evidence, [:apiserver, :launchd, :inherited_environment], %{
+          "HOME" => "/Users/secret-user",
+          "XPC_SERVICE_NAME" => secret_socket
+        })
+        |> put_in([:apiserver, :launchd, :default_environment], %{
+          "TMPDIR" => "/private/var/folders/xx/user-secret/T/"
+        })
+        |> put_in([:apiserver, :launchd, :environment], %{
+          "CONTAINER_APP_ROOT" => @app_root,
+          "CONTAINER_INSTALL_ROOT" => "/usr/local",
+          "XPC_SERVICE_NAME" => "com.apple.container.apiserver",
+          "OSLogRateLimit" => "64"
+        })
+
+      assert {:ok, receipt} = Core.new(bindings, evidence)
+      shown = Core.show(receipt)
+
+      for payload <- [receipt, shown, inspect(receipt), inspect(shown)] do
+        text = if is_binary(payload), do: payload, else: inspect(payload)
+        refute text =~ "secret-user"
+        refute text =~ "user-secret"
+        refute text =~ secret_socket
+        refute text =~ "Listeners"
+      end
+
+      refute Map.has_key?(receipt.apiserver.launchd, :inherited_environment)
+      refute Map.has_key?(receipt.apiserver.launchd, :default_environment)
+      refute Map.has_key?(shown["apiserver"]["launchd"], "inherited_environment")
+      refute Map.has_key?(shown["apiserver"]["launchd"], "default_environment")
     end
 
     test "rejects invalid app_root bindings", %{bindings: bindings, evidence: evidence} do
@@ -440,7 +643,9 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
         bad_bindings = %{bindings | app_root: bad_root}
 
         bad_evidence =
-          put_in(evidence, [:apiserver, :launchd, :environment], %{
+          evidence
+          |> put_in([:apiserver, :launchd, :path], bad_root <> "/apiserver/apiserver.plist")
+          |> put_in([:apiserver, :launchd, :environment], %{
             "CONTAINER_APP_ROOT" => bad_root,
             "CONTAINER_INSTALL_ROOT" => "/usr/local"
           })
@@ -622,12 +827,17 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
           signing("com.apple.container.apiserver", Core.apiserver_designated_requirement()),
         launchd: %{
           label: "com.apple.container.apiserver",
+          path: @app_root <> "/apiserver/apiserver.plist",
+          type: "LaunchAgent",
+          state: "running",
           program: Core.apiserver_path(),
           argv: [Core.apiserver_path(), "start"],
           environment: %{
             "CONTAINER_APP_ROOT" => @app_root,
             "CONTAINER_INSTALL_ROOT" => "/usr/local"
-          }
+          },
+          inherited_environment: %{},
+          default_environment: %{}
         }
       },
       service_status: %{

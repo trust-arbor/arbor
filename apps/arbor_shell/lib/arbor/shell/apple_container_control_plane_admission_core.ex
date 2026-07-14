@@ -115,11 +115,39 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
                             Enum.map(@logical_signing_keys, &Atom.to_string/1)
                         )
 
-  @logical_launchd_keys [:label, :program, :argv, :environment]
+  @logical_launchd_keys [
+    :label,
+    :path,
+    :type,
+    :state,
+    :program,
+    :argv,
+    :environment,
+    :inherited_environment,
+    :default_environment
+  ]
   @allowed_launchd_keys MapSet.new(
                           @logical_launchd_keys ++
                             Enum.map(@logical_launchd_keys, &Atom.to_string/1)
                         )
+
+  @launchd_type "LaunchAgent"
+  @launchd_state "running"
+  @launchd_plist_relative "apiserver/apiserver.plist"
+  @required_job_env_keys ["CONTAINER_APP_ROOT", "CONTAINER_INSTALL_ROOT"]
+  @allowed_job_env_keys MapSet.new([
+                          "CONTAINER_APP_ROOT",
+                          "CONTAINER_INSTALL_ROOT",
+                          "XPC_SERVICE_NAME",
+                          "OSLogRateLimit"
+                        ])
+  @proxy_env_names MapSet.new([
+                     "http_proxy",
+                     "https_proxy",
+                     "all_proxy",
+                     "no_proxy"
+                   ])
+  @oslog_rate_limit_re ~r/\A[0-9]+\z/
 
   @logical_plugin_config_keys [:abstract, :author, :version, :services_config]
   @allowed_plugin_config_keys MapSet.new(
@@ -150,7 +178,10 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
   @max_file_bytes 512 * 1024 * 1024
   @max_mode 0xFFFF_FFFF
   @max_metadata_int 0xFFFF_FFFF_FFFF_FFFF
-  @max_env_entries 16
+  @max_env_entries 64
+  @max_env_key_bytes 256
+  @max_env_value_bytes 4_096
+  @max_oslog_rate_limit_bytes 20
   @max_argv_entries 16
   @max_argv_entry_bytes 4_096
 
@@ -691,6 +722,33 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
              :invalid_launchd_label,
              :launchd_label_too_long
            ),
+         {:ok, path} <-
+           require_bounded_binary_field(
+             launchd,
+             :path,
+             @max_path_bytes,
+             :missing_launchd_path,
+             :invalid_launchd_path,
+             :launchd_path_too_long
+           ),
+         {:ok, type} <-
+           require_bounded_binary_field(
+             launchd,
+             :type,
+             @max_status_bytes,
+             :missing_launchd_type,
+             :invalid_launchd_type,
+             :launchd_type_too_long
+           ),
+         {:ok, state} <-
+           require_bounded_binary_field(
+             launchd,
+             :state,
+             @max_status_bytes,
+             :missing_launchd_state,
+             :invalid_launchd_state,
+             :launchd_state_too_long
+           ),
          {:ok, program} <-
            require_bounded_binary_field(
              launchd,
@@ -701,8 +759,42 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
              :launchd_program_too_long
            ),
          {:ok, argv} <- fetch_argv(launchd),
-         {:ok, environment} <- fetch_environment(launchd) do
-      {:ok, %{label: label, program: program, argv: argv, environment: environment}}
+         {:ok, environment} <-
+           fetch_environment_map(
+             launchd,
+             :environment,
+             :missing_launchd_environment,
+             :invalid_launchd_environment,
+             :too_many_launchd_env
+           ),
+         {:ok, inherited_environment} <-
+           fetch_environment_map(
+             launchd,
+             :inherited_environment,
+             :missing_launchd_inherited_environment,
+             :invalid_launchd_inherited_environment,
+             :too_many_launchd_inherited_env
+           ),
+         {:ok, default_environment} <-
+           fetch_environment_map(
+             launchd,
+             :default_environment,
+             :missing_launchd_default_environment,
+             :invalid_launchd_default_environment,
+             :too_many_launchd_default_env
+           ) do
+      {:ok,
+       %{
+         label: label,
+         path: path,
+         type: type,
+         state: state,
+         program: program,
+         argv: argv,
+         environment: environment,
+         inherited_environment: inherited_environment,
+         default_environment: default_environment
+       }}
     end
   end
 
@@ -741,21 +833,23 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
     end
   end
 
-  defp fetch_environment(launchd) do
-    case get_field(launchd, :environment) do
+  # Normalize a string-keyed environment map. Atom keys are rejected so a later
+  # imperative prober cannot smuggle aliases past the closed UTF-8 surface.
+  defp fetch_environment_map(launchd, field, missing, invalid, too_many) do
+    case get_field(launchd, field) do
       nil ->
-        {:error, :missing_launchd_environment}
+        {:error, missing}
 
       env when is_map(env) ->
         if map_size(env) > @max_env_entries do
-          {:error, :too_many_launchd_env}
+          {:error, too_many}
         else
           keys = Map.keys(env)
 
           if Enum.all?(keys, &is_binary/1) and Enum.all?(Map.values(env), &is_binary/1) do
             Enum.reduce_while(env, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
-              with :ok <- bounded_string(key, @max_signing_field_bytes, :launchd_env_key_too_long),
-                   :ok <- bounded_string(value, @max_path_bytes, :launchd_env_value_too_long),
+              with :ok <- bounded_string(key, @max_env_key_bytes, :launchd_env_key_too_long),
+                   :ok <- bounded_string(value, @max_env_value_bytes, :launchd_env_value_too_long),
                    :ok <- require_valid_utf8(key),
                    :ok <- require_valid_utf8(value),
                    :ok <- reject_control_char(key, :unsafe_launchd_env_key),
@@ -770,13 +864,12 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
               end
             end)
           else
-            # Environment must be string-keyed only; atom keys are ambiguous aliases.
-            {:error, :invalid_launchd_environment}
+            {:error, invalid}
           end
         end
 
       _other ->
-        {:error, :invalid_launchd_environment}
+        {:error, invalid}
     end
   end
 
@@ -1124,61 +1217,126 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
   end
 
   defp validate_launchd(launchd, app_root) do
+    expected_plist_path = app_root <> "/" <> @launchd_plist_relative
+
     with :ok <- require_valid_utf8(launchd.label),
-         :ok <- require_valid_utf8(launchd.program) do
-      expected_env = %{
-        "CONTAINER_APP_ROOT" => app_root,
-        "CONTAINER_INSTALL_ROOT" => @container_install_root_env
-      }
+         :ok <- require_valid_utf8(launchd.path),
+         :ok <- require_valid_utf8(launchd.type),
+         :ok <- require_valid_utf8(launchd.state),
+         :ok <- require_valid_utf8(launchd.program),
+         :ok <- require_exact(launchd.label, @launchd_label, :launchd_label_mismatch),
+         :ok <- require_exact(launchd.path, expected_plist_path, :launchd_path_mismatch),
+         :ok <- require_exact(launchd.type, @launchd_type, :launchd_type_mismatch),
+         :ok <- require_exact(launchd.state, @launchd_state, :launchd_state_mismatch),
+         :ok <- require_exact(launchd.program, @apiserver_path, :launchd_program_mismatch),
+         :ok <- validate_launchd_argv(launchd.argv),
+         :ok <-
+           validate_environment_section_security(
+             launchd.environment,
+             :launchd_environment_forbidden
+           ),
+         :ok <-
+           validate_environment_section_security(
+             launchd.inherited_environment,
+             :launchd_environment_forbidden
+           ),
+         :ok <-
+           validate_environment_section_security(
+             launchd.default_environment,
+             :launchd_environment_forbidden
+           ),
+         :ok <- validate_job_environment(launchd.environment, app_root, launchd.label) do
+      :ok
+    end
+  end
 
-      cond do
-        launchd.label != @launchd_label ->
-          {:error, :launchd_label_mismatch}
-
-        launchd.program != @apiserver_path ->
-          {:error, :launchd_program_mismatch}
-
-        launchd.argv != [@apiserver_path, "start"] ->
-          if Enum.any?(launchd.argv, &(&1 == "--debug")) do
-            {:error, :launchd_debug_forbidden}
-          else
-            {:error, :launchd_argv_mismatch}
-          end
-
-        true ->
-          validate_launchd_environment(launchd.environment, expected_env)
+  defp validate_launchd_argv(argv) do
+    if argv == [@apiserver_path, "start"] do
+      :ok
+    else
+      if Enum.any?(argv, &(&1 == "--debug")) do
+        {:error, :launchd_debug_forbidden}
+      else
+        {:error, :launchd_argv_mismatch}
       end
     end
   end
 
-  defp validate_launchd_environment(environment, expected_env) do
-    forbidden =
-      Enum.any?(Map.keys(environment), fn key ->
-        key in [
-          "HTTP_PROXY",
-          "HTTPS_PROXY",
-          "http_proxy",
-          "https_proxy",
-          "NO_PROXY",
-          "no_proxy",
-          "ALL_PROXY",
-          "all_proxy"
-        ] or
-          (String.starts_with?(key, "CONTAINER_") and
-             key not in ["CONTAINER_APP_ROOT", "CONTAINER_INSTALL_ROOT"]) or
-          (String.contains?(String.downcase(key), "log") and
-             String.contains?(String.downcase(key), "root"))
-      end)
+  # Security scan applied to job, inherited, and default environments before any
+  # section is discarded. Proxy / unexpected CONTAINER_ / log-root keys fail closed.
+  defp validate_environment_section_security(environment, forbidden_reason)
+       when is_map(environment) do
+    Enum.reduce_while(Map.keys(environment), :ok, fn key, :ok ->
+      if forbidden_environment_key?(key) do
+        {:halt, {:error, forbidden_reason}}
+      else
+        {:cont, :ok}
+      end
+    end)
+  end
+
+  defp forbidden_environment_key?(key) when is_binary(key) do
+    downcased = String.downcase(key)
+
+    MapSet.member?(@proxy_env_names, downcased) or
+      (String.starts_with?(key, "CONTAINER_") and key not in @required_job_env_keys) or
+      (String.contains?(downcased, "log") and String.contains?(downcased, "root"))
+  end
+
+  defp validate_job_environment(environment, app_root, label) when is_map(environment) do
+    unknown_keys =
+      Enum.reject(Map.keys(environment), &MapSet.member?(@allowed_job_env_keys, &1))
 
     cond do
-      forbidden ->
+      unknown_keys != [] ->
         {:error, :launchd_environment_forbidden}
 
-      environment != expected_env ->
+      Map.get(environment, "CONTAINER_APP_ROOT") != app_root ->
+        {:error, :launchd_environment_mismatch}
+
+      Map.get(environment, "CONTAINER_INSTALL_ROOT") != @container_install_root_env ->
         {:error, :launchd_environment_mismatch}
 
       true ->
+        with :ok <- validate_optional_xpc_service_name(environment, label),
+             :ok <- validate_optional_oslog_rate_limit(environment) do
+          :ok
+        end
+    end
+  end
+
+  defp validate_optional_xpc_service_name(environment, label) do
+    case Map.fetch(environment, "XPC_SERVICE_NAME") do
+      :error ->
         :ok
+
+      {:ok, value} ->
+        require_exact(value, label, :launchd_environment_mismatch)
+    end
+  end
+
+  defp validate_optional_oslog_rate_limit(environment) do
+    case Map.fetch(environment, "OSLogRateLimit") do
+      :error ->
+        :ok
+
+      {:ok, value} when is_binary(value) ->
+        with :ok <-
+               bounded_string(
+                 value,
+                 @max_oslog_rate_limit_bytes,
+                 :launchd_environment_mismatch
+               ),
+             :ok <- require_valid_utf8(value) do
+          if Regex.match?(@oslog_rate_limit_re, value) do
+            :ok
+          else
+            {:error, :launchd_environment_mismatch}
+          end
+        end
+
+      _other ->
+        {:error, :launchd_environment_mismatch}
     end
   end
 
@@ -1255,6 +1413,11 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
   end
 
   defp build_receipt(bindings, _evidence, cli_version, api_version) do
+    safe_job_environment = %{
+      "CONTAINER_APP_ROOT" => bindings.app_root,
+      "CONTAINER_INSTALL_ROOT" => @container_install_root_env
+    }
+
     %{
       admitted: true,
       app_root: bindings.app_root,
@@ -1279,12 +1442,15 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
         codesign_verified: true,
         launchd: %{
           label: @launchd_label,
+          path: bindings.app_root <> "/" <> @launchd_plist_relative,
+          type: @launchd_type,
+          state: @launchd_state,
           program: @apiserver_path,
           argv: [@apiserver_path, "start"],
-          environment: %{
-            "CONTAINER_APP_ROOT" => bindings.app_root,
-            "CONTAINER_INSTALL_ROOT" => @container_install_root_env
-          }
+          environment: safe_job_environment,
+          inherited_environment_checked: true,
+          default_environment_checked: true,
+          proxy_free: true
         }
       },
       runtime_plugin: %{
@@ -1341,9 +1507,15 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
     show_signed_binary(apiserver)
     |> Map.put("launchd", %{
       "label" => apiserver.launchd.label,
+      "path" => apiserver.launchd.path,
+      "type" => apiserver.launchd.type,
+      "state" => apiserver.launchd.state,
       "program" => apiserver.launchd.program,
       "argv" => apiserver.launchd.argv,
-      "environment" => apiserver.launchd.environment
+      "environment" => apiserver.launchd.environment,
+      "inherited_environment_checked" => apiserver.launchd.inherited_environment_checked,
+      "default_environment_checked" => apiserver.launchd.default_environment_checked,
+      "proxy_free" => apiserver.launchd.proxy_free
     })
   end
 
