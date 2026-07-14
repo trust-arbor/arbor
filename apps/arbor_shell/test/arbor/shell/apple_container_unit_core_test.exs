@@ -25,7 +25,6 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
     tmp: "/private/tmp/arbor-val/tmp",
     build: "/private/tmp/arbor-val/build",
     deps: "/private/tmp/arbor-val/deps",
-    runtime: "/private/tmp/arbor-val/runtime",
     mix_wrapper: "/private/tmp/arbor-val/bin/mix"
   }
 

@@ -80,24 +80,30 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
                               "receipt"
                             ])
 
-  @projection_specs [
-    {:runtime_erlang, :read_only},
-    {:runtime_elixir, :read_only},
-    {:mix_wrapper, :read_only},
-    {:worktree, :read_write},
-    {:home, :read_write},
-    {:tmp, :read_write},
-    {:build, :read_write},
-    {:deps, :read_write},
-    {:runtime, :read_write}
-  ]
+  # Closed Actions envelope: %{read_only: [entry...], read_write: [entry...], revision: ...}
+  # Entries are closed maps with path/mode/purpose (atom or string keys). The retired
+  # revision-runtime parent purpose is intentionally absent.
+  @envelope_logical_keys [:read_only, :read_write, :revision]
+  @allowed_envelope_keys MapSet.new(
+                           @envelope_logical_keys ++
+                             Enum.map(@envelope_logical_keys, &Atom.to_string/1)
+                         )
+
+  @read_only_purposes [:runtime_erlang, :runtime_elixir, :mix_wrapper]
+  @read_write_purposes [:worktree, :home, :tmp, :build, :deps]
+  @projection_specs Enum.map(@read_only_purposes, &{&1, :read_only}) ++
+                      Enum.map(@read_write_purposes, &{&1, :read_write})
 
   @projection_purposes Enum.map(@projection_specs, &elem(&1, 0))
-  @projection_purpose_set MapSet.new(@projection_purposes)
   @projection_purpose_strings MapSet.new(Enum.map(@projection_purposes, &Atom.to_string/1))
   @required_modes Map.new(@projection_specs)
+  @read_only_purpose_set MapSet.new(@read_only_purposes)
+  @read_write_purpose_set MapSet.new(@read_write_purposes)
 
-  @plan_projection_keys [:worktree, :home, :tmp, :build, :deps, :runtime, :mix_wrapper]
+  @allowed_revisions MapSet.new(["candidate", "base"])
+  @allowed_revision_atoms MapSet.new([:candidate, :base])
+
+  @plan_projection_keys [:worktree, :home, :tmp, :build, :deps, :mix_wrapper]
 
   @entry_logical_keys [:path, :mode, :purpose]
   @allowed_entry_keys MapSet.new(
@@ -406,7 +412,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   defp fetch_opt_filesystem_projections(opts) do
     case Keyword.fetch!(opts, :filesystem_projections) do
       projections when is_map(projections) -> {:ok, projections}
-      projections when is_list(projections) -> {:ok, projections}
+      # Legacy flat lists are rejected; only the closed grouped envelope is admitted.
       _other -> {:error, :invalid_filesystem_projections}
     end
   end
@@ -414,115 +420,200 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   # ── Filesystem projections ─────────────────────────────────────────────
 
   defp parse_filesystem_projections(projections) when is_map(projections) do
-    with :ok <- validate_projection_map_keys(projections),
-         {:ok, entries} <- normalize_projection_map(projections) do
-      finalize_projections(entries)
-    end
-  end
-
-  defp parse_filesystem_projections(projections) when is_list(projections) do
-    with {:ok, entries} <- normalize_projection_list(projections) do
+    with :ok <- validate_projection_envelope_keys(projections),
+         {:ok, _revision} <- fetch_projection_revision(projections),
+         {:ok, read_only_raw} <- fetch_projection_group(projections, :read_only),
+         {:ok, read_write_raw} <- fetch_projection_group(projections, :read_write),
+         {:ok, read_only_entries} <-
+           normalize_projection_group(read_only_raw, :read_only, @read_only_purposes),
+         {:ok, read_write_entries} <-
+           normalize_projection_group(read_write_raw, :read_write, @read_write_purposes),
+         {:ok, entries} <- merge_projection_groups(read_only_entries, read_write_entries) do
       finalize_projections(entries)
     end
   end
 
   defp parse_filesystem_projections(_), do: {:error, :invalid_filesystem_projections}
 
-  defp validate_projection_map_keys(projections) do
+  defp validate_projection_envelope_keys(projections) do
     keys = Map.keys(projections)
 
-    keys_ok? =
-      Enum.all?(keys, fn
-        key when is_atom(key) -> MapSet.member?(@projection_purpose_set, key)
-        key when is_binary(key) -> MapSet.member?(@projection_purpose_strings, key)
-        _other -> false
-      end)
+    with :ok <-
+           reject_unknown_keys(
+             keys,
+             @allowed_envelope_keys,
+             :unsupported_filesystem_projection_keys
+           ),
+         :ok <-
+           reject_duplicate_aliases(
+             keys,
+             @envelope_logical_keys,
+             :duplicate_filesystem_projection_key_alias
+           ),
+         :ok <-
+           require_all_keys(
+             projections,
+             @envelope_logical_keys,
+             :missing_filesystem_projection_key
+           ) do
+      # Exact closed envelope: three logical groups only (no extras beyond aliases).
+      logical_count =
+        Enum.count(@envelope_logical_keys, fn key ->
+          Map.has_key?(projections, key) or Map.has_key?(projections, Atom.to_string(key))
+        end)
 
-    required_present? =
-      Enum.all?(@projection_purposes, fn purpose ->
-        Map.has_key?(projections, purpose) or Map.has_key?(projections, Atom.to_string(purpose))
-      end)
-
-    cond do
-      not keys_ok? ->
-        {:error, :unsupported_projection_purpose}
-
-      not required_present? ->
-        missing =
-          Enum.reject(@projection_purposes, fn purpose ->
-            Map.has_key?(projections, purpose) or
-              Map.has_key?(projections, Atom.to_string(purpose))
-          end)
-
-        {:error, {:missing_projections, missing}}
-
-      map_size(projections) != length(@projection_purposes) ->
-        {:error, :duplicate_projection_purpose}
-
-      true ->
+      if map_size(projections) == logical_count and
+           logical_count == length(@envelope_logical_keys) do
         :ok
+      else
+        {:error, :invalid_filesystem_projections}
+      end
     end
   end
 
-  defp normalize_projection_map(projections) do
-    Enum.reduce_while(@projection_purposes, {:ok, %{}}, fn purpose, {:ok, acc} ->
-      raw =
-        case Map.fetch(projections, purpose) do
-          {:ok, value} -> value
-          :error -> Map.get(projections, Atom.to_string(purpose))
+  defp fetch_projection_revision(projections) do
+    case get_field(projections, :revision) do
+      revision when is_binary(revision) ->
+        if MapSet.member?(@allowed_revisions, revision) do
+          {:ok, revision}
+        else
+          {:error, :invalid_projection_revision}
         end
 
-      case normalize_projection_entry(raw, purpose) do
-        {:ok, entry} -> {:cont, {:ok, Map.put(acc, purpose, entry)}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+      revision when is_atom(revision) ->
+        if MapSet.member?(@allowed_revision_atoms, revision) do
+          {:ok, Atom.to_string(revision)}
+        else
+          {:error, :invalid_projection_revision}
+        end
+
+      nil ->
+        {:error, :missing_projection_revision}
+
+      _other ->
+        {:error, :invalid_projection_revision}
+    end
   end
 
-  defp normalize_projection_list(list) do
-    Enum.reduce_while(list, {:ok, %{}, MapSet.new()}, fn raw, {:ok, acc, seen} ->
-      with {:ok, entry} <- normalize_projection_entry(raw, :infer),
-           purpose = entry.purpose,
-           false <- MapSet.member?(seen, purpose) do
-        {:cont, {:ok, Map.put(acc, purpose, entry), MapSet.put(seen, purpose)}}
+  defp fetch_projection_group(projections, group) when group in [:read_only, :read_write] do
+    case get_field(projections, group) do
+      list when is_list(list) -> {:ok, list}
+      _other -> {:error, {:invalid_projection_group, group}}
+    end
+  end
+
+  defp normalize_projection_group(list, group_mode, required_purposes)
+       when is_list(list) and is_atom(group_mode) do
+    expected_count = length(required_purposes)
+
+    if length(list) != expected_count do
+      if length(list) < expected_count do
+        {:error, {:missing_projections, missing_purposes_from_list(list, required_purposes)}}
       else
-        true ->
-          {:halt, {:error, :duplicate_projection_purpose}}
+        {:error, :extra_projections}
+      end
+    else
+      Enum.reduce_while(list, {:ok, %{}, MapSet.new()}, fn raw, {:ok, acc, seen} ->
+        case normalize_projection_entry(raw, group_mode) do
+          {:ok, entry} ->
+            purpose = entry.purpose
+
+            cond do
+              not purpose_allowed_in_group?(purpose, group_mode) ->
+                {:halt, {:error, {:projection_purpose_group_mismatch, purpose, group_mode}}}
+
+              MapSet.member?(seen, purpose) ->
+                {:halt, {:error, :duplicate_projection_purpose}}
+
+              true ->
+                {:cont, {:ok, Map.put(acc, purpose, entry), MapSet.put(seen, purpose)}}
+            end
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, entries, _seen} ->
+          missing = Enum.reject(required_purposes, &Map.has_key?(entries, &1))
+
+          cond do
+            missing != [] ->
+              {:error, {:missing_projections, missing}}
+
+            map_size(entries) != expected_count ->
+              {:error, :extra_projections}
+
+            true ->
+              {:ok, entries}
+          end
 
         {:error, reason} ->
-          {:halt, {:error, reason}}
+          {:error, reason}
       end
-    end)
-    |> case do
-      {:ok, entries, _seen} ->
-        missing = Enum.reject(@projection_purposes, &Map.has_key?(entries, &1))
-
-        if missing == [] and map_size(entries) == length(@projection_purposes) do
-          {:ok, entries}
-        else
-          if missing != [] do
-            {:error, {:missing_projections, missing}}
-          else
-            {:error, :extra_projections}
-          end
-        end
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
-  defp normalize_projection_entry(entry, expected_purpose) when is_map(entry) do
+  defp missing_purposes_from_list(list, required_purposes) do
+    present =
+      list
+      |> Enum.flat_map(fn
+        entry when is_map(entry) ->
+          case get_field(entry, :purpose) do
+            purpose when is_atom(purpose) ->
+              [purpose]
+
+            purpose when is_binary(purpose) ->
+              case parse_purpose_string(purpose) do
+                {:ok, atom} -> [atom]
+                _ -> []
+              end
+
+            _ ->
+              []
+          end
+
+        _ ->
+          []
+      end)
+      |> MapSet.new()
+
+    Enum.reject(required_purposes, &MapSet.member?(present, &1))
+  end
+
+  defp purpose_allowed_in_group?(purpose, :read_only),
+    do: MapSet.member?(@read_only_purpose_set, purpose)
+
+  defp purpose_allowed_in_group?(purpose, :read_write),
+    do: MapSet.member?(@read_write_purpose_set, purpose)
+
+  defp merge_projection_groups(read_only_entries, read_write_entries) do
+    overlap =
+      MapSet.intersection(
+        MapSet.new(Map.keys(read_only_entries)),
+        MapSet.new(Map.keys(read_write_entries))
+      )
+
+    if MapSet.size(overlap) == 0 do
+      {:ok, Map.merge(read_only_entries, read_write_entries)}
+    else
+      {:error, :duplicate_projection_purpose}
+    end
+  end
+
+  defp normalize_projection_entry(entry, group_mode) when is_map(entry) and is_atom(group_mode) do
     with :ok <- validate_entry_keys(entry),
-         {:ok, purpose} <- fetch_entry_purpose(entry, expected_purpose),
+         {:ok, purpose} <- fetch_entry_purpose(entry),
+         :ok <- reject_retired_runtime_purpose(purpose),
          {:ok, path} <- fetch_entry_path(entry),
          {:ok, mode} <- fetch_entry_mode(entry),
+         :ok <- require_group_mode(group_mode, mode),
          :ok <- require_mode(purpose, mode) do
       {:ok, %{purpose: purpose, path: path, mode: mode}}
     end
   end
 
-  defp normalize_projection_entry(_entry, _expected_purpose),
+  defp normalize_projection_entry(_entry, _group_mode),
     do: {:error, :invalid_projection_entry}
 
   defp validate_entry_keys(entry) do
@@ -534,15 +625,29 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
              keys,
              @entry_logical_keys,
              :duplicate_projection_entry_key_alias
-           ) do
-      :ok
+           ),
+         :ok <- require_all_keys(entry, @entry_logical_keys, :missing_projection_entry_key) do
+      # Exact closed entry: path, mode, purpose only.
+      logical_count =
+        Enum.count(@entry_logical_keys, fn key ->
+          Map.has_key?(entry, key) or Map.has_key?(entry, Atom.to_string(key))
+        end)
+
+      if map_size(entry) == logical_count and logical_count == length(@entry_logical_keys) do
+        :ok
+      else
+        {:error, :invalid_projection_entry}
+      end
     end
   end
 
-  defp fetch_entry_purpose(entry, :infer) do
+  defp fetch_entry_purpose(entry) do
     case get_field(entry, :purpose) do
       purpose when is_atom(purpose) and purpose in @projection_purposes ->
         {:ok, purpose}
+
+      purpose when is_atom(purpose) ->
+        reject_retired_runtime_purpose(purpose)
 
       purpose when is_binary(purpose) ->
         parse_purpose_string(purpose)
@@ -555,34 +660,33 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
-  defp fetch_entry_purpose(entry, expected) when is_atom(expected) do
-    expected_string = Atom.to_string(expected)
+  defp reject_retired_runtime_purpose(:runtime),
+    do: {:error, :runtime_parent_projection_forbidden}
 
-    case get_field(entry, :purpose) do
-      nil ->
-        {:ok, expected}
+  defp reject_retired_runtime_purpose("runtime"),
+    do: {:error, :runtime_parent_projection_forbidden}
 
-      ^expected ->
-        {:ok, expected}
-
-      purpose when is_binary(purpose) ->
-        if purpose == expected_string do
-          {:ok, expected}
-        else
-          {:error, {:projection_purpose_mismatch, expected}}
-        end
-
-      _other ->
-        {:error, {:projection_purpose_mismatch, expected}}
+  defp reject_retired_runtime_purpose(purpose) when is_atom(purpose) do
+    if purpose in @projection_purposes do
+      :ok
+    else
+      {:error, :invalid_projection_purpose}
     end
   end
 
+  defp reject_retired_runtime_purpose(_), do: :ok
+
   defp parse_purpose_string(purpose) when is_binary(purpose) do
-    if MapSet.member?(@projection_purpose_strings, purpose) do
-      # purpose strings are known atoms from compile-time module attributes
-      {:ok, String.to_existing_atom(purpose)}
-    else
-      {:error, :invalid_projection_purpose}
+    cond do
+      purpose == "runtime" ->
+        {:error, :runtime_parent_projection_forbidden}
+
+      MapSet.member?(@projection_purpose_strings, purpose) ->
+        # purpose strings are known atoms from compile-time module attributes
+        {:ok, String.to_existing_atom(purpose)}
+
+      true ->
+        {:error, :invalid_projection_purpose}
     end
   end
 
@@ -613,11 +717,24 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
-  defp require_mode(purpose, mode) do
-    if Map.fetch!(@required_modes, purpose) == mode do
+  defp require_group_mode(group_mode, mode) do
+    if group_mode == mode do
       :ok
     else
-      {:error, {:projection_mode_mismatch, purpose, mode}}
+      {:error, {:projection_group_mode_mismatch, group_mode, mode}}
+    end
+  end
+
+  defp require_mode(purpose, mode) do
+    case Map.fetch(@required_modes, purpose) do
+      {:ok, ^mode} ->
+        :ok
+
+      {:ok, _expected} ->
+        {:error, {:projection_mode_mismatch, purpose, mode}}
+
+      :error ->
+        {:error, :invalid_projection_purpose}
     end
   end
 

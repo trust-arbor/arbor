@@ -38,20 +38,85 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
     }
   }
 
-  defp entry(purpose, path, mode), do: %{purpose: purpose, path: path, mode: mode}
-
-  defp base_projections do
+  # Mirror Arbor.Actions.Mix.projections_for_resource/2 exact wire shape:
+  # string-keyed entry maps inside a grouped envelope with revision.
+  defp actions_entry(path, mode, purpose) do
     %{
-      runtime_erlang:
-        entry(:runtime_erlang, "/opt/homebrew/Cellar/erlang/28.4.1/lib/erlang", :read_only),
-      runtime_elixir: entry(:runtime_elixir, "/opt/homebrew/Cellar/elixir/1.19.5", :read_only),
-      mix_wrapper: entry(:mix_wrapper, @mix_wrapper, :read_only),
-      worktree: entry(:worktree, @worktree, :read_write),
-      home: entry(:home, "/private/tmp/arbor-val/home", :read_write),
-      tmp: entry(:tmp, "/private/tmp/arbor-val/tmp", :read_write),
-      build: entry(:build, "/private/tmp/arbor-val/build", :read_write),
-      deps: entry(:deps, "/private/tmp/arbor-val/deps", :read_write),
-      runtime: entry(:runtime, "/private/tmp/arbor-val/runtime", :read_write)
+      "path" => path,
+      "mode" => Atom.to_string(mode),
+      "purpose" => Atom.to_string(purpose)
+    }
+  end
+
+  defp base_projections(revision \\ "candidate") do
+    %{
+      read_only: [
+        actions_entry(
+          "/opt/homebrew/Cellar/erlang/28.4.1/lib/erlang",
+          :read_only,
+          :runtime_erlang
+        ),
+        actions_entry("/opt/homebrew/Cellar/elixir/1.19.5", :read_only, :runtime_elixir),
+        actions_entry(@mix_wrapper, :read_only, :mix_wrapper)
+      ],
+      read_write: [
+        actions_entry(@worktree, :read_write, :worktree),
+        actions_entry("/private/tmp/arbor-val/home", :read_write, :home),
+        actions_entry("/private/tmp/arbor-val/tmp", :read_write, :tmp),
+        actions_entry("/private/tmp/arbor-val/build", :read_write, :build),
+        actions_entry("/private/tmp/arbor-val/deps", :read_write, :deps)
+      ],
+      revision: revision
+    }
+  end
+
+  defp put_group_entry(projections, group, purpose, entry) do
+    list = Map.fetch!(projections, group)
+
+    updated =
+      Enum.map(list, fn existing ->
+        if existing["purpose"] == Atom.to_string(purpose) or
+             existing[:purpose] == purpose do
+          entry
+        else
+          existing
+        end
+      end)
+
+    Map.put(projections, group, updated)
+  end
+
+  defp delete_group_entry(projections, group, purpose) do
+    list =
+      projections
+      |> Map.fetch!(group)
+      |> Enum.reject(fn existing ->
+        existing["purpose"] == Atom.to_string(purpose) or existing[:purpose] == purpose
+      end)
+
+    Map.put(projections, group, list)
+  end
+
+  # Retired flat purpose-map shape (pre-envelope) plus runtime parent purpose.
+  defp legacy_flat_projections do
+    %{
+      runtime_erlang: %{
+        purpose: :runtime_erlang,
+        path: "/opt/homebrew/Cellar/erlang/28.4.1/lib/erlang",
+        mode: :read_only
+      },
+      runtime_elixir: %{
+        purpose: :runtime_elixir,
+        path: "/opt/homebrew/Cellar/elixir/1.19.5",
+        mode: :read_only
+      },
+      mix_wrapper: %{purpose: :mix_wrapper, path: @mix_wrapper, mode: :read_only},
+      worktree: %{purpose: :worktree, path: @worktree, mode: :read_write},
+      home: %{purpose: :home, path: "/private/tmp/arbor-val/home", mode: :read_write},
+      tmp: %{purpose: :tmp, path: "/private/tmp/arbor-val/tmp", mode: :read_write},
+      build: %{purpose: :build, path: "/private/tmp/arbor-val/build", mode: :read_write},
+      deps: %{purpose: :deps, path: "/private/tmp/arbor-val/deps", mode: :read_write},
+      runtime: %{purpose: :runtime, path: "/private/tmp/arbor-val/runtime", mode: :read_write}
     }
   end
 
@@ -228,11 +293,28 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       assert spec.plan.command_args == ["compile"]
     end
 
-    test "list-form filesystem projections are accepted" do
-      list = Enum.map(base_projections(), fn {_k, v} -> v end)
+    test "admits Actions grouped envelope with string entry keys and revision" do
+      for revision <- ["candidate", "base"] do
+        projections = base_projections(revision)
+
+        assert {:ok, spec} =
+                 Core.new(valid_request(%{opts: valid_opts(filesystem_projections: projections)}))
+
+        assert spec.plan.projections.worktree == @worktree
+        assert spec.plan.projections.mix_wrapper == @mix_wrapper
+        refute Map.has_key?(spec.plan.projections, :runtime)
+      end
+    end
+
+    test "accepts string-keyed envelope aliases when atom forms are absent" do
+      projections = %{
+        "read_only" => base_projections().read_only,
+        "read_write" => base_projections().read_write,
+        "revision" => "candidate"
+      }
 
       assert {:ok, spec} =
-               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: list)}))
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: projections)}))
 
       assert spec.plan.projections.worktree == @worktree
     end
@@ -302,34 +384,130 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
   end
 
   describe "projection validation" do
+    @tag :security_regression
+    test "security regression: admits Actions envelope and rejects flat/runtime-parent shape" do
+      assert {:ok, spec} =
+               Core.new(
+                 valid_request(%{opts: valid_opts(filesystem_projections: base_projections())})
+               )
+
+      assert spec.plan.projections.worktree == @worktree
+      assert spec.plan.projections.home == "/private/tmp/arbor-val/home"
+      assert spec.plan.projections.tmp == "/private/tmp/arbor-val/tmp"
+      assert spec.plan.projections.build == "/private/tmp/arbor-val/build"
+      assert spec.plan.projections.deps == "/private/tmp/arbor-val/deps"
+      assert spec.plan.projections.mix_wrapper == @mix_wrapper
+      refute Map.has_key?(spec.plan.projections, :runtime)
+
+      # Legacy flat purpose map (including retired runtime parent) is not an envelope.
+      assert {:error, reason_flat} =
+               Core.new(
+                 valid_request(%{
+                   opts: valid_opts(filesystem_projections: legacy_flat_projections())
+                 })
+               )
+
+      assert reason_flat in [
+               :invalid_filesystem_projections,
+               :unsupported_filesystem_projection_keys,
+               :missing_filesystem_projection_key
+             ] or match?({:unsupported_filesystem_projection_keys, _}, reason_flat) or
+               match?({:missing_filesystem_projection_key, _}, reason_flat)
+
+      # Legacy list form rejected.
+      list = Enum.flat_map([:read_only, :read_write], &Map.fetch!(base_projections(), &1))
+
+      assert {:error, :invalid_filesystem_projections} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: list)}))
+
+      # Runtime parent purpose inside an otherwise envelope-shaped payload.
+      with_runtime =
+        Map.update!(base_projections(), :read_write, fn list ->
+          list ++
+            [
+              %{
+                "path" => "/private/tmp/arbor-val/runtime",
+                "mode" => "read_write",
+                "purpose" => "runtime"
+              }
+            ]
+        end)
+
+      assert {:error, reason_runtime} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: with_runtime)}))
+
+      assert reason_runtime in [
+               :extra_projections,
+               :runtime_parent_projection_forbidden
+             ]
+    end
+
     test "rejects missing, extra, mode swap, duplicates, and overlap" do
-      missing = Map.delete(base_projections(), :deps)
+      missing = delete_group_entry(base_projections(), :read_write, :deps)
 
       assert {:error, {:missing_projections, [:deps]}} =
                Core.new(valid_request(%{opts: valid_opts(filesystem_projections: missing)}))
 
-      extra = Map.put(base_projections(), :evil, entry(:worktree, "/tmp/evil", :read_write))
+      extra =
+        Map.update!(base_projections(), :read_write, fn list ->
+          list ++ [actions_entry("/tmp/evil", :read_write, :worktree)]
+        end)
 
-      assert {:error, :unsupported_projection_purpose} =
+      assert {:error, reason_extra} =
                Core.new(valid_request(%{opts: valid_opts(filesystem_projections: extra)}))
 
-      swapped =
-        put_in(base_projections(), [:worktree], entry(:worktree, @worktree, :read_only))
+      assert reason_extra in [:extra_projections, :duplicate_projection_purpose]
 
-      assert {:error, {:projection_mode_mismatch, :worktree, :read_only}} =
+      swapped =
+        put_group_entry(
+          base_projections(),
+          :read_write,
+          :worktree,
+          actions_entry(@worktree, :read_only, :worktree)
+        )
+
+      assert {:error, reason_mode} =
                Core.new(valid_request(%{opts: valid_opts(filesystem_projections: swapped)}))
 
+      assert reason_mode in [
+               {:projection_group_mode_mismatch, :read_write, :read_only},
+               {:projection_mode_mismatch, :worktree, :read_only}
+             ]
+
+      wrong_group =
+        base_projections()
+        |> delete_group_entry(:read_write, :worktree)
+        |> Map.update!(:read_only, fn list ->
+          list ++ [actions_entry(@worktree, :read_only, :worktree)]
+        end)
+
+      assert {:error, reason_group} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: wrong_group)}))
+
+      assert reason_group in [
+               {:projection_purpose_group_mismatch, :worktree, :read_only},
+               {:missing_projections, [:worktree]},
+               :extra_projections
+             ] or match?({:projection_purpose_group_mismatch, :worktree, _}, reason_group) or
+               match?({:missing_projections, _}, reason_group)
+
       dup_paths =
-        put_in(base_projections(), [:home], entry(:home, @worktree, :read_write))
+        put_group_entry(
+          base_projections(),
+          :read_write,
+          :home,
+          actions_entry(@worktree, :read_write, :home)
+        )
 
       assert {:error, :duplicate_projection_paths} =
                Core.new(valid_request(%{opts: valid_opts(filesystem_projections: dup_paths)}))
 
       overlap =
-        put_in(
+        put_group_entry(
           base_projections(),
-          [:tmp],
-          entry(:tmp, @worktree <> "/nested", :read_write)
+          :read_write,
+          :tmp,
+          actions_entry(@worktree <> "/nested", :read_write, :tmp)
         )
 
       assert {:error, {:overlapping_projection_paths, _, _}} =
@@ -344,19 +522,41 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
                Core.new(valid_request(%{opts: valid_opts(cwd: "/private/tmp/other")}))
     end
 
-    test "rejects duplicate purpose atom/string aliases in map" do
-      bad =
+    test "rejects duplicate envelope and entry key aliases" do
+      bad_envelope =
         base_projections()
-        |> Map.delete(:worktree)
-        |> Map.put("worktree", entry(:worktree, @worktree, :read_write))
-        |> Map.put(:worktree, entry(:worktree, @worktree, :read_write))
+        |> Map.put("read_only", base_projections().read_only)
 
-      # map_size will be 10 with both aliases
-      assert {:error, reason} =
-               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: bad)}))
+      assert {:error, {:duplicate_filesystem_projection_key_alias, :read_only}} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: bad_envelope)}))
 
-      assert reason in [:duplicate_projection_purpose, :unsupported_projection_purpose] or
-               match?({:missing_projections, _}, reason) == false
+      bad_entry =
+        put_group_entry(
+          base_projections(),
+          :read_write,
+          :home,
+          %{
+            "path" => "/private/tmp/arbor-val/home",
+            "mode" => "read_write",
+            "purpose" => "home",
+            path: "/private/tmp/arbor-val/home"
+          }
+        )
+
+      assert {:error, {:duplicate_projection_entry_key_alias, :path}} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: bad_entry)}))
+    end
+
+    test "rejects invalid revision and missing envelope groups" do
+      bad_rev = Map.put(base_projections(), :revision, "staging")
+
+      assert {:error, :invalid_projection_revision} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: bad_rev)}))
+
+      missing_group = Map.delete(base_projections(), :revision)
+
+      assert {:error, {:missing_filesystem_projection_key, [:revision]}} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: missing_group)}))
     end
   end
 
