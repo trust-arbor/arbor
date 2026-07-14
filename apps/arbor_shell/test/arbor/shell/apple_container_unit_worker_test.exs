@@ -24,6 +24,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
   @kernel_path "/usr/local/share/container/kernels/default.kernel"
   @name "arbor-val-unit1"
   @runtime_path "/usr/local/bin/container"
+  @max_secondary_notification_bytes 512
 
   @projections %{
     worktree: "/private/tmp/arbor-val/worktree",
@@ -71,6 +72,26 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       GenServer.call(__MODULE__, :calls)
     end
 
+    def monotonic_ms do
+      ensure_started()
+      GenServer.call(__MODULE__, :monotonic_ms)
+    end
+
+    def advance_mono(ms) when is_integer(ms) and ms >= 0 do
+      ensure_started()
+      GenServer.call(__MODULE__, {:advance_mono, ms})
+    end
+
+    def release_held do
+      ensure_started()
+      GenServer.call(__MODULE__, :release_held)
+    end
+
+    def held_count do
+      ensure_started()
+      GenServer.call(__MODULE__, :held_count)
+    end
+
     def start_command(executable, args, display_command, opts) do
       ensure_started()
       GenServer.call(__MODULE__, {:start_command, executable, args, display_command, opts})
@@ -101,16 +122,42 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
     @impl true
     def init(_) do
-      {:ok, %{script: [], calls: [], owner: nil, counter: 0}}
+      {:ok, %{script: [], calls: [], owner: nil, counter: 0, mono: 1_000_000, held: []}}
     end
 
     @impl true
     def handle_call({:reset, script, owner}, _from, state) do
-      {:reply, :ok, %{state | script: script, calls: [], owner: owner, counter: 0}}
+      for session <- state.held, is_pid(session), Process.alive?(session) do
+        Process.exit(session, :kill)
+      end
+
+      {:reply, :ok,
+       %{state | script: script, calls: [], owner: owner, counter: 0, mono: 1_000_000, held: []}}
     end
 
     def handle_call(:calls, _from, state) do
       {:reply, Enum.reverse(state.calls), state}
+    end
+
+    def handle_call(:monotonic_ms, _from, state) do
+      {:reply, state.mono, state}
+    end
+
+    def handle_call({:advance_mono, ms}, _from, state) do
+      {:reply, :ok, %{state | mono: state.mono + ms}}
+    end
+
+    def handle_call(:held_count, _from, state) do
+      alive = Enum.count(state.held, &(is_pid(&1) and Process.alive?(&1)))
+      {:reply, alive, state}
+    end
+
+    def handle_call(:release_held, _from, state) do
+      for session <- Enum.reverse(state.held), is_pid(session), Process.alive?(session) do
+        send(session, :release_hold)
+      end
+
+      {:reply, :ok, %{state | held: []}}
     end
 
     def handle_call({:start_command, executable, args, display_command, opts}, _from, state) do
@@ -138,6 +185,19 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
           {:ok, session} = start_delay_session(id, result, stream_to, ms)
           {:reply, {:ok, session}, %{state | script: rest}}
 
+        [{:hold, result} | rest] ->
+          stream_to = Keyword.get(opts, :stream_to)
+          {:ok, session} = start_hold_session(id, result, stream_to)
+          {:reply, {:ok, session}, %{state | script: rest, held: [session | state.held]}}
+
+        [{:advance_after, ms, result} | rest] when is_integer(ms) and ms >= 0 ->
+          # Advance during this phase so the *next* phase sees an exhausted
+          # operation deadline (create still launched with positive remaining).
+          stream_to = Keyword.get(opts, :stream_to)
+          state = %{state | mono: state.mono + ms, script: rest}
+          {:ok, session} = start_session_gs(id, normalize_result(result), stream_to, 0)
+          {:reply, {:ok, session}, state}
+
         [result | rest] when is_map(result) ->
           stream_to = Keyword.get(opts, :stream_to)
           {:ok, session} = start_session_gs(id, normalize_result(result), stream_to, 0)
@@ -148,13 +208,18 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       end
     end
 
+    def handle_info(_, state), do: {:noreply, state}
+
     defp start_delay_session(id, result, stream_to, ms) do
       start_session_gs(id, normalize_result(result), stream_to, ms)
     end
 
     defp start_hang_session(id, result, stream_to) do
-      # Only completes on kill/cancel.
       start_session_gs(id, normalize_result(result), stream_to, :hang)
+    end
+
+    defp start_hold_session(id, result, stream_to) do
+      start_session_gs(id, normalize_result(result), stream_to, :hold)
     end
 
     defp start_session_gs(id, result, stream_to, delay) do
@@ -188,10 +253,13 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     use GenServer
 
     def init({id, result, stream_to, delay}) do
-      state = %{id: id, result: result, stream_to: stream_to, done: false}
+      state = %{id: id, result: result, stream_to: stream_to, done: false, mode: delay}
 
       case delay do
         :hang ->
+          {:ok, state}
+
+        :hold ->
           {:ok, state}
 
         ms when is_integer(ms) and ms >= 0 ->
@@ -210,6 +278,20 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       notify_exit(state)
       Process.send_after(self(), :stop, 50)
       {:noreply, %{state | done: true}}
+    end
+
+    def handle_info(:release_hold, %{mode: :hold, done: false} = state) do
+      # Deliver the exact held response — ignore any prior cancel/kill intent.
+      notify_exit(state)
+      Process.send_after(self(), :stop, 50)
+      {:noreply, %{state | done: true}}
+    end
+
+    def handle_info(:release_hold, state), do: {:noreply, state}
+
+    def handle_info(:fake_kill, %{mode: :hold} = state) do
+      # Held sessions ignore kill/cancel until release — gate owns exact response.
+      {:noreply, state}
     end
 
     def handle_info(:fake_kill, state) do
@@ -325,7 +407,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
              )
 
     assert :ok = ExecutionRegistry.adopt(execution_id, worker)
-    send(worker, {:begin_unit_execution, start_ref})
+    assert :ok = Worker.begin(worker, start_ref)
     {execution_id, worker, start_ref}
   end
 
@@ -353,6 +435,47 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       end
     end)
     |> Enum.find(&is_map/1)
+  end
+
+  defp nonterminal_registry?(execution_id) do
+    case ExecutionRegistry.get(execution_id) do
+      {:ok, %{status: status}} when status in [:completed, :failed, :timed_out, :killed] ->
+        false
+
+      {:ok, %{status: status}} when status in [:running, :cancelling, :pending] ->
+        true
+
+      _ ->
+        false
+    end
+  end
+
+  defp restore_unit_supervisor! do
+    case Process.whereis(Arbor.Shell.AppleContainerUnitSupervisor) do
+      pid when is_pid(pid) ->
+        :ok
+
+      _ ->
+        _ =
+          Supervisor.terminate_child(
+            Arbor.Shell.Supervisor,
+            Arbor.Shell.AppleContainerUnitSupervisor
+          )
+
+        _ =
+          Supervisor.delete_child(
+            Arbor.Shell.Supervisor,
+            Arbor.Shell.AppleContainerUnitSupervisor
+          )
+
+        {:ok, _} =
+          Supervisor.start_child(
+            Arbor.Shell.Supervisor,
+            Worker.supervisor_child_spec()
+          )
+
+        :ok
+    end
   end
 
   describe "happy path" do
@@ -389,7 +512,6 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       calls = FakeRuntime.calls()
       assert length(calls) == 6
 
-      # Exact phase order via stripped argv matching plan phases.
       assert Enum.at(calls, 0).args == tl(plan.argv.verify_absent)
       assert Enum.at(calls, 1).args == tl(plan.argv.create)
       assert Enum.at(calls, 2).args == tl(plan.argv.start)
@@ -408,11 +530,9 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         refute call.display_command =~ @runtime_path
       end
 
-      # Candidate phase uses min(spec, UnitCore hard max)
       start_call = Enum.at(calls, 2)
       assert Keyword.get(start_call.opts, :max_output_bytes) == 8_192
 
-      # Non-candidate phases use UnitCore phase limits
       assert Keyword.get(Enum.at(calls, 0).opts, :max_output_bytes) ==
                UnitCore.phase_output_limit(:verify_absent)
 
@@ -424,7 +544,10 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
   end
 
   describe "start protocol" do
-    test "wrong ref runs nothing", %{spec: spec, executable: executable} do
+    test "wrong ref runs nothing and begin is GenServer.call", %{
+      spec: spec,
+      executable: executable
+    } do
       :ok = FakeRuntime.reset([success_list([])])
       start_ref = make_ref()
 
@@ -437,15 +560,64 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
                )
 
       assert :ok = ExecutionRegistry.adopt(execution_id, worker)
-      send(worker, {:begin_unit_execution, make_ref()})
-      Process.sleep(50)
+      assert {:error, :invalid_begin_ref} = Worker.begin(worker, make_ref())
       assert FakeRuntime.calls() == []
       assert Process.alive?(worker)
       assert {:ok, %{status: :running, result: nil}} = ExecutionRegistry.get(execution_id)
 
-      # Replay of wrong ref still does nothing; correct ref later works after cancel path.
+      assert {:error, :invalid_begin_ref} = Worker.begin(worker, make_ref())
+      assert FakeRuntime.calls() == []
+
       send(worker, {:cancel_shell_execution, execution_id})
       assert {:error, :preflight_cancelled} = await_terminal(execution_id)
+    end
+
+    test "replayed begin after start returns bounded error", %{
+      spec: spec,
+      executable: executable
+    } do
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "out"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      :ok = FakeRuntime.reset(script)
+      start_ref = make_ref()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      assert {:ok, worker} =
+               Worker.start_for_test(spec, executable, execution_id, start_ref,
+                 runtime: FakeRuntime
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+      assert :ok = Worker.begin(worker, start_ref)
+      assert {:error, :invalid_begin_ref} = Worker.begin(worker, start_ref)
+      assert {:ok, _} = await_terminal(execution_id)
+    end
+
+    test "invalid runtime atom fails before worker start", %{
+      spec: spec,
+      executable: executable
+    } do
+      start_ref = make_ref()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      assert {:error, :invalid_runtime_module} =
+               Worker.start_for_test(spec, executable, execution_id, start_ref,
+                 runtime: :not_a_runtime_module
+               )
+
+      assert {:error, :invalid_runtime_module} =
+               Worker.start_for_test(spec, executable, execution_id, start_ref, runtime: String)
     end
 
     test "collision/preflight failure publishes error without cleanup commands", %{
@@ -465,58 +637,58 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert length(FakeRuntime.calls()) == 1
     end
 
-    test "launch/session failure during preflight fails closed", %{
+    test "launch failure during preflight reduces to list_containment_failure", %{
       spec: spec,
       executable: executable
     } do
       script = [{:error, :runtime_unavailable}]
       {execution_id, _worker, _} = start_and_begin(spec, executable, script)
-      assert {:error, :runtime_unavailable} = await_terminal(execution_id)
+      assert {:error, :list_containment_failure} = await_terminal(execution_id)
       exec = await_registry_terminal(execution_id)
       assert exec.status == :failed
+      assert exec.result.error == :list_containment_failure
     end
   end
 
   describe "timeouts and cleanup retry" do
-    test "operation timeout after create continues cleanup", %{
+    test "operation deadline after create yields timed_out candidate and cleanup absence", %{
       executable: executable,
       plan: plan
     } do
       spec = %{
         plan: plan,
-        timeout_ms: 30,
+        timeout_ms: 100,
         max_output_bytes: 1024
       }
 
-      # Preflight + create succeed quickly; start hangs until kill/timeout from PortSession opts.
-      # Fake delay longer than remaining deadline is not needed if worker checks deadline at launch.
-      # Use immediate create then a delay start that will be cancelled via timeout at next phase.
+      # Preflight + create succeed; after create the fake clock advances past the
+      # operation deadline so start is never launched.
       script = [
         success_list([]),
-        success(%{exit_code: 0}),
-        # start - by the time create finishes, deadline may remain; give delayed start
-        # then cleanup commands after synthetic timeout if start still launches.
-        {:delay, 200, success(%{exit_code: 0, stdout: "late", timed_out: true, killed: true})},
+        {:advance_after, 200, success(%{exit_code: 0})},
         success(%{exit_code: 0}),
         success(%{exit_code: 0}),
         success_list([])
       ]
 
       {execution_id, _worker, _} = start_and_begin(spec, executable, script)
-      terminal = await_terminal(execution_id, 10_000)
+      assert {:ok, result} = await_terminal(execution_id, 10_000)
+      assert result.timed_out == true
+      assert result.killed == true
+      assert result.exit_code == 137
 
-      # Either start completed with timeout flags or synthetic timeout entered cleanup.
-      case terminal do
-        {:ok, result} ->
-          assert is_map(result)
+      exec = await_registry_terminal(execution_id, 10_000)
+      assert exec.status == :completed
+      assert exec.result.timed_out == true
 
-        {:error, reason} ->
-          assert is_atom(reason)
-      end
-
-      _ = await_registry_terminal(execution_id, 10_000)
-      # Cleanup ran (force_stop/delete/list) after create.
-      assert length(FakeRuntime.calls()) >= 3
+      calls = FakeRuntime.calls()
+      # preflight list, create, force_stop, delete, final list — no start
+      assert length(calls) == 5
+      assert Enum.at(calls, 0).args == tl(plan.argv.verify_absent)
+      assert Enum.at(calls, 1).args == tl(plan.argv.create)
+      assert Enum.at(calls, 2).args == tl(plan.argv.force_stop)
+      assert Enum.at(calls, 3).args == tl(plan.argv.delete)
+      assert Enum.at(calls, 4).args == tl(plan.argv.verify_absent)
     end
 
     test "cleanup retry honors delay then absence", %{spec: spec, executable: executable} do
@@ -526,9 +698,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         success(%{exit_code: 0, stdout: "ok"}),
         success(%{exit_code: 0}),
         success(%{exit_code: 0}),
-        # first verify still present
         success_list([%{"configuration" => %{"id" => @name}}]),
-        # retry cleanup round
         success(%{exit_code: 0}),
         success(%{exit_code: 0}),
         success_list([])
@@ -557,28 +727,126 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
       {execution_id, worker, _} = start_and_begin(spec, executable, script)
 
-      # Wait until start session is active (3rd call queued).
       eventually!(fn -> length(FakeRuntime.calls()) >= 3 end)
 
       assert :ok = ExecutionRegistry.request_cancel(execution_id)
-      terminal = await_terminal(execution_id, 10_000)
-
-      case terminal do
-        {:ok, result} ->
-          assert result.cancelled == true or result.killed == true
-
-        {:error, reason} ->
-          assert reason in [:cancelled, :preflight_cancelled]
-      end
+      assert {:ok, result} = await_terminal(execution_id, 10_000)
+      assert result.cancelled == true
+      assert result.killed == true
 
       exec = await_registry_terminal(execution_id, 10_000)
-      assert exec.status in [:completed, :failed, :killed, :timed_out]
-      # Cleanup commands after cancel
+      assert exec.status == :completed
+      assert exec.result.cancelled == true
       assert length(FakeRuntime.calls()) >= 5
       refute Process.alive?(worker)
     end
 
-    test "controller death retains cleanup ownership", %{spec: spec, executable: executable} do
+    test "security regression: no terminal before exact positive absence", %{
+      spec: spec,
+      executable: executable
+    } do
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "cand"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([%{"configuration" => %{"id" => @name}}]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        {:hold, success_list([])}
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+
+      eventually!(fn -> FakeRuntime.held_count() >= 1 end, 10_000)
+
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 100
+      assert nonterminal_registry?(execution_id)
+      assert Process.alive?(worker)
+
+      assert :ok = FakeRuntime.release_held()
+      assert {:ok, result} = await_terminal(execution_id, 10_000)
+      assert result.stdout == "cand"
+
+      exec = await_registry_terminal(execution_id)
+      assert exec.status == :completed
+      assert exec.result.stdout == "cand"
+      last_list = Enum.at(FakeRuntime.calls(), -1)
+      assert last_list.args == ["list", "--all", "--format", "json"]
+      refute Process.alive?(worker)
+    end
+
+    test "security regression: unit supervisor shutdown waits for exact absence", %{
+      spec: spec,
+      executable: executable
+    } do
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        {:hang, success(%{exit_code: 0, stdout: "partial"})},
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([%{"configuration" => %{"id" => @name}}]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        {:hold, success_list([])}
+      ]
+
+      sessions_before = Process.whereis(Arbor.Shell.PortSessionSupervisor)
+      units_before = Process.whereis(Arbor.Shell.AppleContainerUnitSupervisor)
+      assert is_pid(sessions_before)
+      assert is_pid(units_before)
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeRuntime.calls()) >= 3 end)
+      worker_ref = Process.monitor(worker)
+
+      task =
+        Task.async(fn ->
+          Supervisor.terminate_child(
+            Arbor.Shell.Supervisor,
+            Arbor.Shell.AppleContainerUnitSupervisor
+          )
+        end)
+
+      eventually!(fn -> FakeRuntime.held_count() >= 1 end, 15_000)
+
+      assert Task.yield(task, 150) == nil
+      assert Process.whereis(Arbor.Shell.PortSessionSupervisor) == sessions_before
+      assert Process.alive?(sessions_before)
+      assert Process.alive?(worker)
+      assert nonterminal_registry?(execution_id)
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 50
+
+      assert :ok = FakeRuntime.release_held()
+
+      assert :ok = Task.await(task, 15_000)
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 10_000
+      refute Process.alive?(worker)
+      assert Process.whereis(Arbor.Shell.PortSessionSupervisor) == sessions_before
+
+      exec = await_registry_terminal(execution_id, 5_000)
+      assert exec.status == :completed
+      assert exec.result.cancelled == true
+
+      _ =
+        Supervisor.delete_child(
+          Arbor.Shell.Supervisor,
+          Arbor.Shell.AppleContainerUnitSupervisor
+        )
+
+      {:ok, _} =
+        Supervisor.start_child(
+          Arbor.Shell.Supervisor,
+          Worker.supervisor_child_spec()
+        )
+    end
+
+    test "security regression: controller death holds absence before terminal", %{
+      spec: spec,
+      executable: executable
+    } do
       parent = self()
 
       controller =
@@ -587,10 +855,13 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
             FakeRuntime.reset([
               success_list([]),
               success(%{exit_code: 0}),
-              {:hang, success(%{exit_code: 0, stdout: "x"})},
+              success(%{exit_code: 0, stdout: "x"}),
               success(%{exit_code: 0}),
               success(%{exit_code: 0}),
-              success_list([])
+              success_list([%{"configuration" => %{"id" => @name}}]),
+              success(%{exit_code: 0}),
+              success(%{exit_code: 0}),
+              {:hold, success_list([])}
             ])
 
           start_ref = make_ref()
@@ -602,114 +873,31 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
             Worker.start_for_test(spec, executable, execution_id, start_ref, runtime: FakeRuntime)
 
           :ok = ExecutionRegistry.adopt(execution_id, worker)
-          send(worker, {:begin_unit_execution, start_ref})
+          assert :ok = Worker.begin(worker, start_ref)
           send(parent, {:started, execution_id, worker})
 
-          # Die after start is active.
           receive do
             :die -> :ok
           end
         end)
 
       assert_receive {:started, execution_id, worker}, 2_000
-      eventually!(fn -> length(FakeRuntime.calls()) >= 3 end)
+      eventually!(fn -> FakeRuntime.held_count() >= 1 end, 15_000)
+
       Process.exit(controller, :kill)
 
-      # Worker must continue cleanup and publish terminal without controller.
+      Process.sleep(50)
+      assert Process.alive?(worker)
+      assert nonterminal_registry?(execution_id)
+
+      assert :ok = FakeRuntime.release_held()
       exec = await_registry_terminal(execution_id, 10_000)
-      assert exec.status in [:completed, :failed, :killed, :timed_out]
-      eventually!(fn -> not Process.alive?(worker) end, 10_000)
-      assert length(FakeRuntime.calls()) >= 5
-    end
-
-    test "security regression: no terminal before exact positive absence", %{
-      spec: spec,
-      executable: executable
-    } do
-      # Start succeeds but list never proves absence — inject present forever then finally absent
-      # after we check intermediate state.
-      script = [
-        success_list([]),
-        success(%{exit_code: 0}),
-        success(%{exit_code: 0, stdout: "cand"}),
-        success(%{exit_code: 0}),
-        success(%{exit_code: 0}),
-        success_list([%{"configuration" => %{"id" => @name}}]),
-        success(%{exit_code: 0}),
-        success(%{exit_code: 0}),
-        success_list([])
-      ]
-
-      {execution_id, _worker, _} = start_and_begin(spec, executable, script)
-
-      # While cleanup is retrying, registry must not be terminal success yet.
-      Process.sleep(30)
-
-      case ExecutionRegistry.get(execution_id) do
-        {:ok, %{status: status}} when status in [:completed, :failed, :timed_out, :killed] ->
-          # If already terminal, absence must have been proven (calls include final list).
-          assert length(FakeRuntime.calls()) >= 6
-
-        {:ok, %{status: status}} ->
-          assert status in [:running, :cancelling, :pending]
-
-        _ ->
-          :ok
-      end
-
-      assert {:ok, _} = await_terminal(execution_id, 10_000)
-      exec = await_registry_terminal(execution_id)
       assert exec.status == :completed
-      # Final successful empty list is required
-      last_list = Enum.at(FakeRuntime.calls(), -1)
-      assert last_list.args == ["list", "--all", "--format", "json"]
-    end
-
-    test "security regression: unit supervisor shutdown leaves PortSession supervisor", %{
-      spec: spec,
-      executable: executable
-    } do
-      script = [
-        success_list([]),
-        success(%{exit_code: 0}),
-        {:hang, success(%{exit_code: 0})},
-        success(%{exit_code: 0}),
-        success(%{exit_code: 0}),
-        success_list([])
-      ]
-
-      sessions_before = Process.whereis(Arbor.Shell.PortSessionSupervisor)
-      units_before = Process.whereis(Arbor.Shell.AppleContainerUnitSupervisor)
-      assert is_pid(sessions_before)
-      assert is_pid(units_before)
-
-      {_execution_id, worker, _} = start_and_begin(spec, executable, script)
-      eventually!(fn -> length(FakeRuntime.calls()) >= 3 end)
-      worker_ref = Process.monitor(worker)
-
-      # Terminate only the unit supervisor; PortSession must remain.
-      assert :ok =
-               Supervisor.terminate_child(
-                 Arbor.Shell.Supervisor,
-                 Arbor.Shell.AppleContainerUnitSupervisor
-               )
-
-      assert :ok =
-               Supervisor.delete_child(
-                 Arbor.Shell.Supervisor,
-                 Arbor.Shell.AppleContainerUnitSupervisor
-               )
-
-      assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 10_000
-      assert Process.whereis(Arbor.Shell.PortSessionSupervisor) == sessions_before
-      assert Process.alive?(sessions_before)
-
-      # Restore unit supervisor for later tests.
-      {:ok, _} =
-        Supervisor.start_child(
-          Arbor.Shell.Supervisor,
-          Worker.supervisor_child_spec()
-        )
+      assert exec.result.stdout == "x"
+      eventually!(fn -> not Process.alive?(worker) end, 10_000)
+      assert length(FakeRuntime.calls()) >= 6
+    after
+      restore_unit_supervisor!()
     end
   end
 
@@ -730,7 +918,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
                )
 
       assert :ok = ExecutionRegistry.adopt(execution_id, worker)
-      send(worker, {:begin_unit_execution, start_ref})
+      assert :ok = Worker.begin(worker, start_ref)
       eventually!(fn -> length(FakeRuntime.calls()) >= 1 end)
 
       status = :sys.get_status(worker)
@@ -740,7 +928,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       refute text =~ @projections.worktree
       refute text =~ @image
       refute text =~ inspect(start_ref)
-      # State map values should be redacted markers, not raw pids for controller.
+
       redacted =
         Worker.format_status(%{state: :sys.get_state(worker), message: {:x}, reason: :y, log: []})
 
@@ -756,6 +944,37 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
       send(worker, {:cancel_shell_execution, execution_id})
       _ = await_terminal(execution_id, 10_000)
+    end
+
+    test "secondary notification is bounded; registry keeps full candidate stdout", %{
+      executable: executable,
+      plan: plan
+    } do
+      large = String.duplicate("Z", @max_secondary_notification_bytes + 200)
+
+      spec = %{
+        plan: plan,
+        timeout_ms: 30_000,
+        max_output_bytes: 8_192
+      }
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: large}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, _, _} = start_and_begin(spec, executable, script)
+      assert {:ok, notified} = await_terminal(execution_id)
+      assert byte_size(notified.stdout) == @max_secondary_notification_bytes
+
+      exec = await_registry_terminal(execution_id)
+      assert exec.status == :completed
+      assert exec.result.stdout == large
+      assert byte_size(exec.result.stdout) > @max_secondary_notification_bytes
     end
 
     test "registry projections expose no pid/ref/argv/path authority", %{
@@ -776,7 +995,6 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       {:ok, exec} = ExecutionRegistry.get(execution_id)
       refute contains_authority?(exec)
       assert exec.command == "container unit"
-      # cwd is registry metadata ("/") — must not include projection paths
       refute exec.cwd =~ "arbor-val"
     end
 

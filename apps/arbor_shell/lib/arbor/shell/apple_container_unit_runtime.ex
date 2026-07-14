@@ -6,6 +6,10 @@ defmodule Arbor.Shell.AppleContainerUnitRuntime do
 
   alias Arbor.Shell.PortSession
 
+  @doc false
+  @spec monotonic_ms() :: integer()
+  def monotonic_ms, do: System.monotonic_time(:millisecond)
+
   @spec start_command(term(), [String.t()], String.t(), keyword()) ::
           {:ok, pid()} | {:error, term()}
   def start_command(executable, args, display_command, opts)
