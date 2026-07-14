@@ -32,6 +32,11 @@ Supervisor.start_child(
   {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
 )
 
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec()
+)
+
 defmodule Arbor.Shell.TestAgentAuthorizer do
   @moduledoc false
 

@@ -556,7 +556,8 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthorityTest do
                Arbor.Shell.AppleContainerImagePolicyAuthority,
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
                Arbor.Shell.ExecutionRegistry,
-               DynamicSupervisor
+               DynamicSupervisor,
+               Arbor.Shell.AppleContainerUnitSupervisor
              ]
 
       assert Enum.at(children, 3) ==
@@ -738,6 +739,12 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthorityTest do
         {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
       )
 
+    {:ok, _units} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec()
+      )
+
     :ok
   end
 
@@ -777,11 +784,18 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthorityTest do
         {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
       )
 
+    {:ok, _units} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec()
+      )
+
     :ok
   end
 
   defp remove_global_authority_stack! do
     for child_id <- [
+          Arbor.Shell.AppleContainerUnitSupervisor,
           Arbor.Shell.PortSessionSupervisor,
           Arbor.Shell.ExecutionRegistry,
           Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,

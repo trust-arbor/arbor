@@ -448,6 +448,10 @@ defmodule Arbor.Shell.AppleContainerUnitCore do
     end
   end
 
+  @doc false
+  @spec phase_output_limit(phase()) :: pos_integer()
+  def phase_output_limit(phase), do: stdout_limit_for_phase(phase)
+
   defp stdout_limit_for_phase(:start), do: @max_candidate_stdout_bytes
   defp stdout_limit_for_phase(:verify_absent), do: @max_list_json_bytes
   defp stdout_limit_for_phase(:create), do: @max_setup_cleanup_stdout_bytes

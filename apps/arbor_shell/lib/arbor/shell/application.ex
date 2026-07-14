@@ -70,7 +70,10 @@ defmodule Arbor.Shell.Application do
       # this supervisor (and every later execution owner) before replacement.
       Arbor.Shell.LinuxDependencyBaselineMaterializer.supervisor_child_spec(),
       {Arbor.Shell.ExecutionRegistry, []},
-      {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
+      {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one},
+      # Unit owners sit after PortSession so unit-supervisor shutdown leaves the
+      # PortSession supervisor available for final cleanup sessions.
+      Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec()
     ]
   end
 
