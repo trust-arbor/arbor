@@ -44,7 +44,9 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
 
       assert {:ok, %Executable{} = exe} = Map.fetch(by_path, canonicalize(path))
       assert exe.name == Path.basename(path)
-      assert Map.get(by_name, exe.name) == exe
+      # Fixed pinning must not grant basename authority.
+      assert by_name == %{}
+      refute Map.has_key?(by_name, exe.name)
 
       # Sibling names under the parent must not appear solely from fixed pinning.
       parent = Path.dirname(path)
@@ -94,7 +96,7 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
       end
     end
 
-    test "fixed basename deterministically overrides a PATH-discovered same basename" do
+    test "fixed path pin does not override or create basename authority" do
       path = first_pinnable([@fixed_id, @fixed_sw_vers, "/bin/ls", "/usr/bin/true"])
       name = Path.basename(path)
 
@@ -116,11 +118,14 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
       {merged_name, merged_path} =
         ExecutablePolicy.__merge_fixed_executables_for_test__(by_name, by_path, [path])
 
-      assert %Executable{} = fixed = Map.fetch!(merged_name, name)
+      # Basename map is unchanged — PATH discovery wins / fixed does not inject.
+      assert Map.fetch!(merged_name, name) == path_discovered
+      assert map_size(merged_name) == map_size(by_name)
+
+      assert %Executable{} = fixed = Map.fetch!(merged_path, canonicalize(path))
       assert fixed.path == canonicalize(path)
       refute fixed.path == path_discovered.path
-      assert Map.get(merged_path, fixed.path) == fixed
-      # Prior PATH entry remains by exact path key but basename points at fixed.
+      # Prior PATH entry remains by exact path key.
       assert Map.get(merged_path, path_discovered.path) == path_discovered
     end
 
@@ -167,10 +172,6 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
       assert exe.path == canonicalize(path)
       assert exe.name == Path.basename(path)
 
-      # Basename resolve also returns the fixed identity.
-      assert {:ok, %Executable{path: resolved}} = ExecutablePolicy.resolve(Path.basename(path))
-      assert resolved == exe.path
-
       assert :ok = ExecutablePolicy.verify_pinned(exe)
     end
 
@@ -180,46 +181,67 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
           replace_policy_with_startup_path!("/bin:/usr/bin")
           assert {:ok, %Executable{path: path}} = ExecutablePolicy.resolve(@fixed_container)
           assert path == canonicalize(@fixed_container)
+          # Basename must not gain fixed-path authority solely from the pin.
+          assert {:error, :executable_not_found} = ExecutablePolicy.resolve("container")
 
         {:error, _} ->
           # Host without a root-owned Arbor/Apple container CLI — merge helper still covers logic.
           {by_name, by_path} =
             ExecutablePolicy.__merge_fixed_executables_for_test__(%{}, %{}, [@fixed_container])
 
-          assert by_name == %{} or Map.has_key?(by_name, "container")
+          assert by_name == %{}
           assert is_map(by_path)
       end
     end
   end
 
   describe "security regression" do
+    setup do
+      previous_path = System.get_env("PATH")
+
+      on_exit(fn ->
+        restore_policy!(previous_path)
+      end)
+
+      :ok
+    end
+
     @tag :security_regression
-    test "security regression: no startup option or Application env nominates additional fixed paths" do
-      source =
-        File.read!(
-          Path.expand(
-            "../../../lib/arbor/shell/executable_policy.ex",
-            __DIR__
-          )
-        )
+    test "security regression: fixed absolute pin does not grant basename authority when PATH excludes parent" do
+      # With a trusted search PATH that excludes /usr/bin, /usr/bin/id must still
+      # resolve and verify as pinned, while basename "id" must not gain the fixed
+      # identity (not found unless PATH independently supplied it).
+      assert {:ok, _} = TrustedPath.pin_root_owned_regular_file(@fixed_id, executable: true)
 
-      # Production init must pin only the compiled constant list.
-      assert source =~ "@apple_fixed_executable_paths"
-      assert source =~ "merge_fixed_executables("
-      assert source =~ "@apple_fixed_executable_paths"
+      alt_dirs =
+        ["/bin", "/sbin", "/usr/sbin"]
+        |> Enum.reject(&(&1 == "/usr/bin"))
+        |> Enum.filter(&File.dir?/1)
 
-      # Must not read fixed paths from Application env or start opts.
-      refute source =~ ~r/Application\.get_env\([^\n]*fixed/
-      refute source =~ ~r/Keyword\.get\([^\n]*:fixed/
-      refute source =~ ~r/Keyword\.get_lazy\([^\n]*:fixed/
-      refute source =~ ":fixed_executable_paths"
-      refute source =~ ":fixed_paths"
+      assert alt_dirs != [], "need at least one alternate trusted directory for this host"
 
-      # Caller-supplied option must not expand the fixed set through public start.
-      # The only merge entry point outside init is the doc-false test helper.
-      assert function_exported?(ExecutablePolicy, :__merge_fixed_executables_for_test__, 3)
-      refute function_exported?(ExecutablePolicy, :merge_fixed_executables, 3)
+      # Ensure none of the alternate dirs independently supply basename "id".
+      refute Enum.any?(alt_dirs, fn dir ->
+               case File.ls(dir) do
+                 {:ok, entries} -> "id" in entries
+                 _ -> false
+               end
+             end),
+             "alternate PATH dirs must not independently contain basename id"
 
+      replace_policy_with_startup_path!(Enum.join(alt_dirs, ":"))
+
+      assert {:ok, %Executable{} = exe} = ExecutablePolicy.resolve(@fixed_id)
+      assert exe.path == canonicalize(@fixed_id)
+      assert :ok = ExecutablePolicy.verify_pinned(exe)
+
+      # Basename must not resolve to the fixed identity (or any identity) when
+      # PATH discovery never saw it.
+      assert {:error, :executable_not_found} = ExecutablePolicy.resolve("id")
+    end
+
+    @tag :security_regression
+    test "security regression: compiled fixed list is not nominatable via Application env" do
       # Nominating via Application env has no effect on the compiled list.
       previous = Application.get_env(:arbor_shell, :fixed_executable_paths)
 
@@ -241,6 +263,10 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
           value -> Application.put_env(:arbor_shell, :fixed_executable_paths, value)
         end
       end
+
+      # Public merge is test-only; production does not export a nominatable merge API.
+      assert function_exported?(ExecutablePolicy, :__merge_fixed_executables_for_test__, 3)
+      refute function_exported?(ExecutablePolicy, :merge_fixed_executables, 3)
     end
   end
 

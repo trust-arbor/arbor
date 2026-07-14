@@ -42,9 +42,11 @@ defmodule Arbor.Shell.ExecutablePolicy do
         }
 
   # Exact absolute paths for Apple read-only/control-plane probe commands.
-  # These are pinned individually — never by scanning their parent directories —
-  # so a standalone /usr/local/bin/container install is available even when
-  # /usr/local/bin is omitted from the service PATH, without authorizing siblings.
+  # These are pinned individually into executables_by_path only — never by
+  # scanning their parent directories and never into executables_by_name —
+  # so a standalone /usr/local/bin/container is resolvable by absolute path
+  # when /usr/local/bin is omitted from the service PATH, without granting
+  # generic basename authority or authorizing siblings.
   @apple_fixed_executable_paths [
     "/usr/local/bin/container",
     "/usr/bin/codesign",
@@ -273,19 +275,17 @@ defmodule Arbor.Shell.ExecutablePolicy do
     end)
   end
 
-  # Pin each exact fixed absolute path individually. Missing or untrusted
-  # paths are omitted so non-macOS / Homebrew-only hosts still start; the
-  # Apple probe fails closed later when resolve misses. Fixed basenames
-  # deterministically override PATH-discovered same-name entries.
+  # Pin each exact fixed absolute path into executables_by_path only.
+  # Missing or untrusted paths are omitted so non-macOS / Homebrew-only hosts
+  # still start; the Apple probe fails closed later when resolve misses.
+  # executables_by_name is left exactly as established by trusted PATH
+  # discovery — fixed paths must never become generic basename authority.
   defp merge_fixed_executables(by_name, by_path, fixed_paths)
        when is_map(by_name) and is_map(by_path) and is_list(fixed_paths) do
     Enum.reduce(fixed_paths, {by_name, by_path}, fn path, {names, paths} ->
       case pin_fixed_executable(path) do
         {:ok, %Executable{} = executable} ->
-          {
-            Map.put(names, executable.name, executable),
-            Map.put(paths, executable.path, executable)
-          }
+          {names, Map.put(paths, executable.path, executable)}
 
         {:error, _reason} ->
           {names, paths}
