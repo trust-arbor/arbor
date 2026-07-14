@@ -79,6 +79,63 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
       assert {:error, _} = Unit.new(%{})
       assert {:error, :invalid_plan} = Unit.new("nope")
     end
+
+    test "requires exact canonical plan equality", %{plan: plan} do
+      assert {:ok, _, _} = Unit.new(plan)
+
+      # Extra field fails closed.
+      assert {:error, :plan_not_canonical} = Unit.new(Map.put(plan, :extra, true))
+
+      # Altered lifecycle fails closed.
+      altered_life =
+        put_in(plan, [:lifecycle, :start_order], [:start, :create])
+
+      assert {:error, :plan_not_canonical} = Unit.new(altered_life)
+
+      # String-keyed show map is not a canonical plan.
+      assert {:error, :plan_not_canonical} = Unit.new(AppleContainerPlanCore.show(plan))
+
+      # Request-only map is not a full plan.
+      assert {:error, :plan_not_canonical} = Unit.new(@valid_request)
+    end
+
+    @tag :security_regression
+    test "security regression: forged argv mutation yields no run effect", %{plan: plan} do
+      phases = [:create, :start, :force_stop, :delete, :verify_absent]
+
+      for phase <- phases do
+        forged_argv =
+          Map.update!(plan.argv, phase, fn argv ->
+            argv ++ ["--forged-attacker-flag"]
+          end)
+
+        forged = %{plan | argv: forged_argv}
+
+        assert {:error, :plan_not_canonical} = Unit.new(forged)
+      end
+
+      # Mutating every phase at once also fails with no effect.
+      all_forged =
+        Enum.reduce(phases, plan.argv, fn phase, argv ->
+          Map.update!(argv, phase, &(&1 ++ ["evil"]))
+        end)
+
+      assert {:error, :plan_not_canonical} = Unit.new(%{plan | argv: all_forged})
+    end
+
+    test "rejects altered env, mounts, runtime, and limits", %{plan: plan} do
+      assert {:error, :plan_not_canonical} =
+               Unit.new(%{plan | env: plan.env ++ [{"EVIL", "1"}]})
+
+      assert {:error, :plan_not_canonical} =
+               Unit.new(%{plan | mounts: []})
+
+      assert {:error, :plan_not_canonical} =
+               Unit.new(%{plan | runtime_executable: "/tmp/evil"})
+
+      assert {:error, :plan_not_canonical} =
+               Unit.new(%{plan | resource_limits: %{cpus: "99", memory: "99G"}})
+    end
   end
 
   describe "preflight effects" do
@@ -105,19 +162,18 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
                )
 
       assert state.stage == :terminal
-      assert [{:terminal, terminal}] = effects
-      assert terminal["status"] == "error"
-      assert terminal["reason"] == "unit_name_collision"
+      assert effects == [{:terminal, {:error, :unit_name_collision}}]
 
       refute Enum.any?(effects, fn
                {:run, :delete, _} -> true
                {:run, :force_stop, _} -> true
+               {:retry_after, _, _} -> true
                _ -> false
              end)
 
       shown = Unit.show(state)
-      refute inspect(shown) =~ "stdout"
       refute Map.has_key?(shown, "stdout")
+      assert shown["terminal"]["reason"] == "unit_name_collision"
     end
 
     test "malformed, nonzero, truncated, or unclean list is not absence", %{plan: plan} do
@@ -136,12 +192,12 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
       ]
 
       for result <- cases do
-        assert {:ok, state, [{:terminal, terminal}]} =
+        assert {:ok, state, [{:terminal, {:error, reason}}]} =
                  Unit.apply_result(base, :verify_absent, result)
 
         assert state.stage == :terminal
-        assert terminal["status"] == "error"
-        refute terminal["reason"] in [nil, "ok"]
+        assert is_atom(reason)
+        refute reason in [nil, :ok]
       end
     end
   end
@@ -159,14 +215,20 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
       assert effects == [{:run, :start, plan.argv.start}]
 
       assert {:ok, state, effects} =
-               Unit.apply_result(state, :start, success(%{exit_code: 0}))
+               Unit.apply_result(
+                 state,
+                 :start,
+                 success(%{exit_code: 0, stdout: "candidate-out", duration_ms: 12})
+               )
 
       assert state.stage == :cleanup
       assert state.cleanup_step == :force_stop
-      assert state.primary.status == :ok
+      assert state.candidate_result.exit_code == 0
+      assert state.candidate_result.stdout == "candidate-out"
+      assert state.candidate_result.stderr == ""
+      assert state.candidate_result.duration_ms == 12
       assert effects == [{:run, :force_stop, plan.argv.force_stop}]
 
-      # No terminal success yet.
       refute Enum.any?(effects, &match?({:terminal, _}, &1))
     end
 
@@ -177,27 +239,215 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
                Unit.apply_result(state, :create, success(%{exit_code: 1}))
 
       assert state.stage == :cleanup
-      assert state.primary.status == :error
-      assert state.primary.reason == :create_failed
+      assert state.error_reason == :create_failed
+      assert state.candidate_result == nil
       assert effects == [{:run, :force_stop, plan.argv.force_stop}]
     end
 
-    test "start nonzero/timeout/output/cancel all withhold terminal until positive absence", %{
+    test "start nonzero/timeout/output/cancel/containment withhold terminal until absence", %{
       plan: plan
     } do
-      for result <- [
-            success(%{exit_code: 2}),
-            success(%{timed_out: true, exit_code: 137}),
-            success(%{output_limit_exceeded: true, exit_code: 0}),
-            success(%{cancelled: true, exit_code: 137})
-          ] do
+      cases = [
+        success(%{exit_code: 2, stdout: "fail-out"}),
+        success(%{timed_out: true, exit_code: 137, stdout: "partial"}),
+        success(%{output_limit_exceeded: true, exit_code: 0, stdout: "big"}),
+        success(%{output_truncated: true, exit_code: 0, stdout: "trunc"}),
+        success(%{cancelled: true, exit_code: 137, stdout: "c"}),
+        success(%{containment_failure: true, exit_code: 137, stdout: "x"})
+      ]
+
+      for result <- cases do
         state = through_start_pending(plan)
 
         assert {:ok, state, effects} = Unit.apply_result(state, :start, result)
         assert state.stage == :cleanup
+        assert is_map(state.candidate_result)
         assert effects == [{:run, :force_stop, plan.argv.force_stop}]
-        refute Enum.any?(effects, &match?({:terminal, %{"status" => "ok"}}, &1))
+        refute Enum.any?(effects, &match?({:terminal, _}, &1))
       end
+    end
+  end
+
+  describe "phase-aware stdout bounds and strict flags" do
+    test "accepts start stdout above 256 KiB within 16 MiB", %{plan: plan} do
+      state = through_start_pending(plan)
+      big = String.duplicate("x", 300_000)
+
+      assert {:ok, state, _} =
+               Unit.apply_result(state, :start, success(%{exit_code: 0, stdout: big}))
+
+      assert state.candidate_result.stdout == big
+      assert byte_size(state.candidate_result.stdout) > 262_144
+    end
+
+    test "rejects start stdout over public hard maximum", %{plan: plan} do
+      state = through_start_pending(plan)
+      too_big = String.duplicate("y", 16_777_216 + 1)
+
+      assert {:error, :stdout_too_long} =
+               Unit.apply_result(state, :start, success(%{exit_code: 0, stdout: too_big}))
+    end
+
+    test "rejects oversized create/cleanup stdout and discards setup output", %{plan: plan} do
+      create_state = through_create_pending(plan)
+      oversized = String.duplicate("z", 8_192 + 1)
+
+      assert {:error, :stdout_too_long} =
+               Unit.apply_result(
+                 create_state,
+                 :create,
+                 success(%{exit_code: 0, stdout: oversized})
+               )
+
+      # Successful create with small stdout does not retain that stdout.
+      assert {:ok, state, _} =
+               Unit.apply_result(
+                 create_state,
+                 :create,
+                 success(%{exit_code: 0, stdout: "create-noise"})
+               )
+
+      shown = Unit.show(state)
+      refute inspect(shown) =~ "create-noise"
+      assert state.candidate_result == nil
+
+      # Cleanup force-stop oversized stdout rejected.
+      start_cleanup = through_start_success_cleanup(plan)
+
+      assert {:error, :stdout_too_long} =
+               Unit.apply_result(
+                 start_cleanup,
+                 :force_stop,
+                 success(%{exit_code: 0, stdout: oversized})
+               )
+    end
+
+    test "rejects duplicate atom/string result-key aliases", %{plan: plan} do
+      state = through_start_pending(plan)
+
+      assert {:error, {:duplicate_result_key_alias, :exit_code}} =
+               Unit.apply_result(
+                 state,
+                 :start,
+                 Map.put(success(%{exit_code: 0}), "exit_code", 1)
+               )
+
+      assert {:error, {:duplicate_result_key_alias, :timed_out}} =
+               Unit.apply_result(
+                 state,
+                 :start,
+                 Map.merge(success(%{exit_code: 0}), %{"timed_out" => true, timed_out: false})
+               )
+    end
+
+    test "rejects non-boolean flag values; missing flags default false", %{plan: plan} do
+      state = through_start_pending(plan)
+
+      assert {:error, {:invalid_boolean_flag, :timed_out}} =
+               Unit.apply_result(
+                 state,
+                 :start,
+                 %{exit_code: 0, stdout: "", timed_out: "yes"}
+               )
+
+      assert {:ok, state, _} =
+               Unit.apply_result(state, :start, %{exit_code: 0, stdout: "ok"})
+
+      assert state.candidate_result.timed_out == false
+      assert state.candidate_result.killed == false
+      assert state.candidate_result.output_truncated == false
+      assert state.candidate_result.output_limit_exceeded == false
+      refute Map.has_key?(state.candidate_result, :cancelled)
+      refute Map.has_key?(state.candidate_result, :containment_failure)
+    end
+  end
+
+  describe "candidate result preservation" do
+    test "preserves exit 0 candidate fields through terminal", %{plan: plan} do
+      state = through_start_pending(plan)
+
+      assert {:ok, state, _} =
+               Unit.apply_result(
+                 state,
+                 :start,
+                 success(%{
+                   exit_code: 0,
+                   stdout: "hello",
+                   duration_ms: 42
+                 })
+               )
+
+      assert state.candidate_result == %{
+               exit_code: 0,
+               stdout: "hello",
+               stderr: "",
+               duration_ms: 42,
+               timed_out: false,
+               killed: false,
+               output_truncated: false,
+               output_limit_exceeded: false
+             }
+
+      assert {:ok, state, [{:terminal, {:ok, result}}]} =
+               finish_cleanup_absent(state)
+
+      assert result == state.candidate_result
+      assert result.stdout == "hello"
+      assert Unit.show(state)["candidate_result"]["stdout"] == "hello"
+      assert Unit.show(state)["terminal"]["result"]["stdout"] == "hello"
+    end
+
+    test "nonzero candidate exit is terminal ok data after absence", %{plan: plan} do
+      state = through_start_pending(plan)
+
+      assert {:ok, state, _} =
+               Unit.apply_result(
+                 state,
+                 :start,
+                 success(%{exit_code: 7, stdout: "tests failed"})
+               )
+
+      assert {:ok, state, [{:terminal, {:ok, result}}]} =
+               finish_cleanup_absent(state)
+
+      assert result.exit_code == 7
+      assert result.stdout == "tests failed"
+      assert state.stage == :terminal
+    end
+
+    test "timeout/output/cancel/containment candidates remain {:ok, result}", %{plan: plan} do
+      cases = [
+        success(%{timed_out: true, killed: true, exit_code: 137, stdout: "t"}),
+        success(%{
+          output_limit_exceeded: true,
+          output_truncated: true,
+          killed: true,
+          exit_code: 0,
+          stdout: "o"
+        }),
+        success(%{cancelled: true, killed: true, exit_code: 137, stdout: "c"}),
+        success(%{containment_failure: true, killed: true, exit_code: 137, stdout: "x"})
+      ]
+
+      for result <- cases do
+        state = through_start_pending(plan)
+        assert {:ok, state, _} = Unit.apply_result(state, :start, result)
+        assert {:ok, _state, [{:terminal, {:ok, retained}}]} = finish_cleanup_absent(state)
+        assert retained.stdout == result.stdout
+        assert retained.exit_code == result.exit_code
+      end
+    end
+
+    test "create failure terminal is error after cleanup absence", %{plan: plan} do
+      state = through_create_pending(plan)
+
+      assert {:ok, state, _} =
+               Unit.apply_result(state, :create, success(%{exit_code: 9}))
+
+      assert {:ok, state, [{:terminal, {:error, :create_failed}}]} =
+               finish_cleanup_absent(state)
+
+      assert state.candidate_result == nil
     end
   end
 
@@ -236,7 +486,6 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
       assert {:ok, state, _} =
                Unit.apply_result(state, :delete, success(%{exit_code: 1}))
 
-      # Unit still present — must loop, never terminal ok.
       assert {:ok, state, effects} =
                Unit.apply_result(
                  state,
@@ -246,23 +495,23 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
 
       assert state.stage == :cleanup
       assert state.cleanup_step == :force_stop
-      assert effects == [{:run, :force_stop, plan.argv.force_stop}]
+      assert [{:retry_after, 50, {:run, :force_stop, force_stop}}] = effects
+      assert force_stop == plan.argv.force_stop
       refute Enum.any?(effects, &match?({:terminal, _}, &1))
     end
 
-    test "positive absence after start success emits terminal ok", %{plan: plan} do
+    test "positive absence after start success emits terminal ok result", %{plan: plan} do
       state = through_cleanup_verify_pending(plan)
 
-      assert {:ok, state, [{:terminal, terminal}]} =
+      assert {:ok, state, [{:terminal, {:ok, result}}]} =
                Unit.apply_result(state, :verify_absent, success_list([]))
 
       assert state.stage == :terminal
-      assert terminal["status"] == "ok"
-      assert terminal["exit_code"] == 0
-      refute Map.has_key?(terminal, "stdout")
+      assert result.exit_code == 0
+      assert result.stderr == ""
     end
 
-    test "positive absence after create failure emits terminal error primary", %{plan: plan} do
+    test "positive absence after create failure emits terminal error", %{plan: plan} do
       state = through_create_pending(plan)
 
       assert {:ok, state, _} =
@@ -274,19 +523,16 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
       assert {:ok, state, _} =
                Unit.apply_result(state, :delete, success(%{exit_code: 0}))
 
-      assert {:ok, state, [{:terminal, terminal}]} =
+      assert {:ok, state, [{:terminal, {:error, :create_failed}}]} =
                Unit.apply_result(state, :verify_absent, success_list([]))
 
       assert state.stage == :terminal
-      assert terminal["status"] == "error"
-      assert terminal["reason"] == "create_failed"
     end
 
     @tag :security_regression
     test "security regression: no transition returns success while unit may exist", %{plan: plan} do
       state = through_cleanup_verify_pending(plan)
 
-      # Present unit blocks terminal success.
       assert {:ok, state, effects} =
                Unit.apply_result(
                  state,
@@ -295,13 +541,13 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
                )
 
       refute Enum.any?(effects, fn
-               {:terminal, %{"status" => "ok"}} -> true
+               {:terminal, {:ok, _}} -> true
                _ -> false
              end)
 
       assert state.stage == :cleanup
+      assert match?({:retry_after, _, {:run, :force_stop, _}}, hd(effects))
 
-      # Unclean list is not absence.
       assert {:ok, state, _} =
                Unit.apply_result(state, :force_stop, success(%{exit_code: 0}))
 
@@ -312,18 +558,43 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
                Unit.apply_result(state, :verify_absent, success(%{exit_code: 1, stdout: "[]"}))
 
       refute Enum.any?(effects2, fn
-               {:terminal, %{"status" => "ok"}} -> true
+               {:terminal, {:ok, _}} -> true
                _ -> false
              end)
 
       assert state.stage == :cleanup
     end
 
-    test "repeated cleanup failure stays memory-bounded", %{plan: plan} do
+    test "bounded exponential retry delays and memory", %{plan: plan} do
       state = through_cleanup_verify_pending(plan)
 
+      {delays, state} =
+        Enum.map_reduce(1..8, state, fn _, acc ->
+          assert {:ok, acc, effects} =
+                   Unit.apply_result(
+                     acc,
+                     :verify_absent,
+                     success_list([%{"configuration" => %{"id" => @name}}])
+                   )
+
+          assert [{:retry_after, delay, {:run, :force_stop, _}}] = effects
+          assert delay >= 50
+          assert delay <= 2_000
+
+          assert {:ok, acc, _} =
+                   Unit.apply_result(acc, :force_stop, success(%{exit_code: 1}))
+
+          assert {:ok, acc, _} =
+                   Unit.apply_result(acc, :delete, success(%{exit_code: 1}))
+
+          {delay, acc}
+        end)
+
+      assert delays == [50, 100, 200, 400, 800, 1600, 2000, 2000]
+
+      # Continue looping for diagnostic bound.
       state =
-        Enum.reduce(1..40, state, fn _, acc ->
+        Enum.reduce(1..20, state, fn _, acc ->
           assert {:ok, acc, _} =
                    Unit.apply_result(
                      acc,
@@ -344,6 +615,8 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
       shown = Unit.show(state)
       assert length(shown["cleanup_diagnostics"]) <= 16
       assert is_integer(shown["cleanup_round"])
+      assert is_integer(shown["cleanup_retry_ms"])
+      assert shown["cleanup_retry_ms"] <= 2_000
       assert Jason.encode!(shown)
       refute inspect(shown) =~ "configuration"
     end
@@ -352,24 +625,45 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
   describe "cancellation" do
     test "cancel before create terminates cancelled", %{plan: plan} do
       assert {:ok, state, _} = Unit.new(plan)
-      assert {:ok, state, [{:terminal, terminal}]} = Unit.cancel(state)
+      assert {:ok, state, [{:terminal, {:error, :preflight_cancelled}}]} = Unit.cancel(state)
       assert state.stage == :terminal
-      assert terminal["status"] == "cancelled"
-      assert terminal["reason"] == "preflight_cancelled"
     end
 
-    test "cancel after create enters cleanup", %{plan: plan} do
+    test "cancel after create enters cleanup without terminal", %{plan: plan} do
       state = through_create_pending(plan)
       assert {:ok, state, effects} = Unit.cancel(state)
       assert state.stage == :cleanup
-      assert state.primary.status == :cancelled
+      assert state.error_reason == :cancelled
       assert effects == [{:run, :force_stop, plan.argv.force_stop}]
+      refute Enum.any?(effects, &match?({:terminal, _}, &1))
+    end
+
+    test "cancel while start pending enters cleanup without terminal", %{plan: plan} do
+      state = through_start_pending(plan)
+      assert {:ok, state, effects} = Unit.cancel(state)
+      assert state.stage == :cleanup
+      assert effects == [{:run, :force_stop, plan.argv.force_stop}]
+      refute Enum.any?(effects, &match?({:terminal, _}, &1))
     end
   end
 
   describe "show and purity" do
     test "show never leaks setup or cleanup stdout", %{plan: plan} do
-      state = through_cleanup_verify_pending(plan)
+      state = through_start_success_cleanup(plan)
+
+      assert {:ok, state, _} =
+               Unit.apply_result(
+                 state,
+                 :force_stop,
+                 success(%{exit_code: 0, stdout: "force-stop-secret"})
+               )
+
+      assert {:ok, state, _} =
+               Unit.apply_result(
+                 state,
+                 :delete,
+                 success(%{exit_code: 0, stdout: "delete-secret"})
+               )
 
       assert {:ok, state, _} =
                Unit.apply_result(
@@ -383,9 +677,12 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
 
       shown = Unit.show(state)
       text = inspect(shown)
-      refute text =~ "stdout"
+      refute text =~ "force-stop-secret"
+      refute text =~ "delete-secret"
       refute text =~ "configuration"
       refute Map.has_key?(shown, "stdout")
+      # Candidate stdout from start success is empty string (no payload), not cleanup.
+      assert shown["candidate_result"]["stdout"] == ""
       assert Jason.encode!(shown)
     end
 
@@ -455,6 +752,16 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
     state
   end
 
+  defp finish_cleanup_absent(state) do
+    assert {:ok, state, _} =
+             Unit.apply_result(state, :force_stop, success(%{exit_code: 0}))
+
+    assert {:ok, state, _} =
+             Unit.apply_result(state, :delete, success(%{exit_code: 0}))
+
+    Unit.apply_result(state, :verify_absent, success_list([]))
+  end
+
   defp success_list(entries) when is_list(entries) do
     success(%{exit_code: 0, stdout: Jason.encode!(entries)})
   end
@@ -466,6 +773,7 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
         stdout: "",
         timed_out: false,
         cancelled: false,
+        killed: false,
         output_limit_exceeded: false,
         output_truncated: false,
         containment_failure: false
