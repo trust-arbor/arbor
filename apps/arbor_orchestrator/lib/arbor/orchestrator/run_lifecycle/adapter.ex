@@ -21,6 +21,7 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
   """
 
   alias Arbor.Orchestrator.JobRegistry.Entry, as: JobEntry
+  alias Arbor.Orchestrator.RunLifecycle.EffectEnvelope
   alias Arbor.Orchestrator.RunLifecycle.Record
   alias Arbor.Orchestrator.RunState.Core, as: RunState
 
@@ -34,6 +35,8 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
   @max_node_duration_entries 256
   # Signed 63-bit magnitude ceiling — compare only, never encode bignums.
   @max_int 9_223_372_036_854_775_807
+  # JSON-safe generation ceiling (2^53 - 1) for effect_generation.
+  @max_json_safe_int 9_007_199_254_740_991
 
   # Identity / recovery-pointer ceilings (exact preserve or reject)
   @max_id_bytes 256
@@ -64,6 +67,8 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
     :dot_source_path,
     :logs_root,
     :execution_principal,
+    :effect_generation,
+    :current_effect,
     :spawning_pid
   ]
 
@@ -96,6 +101,9 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
       dot_source_path: Map.get(meta, :dot_source_path),
       logs_root: Map.get(meta, :logs_root),
       execution_principal: Map.get(meta, :execution_principal),
+      # Effect evidence is journal-owned; RunState never carries it.
+      effect_generation: 0,
+      current_effect: nil,
       spawning_pid: state.spawning_pid
     }
   end
@@ -131,6 +139,8 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
       dot_source_path: fetch_raw_binary(data, :dot_source_path),
       logs_root: fetch_raw_binary(data, :logs_root),
       execution_principal: fetch_raw_binary(data, :execution_principal),
+      effect_generation: fetch_effect_generation(data),
+      current_effect: fetch_current_effect(data),
       spawning_pid: fetch_pid(data, :spawning_pid)
     }
   end
@@ -195,7 +205,9 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
         "graph_hash" => record.graph_hash,
         "dot_source_path" => record.dot_source_path,
         "logs_root" => record.logs_root,
-        "execution_principal" => record.execution_principal
+        "execution_principal" => record.execution_principal,
+        "effect_generation" => record.effect_generation || 0,
+        "current_effect" => record.current_effect
       }
 
       bound_final_payload(payload)
@@ -265,7 +277,8 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
              record.execution_principal,
              :execution_principal,
              @max_principal_bytes
-           ) do
+           ),
+         {:ok, effect_generation, current_effect} <- validate_effect_fields(record) do
       {:ok,
        %Record{
          record
@@ -289,7 +302,9 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
            graph_hash: graph_hash,
            dot_source_path: dot_source_path,
            logs_root: logs_root,
-           execution_principal: execution_principal
+           execution_principal: execution_principal,
+           effect_generation: effect_generation,
+           current_effect: current_effect
        }}
     end
   end
@@ -835,7 +850,7 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
   end
 
   # Cap final durable JSON size. Fallback may drop diagnostics/progress only —
-  # identity fields (run_id, pipeline_id, graph_hash, paths, principal) stay exact.
+  # identity fields and effect evidence stay exact; never drop current_effect.
   defp bound_final_payload(payload) when is_map(payload) do
     case encode_if_within(payload) do
       {:ok, ok_payload} ->
@@ -877,7 +892,7 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
     end
   end
 
-  # Minimal payload preserves identity invariants exactly; never truncates them.
+  # Minimal payload preserves identity + effect evidence exactly; never truncates them.
   defp minimal_identity_payload(payload) do
     base = %{
       "run_id" => payload["run_id"],
@@ -900,7 +915,9 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
       "graph_hash" => payload["graph_hash"],
       "dot_source_path" => payload["dot_source_path"],
       "logs_root" => payload["logs_root"],
-      "execution_principal" => payload["execution_principal"]
+      "execution_principal" => payload["execution_principal"],
+      "effect_generation" => payload["effect_generation"] || 0,
+      "current_effect" => payload["current_effect"]
     }
 
     case encode_if_within(base) do
@@ -908,8 +925,68 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
         {:ok, ok}
 
       :too_large ->
-        # Identity alone exceeds ceiling — reject rather than corrupt identity.
-        {:error, {:durable_payload_exceeds_bound, :identity_too_large}}
+        # Identity + effect evidence exceed ceiling — fail closed rather than
+        # drop effect evidence or corrupt identity.
+        {:error, {:durable_payload_exceeds_bound, :identity_or_effect_too_large}}
+    end
+  end
+
+  # ---- effect evidence (exact or reject; never truncate) ----
+
+  defp fetch_effect_generation(data) do
+    case fetch(data, :effect_generation) do
+      n when is_integer(n) and n >= 0 and n <= @max_json_safe_int -> n
+      # Leave invalid values for validate_and_normalize_record to reject.
+      n when is_integer(n) -> n
+      nil -> 0
+      _ -> :invalid_effect_generation
+    end
+  end
+
+  defp fetch_current_effect(data) do
+    case fetch(data, :current_effect) do
+      nil -> nil
+      effect when is_map(effect) -> effect
+      # Sentinel so validate_and_normalize_record fails closed.
+      _ -> :invalid_current_effect
+    end
+  end
+
+  defp validate_effect_fields(%Record{} = record) do
+    gen = record.effect_generation
+    effect = record.current_effect
+
+    cond do
+      gen == :invalid_effect_generation ->
+        {:error, {:invalid_effect_generation, :invalid_type}}
+
+      not is_integer(gen) ->
+        {:error, {:invalid_effect_generation, :invalid_type}}
+
+      gen < 0 or gen > @max_json_safe_int ->
+        {:error, {:invalid_effect_generation, :out_of_range}}
+
+      effect == :invalid_current_effect ->
+        {:error, {:invalid_current_effect, :invalid_type}}
+
+      is_nil(effect) ->
+        {:ok, gen, nil}
+
+      is_map(effect) ->
+        case EffectEnvelope.validate(effect) do
+          {:ok, validated} ->
+            if validated["generation"] == gen do
+              {:ok, gen, validated}
+            else
+              {:error, {:invalid_current_effect, :generation_mismatch}}
+            end
+
+          {:error, reason} ->
+            {:error, {:invalid_current_effect, reason}}
+        end
+
+      true ->
+        {:error, {:invalid_current_effect, :invalid_type}}
     end
   end
 

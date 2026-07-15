@@ -55,6 +55,11 @@ defmodule Arbor.Orchestrator.RunLifecycle.Record do
     field(:logs_root, String.t() | nil, default: nil, enforce: false)
     # Non-secret principal identity for recovery credential matching (never a credential)
     field(:execution_principal, String.t() | nil, default: nil, enforce: false)
+    # Durable pre-effect intent: monotonic generation + current JSON-clean envelope.
+    # generation 0 means no effect has been prepared; envelope is nil or a
+    # validated string-keyed map (see RunLifecycle.EffectEnvelope).
+    field(:effect_generation, non_neg_integer(), default: 0, enforce: false)
+    field(:current_effect, map() | nil, default: nil, enforce: false)
     # Runtime-only — never written to durable backends
     field(:spawning_pid, pid() | nil, default: nil, enforce: false)
   end

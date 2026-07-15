@@ -55,6 +55,7 @@ defmodule Arbor.Orchestrator.RunJournal do
 
   alias Arbor.Contracts.Persistence.Record, as: PersistenceRecord
   alias Arbor.Orchestrator.RunLifecycle.Adapter
+  alias Arbor.Orchestrator.RunLifecycle.EffectEnvelope
   alias Arbor.Orchestrator.RunLifecycle.Record
   alias Arbor.Orchestrator.RunState.Core, as: RunState
 
@@ -301,6 +302,60 @@ defmodule Arbor.Orchestrator.RunJournal do
   @spec delete(String.t(), keyword()) :: :ok | {:error, term()}
   def delete(run_id, opts \\ []) when is_binary(run_id) do
     call_server(opts, {:delete, run_id})
+  end
+
+  @doc """
+  Durably prepare a pending effect envelope for a run (owner API).
+
+  When `current_effect` is `nil` or `settled`, increments `effect_generation`
+  and writes a pending envelope via the backend-first `write_record` path.
+
+  Returns:
+
+  - `{:ok, :prepared, effect}` — new pending envelope written
+  - `{:ok, :already_prepared, effect}` — exact retry of the same pending envelope
+  - `{:error, reason}` — missing run, conflict, generation ceiling, malformed
+    attrs, journal unavailable, or durable write failure (hot state unchanged)
+  """
+  @spec prepare_effect(String.t(), map(), keyword()) ::
+          {:ok, :prepared | :already_prepared, map()} | {:error, term()}
+  def prepare_effect(run_id, attrs, opts \\ [])
+      when is_binary(run_id) and is_map(attrs) do
+    call_server(opts, {:prepare_effect, run_id, attrs})
+  end
+
+  @doc """
+  Durably record a completed effect receipt (owner API).
+
+  Requires the current effect to be pending with the exact `generation` and
+  `execution_id`. Writes a completed envelope; does not clear evidence.
+
+  Returns:
+
+  - `{:ok, :recorded, effect}` — receipt written
+  - `{:ok, :already_recorded, effect}` — exact retry of the same receipt
+  - `{:error, reason}` — conflict, missing run, malformed attrs, or durable failure
+  """
+  @spec record_effect_receipt(String.t(), pos_integer(), String.t(), map(), keyword()) ::
+          {:ok, :recorded | :already_recorded, map()} | {:error, term()}
+  def record_effect_receipt(run_id, generation, execution_id, attrs, opts \\ [])
+      when is_binary(run_id) and is_integer(generation) and is_binary(execution_id) and
+             is_map(attrs) do
+    call_server(opts, {:record_effect_receipt, run_id, generation, execution_id, attrs})
+  end
+
+  @doc """
+  Durably settle a completed effect (owner API).
+
+  Requires the current effect to be completed with the exact `generation` and
+  `execution_id`. Marks it settled without clearing receipt evidence. A later
+  `prepare_effect/3` may replace only a settled effect and increments generation.
+  """
+  @spec settle_effect(String.t(), pos_integer(), String.t(), keyword()) ::
+          {:ok, :settled | :already_settled, map()} | {:error, term()}
+  def settle_effect(run_id, generation, execution_id, opts \\ [])
+      when is_binary(run_id) and is_integer(generation) and is_binary(execution_id) do
+    call_server(opts, {:settle_effect, run_id, generation, execution_id})
   end
 
   # ---------------------------------------------------------------------------
@@ -603,6 +658,21 @@ defmodule Arbor.Orchestrator.RunJournal do
     end
   end
 
+  def handle_call({:prepare_effect, run_id, attrs}, _from, state) do
+    {reply, state} = do_prepare_effect(run_id, attrs, state)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:record_effect_receipt, run_id, generation, execution_id, attrs}, _from, state) do
+    {reply, state} = do_record_effect_receipt(run_id, generation, execution_id, attrs, state)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:settle_effect, run_id, generation, execution_id}, _from, state) do
+    {reply, state} = do_settle_effect(run_id, generation, execution_id, state)
+    {:reply, reply, state}
+  end
+
   @impl true
   def handle_info(_msg, state), do: {:noreply, state}
 
@@ -730,9 +800,15 @@ defmodule Arbor.Orchestrator.RunJournal do
         Enum.reduce_while(keys, {:ok, state}, fn key, {:ok, st} ->
           case durable_get(key, st) do
             {:ok, data} when is_map(data) ->
-              record = boot_normalize(Adapter.from_durable_map(data), st.local_node)
-              hot_insert(st.table, record)
-              {:cont, {:ok, st}}
+              case decode_durable_record(data, st.local_node) do
+                {:ok, record} ->
+                  hot_insert(st.table, record)
+                  {:cont, {:ok, st}}
+
+                {:error, reason} ->
+                  # Fail closed: never drop/normalize corrupt effect evidence into hot ETS.
+                  {:halt, {:error, bound_rehydrate_error(key, reason)}}
+              end
 
             {:error, :not_found} ->
               {:cont, {:ok, st}}
@@ -752,6 +828,50 @@ defmodule Arbor.Orchestrator.RunJournal do
     :exit, reason ->
       {:error, {:durable_rehydrate_exit, reason}}
   end
+
+  # Rehydrate only through Adapter validation so effect envelopes cannot bypass
+  # schema checks and enter the private hot table.
+  defp decode_durable_record(data, local_node) when is_map(data) do
+    record = Adapter.from_durable_map(data)
+
+    case Adapter.validate_and_normalize_record(record) do
+      {:ok, %Record{} = validated} ->
+        {:ok, boot_normalize(validated, local_node)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp bound_rehydrate_error(key, reason) do
+    bounded_key =
+      cond do
+        is_binary(key) and byte_size(key) <= 256 -> key
+        is_binary(key) -> binary_part(key, 0, 256)
+        true -> "unknown"
+      end
+
+    case reason do
+      {:invalid_current_effect, detail} ->
+        {:durable_rehydrate_invalid_effect, bounded_key, bound_effect_reason(detail)}
+
+      {:invalid_effect_generation, detail} ->
+        {:durable_rehydrate_invalid_effect, bounded_key, bound_effect_reason(detail)}
+
+      other ->
+        {:durable_rehydrate_failed, bounded_key, bound_effect_reason(other)}
+    end
+  end
+
+  defp bound_effect_reason(reason) when is_atom(reason), do: reason
+
+  defp bound_effect_reason({a, b}) when is_atom(a) and is_atom(b), do: {a, b}
+
+  defp bound_effect_reason(reason) when is_binary(reason) do
+    if byte_size(reason) <= 128, do: reason, else: binary_part(reason, 0, 128)
+  end
+
+  defp bound_effect_reason(_), do: :invalid_effect
 
   # Boot-normalize rehydrated rows. Do **not** rewrite in-flight rows owned or
   # sourced by another potentially-live node — leave them for L4 fenced recovery.
@@ -920,12 +1040,265 @@ defmodule Arbor.Orchestrator.RunJournal do
           origin_trust_zone: from_state.origin_trust_zone || preserved.origin_trust_zone,
           owner_node: from_state.owner_node || preserved.owner_node,
           source_node: from_state.source_node || preserved.source_node,
-          started_at: from_state.started_at || preserved.started_at
+          started_at: from_state.started_at || preserved.started_at,
+          # Effect evidence is journal-owned — never reset from RunState (always 0/nil).
+          effect_generation: preserved.effect_generation || 0,
+          current_effect: preserved.current_effect
       }
       |> Adapter.merge_meta(meta)
 
     write_record(record, state)
   end
+
+  # ---------------------------------------------------------------------------
+  # Durable effect owner operations (backend-first via write_record/2)
+  # ---------------------------------------------------------------------------
+
+  defp do_prepare_effect(run_id, attrs, state) do
+    case lookup_record(state.table, run_id) do
+      nil ->
+        {{:error, :not_found}, state}
+
+      %Record{} = record ->
+        case record.current_effect do
+          nil ->
+            prepare_new_effect(record, attrs, state)
+
+          %{"status" => "settled"} ->
+            prepare_new_effect(record, attrs, state)
+
+          %{"status" => "pending"} = pending ->
+            case normalize_effect_attrs(attrs) do
+              {:ok, normalized} ->
+                match_attrs = Map.put_new(normalized, "run_id", record.run_id)
+
+                if EffectEnvelope.matches_prepare_attrs?(
+                     pending,
+                     match_attrs,
+                     record.effect_generation
+                   ) do
+                  {{:ok, :already_prepared, pending}, state}
+                else
+                  {{:error, {:effect_conflict, :pending}}, state}
+                end
+
+              {:error, reason} ->
+                {{:error, {:invalid_effect_attrs, reason}}, state}
+            end
+
+          %{"status" => "completed"} ->
+            {{:error, {:effect_conflict, :completed}}, state}
+
+          other when is_map(other) ->
+            {{:error, {:effect_conflict, :invalid_status}}, state}
+
+          _ ->
+            {{:error, {:invalid_current_effect, :invalid_type}}, state}
+        end
+    end
+  end
+
+  defp prepare_new_effect(%Record{} = record, attrs, state) do
+    next_gen = (record.effect_generation || 0) + 1
+    max_gen = EffectEnvelope.max_generation()
+
+    cond do
+      next_gen > max_gen ->
+        {{:error, {:effect_generation_ceiling, max_gen}}, state}
+
+      true ->
+        case normalize_effect_attrs(attrs) do
+          {:ok, normalized} ->
+            prepare_attrs =
+              normalized
+              |> Map.put("generation", next_gen)
+              |> Map.put("run_id", record.run_id)
+
+            case EffectEnvelope.new_pending(prepare_attrs) do
+              {:ok, effect} ->
+                updated = %Record{
+                  record
+                  | effect_generation: next_gen,
+                    current_effect: effect
+                }
+
+                case write_record(updated, state) do
+                  {:ok, new_state} ->
+                    {{:ok, :prepared, effect}, new_state}
+
+                  {{:error, reason}, new_state} ->
+                    {{:error, reason}, new_state}
+                end
+
+              {:error, reason} ->
+                {{:error, {:invalid_effect_attrs, reason}}, state}
+            end
+
+          {:error, reason} ->
+            {{:error, {:invalid_effect_attrs, reason}}, state}
+        end
+    end
+  end
+
+  defp do_record_effect_receipt(run_id, generation, execution_id, attrs, state) do
+    case lookup_record(state.table, run_id) do
+      nil ->
+        {{:error, :not_found}, state}
+
+      %Record{current_effect: nil} ->
+        {{:error, {:effect_conflict, :missing}}, state}
+
+      %Record{current_effect: effect} = record when is_map(effect) ->
+        status = effect["status"]
+
+        cond do
+          not valid_generation?(generation) ->
+            {{:error, {:invalid_effect_attrs, :invalid_generation}}, state}
+
+          status == "pending" and
+              exact_pending_identity?(record, effect, generation, execution_id) ->
+            case normalize_effect_attrs(attrs) do
+              {:ok, normalized} ->
+                case EffectEnvelope.complete(effect, normalized) do
+                  {:ok, completed} ->
+                    updated = %Record{record | current_effect: completed}
+
+                    case write_record(updated, state) do
+                      {:ok, new_state} ->
+                        {{:ok, :recorded, completed}, new_state}
+
+                      {{:error, reason}, new_state} ->
+                        {{:error, reason}, new_state}
+                    end
+
+                  {:error, reason} ->
+                    {{:error, {:invalid_effect_attrs, reason}}, state}
+                end
+
+              {:error, reason} ->
+                {{:error, {:invalid_effect_attrs, reason}}, state}
+            end
+
+          status in ["completed", "settled"] ->
+            case normalize_effect_attrs(attrs) do
+              {:ok, normalized} ->
+                if EffectEnvelope.matches_receipt?(effect, generation, execution_id, normalized) do
+                  {{:ok, :already_recorded, effect}, state}
+                else
+                  conflict =
+                    case status do
+                      "completed" -> :completed
+                      "settled" -> :settled
+                    end
+
+                  {{:error, {:effect_conflict, conflict}}, state}
+                end
+
+              {:error, reason} ->
+                {{:error, {:invalid_effect_attrs, reason}}, state}
+            end
+
+          true ->
+            {{:error, {:effect_conflict, :stale_or_mismatch}}, state}
+        end
+
+      %Record{} ->
+        {{:error, {:invalid_current_effect, :invalid_type}}, state}
+    end
+  end
+
+  defp do_settle_effect(run_id, generation, execution_id, state) do
+    case lookup_record(state.table, run_id) do
+      nil ->
+        {{:error, :not_found}, state}
+
+      %Record{current_effect: nil} ->
+        {{:error, {:effect_conflict, :missing}}, state}
+
+      %Record{current_effect: effect} = record when is_map(effect) ->
+        status = effect["status"]
+
+        cond do
+          not valid_generation?(generation) ->
+            {{:error, {:invalid_effect_attrs, :invalid_generation}}, state}
+
+          status == "completed" and
+              exact_pending_identity?(record, effect, generation, execution_id) ->
+            case EffectEnvelope.settle(effect) do
+              {:ok, settled} ->
+                updated = %Record{record | current_effect: settled}
+
+                case write_record(updated, state) do
+                  {:ok, new_state} ->
+                    {{:ok, :settled, settled}, new_state}
+
+                  {{:error, reason}, new_state} ->
+                    {{:error, reason}, new_state}
+                end
+
+              {:error, reason} ->
+                {{:error, {:invalid_current_effect, reason}}, state}
+            end
+
+          status == "settled" and
+              exact_pending_identity?(record, effect, generation, execution_id) ->
+            {{:ok, :already_settled, effect}, state}
+
+          status == "pending" ->
+            {{:error, {:effect_conflict, :pending}}, state}
+
+          true ->
+            {{:error, {:effect_conflict, :stale_or_mismatch}}, state}
+        end
+
+      %Record{} ->
+        {{:error, {:invalid_current_effect, :invalid_type}}, state}
+    end
+  end
+
+  defp exact_pending_identity?(%Record{} = record, effect, generation, execution_id)
+       when is_map(effect) and is_integer(generation) and is_binary(execution_id) do
+    record.effect_generation == generation and
+      effect["generation"] == generation and
+      effect["execution_id"] == execution_id and
+      effect["run_id"] == record.run_id
+  end
+
+  defp exact_pending_identity?(_, _, _, _), do: false
+
+  defp valid_generation?(n) when is_integer(n) and n >= 1 and n <= 9_007_199_254_740_991,
+    do: true
+
+  defp valid_generation?(_), do: false
+
+  # Normalize caller attrs to string keys; reject atom/string aliases and
+  # non-map/non-string-key inputs before envelope construction.
+  defp normalize_effect_attrs(attrs) when is_map(attrs) do
+    keys = Map.keys(attrs)
+
+    cond do
+      Enum.any?(keys, fn
+        k when is_atom(k) -> Map.has_key?(attrs, Atom.to_string(k))
+        _ -> false
+      end) ->
+        {:error, :atom_string_key_alias}
+
+      Enum.any?(keys, &(not is_binary(&1) and not is_atom(&1))) ->
+        {:error, :non_string_keys}
+
+      true ->
+        normalized =
+          Enum.reduce(attrs, %{}, fn
+            {k, v}, acc when is_binary(k) -> Map.put(acc, k, v)
+            {k, v}, acc when is_atom(k) -> Map.put(acc, Atom.to_string(k), v)
+            _, acc -> acc
+          end)
+
+        {:ok, normalized}
+    end
+  end
+
+  defp normalize_effect_attrs(_), do: {:error, :invalid_type}
 
   # Backend-first when configured: persist before publishing to the private hot
   # table. On backend failure, leave the prior hot record/claim unchanged.
