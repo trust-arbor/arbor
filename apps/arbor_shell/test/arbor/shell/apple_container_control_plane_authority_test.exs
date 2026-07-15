@@ -609,7 +609,8 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
                Arbor.Shell.ExecutionRegistry,
                DynamicSupervisor,
-               Arbor.Shell.AppleContainerUnitSupervisor
+               Arbor.Shell.AppleContainerUnitSupervisor,
+               Arbor.Shell.AppleContainerUnitDrainCoordinator
              ]
 
       authority_child = Enum.at(children, 1)
@@ -814,6 +815,12 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
         Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec()
       )
 
+    {:ok, _drain} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        Arbor.Shell.AppleContainerUnitDrainCoordinator
+      )
+
     :ok
   end
 
@@ -858,11 +865,20 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
         Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec()
       )
 
+    {:ok, _drain} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        Arbor.Shell.AppleContainerUnitDrainCoordinator
+      )
+
     :ok
   end
 
   defp remove_global_authority_stack! do
     for child_id <- [
+          # Coordinator first so its terminate/2 can drain while UnitSupervisor
+          # and PortSessionSupervisor remain live.
+          Arbor.Shell.AppleContainerUnitDrainCoordinator,
           Arbor.Shell.AppleContainerUnitSupervisor,
           Arbor.Shell.PortSessionSupervisor,
           Arbor.Shell.ExecutionRegistry,
