@@ -158,6 +158,16 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
     end
   end
 
+  defmodule ThrowingStore do
+    @moduledoc false
+
+    def durability_class(_opts), do: throw({:backend_throw, :durability})
+    def put(_key, _value, _opts), do: throw({:backend_throw, [1 | 2]})
+    def get(_key, _opts), do: throw({:backend_throw, :get})
+    def delete(_key, _opts), do: throw({:backend_throw, :delete})
+    def list(_opts), do: throw({:backend_throw, :list})
+  end
+
   setup do
     tmp =
       Path.join(
@@ -225,7 +235,7 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
       refute match?({:store_put_failed, %{__exception__: true}}, reason)
     end
 
-    test "file write failure is surfaced and temp artifacts are cleaned", %{
+    test "file write failure is surfaced and only this call's temp is cleaned", %{
       store_name: store_name
     } do
       # Use a path whose parent is a file so mkdir_p/write cannot succeed cleanly.
@@ -243,13 +253,45 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
 
       assert {:error, {:file_write_failed, _}} =
                Checkpoint.persist(cp, bad_root, store_opts(store_name))
+    end
 
-      # No leftover temp files under the parent (or nested, if partially created)
-      leftovers =
-        Path.wildcard(Path.join(parent, "**/*checkpoint.json*.tmp")) ++
-          Path.wildcard(Path.join(parent, "*checkpoint.json*.tmp"))
+    test "security regression: file write failure cleanup never deletes foreign temp sentinel",
+         %{tmp: tmp} do
+      # Foreign sibling matching the old wildcard pattern checkpoint.json.*.tmp.
+      # At f7a45dc7, cleanup_temp_globs/1 deleted this; after the fix only the
+      # exact owned temp path is removed.
+      foreign = Path.join(tmp, "checkpoint.json.foreign.sentinel.tmp")
+      File.write!(foreign, "FOREIGN_SENTINEL_MUST_SURVIVE")
 
-      assert leftovers == []
+      # Force rename failure after this call creates its own exclusive temp:
+      # checkpoint.json as a directory makes File.rename fail.
+      File.mkdir_p!(Path.join(tmp, "checkpoint.json"))
+      cp = sample_checkpoint("run_foreign_temp_security")
+
+      assert {:error, {:file_write_failed, _}} =
+               Checkpoint.persist(cp, tmp, store: nil)
+
+      assert File.exists?(foreign)
+      assert File.read!(foreign) == "FOREIGN_SENTINEL_MUST_SURVIVE"
+    end
+
+    test "security regression: checkpoint.json is created with private 0600 mode on Unix", %{
+      tmp: tmp
+    } do
+      cp = sample_checkpoint("run_mode_0600")
+      assert {:ok, _} = Checkpoint.persist(cp, tmp, store: nil)
+
+      path = Path.join(tmp, "checkpoint.json")
+      assert File.exists?(path)
+
+      case :os.type() do
+        {:unix, _} ->
+          %{mode: mode} = File.stat!(path)
+          assert :erlang.band(mode, 0o777) == 0o600
+
+        _ ->
+          :ok
+      end
     end
 
     test "file-only mode skips store and reports non-durable", %{tmp: tmp} do
@@ -264,6 +306,68 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
       assert status.durable == false
       assert status.durability_class == :volatile
       assert status.mode == :file_only
+    end
+
+    test "invalid store option fails closed rather than weakening to file-only", %{tmp: tmp} do
+      cp = sample_checkpoint("run_invalid_store")
+
+      assert {:error, {:invalid_store_config, :store_not_atom_or_nil}} =
+               Checkpoint.persist(cp, tmp, store: "not-a-module")
+
+      assert {:error, {:invalid_store_config, :store_name_not_atom}} =
+               Checkpoint.persist(cp, tmp, store: MemoryStore, store_name: "bad")
+
+      assert {:error, {:invalid_store_config, :store_opts_not_keyword}} =
+               Checkpoint.persist(cp, tmp,
+                 store: MemoryStore,
+                 store_name: :s,
+                 store_opts: %{not: :keyword}
+               )
+
+      status = Checkpoint.durability_status(store: "bad")
+      assert status.mode == :invalid_configuration
+      assert status.durable == false
+      assert status.last_error == {:invalid_store_config, :store_not_atom_or_nil}
+    end
+
+    test "malformed checkpoint run_id fails before writing a file", %{tmp: tmp} do
+      cp = %{sample_checkpoint("run_valid") | run_id: :invalid}
+
+      assert {:error, {:invalid_checkpoint, :run_id_not_binary_or_nil}} =
+               Checkpoint.persist(cp, tmp, store: nil)
+
+      refute File.exists?(Path.join(tmp, "checkpoint.json"))
+    end
+
+    test "backend throws and improper-list reasons stay bounded", %{tmp: tmp} do
+      cp = sample_checkpoint("run_backend_throw")
+
+      assert {:error, reason} =
+               Checkpoint.persist(cp, tmp,
+                 store: ThrowingStore,
+                 store_name: :throwing_checkpoint_store
+               )
+
+      assert inspect(reason) =~ "backend_throw"
+      assert byte_size(inspect(reason)) <= 512
+
+      status =
+        Checkpoint.durability_status(
+          store: ThrowingStore,
+          store_name: :throwing_checkpoint_store
+        )
+
+      assert status.healthy == false
+      assert status.durable == false
+      assert status.last_error != nil
+    end
+
+    test "replicate is not started when local writes fail", %{tmp: tmp, store_name: store_name} do
+      :ok = MemoryStore.set_fail(store_name, :put)
+      cp = sample_checkpoint("run_no_replicate_on_fail")
+
+      assert {:error, {:store_put_failed, _}} =
+               Checkpoint.persist(cp, tmp, store_opts(store_name, replicate: true))
     end
   end
 
@@ -301,6 +405,7 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
       assert healthy.durability_class == :node_restart
       assert healthy.durable == true
       assert healthy.healthy == true
+      assert healthy.last_error == nil
 
       cp = sample_checkpoint("run_durable_ok")
 
@@ -310,12 +415,14 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
       assert receipt.durable == true
       assert receipt.durability_class == :node_restart
 
-      # Inject list outage → unhealthy → not durable
+      # Inject list outage → unhealthy → not durable, last_error bounded
       :ok = MemoryStore.set_fail(store_name, :list)
       unhealthy = Checkpoint.durability_status(store: MemoryStore, store_name: store_name)
       assert unhealthy.healthy == false
       assert unhealthy.durable == false
       assert unhealthy.durability_class == :node_restart
+      assert unhealthy.last_error != nil
+      refute match?(%{__exception__: true}, unhealthy.last_error)
     end
 
     test "ceiling can lower but not raise application_restart capability" do
@@ -452,6 +559,14 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
 
       assert loaded.run_id == "run_not_found_fallback"
     end
+
+    test "nonbinary run_id returns bounded invalid-option error", %{tmp: tmp} do
+      cp = sample_checkpoint("run_bad_run_id")
+      assert :ok = Checkpoint.write(cp, tmp, store: nil)
+
+      assert {:error, {:invalid_option, :run_id_not_binary}} =
+               Checkpoint.load(Path.join(tmp, "checkpoint.json"), run_id: :atom_run_id)
+    end
   end
 
   describe "cleanup error surface" do
@@ -503,6 +618,38 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
       assert {:ok, count} = Checkpoint.cleanup_older_than(60, store_opts(store_name))
       assert count >= 1
 
+      assert {:error, :not_found} = MemoryStore.get(key, name: store_name)
+    end
+
+    test "cleanup_older_than safely skips malformed nonbinary keys", %{store_name: store_name} do
+      # Inject a non-binary key alongside a valid old checkpoint key.
+      # MemoryStore list returns Map.keys; put an atom key via GenServer state.
+      :ok =
+        GenServer.call(
+          store_name,
+          {:put, :not_a_binary_key, %{"timestamp" => "2000-01-01T00:00:00Z"}}
+        )
+
+      old_payload = %{
+        "timestamp" => "2000-01-01T00:00:00Z",
+        "run_id" => "run_skip_malformed",
+        "current_node" => "n1",
+        "completed_nodes" => [],
+        "node_retries" => %{},
+        "context_values" => %{},
+        "context_taint" => %{},
+        "node_outcomes" => %{},
+        "context_lineage" => %{},
+        "content_hashes" => %{},
+        "pending_intents" => %{},
+        "execution_digests" => %{}
+      }
+
+      key = "checkpoint:run_skip_malformed"
+      :ok = MemoryStore.put(key, PersistenceRecord.new(key, old_payload), name: store_name)
+
+      assert {:ok, count} = Checkpoint.cleanup_older_than(60, store_opts(store_name))
+      assert count >= 1
       assert {:error, :not_found} = MemoryStore.get(key, name: store_name)
     end
   end

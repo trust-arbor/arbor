@@ -59,9 +59,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
         }
 
   @type bounded_receipt :: %{
-          required_key: :run_id | String.t() | nil,
-          store: :ok | :skipped | :not_attempted,
-          file: :ok | :not_attempted,
+          run_id: String.t() | nil,
+          store: :ok | :skipped | :error | :not_attempted,
+          file: :ok | :error | :not_attempted,
           durable: boolean(),
           durability_class: atom(),
           peer_replication: :not_requested | :best_effort_started | :skipped
@@ -77,6 +77,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   @default_collection "orchestrator_checkpoints"
   @checkpoint_filename "checkpoint.json"
   @max_reason_bytes 256
+  @max_reason_depth 4
 
   @durability_rank %{
     volatile: 0,
@@ -202,41 +203,43 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   @spec persist(t(), String.t(), keyword()) ::
           {:ok, bounded_receipt()} | {:error, term()}
   def persist(%__MODULE__{} = checkpoint, logs_root, opts \\ []) when is_binary(logs_root) do
-    store_cfg = resolve_store_config(opts)
-    durability = durability_status(opts)
+    with :ok <- validate_checkpoint_run_id(checkpoint.run_id),
+         {:ok, store_cfg} <- resolve_store_config(opts) do
+      durability = durability_status(opts)
+      payload_map = build_payload(checkpoint, opts)
 
-    payload_map = build_payload(checkpoint, opts)
+      store_result = maybe_put_store(checkpoint.run_id, payload_map, store_cfg)
+      file_result = write_to_file(payload_map, logs_root)
 
-    store_result = maybe_put_store(checkpoint.run_id, payload_map, store_cfg)
-    file_result = write_to_file(payload_map, logs_root)
+      case {store_result, file_result} do
+        {{:ok, _}, :ok} ->
+          # Best-effort peer replication only after both required local writes
+          # succeed. Never replicate a failed store or file attempt.
+          peer_result =
+            if Keyword.get(opts, :replicate, false) do
+              maybe_replicate_to_peer(checkpoint.run_id, payload_map, store_cfg)
+            else
+              :not_requested
+            end
 
-    peer_result =
-      if Keyword.get(opts, :replicate, false) do
-        maybe_replicate_to_peer(checkpoint.run_id, payload_map, store_cfg)
-      else
-        :not_requested
+          {:ok,
+           %{
+             run_id: checkpoint.run_id,
+             store: store_result_tag(store_result),
+             file: :ok,
+             durable: durability.durable == true,
+             durability_class: durability.durability_class,
+             peer_replication: peer_result
+           }}
+
+        {{:error, reason}, _} ->
+          {:error, bound_reason(reason)}
+
+        {_, {:error, reason}} ->
+          {:error, bound_reason(reason)}
       end
-
-    receipt = %{
-      run_id: checkpoint.run_id,
-      store: store_result_tag(store_result),
-      file: file_result_tag(file_result),
-      durable: durability.durable == true,
-      durability_class: durability.durability_class,
-      peer_replication: peer_result
-    }
-
-    case {store_result, file_result} do
-      {{:ok, _}, :ok} ->
-        {:ok, receipt}
-
-      {{:ok, :skipped}, :ok} ->
-        {:ok, receipt}
-
-      {{:error, reason}, _} ->
-        {:error, bound_reason(reason)}
-
-      {_, {:error, reason}} ->
+    else
+      {:error, reason} ->
         {:error, bound_reason(reason)}
     end
   end
@@ -265,30 +268,37 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   """
   @spec load(String.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def load(path, opts \\ []) do
-    hmac_secret = Keyword.get(opts, :hmac_secret)
-    store_cfg = resolve_store_config(opts)
+    with {:ok, store_cfg} <- resolve_store_config(opts) do
+      hmac_secret = Keyword.get(opts, :hmac_secret)
 
-    case Keyword.get(opts, :run_id) do
-      nil ->
-        load_from_file(path, hmac_secret)
+      case Keyword.get(opts, :run_id) do
+        nil ->
+          load_from_file(path, hmac_secret)
 
-      run_id when is_binary(run_id) ->
-        case store_cfg do
-          nil ->
-            load_from_file(path, hmac_secret)
+        run_id when is_binary(run_id) ->
+          case store_cfg do
+            nil ->
+              load_from_file(path, hmac_secret)
 
-          cfg ->
-            case load_from_store(run_id, hmac_secret, cfg) do
-              {:ok, _} = result ->
-                result
+            cfg ->
+              case load_from_store(run_id, hmac_secret, cfg) do
+                {:ok, _} = result ->
+                  result
 
-              {:error, :not_found} ->
-                load_from_file(path, hmac_secret)
+                {:error, :not_found} ->
+                  load_from_file(path, hmac_secret)
 
-              {:error, reason} ->
-                {:error, bound_reason(reason)}
-            end
-        end
+                {:error, reason} ->
+                  {:error, bound_reason(reason)}
+              end
+          end
+
+        _invalid ->
+          {:error, bound_reason({:invalid_option, :run_id_not_binary})}
+      end
+    else
+      {:error, reason} ->
+        {:error, bound_reason(reason)}
     end
   end
 
@@ -304,10 +314,21 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   """
   @spec durability_status(keyword()) :: map()
   def durability_status(opts \\ []) do
-    store_cfg = resolve_store_config(opts)
+    case resolve_store_config(opts) do
+      {:error, reason} ->
+        %{
+          mode: :invalid_configuration,
+          durable: false,
+          durability_class: :volatile,
+          store: nil,
+          store_name: nil,
+          backend: nil,
+          healthy: false,
+          peer_replication_durable: false,
+          last_error: bound_reason(reason)
+        }
 
-    case store_cfg do
-      nil ->
+      {:ok, nil} ->
         %{
           mode: :file_only,
           durable: false,
@@ -320,9 +341,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           last_error: nil
         }
 
-      cfg ->
+      {:ok, cfg} ->
         class = resolve_durability_class(cfg, opts)
-        healthy? = store_healthy?(cfg)
+        {healthy?, probe_error} = store_health_probe(cfg)
         durable? = durable_class?(class) and healthy?
 
         mode =
@@ -340,7 +361,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           backend: inspect(cfg.backend),
           healthy: healthy?,
           peer_replication_durable: false,
-          last_error: nil
+          last_error: if(healthy?, do: nil, else: probe_error)
         }
     end
   end
@@ -354,10 +375,13 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   @spec cleanup(String.t(), keyword()) :: :ok | {:error, term()}
   def cleanup(run_id, opts \\ []) when is_binary(run_id) do
     case resolve_store_config(opts) do
-      nil ->
+      {:error, reason} ->
+        {:error, bound_reason(reason)}
+
+      {:ok, nil} ->
         :ok
 
-      cfg ->
+      {:ok, cfg} ->
         key = store_key(run_id)
 
         case store_delete(cfg, key) do
@@ -373,16 +397,21 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
   Returns `{:ok, deleted_count}` or a bounded `{:error, reason}` on list/get
   outages. Does not swallow backend failures into a zero count.
+
+  Non-binary keys returned by a backend are safely skipped (never raise).
   """
   @spec cleanup_older_than(non_neg_integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def cleanup_older_than(max_age_seconds, opts \\ [])
       when is_integer(max_age_seconds) and max_age_seconds >= 0 do
     case resolve_store_config(opts) do
-      nil ->
+      {:error, reason} ->
+        {:error, bound_reason(reason)}
+
+      {:ok, nil} ->
         {:ok, 0}
 
-      cfg ->
+      {:ok, cfg} ->
         cutoff = DateTime.add(DateTime.utc_now(), -max_age_seconds, :second)
 
         case do_cleanup_older_than(cfg, cutoff) do
@@ -542,27 +571,53 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   # Private — store config / durability
   # ---------------------------------------------------------------------------
 
+  # Returns {:ok, nil} for intentional file-only, {:ok, cfg} for a store, or
+  # {:error, {:invalid_store_config, reason}} when options are malformed.
+  # Invalid :store must never silently weaken to file-only.
   defp resolve_store_config(opts) do
-    backend =
-      case Keyword.fetch(opts, :store) do
-        :error -> @default_store
-        {:ok, nil} -> nil
-        {:ok, backend} when is_atom(backend) -> backend
-        {:ok, _} -> nil
-      end
+    cond do
+      not is_list(opts) or not Keyword.keyword?(opts) ->
+        {:error, {:invalid_store_config, :opts_not_keyword}}
 
-    case backend do
-      nil ->
-        nil
+      true ->
+        case Keyword.fetch(opts, :store) do
+          :error ->
+            build_store_config(@default_store, opts)
 
-      mod ->
-        %{
-          backend: mod,
-          name: Keyword.get(opts, :store_name, @default_store_name),
-          opts: Keyword.get(opts, :store_opts, [])
-        }
+          {:ok, nil} ->
+            # Explicit file-only mode.
+            {:ok, nil}
+
+          {:ok, backend} when is_atom(backend) ->
+            build_store_config(backend, opts)
+
+          {:ok, _} ->
+            {:error, {:invalid_store_config, :store_not_atom_or_nil}}
+        end
     end
   end
+
+  defp build_store_config(backend, opts) when is_atom(backend) do
+    name = Keyword.get(opts, :store_name, @default_store_name)
+    store_opts = Keyword.get(opts, :store_opts, [])
+
+    cond do
+      not is_atom(name) ->
+        {:error, {:invalid_store_config, :store_name_not_atom}}
+
+      not is_list(store_opts) or not Keyword.keyword?(store_opts) ->
+        {:error, {:invalid_store_config, :store_opts_not_keyword}}
+
+      true ->
+        {:ok, %{backend: backend, name: name, opts: store_opts}}
+    end
+  end
+
+  defp validate_checkpoint_run_id(nil), do: :ok
+  defp validate_checkpoint_run_id(run_id) when is_binary(run_id), do: :ok
+
+  defp validate_checkpoint_run_id(_run_id),
+    do: {:error, {:invalid_checkpoint, :run_id_not_binary_or_nil}}
 
   defp resolve_durability_class(nil, _opts), do: :volatile
 
@@ -600,7 +655,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   rescue
     _ -> :process_lifetime
   catch
-    :exit, _ -> :process_lifetime
+    _kind, _reason -> :process_lifetime
   end
 
   defp intersect_durability_class(a, b) do
@@ -613,16 +668,17 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   defp durable_class?(class) when class in [:application_restart, :node_restart], do: true
   defp durable_class?(_), do: false
 
-  defp store_healthy?(cfg) when is_map(cfg) do
-    # Probe via the public facade list path so process-down and injected
-    # backend outages report unhealthy (and therefore non-durable).
+  # Probe via the public facade list path so process-down and injected
+  # backend outages report unhealthy (and therefore non-durable).
+  defp store_health_probe(cfg) when is_map(cfg) do
     case store_list(cfg) do
-      {:ok, _} -> true
-      _ -> false
+      {:ok, _} -> {true, nil}
+      {:error, reason} -> {false, bound_reason(reason)}
+      other -> {false, bound_reason({:unexpected_health_probe, other})}
     end
   end
 
-  defp store_healthy?(_), do: false
+  defp store_health_probe(_), do: {false, :store_unavailable}
 
   # ---------------------------------------------------------------------------
   # Private — store operations (public Persistence facade only)
@@ -648,6 +704,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     end
   end
 
+  defp maybe_put_store(_run_id, _payload_map, _cfg),
+    do: {:error, {:invalid_option, :run_id_not_binary}}
+
   defp store_put(%{backend: backend, name: name, opts: store_opts}, key, value) do
     case Arbor.Persistence.put(name, backend, key, value, store_opts) do
       :ok -> :ok
@@ -658,8 +717,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     e ->
       {:error, bound_exception(e)}
   catch
-    :exit, reason ->
-      {:error, bound_exit(reason)}
+    kind, reason ->
+      {:error, bound_catch(kind, reason)}
   end
 
   defp store_get(%{backend: backend, name: name, opts: store_opts}, key) do
@@ -680,8 +739,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     e ->
       {:error, {:store_unavailable, bound_exception(e)}}
   catch
-    :exit, reason ->
-      {:error, {:store_unavailable, bound_exit(reason)}}
+    kind, reason ->
+      {:error, {:store_unavailable, bound_catch(kind, reason)}}
   end
 
   defp store_delete(%{backend: backend, name: name, opts: store_opts}, key) do
@@ -695,8 +754,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     e ->
       {:error, {:store_delete_failed, bound_exception(e)}}
   catch
-    :exit, reason ->
-      {:error, {:store_delete_failed, bound_exit(reason)}}
+    kind, reason ->
+      {:error, {:store_delete_failed, bound_catch(kind, reason)}}
   end
 
   defp store_list(%{backend: backend, name: name, opts: store_opts}) do
@@ -714,8 +773,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     e ->
       {:error, {:store_list_failed, bound_exception(e)}}
   catch
-    :exit, reason ->
-      {:error, {:store_list_failed, bound_exit(reason)}}
+    kind, reason ->
+      {:error, {:store_list_failed, bound_catch(kind, reason)}}
   end
 
   defp load_from_store(run_id, hmac_secret, cfg) do
@@ -783,56 +842,53 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   defp store_result_tag({:ok, :written}), do: :ok
   defp store_result_tag({:error, _}), do: :error
 
-  defp file_result_tag(:ok), do: :ok
-  defp file_result_tag({:error, _}), do: :error
-
   # ---------------------------------------------------------------------------
   # Private — file operations (compat/debug only; not durable journal)
   # ---------------------------------------------------------------------------
 
+  # Atomic same-directory replacement following CodingPlan.ArtifactStore:
+  # exclusive create, chmod 0600 before payload write, rename, exact-path
+  # cleanup only (never wildcard-delete sibling temps).
   defp write_to_file(payload_map, logs_root) do
     path = Path.join(logs_root, @checkpoint_filename)
-    tmp = Path.join(logs_root, tmp_checkpoint_name())
+    tmp = temporary_checkpoint_path(path)
 
     try do
       with :ok <- File.mkdir_p(logs_root),
            {:ok, payload} <- Jason.encode(payload_map, pretty: true),
-           :ok <- File.write(tmp, payload),
+           :ok <- write_secure_temp(tmp, payload),
            :ok <- File.rename(tmp, path) do
         :ok
       else
         {:error, reason} ->
-          cleanup_temp_file(tmp)
-          cleanup_temp_globs(logs_root)
           {:error, {:file_write_failed, bound_reason(reason)}}
       end
     rescue
       e ->
-        cleanup_temp_file(tmp)
-        cleanup_temp_globs(logs_root)
         {:error, {:file_write_failed, bound_exception(e)}}
+    after
+      # Remove only this call's exact temp path if it still exists.
+      _ = File.rm(tmp)
     end
   end
 
-  defp tmp_checkpoint_name do
-    "#{@checkpoint_filename}.#{System.unique_integer([:positive])}.#{:erlang.phash2(self())}.tmp"
-  end
-
-  defp cleanup_temp_file(tmp) when is_binary(tmp) do
-    _ = File.rm(tmp)
-    :ok
-  end
-
-  defp cleanup_temp_file(_), do: :ok
-
-  defp cleanup_temp_globs(logs_root) when is_binary(logs_root) do
-    pattern = Path.join(logs_root, "#{@checkpoint_filename}.*.tmp")
-
-    for path <- Path.wildcard(pattern) do
-      _ = File.rm(path)
+  defp write_secure_temp(path, content) when is_binary(path) and is_binary(content) do
+    # Empty exclusive file first; set restrictive mode before payload bytes.
+    case File.open(path, [:write, :binary, :exclusive], fn device ->
+           with :ok <- File.chmod(path, 0o600),
+                :ok <- IO.binwrite(device, content) do
+             :ok
+           end
+         end) do
+      {:ok, :ok} -> :ok
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
     end
+  end
 
-    :ok
+  defp temporary_checkpoint_path(path) do
+    suffix = System.unique_integer([:positive, :monotonic])
+    Path.join(Path.dirname(path), ".#{Path.basename(path)}.tmp-#{suffix}")
   end
 
   defp load_from_file(path, hmac_secret) do
@@ -1033,24 +1089,29 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
   defp do_cleanup_older_than(cfg, cutoff) do
     case store_list(cfg) do
-      {:ok, keys} ->
-        checkpoint_keys = Enum.filter(keys, &String.starts_with?(&1, "checkpoint:"))
-
-        result =
-          Enum.reduce_while(checkpoint_keys, {:ok, 0}, fn key, {:ok, deleted} ->
-            case maybe_delete_if_older(cfg, key, cutoff) do
-              :deleted ->
-                {:cont, {:ok, deleted + 1}}
-
-              :kept ->
-                {:cont, {:ok, deleted}}
-
-              {:error, reason} ->
-                {:halt, {:error, reason}}
-            end
+      {:ok, keys} when is_list(keys) ->
+        # Safely skip non-binary keys; never raise on String.starts_with?/2.
+        checkpoint_keys =
+          Enum.filter(keys, fn
+            key when is_binary(key) -> String.starts_with?(key, "checkpoint:")
+            _malformed -> false
           end)
 
-        result
+        Enum.reduce_while(checkpoint_keys, {:ok, 0}, fn key, {:ok, deleted} ->
+          case maybe_delete_if_older(cfg, key, cutoff) do
+            :deleted ->
+              {:cont, {:ok, deleted + 1}}
+
+            :kept ->
+              {:cont, {:ok, deleted}}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+        end)
+
+      {:ok, _other} ->
+        {:error, {:store_list_failed, :keys_not_list}}
 
       {:error, reason} ->
         {:error, reason}
@@ -1181,33 +1242,56 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   end
 
   # ---------------------------------------------------------------------------
-  # Private — bounded public error terms
+  # Private — bounded public error terms (JSON-safe, depth-limited)
   # ---------------------------------------------------------------------------
 
-  defp bound_reason(reason) when is_atom(reason), do: reason
+  defp bound_reason(reason), do: bound_reason(reason, 0)
 
-  defp bound_reason(reason) when is_binary(reason) do
-    truncate_bytes(reason)
+  defp bound_reason(_reason, depth) when depth >= @max_reason_depth do
+    :error_depth_exceeded
   end
 
-  defp bound_reason(reason) when is_integer(reason) or is_float(reason) or is_boolean(reason) do
+  defp bound_reason(reason, _depth) when is_atom(reason), do: reason
+
+  defp bound_reason(reason, _depth) when is_binary(reason) do
+    truncate_utf8_safe(reason)
+  end
+
+  defp bound_reason(reason, _depth)
+       when is_integer(reason) or is_float(reason) or is_boolean(reason) do
     reason
   end
 
-  defp bound_reason(%{__exception__: true} = exception) do
-    {:exception, truncate_bytes(Exception.message(exception))}
+  defp bound_reason(%{__exception__: true} = exception, _depth) do
+    {:exception, truncate_utf8_safe(Exception.message(exception))}
   end
 
-  defp bound_reason({tag, inner}) when is_atom(tag) do
-    {tag, bound_reason(inner)}
+  defp bound_reason({tag, inner}, depth) when is_atom(tag) do
+    {tag, bound_reason(inner, depth + 1)}
   end
 
-  defp bound_reason(other) do
-    truncate_bytes(inspect(other, limit: 20, printable_limit: 64))
+  defp bound_reason([head | tail], depth) do
+    bound_list(tail, depth + 1, 7, [bound_reason(head, depth + 1)])
+  end
+
+  defp bound_reason(other, _depth) do
+    truncate_utf8_safe(inspect(other, limit: 20, printable_limit: 64))
+  end
+
+  defp bound_list([], _depth, _remaining, acc), do: Enum.reverse(acc)
+
+  defp bound_list([head | tail], depth, remaining, acc) when remaining > 0 do
+    bound_list(tail, depth, remaining - 1, [bound_reason(head, depth) | acc])
+  end
+
+  defp bound_list(_tail, _depth, 0, acc), do: Enum.reverse([:truncated | acc])
+
+  defp bound_list(improper_tail, depth, _remaining, acc) do
+    Enum.reverse([bound_reason(improper_tail, depth) | acc])
   end
 
   defp bound_exception(exception) do
-    {:exception, truncate_bytes(Exception.message(exception))}
+    {:exception, truncate_utf8_safe(Exception.message(exception))}
   end
 
   defp bound_exit({:noproc, _}) do
@@ -1215,16 +1299,44 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   end
 
   defp bound_exit(reason) do
-    {:exit, truncate_bytes(inspect(reason, limit: 20, printable_limit: 64))}
+    {:exit, truncate_utf8_safe(inspect(reason, limit: 20, printable_limit: 64))}
   end
 
-  defp truncate_bytes(bin) when is_binary(bin) do
-    if byte_size(bin) <= @max_reason_bytes do
-      bin
+  defp bound_catch(:exit, reason), do: bound_exit(reason)
+  defp bound_catch(kind, reason), do: {kind, bound_reason(reason, 1)}
+
+  # Truncate on a valid UTF-8 boundary so public errors stay JSON-safe.
+  defp truncate_utf8_safe(bin) when is_binary(bin) do
+    candidate =
+      if byte_size(bin) <= @max_reason_bytes do
+        bin
+      else
+        binary_part(bin, 0, @max_reason_bytes)
+      end
+
+    if String.valid?(candidate) do
+      candidate
     else
-      binary_part(bin, 0, @max_reason_bytes)
+      trim_to_valid_utf8(candidate)
     end
   end
 
-  defp truncate_bytes(other), do: truncate_bytes(inspect(other, limit: 20))
+  defp truncate_utf8_safe(other), do: truncate_utf8_safe(inspect(other, limit: 20))
+
+  defp trim_to_valid_utf8(bin) when is_binary(bin) do
+    size = byte_size(bin)
+    do_trim_utf8(bin, size)
+  end
+
+  defp do_trim_utf8(_bin, size) when size <= 0, do: ""
+
+  defp do_trim_utf8(bin, size) do
+    part = binary_part(bin, 0, size)
+
+    if String.valid?(part) do
+      part
+    else
+      do_trim_utf8(bin, size - 1)
+    end
+  end
 end
