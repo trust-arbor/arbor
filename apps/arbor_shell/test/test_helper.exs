@@ -32,6 +32,18 @@ Supervisor.start_child(
   {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
 )
 
+# Missing journal config intentionally starts a disabled Journal owner.
+# Recovery composite + DrainCoordinator still start (closed/retrying).
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  Arbor.Shell.AppleContainerUnitJournal
+)
+
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  Arbor.Shell.AppleContainerUnitRecoverySupervisor
+)
+
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
   Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec()

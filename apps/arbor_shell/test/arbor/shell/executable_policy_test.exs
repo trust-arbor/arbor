@@ -21,6 +21,7 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
   @fixed_launchctl "/bin/launchctl"
   @fixed_codesign "/usr/bin/codesign"
   @fixed_container "/usr/local/bin/container"
+  @fixed_shlock "/usr/bin/shlock"
 
   describe "compiled fixed path set" do
     test "exposes the exact Apple control/runtime fixed paths" do
@@ -29,7 +30,8 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
                "/usr/bin/codesign",
                "/bin/launchctl",
                "/usr/bin/id",
-               "/usr/bin/sw_vers"
+               "/usr/bin/sw_vers",
+               "/usr/bin/shlock"
              ]
     end
   end
@@ -241,6 +243,48 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
     end
 
     @tag :security_regression
+    test "security regression: /usr/bin/shlock is fixed-path only without basename or sibling authority" do
+      case TrustedPath.pin_root_owned_regular_file(@fixed_shlock, executable: true) do
+        {:ok, _} ->
+          alt_dirs =
+            ["/bin", "/sbin", "/usr/sbin"]
+            |> Enum.reject(&(&1 == "/usr/bin"))
+            |> Enum.filter(&File.dir?/1)
+
+          assert alt_dirs != [], "need at least one alternate trusted directory for this host"
+
+          refute Enum.any?(alt_dirs, fn dir ->
+                   case File.ls(dir) do
+                     {:ok, entries} -> "shlock" in entries
+                     _ -> false
+                   end
+                 end),
+                 "alternate PATH dirs must not independently contain basename shlock"
+
+          replace_policy_with_startup_path!(Enum.join(alt_dirs, ":"))
+
+          assert {:ok, %Executable{} = exe} = ExecutablePolicy.resolve(@fixed_shlock)
+          assert exe.path == canonicalize(@fixed_shlock)
+          assert exe.name == "shlock"
+          assert :ok = ExecutablePolicy.verify_pinned(exe)
+
+          # Fixed pin must not grant basename authority or sibling tools under /usr/bin.
+          assert {:error, :executable_not_found} = ExecutablePolicy.resolve("shlock")
+          assert {:error, :executable_not_found} = ExecutablePolicy.resolve("/usr/bin/true")
+
+        {:error, _} ->
+          # Non-macOS / missing shlock: still assert the compiled constant and merge shape.
+          assert @fixed_shlock in ExecutablePolicy.apple_fixed_executable_paths()
+
+          {by_name, by_path} =
+            ExecutablePolicy.__merge_fixed_executables_for_test__(%{}, %{}, [@fixed_shlock])
+
+          assert by_name == %{}
+          refute Map.has_key?(by_path, "shlock")
+      end
+    end
+
+    @tag :security_regression
     test "security regression: compiled fixed list is not nominatable via Application env" do
       # Nominating via Application env has no effect on the compiled list.
       previous = Application.get_env(:arbor_shell, :fixed_executable_paths)
@@ -253,7 +297,8 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
                  "/usr/bin/codesign",
                  "/bin/launchctl",
                  "/usr/bin/id",
-                 "/usr/bin/sw_vers"
+                 "/usr/bin/sw_vers",
+                 "/usr/bin/shlock"
                ]
 
         refute "/evil/bin/tool" in ExecutablePolicy.apple_fixed_executable_paths()

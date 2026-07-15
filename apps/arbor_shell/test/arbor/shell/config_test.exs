@@ -7,6 +7,7 @@ defmodule Arbor.Shell.ConfigTest do
   @key :apple_container
   @linux_key :linux_dependency_baseline
   @image_key :apple_container_image_policy
+  @journal_path_key :apple_container_unit_journal_path
 
   @index_hex String.duplicate("a", 64)
   @manifest_hex String.duplicate("b", 64)
@@ -34,12 +35,14 @@ defmodule Arbor.Shell.ConfigTest do
     previous = Application.get_env(@app, @key)
     previous_linux = Application.get_env(@app, @linux_key)
     previous_image = Application.get_env(@app, @image_key)
+    previous_journal_path = Application.get_env(@app, @journal_path_key)
     previous_home = System.get_env("HOME")
 
     on_exit(fn ->
       restore_env(@key, previous)
       restore_env(@linux_key, previous_linux)
       restore_env(@image_key, previous_image)
+      restore_env(@journal_path_key, previous_journal_path)
       restore_system_env("HOME", previous_home)
     end)
 
@@ -548,6 +551,101 @@ defmodule Arbor.Shell.ConfigTest do
       )
 
       assert {:error, :image_policy_env_too_large} = Config.apple_container_image_policy()
+    end
+  end
+
+  describe "apple_container_unit_journal_path/0" do
+    test "absent config is a stable error" do
+      Application.delete_env(@app, @journal_path_key)
+
+      assert {:error, :apple_container_unit_journal_path_absent} =
+               Config.apple_container_unit_journal_path()
+    end
+
+    test "valid absolute lexically canonical path" do
+      path = "/var/lib/arbor/shell/unit-journal.json"
+      Application.put_env(@app, @journal_path_key, path)
+      assert {:ok, ^path} = Config.apple_container_unit_journal_path()
+    end
+
+    test "rejects relative paths" do
+      Application.put_env(@app, @journal_path_key, "relative/unit-journal.json")
+
+      assert {:error, {:invalid_apple_container_unit_journal_path, :relative_path}} =
+               Config.apple_container_unit_journal_path()
+    end
+
+    test "rejects trailing directory form" do
+      Application.put_env(@app, @journal_path_key, "/var/lib/arbor/shell/unit-journal/")
+
+      assert {:error, {:invalid_apple_container_unit_journal_path, :trailing_slash}} =
+               Config.apple_container_unit_journal_path()
+    end
+
+    test "rejects noncanonical, NUL, empty, oversized, and invalid UTF-8 paths" do
+      Application.put_env(@app, @journal_path_key, "/var/lib/../lib/arbor/journal.json")
+
+      assert {:error, {:invalid_apple_container_unit_journal_path, :dot_segment}} =
+               Config.apple_container_unit_journal_path()
+
+      Application.put_env(@app, @journal_path_key, "/var//lib/arbor/journal.json")
+
+      assert {:error, {:invalid_apple_container_unit_journal_path, :non_canonical_path}} =
+               Config.apple_container_unit_journal_path()
+
+      Application.put_env(@app, @journal_path_key, "/var/lib/arbor/\0journal.json")
+
+      assert {:error, {:invalid_apple_container_unit_journal_path, :nul_byte}} =
+               Config.apple_container_unit_journal_path()
+
+      Application.put_env(@app, @journal_path_key, "")
+
+      assert {:error, {:invalid_apple_container_unit_journal_path, :empty_path}} =
+               Config.apple_container_unit_journal_path()
+
+      oversized = "/" <> String.duplicate("a", 4_096)
+      Application.put_env(@app, @journal_path_key, oversized)
+
+      assert {:error, {:invalid_apple_container_unit_journal_path, :path_too_long}} =
+               Config.apple_container_unit_journal_path()
+
+      Application.put_env(@app, @journal_path_key, <<"/var/lib/arbor/", 0xFF>>)
+
+      assert {:error, {:invalid_apple_container_unit_journal_path, :invalid_utf8}} =
+               Config.apple_container_unit_journal_path()
+    end
+
+    test "rejects malformed non-binary config containers" do
+      Application.put_env(@app, @journal_path_key, %{path: "/tmp/x"})
+
+      assert {:error, :apple_container_unit_journal_path_malformed} =
+               Config.apple_container_unit_journal_path()
+
+      Application.put_env(@app, @journal_path_key, ["/var/lib/arbor/journal.json"])
+
+      assert {:error, :apple_container_unit_journal_path_malformed} =
+               Config.apple_container_unit_journal_path()
+
+      Application.put_env(@app, @journal_path_key, :not_a_path)
+
+      assert {:error, :apple_container_unit_journal_path_malformed} =
+               Config.apple_container_unit_journal_path()
+    end
+
+    test "does not fall back to HOME, cwd, or packaged defaults" do
+      Application.delete_env(@app, @journal_path_key)
+      System.put_env("HOME", "/tmp/should-not-matter")
+
+      assert {:error, :apple_container_unit_journal_path_absent} =
+               Config.apple_container_unit_journal_path()
+    end
+
+    test "validate_unit_journal_path/1 is a narrow lexical validator" do
+      assert {:ok, "/opt/arbor/unit-journal.json"} =
+               Config.validate_unit_journal_path("/opt/arbor/unit-journal.json")
+
+      assert {:error, :relative_path} = Config.validate_unit_journal_path("unit-journal.json")
+      assert {:error, :invalid_path} = Config.validate_unit_journal_path(123)
     end
   end
 

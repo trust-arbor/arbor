@@ -782,6 +782,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
                Arbor.Shell.ExecutionRegistry,
                DynamicSupervisor,
+               Arbor.Shell.AppleContainerUnitJournal,
+               Arbor.Shell.AppleContainerUnitRecoverySupervisor,
                Arbor.Shell.AppleContainerUnitSupervisor,
                Arbor.Shell.AppleContainerUnitDrainCoordinator
              ]
@@ -974,6 +976,18 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
         {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
       )
 
+    {:ok, _journal} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        Arbor.Shell.AppleContainerUnitJournal
+      )
+
+    {:ok, _recovery} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        Arbor.Shell.AppleContainerUnitRecoverySupervisor
+      )
+
     {:ok, _units} =
       Supervisor.start_child(
         Arbor.Shell.Supervisor,
@@ -1025,6 +1039,18 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
         {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
       )
 
+    {:ok, _journal} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        Arbor.Shell.AppleContainerUnitJournal
+      )
+
+    {:ok, _recovery} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        Arbor.Shell.AppleContainerUnitRecoverySupervisor
+      )
+
     {:ok, _units} =
       Supervisor.start_child(
         Arbor.Shell.Supervisor,
@@ -1042,10 +1068,12 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
 
   defp remove_global_authority_stack! do
     for child_id <- [
-          # Coordinator first so its terminate/2 can drain while UnitSupervisor
-          # and PortSessionSupervisor remain live.
+          # Coordinator first so its terminate/2 can drain while UnitSupervisor,
+          # recovery, Journal, and PortSession remain live.
           Arbor.Shell.AppleContainerUnitDrainCoordinator,
           Arbor.Shell.AppleContainerUnitSupervisor,
+          Arbor.Shell.AppleContainerUnitRecoverySupervisor,
+          Arbor.Shell.AppleContainerUnitJournal,
           Arbor.Shell.PortSessionSupervisor,
           Arbor.Shell.ExecutionRegistry,
           Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,

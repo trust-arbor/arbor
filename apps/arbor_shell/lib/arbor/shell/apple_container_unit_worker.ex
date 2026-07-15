@@ -5,8 +5,18 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   #
   # Drives every lifecycle transition through AppleContainerUnitCore. Runs
   # structured argv via AppleContainerUnitRuntime (PortSession) — never shell
-  # text. Publishes nothing to ExecutionRegistry until positive unit absence is
-  # proven. Production spawn facade remains fail-closed.
+  # text. Holds Core terminals privately until durable journal completion, then
+  # publishes once to ExecutionRegistry / controller. Never publishes or
+  # completes the journal before positive unit absence when create was
+  # attempted. Production spawn facade remains fail-closed.
+  #
+  # Terminal publication is two-stage: hold a bounded terminal, call the stored
+  # production AppleContainerUnitJournal.complete/3 with the exact journal
+  # record unit_name + token, and only on `:ok` publish registry/controller
+  # once. Completion errors without an accepted drain retry forever with
+  # bounded exponential delay; accepted drain + safe containment + failed
+  # completion emits the drain receipt and stops without publication so the
+  # durable row remains for the Reconciler.
   #
   # Drain protocol (`request_drain/3`): a sibling drain coordinator (not the
   # parent supervisor EXIT — OTP consumes parent exit into terminate/2 and does
@@ -28,12 +38,16 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   alias Arbor.Shell.AppleContainerExecutionCore
   alias Arbor.Shell.AppleContainerUnitCore, as: UnitCore
   alias Arbor.Shell.AppleContainerUnitDrainCoordinator
+  alias Arbor.Shell.AppleContainerUnitJournal
+  alias Arbor.Shell.AppleContainerUnitJournalCore, as: JournalCore
   alias Arbor.Shell.AppleContainerUnitRuntime
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutionRegistry
 
   @supervisor Arbor.Shell.AppleContainerUnitSupervisor
   @coordinator AppleContainerUnitDrainCoordinator
+  # Production journal owner — hardcoded; never a configurable production callback.
+  @journal AppleContainerUnitJournal
   @runtime_path "/usr/local/bin/container"
   @display_command "container unit"
   @cleanup_attempt_timeout_ms 30_000
@@ -45,6 +59,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   @max_reason_bytes 512
   # Secondary controller notification only — registry keeps the full primary result.
   @max_secondary_notification_bytes 512
+  @journal_retry_initial_ms 50
+  @journal_retry_max_ms 2_000
 
   @required_runtime_callbacks [
     {:start_command, 4},
@@ -54,14 +70,22 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     {:monotonic_ms, 0}
   ]
 
+  @required_journal_callbacks [
+    {:complete, 2}
+  ]
+
   @type start_args :: %{
           required(:spec) => map(),
           required(:executable) => ExecutablePolicy.Executable.t(),
           required(:execution_id) => String.t(),
           required(:start_ref) => reference(),
           required(:controller_pid) => pid(),
+          required(:journal_record) => JournalCore.record(),
+          required(:operation_deadline) => integer(),
+          required(:ownership_caller) => pid() | {:registered, atom()},
           optional(:runtime) => module(),
-          optional(:pre_begin_timeout_ms) => pos_integer()
+          optional(:pre_begin_timeout_ms) => pos_integer(),
+          optional(:journal_module) => module()
         }
 
   # ---------------------------------------------------------------------------
@@ -146,8 +170,44 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   def start_under_coordinator(spec, executable, execution_id, start_ref, controller_pid)
       when is_map(spec) and is_binary(execution_id) and is_reference(start_ref) and
              is_pid(controller_pid) do
+    # Legacy non-durable seam: validate ordinary inputs then fail closed so no
+    # production path can admit a unit without journal + absolute deadline.
+    with :ok <- validate_spec(spec),
+         :ok <- validate_executable(executable),
+         :ok <- validate_execution_id(execution_id) do
+      {:error, :durable_unit_admission_required}
+    end
+  end
+
+  def start_under_coordinator(_spec, _executable, _execution_id, _start_ref, _controller_pid),
+    do: {:error, :invalid_unit_start}
+
+  @doc false
+  @spec start_under_coordinator_durable(
+          AppleContainerExecutionCore.execution_spec(),
+          ExecutablePolicy.Executable.t(),
+          String.t(),
+          reference(),
+          pid(),
+          map(),
+          integer()
+        ) :: {:ok, pid()} | {:error, term()}
+  def start_under_coordinator_durable(
+        spec,
+        executable,
+        execution_id,
+        start_ref,
+        controller_pid,
+        journal_record,
+        operation_deadline
+      )
+      when is_map(spec) and is_binary(execution_id) and is_reference(start_ref) and
+             is_pid(controller_pid) and is_map(journal_record) and is_integer(operation_deadline) do
     case Process.whereis(@coordinator) do
       pid when is_pid(pid) and pid == self() ->
+        # Ownership follows the registered DrainCoordinator authority across
+        # coordinator restarts; it never belongs to the facade/action controller.
+        # Production hardcodes @journal for the terminal-publication slice.
         start_waiting(
           spec,
           executable,
@@ -155,7 +215,10 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
           start_ref,
           controller_pid,
           AppleContainerUnitRuntime,
-          @pre_begin_timeout_ms
+          @pre_begin_timeout_ms,
+          journal_record,
+          operation_deadline,
+          {:registered, @coordinator}
         )
 
       _other ->
@@ -163,8 +226,16 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     end
   end
 
-  def start_under_coordinator(_spec, _executable, _execution_id, _start_ref, _controller_pid),
-    do: {:error, :coordinator_start_required}
+  def start_under_coordinator_durable(
+        _spec,
+        _executable,
+        _execution_id,
+        _start_ref,
+        _controller_pid,
+        _journal_record,
+        _operation_deadline
+      ),
+      do: {:error, :invalid_unit_start}
 
   @doc false
   @spec start_for_test(
@@ -174,16 +245,24 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
           reference(),
           keyword()
         ) :: {:ok, pid()} | {:error, term()}
-  def start_for_test(spec, executable, execution_id, start_ref, opts \\ [])
+  def start_for_test(spec, executable, execution_id, start_ref, opts)
 
   def start_for_test(spec, executable, execution_id, start_ref, opts)
       when is_map(spec) and is_binary(execution_id) and is_reference(start_ref) and is_list(opts) do
     if Keyword.keyword?(opts) do
       runtime = Keyword.get(opts, :runtime, AppleContainerUnitRuntime)
       pre_begin_timeout_ms = Keyword.get(opts, :pre_begin_timeout_ms, @pre_begin_timeout_ms)
+      # Test-only journal injection. Production paths hardcode @journal.
+      journal_module = Keyword.get(opts, :journal_module, @journal)
 
-      with :ok <- validate_runtime_module(runtime),
-           :ok <- validate_pre_begin_timeout(pre_begin_timeout_ms) do
+      with :ok <- require_admission_opts(opts),
+           {:ok, journal_record} <- fetch_admission_opt(opts, :journal_record),
+           {:ok, operation_deadline} <- fetch_admission_opt(opts, :operation_deadline),
+           {:ok, ownership_caller} <- fetch_admission_opt(opts, :ownership_caller),
+           :ok <- validate_runtime_module(runtime),
+           :ok <- validate_journal_module(journal_module),
+           :ok <- validate_pre_begin_timeout(pre_begin_timeout_ms),
+           :ok <- validate_ownership_caller(ownership_caller) do
         start_waiting(
           spec,
           executable,
@@ -191,7 +270,11 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
           start_ref,
           self(),
           runtime,
-          pre_begin_timeout_ms
+          pre_begin_timeout_ms,
+          journal_record,
+          operation_deadline,
+          ownership_caller,
+          journal_module
         )
       end
     else
@@ -226,6 +309,41 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
   def request_drain(_worker, _receipt_ref, _timeout), do: {:error, :invalid_drain}
 
+  @doc false
+  @spec ownership_info(pid(), map(), pos_integer()) :: {:ok, map()} | {:error, term()}
+  def ownership_info(worker, exact_record, timeout \\ @default_call_timeout_ms)
+
+  def ownership_info(worker, exact_record, timeout)
+      when is_pid(worker) and is_map(exact_record) and is_integer(timeout) and timeout > 0 and
+             timeout <= @max_call_timeout_ms do
+    GenServer.call(worker, {:ownership_info, exact_record}, timeout)
+  catch
+    :exit, _reason ->
+      {:error, :ownership_denied}
+  end
+
+  def ownership_info(_worker, _exact_record, _timeout), do: {:error, :invalid_ownership_info}
+
+  # Non-authoritative reconstruction hint for a restarted DrainCoordinator.
+  # Same ownership authority as ownership_info/3, but returns only
+  # %{execution_id: execution_id}. Callers must still ownership_info/3 with the
+  # full exact journal record before monitor/adoption.
+  @doc false
+  @spec ownership_hint(pid(), pos_integer()) ::
+          {:ok, %{execution_id: String.t()}} | {:error, term()}
+  def ownership_hint(worker, timeout \\ @default_call_timeout_ms)
+
+  def ownership_hint(worker, timeout)
+      when is_pid(worker) and is_integer(timeout) and timeout > 0 and
+             timeout <= @max_call_timeout_ms do
+    GenServer.call(worker, :ownership_hint, timeout)
+  catch
+    :exit, _reason ->
+      {:error, :ownership_denied}
+  end
+
+  def ownership_hint(_worker, _timeout), do: {:error, :invalid_ownership_hint}
+
   defp start_waiting(
          spec,
          executable,
@@ -233,13 +351,23 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
          start_ref,
          controller_pid,
          runtime,
-         pre_begin_timeout_ms
+         pre_begin_timeout_ms,
+         journal_record,
+         operation_deadline,
+         ownership_caller,
+         journal_module \\ @journal
        ) do
     with :ok <- validate_spec(spec),
          :ok <- validate_executable(executable),
          :ok <- validate_execution_id(execution_id),
          :ok <- validate_runtime_module(runtime),
-         :ok <- validate_pre_begin_timeout(pre_begin_timeout_ms) do
+         :ok <- validate_journal_module(journal_module),
+         :ok <- validate_pre_begin_timeout(pre_begin_timeout_ms),
+         :ok <- validate_ownership_caller(ownership_caller),
+         {:ok, record} <- validate_journal_record(journal_record, execution_id, spec),
+         {:ok, deadline} <- validate_operation_deadline(operation_deadline, runtime, spec),
+         {:ok, capped_pre_begin} <-
+           cap_pre_begin_timeout(pre_begin_timeout_ms, deadline, runtime) do
       args = %{
         spec: spec,
         executable: executable,
@@ -247,7 +375,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         start_ref: start_ref,
         controller_pid: controller_pid,
         runtime: runtime,
-        pre_begin_timeout_ms: pre_begin_timeout_ms
+        pre_begin_timeout_ms: capped_pre_begin,
+        journal_record: record,
+        operation_deadline: deadline,
+        ownership_caller: ownership_caller,
+        # Production always passes @journal; tests may inject via start_for_test.
+        journal_module: journal_module
       }
 
       case DynamicSupervisor.start_child(@supervisor, {__MODULE__, args}) do
@@ -271,7 +404,11 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     spec = Map.fetch!(args, :spec)
     executable = Map.fetch!(args, :executable)
     runtime = Map.get(args, :runtime, AppleContainerUnitRuntime)
-    pre_begin_timeout_ms = Map.get(args, :pre_begin_timeout_ms, @pre_begin_timeout_ms)
+    pre_begin_timeout_ms = Map.fetch!(args, :pre_begin_timeout_ms)
+    journal_record = Map.fetch!(args, :journal_record)
+    operation_deadline = Map.fetch!(args, :operation_deadline)
+    ownership_caller = Map.fetch!(args, :ownership_caller)
+    journal_module = Map.get(args, :journal_module, @journal)
 
     pre_begin_timer =
       :erlang.start_timer(pre_begin_timeout_ms, self(), :pre_begin_timeout)
@@ -282,10 +419,14 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       start_ref: start_ref,
       controller_pid: controller,
       controller_ref: Process.monitor(controller),
+      ownership_caller: ownership_caller,
+      journal_record: journal_record,
+      journal_module: journal_module,
       spec: spec,
       executable: executable,
       runtime: runtime,
-      operation_deadline: nil,
+      # Absolute monotonic deadline fixed at admission — never recomputed at begin.
+      operation_deadline: operation_deadline,
       core: nil,
       active_phase: nil,
       active_session: nil,
@@ -299,7 +440,14 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       cleanup_timer_effect: nil,
       pre_begin_timer: pre_begin_timer,
       terminal_published: false,
-      terminal: nil
+      terminal: nil,
+      # Private held terminal before durable journal completion + publication.
+      held_terminal: nil,
+      journal_retry_timer: nil,
+      journal_retry_token: nil,
+      journal_retry_ms: @journal_retry_initial_ms,
+      journal_complete_status: nil,
+      journal_complete_reason: nil
     }
 
     {:ok, state}
@@ -309,13 +457,17 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   def handle_call({:begin, start_ref}, _from, %{status: :waiting, start_ref: start_ref} = state)
       when is_reference(start_ref) do
     # Exact waiting ref is an accepted begin. Synchronous Core terminals
-    # (e.g. preflight list_containment_failure) publish via registry/controller;
-    # accepted begin itself is not an invalid-begin error.
+    # (e.g. preflight list_containment_failure) enter the journal gate before
+    # registry/controller publication; accepted begin itself is not invalid.
     state = cancel_pre_begin_timer(state)
 
     case begin_lifecycle(state) do
       {:ok, started} ->
         {:reply, :ok, started}
+
+      {:noreply, next} ->
+        # Sync terminal held while journal completion retries.
+        {:reply, :ok, next}
 
       {:stop, reason, stopped} ->
         {:stop, reason, :ok, stopped}
@@ -327,10 +479,42 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     {:reply, {:error, :invalid_begin_ref}, state}
   end
 
+  def handle_call({:ownership_info, exact_record}, {caller_pid, _tag}, state)
+      when is_map(exact_record) and is_pid(caller_pid) do
+    case authorize_ownership_info(state, caller_pid, exact_record) do
+      {:ok, info} ->
+        {:reply, {:ok, info}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:ownership_info, _invalid}, _from, state) do
+    {:reply, {:error, :ownership_denied}, state}
+  end
+
+  def handle_call(:ownership_hint, {caller_pid, _tag}, state) when is_pid(caller_pid) do
+    case authorize_ownership_hint(state, caller_pid) do
+      {:ok, hint} ->
+        {:reply, {:ok, hint}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:ownership_hint, _from, state) do
+    {:reply, {:error, :ownership_denied}, state}
+  end
+
   def handle_call({:request_drain, receipt_ref}, {caller_pid, _tag}, state)
       when is_reference(receipt_ref) and is_pid(caller_pid) do
     case accept_drain_request(state, caller_pid, receipt_ref) do
       {:ok, next} ->
+        {:reply, :ok, next}
+
+      {:noreply, next} ->
         {:reply, :ok, next}
 
       {:stop, reason, next} ->
@@ -401,6 +585,16 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   end
 
   def handle_info(
+        {:timeout, timer_ref, {:journal_complete_retry, token}},
+        %{journal_retry_timer: timer_ref, journal_retry_token: token} = state
+      )
+      when is_reference(timer_ref) and is_reference(token) do
+    # Exact stored timer ref + opaque per-attempt token only.
+    state = %{state | journal_retry_timer: nil, journal_retry_token: nil}
+    attempt_journal_completion_gate(state)
+  end
+
+  def handle_info(
         {:timeout, timer_ref, :pre_begin_timeout},
         %{pre_begin_timer: timer_ref, status: :waiting} = state
       )
@@ -419,8 +613,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     {:noreply, %{state | pre_begin_timer: nil}}
   end
 
-  def handle_info({:timeout, _other_ref, _effect}, state) do
-    # Stale or foreign timer — ignore.
+  def handle_info({:timeout, _other_ref, _payload}, state) do
+    # Stale, forged, or foreign timer — ignore (including wrong retry tokens).
     {:noreply, state}
   end
 
@@ -438,7 +632,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     # Final defense only — coordinated cleanup is request_drain / cancel, not
     # a finite terminate loop. Do not weaken positive-absence gating here.
     state = cancel_pre_begin_timer(state)
-    _ = cancel_cleanup_timer(state)
+    state = cancel_cleanup_timer(state)
+    _ = cancel_journal_retry_timer(state)
     _ = kill_active_session(state)
     :ok
   end
@@ -462,26 +657,30 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
   defp begin_lifecycle(state) do
     now = state.runtime.monotonic_ms()
-    deadline = now + state.spec.timeout_ms
+    deadline = state.operation_deadline
 
-    case UnitCore.new(state.spec.plan) do
-      {:ok, core, effects} ->
-        state = %{
-          state
-          | status: :running,
-            start_ref: nil,
-            operation_deadline: deadline,
-            core: core
-        }
+    # Admission-fixed absolute deadline only — never recompute now + timeout_ms.
+    if not is_integer(deadline) or now >= deadline do
+      # Pre-create path: zero runtime commands, same as pre-begin cancel.
+      hold_terminal_for_gate(state, {:error, :preflight_cancelled})
+    else
+      case UnitCore.new(state.spec.plan) do
+        {:ok, core, effects} ->
+          state = %{
+            state
+            | status: :running,
+              start_ref: nil,
+              core: core
+          }
 
-        case dispatch_effects(state, effects) do
-          {:noreply, next} -> {:ok, next}
-          {:stop, reason, next} -> {:stop, reason, next}
-        end
+          case dispatch_effects(state, effects) do
+            {:noreply, next} -> {:ok, next}
+            {:stop, reason, next} -> {:stop, reason, next}
+          end
 
-      {:error, reason} ->
-        state = publish_error(state, reason)
-        {:stop, :normal, state}
+        {:error, reason} ->
+          hold_terminal_for_gate(state, {:error, reason})
+      end
     end
   end
 
@@ -495,8 +694,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   end
 
   defp apply_effect(state, {:terminal, terminal}) do
-    state = publish_terminal(state, terminal)
-    stop_after_terminal(state)
+    hold_terminal_for_gate(state, terminal)
   end
 
   defp apply_effect(state, {:retry_after, delay_ms, next_effect})
@@ -667,8 +865,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
           {:noreply, %{state | cancel_applied: true}}
 
         {:error, reason} ->
-          state = publish_error(state, reason)
-          stop_after_terminal(state)
+          hold_terminal_for_gate(state, {:error, reason})
       end
     end
   end
@@ -751,8 +948,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         if state.core && state.core.create_attempted do
           apply_cancel_once(%{state | cancel_requested: true}, reason)
         else
-          state = publish_error(state, reason)
-          stop_after_terminal(state)
+          hold_terminal_for_gate(state, {:error, reason})
         end
     end
   end
@@ -783,8 +979,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
     cond do
       is_nil(state.core) ->
-        state = publish_error(state, :unit_error)
-        stop_after_terminal(state)
+        hold_terminal_for_gate(state, {:error, :unit_error})
 
       expected == phase ->
         apply_core_result(state, phase, result)
@@ -822,12 +1017,20 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         else
           state = %{state | drain_receipt: {caller_pid, receipt_ref}}
 
-          case handle_cancel(state) do
-            {:noreply, next} ->
-              {:ok, next}
+          cond do
+            not is_nil(state.held_terminal) ->
+              # Already holding a private terminal — re-enter the journal gate
+              # without overwriting it with cancellation.
+              attempt_journal_completion_gate(state)
 
-            {:stop, reason, next} ->
-              {:stop, reason, next}
+            true ->
+              case handle_cancel(state) do
+                {:noreply, next} ->
+                  {:ok, next}
+
+                {:stop, reason, next} ->
+                  {:stop, reason, next}
+              end
           end
         end
     end
@@ -841,11 +1044,15 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
   defp do_handle_cancel(%{status: :waiting} = state) do
     # Preflight not begun — no create attempted.
-    state = publish_error(state, :preflight_cancelled)
-    stop_after_terminal(state)
+    hold_terminal_for_gate(state, {:error, :preflight_cancelled})
   end
 
   defp do_handle_cancel(%{terminal_published: true} = state), do: {:noreply, state}
+
+  defp do_handle_cancel(%{held_terminal: held} = state) when not is_nil(held) do
+    # Private held terminal must not be overwritten by later cancellation.
+    {:noreply, %{state | cancel_requested: true}}
+  end
 
   defp do_handle_cancel(%{pending_result: true} = state) do
     # Request PortSession cancellation and wait for its terminal cleanup before
@@ -864,12 +1071,16 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   end
 
   defp do_handle_cancel(state) do
-    state = publish_error(state, :cancelled)
-    stop_after_terminal(state)
+    hold_terminal_for_gate(state, {:error, :cancelled})
   end
 
   defp apply_cancel_once(%{cancel_applied: true} = state, _fallback_reason) do
     {:noreply, state}
+  end
+
+  defp apply_cancel_once(%{held_terminal: held} = state, _fallback_reason)
+       when not is_nil(held) do
+    {:noreply, %{state | cancel_applied: true, cancel_requested: true}}
   end
 
   defp apply_cancel_once(%{core: core} = state, fallback_reason) when is_map(core) do
@@ -880,21 +1091,35 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         dispatch_effects(%{state | core: core, cancel_applied: true}, effects)
 
       {:error, :lifecycle_already_terminal} ->
-        {:noreply, %{state | cancel_applied: true}}
+        # Core is already terminal — hold its terminal if not yet held.
+        state = %{state | cancel_applied: true}
+
+        case Map.get(core, :terminal) do
+          nil ->
+            hold_terminal_for_gate(state, {:error, fallback_reason})
+
+          terminal ->
+            hold_terminal_for_gate(%{state | core: core}, terminal)
+        end
 
       {:error, reason} ->
-        state = publish_error(state, reason || fallback_reason)
-        stop_after_terminal(state)
+        hold_terminal_for_gate(state, {:error, reason || fallback_reason})
     end
   end
 
   defp apply_cancel_once(state, fallback_reason) do
-    state = publish_error(state, fallback_reason)
-    stop_after_terminal(state)
+    hold_terminal_for_gate(state, {:error, fallback_reason})
   end
 
+  # Called only after successful journal completion + publication.
+  # Drain-without-publication (failed complete + accepted drain) is handled in
+  # handle_journal_complete_failure and must never claim completion/publication.
   defp stop_after_terminal(state) do
     cond do
+      state.terminal_published != true ->
+        # Failed journal calls must not fall through to direct stop.
+        {:noreply, state}
+
       is_nil(state.drain_receipt) ->
         {:stop, :normal, state}
 
@@ -903,8 +1128,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         {:stop, :normal, state}
 
       true ->
-        # Drain requested after create without Core absence proof — never emit a
-        # drain receipt and never stop on a raw post-create error.
+        # Drain requested after create without Core absence proof — never emit.
         {:noreply, state}
     end
   end
@@ -913,9 +1137,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
   defp drain_emission_allowed?(%{core: %{create_attempted: false}}), do: true
 
+  # Any valid UnitCore terminal after create_attempted (success or error)
+  # implies positive structured absence was proven by UnitCore.
   defp drain_emission_allowed?(%{
-         core: %{create_attempted: true, stage: :terminal, terminal: {:ok, _}}
-       }),
+         core: %{create_attempted: true, stage: :terminal, terminal: terminal}
+       })
+       when not is_nil(terminal),
        do: true
 
   defp drain_emission_allowed?(_), do: false
@@ -1005,45 +1232,234 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
   defp cancel_pre_begin_timer(state), do: state
 
+  defp cancel_journal_retry_timer(%{journal_retry_timer: timer_ref} = state)
+       when is_reference(timer_ref) do
+    _ = :erlang.cancel_timer(timer_ref)
+
+    receive do
+      {:timeout, ^timer_ref, {:journal_complete_retry, _token}} -> :ok
+    after
+      0 -> :ok
+    end
+
+    %{state | journal_retry_timer: nil, journal_retry_token: nil}
+  end
+
+  defp cancel_journal_retry_timer(state), do: state
+
   # ---------------------------------------------------------------------------
-  # Registry publish / secondary notification
+  # Durable journal completion gate + registry publish
   # ---------------------------------------------------------------------------
 
-  defp publish_terminal(state, {:ok, result} = _terminal) when is_map(result) do
-    if state.terminal_published do
-      state
-    else
-      sanitized = sanitize_result(result, state)
-      # Registry projection is secondary: absence-proven terminals and drain
-      # receipts must still complete when the registry is gone or exits.
-      _ =
-        best_effort_registry_publish(fn ->
-          ExecutionRegistry.finish(state.execution_id, sanitized)
-        end)
+  # Hold a bounded terminal privately, complete the durable journal, then
+  # publish registry/controller exactly once. Never publish before journal :ok.
+  defp hold_terminal_for_gate(state, terminal) do
+    cond do
+      state.terminal_published == true ->
+        stop_after_terminal(state)
 
-      notify_controller(state, {:ok, sanitized})
-      %{state | terminal_published: true, terminal: {:ok, sanitized}, status: :terminal}
+      not is_nil(state.held_terminal) ->
+        # Never overwrite a held terminal (e.g. later cancel).
+        attempt_journal_completion_gate(state)
+
+      true ->
+        held = prepare_held_terminal(state, terminal)
+
+        state = %{
+          state
+          | held_terminal: held,
+            terminal: held,
+            status: :journal_completing
+        }
+
+        attempt_journal_completion_gate(state)
     end
   end
 
-  defp publish_terminal(state, {:error, reason} = terminal) do
-    publish_error(state, reason, terminal)
+  defp prepare_held_terminal(state, {:ok, result}) when is_map(result) do
+    {:ok, sanitize_result(result, state)}
   end
 
-  defp publish_error(state, reason, terminal \\ nil) do
+  defp prepare_held_terminal(_state, {:error, reason}) do
+    {:error, bound_reason(reason)}
+  end
+
+  defp prepare_held_terminal(_state, reason) do
+    {:error, bound_reason(reason)}
+  end
+
+  defp attempt_journal_completion_gate(state) do
+    cond do
+      state.terminal_published == true ->
+        stop_after_terminal(state)
+
+      is_nil(state.held_terminal) ->
+        {:noreply, state}
+
+      not journal_completion_allowed?(state) ->
+        # Raw post-create nonterminal Core: never complete, publish, or drain.
+        state = cancel_journal_retry_timer(state)
+
+        %{
+          state
+          | journal_complete_status: :blocked,
+            journal_complete_reason: :completion_not_allowed
+        }
+        |> then(&{:noreply, &1})
+
+      true ->
+        case invoke_journal_complete(state) do
+          :ok ->
+            state = cancel_journal_retry_timer(state)
+            state = publish_held_terminal(state)
+            stop_after_terminal(state)
+
+          {:error, reason} ->
+            handle_journal_complete_failure(state, reason)
+        end
+    end
+  end
+
+  # Allow complete only when create was never attempted, or Core is terminal
+  # after create_attempted (UnitCore guarantees that follows positive absence).
+  defp journal_completion_allowed?(%{core: nil}), do: true
+
+  defp journal_completion_allowed?(%{core: %{create_attempted: false}}), do: true
+
+  defp journal_completion_allowed?(%{core: %{create_attempted: true, stage: :terminal}}),
+    do: true
+
+  defp journal_completion_allowed?(_), do: false
+
+  defp invoke_journal_complete(state) do
+    record = state.journal_record
+    unit_name = Map.get(record, :unit_name)
+    token = Map.get(record, :token)
+    journal = state.journal_module
+
+    if is_binary(unit_name) and is_binary(token) and is_atom(journal) do
+      try do
+        case journal.complete(unit_name, token) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            {:error, reason}
+
+          _other ->
+            {:error, :unexpected_journal_result}
+        end
+      catch
+        :exit, _reason ->
+          {:error, :journal_call_failed}
+
+        :error, _reason ->
+          {:error, :journal_call_failed}
+
+        :throw, _reason ->
+          {:error, :journal_call_failed}
+      end
+    else
+      {:error, :invalid_journal_record}
+    end
+  end
+
+  defp handle_journal_complete_failure(state, reason) do
+    bound = bound_reason(reason)
+
+    state = %{
+      state
+      | journal_complete_status: :error,
+        journal_complete_reason: bound
+    }
+
+    if match?({_pid, _ref}, state.drain_receipt) and drain_emission_allowed?(state) do
+      # Accepted drain + safe containment + failed completion: emit receipt and
+      # stop WITHOUT registry/controller publication or completion claim. Leave
+      # the durable journal row for the Reconciler.
+      state = cancel_journal_retry_timer(state)
+      state = emit_drain_receipt(state)
+      {:stop, :normal, state}
+    else
+      schedule_journal_retry(state)
+    end
+  end
+
+  defp schedule_journal_retry(state) do
+    state = cancel_journal_retry_timer(state)
+    delay = state.journal_retry_ms || @journal_retry_initial_ms
+    # Opaque per-attempt token; timer payload carries neither journal record
+    # nor token nor raw terminal result.
+    attempt_token = make_ref()
+    timer_ref = :erlang.start_timer(delay, self(), {:journal_complete_retry, attempt_token})
+    next_delay = min(delay * 2, @journal_retry_max_ms)
+
+    {:noreply,
+     %{
+       state
+       | journal_retry_timer: timer_ref,
+         journal_retry_token: attempt_token,
+         journal_retry_ms: next_delay
+     }}
+  end
+
+  defp publish_held_terminal(state) do
     if state.terminal_published do
       state
     else
-      bound = bound_reason(reason)
+      case state.held_terminal do
+        {:ok, sanitized} = terminal when is_map(sanitized) ->
+          # Registry projection is secondary: absence-proven terminals and drain
+          # receipts must still complete when the registry is gone or exits.
+          _ =
+            best_effort_registry_publish(fn ->
+              ExecutionRegistry.finish(state.execution_id, sanitized)
+            end)
 
-      _ =
-        best_effort_registry_publish(fn ->
-          ExecutionRegistry.fail(state.execution_id, bound)
-        end)
+          notify_controller(state, {:ok, sanitized})
 
-      terminal = terminal || {:error, bound}
-      notify_controller(state, terminal)
-      %{state | terminal_published: true, terminal: terminal, status: :terminal}
+          %{
+            state
+            | terminal_published: true,
+              terminal: terminal,
+              status: :terminal,
+              journal_complete_status: :ok,
+              journal_complete_reason: nil
+          }
+
+        {:error, bound} = terminal ->
+          _ =
+            best_effort_registry_publish(fn ->
+              ExecutionRegistry.fail(state.execution_id, bound)
+            end)
+
+          notify_controller(state, terminal)
+
+          %{
+            state
+            | terminal_published: true,
+              terminal: terminal,
+              status: :terminal,
+              journal_complete_status: :ok,
+              journal_complete_reason: nil
+          }
+
+        _other ->
+          state
+      end
+    end
+  end
+
+  # ExecutionRegistry is a best-effort projection only. Catch exits/errors so a
+  # missing or restarting registry never aborts controller notification, terminal
+  # state transition, drain receipt emission, or normal worker stop.
+  defp best_effort_registry_publish(fun) when is_function(fun, 0) do
+    try do
+      fun.()
+    catch
+      :exit, _reason -> :registry_unavailable
+      :error, _reason -> :registry_unavailable
+      :throw, _reason -> :registry_unavailable
     end
   end
 
@@ -1176,6 +1592,143 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
   defp validate_pre_begin_timeout(_), do: {:error, :invalid_pre_begin_timeout}
 
+  defp validate_ownership_caller(pid) when is_pid(pid), do: :ok
+
+  defp validate_ownership_caller({:registered, name}) when is_atom(name) do
+    if Process.whereis(name) == self() do
+      :ok
+    else
+      {:error, :invalid_ownership_caller}
+    end
+  end
+
+  defp validate_ownership_caller(_), do: {:error, :invalid_ownership_caller}
+
+  defp require_admission_opts(opts) when is_list(opts) do
+    required = [:journal_record, :operation_deadline, :ownership_caller]
+
+    if Enum.all?(required, &Keyword.has_key?(opts, &1)) do
+      :ok
+    else
+      {:error, :durable_unit_admission_required}
+    end
+  end
+
+  defp fetch_admission_opt(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, :durable_unit_admission_required}
+    end
+  end
+
+  defp validate_journal_record(record, execution_id, %{plan: plan})
+       when is_map(record) and is_binary(execution_id) and is_map(plan) do
+    unit_name = Map.get(plan, :unit_name)
+
+    with true <- is_binary(unit_name) and unit_name != "",
+         {:ok, empty} <- JournalCore.new(),
+         {:ok, journal, _effects} <- JournalCore.reserve(empty, record),
+         entries when is_list(entries) <- JournalCore.recovery_entries(journal),
+         [normalized] <- entries do
+      cond do
+        normalized.execution_id != execution_id ->
+          {:error, :journal_record_mismatch}
+
+        normalized.unit_name != unit_name ->
+          {:error, :journal_record_mismatch}
+
+        true ->
+          {:ok, normalized}
+      end
+    else
+      {:error, reason} ->
+        {:error, reason}
+
+      _other ->
+        {:error, :invalid_journal_record}
+    end
+  end
+
+  defp validate_journal_record(_record, _execution_id, _spec),
+    do: {:error, :invalid_journal_record}
+
+  defp validate_operation_deadline(deadline, runtime, %{timeout_ms: timeout_ms})
+       when is_integer(deadline) and is_atom(runtime) and is_integer(timeout_ms) and
+              timeout_ms > 0 do
+    now = runtime.monotonic_ms()
+
+    if is_integer(now) do
+      remaining = deadline - now
+
+      # Strictly future and no farther than the execution spec timeout.
+      if remaining > 0 and remaining <= timeout_ms do
+        {:ok, deadline}
+      else
+        {:error, :invalid_operation_deadline}
+      end
+    else
+      {:error, :invalid_operation_deadline}
+    end
+  end
+
+  defp validate_operation_deadline(_deadline, _runtime, _spec),
+    do: {:error, :invalid_operation_deadline}
+
+  defp cap_pre_begin_timeout(pre_begin_timeout_ms, deadline, runtime) do
+    now = runtime.monotonic_ms()
+
+    if is_integer(now) and deadline > now do
+      {:ok, min(pre_begin_timeout_ms, deadline - now)}
+    else
+      {:error, :invalid_operation_deadline}
+    end
+  end
+
+  defp authorize_ownership_info(state, caller_pid, exact_record) do
+    stored = Map.get(state, :journal_record)
+    ownership = Map.get(state, :ownership_caller)
+
+    with true <- authorized_ownership_caller?(ownership, caller_pid),
+         true <- is_map(stored),
+         {:ok, empty} <- JournalCore.new(),
+         {:ok, journal, _effects} <- JournalCore.reserve(empty, exact_record),
+         entries when is_list(entries) <- JournalCore.recovery_entries(journal),
+         [normalized] <- entries,
+         true <- normalized == stored do
+      {:ok,
+       %{
+         journal_record: stored,
+         controller_pid: Map.get(state, :controller_pid),
+         execution_id: Map.get(state, :execution_id)
+       }}
+    else
+      _ ->
+        {:error, :ownership_denied}
+    end
+  end
+
+  # Same caller authority as ownership_info, but no full-record gate and only
+  # the execution_id is projected — never journal/token/controller/ownership.
+  defp authorize_ownership_hint(state, caller_pid) do
+    ownership = Map.get(state, :ownership_caller)
+    execution_id = Map.get(state, :execution_id)
+
+    if authorized_ownership_caller?(ownership, caller_pid) and is_binary(execution_id) and
+         execution_id != "" do
+      {:ok, %{execution_id: execution_id}}
+    else
+      {:error, :ownership_denied}
+    end
+  end
+
+  defp authorized_ownership_caller?(ownership, caller_pid) when is_pid(ownership),
+    do: caller_pid == ownership
+
+  defp authorized_ownership_caller?({:registered, name}, caller_pid) when is_atom(name),
+    do: Process.whereis(name) == caller_pid
+
+  defp authorized_ownership_caller?(_ownership, _caller_pid), do: false
+
   defp validate_runtime_module(AppleContainerUnitRuntime), do: :ok
 
   defp validate_runtime_module(runtime) when is_atom(runtime) do
@@ -1195,6 +1748,27 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   end
 
   defp validate_runtime_module(_), do: {:error, :invalid_runtime_module}
+
+  defp validate_journal_module(@journal), do: :ok
+
+  defp validate_journal_module(journal) when is_atom(journal) do
+    case Code.ensure_loaded(journal) do
+      {:module, ^journal} ->
+        if Enum.any?(@required_journal_callbacks, fn {fun, arity} ->
+             function_exported?(journal, fun, arity) or
+               function_exported?(journal, fun, arity + 1)
+           end) do
+          :ok
+        else
+          {:error, :invalid_journal_module}
+        end
+
+      _ ->
+        {:error, :invalid_journal_module}
+    end
+  end
+
+  defp validate_journal_module(_), do: {:error, :invalid_journal_module}
 
   # ---------------------------------------------------------------------------
   # Redaction
@@ -1218,6 +1792,11 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       start_ref: :redacted,
       controller_pid: :redacted,
       controller_ref: :redacted,
+      ownership_caller: :redacted,
+      ownership: :redacted,
+      journal_record: :redacted,
+      journal_module: :redacted,
+      token: :redacted,
       active_session: :redacted,
       active_session_id: :redacted,
       active_session_ref: :redacted,
@@ -1229,6 +1808,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       spec: :redacted,
       core: :redacted,
       terminal: :redacted,
+      held_terminal: :redacted,
+      journal_retry_timer: :redacted,
+      journal_retry_token: :redacted,
+      journal_retry_ms: :redacted,
+      journal_complete_status: :redacted,
+      journal_complete_reason: :redacted,
       runtime: :redacted,
       paths: :redacted,
       output: :redacted,

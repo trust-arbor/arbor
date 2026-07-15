@@ -52,7 +52,8 @@ defmodule Arbor.Shell.ExecutablePolicy do
     "/usr/bin/codesign",
     "/bin/launchctl",
     "/usr/bin/id",
-    "/usr/bin/sw_vers"
+    "/usr/bin/sw_vers",
+    "/usr/bin/shlock"
   ]
 
   @spec start_link(keyword()) :: GenServer.on_start()

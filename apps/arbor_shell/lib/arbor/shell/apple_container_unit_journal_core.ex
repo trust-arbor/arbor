@@ -16,6 +16,9 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
 
   @schema_version 1
   @max_active 1_024
+  # JSON-safe integer ceiling (2^53 - 1). Larger generation values fail closed
+  # before arithmetic so huge decoded JSON integers cannot overflow counters.
+  @max_generation 9_007_199_254_740_991
   @max_map_keys 16
   @max_execution_id_bytes 256
   @unit_name_prefix "arbor-v1-"
@@ -57,8 +60,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
   @type effect :: {:persist_snapshot, map()}
 
   @doc false
-  @spec limits() :: %{max_active: pos_integer()}
-  def limits, do: %{max_active: @max_active}
+  @spec limits() :: %{max_active: pos_integer(), max_generation: pos_integer()}
+  def limits, do: %{max_active: @max_active, max_generation: @max_generation}
 
   @doc """
   Construct an empty journal (`schema_version` 1, `generation` 0, no actives).
@@ -120,6 +123,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
            ),
          {:ok, record} <- normalize_record(attrs),
          :ok <- reject_capacity(state),
+         :ok <- reject_generation_ceiling(state),
          :ok <- reject_duplicate_name(state, record.unit_name),
          :ok <- reject_duplicate_execution_id(state, record.execution_id),
          :ok <- reject_duplicate_token(state, record.token) do
@@ -148,7 +152,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
          {:ok, unit_name} <- validate_unit_name(unit_name),
          {:ok, token} <- validate_token(token),
          {:ok, existing} <- fetch_active(state, unit_name),
-         :ok <- match_token(existing.token, token) do
+         :ok <- match_token(existing.token, token),
+         :ok <- reject_generation_ceiling(state) do
       new_state = %{
         state
         | generation: state.generation + 1,
@@ -202,7 +207,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
            by_name: by_name
          } = state
        )
-       when is_integer(generation) and generation >= 0 and is_map(by_name) do
+       when is_integer(generation) and generation >= 0 and generation <= @max_generation and
+              is_map(by_name) do
     with true <- Map.keys(state) |> MapSet.new() |> MapSet.equal?(MapSet.new(@logical_state_keys)),
          true <- map_size(by_name) <= @max_active,
          {:ok, normalized_by_name} <- normalize_active_records(Map.values(by_name)),
@@ -237,8 +243,12 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
       :error ->
         {:error, :missing_generation}
 
-      {:ok, generation} when is_integer(generation) and generation >= 0 ->
+      {:ok, generation}
+      when is_integer(generation) and generation >= 0 and generation <= @max_generation ->
         {:ok, generation}
+
+      {:ok, generation} when is_integer(generation) and generation > @max_generation ->
+        {:error, :generation_too_large}
 
       {:ok, _other} ->
         {:error, :invalid_generation}
@@ -437,6 +447,18 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
       :ok
     end
   end
+
+  defp reject_generation_ceiling(%{generation: generation})
+       when is_integer(generation) and generation >= @max_generation do
+    {:error, :generation_too_large}
+  end
+
+  defp reject_generation_ceiling(%{generation: generation})
+       when is_integer(generation) and generation >= 0 do
+    :ok
+  end
+
+  defp reject_generation_ceiling(_), do: {:error, :invalid_generation}
 
   defp reject_duplicate_name(%{by_name: by_name}, unit_name) do
     if Map.has_key?(by_name, unit_name) do

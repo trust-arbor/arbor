@@ -133,6 +133,11 @@ defmodule Arbor.Shell.Config do
           | :image_policy_env_too_large
           | :image_policy_labels_too_large
 
+  @type apple_container_unit_journal_path_error ::
+          :apple_container_unit_journal_path_absent
+          | :apple_container_unit_journal_path_malformed
+          | {:invalid_apple_container_unit_journal_path, atom()}
+
   @doc """
   Read and validate the closed Apple Container operator locator config.
 
@@ -197,6 +202,41 @@ defmodule Arbor.Shell.Config do
         normalize_apple_container_image_policy(config)
     end
   end
+
+  @doc """
+  Read and validate the durable Apple Container unit-intent journal path.
+
+  Accepts only a single absolute, lexically canonical file path string. Never
+  falls back to HOME, the process CWD, or a packaged default. Absent and
+  malformed Application env values are explicit stable errors.
+  """
+  @spec apple_container_unit_journal_path() ::
+          {:ok, String.t()} | {:error, apple_container_unit_journal_path_error()}
+  def apple_container_unit_journal_path do
+    case Application.get_env(@app, :apple_container_unit_journal_path) do
+      nil ->
+        {:error, :apple_container_unit_journal_path_absent}
+
+      path ->
+        case validate_unit_journal_path(path) do
+          {:ok, ^path} = ok ->
+            ok
+
+          {:ok, normalized} when is_binary(normalized) ->
+            {:ok, normalized}
+
+          {:error, :invalid_path} ->
+            {:error, :apple_container_unit_journal_path_malformed}
+
+          {:error, reason} when is_atom(reason) ->
+            {:error, {:invalid_apple_container_unit_journal_path, reason}}
+        end
+    end
+  end
+
+  @doc false
+  @spec validate_unit_journal_path(term()) :: {:ok, String.t()} | {:error, atom()}
+  def validate_unit_journal_path(path), do: validate_locator_path(path)
 
   defp normalize_apple_container(config) when is_list(config) do
     if Keyword.keyword?(config) do

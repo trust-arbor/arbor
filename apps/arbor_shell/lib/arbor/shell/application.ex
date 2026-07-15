@@ -3,13 +3,23 @@ defmodule Arbor.Shell.Application do
 
   use Application
 
+  alias Arbor.Shell.AppleContainerUnitDrainCoordinator
+
+  # Poll interval while waiting for coordinator/dependency restart during
+  # prep_stop. Not a time cap on absence proof — only paces retry of the
+  # sealed barrier admission call across rest_for_one turnover.
+  @prep_stop_retry_ms 50
+
   @impl true
   def start(_type, _args) do
     executable_policy_opts = [startup_path: System.get_env("PATH", "")]
     startup_epoch = make_ref()
+    # Immutable for the process lifetime: prep_stop must not re-read mutable
+    # Application env (config can change after start and skip/force the barrier).
+    children_started? = Application.get_env(:arbor_shell, :start_children, true) == true
 
     children =
-      if Application.get_env(:arbor_shell, :start_children, true) do
+      if children_started? do
         production_children(executable_policy_opts, startup_epoch)
       else
         []
@@ -22,12 +32,41 @@ defmodule Arbor.Shell.Application do
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
-        {:ok, pid, %{startup_epoch: startup_epoch}}
+        {:ok, pid,
+         %{
+           startup_epoch: startup_epoch,
+           children_started?: children_started?
+         }}
 
       {:error, _reason} = error ->
         clear_startup_epoch(startup_epoch)
         error
     end
+  end
+
+  @doc """
+  Planned application shutdown barrier.
+
+  Runs while the supervision tree is still fully alive — before OTP begins
+  child teardown. Exhaustive Apple Container unit drain + durable recovery
+  converge here via `AppleContainerUnitDrainCoordinator.prepare_durable_shutdown/1`
+  (nonblocking GenServer state machine). Coordinator `terminate/2` deliberately
+  does not own this barrier so crash-driven rest_for_one turnover cannot
+  deadlock on earlier siblings.
+
+  Whether the barrier runs is decided from the immutable
+  `children_started?` flag captured at `start/2`, not from live Application env.
+
+  Retries across coordinator/dependency restarts until the barrier positively
+  succeeds. Preserves the application state for `stop/1`.
+  """
+  @impl true
+  def prep_stop(state) do
+    if children_started?(state) do
+      await_durable_shutdown_barrier()
+    end
+
+    state
   end
 
   @impl true
@@ -71,14 +110,59 @@ defmodule Arbor.Shell.Application do
       Arbor.Shell.LinuxDependencyBaselineMaterializer.supervisor_child_spec(),
       {Arbor.Shell.ExecutionRegistry, []},
       {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one},
-      # Unit owners sit after PortSession so unit-supervisor shutdown leaves the
-      # PortSession supervisor available for final cleanup sessions.
+      # Durable unit-intent journal outlives unit-supervisor and coordinator
+      # failures so recovery/admission can re-read authoritative intent. Missing
+      # journal config starts a live disabled owner (Shell still boots).
+      Arbor.Shell.AppleContainerUnitJournal,
+      # Recovery composite (worker DS + reconciler). Loss turns over later unit
+      # owners before a replacement startup sweep. shutdown: :infinity.
+      Arbor.Shell.AppleContainerUnitRecoverySupervisor,
+      # Unit owners sit after recovery so recovery authority remains available
+      # while units restart; unit-supervisor shutdown leaves PortSession
+      # available for final cleanup sessions.
       Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec(),
-      # Drain coordinator is last so reverse rest_for_one stops it first while
-      # UnitSupervisor and PortSessionSupervisor remain alive for request_drain
-      # and positive-absence cleanup. shutdown: :infinity — no finite budget.
+      # Drain coordinator is last under rest_for_one so reverse stop order
+      # terminates it first. Planned exhaustive drain is NOT owned by
+      # terminate/2 — Application.prep_stop runs prepare_durable_shutdown/1
+      # (nonblocking state machine) while Journal, Recovery, UnitSupervisor,
+      # and PortSession are still alive. Crash-driven terminate returns
+      # promptly so parent EXIT can complete while an earlier sibling restarts.
       Arbor.Shell.AppleContainerUnitDrainCoordinator
     ]
+  end
+
+  # Production fail-closed: missing flag on older state shapes that did start
+  # children still runs the barrier. Explicit false skips (intentionally
+  # childless apps). Config mutation after start must not change this decision.
+  defp children_started?(%{children_started?: false}), do: false
+  defp children_started?(%{children_started?: true}), do: true
+  # Older state without the flag: fail closed and run the barrier (production
+  # historically started children by default).
+  defp children_started?(%{startup_epoch: _}), do: true
+  defp children_started?(%{apple_container_boot_epoch: _}), do: true
+  defp children_started?(_other), do: true
+
+  defp await_durable_shutdown_barrier do
+    case Process.whereis(AppleContainerUnitDrainCoordinator) do
+      pid when is_pid(pid) ->
+        case AppleContainerUnitDrainCoordinator.prepare_durable_shutdown(pid) do
+          :ok ->
+            :ok
+
+          {:error, _reason} ->
+            # Coordinator/dependency mid-restart or transient rejection.
+            # Do not begin child teardown until the barrier positively succeeds.
+            Process.sleep(@prep_stop_retry_ms)
+            await_durable_shutdown_barrier()
+        end
+
+      nil ->
+        # Topology expected (children_started?) but coordinator not yet
+        # registered — wait through rest_for_one replacement rather than
+        # treating absence as success.
+        Process.sleep(@prep_stop_retry_ms)
+        await_durable_shutdown_barrier()
+    end
   end
 
   defp clear_startup_epoch(startup_epoch) do

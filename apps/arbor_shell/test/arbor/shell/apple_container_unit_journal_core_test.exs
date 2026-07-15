@@ -503,6 +503,94 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
     end
   end
 
+  describe "generation ceiling" do
+    test "limits/0 exposes the JSON-safe integer ceiling" do
+      max = Core.limits().max_generation
+      assert max == 9_007_199_254_740_991
+      assert max == Integer.pow(2, 53) - 1
+    end
+
+    test "new/1 rejects generations above the ceiling" do
+      max = Core.limits().max_generation
+
+      assert {:error, :generation_too_large} =
+               Core.new(%{"schema_version" => 1, "generation" => max + 1, "active" => []})
+
+      assert {:error, :generation_too_large} =
+               Core.new(%{schema_version: 1, generation: max + 100, active: []})
+    end
+
+    test "new/1 accepts the exact ceiling" do
+      max = Core.limits().max_generation
+
+      assert {:ok, state} =
+               Core.new(%{"schema_version" => 1, "generation" => max, "active" => []})
+
+      assert state.generation == max
+      assert Core.show(state)["generation"] == max
+    end
+
+    test "reserve at the ceiling fails closed without mutation or effects" do
+      max = Core.limits().max_generation
+
+      assert {:ok, state} =
+               Core.new(%{"schema_version" => 1, "generation" => max, "active" => []})
+
+      original = Core.show(state)
+
+      assert {:error, :generation_too_large} =
+               Core.reserve(
+                 state,
+                 reserve_attrs(unit_name: @unit_a, execution_id: @exec_a, token: @token_a)
+               )
+
+      assert Core.show(state) == original
+      assert state.generation == max
+      assert state.by_name == %{}
+    end
+
+    test "complete at the ceiling fails closed without mutation or effects" do
+      max = Core.limits().max_generation
+
+      assert {:ok, state} =
+               Core.new(%{
+                 "schema_version" => 1,
+                 "generation" => max,
+                 "active" => [
+                   snapshot_record(
+                     unit_name: @unit_a,
+                     execution_id: @exec_a,
+                     token: @token_a,
+                     reserved_at_ms: 1
+                   )
+                 ]
+               })
+
+      original = Core.show(state)
+      assert {:error, :generation_too_large} = Core.complete(state, @unit_a, @token_a)
+      assert Core.show(state) == original
+      assert Map.has_key?(state.by_name, @unit_a)
+      assert state.generation == max
+    end
+
+    test "a transition one below the ceiling reaches it exactly" do
+      max = Core.limits().max_generation
+
+      assert {:ok, state} =
+               Core.new(%{"schema_version" => 1, "generation" => max - 1, "active" => []})
+
+      assert {:ok, next, [{:persist_snapshot, snapshot}]} =
+               Core.reserve(
+                 state,
+                 reserve_attrs(unit_name: @unit_a, execution_id: @exec_a, token: @token_a)
+               )
+
+      assert next.generation == max
+      assert snapshot == Core.show(next)
+      assert {:error, :generation_too_large} = Core.complete(next, @unit_a, @token_a)
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Capacity 1,024
   # ---------------------------------------------------------------------------

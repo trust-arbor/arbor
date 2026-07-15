@@ -23,7 +23,9 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
   @image "127.0.0.1:0/arbor/workload@sha256:#{@index_hex}"
   @init_image "127.0.0.1:0/arbor/vminit@sha256:#{@vminit_hex}"
   @kernel_path "/usr/local/share/container/kernels/default.kernel"
-  @name "arbor-val-unit1"
+  # Journal-valid unit name: arbor-v1- + 32 lowercase hex.
+  @name "arbor-v1-" <> String.duplicate("a", 32)
+  @journal_token String.duplicate("1", 64)
   @runtime_path "/usr/local/bin/container"
   @max_secondary_notification_bytes 512
 
@@ -88,6 +90,11 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       GenServer.call(__MODULE__, {:advance_mono, ms})
     end
 
+    def set_mono_step(ms) when is_integer(ms) and ms >= 0 do
+      ensure_started()
+      GenServer.call(__MODULE__, {:set_mono_step, ms})
+    end
+
     def release_held do
       ensure_started()
       GenServer.call(__MODULE__, :release_held)
@@ -128,7 +135,16 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
     @impl true
     def init(_) do
-      {:ok, %{script: [], calls: [], owner: nil, counter: 0, mono: 1_000_000, held: []}}
+      {:ok,
+       %{
+         script: [],
+         calls: [],
+         owner: nil,
+         counter: 0,
+         mono: 1_000_000,
+         mono_step: 0,
+         held: []
+       }}
     end
 
     @impl true
@@ -138,7 +154,16 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       end
 
       {:reply, :ok,
-       %{state | script: script, calls: [], owner: owner, counter: 0, mono: 1_000_000, held: []}}
+       %{
+         state
+         | script: script,
+           calls: [],
+           owner: owner,
+           counter: 0,
+           mono: 1_000_000,
+           mono_step: 0,
+           held: []
+       }}
     end
 
     def handle_call(:calls, _from, state) do
@@ -146,11 +171,15 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     end
 
     def handle_call(:monotonic_ms, _from, state) do
-      {:reply, state.mono, state}
+      {:reply, state.mono, %{state | mono: state.mono + state.mono_step}}
     end
 
     def handle_call({:advance_mono, ms}, _from, state) do
       {:reply, :ok, %{state | mono: state.mono + ms}}
+    end
+
+    def handle_call({:set_mono_step, ms}, _from, state) do
+      {:reply, :ok, %{state | mono_step: ms}}
     end
 
     def handle_call(:held_count, _from, state) do
@@ -252,6 +281,122 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       |> then(fn m ->
         if m.containment_failure, do: m, else: Map.delete(m, :containment_failure)
       end)
+    end
+  end
+
+  defmodule FakeJournal do
+    @moduledoc false
+
+    use GenServer
+
+    def ensure_started do
+      case GenServer.start(__MODULE__, %{}, name: __MODULE__) do
+        {:ok, pid} ->
+          pid
+
+        {:error, {:already_started, pid}} ->
+          pid
+      end
+    end
+
+    def reset(opts \\ []) when is_list(opts) do
+      ensure_started()
+      GenServer.call(__MODULE__, {:reset, opts})
+    end
+
+    def complete_calls do
+      ensure_started()
+      GenServer.call(__MODULE__, :complete_calls)
+    end
+
+    def block do
+      ensure_started()
+      GenServer.call(__MODULE__, :block)
+    end
+
+    def release do
+      ensure_started()
+      GenServer.call(__MODULE__, :release)
+    end
+
+    def complete(unit_name, token, server \\ __MODULE__) do
+      case GenServer.call(server, {:complete, unit_name, token}, 30_000) do
+        {:do_raise, exception} -> raise exception
+        {:do_exit, reason} -> exit(reason)
+        {:do_throw, reason} -> throw(reason)
+        other -> other
+      end
+    end
+
+    @impl true
+    def init(_) do
+      {:ok,
+       %{
+         results: [],
+         calls: [],
+         blocked: false,
+         expected_unit: nil,
+         expected_token: nil
+       }}
+    end
+
+    @impl true
+    def handle_call({:reset, opts}, _from, _state) do
+      {:reply, :ok,
+       %{
+         results: Keyword.get(opts, :results, []),
+         calls: [],
+         blocked: Keyword.get(opts, :blocked, false),
+         expected_unit: Keyword.get(opts, :expected_unit),
+         expected_token: Keyword.get(opts, :expected_token)
+       }}
+    end
+
+    def handle_call(:complete_calls, _from, state) do
+      {:reply, Enum.reverse(state.calls), state}
+    end
+
+    def handle_call(:block, _from, state) do
+      {:reply, :ok, %{state | blocked: true}}
+    end
+
+    def handle_call(:release, _from, state) do
+      {:reply, :ok, %{state | blocked: false}}
+    end
+
+    def handle_call({:complete, unit_name, token}, _from, state) do
+      calls = [{unit_name, token} | state.calls]
+
+      cond do
+        is_binary(state.expected_unit) and unit_name != state.expected_unit ->
+          {:reply, {:error, :unknown_unit_name}, %{state | calls: calls}}
+
+        is_binary(state.expected_token) and token != state.expected_token ->
+          {:reply, {:error, :token_mismatch}, %{state | calls: calls}}
+
+        state.blocked ->
+          {:reply, {:error, :journal_blocked}, %{state | calls: calls}}
+
+        true ->
+          case state.results do
+            [{:raise, exception} | rest] ->
+              {:reply, {:do_raise, exception}, %{state | results: rest, calls: calls}}
+
+            [{:exit, reason} | rest] ->
+              {:reply, {:do_exit, reason}, %{state | results: rest, calls: calls}}
+
+            [{:throw, reason} | rest] ->
+              {:reply, {:do_throw, reason}, %{state | results: rest, calls: calls}}
+
+            [result | rest] ->
+              {:reply, result, %{state | results: rest, calls: calls}}
+
+            [] ->
+              # Default success after script exhaustion — keeps existing worker
+              # tests green while still recording exact complete calls.
+              {:reply, :ok, %{state | calls: calls}}
+          end
+      end
     end
   end
 
@@ -359,6 +504,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
   setup do
     FakeRuntime.ensure_started()
+    FakeJournal.ensure_started()
+    :ok = FakeJournal.reset()
     assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
 
     executable = %ExecutablePolicy.Executable{
@@ -401,6 +548,30 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     )
   end
 
+  defp journal_record_for(spec, execution_id, opts \\ []) do
+    %{
+      unit_name: Keyword.get(opts, :unit_name, spec.plan.unit_name),
+      execution_id: Keyword.get(opts, :execution_id, execution_id),
+      token: Keyword.get(opts, :token, @journal_token),
+      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, 1_700_000_000_000)
+    }
+  end
+
+  defp admission_opts(spec, execution_id, extra \\ []) do
+    now = FakeRuntime.monotonic_ms()
+    timeout_ms = Map.fetch!(spec, :timeout_ms)
+
+    base = [
+      runtime: FakeRuntime,
+      journal_module: FakeJournal,
+      journal_record: journal_record_for(spec, execution_id),
+      operation_deadline: now + timeout_ms,
+      ownership_caller: self()
+    ]
+
+    Keyword.merge(base, extra)
+  end
+
   defp start_and_begin(spec, executable, script) do
     :ok = FakeRuntime.reset(script)
     start_ref = make_ref()
@@ -409,8 +580,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
 
     assert {:ok, worker} =
-             Worker.start_for_test(spec, executable, execution_id, start_ref,
-               runtime: FakeRuntime
+             Worker.start_for_test(
+               spec,
+               executable,
+               execution_id,
+               start_ref,
+               admission_opts(spec, execution_id)
              )
 
     assert :ok = ExecutionRegistry.adopt(execution_id, worker)
@@ -457,6 +632,40 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     end
   end
 
+  # After a drain-without-publication stop, the registry may still be running or
+  # may only observe owner-down. It must not carry a journal-gated finish/fail.
+  defp unpublished_registry_after_owner_stop?(execution_id) do
+    case ExecutionRegistry.get(execution_id) do
+      {:ok, %{status: status}} when status in [:running, :cancelling, :pending] ->
+        true
+
+      {:ok, %{status: status, result: result}}
+      when status in [:failed, :killed] and is_map(result) ->
+        if owner_down_registry_error?(Map.get(result, :error)) do
+          true
+        else
+          flunk(
+            "registry shows journal-gated publication after drain-without-publication: " <>
+              "#{inspect(status)} #{inspect(result)}"
+          )
+        end
+
+      {:ok, %{status: :completed, result: result}} ->
+        flunk(
+          "registry shows journal-gated success publication after drain-without-publication: " <>
+            "#{inspect(result)}"
+        )
+
+      other ->
+        flunk("unexpected registry state: #{inspect(other)}")
+    end
+  end
+
+  defp owner_down_registry_error?({:execution_owner_down, _}), do: true
+  defp owner_down_registry_error?([:execution_owner_down | _]), do: true
+  defp owner_down_registry_error?(%{error: inner}), do: owner_down_registry_error?(inner)
+  defp owner_down_registry_error?(_), do: false
+
   defp restore_unit_supervisor! do
     case Process.whereis(Arbor.Shell.AppleContainerUnitSupervisor) do
       pid when is_pid(pid) ->
@@ -485,13 +694,54 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     end
   end
 
+  # prep_stop leaves the coordinator permanently closed while still registered.
+  # Always terminate/restart so later tests receive a fresh ready coordinator.
   defp restore_drain_coordinator! do
     case Process.whereis(DrainCoordinator) do
+      pid when is_pid(pid) ->
+        _ = Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
+
+      _missing ->
+        :ok
+    end
+
+    case Supervisor.restart_child(Arbor.Shell.Supervisor, DrainCoordinator) do
+      {:ok, _pid} ->
+        :ok
+
+      {:ok, _pid, _info} ->
+        :ok
+
+      {:error, :running} ->
+        :ok
+
+      {:error, {:already_started, _pid}} ->
+        :ok
+
+      {:error, :not_found} ->
+        {:ok, _} =
+          Supervisor.start_child(Arbor.Shell.Supervisor, DrainCoordinator)
+
+        :ok
+
+      {:error, _reason} ->
+        _ = Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
+        _ = Supervisor.delete_child(Arbor.Shell.Supervisor, DrainCoordinator)
+
+        {:ok, _} =
+          Supervisor.start_child(Arbor.Shell.Supervisor, DrainCoordinator)
+
+        :ok
+    end
+  end
+
+  defp restore_execution_registry! do
+    case Process.whereis(ExecutionRegistry) do
       pid when is_pid(pid) ->
         :ok
 
       _missing ->
-        case Supervisor.restart_child(Arbor.Shell.Supervisor, DrainCoordinator) do
+        case Supervisor.restart_child(Arbor.Shell.Supervisor, ExecutionRegistry) do
           {:ok, _pid} ->
             :ok
 
@@ -506,16 +756,16 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
           {:error, :not_found} ->
             {:ok, _} =
-              Supervisor.start_child(Arbor.Shell.Supervisor, DrainCoordinator)
+              Supervisor.start_child(Arbor.Shell.Supervisor, {ExecutionRegistry, []})
 
             :ok
 
           {:error, _reason} ->
-            _ = Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
-            _ = Supervisor.delete_child(Arbor.Shell.Supervisor, DrainCoordinator)
+            _ = Supervisor.terminate_child(Arbor.Shell.Supervisor, ExecutionRegistry)
+            _ = Supervisor.delete_child(Arbor.Shell.Supervisor, ExecutionRegistry)
 
             {:ok, _} =
-              Supervisor.start_child(Arbor.Shell.Supervisor, DrainCoordinator)
+              Supervisor.start_child(Arbor.Shell.Supervisor, {ExecutionRegistry, []})
 
             :ok
         end
@@ -647,8 +897,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
 
       assert {:ok, worker} =
-               Worker.start_for_test(spec, executable, execution_id, start_ref,
-                 runtime: FakeRuntime
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id)
                )
 
       assert :ok = ExecutionRegistry.adopt(execution_id, worker)
@@ -684,8 +938,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
 
       assert {:ok, worker} =
-               Worker.start_for_test(spec, executable, execution_id, start_ref,
-                 runtime: FakeRuntime
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id)
                )
 
       assert :ok = ExecutionRegistry.adopt(execution_id, worker)
@@ -698,18 +956,48 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       spec: spec,
       executable: executable
     } do
+      :ok = FakeRuntime.reset([])
       start_ref = make_ref()
 
       {:ok, execution_id} =
         ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
 
       assert {:error, :invalid_runtime_module} =
-               Worker.start_for_test(spec, executable, execution_id, start_ref,
-                 runtime: :not_a_runtime_module
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, runtime: :not_a_runtime_module)
                )
 
       assert {:error, :invalid_runtime_module} =
-               Worker.start_for_test(spec, executable, execution_id, start_ref, runtime: String)
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, runtime: String)
+               )
+    end
+
+    test "omitting durable admission opts fails closed before child start", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([])
+      start_ref = make_ref()
+      before = unit_child_count()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      assert {:error, :durable_unit_admission_required} =
+               Worker.start_for_test(spec, executable, execution_id, start_ref,
+                 runtime: FakeRuntime
+               )
+
+      assert unit_child_count() == before
     end
 
     test "collision/preflight failure publishes error without cleanup commands", %{
@@ -1013,7 +1301,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       executable: executable
     } do
       # Active start cancelled by coordinator drain; one present cleanup round;
-      # final successful absence is held so terminate_child must block.
+      # final successful absence is held so Application.prep_stop must block.
       script = [
         success_list([]),
         success(%{exit_code: 0}),
@@ -1041,15 +1329,17 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert Process.alive?(unit_sup)
       assert Process.alive?(port_sup)
 
+      app_state = %{startup_epoch: make_ref(), children_started?: true}
+
       task =
         Task.async(fn ->
-          Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
+          Arbor.Shell.Application.prep_stop(app_state)
         end)
 
       try do
         eventually!(fn -> FakeRuntime.held_count() >= 1 end, 30_000)
 
-        # terminate_child remains blocked while final absence is held.
+        # prep_stop remains blocked while final absence is held.
         assert is_nil(Task.yield(task, 300))
         assert Process.alive?(task.pid)
         assert Process.alive?(coordinator)
@@ -1071,17 +1361,23 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
         assert :ok = FakeRuntime.release_held()
 
-        assert :ok = Task.await(task, 30_000)
+        assert ^app_state = Task.await(task, 30_000)
         assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 15_000
         refute Process.alive?(worker)
-        refute Process.alive?(coordinator)
+        # prep_stop barrier completes without killing the coordinator; it stays
+        # registered and permanently closed.
+        assert Process.alive?(coordinator)
+        assert Process.whereis(DrainCoordinator) == coordinator
+
+        assert {:error, :unit_start_unavailable} =
+                 Worker.start(spec, executable, "exec_after_prep_stop", make_ref())
 
         exec = await_registry_terminal(execution_id, 10_000)
         assert exec.status == :killed
         assert exec.result.cancelled == true
       after
         # Release held sessions before waiting so a failed assertion cannot
-        # poison later tests by leaving the coordinator stuck in terminate/2.
+        # poison later tests by leaving prep_stop blocked on absence.
         _ = FakeRuntime.release_held()
 
         if Process.alive?(task.pid) do
@@ -1092,20 +1388,46 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       end
     end
 
-    test "security regression: coordinator-only start seam rejects non-coordinator callers", %{
+    test "security regression: legacy coordinator start requires durable admission", %{
       spec: spec,
       executable: executable
     } do
       before = unit_child_count()
       start_ref = make_ref()
 
-      assert {:error, :coordinator_start_required} =
+      assert {:error, :durable_unit_admission_required} =
                Worker.start_under_coordinator(
                  spec,
                  executable,
                  "exec_direct_bypass",
                  start_ref,
                  self()
+               )
+
+      assert unit_child_count() == before
+      assert unit_child_pids() == []
+    end
+
+    test "security regression: durable coordinator start rejects non-coordinator callers", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([])
+      before = unit_child_count()
+      start_ref = make_ref()
+      execution_id = "exec_durable_bypass"
+      record = journal_record_for(spec, execution_id)
+      deadline = FakeRuntime.monotonic_ms() + spec.timeout_ms
+
+      assert {:error, :coordinator_start_required} =
+               Worker.start_under_coordinator_durable(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 self(),
+                 record,
+                 deadline
                )
 
       assert unit_child_count() == before
@@ -1142,15 +1464,17 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert is_pid(port_sup)
       assert unit_child_count() == 1
 
+      app_state = %{startup_epoch: make_ref(), children_started?: true}
+
       drain_task =
         Task.async(fn ->
-          Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
+          Arbor.Shell.Application.prep_stop(app_state)
         end)
 
       try do
         eventually!(fn -> FakeRuntime.held_count() >= 1 end, 30_000)
 
-        # Drain is mid-absence wait; coordinator is in terminate/2.
+        # prep_stop barrier is mid-absence wait; coordinator stays nonblocking.
         assert is_nil(Task.yield(drain_task, 200))
         assert Process.alive?(coordinator)
         assert unit_child_count() == 1
@@ -1170,11 +1494,15 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         assert nonterminal_registry?(execution_id)
 
         assert :ok = FakeRuntime.release_held()
-        assert :ok = Task.await(drain_task, 30_000)
+        assert ^app_state = Task.await(drain_task, 30_000)
 
         assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 15_000
         refute Process.alive?(worker)
-        refute Process.alive?(coordinator)
+        assert Process.alive?(coordinator)
+        assert Process.whereis(DrainCoordinator) == coordinator
+
+        assert {:error, :unit_start_unavailable} =
+                 Worker.start(spec, executable, "exec_after_prep_stop", make_ref())
 
         exec = await_registry_terminal(execution_id, 10_000)
         assert exec.status == :killed
@@ -1201,9 +1529,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
 
       assert {:ok, worker} =
-               Worker.start_for_test(spec, executable, execution_id, start_ref,
-                 runtime: FakeRuntime,
-                 pre_begin_timeout_ms: 50
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, pre_begin_timeout_ms: 50)
                )
 
       assert :ok = ExecutionRegistry.adopt(execution_id, worker)
@@ -1249,17 +1580,19 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert is_pid(unit_sup)
       assert is_pid(port_sup)
 
-      # Suspend before coordinator termination so request_drain handshake times out.
+      # Suspend before prep_stop so request_drain handshake times out.
       assert :ok = :sys.suspend(worker)
+
+      app_state = %{startup_epoch: make_ref(), children_started?: true}
 
       task =
         Task.async(fn ->
-          Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
+          Arbor.Shell.Application.prep_stop(app_state)
         end)
 
       try do
         # Cross at least one bounded handshake timeout (5_000ms). A prior bug
-        # dropped unresponsive workers and let terminate_child return.
+        # dropped unresponsive workers and let the barrier return.
         assert is_nil(Task.yield(task, 5_500))
         assert Process.alive?(task.pid)
         assert Process.alive?(coordinator)
@@ -1288,10 +1621,11 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
         assert :ok = FakeRuntime.release_held()
 
-        assert :ok = Task.await(task, 30_000)
+        assert ^app_state = Task.await(task, 30_000)
         assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 15_000
         refute Process.alive?(worker)
-        refute Process.alive?(coordinator)
+        assert Process.alive?(coordinator)
+        assert Process.whereis(DrainCoordinator) == coordinator
 
         assert_receive {:apple_container_unit_terminal, ^execution_id, {:ok, result}}, 5_000
         assert result.cancelled == true
@@ -1300,8 +1634,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         assert exec.status == :killed
         assert exec.result.cancelled == true
       after
-        # Resume/release before waiting so assertion failure cannot leave the
-        # coordinator stuck mid-handshake or mid-absence wait.
+        # Resume/release before waiting so assertion failure cannot leave
+        # prep_stop blocked mid-handshake or mid-absence wait.
         if is_pid(worker) and Process.alive?(worker) do
           try do
             :sys.resume(worker)
@@ -1347,7 +1681,13 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
             ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
 
           {:ok, worker} =
-            Worker.start_for_test(spec, executable, execution_id, start_ref, runtime: FakeRuntime)
+            Worker.start_for_test(
+              spec,
+              executable,
+              execution_id,
+              start_ref,
+              admission_opts(spec, execution_id)
+            )
 
           :ok = ExecutionRegistry.adopt(execution_id, worker)
           assert :ok = Worker.begin(worker, start_ref)
@@ -1389,9 +1729,15 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       {:ok, execution_id} =
         ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
 
+      record = journal_record_for(spec, execution_id)
+
       assert {:ok, worker} =
-               Worker.start_for_test(spec, executable, execution_id, start_ref,
-                 runtime: FakeRuntime
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, journal_record: record)
                )
 
       assert :ok = ExecutionRegistry.adopt(execution_id, worker)
@@ -1405,6 +1751,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       refute text =~ @projections.worktree
       refute text =~ @image
       refute text =~ inspect(start_ref)
+      # Token value must not appear; redacted map keys may name sensitive fields.
+      refute text =~ @journal_token
 
       redacted =
         Worker.format_status(%{state: :sys.get_state(worker), message: {:x}, reason: :y, log: []})
@@ -1417,6 +1765,10 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert redacted.state.projections == :redacted
       assert redacted.state.executable == :redacted
       assert redacted.state.controller_pid == :redacted
+      assert redacted.state.ownership_caller == :redacted
+      assert redacted.state.journal_record == :redacted
+      assert redacted.state.token == :redacted
+      assert redacted.state.operation_deadline == :redacted
       assert redacted.state.active_session == :redacted
 
       send(worker, {:cancel_shell_execution, execution_id})
@@ -1491,8 +1843,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
 
       assert {:ok, worker} =
-               Worker.start_for_test(spec, executable, execution_id, start_ref,
-                 runtime: FakeRuntime
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id)
                )
 
       assert :ok = ExecutionRegistry.adopt(execution_id, worker)
@@ -1511,7 +1867,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       _ = await_terminal(execution_id, 10_000)
     end
 
-    test "production start rejects non-container executable path", %{spec: spec} do
+    test "durable worker boundary rejects non-container executable path", %{spec: spec} do
       bad = %ExecutablePolicy.Executable{
         name: "container",
         path: "/tmp/evil",
@@ -1524,23 +1880,943 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         sha256: String.duplicate("d", 64)
       }
 
+      before = unit_child_count()
+
+      # Exact deterministic assertion at the durable Worker admission boundary
+      # (validates executable before the durable-admission-required gate).
       assert {:error, :invalid_runtime_executable} =
-               Worker.start(spec, bad, "exec_test", make_ref())
+               Worker.start_under_coordinator(
+                 spec,
+                 bad,
+                 "exec_test",
+                 make_ref(),
+                 self()
+               )
+
+      assert unit_child_count() == before
+    end
+  end
+
+  describe "durable admission boundary" do
+    test "rejects missing malformed extra and mismatched journal records", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([])
+      start_ref = make_ref()
+      before = unit_child_count()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      base = admission_opts(spec, execution_id)
+
+      assert {:error, :durable_unit_admission_required} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 Keyword.delete(base, :journal_record)
+               )
+
+      assert {:error, reason_missing} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 Keyword.put(base, :journal_record, %{})
+               )
+
+      assert reason_missing in [
+               :missing_unit_name,
+               :missing_execution_id,
+               :missing_token,
+               :missing_reserved_at_ms,
+               :invalid_journal_record,
+               :invalid_record
+             ]
+
+      assert {:error, {:unsupported_keys, _scope}} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 Keyword.put(
+                   base,
+                   :journal_record,
+                   Map.put(journal_record_for(spec, execution_id), :extra, true)
+                 )
+               )
+
+      assert {:error, :journal_record_mismatch} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 Keyword.put(
+                   base,
+                   :journal_record,
+                   journal_record_for(spec, execution_id, execution_id: "other-exec")
+                 )
+               )
+
+      assert {:error, :journal_record_mismatch} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 Keyword.put(
+                   base,
+                   :journal_record,
+                   journal_record_for(spec, execution_id,
+                     unit_name: "arbor-v1-" <> String.duplicate("b", 32)
+                   )
+                 )
+               )
+
+      assert unit_child_count() == before
+    end
+
+    test "rejects expired and overlong operation deadlines before child start", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([])
+      start_ref = make_ref()
+      before = unit_child_count()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      now = FakeRuntime.monotonic_ms()
+
+      assert {:error, :invalid_operation_deadline} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, operation_deadline: now)
+               )
+
+      assert {:error, :invalid_operation_deadline} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, operation_deadline: now - 1)
+               )
+
+      assert {:error, :invalid_operation_deadline} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, operation_deadline: now + spec.timeout_ms + 1)
+               )
+
+      assert unit_child_count() == before
+    end
+
+    test "deadline expiring between admission checks fails before child start", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([])
+      :ok = FakeRuntime.set_mono_step(2)
+      start_ref = make_ref()
+      before = unit_child_count()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      opts = [
+        runtime: FakeRuntime,
+        journal_record: journal_record_for(spec, execution_id),
+        operation_deadline: 1_000_001,
+        ownership_caller: self()
+      ]
+
+      assert {:error, :invalid_operation_deadline} =
+               Worker.start_for_test(spec, executable, execution_id, start_ref, opts)
+
+      assert unit_child_count() == before
+    end
+
+    test "waiting does not reset the admission operation deadline", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([success_list([])])
+      start_ref = make_ref()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      now = FakeRuntime.monotonic_ms()
+      # Short remaining budget after a wait; must stay absolute (not now+timeout).
+      deadline = now + 250
+
+      assert {:ok, worker} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, operation_deadline: deadline)
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+
+      # Advance clock while waiting — begin must keep the original deadline.
+      :ok = FakeRuntime.advance_mono(200)
+      assert :ok = Worker.begin(worker, start_ref)
+
+      eventually!(fn -> length(FakeRuntime.calls()) >= 1 end)
+      [call] = FakeRuntime.calls()
+      remaining = Keyword.get(call.opts, :timeout)
+      assert is_integer(remaining)
+      assert remaining > 0
+      assert remaining <= 50
+
+      send(worker, {:cancel_shell_execution, execution_id})
+      _ = await_terminal(execution_id, 10_000)
+    end
+
+    test "pre-begin expiry from operation deadline runs zero runtime commands", %{
+      executable: executable,
+      plan: plan
+    } do
+      # Cap pre-begin by a tiny remaining operation budget.
+      spec = %{plan: plan, timeout_ms: 30_000, max_output_bytes: 1024}
+      :ok = FakeRuntime.reset([])
+      start_ref = make_ref()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      now = FakeRuntime.monotonic_ms()
+
+      assert {:ok, worker} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id,
+                   operation_deadline: now + 40,
+                   pre_begin_timeout_ms: 30_000
+                 )
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+      worker_ref = Process.monitor(worker)
+
+      assert {:error, :preflight_cancelled} = await_terminal(execution_id, 5_000)
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 5_000
+      refute Process.alive?(worker)
+      assert FakeRuntime.calls() == []
+    end
+
+    test "begin after deadline expiry runs zero runtime commands", %{
+      executable: executable,
+      plan: plan
+    } do
+      spec = %{plan: plan, timeout_ms: 30_000, max_output_bytes: 1024}
+      :ok = FakeRuntime.reset([])
+      start_ref = make_ref()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      now = FakeRuntime.monotonic_ms()
+
+      assert {:ok, worker} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, operation_deadline: now + 500)
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+      :ok = FakeRuntime.advance_mono(600)
+
+      assert :ok = Worker.begin(worker, start_ref)
+      assert {:error, :preflight_cancelled} = await_terminal(execution_id, 5_000)
+      assert FakeRuntime.calls() == []
+    end
+
+    test "ownership_info requires exact caller and full record match", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([{:hang, success(%{exit_code: 0})}])
+      start_ref = make_ref()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      record = journal_record_for(spec, execution_id)
+
+      assert {:ok, worker} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, journal_record: record)
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+
+      assert {:ok, info} = Worker.ownership_info(worker, record)
+      assert info.journal_record == record
+      assert info.controller_pid == self()
+      assert info.execution_id == execution_id
+      refute Map.has_key?(info, :ownership_caller)
+      refute Map.has_key?(info, :operation_deadline)
+
+      # Wrong caller PID alone is insufficient even with the exact record.
+      wrong_caller =
+        Task.async(fn -> Worker.ownership_info(worker, record) end)
+        |> Task.await(5_000)
+
+      assert wrong_caller == {:error, :ownership_denied}
+
+      assert {:error, :ownership_denied} =
+               Worker.ownership_info(
+                 worker,
+                 %{record | token: String.duplicate("2", 64)}
+               )
+
+      assert {:error, :ownership_denied} =
+               Worker.ownership_info(
+                 worker,
+                 %{record | reserved_at_ms: record.reserved_at_ms + 1}
+               )
+
+      assert {:error, :ownership_denied} =
+               Worker.ownership_info(worker, Map.put(record, :extra, true))
+
+      assert {:error, :ownership_denied} = Worker.ownership_info(worker, %{})
+
+      send(worker, {:cancel_shell_execution, execution_id})
+      _ = await_terminal(execution_id, 10_000)
+      assert {:error, :ownership_denied} = Worker.ownership_info(worker, record)
+    end
+
+    test "ownership_hint returns only execution_id to exact PID owner", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([{:hang, success(%{exit_code: 0})}])
+      start_ref = make_ref()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      record = journal_record_for(spec, execution_id)
+
+      assert {:ok, worker} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id, journal_record: record)
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+
+      assert {:ok, hint} = Worker.ownership_hint(worker)
+      assert hint == %{execution_id: execution_id}
+      assert Map.keys(hint) == [:execution_id]
+      refute Map.has_key?(hint, :journal_record)
+      refute Map.has_key?(hint, :token)
+      refute Map.has_key?(hint, :controller_pid)
+      refute Map.has_key?(hint, :ownership_caller)
+      refute Map.has_key?(hint, :unit_name)
+      refute Map.has_key?(hint, :operation_deadline)
+
+      # ownership_info still requires the full exact record — hint is not authority.
+      assert {:error, :ownership_denied} = Worker.ownership_info(worker, %{})
+
+      wrong_caller =
+        Task.async(fn -> Worker.ownership_hint(worker) end)
+        |> Task.await(5_000)
+
+      assert wrong_caller == {:error, :ownership_denied}
+
+      assert {:error, :invalid_ownership_hint} = Worker.ownership_hint(worker, 0)
+      assert {:error, :invalid_ownership_hint} = Worker.ownership_hint(worker, :infinity)
+
+      send(worker, {:cancel_shell_execution, execution_id})
+      _ = await_terminal(execution_id, 10_000)
+      assert {:error, :ownership_denied} = Worker.ownership_hint(worker)
+    end
+
+    test "ownership_hint follows registered-name replacement across coordinator restart", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([{:hang, success(%{exit_code: 0})}])
+      start_ref = make_ref()
+      ownership_name = __MODULE__.HintRestartableCoordinator
+      parent = self()
+
+      assert Process.whereis(ownership_name) == nil
+      assert Process.register(self(), ownership_name)
+
+      on_exit(fn ->
+        case Process.whereis(ownership_name) do
+          pid when is_pid(pid) -> Process.exit(pid, :kill)
+          _ -> :ok
+        end
+      end)
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      record = journal_record_for(spec, execution_id)
+
+      assert {:ok, worker} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id,
+                   journal_record: record,
+                   ownership_caller: {:registered, ownership_name}
+                 )
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+      assert {:ok, %{execution_id: ^execution_id}} = Worker.ownership_hint(worker)
+      assert Process.unregister(ownership_name)
+      assert {:error, :ownership_denied} = Worker.ownership_hint(worker)
+
+      replacement =
+        spawn(fn ->
+          true = Process.register(self(), ownership_name)
+          send(parent, {:hint_replacement_registered, self()})
+
+          receive do
+            {:query_hint, ^worker} ->
+              send(parent, {:hint_replacement_result, Worker.ownership_hint(worker)})
+          end
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:hint_replacement_registered, ^replacement}, 1_000
+      send(replacement, {:query_hint, worker})
+      assert_receive {:hint_replacement_result, {:ok, %{execution_id: ^execution_id}}}, 5_000
+
+      # Full-record gate is unchanged after restart: re-register as authority.
+      ref = Process.monitor(replacement)
+      send(replacement, :stop)
+      assert_receive {:DOWN, ^ref, :process, ^replacement, _}, 5_000
+      assert Process.whereis(ownership_name) == nil
+      assert Process.register(self(), ownership_name)
+      assert {:ok, info} = Worker.ownership_info(worker, record)
+      assert info.journal_record == record
+      assert info.execution_id == execution_id
+      # Hint never grants full-record fields.
+      assert {:ok, %{execution_id: ^execution_id} = hint} = Worker.ownership_hint(worker)
+      assert map_size(hint) == 1
+
+      send(worker, {:cancel_shell_execution, execution_id})
+      _ = await_terminal(execution_id, 10_000)
+    end
+
+    test "registered coordinator ownership survives coordinator process restart", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([{:hang, success(%{exit_code: 0})}])
+      start_ref = make_ref()
+      ownership_name = __MODULE__.RestartableCoordinator
+      parent = self()
+
+      assert Process.whereis(ownership_name) == nil
+      assert Process.register(self(), ownership_name)
+
+      on_exit(fn ->
+        case Process.whereis(ownership_name) do
+          pid when is_pid(pid) -> Process.exit(pid, :kill)
+          _ -> :ok
+        end
+      end)
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      record = journal_record_for(spec, execution_id)
+
+      assert {:ok, worker} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 admission_opts(spec, execution_id,
+                   journal_record: record,
+                   ownership_caller: {:registered, ownership_name}
+                 )
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+      assert {:ok, _info} = Worker.ownership_info(worker, record)
+      assert Process.unregister(ownership_name)
+      assert {:error, :ownership_denied} = Worker.ownership_info(worker, record)
+
+      replacement =
+        spawn(fn ->
+          true = Process.register(self(), ownership_name)
+          send(parent, {:replacement_registered, self()})
+
+          receive do
+            {:query_ownership, ^worker, ^record} ->
+              send(parent, {:replacement_result, Worker.ownership_info(worker, record)})
+          end
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:replacement_registered, ^replacement}, 1_000
+      send(replacement, {:query_ownership, worker, record})
+      assert_receive {:replacement_result, {:ok, info}}, 5_000
+      assert info.journal_record == record
+      assert info.execution_id == execution_id
+
+      send(worker, {:cancel_shell_execution, execution_id})
+      _ = await_terminal(execution_id, 10_000)
+      send(replacement, :stop)
+    end
+  end
+
+  describe "durable terminal-publication gate" do
+    test "blocked complete hides registry/controller terminal until release", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset(blocked: true)
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "gated"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+
+      eventually!(fn -> length(FakeJournal.complete_calls()) >= 1 end, 10_000)
+
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 150
+      assert nonterminal_registry?(execution_id)
+      assert Process.alive?(worker)
+
+      assert :ok = FakeJournal.release()
+      assert {:ok, result} = await_terminal(execution_id, 10_000)
+      assert result.stdout == "gated"
+
+      exec = await_registry_terminal(execution_id)
+      assert exec.status == :completed
+      assert exec.result.stdout == "gated"
+      refute Process.alive?(worker)
+
+      calls = FakeJournal.complete_calls()
+      assert length(calls) >= 1
+      assert Enum.all?(calls, fn {unit, token} -> unit == @name and token == @journal_token end)
+      assert List.last(calls) == {@name, @journal_token}
+    end
+
+    test "completion uses exact unit_name+token and precedes publication", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok =
+        FakeJournal.reset(
+          expected_unit: @name,
+          expected_token: @journal_token,
+          results: [:ok]
+        )
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "order"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, _worker, _} = start_and_begin(spec, executable, script)
+      assert {:ok, _} = await_terminal(execution_id)
+
+      assert FakeJournal.complete_calls() == [{@name, @journal_token}]
+      exec = await_registry_terminal(execution_id)
+      assert exec.status == :completed
+    end
+
+    test "fail once then retry succeeds with exactly one publication", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset(results: [{:error, :temporary_unavailable}, :ok])
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "retry-once"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      assert {:ok, result} = await_terminal(execution_id, 10_000)
+      assert result.stdout == "retry-once"
+
+      exec = await_registry_terminal(execution_id)
+      assert exec.status == :completed
+      assert exec.result.stdout == "retry-once"
+      refute Process.alive?(worker)
+
+      calls = FakeJournal.complete_calls()
+      assert length(calls) == 2
+      assert Enum.uniq(calls) == [{@name, @journal_token}]
+    end
+
+    test "stale journal retry timer is ignored", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset(blocked: true)
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "stale"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeJournal.complete_calls()) >= 1 end, 10_000)
+
+      # Forged timer ref/token pairs must be ignored. Real retries may still run
+      # while blocked, but publication must wait for an exact matching timer
+      # after release (or a successful complete).
+      for _ <- 1..5 do
+        send(worker, {:timeout, make_ref(), {:journal_complete_retry, make_ref()}})
+        send(worker, {:timeout, make_ref(), {:journal_complete_retry, :forged}})
+      end
+
+      _ = :sys.get_state(worker)
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 50
+      assert nonterminal_registry?(execution_id)
+      assert Process.alive?(worker)
+
+      assert :ok = FakeJournal.release()
+      assert {:ok, result} = await_terminal(execution_id, 10_000)
+      assert result.stdout == "stale"
+    end
+
+    test "failure plus exact drain emits receipt/stop without publication", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset(blocked: true)
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "drain-no-pub"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeJournal.complete_calls()) >= 1 end, 10_000)
+
+      worker_ref = Process.monitor(worker)
+      receipt_ref = make_ref()
+      parent = self()
+
+      _drain_caller =
+        spawn(fn ->
+          reply = Worker.request_drain(worker, receipt_ref, 15_000)
+          send(parent, {:drain_reply, reply})
+
+          receive do
+            {:apple_container_unit_drained, _, _, _} = msg ->
+              send(parent, {:drain_receipt, msg})
+          after
+            30_000 ->
+              send(parent, {:drain_receipt, :timeout})
+          end
+        end)
+
+      assert_receive {:drain_reply, :ok}, 5_000
+
+      assert_receive {:drain_receipt,
+                      {:apple_container_unit_drained, ^worker, ^execution_id, ^receipt_ref}},
+                     10_000
+
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, :normal}, 10_000
+      refute Process.alive?(worker)
+
+      # No controller publication. Registry may only observe owner-down after
+      # stop — never a journal-gated finish/fail payload.
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 100
+      assert unpublished_registry_after_owner_stop?(execution_id)
+      assert length(FakeJournal.complete_calls()) >= 1
+    end
+
+    test "no complete before positive absence", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset()
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "cand"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        {:hold, success_list([])}
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> FakeRuntime.held_count() >= 1 end, 10_000)
+
+      assert FakeJournal.complete_calls() == []
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 100
+      assert nonterminal_registry?(execution_id)
+      assert Process.alive?(worker)
+
+      assert :ok = FakeRuntime.release_held()
+      assert {:ok, result} = await_terminal(execution_id, 10_000)
+      assert result.stdout == "cand"
+      assert FakeJournal.complete_calls() == [{@name, @journal_token}]
+    end
+
+    test "create failure with absence completes and publishes error and can drain", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset()
+
+      # Create fails after preflight empty; UnitCore cleanup until absence, then
+      # terminal error — gate completes then publishes the error.
+      script = [
+        success_list([]),
+        success(%{exit_code: 1, stdout: "create-failed"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+
+      # Race: drain may arrive before or after journal complete succeeds.
+      # For create-failure terminal error path, first wait for held absence path
+      # completion via terminal, then prove journal complete + publish.
+      terminal = await_terminal(execution_id, 10_000)
+      assert match?({:error, _}, terminal)
+      assert FakeJournal.complete_calls() == [{@name, @journal_token}]
+
+      exec = await_registry_terminal(execution_id)
+      assert exec.status == :failed
+      refute Process.alive?(worker)
+    end
+
+    test "create failure absence terminal can drain without publication when complete fails", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset(blocked: true)
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 1, stdout: "create-failed"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeJournal.complete_calls()) >= 1 end, 10_000)
+
+      worker_ref = Process.monitor(worker)
+      receipt_ref = make_ref()
+      parent = self()
+
+      _drain_caller =
+        spawn(fn ->
+          reply = Worker.request_drain(worker, receipt_ref, 15_000)
+          send(parent, {:drain_reply, reply})
+
+          receive do
+            {:apple_container_unit_drained, _, _, _} = msg ->
+              send(parent, {:drain_receipt, msg})
+          after
+            30_000 ->
+              send(parent, {:drain_receipt, :timeout})
+          end
+        end)
+
+      assert_receive {:drain_reply, :ok}, 5_000
+
+      # Blocked complete + drain + safe terminal error → receipt without publication.
+      assert_receive {:drain_receipt,
+                      {:apple_container_unit_drained, ^worker, ^execution_id, ^receipt_ref}},
+                     10_000
+
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, :normal}, 10_000
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 50
+      assert unpublished_registry_after_owner_stop?(execution_id)
+      assert length(FakeJournal.complete_calls()) >= 1
+    end
+
+    test "pre-create terminal completes journal before publish", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset(blocked: true)
+
+      script = [
+        success_list([%{"configuration" => %{"id" => @name}}])
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeJournal.complete_calls()) >= 1 end, 5_000)
+
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 100
+      assert nonterminal_registry?(execution_id)
+      assert Process.alive?(worker)
+      assert hd(FakeJournal.complete_calls()) == {@name, @journal_token}
+
+      assert :ok = FakeJournal.release()
+      assert {:error, :unit_name_collision} = await_terminal(execution_id, 10_000)
+      exec = await_registry_terminal(execution_id)
+      assert exec.status == :failed
+      assert exec.result.error == :unit_name_collision
+      refute Process.alive?(worker)
+    end
+
+    test "held terminal and journal retry fields are redacted", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset(blocked: true)
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "redact-me"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeJournal.complete_calls()) >= 1 end, 10_000)
+
+      redacted =
+        Worker.format_status(%{
+          state: :sys.get_state(worker),
+          message: {:x},
+          reason: :y,
+          log: []
+        })
+
+      assert redacted.state.held_terminal == :redacted
+      assert redacted.state.journal_retry_timer == :redacted
+      assert redacted.state.journal_retry_token == :redacted
+      assert redacted.state.journal_complete_status == :redacted
+      assert redacted.state.journal_complete_reason == :redacted
+      assert redacted.state.journal_module == :redacted
+      assert redacted.state.journal_record == :redacted
+      assert redacted.state.token == :redacted
+
+      text = inspect(redacted, limit: :infinity, printable_limit: :infinity)
+      refute text =~ @journal_token
+      refute text =~ "redact-me"
+
+      assert :ok = FakeJournal.release()
+      _ = await_terminal(execution_id, 10_000)
+    end
+
+    test "later cancel does not overwrite held terminal", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeJournal.reset(blocked: true)
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "keep-me"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeJournal.complete_calls()) >= 1 end, 10_000)
+
+      send(worker, {:cancel_shell_execution, execution_id})
+      _ = :sys.get_state(worker)
+
+      assert :ok = FakeJournal.release()
+      assert {:ok, result} = await_terminal(execution_id, 10_000)
+      assert result.stdout == "keep-me"
     end
   end
 
   describe "application order" do
-    test "unit supervisor is after PortSession supervisor" do
+    test "unit durable owners follow PortSession in rest_for_one order" do
       children = Arbor.Shell.Application.production_children([startup_path: "/bin"], make_ref())
       modules = Enum.map(children, &child_module/1)
 
       port_idx = Enum.find_index(modules, &(&1 == DynamicSupervisor))
+      journal_idx = Enum.find_index(modules, &(&1 == Arbor.Shell.AppleContainerUnitJournal))
+
+      recovery_idx =
+        Enum.find_index(modules, &(&1 == Arbor.Shell.AppleContainerUnitRecoverySupervisor))
+
       unit_idx = Enum.find_index(modules, &(&1 == Arbor.Shell.AppleContainerUnitSupervisor))
       coord_idx = Enum.find_index(modules, &(&1 == DrainCoordinator))
       assert is_integer(port_idx)
+      assert is_integer(journal_idx)
+      assert is_integer(recovery_idx)
       assert is_integer(unit_idx)
       assert is_integer(coord_idx)
-      assert unit_idx == port_idx + 1
+      assert journal_idx == port_idx + 1
+      assert recovery_idx == journal_idx + 1
+      assert unit_idx == recovery_idx + 1
       assert coord_idx == unit_idx + 1
     end
   end
