@@ -1,14 +1,29 @@
 defmodule Arbor.Orchestrator.Engine.Checkpoint do
   @moduledoc """
-  Pipeline checkpoint persistence for crash recovery.
+  Pipeline checkpoint persistence with an honest write/durability contract.
 
-  Checkpoints capture the full engine state (context, completed nodes, outcomes,
-  retries) at each node completion. Written to both BufferedStore (durable,
-  queryable) and local JSON files (backward compat, human-readable debugging).
+  Checkpoints capture engine state (context, completed nodes, outcomes, retries)
+  at each node completion. Persistence has two layers with distinct honesty
+  guarantees:
+
+  - **Injected store** (default: `Arbor.Persistence.BufferedStore` named
+    `:arbor_orchestrator_checkpoints`) — optional process-lifetime cache for
+    resume convenience. Not crash-durable by default. Use only the public
+    `Arbor.Persistence` facade for put/get/delete/list/durability_class.
+  - **Local `checkpoint.json`** — compatibility/debug artifact written with
+    atomic same-directory temp-file replacement. Never counted as the durable
+    effect journal.
+
+  Prefer `persist/3`, which returns a bounded receipt or bounded error.
+  `write/3` remains a compatibility wrapper that returns `:ok` only when every
+  required/attempted write succeeded.
 
   HMAC signing uses expanded AAD: the secret is combined with `run_id`,
   `current_node`, and `graph_hash` to prevent checkpoint replay across
   different pipelines or modified graphs.
+
+  Peer replication (when enabled) is best-effort only and is never treated as
+  durable crash recovery.
   """
 
   @type pending_intent :: %{
@@ -43,11 +58,32 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           execution_digests: %{String.t() => execution_digest()}
         }
 
+  @type bounded_receipt :: %{
+          required_key: :run_id | String.t() | nil,
+          store: :ok | :skipped | :not_attempted,
+          file: :ok | :not_attempted,
+          durable: boolean(),
+          durability_class: atom(),
+          peer_replication: :not_requested | :best_effort_started | :skipped
+        }
+
   require Logger
 
+  alias Arbor.Contracts.Persistence.Record, as: PersistenceRecord
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
-  @store_name :arbor_orchestrator_checkpoints
+  @default_store_name :arbor_orchestrator_checkpoints
+  @default_store Arbor.Persistence.BufferedStore
+  @default_collection "orchestrator_checkpoints"
+  @checkpoint_filename "checkpoint.json"
+  @max_reason_bytes 256
+
+  @durability_rank %{
+    volatile: 0,
+    process_lifetime: 1,
+    application_restart: 2,
+    node_restart: 3
+  }
 
   defstruct timestamp: "",
             run_id: nil,
@@ -147,91 +183,213 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   @internal_keys ~w(__adapted_graph__ __completed_nodes__)
 
   @doc """
-  Write checkpoint to both BufferedStore and local JSON file.
+  Persist a checkpoint with an honest bounded receipt.
 
-  The BufferedStore write provides durability across restarts.
-  The file write preserves backward compatibility and human-readable debugging.
+  Writes the optional injected store (Record envelope) and the local
+  compatibility `checkpoint.json` (atomic temp-file replace). Returns
+  `{:ok, receipt}` only when every required/attempted write succeeded;
+  otherwise `{:error, bounded_reason}` — never swallowed into `:ok`.
+
+  ## Options
+
+  - `:store` — backend module (default `BufferedStore`), or `nil` for file-only
+  - `:store_name` — store name atom (default `:arbor_orchestrator_checkpoints`)
+  - `:store_opts` — extra opts forwarded to `Arbor.Persistence.*`
+  - `:durability_class` — ceiling/intersection only (never elevates backend)
+  - `:hmac_secret` — optional HMAC secret
+  - `:replicate` — best-effort peer copy; never counted as durable
   """
-  @spec write(t(), String.t(), keyword()) :: :ok | {:error, term()}
-  def write(%__MODULE__{} = checkpoint, logs_root, opts \\ []) do
-    payload_map = serialize(checkpoint)
+  @spec persist(t(), String.t(), keyword()) ::
+          {:ok, bounded_receipt()} | {:error, term()}
+  def persist(%__MODULE__{} = checkpoint, logs_root, opts \\ []) when is_binary(logs_root) do
+    store_cfg = resolve_store_config(opts)
+    durability = durability_status(opts)
 
-    payload_map =
-      case Keyword.get(opts, :hmac_secret) do
-        nil ->
-          payload_map
+    payload_map = build_payload(checkpoint, opts)
 
-        secret ->
-          aad_opts = [
-            run_id: checkpoint.run_id,
-            current_node: checkpoint.current_node,
-            graph_hash: checkpoint.graph_hash
-          ]
+    store_result = maybe_put_store(checkpoint.run_id, payload_map, store_cfg)
+    file_result = write_to_file(payload_map, logs_root)
 
-          sign(payload_map, secret, aad_opts)
+    peer_result =
+      if Keyword.get(opts, :replicate, false) do
+        maybe_replicate_to_peer(checkpoint.run_id, payload_map, store_cfg)
+      else
+        :not_requested
       end
 
-    # Write to BufferedStore for durable persistence
-    write_to_store(checkpoint.run_id, payload_map)
+    receipt = %{
+      run_id: checkpoint.run_id,
+      store: store_result_tag(store_result),
+      file: file_result_tag(file_result),
+      durable: durability.durable == true,
+      durability_class: durability.durability_class,
+      peer_replication: peer_result
+    }
 
-    # Write to file for backward compat and debugging
-    write_to_file(payload_map, logs_root)
+    case {store_result, file_result} do
+      {{:ok, _}, :ok} ->
+        {:ok, receipt}
 
-    # Replicate to a peer node for crash recovery (ETS-only fallback)
-    if Keyword.get(opts, :replicate, false) do
-      replicate_to_peer(checkpoint.run_id, payload_map)
+      {{:ok, :skipped}, :ok} ->
+        {:ok, receipt}
+
+      {{:error, reason}, _} ->
+        {:error, bound_reason(reason)}
+
+      {_, {:error, reason}} ->
+        {:error, bound_reason(reason)}
     end
-
-    :ok
   end
 
   @doc """
-  Load checkpoint, trying BufferedStore first then falling back to file.
+  Compatibility write: returns `:ok` only when all required/attempted writes
+  succeeded. Prefer `persist/3` for a bounded receipt.
+
+  The local JSON file is a compatibility/debug artifact only — not a durable
+  effect journal. Store writes go through `Arbor.Persistence` and surface
+  failures rather than being rescued into `:ok`.
+  """
+  @spec write(t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def write(%__MODULE__{} = checkpoint, logs_root, opts \\ []) do
+    case persist(checkpoint, logs_root, opts) do
+      {:ok, _receipt} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Load checkpoint, trying the configured store first then falling back to file.
+
+  File fallback is allowed only for a genuine `{:error, :not_found}` from the
+  store. Backend outages/errors are surfaced and never masquerade as missing.
   """
   @spec load(String.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def load(path, opts \\ []) do
     hmac_secret = Keyword.get(opts, :hmac_secret)
+    store_cfg = resolve_store_config(opts)
 
-    # If a run_id is provided, try BufferedStore first
     case Keyword.get(opts, :run_id) do
       nil ->
         load_from_file(path, hmac_secret)
 
-      run_id ->
-        case load_from_store(run_id, hmac_secret) do
-          {:ok, _} = result -> result
-          {:error, _} -> load_from_file(path, hmac_secret)
+      run_id when is_binary(run_id) ->
+        case store_cfg do
+          nil ->
+            load_from_file(path, hmac_secret)
+
+          cfg ->
+            case load_from_store(run_id, hmac_secret, cfg) do
+              {:ok, _} = result ->
+                result
+
+              {:error, :not_found} ->
+                load_from_file(path, hmac_secret)
+
+              {:error, reason} ->
+                {:error, bound_reason(reason)}
+            end
         end
     end
   end
 
   @doc """
-  Delete checkpoint data from BufferedStore.
-  Called after pipeline completion for retention management.
+  Report honest durability for the configured checkpoint store.
+
+  - `durable` is true only for healthy `:application_restart` / `:node_restart`
+    backends (code-owned via `Arbor.Persistence.durability_class/3`).
+  - Default `BufferedStore` / process-lifetime and file-only modes are non-durable.
+  - A caller-supplied `:durability_class` is a ceiling/intersection only and
+    never elevates backend capability.
+  - Peer replication is never counted as durable.
   """
-  @spec cleanup(String.t()) :: :ok
-  def cleanup(run_id) when is_binary(run_id) do
-    key = store_key(run_id)
+  @spec durability_status(keyword()) :: map()
+  def durability_status(opts \\ []) do
+    store_cfg = resolve_store_config(opts)
 
-    if store_available?() do
-      Arbor.Persistence.BufferedStore.delete(key, name: @store_name)
+    case store_cfg do
+      nil ->
+        %{
+          mode: :file_only,
+          durable: false,
+          durability_class: :volatile,
+          store: nil,
+          store_name: nil,
+          backend: nil,
+          healthy: true,
+          peer_replication_durable: false,
+          last_error: nil
+        }
+
+      cfg ->
+        class = resolve_durability_class(cfg, opts)
+        healthy? = store_healthy?(cfg)
+        durable? = durable_class?(class) and healthy?
+
+        mode =
+          cond do
+            durable? -> :durable_declared
+            true -> :store_nondurable
+          end
+
+        %{
+          mode: mode,
+          durable: durable?,
+          durability_class: class,
+          store: cfg.backend,
+          store_name: cfg.name,
+          backend: inspect(cfg.backend),
+          healthy: healthy?,
+          peer_replication_durable: false,
+          last_error: nil
+        }
     end
-
-    :ok
-  rescue
-    _ -> :ok
   end
 
   @doc """
-  Delete checkpoints older than the given duration.
+  Delete checkpoint data from the configured store.
+
+  Uses the public `Arbor.Persistence` facade. Missing keys are idempotent
+  (`:ok`). Store outages are returned as bounded errors, not swallowed.
   """
-  @spec cleanup_older_than(non_neg_integer()) :: {:ok, non_neg_integer()}
-  def cleanup_older_than(max_age_seconds) do
-    cutoff = DateTime.add(DateTime.utc_now(), -max_age_seconds, :second)
-    deleted = do_cleanup_older_than(cutoff)
-    {:ok, deleted}
-  rescue
-    _ -> {:ok, 0}
+  @spec cleanup(String.t(), keyword()) :: :ok | {:error, term()}
+  def cleanup(run_id, opts \\ []) when is_binary(run_id) do
+    case resolve_store_config(opts) do
+      nil ->
+        :ok
+
+      cfg ->
+        key = store_key(run_id)
+
+        case store_delete(cfg, key) do
+          :ok -> :ok
+          {:error, :not_found} -> :ok
+          {:error, reason} -> {:error, bound_reason(reason)}
+        end
+    end
+  end
+
+  @doc """
+  Delete checkpoints older than the given duration from the configured store.
+
+  Returns `{:ok, deleted_count}` or a bounded `{:error, reason}` on list/get
+  outages. Does not swallow backend failures into a zero count.
+  """
+  @spec cleanup_older_than(non_neg_integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def cleanup_older_than(max_age_seconds, opts \\ [])
+      when is_integer(max_age_seconds) and max_age_seconds >= 0 do
+    case resolve_store_config(opts) do
+      nil ->
+        {:ok, 0}
+
+      cfg ->
+        cutoff = DateTime.add(DateTime.utc_now(), -max_age_seconds, :second)
+
+        case do_cleanup_older_than(cfg, cutoff) do
+          {:ok, count} -> {:ok, count}
+          {:error, reason} -> {:error, bound_reason(reason)}
+        end
+    end
   end
 
   @doc """
@@ -288,8 +446,26 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   end
 
   # ---------------------------------------------------------------------------
-  # Private — serialization
+  # Private — payload / serialization
   # ---------------------------------------------------------------------------
+
+  defp build_payload(%__MODULE__{} = checkpoint, opts) do
+    payload_map = serialize(checkpoint)
+
+    case Keyword.get(opts, :hmac_secret) do
+      nil ->
+        payload_map
+
+      secret ->
+        aad_opts = [
+          run_id: checkpoint.run_id,
+          current_node: checkpoint.current_node,
+          graph_hash: checkpoint.graph_hash
+        ]
+
+        sign(payload_map, secret, aad_opts)
+    end
+  end
 
   defp serialize(%__MODULE__{} = checkpoint) do
     encoded_outcomes =
@@ -363,60 +539,300 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   defp maybe_encode_pipeline_started_at(map), do: map
 
   # ---------------------------------------------------------------------------
-  # Private — store operations
+  # Private — store config / durability
   # ---------------------------------------------------------------------------
 
-  defp write_to_store(nil, _payload_map), do: :ok
+  defp resolve_store_config(opts) do
+    backend =
+      case Keyword.fetch(opts, :store) do
+        :error -> @default_store
+        {:ok, nil} -> nil
+        {:ok, backend} when is_atom(backend) -> backend
+        {:ok, _} -> nil
+      end
 
-  defp write_to_store(run_id, payload_map) do
-    if store_available?() do
-      key = store_key(run_id)
-      Arbor.Persistence.BufferedStore.put(key, payload_map, name: @store_name)
+    case backend do
+      nil ->
+        nil
+
+      mod ->
+        %{
+          backend: mod,
+          name: Keyword.get(opts, :store_name, @default_store_name),
+          opts: Keyword.get(opts, :store_opts, [])
+        }
     end
-
-    :ok
-  rescue
-    _ -> :ok
   end
 
-  defp load_from_store(run_id, hmac_secret) do
-    key = store_key(run_id)
+  defp resolve_durability_class(nil, _opts), do: :volatile
 
-    if store_available?() do
-      case Arbor.Persistence.BufferedStore.get(key, name: @store_name) do
-        {:ok, data} when is_map(data) ->
-          # Data from store may have atom or string keys
-          decoded = normalize_keys(data)
+  defp resolve_durability_class(cfg, opts) do
+    capability = backend_durability_capability(cfg)
+    ceiling = Keyword.get(opts, :durability_class)
 
-          with {:ok, decoded} <- maybe_verify(decoded, hmac_secret) do
-            deserialize(decoded)
-          end
+    case ceiling do
+      nil ->
+        capability
 
-        _ ->
-          {:error, :not_found}
-      end
-    else
-      {:error, :store_unavailable}
+      class when is_map_key(@durability_rank, class) ->
+        intersect_durability_class(capability, class)
+
+      _invalid ->
+        # Invalid ceiling fails closed: cannot raise capability.
+        intersect_durability_class(capability, :process_lifetime)
+    end
+  end
+
+  defp backend_durability_capability(%{backend: backend, name: name, opts: store_opts}) do
+    case Arbor.Persistence.durability_class(name, backend, store_opts) do
+      {:ok, class} when is_map_key(@durability_rank, class) ->
+        class
+
+      {:ok, _invalid} ->
+        :process_lifetime
+
+      {:error, :unsupported} ->
+        :process_lifetime
+
+      {:error, _} ->
+        :process_lifetime
     end
   rescue
-    _ -> {:error, :store_unavailable}
+    _ -> :process_lifetime
+  catch
+    :exit, _ -> :process_lifetime
+  end
+
+  defp intersect_durability_class(a, b) do
+    rank_a = Map.fetch!(@durability_rank, a)
+    rank_b = Map.fetch!(@durability_rank, b)
+
+    if rank_a <= rank_b, do: a, else: b
+  end
+
+  defp durable_class?(class) when class in [:application_restart, :node_restart], do: true
+  defp durable_class?(_), do: false
+
+  defp store_healthy?(cfg) when is_map(cfg) do
+    # Probe via the public facade list path so process-down and injected
+    # backend outages report unhealthy (and therefore non-durable).
+    case store_list(cfg) do
+      {:ok, _} -> true
+      _ -> false
+    end
+  end
+
+  defp store_healthy?(_), do: false
+
+  # ---------------------------------------------------------------------------
+  # Private — store operations (public Persistence facade only)
+  # ---------------------------------------------------------------------------
+
+  defp maybe_put_store(nil, _payload_map, _cfg), do: {:ok, :skipped}
+  defp maybe_put_store(_run_id, _payload_map, nil), do: {:ok, :skipped}
+
+  defp maybe_put_store(run_id, payload_map, cfg) when is_binary(run_id) do
+    key = store_key(run_id)
+
+    record =
+      PersistenceRecord.new(key, payload_map,
+        metadata: %{
+          "collection" => @default_collection,
+          "type" => "engine_checkpoint"
+        }
+      )
+
+    case store_put(cfg, key, record) do
+      :ok -> {:ok, :written}
+      {:error, reason} -> {:error, {:store_put_failed, reason}}
+    end
+  end
+
+  defp store_put(%{backend: backend, name: name, opts: store_opts}, key, value) do
+    case Arbor.Persistence.put(name, backend, key, value, store_opts) do
+      :ok -> :ok
+      {:error, reason} -> {:error, bound_reason(reason)}
+      other -> {:error, bound_reason({:unexpected_put_result, other})}
+    end
+  rescue
+    e ->
+      {:error, bound_exception(e)}
+  catch
+    :exit, reason ->
+      {:error, bound_exit(reason)}
+  end
+
+  defp store_get(%{backend: backend, name: name, opts: store_opts}, key) do
+    case Arbor.Persistence.get(name, backend, key, store_opts) do
+      {:ok, value} ->
+        {:ok, value}
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, {:store_unavailable, bound_reason(reason)}}
+
+      other ->
+        {:error, {:store_unavailable, bound_reason({:unexpected_get_result, other})}}
+    end
+  rescue
+    e ->
+      {:error, {:store_unavailable, bound_exception(e)}}
+  catch
+    :exit, reason ->
+      {:error, {:store_unavailable, bound_exit(reason)}}
+  end
+
+  defp store_delete(%{backend: backend, name: name, opts: store_opts}, key) do
+    case Arbor.Persistence.delete(name, backend, key, store_opts) do
+      :ok -> :ok
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, reason} -> {:error, {:store_delete_failed, bound_reason(reason)}}
+      other -> {:error, {:store_delete_failed, bound_reason(other)}}
+    end
+  rescue
+    e ->
+      {:error, {:store_delete_failed, bound_exception(e)}}
+  catch
+    :exit, reason ->
+      {:error, {:store_delete_failed, bound_exit(reason)}}
+  end
+
+  defp store_list(%{backend: backend, name: name, opts: store_opts}) do
+    case Arbor.Persistence.list(name, backend, store_opts) do
+      {:ok, keys} when is_list(keys) ->
+        {:ok, keys}
+
+      {:error, reason} ->
+        {:error, {:store_list_failed, bound_reason(reason)}}
+
+      other ->
+        {:error, {:store_list_failed, bound_reason(other)}}
+    end
+  rescue
+    e ->
+      {:error, {:store_list_failed, bound_exception(e)}}
+  catch
+    :exit, reason ->
+      {:error, {:store_list_failed, bound_exit(reason)}}
+  end
+
+  defp load_from_store(run_id, hmac_secret, cfg) do
+    key = store_key(run_id)
+
+    case store_get(cfg, key) do
+      {:ok, value} ->
+        with {:ok, data} <- unwrap_store_value(value),
+             decoded <- normalize_keys(data),
+             {:ok, decoded} <- maybe_verify(decoded, hmac_secret) do
+          deserialize(decoded)
+        end
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Postgres QueryableStore and Record-aware backends return %Record{}.
+  # Legacy raw-map payloads remain readable for compatibility.
+  defp unwrap_store_value(%PersistenceRecord{data: data}) when is_map(data), do: {:ok, data}
+
+  defp unwrap_store_value(%{__struct__: mod, data: data}) when is_map(data) do
+    if mod == PersistenceRecord do
+      {:ok, data}
+    else
+      unwrap_legacy_map(%{data: data})
+    end
+  end
+
+  defp unwrap_store_value(value) when is_map(value), do: unwrap_legacy_map(value)
+
+  defp unwrap_store_value(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, map} when is_map(map) -> unwrap_legacy_map(map)
+      _ -> {:error, :invalid_checkpoint_payload}
+    end
+  end
+
+  defp unwrap_store_value(_), do: {:error, :invalid_checkpoint_payload}
+
+  defp unwrap_legacy_map(map) when is_map(map) do
+    cond do
+      # Serialized Record envelope (string keys)
+      is_map(Map.get(map, "data")) and
+          (Map.has_key?(map, "key") or Map.has_key?(map, "id") or Map.has_key?(map, "revision")) ->
+        {:ok, Map.get(map, "data")}
+
+      is_map(Map.get(map, :data)) and
+          (Map.has_key?(map, :key) or Map.has_key?(map, :id) or Map.has_key?(map, :revision)) ->
+        {:ok, Map.get(map, :data)}
+
+      # Legacy raw checkpoint payload
+      true ->
+        {:ok, map}
+    end
   end
 
   defp store_key(run_id), do: "checkpoint:#{run_id}"
 
-  defp store_available? do
-    Process.whereis(@store_name) != nil
-  end
+  defp store_result_tag({:ok, :skipped}), do: :skipped
+  defp store_result_tag({:ok, :written}), do: :ok
+  defp store_result_tag({:error, _}), do: :error
+
+  defp file_result_tag(:ok), do: :ok
+  defp file_result_tag({:error, _}), do: :error
 
   # ---------------------------------------------------------------------------
-  # Private — file operations
+  # Private — file operations (compat/debug only; not durable journal)
   # ---------------------------------------------------------------------------
 
   defp write_to_file(payload_map, logs_root) do
-    with :ok <- File.mkdir_p(logs_root),
-         {:ok, payload} <- Jason.encode(payload_map, pretty: true) do
-      File.write(Path.join(logs_root, "checkpoint.json"), payload)
+    path = Path.join(logs_root, @checkpoint_filename)
+    tmp = Path.join(logs_root, tmp_checkpoint_name())
+
+    try do
+      with :ok <- File.mkdir_p(logs_root),
+           {:ok, payload} <- Jason.encode(payload_map, pretty: true),
+           :ok <- File.write(tmp, payload),
+           :ok <- File.rename(tmp, path) do
+        :ok
+      else
+        {:error, reason} ->
+          cleanup_temp_file(tmp)
+          cleanup_temp_globs(logs_root)
+          {:error, {:file_write_failed, bound_reason(reason)}}
+      end
+    rescue
+      e ->
+        cleanup_temp_file(tmp)
+        cleanup_temp_globs(logs_root)
+        {:error, {:file_write_failed, bound_exception(e)}}
     end
+  end
+
+  defp tmp_checkpoint_name do
+    "#{@checkpoint_filename}.#{System.unique_integer([:positive])}.#{:erlang.phash2(self())}.tmp"
+  end
+
+  defp cleanup_temp_file(tmp) when is_binary(tmp) do
+    _ = File.rm(tmp)
+    :ok
+  end
+
+  defp cleanup_temp_file(_), do: :ok
+
+  defp cleanup_temp_globs(logs_root) when is_binary(logs_root) do
+    pattern = Path.join(logs_root, "#{@checkpoint_filename}.*.tmp")
+
+    for path <- Path.wildcard(pattern) do
+      _ = File.rm(path)
+    end
+
+    :ok
   end
 
   defp load_from_file(path, hmac_secret) do
@@ -424,6 +840,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
          {:ok, decoded} <- Jason.decode(payload),
          {:ok, decoded} <- maybe_verify(decoded, hmac_secret) do
       deserialize(decoded)
+    else
+      {:error, reason} -> {:error, bound_reason(reason)}
+      other -> {:error, bound_reason(other)}
     end
   end
 
@@ -612,40 +1031,64 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   # Private — TTL cleanup
   # ---------------------------------------------------------------------------
 
-  defp do_cleanup_older_than(cutoff) do
-    if store_available?() do
-      case Arbor.Persistence.BufferedStore.list(name: @store_name) do
-        {:ok, keys} ->
-          checkpoint_keys = Enum.filter(keys, &String.starts_with?(&1, "checkpoint:"))
+  defp do_cleanup_older_than(cfg, cutoff) do
+    case store_list(cfg) do
+      {:ok, keys} ->
+        checkpoint_keys = Enum.filter(keys, &String.starts_with?(&1, "checkpoint:"))
 
-          Enum.count(checkpoint_keys, fn key ->
-            case Arbor.Persistence.BufferedStore.get(key, name: @store_name) do
-              {:ok, data} when is_map(data) ->
-                ts = Map.get(data, "timestamp") || Map.get(data, :timestamp)
+        result =
+          Enum.reduce_while(checkpoint_keys, {:ok, 0}, fn key, {:ok, deleted} ->
+            case maybe_delete_if_older(cfg, key, cutoff) do
+              :deleted ->
+                {:cont, {:ok, deleted + 1}}
 
-                case parse_timestamp(ts) do
-                  {:ok, dt} ->
-                    if DateTime.compare(dt, cutoff) == :lt do
-                      Arbor.Persistence.BufferedStore.delete(key, name: @store_name)
-                      true
-                    else
-                      false
-                    end
+              :kept ->
+                {:cont, {:ok, deleted}}
 
-                  _ ->
-                    false
-                end
-
-              _ ->
-                false
+              {:error, reason} ->
+                {:halt, {:error, reason}}
             end
           end)
 
-        _ ->
-          0
-      end
-    else
-      0
+        result
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp maybe_delete_if_older(cfg, key, cutoff) do
+    case store_get(cfg, key) do
+      {:ok, value} ->
+        case unwrap_store_value(value) do
+          {:ok, data} when is_map(data) ->
+            ts = Map.get(data, "timestamp") || Map.get(data, :timestamp)
+
+            case parse_timestamp(ts) do
+              {:ok, dt} ->
+                if DateTime.compare(dt, cutoff) == :lt do
+                  case store_delete(cfg, key) do
+                    :ok -> :deleted
+                    {:error, :not_found} -> :deleted
+                    {:error, reason} -> {:error, reason}
+                  end
+                else
+                  :kept
+                end
+
+              _ ->
+                :kept
+            end
+
+          _ ->
+            :kept
+        end
+
+      {:error, :not_found} ->
+        :kept
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -661,40 +1104,55 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
   defp parse_timestamp(_), do: {:error, :invalid}
 
-  # Replicate checkpoint data to one peer node asynchronously.
-  # Used in ETS-only mode for crash recovery — writes to the peer's BufferedStore.
-  # In shared-Postgres mode this is redundant (same DB), but harmless.
-  defp replicate_to_peer(nil, _payload_map), do: :ok
+  # ---------------------------------------------------------------------------
+  # Private — best-effort peer replication (never durable)
+  # ---------------------------------------------------------------------------
 
-  defp replicate_to_peer(run_id, payload_map) do
+  # Best-effort peer copy for multi-node convenience only. Failures are logged
+  # and never counted toward durable status or persist success.
+  defp maybe_replicate_to_peer(nil, _payload_map, _cfg), do: :skipped
+  defp maybe_replicate_to_peer(_run_id, _payload_map, nil), do: :skipped
+
+  defp maybe_replicate_to_peer(run_id, payload_map, cfg) do
     peers = Node.list()
 
-    if peers != [] do
-      # Pick a peer, preferring one in the same trust zone
+    if peers == [] do
+      :skipped
+    else
       peer = select_replication_peer(peers)
       key = store_key(run_id)
-      json = Jason.encode!(payload_map)
 
-      # Async replication — don't block the engine loop
+      record =
+        PersistenceRecord.new(key, payload_map,
+          metadata: %{
+            "collection" => @default_collection,
+            "type" => "engine_checkpoint"
+          }
+        )
+
+      name = cfg.name
+      backend = cfg.backend
+      store_opts = cfg.opts
+
       Task.start(fn ->
         try do
           :erpc.call(
             peer,
-            Arbor.Persistence.BufferedStore,
+            Arbor.Persistence,
             :put,
-            [key, json, [name: @store_name]],
+            [name, backend, key, record, store_opts],
             5_000
           )
         catch
           kind, reason ->
             Logger.debug(
-              "[Checkpoint] Peer replication to #{peer} failed: #{inspect(kind)}: #{inspect(reason)}"
+              "[Checkpoint] Peer replication to #{peer} failed (best-effort, non-durable): #{inspect(kind)}: #{inspect(reason, limit: 50)}"
             )
         end
       end)
-    end
 
-    :ok
+      :best_effort_started
+    end
   end
 
   # Select a peer for checkpoint replication, preferring same trust zone.
@@ -721,4 +1179,52 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   rescue
     _ -> List.first(peers)
   end
+
+  # ---------------------------------------------------------------------------
+  # Private — bounded public error terms
+  # ---------------------------------------------------------------------------
+
+  defp bound_reason(reason) when is_atom(reason), do: reason
+
+  defp bound_reason(reason) when is_binary(reason) do
+    truncate_bytes(reason)
+  end
+
+  defp bound_reason(reason) when is_integer(reason) or is_float(reason) or is_boolean(reason) do
+    reason
+  end
+
+  defp bound_reason(%{__exception__: true} = exception) do
+    {:exception, truncate_bytes(Exception.message(exception))}
+  end
+
+  defp bound_reason({tag, inner}) when is_atom(tag) do
+    {tag, bound_reason(inner)}
+  end
+
+  defp bound_reason(other) do
+    truncate_bytes(inspect(other, limit: 20, printable_limit: 64))
+  end
+
+  defp bound_exception(exception) do
+    {:exception, truncate_bytes(Exception.message(exception))}
+  end
+
+  defp bound_exit({:noproc, _}) do
+    :store_unavailable
+  end
+
+  defp bound_exit(reason) do
+    {:exit, truncate_bytes(inspect(reason, limit: 20, printable_limit: 64))}
+  end
+
+  defp truncate_bytes(bin) when is_binary(bin) do
+    if byte_size(bin) <= @max_reason_bytes do
+      bin
+    else
+      binary_part(bin, 0, @max_reason_bytes)
+    end
+  end
+
+  defp truncate_bytes(other), do: truncate_bytes(inspect(other, limit: 20))
 end
