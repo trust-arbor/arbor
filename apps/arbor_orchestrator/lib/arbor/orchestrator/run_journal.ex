@@ -41,12 +41,21 @@ defmodule Arbor.Orchestrator.RunJournal do
   surface journal unavailability as `{:error, :journal_unavailable}`
   rather than `[]` / `nil` / `:ok`.
 
-  ## Distributed claims (L1/L2 honesty)
+  ## Distributed claims (L4B fenced recovery)
 
-  Local GenServer claims are atomic. There is **no** durable CAS/fencing
-  primitive yet (L4). Records owned or sourced by another node, or with
-  ambiguous ownership after rehydrate, fail closed on claim until L4 adds
-  a fenced backend claim.
+  Local GenServer claims remain atomic for unfenced backends (including
+  healthy `:application_restart` without linearizable CAS). When
+  `durability_status/0` reports `fenced_claim: true` (healthy crash-durable
+  backend that exports public `compare_and_swap/4`), claims CAS the
+  canonical structured `PersistenceRecord` (generation + revision) so
+  concurrent journals sharing the backend elect exactly one winner.
+
+  `cross_node_atomic_recovery: true` only when that fenced path is active
+  and the effective durability class is `:node_restart`. Remote-source or
+  remote-owned interrupted rows are claimable only on that path. Callers
+  cannot claim on behalf of an arbitrary remote node — `claiming_node`
+  must be this journal's local node. Unstructured/unversioned durable
+  values and CAS anomalies fail closed.
   """
 
   use GenServer
@@ -162,9 +171,13 @@ defmodule Arbor.Orchestrator.RunJournal do
   Atomically claim an `:interrupted` pipeline for recovery.
 
   Only interrupted records are claimable. On success status becomes
-  `:recovering` and `owner_node` is set. Durable claim writes are
-  backend-first: backend failure returns error and leaves the record
-  interrupted (retryable after storage recovers).
+  `:recovering` and `owner_node` is set to this journal's local node
+  (`claiming_node` must match that local node).
+
+  Unfenced backends use backend-first put under the local GenServer lock.
+  Fenced backends (`fenced_claim: true`) obtain the canonical structured
+  `PersistenceRecord` and CAS generation+revision; a conflict refreshes
+  hot state from durable authority without fabricating local ownership.
   """
   @spec claim_for_recovery(String.t(), node(), keyword()) ::
           {:ok, Record.t()} | {:error, term()}
@@ -570,40 +583,7 @@ defmodule Arbor.Orchestrator.RunJournal do
   end
 
   def handle_call({:claim_for_recovery, run_id, claiming_node}, _from, state) do
-    {reply, state} =
-      case lookup_record(state.table, run_id) do
-        nil ->
-          {{:error, :not_found}, state}
-
-        %Record{} = record ->
-          case record.status do
-            :interrupted ->
-              case claim_eligibility(record, claiming_node, state) do
-                :ok ->
-                  updated = %Record{
-                    record
-                    | owner_node: claiming_node,
-                      status: :recovering
-                  }
-
-                  case write_record(updated, state) do
-                    {:ok, new_state} ->
-                      {{:ok, updated}, new_state}
-
-                    {{:error, reason}, new_state} ->
-                      # Backend-first: prior interrupted record still in hot table.
-                      {{:error, reason}, new_state}
-                  end
-
-                {:error, reason} ->
-                  {{:error, reason}, state}
-              end
-
-            other ->
-              {{:error, {:invalid_status, other}}, state}
-          end
-      end
-
+    {reply, state} = do_claim_for_recovery(run_id, claiming_node, state)
     {:reply, reply, state}
   end
 
@@ -919,43 +899,289 @@ defmodule Arbor.Orchestrator.RunJournal do
     owner_remote? or source_remote?
   end
 
-  # Local GenServer claim only — no cross-node CAS. Fail closed for remote or
-  # ambiguous ownership until L4 adds a fenced backend claim.
+  # Claim eligibility for interrupted rows.
   #
-  # When a durable backend is configured, also reject source/owner-ambiguous
-  # rows (including empty owner with remote source). Local ETS-only rows may
-  # remain locally claimable.
+  # - claiming_node must always be this journal's local node (no claim-on-behalf).
+  # - Unfenced / application-restart paths fail closed for remote owner/source.
+  # - node_restart + CAS (`cross_node_atomic_recovery`) may claim remote-source
+  #   or remote-owned interrupted rows via durable fencing.
+  # - Backed rows missing both owner and source remain ambiguous forever.
   defp claim_eligibility(%Record{} = record, claiming_node, state) do
     local = to_string(state.local_node)
     claimer = to_string(claiming_node)
     backed? = state.durable_mode in [:backed, :degraded] and not is_nil(state.backend)
+    cross_node? = cross_node_atomic_recovery_enabled?(state)
 
     cond do
-      # Another node already owns the claim slot.
-      not is_nil(record.owner_node) and to_string(record.owner_node) != claimer ->
-        {:error, :remote_or_foreign_claim}
-
-      # Source belongs to another node and owner is empty → always fail closed.
-      is_nil(record.owner_node) and not is_nil(record.source_node) and
-        to_string(record.source_node) != local and to_string(record.source_node) != claimer ->
-        {:error, :ambiguous_remote_row}
-
-      # Backed store: fail closed when owner/source metadata is ambiguous
-      # (missing both, or source differs from local without owner proof).
-      backed? and is_nil(record.owner_node) and is_nil(record.source_node) ->
-        {:error, :ambiguous_remote_row}
-
-      backed? and not is_nil(record.source_node) and to_string(record.source_node) != local and
-          is_nil(record.owner_node) ->
-        {:error, :ambiguous_remote_row}
-
-      # Claiming from a non-local node through this journal is not fenced.
+      # Never allow a caller to claim as an arbitrary remote node.
       claimer != local ->
         {:error, :cross_node_claim_unfenced}
+
+      # Foreign owner: only the distributed fenced path may take over.
+      not is_nil(record.owner_node) and to_string(record.owner_node) != claimer and
+          not cross_node? ->
+        {:error, :remote_or_foreign_claim}
+
+      # Remote source with empty owner — fail closed unless distributed fencing.
+      is_nil(record.owner_node) and not is_nil(record.source_node) and
+        to_string(record.source_node) != local and to_string(record.source_node) != claimer and
+          not cross_node? ->
+        {:error, :ambiguous_remote_row}
+
+      # Backed store with no ownership provenance at all remains ambiguous.
+      backed? and is_nil(record.owner_node) and is_nil(record.source_node) ->
+        {:error, :ambiguous_remote_row}
 
       true ->
         :ok
     end
+  end
+
+  defp do_claim_for_recovery(run_id, claiming_node, state) do
+    case lookup_record(state.table, run_id) do
+      nil ->
+        {{:error, :not_found}, state}
+
+      %Record{} = record ->
+        case record.status do
+          :interrupted ->
+            case claim_eligibility(record, claiming_node, state) do
+              :ok ->
+                if fenced_claim_enabled?(state) do
+                  fenced_claim_for_recovery(record, claiming_node, state)
+                else
+                  local_claim_for_recovery(record, claiming_node, state)
+                end
+
+              {:error, reason} ->
+                {{:error, reason}, state}
+            end
+
+          other ->
+            {{:error, {:invalid_status, other}}, state}
+        end
+    end
+  end
+
+  defp local_claim_for_recovery(%Record{} = record, claiming_node, state) do
+    updated = %Record{record | owner_node: claiming_node, status: :recovering}
+
+    case write_record(updated, state) do
+      {:ok, new_state} ->
+        {{:ok, updated}, new_state}
+
+      {{:error, reason}, new_state} ->
+        # Backend-first: prior interrupted record still in hot table.
+        {{:error, reason}, new_state}
+    end
+  end
+
+  # Fenced claim: durable structured PersistenceRecord is the authority.
+  # CAS generation+revision elects exactly one concurrent winner.
+  defp fenced_claim_for_recovery(%Record{} = hot_record, claiming_node, state) do
+    run_id = hot_record.run_id
+
+    case durable_get_structured_record(run_id, state) do
+      {:ok, %PersistenceRecord{} = expected} ->
+        case decode_lifecycle_from_persistence(expected) do
+          {:ok, %Record{status: :interrupted} = durable_lifecycle} ->
+            case claim_eligibility(durable_lifecycle, claiming_node, state) do
+              :ok ->
+                claimed = %Record{
+                  durable_lifecycle
+                  | owner_node: claiming_node,
+                    status: :recovering
+                }
+
+                case cas_lifecycle_claim(expected, claimed, state) do
+                  {:ok, %Record{} = stored_lifecycle, new_state} ->
+                    hot_insert(new_state.table, stored_lifecycle)
+                    {{:ok, stored_lifecycle}, new_state}
+
+                  {:error, :conflict, new_state} ->
+                    refresh_hot_after_claim_conflict(run_id, new_state)
+
+                  {:error, reason, new_state} ->
+                    {{:error, reason}, new_state}
+                end
+
+              {:error, reason} ->
+                # Durable authority disagrees with hot eligibility — refresh hot.
+                hot_insert(state.table, durable_lifecycle)
+                {{:error, reason}, state}
+            end
+
+          {:ok, %Record{status: other} = durable_lifecycle} ->
+            hot_insert(state.table, durable_lifecycle)
+            {{:error, {:invalid_status, other}}, state}
+
+          {:error, reason} ->
+            {{:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  defp cas_lifecycle_claim(%PersistenceRecord{} = expected, %Record{} = claimed, state) do
+    case Adapter.to_durable_map(claimed) do
+      {:ok, payload} ->
+        replacement =
+          PersistenceRecord.new(expected.key, payload,
+            metadata: expected.metadata || %{"collection" => state.collection}
+          )
+
+        backend_opts = Map.get(state, :backend_opts, [])
+
+        case Arbor.Persistence.compare_and_swap(
+               state.store_name,
+               state.backend,
+               expected.key,
+               {:value, expected},
+               replacement,
+               backend_opts
+             ) do
+          {:ok, %PersistenceRecord{} = stored} ->
+            case decode_lifecycle_from_persistence(stored) do
+              {:ok, %Record{} = lifecycle} ->
+                {:ok, lifecycle,
+                 %{state | last_write_error: nil, durable_error: nil, durable_mode: :backed}}
+
+              {:error, reason} ->
+                {:error, {:durable_decode_failed, reason}, state}
+            end
+
+          {:error, :conflict} ->
+            {:error, :conflict, state}
+
+          {:error, :unsupported} ->
+            {:error, :fenced_claim_unsupported, state}
+
+          {:error, reason} ->
+            Logger.warning(
+              "[RunJournal] fenced claim CAS failed for #{claimed.run_id}: #{inspect(reason)}"
+            )
+
+            {:error, {:durable_write_failed, reason},
+             %{
+               state
+               | last_write_error: reason,
+                 durable_error: reason,
+                 durable_mode: :degraded
+             }}
+
+          other ->
+            {:error, {:unexpected_cas_result, other}, state}
+        end
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  rescue
+    e ->
+      reason = Exception.message(e)
+
+      {:error, {:durable_write_failed, reason},
+       %{
+         state
+         | last_write_error: reason,
+           durable_error: reason,
+           durable_mode: :degraded
+       }}
+  catch
+    :exit, reason ->
+      {:error, {:durable_write_failed, reason},
+       %{
+         state
+         | last_write_error: reason,
+           durable_error: reason,
+           durable_mode: :degraded
+       }}
+  end
+
+  defp refresh_hot_after_claim_conflict(run_id, state) do
+    case durable_get_structured_record(run_id, state) do
+      {:ok, %PersistenceRecord{} = pr} ->
+        case decode_lifecycle_from_persistence(pr) do
+          {:ok, %Record{} = lifecycle} ->
+            hot_insert(state.table, lifecycle)
+            {{:error, :claim_conflict}, state}
+
+          {:error, reason} ->
+            {{:error, {:claim_conflict, reason}}, state}
+        end
+
+      {:error, reason} ->
+        {{:error, {:claim_conflict, reason}}, state}
+    end
+  end
+
+  # Structured Record CAS requires a versioned PersistenceRecord. Legacy plain
+  # maps / gen0 placeholders are not distributed-fenced current records.
+  defp durable_get_structured_record(key, %{backend: backend, store_name: store_name} = state)
+       when not is_nil(backend) do
+    backend_opts = Map.get(state, :backend_opts, [])
+
+    case Arbor.Persistence.get(store_name, backend, key, backend_opts) do
+      {:ok, %PersistenceRecord{generation: gen, revision: rev} = record}
+      when is_integer(gen) and gen >= 1 and is_integer(rev) and rev >= 1 ->
+        if is_binary(record.key) and record.key == key do
+          {:ok, record}
+        else
+          {:error, :unstructured_durable_record}
+        end
+
+      {:ok, %PersistenceRecord{}} ->
+        {:error, :unfenced_durable_record}
+
+      {:ok, _other} ->
+        {:error, :unstructured_durable_record}
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, {:durable_unavailable, reason}}
+
+      other ->
+        {:error, {:unexpected_durable_value, other}}
+    end
+  rescue
+    e ->
+      {:error, {:durable_unavailable, Exception.message(e)}}
+  catch
+    :exit, reason ->
+      {:error, {:durable_unavailable, reason}}
+  end
+
+  defp durable_get_structured_record(_key, _state), do: {:error, :not_found}
+
+  defp decode_lifecycle_from_persistence(%PersistenceRecord{data: data}) when is_map(data) do
+    record = Adapter.from_durable_map(data)
+
+    case Adapter.validate_and_normalize_record(record) do
+      {:ok, %Record{} = validated} ->
+        # Runtime-only PID must not re-enter hot state from durable authority.
+        {:ok, %Record{validated | spawning_pid: nil}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp decode_lifecycle_from_persistence(_), do: {:error, :unstructured_durable_record}
+
+  defp fenced_claim_enabled?(state) do
+    class = Map.get(state, :durability_class, :volatile)
+    backend = state.backend
+
+    durable_class?(class) and healthy_backend?(state) and not is_nil(backend) and
+      Arbor.Persistence.supports_compare_and_swap?(backend)
+  end
+
+  defp cross_node_atomic_recovery_enabled?(state) do
+    fenced_claim_enabled?(state) and Map.get(state, :durability_class) == :node_restart
   end
 
   # Fresh admission + first publish in one owner critical section.
@@ -1764,6 +1990,8 @@ defmodule Arbor.Orchestrator.RunJournal do
           :ets_only
       end
 
+    fenced? = fenced_claim_enabled?(state)
+
     %{
       mode: mode,
       durable: durable?,
@@ -1771,9 +1999,8 @@ defmodule Arbor.Orchestrator.RunJournal do
       backend: state.backend && inspect(state.backend),
       store: state.store_name,
       last_error: state.last_write_error || state.durable_error,
-      # Explicit: no cross-node CAS / fencing in L1/L2.
-      fenced_claim: false,
-      cross_node_atomic_recovery: false
+      fenced_claim: fenced?,
+      cross_node_atomic_recovery: fenced? and class == :node_restart
     }
   end
 

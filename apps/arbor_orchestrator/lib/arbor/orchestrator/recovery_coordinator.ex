@@ -18,21 +18,26 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   the run stays `:interrupted` and recovery reports a retryable
   `:authentication_unavailable` outcome — no claim, no terminalization.
 
-  Every recovery path **claims** atomically before resume (local GenServer
-  claim only — L4 will add fenced cross-node CAS). Task error/crash leaves
-  an explicit interrupted or failed lifecycle state — never stranded
-  `:recovering`. Settle results are checked; retryable failures return to
-  `:interrupted`.
+  Every recovery path **claims** atomically before resume. Local journal
+  claims are GenServer-atomic; fenced backends CAS structured durable
+  records (`RunJournal` `fenced_claim` / `cross_node_atomic_recovery`).
+  Task error/crash leaves an explicit interrupted or failed lifecycle
+  state — never stranded `:recovering`. Settle results are checked;
+  retryable failures return to `:interrupted`.
 
   ## Automatic crash recovery vs manual resume
 
-  Automatic discovery / orphan / stale recovery runs **only** when
+  Automatic **local boot** discovery / stale recovery runs **only** when
   `RunJournal.durability_status/0` reports a healthy crash-durable class
   (`:application_restart` or `:node_restart` with `durable: true`). A
   volatile or `:process_lifetime` backend may still support **explicit
   manual resume** while the journal is alive, but is never treated as
-  automatic crash recovery. There is no force flag and no module-name
-  heuristic — classification is honest durability status only.
+  automatic crash recovery.
+
+  **Nodedown / remote-owner** recovery is inactive unless
+  `cross_node_atomic_recovery: true` (healthy `:node_restart` backend with
+  linearizable CAS). There is no force flag and no module-name heuristic —
+  classification is honest durability status only.
   """
 
   use GenServer
@@ -209,6 +214,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
       durability_class: Map.get(durability, :durability_class),
       durable: Map.get(durability, :durable, false),
       durability_mode: Map.get(durability, :mode),
+      fenced_claim: Map.get(durability, :fenced_claim, false) == true,
+      cross_node_atomic_recovery: Map.get(durability, :cross_node_atomic_recovery, false) == true,
       recovering: map_size(state.recovering),
       recovered: length(state.recovered),
       failed: length(state.failed),
@@ -400,7 +407,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   end
 
   def handle_info({:nodedown, dead_node}, state) do
-    if automatic_recovery_active?(state) do
+    # Remote-owner recovery requires node-restart + linearizable CAS fencing.
+    # Local application-restart discovery remains on the boot path only.
+    if automatic_recovery_active?(state) and cross_node_atomic_recovery?(state) do
       Logger.info(
         "[RecoveryCoordinator] Node #{dead_node} went down, scanning for orphaned pipelines"
       )
@@ -414,11 +423,36 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         )
 
         # Only mark interrupted here; atomic claim happens in attempt_recovery.
+        # Never enqueue a fabricated interrupted candidate when the mutation fails.
         pending_orphans =
-          Enum.map(orphaned, fn candidate ->
-            mark_interrupted_entry(candidate, jopts)
-            %Record{} = rec = candidate.record
-            %{candidate | record: %{rec | status: :interrupted}}
+          Enum.flat_map(orphaned, fn candidate ->
+            case mark_interrupted_entry(candidate, jopts) do
+              :ok ->
+                %Record{} = rec = candidate.record
+
+                [
+                  %{
+                    candidate
+                    | record: %Record{rec | status: :interrupted, owner_node: nil}
+                  }
+                ]
+
+              {:error, reason} ->
+                Logger.warning(
+                  "[RecoveryCoordinator] mark_interrupted failed for #{candidate.record.run_id}: " <>
+                    inspect(reason) <> "; not enqueueing fabricated interrupted candidate"
+                )
+
+                []
+
+              other ->
+                Logger.warning(
+                  "[RecoveryCoordinator] unexpected mark_interrupted result for " <>
+                    "#{candidate.record.run_id}: #{inspect(other)}; not enqueueing"
+                )
+
+                []
+            end
           end)
 
         if pending_orphans != [] do
@@ -474,14 +508,32 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
             owner_connected = MapSet.member?(connected, entry.owner_node)
 
             if not owner_connected do
-              mark_interrupted_entry(candidate, jopts)
+              # Disconnected remote owners are distributed recovery — require
+              # cross_node_atomic_recovery. Local nil/local-owner cases may proceed.
+              if remote_owner_recovery?(entry, state) and not cross_node_atomic_recovery?(state) do
+                []
+              else
+                case mark_interrupted_entry(candidate, jopts) do
+                  :ok ->
+                    [
+                      %{
+                        candidate
+                        | record: %Record{entry | status: :interrupted, owner_node: nil}
+                      }
+                    ]
 
-              [
-                %{
-                  candidate
-                  | record: %Record{entry | status: :interrupted}
-                }
-              ]
+                  {:error, reason} ->
+                    Logger.warning(
+                      "[RecoveryCoordinator] mark_interrupted failed for #{entry.run_id}: " <>
+                        inspect(reason) <> "; not enqueueing fabricated interrupted candidate"
+                    )
+
+                    []
+
+                  _other ->
+                    []
+                end
+              end
             else
               spawner_alive = spawning_process_alive?(entry.spawning_pid)
 
@@ -549,6 +601,18 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   defp automatic_recovery_active?(%{enabled: true, automatic_recovery: true}), do: true
   defp automatic_recovery_active?(_), do: false
+
+  defp cross_node_atomic_recovery?(state) do
+    durability = Map.get(state, :durability) || %{}
+    Map.get(durability, :cross_node_atomic_recovery, false) == true
+  end
+
+  # True when the entry's owner is a non-local node — nodedown/remote takeover.
+  defp remote_owner_recovery?(%Record{owner_node: nil}, _state), do: false
+
+  defp remote_owner_recovery?(%Record{owner_node: owner}, _state) do
+    to_string(owner) != to_string(Kernel.node())
+  end
 
   # ---------------------------------------------------------------------------
   # Recovery flow: claim → locate checkpoint → resume
