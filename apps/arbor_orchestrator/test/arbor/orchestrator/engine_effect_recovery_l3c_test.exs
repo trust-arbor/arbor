@@ -884,8 +884,11 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
 
       _ = File.rm_rf(logs_root)
       :ok = File.mkdir_p(logs_root)
-      # Terminal checkpoint without this visit's execution marker → unapplied.
-      seed_terminal_checkpoint!(logs_root, ctx.run_id, identity, completed_nodes: ["start"])
+      # Structurally coherent terminal progress without this visit's exact
+      # execution marker is still completed-but-unapplied.
+      seed_terminal_checkpoint!(logs_root, ctx.run_id, identity,
+        completed_nodes: ["start", "end"]
+      )
 
       reopen_as_recovering!(ctx.run_id, jopts, logs_root)
 
