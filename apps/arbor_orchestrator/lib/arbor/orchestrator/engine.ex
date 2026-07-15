@@ -33,6 +33,7 @@ defmodule Arbor.Orchestrator.Engine do
   alias Arbor.Orchestrator.Handlers.{Handler, Registry}
   alias Arbor.Orchestrator.JsonSafe
   alias Arbor.Orchestrator.PipelineStatus
+  alias Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore
   alias Arbor.Orchestrator.Validation.Validator
 
   @type event :: map()
@@ -321,60 +322,95 @@ defmodule Arbor.Orchestrator.Engine do
           |> Map.put(:pending_intents, Map.get(state, :pending_intents, %{}))
           |> Map.put(:execution_digests, Map.get(state, :execution_digests, %{}))
 
-        # Fold checkpoint-completed progress into process-local RunState and journal
-        # so resume never drops completed_count/nodes after load.
-        run_state =
-          seed_run_state_from_checkpoint(
-            run_state,
-            state,
-            run_id,
-            lifecycle_meta,
-            journal_opts_from(opts)
-          )
+        journal_opts = journal_opts_from(opts)
 
-        engine_state = %State{
-          graph: graph,
-          node_id: state.next_node_id,
-          incoming_edge: nil,
-          context: state.context,
-          logs_root: logs_root,
-          max_steps: max_steps,
-          completed: state.completed_nodes,
-          retries: state.retries,
-          outcomes: state.outcomes,
-          pending: [],
-          opts: opts,
-          pipeline_started_at: pipeline_started_at,
-          tracking: tracking,
-          run_state: run_state,
-          run_authorization: run_authorization
-        }
+        # Canonical effect recovery (L3C) after authenticated checkpoint load
+        # and before any handler dispatch. Pure decision + shell interpretation.
+        case recover_canonical_effect(
+               run_state,
+               state,
+               run_id,
+               lifecycle_meta,
+               journal_opts,
+               opts
+             ) do
+          {:error, reason} = error ->
+            handle_prepared_pipeline_error(
+              reason,
+              error,
+              run_state,
+              run_id,
+              opts,
+              lifecycle_meta,
+              pipeline_started_at
+            )
 
-        safe_loop(engine_state)
+          {:ok, run_state} ->
+            engine_state = %State{
+              graph: graph,
+              node_id: state.next_node_id,
+              incoming_edge: nil,
+              context: state.context,
+              logs_root: logs_root,
+              max_steps: max_steps,
+              completed: state.completed_nodes,
+              retries: state.retries,
+              outcomes: state.outcomes,
+              pending: [],
+              opts: opts,
+              pipeline_started_at: pipeline_started_at,
+              tracking: tracking,
+              run_state: run_state,
+              run_authorization: run_authorization
+            }
+
+            safe_loop(engine_state)
+        end
 
       {:error, reason} = error ->
         # Pre-execution resume/recovery failures (checkpoint load, HMAC,
-        # capability/auth, identity) must not be terminalized here — the outer
-        # claim owner (public resume / RecoveryCoordinator) classifies and
-        # settles exactly once (retryable → :interrupted, corruption → :failed).
-        if resume_or_recovery?(opts) and pre_execution_resume_failure?(reason) do
-          error
-        else
-          duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+        # capability/auth, identity, canonical effect recovery) must not be
+        # terminalized here — the outer claim owner (public resume /
+        # RecoveryCoordinator) classifies and settles exactly once
+        # (retryable → :interrupted, corruption → :failed).
+        handle_prepared_pipeline_error(
+          reason,
+          error,
+          run_state,
+          run_id,
+          opts,
+          lifecycle_meta,
+          pipeline_started_at
+        )
+    end
+  end
 
-          case finalize_terminal(
-                 run_state,
-                 run_id,
-                 :failed,
-                 reason,
-                 duration_ms,
-                 opts,
-                 lifecycle_meta
-               ) do
-            :ok -> error
-            {:error, finalize_reason} -> {:error, {:lifecycle_finalize_failed, finalize_reason}}
-          end
-        end
+  defp handle_prepared_pipeline_error(
+         reason,
+         error,
+         run_state,
+         run_id,
+         opts,
+         lifecycle_meta,
+         pipeline_started_at
+       ) do
+    if resume_or_recovery?(opts) and pre_execution_resume_failure?(reason) do
+      error
+    else
+      duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+
+      case finalize_terminal(
+             run_state,
+             run_id,
+             :failed,
+             reason,
+             duration_ms,
+             opts,
+             lifecycle_meta
+           ) do
+        :ok -> error
+        {:error, finalize_reason} -> {:error, {:lifecycle_finalize_failed, finalize_reason}}
+      end
     end
   end
 
@@ -1850,6 +1886,16 @@ defmodule Arbor.Orchestrator.Engine do
       {:checkpoint_hmac_derivation_failed, _} -> true
       {:capability_revalidation_failed, _} -> true
       {:indeterminate_intents, _} -> true
+      {:indeterminate_side_effect, _, _} -> true
+      # L3C canonical effect recovery (pre-handler). Outer settler classifies
+      # indeterminate / unapplied as retryable; structural inconsistency as failed.
+      {:indeterminate_effect, _, _} -> true
+      {:completed_effect_unapplied, _, _} -> true
+      {:effect_recovery_inconsistent, _} -> true
+      {:invalid_current_effect, _} -> true
+      {:effect_recovery_progress_sync_failed, _} -> true
+      {:effect_recovery_settle_failed, _} -> true
+      {:effect_recovery_record_unavailable, _} -> true
       # Structurally corrupt checkpoint / graph state (still pre-exec; outer
       # settler marks :failed rather than reopening arbitrary terminals)
       :checkpoint_current_node_missing -> true
@@ -1922,6 +1968,9 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
+  # Fold authenticated checkpoint progress into process-local RunState and the
+  # durable journal. Sync failures are first-class — never ignore them on the
+  # resume path (exact reconciliation / continue both depend on published progress).
   defp seed_run_state_from_checkpoint(run_state, state, run_id, lifecycle_meta, journal_opts) do
     completed = state.completed_nodes || []
 
@@ -1933,11 +1982,135 @@ defmodule Arbor.Orchestrator.Engine do
           completed_nodes: Enum.reverse(completed)
       }
 
-      _ = sync_run_state(run_id, rs, lifecycle_meta, journal_opts)
-      rs
+      case sync_run_state(run_id, rs, lifecycle_meta, journal_opts) do
+        :ok -> {:ok, rs}
+        {:error, reason} -> {:error, {:effect_recovery_progress_sync_failed, reason}}
+      end
     else
-      run_state
+      {:ok, run_state}
     end
+  end
+
+  # L3C: classify canonical current_effect after authenticated checkpoint load.
+  # Pure decision in EffectRecoveryCore; journal sync/settle interpreted here.
+  # force_replay / on_resume="retry" never bypass pending or completed-unapplied.
+  defp recover_canonical_effect(
+         run_state,
+         state,
+         run_id,
+         lifecycle_meta,
+         journal_opts,
+         opts
+       ) do
+    if resume_or_recovery?(opts) do
+      case PipelineStatus.get_record(run_id, journal_opts) do
+        {:error, reason} ->
+          {:error, {:effect_recovery_record_unavailable, reason}}
+
+        nil ->
+          # No journal row (legacy-only resume): leave legacy intent handling intact.
+          seed_run_state_from_checkpoint(
+            run_state,
+            state,
+            run_id,
+            lifecycle_meta,
+            journal_opts
+          )
+
+        %Arbor.Orchestrator.RunLifecycle.Record{} = record ->
+          checkpoint_view = %{
+            completed_nodes: state.completed_nodes || [],
+            outcomes: state.outcomes || %{}
+          }
+
+          case EffectRecoveryCore.decide(record, checkpoint_view) do
+            {:ok, :continue} ->
+              seed_run_state_from_checkpoint(
+                run_state,
+                state,
+                run_id,
+                lifecycle_meta,
+                journal_opts
+              )
+
+            {:ok, :reconcile, actions} ->
+              apply_effect_recovery_actions(
+                actions,
+                run_state,
+                state,
+                run_id,
+                lifecycle_meta,
+                journal_opts
+              )
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+      end
+    else
+      # Fresh runs never carry a prior current_effect into this path.
+      {:ok, run_state}
+    end
+  end
+
+  defp apply_effect_recovery_actions(
+         actions,
+         run_state,
+         state,
+         run_id,
+         lifecycle_meta,
+         journal_opts
+       )
+       when is_list(actions) do
+    Enum.reduce_while(actions, {:ok, run_state}, fn action, {:ok, rs} ->
+      case apply_effect_recovery_action(action, rs, state, run_id, lifecycle_meta, journal_opts) do
+        {:ok, next_rs} -> {:cont, {:ok, next_rs}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp apply_effect_recovery_action(
+         {:sync_progress, completed_nodes},
+         run_state,
+         _state,
+         run_id,
+         lifecycle_meta,
+         journal_opts
+       )
+       when is_list(completed_nodes) do
+    rs = %{
+      run_state
+      | completed_count: length(completed_nodes),
+        completed_nodes: Enum.reverse(completed_nodes)
+    }
+
+    case sync_run_state(run_id, rs, lifecycle_meta, journal_opts) do
+      :ok -> {:ok, rs}
+      {:error, reason} -> {:error, {:effect_recovery_progress_sync_failed, reason}}
+    end
+  end
+
+  defp apply_effect_recovery_action(
+         {:settle, generation, execution_id},
+         run_state,
+         _state,
+         run_id,
+         _lifecycle_meta,
+         journal_opts
+       )
+       when is_integer(generation) and is_binary(execution_id) do
+    case PipelineStatus.settle_effect(run_id, generation, execution_id, journal_opts) do
+      {:ok, tag, _effect} when tag in [:settled, :already_settled] ->
+        {:ok, run_state}
+
+      {:error, reason} ->
+        {:error, {:effect_recovery_settle_failed, reason}}
+    end
+  end
+
+  defp apply_effect_recovery_action(_action, _run_state, _state, _run_id, _meta, _jopts) do
+    {:error, {:effect_recovery_inconsistent, :unknown_recovery_action}}
   end
 
   defp lifecycle_meta_from_opts(opts, logs_root, graph_hash, dot_source_path) do

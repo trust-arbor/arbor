@@ -818,6 +818,19 @@ defmodule Arbor.Orchestrator do
   defp non_retryable_resume_error?({:compile_error, _}), do: true
   defp non_retryable_resume_error?({:invalid_graph, _}), do: true
 
+  # L3C: structural effect/receipt/progress inconsistency is non-retryable.
+  # Operator may abandon; automatic reopen must not loop forever.
+  defp non_retryable_resume_error?({:effect_recovery_inconsistent, _}), do: true
+  defp non_retryable_resume_error?({:invalid_current_effect, _}), do: true
+
+  # L3C: indeterminate / completed-unapplied need operator abandon or repair —
+  # keep interrupted so an explicit later abandon remains possible.
+  defp non_retryable_resume_error?({:indeterminate_effect, _, _}), do: false
+  defp non_retryable_resume_error?({:completed_effect_unapplied, _, _}), do: false
+  defp non_retryable_resume_error?({:effect_recovery_progress_sync_failed, _}), do: false
+  defp non_retryable_resume_error?({:effect_recovery_settle_failed, _}), do: false
+  defp non_retryable_resume_error?({:effect_recovery_record_unavailable, _}), do: false
+
   # Retryable credential / backend unavailability
   defp non_retryable_resume_error?(:identity_required_for_resume), do: false
   defp non_retryable_resume_error?(:authentication_unavailable), do: false
