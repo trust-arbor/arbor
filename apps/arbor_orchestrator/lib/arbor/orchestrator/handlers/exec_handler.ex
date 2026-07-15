@@ -167,6 +167,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
             |> maybe_put_execution_binding(authority)
             |> maybe_put_nested_engine_controls(opts, authority)
             |> maybe_put_approval_timeout(opts)
+            |> maybe_put_execution_id(opts)
 
           try do
             case executor.execute(action_name, action_args, workdir, executor_opts) do
@@ -421,6 +422,20 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     case Keyword.get(engine_opts, :approval_timeout_ms) do
       timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
         Keyword.put(executor_opts, :approval_timeout_ms, timeout_ms)
+
+      _ ->
+        executor_opts
+    end
+  end
+
+  # Owner-issued effect execution ID is process-local Engine handler control
+  # data only. Forward the exact value when present; never read it from DOT
+  # attrs, action params, Engine Context, or user data, and never inject it
+  # into action params / Outcome updates.
+  defp maybe_put_execution_id(executor_opts, engine_opts) do
+    case Keyword.fetch(engine_opts, :execution_id) do
+      {:ok, execution_id} when not is_nil(execution_id) ->
+        Keyword.put(executor_opts, :execution_id, execution_id)
 
       _ ->
         executor_opts

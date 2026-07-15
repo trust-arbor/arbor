@@ -223,6 +223,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                 |> maybe_put_context(:nested_engine_opts, nested_engine_opts)
                 |> maybe_put_context(:pinned_action_binding, pinned_binding)
                 |> maybe_put_context(:pinned_action_name, name)
+                # Owner-issued effect execution ID from Engine/ExecHandler opts only.
+                # Never derived here; omit when the owner did not supply one.
+                |> maybe_put_context(:execution_id, Keyword.get(opts, :execution_id))
                 # Engine-pinned graph execution may resolve pipeline_internal actions.
                 |> Map.put(:allow_pipeline_internal, true)
                 |> maybe_put_file_workspace(action_module, workdir)
