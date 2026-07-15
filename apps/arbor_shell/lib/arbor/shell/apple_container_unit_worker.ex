@@ -232,12 +232,15 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   @impl true
   def handle_call({:begin, start_ref}, _from, %{status: :waiting, start_ref: start_ref} = state)
       when is_reference(start_ref) do
+    # Exact waiting ref is an accepted begin. Synchronous Core terminals
+    # (e.g. preflight list_containment_failure) publish via registry/controller;
+    # accepted begin itself is not an invalid-begin error.
     case begin_lifecycle(state) do
       {:ok, started} ->
         {:reply, :ok, started}
 
       {:stop, reason, stopped} ->
-        {:stop, reason, reply_for_stop(stopped), stopped}
+        {:stop, reason, :ok, stopped}
     end
   end
 
@@ -383,10 +386,6 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         {:stop, :normal, state}
     end
   end
-
-  defp reply_for_stop(%{terminal: {:error, reason}}), do: {:error, reason}
-  defp reply_for_stop(%{terminal: {:ok, _}}), do: :ok
-  defp reply_for_stop(_), do: :ok
 
   defp dispatch_effects(state, effects) when is_list(effects) do
     Enum.reduce_while(effects, {:noreply, state}, fn effect, {:noreply, acc} ->

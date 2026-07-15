@@ -56,10 +56,15 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
     use GenServer
 
+    # Suite-stable ownership: unlinked start so a per-test ExUnit process exit
+    # cannot take down the named fake mid-suite (start_link raced reset -> :noproc).
     def ensure_started do
-      case GenServer.start_link(__MODULE__, %{}, name: __MODULE__) do
-        {:ok, pid} -> pid
-        {:error, {:already_started, pid}} -> pid
+      case GenServer.start(__MODULE__, %{}, name: __MODULE__) do
+        {:ok, pid} ->
+          pid
+
+        {:error, {:already_started, pid}} ->
+          pid
       end
     end
 
@@ -679,7 +684,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert result.exit_code == 137
 
       exec = await_registry_terminal(execution_id, 10_000)
-      assert exec.status == :completed
+      assert exec.status == :timed_out
       assert exec.result.timed_out == true
 
       calls = FakeRuntime.calls()
@@ -736,7 +741,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert result.killed == true
 
       exec = await_registry_terminal(execution_id, 10_000)
-      assert exec.status == :completed
+      assert exec.status == :killed
       assert exec.result.cancelled == true
       assert length(FakeRuntime.calls()) >= 5
       refute Process.alive?(worker)
