@@ -272,40 +272,6 @@ defmodule Arbor.Orchestrator.Engine do
     )
 
     case initial_state(graph, logs_root, opts) do
-      {:ok,
-       %{next_node_id: nil, context: context, completed_nodes: completed, outcomes: outcomes}} ->
-        completed = Enum.reverse(completed)
-        last_id = List.last(completed)
-        final_outcome = last_id && Map.get(outcomes, last_id)
-        duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
-
-        case finalize_terminal(
-               run_state,
-               run_id,
-               :completed,
-               nil,
-               duration_ms,
-               opts,
-               lifecycle_meta,
-               completed_nodes: completed
-             ) do
-          :ok ->
-            Checkpoint.cleanup(run_id)
-
-            {:ok,
-             %{
-               run_id: run_id,
-               final_outcome: final_outcome,
-               completed_nodes: completed,
-               context: Context.snapshot(context),
-               taint: Context.taint_map(context),
-               node_durations: %{}
-             }}
-
-          {:error, reason} ->
-            {:error, {:lifecycle_finalize_failed, reason}}
-        end
-
       {:ok, state} ->
         tracking =
           case state do
@@ -325,7 +291,10 @@ defmodule Arbor.Orchestrator.Engine do
         journal_opts = journal_opts_from(opts)
 
         # Canonical effect recovery (L3C) after authenticated checkpoint load
-        # and before any handler dispatch. Pure decision + shell interpretation.
+        # and before any handler dispatch OR terminal finalization. Pure
+        # decision + shell interpretation. Terminal checkpoints (next_node_id
+        # nil) share this path so pending/completed-unapplied effects cannot
+        # bypass recovery and be finalized as completed.
         case recover_canonical_effect(
                run_state,
                state,
@@ -346,25 +315,19 @@ defmodule Arbor.Orchestrator.Engine do
             )
 
           {:ok, run_state} ->
-            engine_state = %State{
-              graph: graph,
-              node_id: state.next_node_id,
-              incoming_edge: nil,
-              context: state.context,
-              logs_root: logs_root,
-              max_steps: max_steps,
-              completed: state.completed_nodes,
-              retries: state.retries,
-              outcomes: state.outcomes,
-              pending: [],
-              opts: opts,
-              pipeline_started_at: pipeline_started_at,
-              tracking: tracking,
-              run_state: run_state,
-              run_authorization: run_authorization
-            }
-
-            safe_loop(engine_state)
+            after_canonical_recovery(
+              state,
+              run_state,
+              graph,
+              run_authorization,
+              logs_root,
+              max_steps,
+              pipeline_started_at,
+              run_id,
+              lifecycle_meta,
+              opts,
+              tracking
+            )
         end
 
       {:error, reason} = error ->
@@ -383,6 +346,91 @@ defmodule Arbor.Orchestrator.Engine do
           pipeline_started_at
         )
     end
+  end
+
+  # Shared post-recovery branch for every successful authenticated initial_state.
+  # Checkpoint.completed_nodes is chronological (from_state persists
+  # Enum.reverse of newest-first internal state). Engine State.completed is
+  # newest-first. Terminal resumes finalize with chronological order unchanged.
+  defp after_canonical_recovery(
+         %{next_node_id: nil, context: context, completed_nodes: completed, outcomes: outcomes},
+         run_state,
+         _graph,
+         _run_authorization,
+         _logs_root,
+         _max_steps,
+         pipeline_started_at,
+         run_id,
+         lifecycle_meta,
+         opts,
+         _tracking
+       ) do
+    # Chronological checkpoint order — do not reverse.
+    last_id = List.last(completed)
+    final_outcome = last_id && Map.get(outcomes, last_id)
+    duration_ms = System.monotonic_time(:millisecond) - pipeline_started_at
+
+    case finalize_terminal(
+           run_state,
+           run_id,
+           :completed,
+           nil,
+           duration_ms,
+           opts,
+           lifecycle_meta,
+           completed_nodes: completed
+         ) do
+      :ok ->
+        Checkpoint.cleanup(run_id)
+
+        {:ok,
+         %{
+           run_id: run_id,
+           final_outcome: final_outcome,
+           completed_nodes: completed,
+           context: Context.snapshot(context),
+           taint: Context.taint_map(context),
+           node_durations: %{}
+         }}
+
+      {:error, reason} ->
+        {:error, {:lifecycle_finalize_failed, reason}}
+    end
+  end
+
+  defp after_canonical_recovery(
+         state,
+         run_state,
+         graph,
+         run_authorization,
+         logs_root,
+         max_steps,
+         pipeline_started_at,
+         _run_id,
+         _lifecycle_meta,
+         opts,
+         tracking
+       ) do
+    engine_state = %State{
+      graph: graph,
+      node_id: state.next_node_id,
+      incoming_edge: nil,
+      context: state.context,
+      logs_root: logs_root,
+      max_steps: max_steps,
+      # Chronological checkpoint → newest-first internal representation.
+      completed: Enum.reverse(state.completed_nodes || []),
+      retries: state.retries,
+      outcomes: state.outcomes,
+      pending: [],
+      opts: opts,
+      pipeline_started_at: pipeline_started_at,
+      tracking: tracking,
+      run_state: run_state,
+      run_authorization: run_authorization
+    }
+
+    safe_loop(engine_state)
   end
 
   defp handle_prepared_pipeline_error(
