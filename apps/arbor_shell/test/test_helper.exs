@@ -37,6 +37,11 @@ Supervisor.start_child(
   Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec()
 )
 
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  Arbor.Shell.AppleContainerUnitDrainCoordinator
+)
+
 defmodule Arbor.Shell.TestAgentAuthorizer do
   @moduledoc false
 

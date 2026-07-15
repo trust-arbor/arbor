@@ -11,6 +11,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
   alias Arbor.Shell
   alias Arbor.Shell.AppleContainerPlanCore
   alias Arbor.Shell.AppleContainerUnitCore, as: UnitCore
+  alias Arbor.Shell.AppleContainerUnitDrainCoordinator, as: DrainCoordinator
   alias Arbor.Shell.AppleContainerUnitWorker, as: Worker
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutionRegistry
@@ -484,6 +485,43 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     end
   end
 
+  defp restore_drain_coordinator! do
+    case Process.whereis(DrainCoordinator) do
+      pid when is_pid(pid) ->
+        :ok
+
+      _missing ->
+        case Supervisor.restart_child(Arbor.Shell.Supervisor, DrainCoordinator) do
+          {:ok, _pid} ->
+            :ok
+
+          {:ok, _pid, _info} ->
+            :ok
+
+          {:error, :running} ->
+            :ok
+
+          {:error, {:already_started, _pid}} ->
+            :ok
+
+          {:error, :not_found} ->
+            {:ok, _} =
+              Supervisor.start_child(Arbor.Shell.Supervisor, DrainCoordinator)
+
+            :ok
+
+          {:error, _reason} ->
+            _ = Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
+            _ = Supervisor.delete_child(Arbor.Shell.Supervisor, DrainCoordinator)
+
+            {:ok, _} =
+              Supervisor.start_child(Arbor.Shell.Supervisor, DrainCoordinator)
+
+            :ok
+        end
+    end
+  end
+
   describe "happy path" do
     test "nonzero candidate then cleanup/absence publishes success", %{
       spec: spec,
@@ -856,6 +894,90 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert exec.result.cancelled == true
     end
 
+    test "security regression: supervised drain coordinator waits for exact absence", %{
+      spec: spec,
+      executable: executable
+    } do
+      # Active start cancelled by coordinator drain; one present cleanup round;
+      # final successful absence is held so terminate_child must block.
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        {:hang, success(%{exit_code: 0, stdout: "partial"})},
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([%{"configuration" => %{"id" => @name}}]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        {:hold, success_list([])}
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeRuntime.calls()) >= 3 end)
+
+      worker_ref = Process.monitor(worker)
+      coordinator = Process.whereis(DrainCoordinator)
+      unit_sup = Process.whereis(Arbor.Shell.AppleContainerUnitSupervisor)
+      port_sup = Process.whereis(Arbor.Shell.PortSessionSupervisor)
+
+      assert is_pid(coordinator)
+      assert is_pid(unit_sup)
+      assert is_pid(port_sup)
+      assert Process.alive?(coordinator)
+      assert Process.alive?(unit_sup)
+      assert Process.alive?(port_sup)
+
+      task =
+        Task.async(fn ->
+          Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
+        end)
+
+      try do
+        eventually!(fn -> FakeRuntime.held_count() >= 1 end, 30_000)
+
+        # terminate_child remains blocked while final absence is held.
+        assert is_nil(Task.yield(task, 300))
+        assert Process.alive?(task.pid)
+        assert Process.alive?(coordinator)
+        assert Process.alive?(worker)
+        assert Process.alive?(unit_sup)
+        assert Process.alive?(port_sup)
+        assert nonterminal_registry?(execution_id)
+        refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 100
+
+        # Still no controller terminal and supervisors stay up while held.
+        Process.sleep(100)
+        assert is_nil(Task.yield(task, 50))
+        assert Process.alive?(coordinator)
+        assert Process.alive?(worker)
+        assert Process.alive?(unit_sup)
+        assert Process.alive?(port_sup)
+        assert nonterminal_registry?(execution_id)
+        refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 50
+
+        assert :ok = FakeRuntime.release_held()
+
+        assert :ok = Task.await(task, 30_000)
+        assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 15_000
+        refute Process.alive?(worker)
+        refute Process.alive?(coordinator)
+
+        exec = await_registry_terminal(execution_id, 10_000)
+        assert exec.status == :killed
+        assert exec.result.cancelled == true
+      after
+        # Release held sessions before waiting so a failed assertion cannot
+        # poison later tests by leaving the coordinator stuck in terminate/2.
+        _ = FakeRuntime.release_held()
+
+        if Process.alive?(task.pid) do
+          _ = Task.yield(task, 30_000) || Task.shutdown(task, :brutal_kill)
+        end
+
+        restore_drain_coordinator!()
+      end
+    end
+
     test "security regression: controller death holds absence before terminal", %{
       spec: spec,
       executable: executable
@@ -1041,9 +1163,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
       port_idx = Enum.find_index(modules, &(&1 == DynamicSupervisor))
       unit_idx = Enum.find_index(modules, &(&1 == Arbor.Shell.AppleContainerUnitSupervisor))
+      coord_idx = Enum.find_index(modules, &(&1 == DrainCoordinator))
       assert is_integer(port_idx)
       assert is_integer(unit_idx)
+      assert is_integer(coord_idx)
       assert unit_idx == port_idx + 1
+      assert coord_idx == unit_idx + 1
     end
   end
 

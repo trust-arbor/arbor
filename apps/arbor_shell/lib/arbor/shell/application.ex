@@ -73,7 +73,11 @@ defmodule Arbor.Shell.Application do
       {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one},
       # Unit owners sit after PortSession so unit-supervisor shutdown leaves the
       # PortSession supervisor available for final cleanup sessions.
-      Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec()
+      Arbor.Shell.AppleContainerUnitWorker.supervisor_child_spec(),
+      # Drain coordinator is last so reverse rest_for_one stops it first while
+      # UnitSupervisor and PortSessionSupervisor remain alive for request_drain
+      # and positive-absence cleanup. shutdown: :infinity — no finite budget.
+      Arbor.Shell.AppleContainerUnitDrainCoordinator
     ]
   end
 
