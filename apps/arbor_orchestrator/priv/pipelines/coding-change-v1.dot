@@ -266,12 +266,52 @@ digraph CodingChangeV1 {
 
   // Implement (same worker across rework)
 
+  // Compatibility phrasing: request one terminal JSON object so resumed older
+  // graph artifacts that still parse worker text do not enter protocol-repair
+  // loops. The v1 graph ignores that prose for control and uses owner-observed
+  // workspace state only.
   build_implement_prompt [
     type="transform",
     transform="template",
     source_key="task",
-    expression="You are implementing an Arbor code change inside worktree {ctx.worktree_path}. Task: {value}. Requirements: work only in the worktree; produce a reviewable diff; do not merge, push, or open a PR. Respond with a concise implementation summary of what you changed (or why you made no change).",
+    expression="You are implementing an Arbor code change inside worktree {ctx.worktree_path}. Task: {value}. Requirements: work only in the worktree; produce a reviewable diff; do not merge, push, or open a PR. Respond with a concise implementation summary of what you changed (or why you made no change). Also emit exactly one valid terminal JSON object for compatibility with archived graphs, for example {\"status\":\"implemented\"} or {\"status\":\"declined\"}; Arbor treats worker prose and that JSON as advisory only and decides outcomes from the owned workspace.",
     output_key="prompt"
+  ]
+
+  // Capture a bounded owner-observed fingerprint immediately before each
+  // worker send so progress is relative to this turn, not only lease base.
+  capture_pre_turn_workspace [
+    type="exec",
+    target="action",
+    action="coding_workspace_inspect",
+    context_keys="workspace_id",
+    output_prefix="pre_turn",
+    max_retries="0"
+  ]
+
+  hoist_baseline_fingerprint [
+    type="transform",
+    transform="identity",
+    source_key="pre_turn.fingerprint",
+    output_key="baseline_fingerprint"
+  ]
+
+  // Recovery sends share the same inspect action under a distinct node so the
+  // baseline is refreshed without re-entering the implement edge.
+  capture_pre_turn_recovery [
+    type="exec",
+    target="action",
+    action="coding_workspace_inspect",
+    context_keys="workspace_id",
+    output_prefix="pre_turn",
+    max_retries="0"
+  ]
+
+  hoist_baseline_fingerprint_recovery [
+    type="transform",
+    transform="identity",
+    source_key="pre_turn.fingerprint",
+    output_key="baseline_fingerprint"
   ]
 
   implement [
@@ -283,9 +323,16 @@ digraph CodingChangeV1 {
     max_retries="0"
   ]
 
-  // After a successful worker turn, Arbor owns outcome authority: hoist the
-  // provider session id for continuity, then inspect the workspace. Worker
-  // free-form text is advisory evidence only — never protocol JSON.
+  // After a successful worker turn, Arbor owns outcome authority: require an
+  // explicit trusted stop_reason=end_turn, hoist the provider session id for
+  // continuity, then inspect the workspace. Worker free-form text is advisory
+  // evidence only — never protocol JSON.
+
+  check_worker_stop_reason [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
 
   // One-shot send recovery. The current prompt remains in `prompt` until a
   // fresh-conversation summary deliberately replaces it.
@@ -412,15 +459,21 @@ digraph CodingChangeV1 {
     max_retries="0"
   ]
 
-  // Inspect outcome
+  // Inspect outcome (post-turn; compares against baseline_fingerprint)
 
   inspect_workspace [
     type="exec",
     target="action",
     action="coding_workspace_inspect",
-    context_keys="workspace_id",
+    context_keys="workspace_id,baseline_fingerprint",
     output_prefix="inspect",
     max_retries="0"
+  ]
+
+  check_workspace_exists [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
   ]
 
   hoist_dirty [
@@ -442,6 +495,32 @@ digraph CodingChangeV1 {
     transform="identity",
     source_key="inspect.head_commit",
     output_key="head_commit"
+  ]
+
+  hoist_turn_progressed [
+    type="transform",
+    transform="identity",
+    source_key="inspect.turn_progressed",
+    output_key="turn_progressed"
+  ]
+
+  hoist_workspace_fingerprint [
+    type="transform",
+    transform="identity",
+    source_key="inspect.fingerprint",
+    output_key="workspace_fingerprint"
+  ]
+
+  route_turn_progress [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  route_no_progress [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
   ]
 
   // Validation (top-level; ActionsExecutor owns approval wait/retry)
@@ -517,7 +596,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Validation failed after your previous edit. Task: {value}. Structured validation feedback JSON: {ctx.validation.feedback_json}. Fix the issues in the same worktree. Respond with a concise implementation summary of what you changed.",
+    expression="Validation failed after your previous edit. Task: {value}. Structured validation feedback JSON: {ctx.validation.feedback_json}. Fix the issues in the same worktree. Respond with a concise implementation summary of what you changed. Also emit exactly one valid terminal JSON object for compatibility with archived graphs, for example {\"status\":\"implemented\"} or {\"status\":\"declined\"}; Arbor treats worker prose and that JSON as advisory only and decides outcomes from the owned workspace.",
     output_key="prompt"
   ]
 
@@ -525,7 +604,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Code review requested rework. Task: {value}. Structured review feedback JSON: {ctx.review.feedback_json}. Address the review feedback in the same worktree. Respond with a concise implementation summary of what you changed.",
+    expression="Code review requested rework. Task: {value}. Structured review feedback JSON: {ctx.review.feedback_json}. Address the review feedback in the same worktree. Respond with a concise implementation summary of what you changed. Also emit exactly one valid terminal JSON object for compatibility with archived graphs, for example {\"status\":\"implemented\"} or {\"status\":\"declined\"}; Arbor treats worker prose and that JSON as advisory only and decides outcomes from the owned workspace.",
     output_key="prompt"
   ]
 
@@ -533,7 +612,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Operator requested rework of the commit. Task: {value}. Operator note: {ctx.approval_note}. Address the operator feedback in the same worktree. Respond with a concise implementation summary of what you changed.",
+    expression="Operator requested rework of the commit. Task: {value}. Operator note: {ctx.approval_note}. Address the operator feedback in the same worktree. Respond with a concise implementation summary of what you changed. Also emit exactly one valid terminal JSON object for compatibility with archived graphs, for example {\"status\":\"implemented\"} or {\"status\":\"declined\"}; Arbor treats worker prose and that JSON as advisory only and decides outcomes from the owned workspace.",
     output_key="prompt"
   ]
 
@@ -1173,6 +1252,27 @@ digraph CodingChangeV1 {
     output_key="error"
   ]
 
+  error_worker_stop_reason_not_end_turn [
+    type="transform",
+    transform="constant",
+    expression="worker_stop_reason_not_end_turn",
+    output_key="error"
+  ]
+
+  error_workspace_missing [
+    type="transform",
+    transform="constant",
+    expression="workspace_missing",
+    output_key="error"
+  ]
+
+  error_worker_turn_no_progress [
+    type="transform",
+    transform="constant",
+    expression="worker_turn_no_progress",
+    output_key="error"
+  ]
+
   error_worker_send_recovery_exhausted [
     type="transform",
     transform="constant",
@@ -1311,7 +1411,11 @@ digraph CodingChangeV1 {
 
   open_worker -> hoist_worker_session_id [condition="outcome=success"]
   hoist_worker_session_id -> hoist_worker_provider_session_id
-  hoist_worker_provider_session_id -> build_implement_prompt -> implement
+  hoist_worker_provider_session_id -> build_implement_prompt
+  build_implement_prompt -> capture_pre_turn_workspace
+  capture_pre_turn_workspace -> status_pipeline_error_then_close [condition="outcome=fail"]
+  capture_pre_turn_workspace -> hoist_baseline_fingerprint [condition="outcome=success"]
+  hoist_baseline_fingerprint -> implement
 
   // Worker send sites use one engine-attempt and converge on one recovery gate.
   implement -> check_worker_send_recovery_budget [condition="outcome=fail"]
@@ -1332,13 +1436,18 @@ digraph CodingChangeV1 {
   open_recovery_worker -> error_worker_recovery_reopen_failed [condition="outcome=fail"]
   hoist_recovery_worker_session_id -> hoist_recovery_worker_provider_session_id
   hoist_recovery_worker_provider_session_id -> route_recovery_continuity
-  route_recovery_continuity -> retry_recovered_send [condition="context.worker.continuity=resumed"]
+  // Re-fingerprint before every recovered send so progress is relative to the
+  // state immediately before that turn, not a stale pre-failure baseline.
+  route_recovery_continuity -> capture_pre_turn_recovery [condition="context.worker.continuity=resumed"]
   route_recovery_continuity -> copy_recovery_pending_prompt [condition="context.worker.continuity=fresh_recovery"]
   route_recovery_continuity -> error_worker_recovery_continuity_invalid
   copy_recovery_pending_prompt -> coding_workspace_recovery_summary
   coding_workspace_recovery_summary -> error_worker_recovery_summary_failed [condition="outcome=fail"]
   coding_workspace_recovery_summary -> hoist_recovery_prompt [condition="outcome=success"]
-  hoist_recovery_prompt -> retry_recovered_send
+  hoist_recovery_prompt -> capture_pre_turn_recovery
+  capture_pre_turn_recovery -> status_pipeline_error_then_close [condition="outcome=fail"]
+  capture_pre_turn_recovery -> hoist_baseline_fingerprint_recovery [condition="outcome=success"]
+  hoist_baseline_fingerprint_recovery -> retry_recovered_send
   retry_recovered_send -> error_worker_recovery_send_failed [condition="outcome=fail"]
   retry_recovered_send -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
 
@@ -1350,12 +1459,18 @@ digraph CodingChangeV1 {
   error_worker_recovery_continuity_invalid -> status_pipeline_error_then_close
   error_worker_recovery_summary_failed -> status_pipeline_error_then_close
   error_worker_recovery_send_failed -> status_pipeline_error_then_close
+  error_worker_stop_reason_not_end_turn -> status_pipeline_error_then_close
+  error_workspace_missing -> status_pipeline_error_then_close
+  error_worker_turn_no_progress -> status_pipeline_error_then_close
   status_pipeline_error_then_close -> close_worker
 
-  // Owner-observed outcome: successful turns inspect the workspace; worker
-  // prose never gates validation/review/commit vs no_changes.
+  // Owner-observed outcome: successful turns require trusted end_turn, then
+  // inspect the workspace. Worker prose never gates validation/review/commit
+  // vs no_changes.
   implement -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
-  hoist_worker_provider_session_id_from_message -> inspect_workspace
+  hoist_worker_provider_session_id_from_message -> check_worker_stop_reason
+  check_worker_stop_reason -> inspect_workspace [condition="context.worker_msg.stop_reason=end_turn"]
+  check_worker_stop_reason -> error_worker_stop_reason_not_end_turn
 
   // Impossible seed edges keep the reviewed dormant subgraph structurally
   // reachable. The compiler removes them before activating the security profile;
@@ -1401,15 +1516,23 @@ digraph CodingChangeV1 {
   // Owner-observed workspace inspection is the control authority after every
   // successful worker turn (initial, recovery, and rework).
   inspect_workspace -> status_pipeline_error_then_close [condition="outcome=fail"]
-  inspect_workspace -> hoist_dirty [condition="outcome=success"]
+  inspect_workspace -> check_workspace_exists [condition="outcome=success"]
+  // Missing worktree is a pipeline error with retention — never no_changes.
+  check_workspace_exists -> error_workspace_missing [condition="context.inspect.exists!=true"]
+  check_workspace_exists -> hoist_dirty [condition="context.inspect.exists=true"]
   hoist_dirty -> hoist_changed -> hoist_head_commit
+  hoist_head_commit -> hoist_turn_progressed -> hoist_workspace_fingerprint
+  hoist_workspace_fingerprint -> route_turn_progress
 
-  // No reviewable change
-  hoist_head_commit -> status_no_changes [condition="context.changed_from_base!=true"]
+  // Per-turn progress: initial no-op => no_changes; rework no-op => pipeline_error
+  // so a prior candidate is never re-presented as fresh work.
+  route_turn_progress -> prep_validation_path [condition="context.turn_progressed=true"]
+  route_turn_progress -> route_no_progress [condition="context.turn_progressed!=true"]
+  route_no_progress -> error_worker_turn_no_progress [condition="context.total_rework_count>=1"]
+  route_no_progress -> status_no_changes [condition="context.total_rework_count<1"]
   status_no_changes -> close_worker
 
-  // Changed -> validate
-  hoist_head_commit -> prep_validation_path [condition="context.changed_from_base=true"]
+  // Progress this turn -> validate
   prep_validation_path -> validate
 
   // Hard validation action error (not soft passed=false)
@@ -1428,7 +1551,7 @@ digraph CodingChangeV1 {
   inc_validation_total_rework_count -> mark_validation_rework_kind
   mark_validation_rework_kind -> mark_validation_rework_iteration
   mark_validation_rework_iteration -> build_validation_rework_prompt
-  build_validation_rework_prompt -> implement
+  build_validation_rework_prompt -> capture_pre_turn_workspace
 
   // Validation passed -> commit or adopt HEAD
   check_validation_passed -> prep_commit_path [condition="outcome=success"]
@@ -1482,7 +1605,7 @@ digraph CodingChangeV1 {
   inc_operator_total_rework_count -> mark_operator_rework_kind
   mark_operator_rework_kind -> mark_operator_rework_iteration
   mark_operator_rework_iteration -> build_operator_rework_prompt
-  build_operator_rework_prompt -> implement
+  build_operator_rework_prompt -> capture_pre_turn_workspace
 
   // Unknown interaction_outcome fails closed (not success, not silent deny).
   route_commit_interaction -> status_pipeline_error_then_close
@@ -1562,7 +1685,7 @@ digraph CodingChangeV1 {
   inc_review_total_rework_count -> mark_review_rework_kind
   mark_review_rework_kind -> mark_review_rework_iteration
   mark_review_rework_iteration -> build_review_rework_prompt
-  build_review_rework_prompt -> implement
+  build_review_rework_prompt -> capture_pre_turn_workspace
 
   // Publish: optional draft PR
   route_publish -> prep_pr_path [condition="context.open_pr=true"]

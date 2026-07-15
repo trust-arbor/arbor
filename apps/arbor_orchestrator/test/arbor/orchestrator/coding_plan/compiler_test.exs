@@ -671,8 +671,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     unknown_action =
       String.replace(
         ctx.template_source,
-        ~s(action="coding_workspace_inspect"),
-        ~s(action="unregistered_workspace_inspect"),
+        ~s(  inspect_workspace [\n    type="exec",\n    target="action",\n    action="coding_workspace_inspect"),
+        ~s(  inspect_workspace [\n    type="exec",\n    target="action",\n    action="unregistered_workspace_inspect"),
         global: false
       )
 
@@ -684,7 +684,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     missing_required =
       String.replace(
         ctx.template_source,
-        ~s(context_keys="workspace_id",\n    output_prefix="inspect"),
+        ~s(context_keys="workspace_id,baseline_fingerprint",\n    output_prefix="inspect"),
         ~s(context_keys="",\n    output_prefix="inspect"),
         global: false
       )
@@ -696,8 +696,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     unknown_parameter =
       String.replace(
         ctx.template_source,
-        ~s(context_keys="workspace_id",\n    output_prefix="inspect"),
-        ~s(context_keys="workspace_id",\n    param.unexpected="value",\n    output_prefix="inspect"),
+        ~s(context_keys="workspace_id,baseline_fingerprint",\n    output_prefix="inspect"),
+        ~s(context_keys="workspace_id,baseline_fingerprint",\n    param.unexpected="value",\n    output_prefix="inspect"),
         global: false
       )
 

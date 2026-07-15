@@ -83,22 +83,17 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
        }}
     end
 
-    defp dispatch("coding_workspace_inspect", _args, scenario, state) do
+    defp dispatch("coding_workspace_inspect", args, scenario, state) do
       inspect_index = bump(state, :inspect)
+      implement_count = Agent.get(state, fn s -> Map.get(s.counters, :implement, 0) end)
+      baseline = args["baseline_fingerprint"] || args[:baseline_fingerprint]
+      post_turn? = is_binary(baseline) and baseline != ""
 
-      {dirty, head_commit} =
-        case {scenario, inspect_index} do
-          {scenario, 2}
-          when scenario in [:validation_rework_self_commit, :review_rework_self_commit] ->
-            {false, "commit-2"}
+      {dirty, head_commit, fingerprint} =
+        security_inspect_view(scenario, implement_count, post_turn?, inspect_index)
 
-          {scenario, 2}
-          when scenario in [:validation_rework_noop, :review_rework_noop] ->
-            {false, "commit-1"}
-
-          _other ->
-            {true, if(inspect_index == 1, do: "base-commit", else: "commit-1")}
-        end
+      turn_progressed =
+        if post_turn?, do: fingerprint != baseline, else: true
 
       {:ok,
        %{
@@ -111,8 +106,67 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
          exists: true,
          dirty: dirty,
          head_commit: head_commit,
-         changed_from_base: true
+         changed_from_base: head_commit != "base-commit" or dirty,
+         fingerprint: fingerprint,
+         turn_progressed: turn_progressed
        }}
+    end
+
+    # implement_count is the number of completed ACP sends when this inspect runs.
+    defp security_inspect_view(scenario, implement_count, post_turn?, _inspect_index) do
+      case scenario do
+        s when s in [:validation_rework_noop, :review_rework_noop] ->
+          cond do
+            implement_count == 0 and not post_turn? ->
+              {false, "base-commit", "fp-base"}
+
+            # After first implement, candidate is commit-1; rework leaves it unchanged.
+            true ->
+              {false, "commit-1", "fp-commit-1"}
+          end
+
+        s when s in [:validation_rework_self_commit, :review_rework_self_commit] ->
+          cond do
+            implement_count == 0 and not post_turn? ->
+              {false, "base-commit", "fp-base"}
+
+            implement_count == 1 and not post_turn? ->
+              {true, "commit-1", "fp-commit-1"}
+
+            implement_count == 1 ->
+              {true, "commit-1", "fp-commit-1"}
+
+            implement_count >= 2 and not post_turn? ->
+              {false, "commit-1", "fp-commit-1"}
+
+            true ->
+              {false, "commit-2", "fp-commit-2"}
+          end
+
+        s when s in [:validation_rework_dirty, :review_rework_dirty] ->
+          cond do
+            implement_count == 0 and not post_turn? ->
+              {false, "base-commit", "fp-base"}
+
+            implement_count <= 1 ->
+              {true, "commit-1", "fp-commit-1"}
+
+            not post_turn? ->
+              {true, "commit-1", "fp-commit-1"}
+
+            true ->
+              {true, "commit-1", "fp-commit-1-rework"}
+          end
+
+        _other ->
+          cond do
+            implement_count == 0 and not post_turn? ->
+              {false, "base-commit", "fp-base"}
+
+            true ->
+              {true, "commit-1", "fp-commit-1"}
+          end
+      end
     end
 
     defp dispatch("coding_reviewed_commit", args, scenario, state) do
@@ -541,15 +595,19 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
   end
 
   for scenario <- [:validation_rework_noop, :review_rework_noop] do
-    test "#{scenario} rejects the same reviewed HEAD before another Council token", ctx do
+    test "#{scenario} rejects rework no-op before re-presenting the prior candidate", ctx do
       assert {{:ok, result}, calls} = run_fixture(unquote(scenario), ctx)
-      assert result.context["status"] == "validation_failed"
-      assert result.context["prior_reviewed_commit"] == "commit-1"
-      assert result.context["commit_hash"] == "commit-1"
-      assert result.context["fresh_rework_commit"] == false
-      assert called?(calls, "council_review_change", 1)
+      # Owner-observed per-turn fingerprint is authoritative: a rework turn that
+      # makes no workspace progress fails closed without re-committing/re-reviewing
+      # the previous candidate.
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_turn_no_progress"
+      assert "error_worker_turn_no_progress" in result.completed_nodes
       assert_single_worker(calls, 2)
-      assert "error_security_rework_not_fresh" in result.completed_nodes
+      refute "error_security_rework_not_fresh" in result.completed_nodes
+      # Only the first turn commits/reviews; rework no-op never re-presents it.
+      assert called?(calls, "coding_reviewed_commit", 1)
+      assert called?(calls, "council_review_change", 1)
     end
   end
 

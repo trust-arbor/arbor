@@ -169,7 +169,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           {:ok, %{workspace_id: "ws_fixture_1", recovery_prompt: "RECOVERY SUMMARY\n" <> pending}}
 
         "coding_workspace_inspect" ->
-          inspect_response(scenario, counters, state)
+          inspect_response(scenario, counters, state, args)
 
         "mix_compile" ->
           validate_response(scenario, counters, state)
@@ -347,6 +347,27 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:narrative_review_rework, _} ->
                 "Narrative review rework summary: addressed council feedback."
 
+              {:rework_no_progress, 0} ->
+                "First implement created a candidate."
+
+              {:rework_no_progress, _} ->
+                "Rework claimed progress but owner observes none."
+
+              {:rework_with_progress, 0} ->
+                "First implement created a candidate."
+
+              {:rework_with_progress, _} ->
+                "Rework actually changed the workspace."
+
+              {:max_tokens_stop, _} ->
+                "Partial output truncated by token budget."
+
+              {:missing_stop_reason, _} ->
+                "Provider omitted stop_reason."
+
+              {:missing_workspace, _} ->
+                "Implement claimed success but worktree is gone."
+
               {:close_failed, _} ->
                 "Implement complete on close-failure path."
 
@@ -386,17 +407,36 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                do: "sess_2",
                else: "sess_1"
 
+          stop_reason =
+            case scenario do
+              :max_tokens_stop -> "max_tokens"
+              :missing_stop_reason -> ""
+              _ -> "end_turn"
+            end
+
           {:ok,
-           %{text: text, stop_reason: "end_turn", session_id: response_session_id, usage: %{}}}
+           %{
+             text: text,
+             stop_reason: stop_reason,
+             session_id: response_session_id,
+             usage: %{}
+           }}
       end
     end
 
-    defp inspect_response(scenario, counters, state) do
+    defp inspect_response(scenario, counters, state, args) do
       n = Map.get(counters, :inspect, 0)
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :inspect, n + 1)} end)
 
+      baseline =
+        Map.get(args, "baseline_fingerprint") || Map.get(args, :baseline_fingerprint)
+
+      post_turn? = is_binary(baseline) and baseline != ""
+      # Implement counter is incremented in implement_response before post-turn inspect.
+      sends = Map.get(counters, :implement, 0)
+
       case scenario do
-        :inspect_hard_fail ->
+        :inspect_hard_fail when post_turn? ->
           {:error, "inspect failed"}
 
         _ ->
@@ -410,31 +450,88 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
             exists: true
           }
 
+          fingerprint = fixture_fingerprint(scenario, sends, post_turn?)
+
           view =
             case scenario do
               scenario when scenario in [:no_changes, :narrative_no_changes] ->
                 Map.merge(base, %{
                   dirty: false,
                   head_commit: "basecommit0001",
-                  changed_from_base: false
+                  changed_from_base: false,
+                  fingerprint: fingerprint
+                })
+
+              :missing_workspace when post_turn? ->
+                Map.merge(base, %{
+                  exists: false,
+                  dirty: false,
+                  head_commit: nil,
+                  changed_from_base: false,
+                  fingerprint: fingerprint
                 })
 
               :self_commit_adopt ->
                 Map.merge(base, %{
                   dirty: false,
                   head_commit: "selfcommit9999",
-                  changed_from_base: true
+                  changed_from_base: true,
+                  fingerprint: fingerprint
                 })
 
               _ ->
                 Map.merge(base, %{
-                  dirty: true,
+                  dirty: fingerprint != "fp-clean",
                   head_commit: "basecommit0001",
-                  changed_from_base: true
+                  changed_from_base: fingerprint != "fp-clean",
+                  fingerprint: fingerprint
                 })
             end
 
-          {:ok, view}
+          turn_progressed =
+            if post_turn? do
+              view.fingerprint != baseline
+            else
+              true
+            end
+
+          {:ok, Map.put(view, :turn_progressed, turn_progressed)}
+      end
+    end
+
+    # Fingerprints are relative to completed ACP sends so pre-turn capture and
+    # post-turn inspect share a stable owner-observed identity for each turn.
+    defp fixture_fingerprint(scenario, sends, post_turn?) do
+      case scenario do
+        s when s in [:no_changes, :narrative_no_changes] ->
+          "fp-clean"
+
+        :missing_workspace when post_turn? ->
+          "sha256:missing-worktree"
+
+        :self_commit_adopt ->
+          if post_turn? or sends > 0, do: "fp-self-commit", else: "fp-clean"
+
+        :rework_no_progress ->
+          cond do
+            sends == 0 and not post_turn? -> "fp-clean"
+            # After the first successful implement, rework leaves the same fingerprint.
+            true -> "fp-dirty-1"
+          end
+
+        :rework_with_progress ->
+          cond do
+            sends == 0 and not post_turn? -> "fp-clean"
+            not post_turn? -> "fp-after-send-#{sends}"
+            true -> "fp-after-send-#{sends}"
+          end
+
+        _ ->
+          cond do
+            sends == 0 and not post_turn? -> "fp-clean"
+            not post_turn? -> "fp-after-send-#{sends}"
+            true -> "fp-after-send-#{sends}"
+          end
       end
     end
 
@@ -458,6 +555,11 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:validation_then_operator_rework_exhausted, _} -> true
               {:narrative_validation_rework, 0} -> false
               {:narrative_validation_rework, _} -> true
+              # First implement progresses then fails validation so rework runs;
+              # rework_no_progress never reaches a second validate.
+              {:rework_no_progress, _} -> false
+              {:rework_with_progress, 0} -> false
+              {:rework_with_progress, _} -> true
               _ -> true
             end
 
@@ -1090,6 +1192,14 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute Map.has_key?(graph.nodes, "reset_worker_turn_protocol_retry_count")
       refute Map.has_key?(graph.nodes, "status_declined")
       assert graph.nodes["inspect_workspace"]
+      assert graph.nodes["capture_pre_turn_workspace"]
+      assert graph.nodes["check_worker_stop_reason"]
+      assert graph.nodes["check_workspace_exists"]
+      assert graph.nodes["route_turn_progress"]
+      assert graph.nodes["route_no_progress"]
+      assert graph.nodes["error_worker_stop_reason_not_end_turn"]
+      assert graph.nodes["error_workspace_missing"]
+      assert graph.nodes["error_worker_turn_no_progress"]
       assert graph.nodes["init_protocol_retry_count"]
 
       for counter <-
@@ -1101,6 +1211,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert load_dot() =~ "output_key=\"protocol_retry_count\""
       refute load_dot() =~ "output_key=\"worker_turn_protocol_retry_count\""
       refute load_dot() =~ "worker_protocol_invalid_json_after_retry"
+      # Steering prompts still request one terminal JSON object for old-graph
+      # compatibility, but never require JSON-only protocol output.
+      assert load_dot() =~ "exactly one valid terminal JSON object"
       refute load_dot() =~ "ONLY one JSON object"
       refute load_dot() =~ "ONLY a JSON object"
       refute load_dot() =~ "source_key=\"rework_count\""
@@ -1202,6 +1315,77 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute called?(calls, "coding_reviewed_commit")
     end
 
+    test "max_tokens stop_reason is pipeline_error with retain and worker close" do
+      assert {{:ok, result}, calls} = run_fixture(:max_tokens_stop)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_stop_reason_not_end_turn"
+      assert "error_worker_stop_reason_not_end_turn" in result.completed_nodes
+      assert "close_worker" in result.completed_nodes
+      assert_release_mode(calls, "retain")
+      refute called?(calls, "mix_compile")
+      refute called?(calls, "coding_reviewed_commit")
+      assert_closed_and_released(calls)
+    end
+
+    test "missing stop_reason is pipeline_error with retain and worker close" do
+      assert {{:ok, result}, calls} = run_fixture(:missing_stop_reason)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_stop_reason_not_end_turn"
+      assert "close_worker" in result.completed_nodes
+      assert_release_mode(calls, "retain")
+      refute called?(calls, "mix_compile")
+      assert_closed_and_released(calls)
+    end
+
+    test "missing workspace after end_turn is pipeline_error, not no_changes" do
+      assert {{:ok, result}, calls} = run_fixture(:missing_workspace)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "workspace_missing"
+      assert "error_workspace_missing" in result.completed_nodes
+      refute result.context["status"] == "no_changes"
+      assert_release_mode(calls, "retain")
+      refute called?(calls, "mix_compile")
+      assert_closed_and_released(calls)
+    end
+
+    test "rework no-op after candidate is pipeline_error and does not re-present prior work" do
+      assert {{:ok, result}, calls} = run_fixture(:rework_no_progress)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_turn_no_progress"
+      assert result.context["total_rework_count"] == 1
+      assert "error_worker_turn_no_progress" in result.completed_nodes
+      assert_release_mode(calls, "retain")
+      # First turn validates once; rework no-op never re-validates or commits.
+      assert Enum.count(calls, fn {name, _} -> name == "mix_compile" end) == 1
+      refute called?(calls, "coding_reviewed_commit")
+      assert_single_worker_session(calls, 2)
+      assert_closed_and_released(calls)
+    end
+
+    test "rework progress continues validation and does not use worker prose control" do
+      assert {{:ok, result}, calls} = run_fixture(:rework_with_progress)
+      assert result.context["status"] == "change_committed"
+      assert result.context["total_rework_count"] == 1
+      assert result.context["validation_rework_count"] == 1
+      refute Map.has_key?(result.context, "error")
+      assert Enum.count(calls, fn {name, _} -> name == "mix_compile" end) == 2
+      assert called?(calls, "coding_reviewed_commit")
+      assert_single_worker_session(calls, 2)
+      assert_closed_and_released(calls)
+    end
+
+    test "steering prompts request old-graph-compatible terminal JSON while remaining advisory" do
+      assert {{:ok, result}, calls} = run_fixture(:change_committed)
+      assert result.context["status"] == "change_committed"
+      prompts = action_prompts(calls)
+      assert Enum.at(prompts, 0) =~ "exactly one valid terminal JSON object"
+      assert Enum.at(prompts, 0) =~ ~s({"status":"implemented"})
+      assert Enum.at(prompts, 0) =~ ~s({"status":"declined"})
+      assert Enum.at(prompts, 0) =~ "advisory only"
+      refute Enum.at(prompts, 0) =~ "ONLY one JSON object"
+      refute called_with_prompt?(calls, "ONLY a JSON object")
+    end
+
     test "repeated validation failure exhausts only the validation retry" do
       assert {{:ok, result}, calls} = run_fixture(:validation_failed)
       assert result.context["status"] == "validation_failed"
@@ -1222,6 +1406,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDOUT_SENTINEL"
       refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDERR_SENTINEL"
       assert Enum.at(prompts, 1) =~ "concise implementation summary"
+      assert Enum.at(prompts, 1) =~ "exactly one valid terminal JSON object"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
       refute called?(calls, "coding_reviewed_commit")
     end
@@ -1244,6 +1429,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert Enum.at(prompts, 1) =~ "Structured review feedback JSON"
       assert Enum.at(prompts, 1) =~ "bounded council feedback"
       assert Enum.at(prompts, 1) =~ "concise implementation summary"
+      assert Enum.at(prompts, 1) =~ "exactly one valid terminal JSON object"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
     end
 
@@ -1633,8 +1819,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_single_worker_session(calls, 2)
       assert Enum.at(prompts, 1) =~ "Structured validation feedback JSON"
       assert Enum.at(prompts, 1) =~ "concise implementation summary"
+      assert Enum.at(prompts, 1) =~ "exactly one valid terminal JSON object"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
-      assert Enum.count(calls, fn {name, _} -> name == "coding_workspace_inspect" end) == 2
+      # Two turns × (pre-turn capture + post-turn inspect)
+      assert Enum.count(calls, fn {name, _} -> name == "coding_workspace_inspect" end) == 4
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
     end
@@ -1653,8 +1841,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_single_worker_session(calls, 2)
       assert Enum.at(prompts, 1) =~ "Structured review feedback JSON"
       assert Enum.at(prompts, 1) =~ "concise implementation summary"
+      assert Enum.at(prompts, 1) =~ "exactly one valid terminal JSON object"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
-      assert Enum.count(calls, fn {name, _} -> name == "coding_workspace_inspect" end) == 2
+      assert Enum.count(calls, fn {name, _} -> name == "coding_workspace_inspect" end) == 4
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
     end

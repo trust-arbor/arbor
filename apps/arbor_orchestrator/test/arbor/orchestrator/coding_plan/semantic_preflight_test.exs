@@ -222,14 +222,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       replace_edge_target(
         graph,
         "build_review_rework_prompt",
-        "implement",
+        "capture_pre_turn_workspace",
         nil,
         "route_publish"
       ),
       replace_edge_target(
         graph,
         "build_validation_rework_prompt",
-        "implement",
+        "capture_pre_turn_workspace",
         nil,
         "commit_change"
       )
@@ -586,8 +586,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     bypassed =
       String.replace(
         ctx.template_source,
-        ~s(hoist_head_commit -> prep_validation_path [condition="context.changed_from_base=true"]),
-        ~s(hoist_head_commit -> prep_validation_path [condition="context.changed_from_base=true"]\n  hoist_head_commit -> prep_commit_path [condition="context.bypass_validation=true"])
+        ~s(route_turn_progress -> prep_validation_path [condition="context.turn_progressed=true"]),
+        ~s(route_turn_progress -> prep_validation_path [condition="context.turn_progressed=true"]\n  route_turn_progress -> prep_commit_path [condition="context.bypass_validation=true"])
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} = compile(plan!(), ctx, bypassed)
@@ -935,7 +935,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     bypassed =
       inject_edge(
         ctx.template_source,
-        "build_operator_rework_prompt -> implement",
+        "build_operator_rework_prompt -> capture_pre_turn_workspace",
         "build_operator_rework_prompt -> hoist_commit_hash [condition=\"context.bypass_fresh_gate=true\"]"
       )
 

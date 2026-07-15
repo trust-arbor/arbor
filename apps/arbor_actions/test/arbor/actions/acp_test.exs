@@ -664,6 +664,49 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(opts, :principal_id) == "agent_owner"
       assert Keyword.get(opts, :task_id) == "task_owner"
     end
+
+    test "security regression: does not default missing ACP stop_reason to end_turn" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok, %{"text" => "truncated output", "session_id" => "provider_sess_1", "usage" => %{}}}
+      )
+
+      assert {:ok, response} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_missing_stop", prompt: "continue"},
+                 %{agent_id: "agent_owner", task_id: "task_owner"}
+               )
+
+      assert response.stop_reason == ""
+      refute response.stop_reason == "end_turn"
+      assert json_clean?(response)
+    end
+
+    test "security regression: preserves explicit max_tokens stop_reason" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           "text" => "partial",
+           "stop_reason" => "max_tokens",
+           "session_id" => "provider_sess_1",
+           "usage" => %{}
+         }}
+      )
+
+      assert {:ok, response} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_max_tokens", prompt: "continue"},
+                 %{agent_id: "agent_owner", task_id: "task_owner"}
+               )
+
+      assert response.stop_reason == "max_tokens"
+      assert json_clean?(response)
+    end
   end
 
   # SessionStatus

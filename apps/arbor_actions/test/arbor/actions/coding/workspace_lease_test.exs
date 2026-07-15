@@ -93,6 +93,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       assert inspected.dirty == false
       assert inspected.head_commit == base_commit
       assert inspected.changed_from_base == false
+      assert is_binary(inspected.fingerprint)
+      assert String.starts_with?(inspected.fingerprint, "sha256:")
+      assert inspected.turn_progressed == true
 
       File.write!(Path.join(lease.worktree_path, "dirty.txt"), "uncommitted\n")
 
@@ -102,6 +105,43 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       assert dirty_view.dirty == true
       assert dirty_view.changed_from_base == true
       assert dirty_view.head_commit == base_commit
+      assert dirty_view.fingerprint != inspected.fingerprint
+
+      assert {:ok, compared} =
+               Workspace.Inspect.run(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   baseline_fingerprint: inspected.fingerprint
+                 },
+                 %{}
+               )
+
+      assert compared.turn_progressed == true
+      assert compared.fingerprint == dirty_view.fingerprint
+
+      assert {:ok, no_progress} =
+               Workspace.Inspect.run(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   baseline_fingerprint: dirty_view.fingerprint
+                 },
+                 %{}
+               )
+
+      assert no_progress.turn_progressed == false
+      assert no_progress.fingerprint == dirty_view.fingerprint
+    end
+
+    test "inspect_worktree reports missing path without treating it as no_changes", %{
+      tmp_dir: tmp_dir
+    } do
+      missing = Path.join(tmp_dir, "gone-worktree")
+      view = Workspace.inspect_worktree(missing, "basecommit")
+
+      assert view.exists == false
+      assert view.changed_from_base == false
+      assert view.fingerprint == "sha256:missing-worktree"
+      assert is_binary(view.fingerprint)
     end
 
     test "retain disarms cleanup, preserves worktree, and is idempotent", %{tmp_dir: tmp_dir} do

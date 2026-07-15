@@ -514,11 +514,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <-
            rewrite_edge(
              graph,
-             "hoist_head_commit",
+             "route_turn_progress",
              "prep_validation_path",
-             "context.changed_from_base=true",
+             "context.turn_progressed=true",
              "prep_commit_path",
-             "context.changed_from_base=true"
+             "context.turn_progressed=true"
            ),
          {:ok, graph} <-
            rewrite_edge(

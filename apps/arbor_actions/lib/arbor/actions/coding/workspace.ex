@@ -198,13 +198,15 @@ defmodule Arbor.Actions.Coding.Workspace do
   def context_principal_id(_), do: nil
 
   @doc false
-  @spec inspect_worktree(String.t() | nil, String.t() | nil) :: map()
-  def inspect_worktree(worktree_path, base_commit) do
+  @spec inspect_worktree(String.t() | nil, String.t() | nil, keyword() | map()) :: map()
+  def inspect_worktree(worktree_path, base_commit, opts \\ []) do
+    baseline = inspect_baseline_fingerprint(opts)
     exists = is_binary(worktree_path) and worktree_path != "" and File.dir?(worktree_path)
 
     if exists do
       dirty = worktree_dirty?(worktree_path)
       head_commit = head_commit(worktree_path)
+      fingerprint = worktree_fingerprint(worktree_path, head_commit)
 
       changed_from_base =
         dirty or
@@ -215,15 +217,94 @@ defmodule Arbor.Actions.Coding.Workspace do
         exists: true,
         dirty: dirty,
         head_commit: head_commit,
-        changed_from_base: changed_from_base
+        changed_from_base: changed_from_base,
+        fingerprint: fingerprint,
+        turn_progressed: turn_progressed?(fingerprint, baseline)
       }
     else
+      fingerprint = missing_worktree_fingerprint()
+
       %{
         exists: false,
         dirty: false,
         head_commit: nil,
-        changed_from_base: false
+        changed_from_base: false,
+        fingerprint: fingerprint,
+        turn_progressed: turn_progressed?(fingerprint, baseline)
       }
+    end
+  end
+
+  @doc false
+  # Bounded, deterministic owner-observed workspace identity for turn-progress
+  # detection. Hashes HEAD plus porcelain status (tracked/staged/untracked/
+  # deleted/renamed) without retaining unbounded diff contents.
+  @spec worktree_fingerprint(String.t() | term(), String.t() | nil) :: String.t()
+  def worktree_fingerprint(worktree_path, head_commit \\ nil)
+
+  def worktree_fingerprint(worktree_path, head_commit) when is_binary(worktree_path) do
+    head =
+      cond do
+        is_binary(head_commit) and head_commit != "" -> head_commit
+        true -> head_commit(worktree_path) || ""
+      end
+
+    status =
+      case git(worktree_path, ["status", "--porcelain", "--untracked-files=all"]) do
+        {:ok, output} when is_binary(output) -> normalize_fingerprint_status(output)
+        {:error, reason} -> "status-error:#{normalize_fingerprint_status(to_string(reason))}"
+      end
+
+    # Include a bounded tree listing so renames/mode bits that status reports
+    # stay covered while the payload remains a fixed-size digest.
+    digest_input = ["arbor-coding-ws-fp-v1", head, status] |> Enum.join("\0")
+
+    digest_input
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+    |> then(&("sha256:" <> &1))
+  end
+
+  def worktree_fingerprint(_worktree_path, _head_commit), do: missing_worktree_fingerprint()
+
+  defp missing_worktree_fingerprint, do: "sha256:missing-worktree"
+
+  defp inspect_baseline_fingerprint(opts) when is_list(opts) do
+    case Keyword.get(opts, :baseline_fingerprint) do
+      fp when is_binary(fp) -> String.trim(fp)
+      _ -> nil
+    end
+  end
+
+  defp inspect_baseline_fingerprint(opts) when is_map(opts) do
+    case map_value(opts, :baseline_fingerprint) do
+      fp when is_binary(fp) -> String.trim(fp)
+      _ -> nil
+    end
+  end
+
+  defp inspect_baseline_fingerprint(_), do: nil
+
+  defp turn_progressed?(_fingerprint, baseline)
+       when not is_binary(baseline) or baseline == "",
+       do: true
+
+  defp turn_progressed?(fingerprint, baseline) when is_binary(fingerprint),
+    do: fingerprint != baseline
+
+  defp turn_progressed?(_fingerprint, _baseline), do: true
+
+  defp normalize_fingerprint_status(output) when is_binary(output) do
+    # Cap retained status bytes before hashing so a hostile worktree cannot
+    # force unbounded memory into the action result path. The digest still
+    # covers the truncated window plus an explicit overflow marker.
+    max_bytes = 65_536
+    trimmed = String.trim(output)
+
+    if byte_size(trimmed) <= max_bytes do
+      trimmed
+    else
+      binary_part(trimmed, 0, max_bytes) <> "\n#truncated:#{byte_size(trimmed)}"
     end
   end
 
@@ -972,8 +1053,9 @@ defmodule Arbor.Actions.Coding.Workspace do
     sufficient.
 
     Returns registry metadata plus live workspace inspection: `exists`, `dirty`,
-    `head_commit`, and `changed_from_base` (dirty OR HEAD differs from the
-    acquired `base_commit`). PID/ref/function data stay private.
+    `head_commit`, `changed_from_base` (dirty OR HEAD differs from the acquired
+    `base_commit`), a bounded `fingerprint`, and `turn_progressed` when a
+    `baseline_fingerprint` is supplied. PID/ref/function data stay private.
     """
 
     use Jido.Action,
@@ -986,6 +1068,12 @@ defmodule Arbor.Actions.Coding.Workspace do
           type: :string,
           required: true,
           doc: "Opaque workspace lease id from acquire"
+        ],
+        baseline_fingerprint: [
+          type: :string,
+          required: false,
+          doc:
+            "Optional pre-turn fingerprint; when present, turn_progressed reports owner-observed progress"
         ]
       ]
 
@@ -994,36 +1082,48 @@ defmodule Arbor.Actions.Coding.Workspace do
     alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
     def taint_roles do
-      %{workspace_id: :control}
+      %{
+        workspace_id: :control,
+        baseline_fingerprint: :control
+      }
     end
 
     def effect_class, do: :read
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(%{workspace_id: workspace_id}, context) when is_binary(workspace_id) do
-      Actions.emit_started(__MODULE__, %{workspace_id: workspace_id})
+    def run(params, context) when is_map(params) do
+      workspace_id = map_value(params, :workspace_id)
 
-      case WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
-             task_id: Workspace.context_task_id(context),
-             principal_id: Workspace.context_principal_id(context)
-           }) do
-        {:ok, lease} ->
-          view =
-            lease
-            |> Map.merge(
-              Workspace.inspect_worktree(
-                map_value(lease, :worktree_path),
-                map_value(lease, :base_commit)
+      if is_binary(workspace_id) and workspace_id != "" do
+        Actions.emit_started(__MODULE__, %{workspace_id: workspace_id})
+
+        case WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
+               task_id: Workspace.context_task_id(context),
+               principal_id: Workspace.context_principal_id(context)
+             }) do
+          {:ok, lease} ->
+            baseline = map_value(params, :baseline_fingerprint)
+
+            view =
+              lease
+              |> Map.merge(
+                Workspace.inspect_worktree(
+                  map_value(lease, :worktree_path),
+                  map_value(lease, :base_commit),
+                  baseline_fingerprint: baseline
+                )
               )
-            )
 
-          Actions.emit_completed(__MODULE__, %{workspace_id: workspace_id})
-          {:ok, view}
+            Actions.emit_completed(__MODULE__, %{workspace_id: workspace_id})
+            {:ok, view}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, reason}
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, reason}
+        end
+      else
+        {:error, "workspace_id is required"}
       end
     end
 

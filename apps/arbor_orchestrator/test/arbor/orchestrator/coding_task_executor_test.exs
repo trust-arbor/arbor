@@ -173,8 +173,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       dot_source =
         String.replace(
           compilation.dot_source,
-          ~s(hoist_head_commit -> prep_validation_path [condition="context.changed_from_base=true"]),
-          ~s(hoist_head_commit -> prep_validation_path [condition="context.changed_from_base=true"]\n  hoist_head_commit -> prep_commit_path [condition="context.bypass_validation=true"])
+          ~s(route_turn_progress -> prep_validation_path [condition="context.turn_progressed=true"]),
+          ~s(route_turn_progress -> prep_validation_path [condition="context.turn_progressed=true"]\n  route_turn_progress -> prep_commit_path [condition="context.bypass_validation=true"])
         )
 
       true = dot_source != compilation.dot_source

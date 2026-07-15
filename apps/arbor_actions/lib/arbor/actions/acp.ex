@@ -730,12 +730,12 @@ defmodule Arbor.Actions.Acp do
         {:ok, response} ->
           status = managed_status(worker_session_id, context)
 
+          # Preserve the ACP stop_reason fact. Never default missing/blank values
+          # to "end_turn" — owner graphs must gate on an explicit trusted end_turn.
           {:ok,
            %{
              text: map_get(response, :text) || map_get(response, "text") || "",
-             stop_reason:
-               map_get(response, :stop_reason) || map_get(response, "stop_reason") ||
-                 "end_turn",
+             stop_reason: normalize_stop_reason(response),
              session_id: provider_session_id(response, status),
              context_pressure:
                map_get(status, :context_pressure) || map_get(status, "context_pressure") || false,
@@ -759,9 +759,7 @@ defmodule Arbor.Actions.Acp do
           {:ok,
            %{
              text: map_get(response, :text) || map_get(response, "text") || "",
-             stop_reason:
-               map_get(response, :stop_reason) || map_get(response, "stop_reason") ||
-                 "end_turn",
+             stop_reason: normalize_stop_reason(response),
              session_id: map_get(response, :session_id) || map_get(response, "session_id") || "",
              context_pressure: Acp.check_context_pressure(pid),
              usage: map_get(response, :usage) || map_get(response, "usage") || %{}
@@ -769,6 +767,22 @@ defmodule Arbor.Actions.Acp do
 
         {:error, reason} ->
           {:error, Acp.format_error(reason)}
+      end
+    end
+
+    # Keep missing/blank stop_reason as "" (not a defaulted "end_turn") so
+    # JSON-clean consumers and graph conditions can distinguish omission from a
+    # trusted end_turn. Empty string is Engine-condition-safe (nil is not).
+    defp normalize_stop_reason(response) when is_map(response) do
+      case map_get(response, :stop_reason) || map_get(response, "stop_reason") do
+        reason when is_binary(reason) ->
+          String.trim(reason)
+
+        reason when is_atom(reason) and not is_nil(reason) ->
+          Atom.to_string(reason)
+
+        _ ->
+          ""
       end
     end
 

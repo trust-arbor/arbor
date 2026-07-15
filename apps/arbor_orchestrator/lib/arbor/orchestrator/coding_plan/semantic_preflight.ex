@@ -917,7 +917,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   @rework_exhaustion_marker "mark_operator_rework_exhausted_error"
   @rework_exhaustion_status "status_rework_exhausted"
   @rework_dispatch_node "build_operator_rework_prompt"
-  @rework_dispatch_target "implement"
+  # Pre-turn fingerprint capture is mandatory before each implement send.
+  @rework_dispatch_target "capture_pre_turn_workspace"
 
   @workspace_cleanup_node_attrs %{
     "prep_release_mode_only" => %{
@@ -1064,8 +1065,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   @precommit_abort_origins %{
-    "status_no_changes" => "inspect_workspace",
-    "status_pipeline_error_then_close" => "implement",
+    "status_no_changes" => "route_no_progress",
+    # Pre-turn fingerprint capture precedes every implement/rework send and is
+    # the earliest owner-observed gate that may abort into the shared cleanup
+    # status without re-entering the commit gate.
+    "status_pipeline_error_then_close" => "capture_pre_turn_workspace",
     "status_validation_failed" => "validate"
   }
 
@@ -1893,7 +1897,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"hoist_worker_session_id", "hoist_worker_provider_session_id", nil},
       {"hoist_worker_provider_session_id", "build_implement_prompt", nil},
       {"implement", "hoist_worker_provider_session_id_from_message", "outcome=success"},
-      {"hoist_worker_provider_session_id_from_message", "inspect_workspace", nil}
+      {"hoist_worker_provider_session_id_from_message", "check_worker_stop_reason", nil},
+      {"check_worker_stop_reason", "inspect_workspace", "context.worker_msg.stop_reason=end_turn"}
     ]
 
     errors =
@@ -2951,10 +2956,17 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     )
     |> require_dominates(
       "hoist_worker_provider_session_id_from_message",
-      "inspect_workspace",
+      "check_worker_stop_reason",
       reachable,
       dominators,
       "worker_provider_session_message_capture"
+    )
+    |> require_dominates(
+      "check_worker_stop_reason",
+      "inspect_workspace",
+      reachable,
+      dominators,
+      "worker_stop_reason_gate"
     )
   end
 

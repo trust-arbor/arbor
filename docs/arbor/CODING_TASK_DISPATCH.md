@@ -105,6 +105,31 @@ default (`Arbor.Orchestrator.CodingTaskExecutor`). The plan is normalized,
 compiled to an immutable graph, archived with a compile manifest, and executed
 under the target agent's identity and capabilities.
 
+### Owner-observed outcomes (worker prose is advisory)
+
+The DOT coding graph (`coding-change-v1`) decides `no_changes`, validation,
+review, and commit routing from **owner-observed workspace state**, not from
+worker narrative or terminal JSON:
+
+1. Every successful ACP send must report an explicit trusted
+   `stop_reason == "end_turn"`. Values such as `max_tokens`, `cancelled`,
+   blank, or missing route to `pipeline_error`, retain the workspace, and
+   close/check in the worker. The action layer does **not** default a missing
+   stop reason to `end_turn`.
+2. After a trusted end_turn, `coding_workspace_inspect` must see
+   `exists == true`. A missing worktree is `pipeline_error` with retention —
+   never `no_changes`.
+3. Progress is measured against a bounded workspace fingerprint captured
+   immediately before **each** implement/rework send (not only the lease base).
+   Initial no-op => `no_changes`. Rework no-op => `pipeline_error`
+   (`worker_turn_no_progress`) so a prior candidate is not re-presented as
+   fresh work.
+4. Worker prompts still request one valid terminal JSON object so resumed
+   older graph artifacts that parse prose do not enter protocol-repair loops.
+   The current graph ignores that prose for control.
+5. The shared `STATUS: declined` contract remains on the legacy direct
+   `coding_produce_reviewable_change` path only.
+
 ## Rollback (legacy executor)
 
 Rollback is operator-only, temporary for **one release window**, and selected

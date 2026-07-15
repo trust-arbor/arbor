@@ -13,6 +13,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @default_required_nodes Enum.sort(~w[
                     acquire_workspace
+                    capture_pre_turn_recovery
+                    capture_pre_turn_workspace
                     check_operator_rework_category_budget
                     check_operator_rework_total_budget
                     check_review_category_budget
@@ -20,6 +22,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     check_validation_category_budget
                     check_validation_passed
                     check_validation_total_budget
+                    check_worker_stop_reason
+                    check_workspace_exists
                     close_worker
                     close_stale_worker
                     commit_change
@@ -35,13 +39,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     error_worker_recovery_summary_failed
                     error_worker_send_recovery_exhausted
                     error_worker_stale_close_failed
+                    error_worker_stop_reason_not_end_turn
+                    error_worker_turn_no_progress
+                    error_workspace_missing
                     error_review_cycle_invalid
+                    hoist_baseline_fingerprint
+                    hoist_baseline_fingerprint_recovery
                     hoist_review_cycle
                     hoist_review_disposition
                     hoist_review_finding_ledger
                     hoist_recovery_prompt
                     hoist_recovery_worker_provider_session_id
                     hoist_recovery_worker_session_id
+                    hoist_turn_progressed
+                    hoist_workspace_fingerprint
                     hoist_worker_provider_session_id
                     hoist_worker_provider_session_id_from_message
                     hoist_worker_provider_session_id_from_status
@@ -66,10 +77,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     release_workspace
                     release_workspace_only
                     retry_recovered_send
+                    route_no_progress
                     route_release_mode
                     route_completed_review_cycle
                     route_prepared_review
                     route_review_material
+                    route_turn_progress
                     review_change
                     route_after_commit
                     route_commit_interaction
@@ -218,7 +231,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                 %{
                                   "node_id" => "implement",
                                   "action" => "acp_send_message",
-                                  "required_dominators" => ["open_worker"],
+                                  "required_dominators" => [
+                                    "capture_pre_turn_workspace",
+                                    "open_worker"
+                                  ],
                                   "review_required_dominators" => [],
                                   "required_dominator_sets" => []
                                 },
@@ -233,9 +249,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "required_dominator_sets" => []
                                 },
                                 %{
-                                  "node_id" => "inspect_workspace",
+                                  "node_id" => "capture_pre_turn_workspace",
                                   "action" => "coding_workspace_inspect",
                                   "required_dominators" => ["acquire_workspace"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "capture_pre_turn_recovery",
+                                  "action" => "coding_workspace_inspect",
+                                  "required_dominators" => ["acquire_workspace"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "inspect_workspace",
+                                  "action" => "coding_workspace_inspect",
+                                  "required_dominators" => [
+                                    "acquire_workspace",
+                                    "check_worker_stop_reason"
+                                  ],
                                   "review_required_dominators" => [],
                                   "required_dominator_sets" => []
                                 },
@@ -287,6 +320,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "node_id" => "retry_recovered_send",
                                   "action" => "acp_send_message",
                                   "required_dominators" => [
+                                    "capture_pre_turn_recovery",
                                     "open_recovery_worker",
                                     "route_recovery_continuity"
                                   ],
@@ -320,6 +354,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
           "action" => "acp_session_status",
           "context_keys" => "worker_session_id",
           "output_prefix" => "worker_status",
+          "max_retries" => "0"
+        }
+      },
+      %{
+        "node_id" => "capture_pre_turn_recovery",
+        "attrs" => %{
+          "type" => "exec",
+          "target" => "action",
+          "action" => "coding_workspace_inspect",
+          "context_keys" => "workspace_id",
+          "output_prefix" => "pre_turn",
           "max_retries" => "0"
         }
       },
@@ -440,6 +485,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         }
       },
       %{
+        "node_id" => "hoist_baseline_fingerprint_recovery",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "identity",
+          "source_key" => "pre_turn.fingerprint",
+          "output_key" => "baseline_fingerprint"
+        }
+      },
+      %{
         "node_id" => "hoist_recovery_prompt",
         "attrs" => %{
           "type" => "transform",
@@ -510,6 +564,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       }
     ],
     "protected_writers" => %{
+      "baseline_fingerprint" => [
+        "hoist_baseline_fingerprint",
+        "hoist_baseline_fingerprint_recovery"
+      ],
       "session_id" => ["copy_worker_provider_session_id_to_session_id"],
       "worker_provider_session_id" => [
         "hoist_recovery_worker_provider_session_id",
@@ -522,6 +580,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "edges" => [
       ["acp_session_status", "check_recovery_provider_id", "outcome=fail"],
       ["acp_session_status", "check_worker_status_session_id", "outcome=success"],
+      [
+        "capture_pre_turn_recovery",
+        "hoist_baseline_fingerprint_recovery",
+        "outcome=success"
+      ],
+      ["capture_pre_turn_recovery", "status_pipeline_error_then_close", "outcome=fail"],
       [
         "check_recovery_provider_id",
         "copy_worker_provider_session_id_to_session_id",
@@ -561,7 +625,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ["error_worker_recovery_summary_failed", "status_pipeline_error_then_close", nil],
       ["error_worker_send_recovery_exhausted", "status_pipeline_error_then_close", nil],
       ["error_worker_stale_close_failed", "status_pipeline_error_then_close", nil],
-      ["hoist_recovery_prompt", "retry_recovered_send", nil],
+      ["hoist_baseline_fingerprint_recovery", "retry_recovered_send", nil],
+      ["hoist_recovery_prompt", "capture_pre_turn_recovery", nil],
       ["hoist_recovery_worker_provider_session_id", "route_recovery_continuity", nil],
       ["hoist_recovery_worker_session_id", "hoist_recovery_worker_provider_session_id", nil],
       ["implement", "check_worker_send_recovery_budget", "outcome=fail"],
@@ -577,11 +642,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ],
       [
         "route_recovery_continuity",
+        "capture_pre_turn_recovery",
+        "context.worker.continuity=resumed"
+      ],
+      [
+        "route_recovery_continuity",
         "copy_recovery_pending_prompt",
         "context.worker.continuity=fresh_recovery"
       ],
-      ["route_recovery_continuity", "error_worker_recovery_continuity_invalid", nil],
-      ["route_recovery_continuity", "retry_recovered_send", "context.worker.continuity=resumed"]
+      ["route_recovery_continuity", "error_worker_recovery_continuity_invalid", nil]
     ]
   }
 
@@ -1046,9 +1115,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "mark_validation_rework_iteration",
       nil
     ],
-    ["build_operator_rework_prompt", "implement", nil],
-    ["build_review_rework_prompt", "implement", nil],
-    ["build_validation_rework_prompt", "implement", nil]
+    ["build_operator_rework_prompt", "capture_pre_turn_workspace", nil],
+    ["build_review_rework_prompt", "capture_pre_turn_workspace", nil],
+    ["build_validation_rework_prompt", "capture_pre_turn_workspace", nil]
   ]
 
   @review_convergence_edges [
