@@ -59,6 +59,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Orchestrator.Config
+  alias Arbor.Orchestrator.Engine
+  alias Arbor.Orchestrator.Engine.Checkpoint
   alias Arbor.Orchestrator.PipelineStatus
   alias Arbor.Orchestrator.RunLifecycle.LegacyJobAdapter
   alias Arbor.Orchestrator.RunLifecycle.Record
@@ -183,12 +186,18 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
           {false, reason}
       end
 
+    # Capture Config-owned checkpoint store opts once at init. Malformed
+    # engine_checkpoints is preserved as an explicit bounded error — never
+    # substitute defaults or re-resolve caller/resolver store targets later.
+    checkpoint_store_opts = capture_checkpoint_store_opts()
+
     state = %{
       enabled: enabled,
       automatic_recovery: automatic_recovery,
       automatic_recovery_disabled_reason: automatic_recovery_disabled_reason,
       durability: durability,
       journal_opts: journal_opts,
+      checkpoint_store_opts: checkpoint_store_opts,
       max_concurrent: max_concurrent,
       delay_ms: delay_ms,
       resume_options_resolver: resume_options_resolver,
@@ -746,7 +755,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
           {:ok, claimed} ->
             # Every post-claim exit must settle exactly once (interrupted or failed).
             try do
-              with {:ok, checkpoint_source} <- locate_checkpoint(claimed.record),
+              with {:ok, checkpoint_source} <-
+                     locate_checkpoint(claimed.record, state, resume_opts),
                    :ok <- validate_graph_unchanged(claimed.record) do
                 recovery_root = state.recovery_root
 
@@ -912,28 +922,36 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
-  defp locate_checkpoint(%Record{} = entry) do
+  # Precedence after claim:
+  # 1. existing local checkpoint.json
+  # 2. Config-owned durable store via Checkpoint.fetch_persisted/2
+  # 3. peer file only for exact :not_found or :store_not_configured
+  #
+  # Outage, corruption, tamper, envelope/payload identity mismatch, and
+  # invalid captured config fail closed — never peer-fallback.
+  defp locate_checkpoint(%Record{} = entry, state, resume_opts)
+       when is_map(state) and is_list(resume_opts) do
     run_id = entry.run_id
     logs_root = entry.logs_root
-    local_path = if logs_root, do: Path.join(logs_root, "checkpoint.json")
+    local_path = if is_binary(logs_root), do: Path.join(logs_root, "checkpoint.json")
 
     cond do
-      local_path && File.exists?(local_path) ->
+      is_binary(local_path) and File.exists?(local_path) ->
         {:ok, {:file, local_path}}
 
-      run_id != nil ->
-        case Arbor.Persistence.BufferedStore.get(
-               run_id,
-               name: :arbor_orchestrator_checkpoints
-             ) do
-          {:ok, checkpoint_data} when checkpoint_data != nil ->
+      is_binary(run_id) and run_id != "" ->
+        case fetch_durable_checkpoint(run_id, state, resume_opts) do
+          {:ok, checkpoint_data} when is_map(checkpoint_data) ->
             {:ok, {:store, checkpoint_data}}
 
-          _ ->
-            case fetch_checkpoint_from_peers(logs_root) do
-              {:ok, data} -> {:ok, {:remote_data, data}}
-              _ -> {:error, :checkpoint_not_found}
-            end
+          {:error, :not_found} ->
+            peer_checkpoint_fallback(logs_root)
+
+          {:error, :store_not_configured} ->
+            peer_checkpoint_fallback(logs_root)
+
+          {:error, reason} ->
+            {:error, map_durable_checkpoint_error(reason)}
         end
 
       true ->
@@ -941,9 +959,102 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
+  defp locate_checkpoint(%Record{}, _state, _resume_opts), do: {:error, :no_checkpoint_source}
+
+  # Capture once at init — never re-read Application env during locate.
+  defp capture_checkpoint_store_opts do
+    case Config.fetch_engine_checkpoint_store_opts() do
+      {:ok, opts} when is_list(opts) ->
+        {:ok, opts}
+
+      {:error, reason} ->
+        {:error, {:invalid_engine_checkpoints, reason}}
+    end
+  end
+
+  # Store target comes only from captured Config opts. Resolver/caller store
+  # keys must never redirect durable lookup.
+  defp fetch_durable_checkpoint(run_id, state, resume_opts)
+       when is_binary(run_id) and is_map(state) and is_list(resume_opts) do
+    case Map.get(state, :checkpoint_store_opts) do
+      {:ok, store_opts} when is_list(store_opts) ->
+        fetch_durable_checkpoint_with_opts(run_id, store_opts, resume_opts)
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _ ->
+        {:error, {:invalid_engine_checkpoints, :checkpoint_store_opts_not_captured}}
+    end
+  end
+
+  defp fetch_durable_checkpoint_with_opts(run_id, store_opts, resume_opts)
+       when is_binary(run_id) and is_list(store_opts) and is_list(resume_opts) do
+    # Drop any residual store-target keys so only Config-owned identity remains.
+    clean_store_opts =
+      store_opts
+      |> Keyword.take([:store, :store_name, :store_opts, :durability_class])
+
+    try do
+      case resolve_resume_hmac_secret(resume_opts) do
+        {:ok, nil} ->
+          Checkpoint.fetch_persisted(run_id, clean_store_opts)
+
+        {:ok, secret} when is_binary(secret) ->
+          Checkpoint.fetch_persisted(
+            run_id,
+            Keyword.put(clean_store_opts, :hmac_secret, secret)
+          )
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    rescue
+      e ->
+        {:error, {:store_unavailable, Exception.message(e)}}
+    catch
+      kind, reason ->
+        {:error, {:store_unavailable, {kind, inspect(reason, limit: 20, printable_limit: 200)}}}
+    end
+  end
+
+  # Honor explicit valid :hmac_secret; otherwise derive from trusted resume
+  # credentials. Never consult store-target keys from resume_opts.
+  defp resolve_resume_hmac_secret(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :hmac_secret) do
+      {:ok, secret} when is_binary(secret) and byte_size(secret) > 0 ->
+        {:ok, secret}
+
+      {:ok, _} ->
+        {:error, :checkpoint_hmac_invalid}
+
+      :error ->
+        case Engine.derive_checkpoint_hmac_secret(opts) do
+          secret when is_binary(secret) and byte_size(secret) > 0 ->
+            {:ok, secret}
+
+          nil ->
+            {:ok, nil}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  end
+
+  defp resolve_resume_hmac_secret(_), do: {:ok, nil}
+
+  # Peer file only after exact durable absence / file-only config.
+  defp peer_checkpoint_fallback(logs_root) do
+    case fetch_checkpoint_from_peers(logs_root) do
+      {:ok, data} -> {:ok, {:remote_data, data}}
+      _ -> {:error, :checkpoint_not_found}
+    end
+  end
+
   defp fetch_checkpoint_from_peers(nil), do: {:error, :no_logs_root}
 
-  defp fetch_checkpoint_from_peers(logs_root) do
+  defp fetch_checkpoint_from_peers(logs_root) when is_binary(logs_root) do
     checkpoint_path = Path.join(logs_root, "checkpoint.json")
 
     Enum.find_value(Node.list(), {:error, :checkpoint_not_on_peers}, fn node ->
@@ -957,6 +1068,28 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
       end
     end)
   end
+
+  defp fetch_checkpoint_from_peers(_), do: {:error, :no_logs_root}
+
+  # Bound durable-locator errors for settlement classification.
+  # Structural identity / corruption → non-retryable atoms below.
+  # Auth/HMAC availability and store outage remain retryable.
+  defp map_durable_checkpoint_error(:tampered), do: :checkpoint_hmac_invalid
+  defp map_durable_checkpoint_error(:checkpoint_hmac_invalid), do: :checkpoint_hmac_invalid
+
+  defp map_durable_checkpoint_error(:checkpoint_key_mismatch), do: :checkpoint_key_mismatch
+
+  defp map_durable_checkpoint_error(:checkpoint_run_id_mismatch),
+    do: :checkpoint_run_id_mismatch
+
+  defp map_durable_checkpoint_error(:invalid_checkpoint_payload),
+    do: {:checkpoint_corrupt, :invalid_checkpoint_payload}
+
+  defp map_durable_checkpoint_error({:invalid_engine_checkpoints, _} = reason), do: reason
+  defp map_durable_checkpoint_error({:store_unavailable, _} = reason), do: reason
+  defp map_durable_checkpoint_error(:store_not_configured), do: :store_not_configured
+  defp map_durable_checkpoint_error(:not_found), do: :not_found
+  defp map_durable_checkpoint_error(reason), do: {:durable_checkpoint, reason}
 
   # Fail closed: hash means source identity matters — missing/unreadable path
   # is an explicit error, never a silent pass-through.
@@ -1594,6 +1727,11 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   defp non_retryable_recovery_error?(:checkpoint_corrupt), do: true
   defp non_retryable_recovery_error?({:checkpoint_corrupt, _}), do: true
   defp non_retryable_recovery_error?({:checkpoint_invalid, _}), do: true
+  # Durable store structural identity / config captured at init.
+  defp non_retryable_recovery_error?(:checkpoint_key_mismatch), do: true
+  defp non_retryable_recovery_error?(:checkpoint_run_id_mismatch), do: true
+  defp non_retryable_recovery_error?(:invalid_checkpoint_payload), do: true
+  defp non_retryable_recovery_error?({:invalid_engine_checkpoints, _}), do: true
   defp non_retryable_recovery_error?({:unsafe_recovery_path, _}), do: true
   defp non_retryable_recovery_error?(:checkpoint_is_symlink), do: true
   defp non_retryable_recovery_error?(:checkpoint_path_exists), do: true
@@ -1641,6 +1779,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   defp non_retryable_recovery_error?(:checkpoint_hmac_missing), do: false
   defp non_retryable_recovery_error?({:unauthorized_resume, _}), do: false
   defp non_retryable_recovery_error?({:checkpoint_load_failed, _}), do: false
+  # Store outage / durable transport failures remain retryable.
+  defp non_retryable_recovery_error?({:store_unavailable, _}), do: false
+  defp non_retryable_recovery_error?({:durable_checkpoint, _}), do: false
   defp non_retryable_recovery_error?(_), do: false
 
   # Transient filesystem / mount I/O — leave interrupted for retry.
@@ -1738,6 +1879,18 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   @doc false
   def __test_non_retryable_recovery_error__(reason),
     do: non_retryable_recovery_error?(reason)
+
+  # Test-only seam for the real post-claim durable locator (not production API).
+  # `state` must include `:checkpoint_store_opts` as captured by init
+  # (`{:ok, keyword}` or `{:error, {:invalid_engine_checkpoints, _}}`).
+  @doc false
+  def __test_locate_checkpoint__(%Record{} = entry, state, resume_opts \\ [])
+      when is_map(state) and is_list(resume_opts) do
+    locate_checkpoint(entry, state, resume_opts)
+  end
+
+  @doc false
+  def __test_capture_checkpoint_store_opts__, do: capture_checkpoint_store_opts()
 
   defp spawning_process_alive?(nil), do: false
 
