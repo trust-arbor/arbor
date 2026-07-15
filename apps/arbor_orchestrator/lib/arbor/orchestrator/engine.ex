@@ -16,6 +16,7 @@ defmodule Arbor.Orchestrator.Engine do
     Checkpoint,
     ContentHash,
     Context,
+    EffectOwner,
     Executor,
     Fidelity,
     FidelityTransformer,
@@ -31,6 +32,7 @@ defmodule Arbor.Orchestrator.Engine do
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.{Handler, Registry}
   alias Arbor.Orchestrator.JsonSafe
+  alias Arbor.Orchestrator.PipelineStatus
   alias Arbor.Orchestrator.Validation.Validator
 
   @type event :: map()
@@ -732,205 +734,457 @@ defmodule Arbor.Orchestrator.Engine do
         advance_with_fan_in(node, outcome, updated_state)
       end
     else
-      # Normal execution path
-      emit(state.opts, Event.stage_started(node.id))
-      emit(state.opts, Event.fidelity_resolved(node.id, fidelity.mode, fidelity.thread_id))
-
-      # Update RunState with node_started + sync via PipelineStatus
-      run_state =
-        if state.run_state do
-          rs = Arbor.Orchestrator.RunState.Core.node_started(state.run_state, node.id)
-
-          sync_run_state(
-            Keyword.get(state.opts, :run_id),
-            rs,
-            lifecycle_meta_from_state(state),
-            journal_opts_from(state.opts)
-          )
-
-          rs
-        else
-          state.run_state
-        end
-
-      stage_started_at = System.monotonic_time(:millisecond)
-
-      # Determine idempotency class for WAL wrapping
-      idempotency = Handler.idempotency_of(handler)
-      is_side_effecting = idempotency == :side_effecting
-
-      # Generate deterministic execution ID for side-effecting nodes
-      execution_id =
-        if is_side_effecting do
-          Checkpoint.generate_execution_id(
-            Keyword.get(state.opts, :run_id),
-            node.id,
-            computed_hash
-          )
-        else
-          nil
-        end
-
-      handler_opts =
-        state.opts
-        |> Keyword.put_new(:logs_root, state.logs_root)
-        |> Keyword.put(:stage_started_at, stage_started_at)
-        |> then(fn opts ->
-          if execution_id, do: Keyword.put(opts, :execution_id, execution_id), else: opts
-        end)
-
-      # WAL: Write PendingIntent before executing side-effecting nodes
-      tracking =
-        if is_side_effecting do
-          intent =
-            Checkpoint.build_pending_intent(
-              to_string(handler),
-              computed_hash,
-              execution_id
-            )
-
-          put_in(state.tracking, [:pending_intents, node.id], intent)
-        else
-          state.tracking
-        end
-
-      # Apply fidelity transform only when explicitly set on node/edge/graph
-      handler_context =
-        if fidelity.explicit? do
-          FidelityTransformer.transform(context, fidelity.mode, handler_opts)
-        else
-          context
-        end
-
-      # Long-running handlers (notably LlmHandler against reasoning models or
-      # large local LMs) can block for minutes. The engine only refreshes
-      # heartbeats at the top of each loop iteration — between nodes — so a
-      # single multi-minute node would let the heartbeat go stale, and
-      # RecoveryCoordinator would spam warnings every 30s. The ticker below
-      # refreshes the canonical PipelineStatus/RunJournal entry while the
-      # handler runs; it's killed as soon as the call returns.
-      # Journal target stays process-local on the ticker (not in context).
-      {outcome, retries} =
-        with_in_call_heartbeat(
-          Keyword.get(state.opts, :run_id),
-          journal_opts_from(state.opts),
-          fn ->
-            Executor.execute_with_retry(
-              node,
-              handler_context,
-              state.graph,
-              state.retries,
-              handler_opts
-            )
-          end
-        )
-
-      # auto_status: when enabled and handler didn't produce a success,
-      # synthesize SUCCESS so the pipeline continues (spec §4.5)
-      outcome = maybe_auto_status(outcome, node)
-
-      # WAL: Promote PendingIntent to ExecutionDigest after successful execution
-      tracking =
-        if is_side_effecting do
-          digest =
-            Checkpoint.build_execution_digest(
-              computed_hash,
-              outcome.status,
-              execution_id
-            )
-
-          tracking
-          |> put_in([:execution_digests, node.id], digest)
-          |> update_in([:pending_intents], &Map.delete(&1, node.id))
-        else
-          tracking
-        end
-
-      completed = [node.id | state.completed]
-      outcomes = Map.put(state.outcomes, node.id, outcome)
-      stage_duration = System.monotonic_time(:millisecond) - stage_started_at
-
-      # Update RunState with node_completed + sync via PipelineStatus
-      run_state =
-        if run_state do
-          rs = Arbor.Orchestrator.RunState.Core.node_completed(run_state, node.id, stage_duration)
-
-          sync_run_state(
-            Keyword.get(state.opts, :run_id),
-            rs,
-            lifecycle_meta_from_state(state),
-            journal_opts_from(state.opts)
-          )
-
-          rs
-        else
-          run_state
-        end
-
-      tracking =
-        tracking
-        |> put_in([:node_durations, node.id], stage_duration)
-        |> put_in([:content_hashes, node.id], computed_hash)
-
-      context =
-        context
-        |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
-        |> record_node_taint(node, outcome)
-        |> apply_taint_reductions(node, outcome)
-        |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
-        |> Context.set("__completed_nodes__", completed, node.id, step_now)
-        |> maybe_set_preferred_label(outcome, node.id, step_now)
-
-      # Check for graph adaptation (graph.adapt handler stores mutated graph in context)
-      {graph, context} = check_graph_adaptation(state.graph, context)
-
-      if resumable?(state.opts) do
-        checkpoint =
-          Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes,
-            content_hashes: tracking.content_hashes,
-            run_id: Keyword.get(state.opts, :run_id),
-            graph_hash: Keyword.get(state.opts, :graph_hash),
-            pending_intents: tracking.pending_intents,
-            execution_digests: tracking.execution_digests,
-            pipeline_started_at: Context.pipeline_started_at(context),
-            run_authorization: RunAuthorization.projection(state.run_authorization)
-          )
-
-        :ok =
-          Checkpoint.write(checkpoint, state.logs_root,
-            hmac_secret: Keyword.get(state.opts, :hmac_secret)
-          )
-
-        emit(
-          state.opts,
-          Event.checkpoint_saved(node.id, Path.join(state.logs_root, "checkpoint.json"))
-        )
-      end
-
-      # Per-node audit (status.json + artifacts) is kept regardless of
-      # resumability — it's the execution record, not resume state. The on-disk
-      # status.json can be retired (config) once the durable event stream carries
-      # the per-node outcome (stage_completed enrichment) — deployments that trust
-      # the durable backend set `status_files_enabled: false`. Default keeps it.
-      if status_files_enabled?(), do: :ok = write_node_status(node.id, outcome, state.logs_root)
-      maybe_store_artifact(state.opts, node.id, outcome)
-
-      updated_state = %{
+      execute_node_visit(
+        node,
+        handler,
+        context,
+        fidelity,
+        computed_hash,
+        step_now,
         state
-        | graph: graph,
-          context: context,
-          completed: completed,
-          retries: retries,
-          outcomes: outcomes,
-          tracking: tracking,
-          run_state: run_state
-      }
+      )
+    end
+  end
 
-      if Router.terminal?(node) do
-        handle_terminal(node, outcome, updated_state)
-      else
-        advance_with_fan_in(node, outcome, updated_state)
+  # Normal node visit: journaled handlers (:idempotent_with_key / :side_effecting)
+  # follow the PipelineStatus effect-owner protocol. Other classes keep the
+  # lightweight path (no effect envelope; no new pending_intents/execution_digests).
+  defp execute_node_visit(
+         node,
+         handler,
+         context,
+         fidelity,
+         computed_hash,
+         step_now,
+         %State{} = state
+       ) do
+    emit(state.opts, Event.stage_started(node.id))
+    emit(state.opts, Event.fidelity_resolved(node.id, fidelity.mode, fidelity.thread_id))
+
+    idempotency = Handler.idempotency_of(handler)
+    journaled? = EffectOwner.journaled?(idempotency)
+    run_id = Keyword.get(state.opts, :run_id)
+    journal_opts = journal_opts_from(state.opts)
+    lifecycle_meta = lifecycle_meta_from_state(state)
+    stage_started_at = System.monotonic_time(:millisecond)
+
+    case sync_node_started(
+           state.run_state,
+           node.id,
+           run_id,
+           lifecycle_meta,
+           journal_opts,
+           journaled?
+         ) do
+      {:error, reason, run_state} ->
+        fail_from_engine_state(%{state | run_state: run_state}, reason)
+
+      {:error, reason} ->
+        fail_from_engine_state(state, reason)
+
+      {:ok, run_state} ->
+        case maybe_prepare_effect(
+               journaled?,
+               run_id,
+               node,
+               handler,
+               idempotency,
+               computed_hash,
+               journal_opts
+             ) do
+          {:error, reason} ->
+            # Preserve node_started RunState when prepare fails closed.
+            fail_from_engine_state(%{state | run_state: run_state}, reason)
+
+          {:ok, effect_ctx} ->
+            execution_id = effect_ctx && effect_ctx.execution_id
+
+            handler_opts =
+              state.opts
+              |> Keyword.put_new(:logs_root, state.logs_root)
+              |> Keyword.put(:stage_started_at, stage_started_at)
+              |> then(fn opts ->
+                if execution_id, do: Keyword.put(opts, :execution_id, execution_id), else: opts
+              end)
+
+            # No new legacy checkpoint WAL entries on this path. Loaded legacy
+            # pending_intents / execution_digests remain in tracking for resume compat.
+            tracking = state.tracking
+
+            handler_context =
+              if fidelity.explicit? do
+                FidelityTransformer.transform(context, fidelity.mode, handler_opts)
+              else
+                context
+              end
+
+            # Long-running handlers can block for minutes; refresh heartbeat while
+            # the call is in flight. Journal target stays process-local on the ticker.
+            {outcome, retries} =
+              with_in_call_heartbeat(run_id, journal_opts, fn ->
+                Executor.execute_with_retry(
+                  node,
+                  handler_context,
+                  state.graph,
+                  state.retries,
+                  handler_opts
+                )
+              end)
+
+            outcome = maybe_auto_status(outcome, node)
+            stage_duration = System.monotonic_time(:millisecond) - stage_started_at
+
+            post_execute_visit(
+              node,
+              outcome,
+              retries,
+              context,
+              computed_hash,
+              step_now,
+              stage_duration,
+              run_state,
+              tracking,
+              effect_ctx,
+              journaled?,
+              %{state | run_state: run_state}
+            )
+        end
+    end
+  end
+
+  defp sync_node_started(nil, _node_id, _run_id, _meta, _journal_opts, true) do
+    {:error, {:effect_node_start_sync_failed, :run_state_missing}}
+  end
+
+  defp sync_node_started(nil, _node_id, _run_id, _meta, _journal_opts, false), do: {:ok, nil}
+
+  defp sync_node_started(run_state, node_id, run_id, meta, journal_opts, journaled?) do
+    rs = Arbor.Orchestrator.RunState.Core.node_started(run_state, node_id)
+
+    case sync_run_state(run_id, rs, meta, journal_opts) do
+      :ok ->
+        {:ok, rs}
+
+      {:error, reason} ->
+        if journaled? do
+          {:error, {:effect_node_start_sync_failed, reason}, rs}
+        else
+          # Non-journaled path preserves prior best-effort progress sync.
+          {:ok, rs}
+        end
+    end
+  end
+
+  defp maybe_prepare_effect(false, _run_id, _node, _handler, _idempotency, _hash, _jopts) do
+    {:ok, nil}
+  end
+
+  defp maybe_prepare_effect(
+         true,
+         run_id,
+         node,
+         handler,
+         idempotency,
+         computed_hash,
+         journal_opts
+       )
+       when is_binary(run_id) do
+    # Impure inputs obtained once at the Engine boundary, then pure construction.
+    execution_id = EffectOwner.fresh_execution_id(:crypto.strong_rand_bytes(16))
+    started_at = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    attrs =
+      EffectOwner.prepare_attrs(
+        run_id,
+        node.id,
+        execution_id,
+        EffectOwner.handler_identity(handler),
+        idempotency,
+        computed_hash,
+        started_at
+      )
+
+    case PipelineStatus.prepare_effect(run_id, attrs, journal_opts) do
+      {:ok, tag, effect} when tag in [:prepared, :already_prepared] ->
+        generation = effect["generation"]
+
+        {:ok,
+         %{
+           execution_id: execution_id,
+           generation: generation,
+           run_id: run_id,
+           journal_opts: journal_opts
+         }}
+
+      {:error, reason} ->
+        {:error, {:effect_prepare_failed, reason}}
+    end
+  end
+
+  defp maybe_prepare_effect(true, _run_id, _node, _handler, _idempotency, _hash, _jopts) do
+    {:error, {:effect_prepare_failed, :run_id_missing}}
+  end
+
+  defp post_execute_visit(
+         node,
+         outcome,
+         retries,
+         context,
+         computed_hash,
+         step_now,
+         stage_duration,
+         run_state,
+         tracking,
+         effect_ctx,
+         journaled?,
+         %State{} = state
+       ) do
+    # Always carry the newest process-local engine state into terminal finalization
+    # on failure paths. RunJournal retains effect evidence independently.
+    base_state = %{state | run_state: run_state}
+
+    case maybe_record_effect_receipt(journaled?, effect_ctx, outcome) do
+      {:error, reason} ->
+        fail_from_engine_state(base_state, reason)
+
+      :ok ->
+        case apply_outcome_and_checkpoint(
+               node,
+               outcome,
+               retries,
+               context,
+               computed_hash,
+               step_now,
+               stage_duration,
+               run_state,
+               tracking,
+               journaled?,
+               state
+             ) do
+          {:error, reason, partial_state} ->
+            fail_from_engine_state(partial_state, reason)
+
+          {:ok, applied} ->
+            partial_after_apply = %{
+              state
+              | graph: applied.graph,
+                context: applied.context,
+                completed: applied.completed,
+                retries: applied.retries,
+                outcomes: applied.outcomes,
+                tracking: applied.tracking,
+                run_state: applied.run_state
+            }
+
+            case sync_node_completed(
+                   applied.run_state,
+                   node.id,
+                   stage_duration,
+                   Keyword.get(state.opts, :run_id),
+                   lifecycle_meta_from_state(partial_after_apply),
+                   journal_opts_from(state.opts),
+                   journaled?
+                 ) do
+              {:error, reason, rs} ->
+                # Prefer the post-node_completed RunState even when journal sync fails.
+                fail_from_engine_state(%{partial_after_apply | run_state: rs}, reason)
+
+              {:error, reason} ->
+                fail_from_engine_state(partial_after_apply, reason)
+
+              {:ok, run_state2} ->
+                partial_after_progress = %{partial_after_apply | run_state: run_state2}
+
+                case maybe_settle_effect(journaled?, effect_ctx) do
+                  {:error, reason} ->
+                    fail_from_engine_state(partial_after_progress, reason)
+
+                  :ok ->
+                    # Status/artifact publication and graph routing only after
+                    # settle (or non-journaled path with no effect protocol).
+                    if status_files_enabled?(),
+                      do: :ok = write_node_status(node.id, outcome, state.logs_root)
+
+                    maybe_store_artifact(state.opts, node.id, outcome)
+
+                    if Router.terminal?(node) do
+                      handle_terminal(node, outcome, partial_after_progress)
+                    else
+                      advance_with_fan_in(node, outcome, partial_after_progress)
+                    end
+                end
+            end
+        end
+    end
+  end
+
+  defp maybe_record_effect_receipt(false, _effect_ctx, _outcome), do: :ok
+
+  defp maybe_record_effect_receipt(true, effect_ctx, outcome) do
+    %{run_id: run_id, generation: generation, execution_id: execution_id, journal_opts: jopts} =
+      effect_ctx
+
+    completed_at = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    case EffectOwner.receipt_attrs(outcome, completed_at) do
+      {:error, reason} ->
+        {:error, {:effect_receipt_failed, reason}}
+
+      {:ok, receipt} ->
+        case PipelineStatus.record_effect_receipt(
+               run_id,
+               generation,
+               execution_id,
+               receipt,
+               jopts
+             ) do
+          {:ok, tag, _effect} when tag in [:recorded, :already_recorded] ->
+            :ok
+
+          {:error, reason} ->
+            {:error, {:effect_receipt_failed, reason}}
+        end
+    end
+  end
+
+  defp apply_outcome_and_checkpoint(
+         node,
+         outcome,
+         retries,
+         context,
+         computed_hash,
+         step_now,
+         stage_duration,
+         run_state,
+         tracking,
+         journaled?,
+         %State{} = state
+       ) do
+    completed = [node.id | state.completed]
+    outcomes = Map.put(state.outcomes, node.id, outcome)
+
+    tracking =
+      tracking
+      |> put_in([:node_durations, node.id], stage_duration)
+      |> put_in([:content_hashes, node.id], computed_hash)
+
+    context =
+      context
+      |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
+      |> record_node_taint(node, outcome)
+      |> apply_taint_reductions(node, outcome)
+      |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
+      |> Context.set("__completed_nodes__", completed, node.id, step_now)
+      |> maybe_set_preferred_label(outcome, node.id, step_now)
+
+    {graph, context} = check_graph_adaptation(state.graph, context)
+
+    applied = %{
+      graph: graph,
+      context: context,
+      completed: completed,
+      retries: retries,
+      outcomes: outcomes,
+      tracking: tracking,
+      run_state: run_state
+    }
+
+    # Newest in-process graph/context/outcomes even if checkpoint persistence fails.
+    partial_state = %{
+      state
+      | graph: graph,
+        context: context,
+        completed: completed,
+        retries: retries,
+        outcomes: outcomes,
+        tracking: tracking,
+        run_state: run_state
+    }
+
+    if resumable?(state.opts) do
+      checkpoint =
+        Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes,
+          content_hashes: tracking.content_hashes,
+          run_id: Keyword.get(state.opts, :run_id),
+          graph_hash: Keyword.get(state.opts, :graph_hash),
+          # Preserve any loaded legacy maps; do not create new WAL entries.
+          pending_intents: tracking.pending_intents,
+          execution_digests: tracking.execution_digests,
+          pipeline_started_at: Context.pipeline_started_at(context),
+          run_authorization: RunAuthorization.projection(state.run_authorization)
+        )
+
+      case Checkpoint.persist(checkpoint, state.logs_root,
+             hmac_secret: Keyword.get(state.opts, :hmac_secret)
+           ) do
+        {:ok, _receipt} ->
+          emit(
+            state.opts,
+            Event.checkpoint_saved(node.id, Path.join(state.logs_root, "checkpoint.json"))
+          )
+
+          {:ok, applied}
+
+        {:error, reason} ->
+          # Phase-specific tag for journaled visits; non-journaled keeps a
+          # stable checkpoint-failure shape for the same terminal path.
+          err =
+            if journaled?,
+              do: {:effect_checkpoint_failed, reason},
+              else: {:checkpoint_persist_failed, reason}
+
+          {:error, err, partial_state}
       end
+    else
+      {:ok, applied}
+    end
+  end
+
+  defp sync_node_completed(nil, _node_id, _duration, _run_id, _meta, _jopts, true) do
+    {:error, {:effect_completed_progress_failed, :run_state_missing}}
+  end
+
+  defp sync_node_completed(nil, _node_id, _duration, _run_id, _meta, _jopts, false),
+    do: {:ok, nil}
+
+  defp sync_node_completed(
+         run_state,
+         node_id,
+         stage_duration,
+         run_id,
+         meta,
+         journal_opts,
+         journaled?
+       ) do
+    # Compute newest process-local progress first; journal sync may fail while
+    # this RunState is still the correct finalization input.
+    rs = Arbor.Orchestrator.RunState.Core.node_completed(run_state, node_id, stage_duration)
+
+    case sync_run_state(run_id, rs, meta, journal_opts) do
+      :ok ->
+        {:ok, rs}
+
+      {:error, reason} ->
+        if journaled? do
+          {:error, {:effect_completed_progress_failed, reason}, rs}
+        else
+          {:ok, rs}
+        end
+    end
+  end
+
+  defp maybe_settle_effect(false, _effect_ctx), do: :ok
+
+  defp maybe_settle_effect(true, effect_ctx) do
+    %{run_id: run_id, generation: generation, execution_id: execution_id, journal_opts: jopts} =
+      effect_ctx
+
+    case PipelineStatus.settle_effect(run_id, generation, execution_id, jopts) do
+      {:ok, tag, _effect} when tag in [:settled, :already_settled] ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:effect_settle_failed, reason}}
     end
   end
 
