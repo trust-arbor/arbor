@@ -920,15 +920,18 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     refute File.exists?(resource.candidate_path)
   end
 
-  test "workspace owner death retains failed child and task-principal recovery authority", %{
-    tmp_dir: tmp_dir
-  } do
+  test "security regression: workspace owner death retries failed child cleanup before bounded parent retention",
+       %{
+         tmp_dir: tmp_dir
+       } do
     repo = create_base_project(Path.join(tmp_dir, "owner-cleanup-repo"), valid_module())
     server = :"cleanup_owner_death_#{System.unique_integer([:positive])}"
 
     start_supervised!(
       {WorkspaceLeaseRegistry,
        name: server,
+       retention_ttl_ms: 5_000,
+       owner_death_retry_base_ms: 100,
        linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
     )
 
@@ -969,8 +972,14 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
       state = :sys.get_state(server)
 
       case Map.get(state.leases, lease.workspace_id) do
-        nil -> false
-        retained_lease -> not Map.has_key?(state.by_ref, retained_lease.owner_ref)
+        nil ->
+          false
+
+        pending ->
+          Map.get(pending, :owner_death_quarantine_state) == :validation_cleanup_pending and
+            Map.get(pending, :owner_death_deletion_disabled) == true and
+            is_reference(Map.get(pending, :owner_death_retry_ref)) and
+            not Map.has_key?(state.by_ref, pending.owner_ref)
       end
     end)
 
@@ -983,11 +992,41 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     assert retained.resource_id == resource.resource_id
     assert File.dir?(retained.root_path)
 
-    assert {:ok, %{status: "removed"}} =
-             WorkspaceLeaseRegistry.release_validation_resource(resource.resource_id, recovery)
+    assert {:error, :workspace_cleanup_pending} =
+             WorkspaceLeaseRegistry.acquire(
+               %{
+                 workspace_id: lease.workspace_id,
+                 repo_path: repo,
+                 branch: "test/cleanup-owner-death",
+                 task_id: task_id,
+                 principal_id: principal_id,
+                 worktree_base_dir: Path.join(tmp_dir, "cleanup-owner-worktrees")
+               },
+               server: server
+             )
+
+    assert_eventually(fn ->
+      state = :sys.get_state(server)
+
+      map_size(state.leases) == 0 and map_size(state.retained_by_id) == 1 and
+        map_size(state.validation_resources) == 0 and not File.dir?(retained.root_path)
+    end)
+
+    assert {:ok, reactivated} =
+             WorkspaceLeaseRegistry.acquire(
+               %{
+                 workspace_id: lease.workspace_id,
+                 repo_path: repo,
+                 branch: "test/cleanup-owner-death",
+                 task_id: task_id,
+                 principal_id: principal_id,
+                 worktree_base_dir: Path.join(tmp_dir, "cleanup-owner-worktrees")
+               },
+               server: server
+             )
 
     assert {:ok, _released} =
-             WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, recovery)
+             WorkspaceLeaseRegistry.release(reactivated.workspace_id, :remove, recovery)
   end
 
   test "council issues only after approved quorum routing and compares the reviewed full diff", %{

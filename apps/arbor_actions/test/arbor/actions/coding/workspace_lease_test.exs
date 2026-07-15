@@ -687,9 +687,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                })
     end
 
-    test "identity-failure quarantine retries and exact task+principal can reactivate", %{
-      tmp_dir: tmp_dir
-    } do
+    test "security regression: reactivated identity-invalid quarantine cannot force-remove and survives another owner death",
+         %{
+           tmp_dir: tmp_dir
+         } do
       fake_repo = Path.join(tmp_dir, "fake-repo")
       fake_worktree = Path.join(tmp_dir, "fake-worktree")
       File.mkdir_p!(fake_repo)
@@ -707,6 +708,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
         {WorkspaceLeaseRegistry,
          name: server,
          retention_ttl_ms: 50,
+         owner_death_retry_base_ms: 100,
          linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
       )
 
@@ -769,10 +771,136 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                  server: server
                )
 
+      recovery_owner =
+        spawn(fn ->
+          result =
+            WorkspaceLeaseRegistry.acquire(
+              %{
+                workspace_id: workspace_id,
+                repo_path: fake_repo,
+                branch: branch,
+                worktree_path: fake_worktree,
+                task_id: task_id,
+                principal_id: principal_id,
+                create_worktree: create_worktree
+              },
+              server: server
+            )
+
+          send(parent, {:reactivated, result})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:reactivated, {:ok, reactivated}}, 2_000
+
+      state = :sys.get_state(server)
+      active = Map.fetch!(state.leases, workspace_id)
+      assert active.cleanup_armed == true
+      assert active.owner_death_deletion_disabled == true
+      assert Map.has_key?(state.by_ref, active.owner_ref)
+      assert active.owner_death_retry_ref == nil
+      assert reactivated.workspace_id == lease.workspace_id
+
+      assert {:error, :quarantine_identity_unavailable} =
+               WorkspaceLeaseRegistry.release(workspace_id, :remove, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      assert File.read!(Path.join(fake_worktree, "partial.txt")) == "recoverable\n"
+
+      Process.exit(recovery_owner, :kill)
+
+      assert_eventually(fn ->
+        again = Map.fetch!(:sys.get_state(server).leases, workspace_id)
+        assert again.cleanup_armed == false
+        assert again.owner_death_deletion_disabled == true
+        assert is_reference(again.owner_death_retry_ref)
+      end)
+
+      assert {:ok, recovered} =
+               WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      assert recovered.workspace_id == workspace_id
+    end
+
+    test "identity quarantine retry captures a newly provable worktree and enters bounded retention",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      fake_repo = Path.join(tmp_dir, "retry-fake-repo")
+      fake_worktree = Path.join(tmp_dir, "retry-fake-worktree")
+      File.mkdir_p!(fake_repo)
+      File.mkdir_p!(fake_worktree)
+
+      branch = "test/workspace-owner-death-retry"
+      workspace_id = "ws_retry_#{System.unique_integer([:positive])}"
+      task_id = "task-retry-#{System.unique_integer([:positive])}"
+      principal_id = "agent-retry-#{System.unique_integer([:positive])}"
+      parent = self()
+      server = :"workspace_quarantine_retry_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         retention_ttl_ms: 5_000,
+         owner_death_retry_base_ms: 100,
+         owner_death_retry_limit: 3,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
+
+      create_worktree = fn _repo, _branch, _params ->
+        {:ok, fake_worktree, :owned, String.duplicate("a", 40)}
+      end
+
+      owner =
+        spawn(fn ->
+          result =
+            WorkspaceLeaseRegistry.acquire(
+              %{
+                workspace_id: workspace_id,
+                repo_path: fake_repo,
+                branch: branch,
+                worktree_path: fake_worktree,
+                task_id: task_id,
+                principal_id: principal_id,
+                create_worktree: create_worktree
+              },
+              server: server
+            )
+
+          send(parent, {:leased, result})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:leased, {:ok, _lease}}, 2_000
+      Process.exit(owner, :kill)
+
+      assert_eventually(fn ->
+        quarantined = Map.get(:sys.get_state(server).leases, workspace_id)
+        assert quarantined.cleanup_armed == false
+        assert quarantined.owner_death_retry_count == 1
+        assert is_reference(quarantined.owner_death_retry_ref)
+      end)
+
+      {:ok, _removed} = File.rm_rf(fake_worktree)
+      create_git_repo(fake_repo)
+      git!(fake_repo, ["worktree", "add", "-b", branch, fake_worktree])
+
+      assert_eventually(fn ->
+        state = :sys.get_state(server)
+        assert map_size(state.leases) == 0
+        assert map_size(state.retained_by_id) == 1
+      end)
+
       assert {:ok, reactivated} =
                WorkspaceLeaseRegistry.acquire(
                  %{
-                   workspace_id: workspace_id,
                    repo_path: fake_repo,
                    branch: branch,
                    worktree_path: fake_worktree,
@@ -783,21 +911,95 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                  server: server
                )
 
-      state = :sys.get_state(server)
-      active = Map.fetch!(state.leases, workspace_id)
-      assert active.cleanup_armed == true
-      assert Map.has_key?(state.by_ref, active.owner_ref)
-      refute Map.has_key?(active, :owner_death_retry_ref)
-      assert reactivated.workspace_id == lease.workspace_id
-
       assert {:ok, _} =
+               WorkspaceLeaseRegistry.release(reactivated.workspace_id, :remove, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+    end
+
+    test "identity-invalid quarantine becomes dormant after bounded retries without losing exact authority",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      fake_repo = Path.join(tmp_dir, "dormant-fake-repo")
+      fake_worktree = Path.join(tmp_dir, "dormant-fake-worktree")
+      File.mkdir_p!(fake_repo)
+      File.mkdir_p!(fake_worktree)
+      File.write!(Path.join(fake_worktree, "preserve.txt"), "do not delete\n")
+
+      branch = "test/workspace-owner-death-dormant"
+      workspace_id = "ws_dormant_#{System.unique_integer([:positive])}"
+      task_id = "task-dormant-#{System.unique_integer([:positive])}"
+      principal_id = "agent-dormant-#{System.unique_integer([:positive])}"
+      parent = self()
+      server = :"workspace_quarantine_dormant_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         owner_death_retry_base_ms: 10,
+         owner_death_retry_limit: 2,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
+
+      create_worktree = fn _repo, _branch, _params ->
+        {:ok, fake_worktree, :owned, String.duplicate("a", 40)}
+      end
+
+      owner =
+        spawn(fn ->
+          result =
+            WorkspaceLeaseRegistry.acquire(
+              %{
+                workspace_id: workspace_id,
+                repo_path: fake_repo,
+                branch: branch,
+                worktree_path: fake_worktree,
+                task_id: task_id,
+                principal_id: principal_id,
+                create_worktree: create_worktree
+              },
+              server: server
+            )
+
+          send(parent, {:leased, result})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:leased, {:ok, _lease}}, 2_000
+      Process.exit(owner, :kill)
+
+      assert_eventually(fn ->
+        dormant = Map.get(:sys.get_state(server).leases, workspace_id)
+        assert dormant.cleanup_armed == false
+        assert dormant.owner_death_quarantine_state == :dormant
+        assert dormant.owner_death_retry_exhausted == true
+        assert dormant.owner_death_retry_count == 2
+        assert dormant.owner_death_retry_ref == nil
+        assert dormant.owner_death_retry_generation == nil
+      end)
+
+      assert File.read!(Path.join(fake_worktree, "preserve.txt")) == "do not delete\n"
+
+      assert {:ok, inspected} =
+               WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      assert inspected.workspace_id == workspace_id
+
+      assert {:error, :quarantine_identity_unavailable} =
                WorkspaceLeaseRegistry.release(workspace_id, :remove, %{
                  server: server,
                  task_id: task_id,
                  principal_id: principal_id
                })
 
-      refute File.dir?(fake_worktree)
+      assert File.read!(Path.join(fake_worktree, "preserve.txt")) == "do not delete\n"
     end
 
     test "owner death retains clean committed HEAD ahead of base for exact task+principal", %{

@@ -74,6 +74,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   @type ownership :: :owned | :reused
   @type release_mode :: :retain | :remove
 
+  # Owner-death retries are a liveness aid, never deletion authority. An
+  # exhausted quarantine remains available to its exact task+principal for
+  # explicit inspection and recovery, but stops waking the registry forever.
+  @default_owner_death_retry_limit 3
+  @max_owner_death_retry_limit 10
+  @default_owner_death_retry_base_ms 1_000
+  @max_owner_death_retry_base_ms 60_000
+
   @type lease :: %{
           workspace_id: String.t(),
           owner_pid: pid(),
@@ -379,6 +387,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
        retention_ttl_ms: Config.workspace_retention_ttl_ms(server_opts(opts)),
        retained_cleanup:
          Keyword.get(server_opts(opts), :retained_cleanup, &remove_owned_worktree/2),
+       owner_death_retry_limit: owner_death_retry_limit(server_opts(opts)),
+       owner_death_retry_base_ms: owner_death_retry_base_ms(server_opts(opts)),
        validation_resources: %{},
        validation_by_ref: %{},
        validation_by_workspace: %{},
@@ -393,6 +403,26 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp server_opts(opts) when is_list(opts), do: opts
   defp server_opts(_opts), do: []
+
+  defp owner_death_retry_limit(opts) do
+    case Keyword.get(opts, :owner_death_retry_limit) do
+      limit when is_integer(limit) and limit >= 0 and limit <= @max_owner_death_retry_limit ->
+        limit
+
+      _ ->
+        @default_owner_death_retry_limit
+    end
+  end
+
+  defp owner_death_retry_base_ms(opts) do
+    case Keyword.get(opts, :owner_death_retry_base_ms) do
+      delay when is_integer(delay) and delay >= 1 and delay <= @max_owner_death_retry_base_ms ->
+        delay
+
+      _ ->
+        @default_owner_death_retry_base_ms
+    end
+  end
 
   defp dependency_baseline_materializer_from_opts(opts) when is_list(opts) do
     case Keyword.get(server_opts(opts), :linux_dependency_baseline_materializer) do
@@ -513,6 +543,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         case fetch_authorized_validation_resource(state, resource_id, caller) do
           {:ok, _authorized} ->
             {result, state} = do_release_validation_resource(state, resource)
+            state = complete_owner_death_validation_cleanup(state, resource.workspace_id, result)
             {:reply, result, state}
 
           {:error, reason} ->
@@ -1675,9 +1706,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
         case cleanup_workspace_validation_resources(state, workspace_id) do
           {:error, state} ->
-            # The dead owner ref is gone, but the lease remains as the
-            # task+principal authority needed to discover and retry cleanup.
-            {:noreply, state}
+            # The dead owner ref is gone, but exact task+principal authority
+            # must remain available for the child cleanup. Quarantine the
+            # parent and retry the child cleanup before retention conversion.
+            case Map.get(state.leases, workspace_id) do
+              nil ->
+                {:noreply, state}
+
+              lease ->
+                {:noreply, preserve_cleanup_pending_after_owner_death(state, lease)}
+            end
 
           {:ok, state} ->
             state =
@@ -1700,6 +1738,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   # Serialized inside the GenServer — never a DOT node or Jido action.
   defp apply_owner_death_workspace_policy(state, lease) do
     cond do
+      owner_death_quarantined?(lease) and lease.ownership == :owned ->
+        # A reactivated quarantine keeps its deletion-disabled marker. On a
+        # later owner death it must re-enter retention, never be dropped.
+        retain_on_owner_death(state, lease, :owner_terminated)
+
       lease.cleanup_armed != true ->
         drop_lease(state, lease)
 
@@ -1756,7 +1799,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       lease =
         lease
         |> preserve_lease_after_owner_death(reason, policy, detail)
-        |> schedule_owner_death_retention_retry()
+        |> schedule_owner_death_retention_retry(state)
 
       put_lease(state, lease)
     else
@@ -1769,38 +1812,116 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     lease
     |> Map.put(:cleanup_armed, false)
     |> Map.put(:active, true)
+    |> Map.put(:owner_death_deletion_disabled, true)
+    |> Map.put(:owner_death_quarantine_state, :identity_pending)
     |> Map.put(:owner_death_policy, policy)
     |> Map.put(:owner_death_policy_reason, reason)
     |> Map.put(:owner_death_policy_error, detail)
   end
 
-  defp schedule_owner_death_retention_retry(lease) do
-    retry_count = Map.get(lease, :owner_death_retry_count, 0)
-    delay_ms = min(1_000 * Integer.pow(2, min(retry_count, 5)), 60_000)
-    generation = make_ref()
-
-    retry_ref =
-      Process.send_after(
-        self(),
-        {:owner_death_retention_retry, lease.workspace_id, generation},
-        delay_ms
+  defp preserve_cleanup_pending_after_owner_death(state, lease) do
+    lease =
+      lease
+      |> preserve_lease_after_owner_death(
+        :owner_terminated,
+        :validation_cleanup_pending,
+        :validation_resource_cleanup_failed
       )
+      |> Map.put(:owner_death_quarantine_state, :validation_cleanup_pending)
 
-    lease
-    |> Map.put(:owner_death_retry_count, retry_count + 1)
-    |> Map.put(:owner_death_retry_generation, generation)
-    |> Map.put(:owner_death_retry_ref, retry_ref)
+    put_lease(state, schedule_owner_death_retention_retry(lease, state))
+  end
+
+  defp schedule_owner_death_retention_retry(lease, state) do
+    retry_count = Map.get(lease, :owner_death_retry_count, 0)
+    limit = state.owner_death_retry_limit
+
+    if retry_count >= limit do
+      quarantine_state =
+        case Map.get(lease, :owner_death_quarantine_state) do
+          :validation_cleanup_pending -> :validation_cleanup_dormant
+          _ -> :dormant
+        end
+
+      lease
+      |> Map.put(:owner_death_retry_exhausted, true)
+      |> Map.put(:owner_death_retry_generation, nil)
+      |> Map.put(:owner_death_retry_ref, nil)
+      |> Map.put(:owner_death_quarantine_state, quarantine_state)
+    else
+      delay_ms =
+        min(
+          state.owner_death_retry_base_ms * Integer.pow(2, min(retry_count, 5)),
+          @max_owner_death_retry_base_ms
+        )
+
+      generation = make_ref()
+
+      retry_ref =
+        Process.send_after(
+          self(),
+          {:owner_death_retention_retry, lease.workspace_id, generation},
+          delay_ms
+        )
+
+      lease
+      |> Map.put(:owner_death_retry_count, retry_count + 1)
+      |> Map.put(:owner_death_retry_exhausted, false)
+      |> Map.put(:owner_death_retry_generation, generation)
+      |> Map.put(:owner_death_retry_ref, retry_ref)
+    end
   end
 
   defp retry_owner_death_retention(state, workspace_id, generation) do
     case Map.get(state.leases, workspace_id) do
       %{cleanup_armed: false, owner_death_retry_generation: ^generation} = lease ->
-        retain_on_owner_death(state, lease, :identity_retry)
+        retry_owner_death_quarantine(state, lease)
 
       _ ->
         state
     end
   end
+
+  defp retry_owner_death_quarantine(
+         state,
+         %{owner_death_quarantine_state: :validation_cleanup_pending} = lease
+       ) do
+    case cleanup_workspace_validation_resources(state, lease.workspace_id) do
+      {:error, state} ->
+        preserve_cleanup_pending_after_owner_death(state, lease)
+
+      {:ok, state} ->
+        complete_owner_death_validation_cleanup(state, lease.workspace_id, {:ok, %{}})
+    end
+  end
+
+  defp retry_owner_death_quarantine(state, lease),
+    do: retain_on_owner_death(state, lease, :identity_retry)
+
+  defp complete_owner_death_validation_cleanup(state, workspace_id, {:ok, _result}) do
+    case Map.get(state.leases, workspace_id) do
+      %{owner_death_quarantine_state: quarantine_state} = lease
+      when quarantine_state in [:validation_cleanup_pending, :validation_cleanup_dormant] ->
+        state =
+          state
+          |> cleanup_workspace_attestations(workspace_id)
+          |> cleanup_workspace_review_snapshots(workspace_id)
+
+        lease =
+          lease
+          |> Map.put(:owner_death_quarantine_state, :identity_pending)
+          |> Map.put(:owner_death_policy, :retention_identity_unavailable)
+          |> Map.put(:owner_death_policy_error, nil)
+
+        state = put_lease(state, lease)
+        apply_owner_death_workspace_policy(state, lease)
+
+      _ ->
+        state
+    end
+  end
+
+  defp complete_owner_death_validation_cleanup(state, _workspace_id, _result), do: state
 
   defp ensure_material_matches_lease(material, lease) do
     if material.workspace_id == lease.workspace_id and material.base_commit == lease.base_commit and
@@ -2233,6 +2354,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
               canonical_path_or_expanded(lease.worktree_path) ->
             {:error, :workspace_in_use}
 
+          Map.get(lease, :owner_death_quarantine_state) in [
+            :validation_cleanup_pending,
+            :validation_cleanup_dormant
+          ] ->
+            # Child cleanup is still registry-owned after the parent owner
+            # died. A new owner cannot adopt the parent around that cleanup.
+            {:error, :workspace_cleanup_pending}
+
           principal_task_match?(lease, prepared) ->
             {:ok, lease}
 
@@ -2244,7 +2373,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp quarantined_target?(lease, prepared) do
     lease.cleanup_armed == false and
-      Map.has_key?(lease, :owner_death_policy) and
+      owner_death_quarantined?(lease) and
       lease.repo_path == prepared.repo_path and lease.branch == prepared.branch and
       (not is_pid(lease.owner_pid) or not Process.alive?(lease.owner_pid))
   end
@@ -2255,19 +2384,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     lease =
       lease
-      |> Map.drop([
-        :owner_death_policy,
-        :owner_death_policy_reason,
-        :owner_death_policy_error,
-        :owner_death_retry_count,
-        :owner_death_retry_generation,
-        :owner_death_retry_ref
-      ])
       |> Map.merge(%{
         owner_pid: prepared.owner_pid,
         owner_ref: owner_ref,
         active: true,
-        cleanup_armed: true
+        cleanup_armed: true,
+        owner_death_quarantine_state: :reactivated,
+        owner_death_retry_count: 0,
+        owner_death_retry_exhausted: false,
+        owner_death_retry_generation: nil,
+        owner_death_retry_ref: nil
       })
 
     state = state |> put_lease(lease) |> put_ref(lease)
@@ -2596,6 +2722,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp non_empty_id?(id), do: is_binary(id) and id != ""
 
+  defp owner_death_quarantined?(lease) do
+    Map.get(lease, :owner_death_deletion_disabled) == true
+  end
+
   defp do_release(state, lease, :retain) when lease.ownership == :reused do
     state = drop_lease(state, lease)
     # A reused path never becomes deletion authority and never gets a timer.
@@ -2668,7 +2798,26 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp do_release(state, lease, :remove) do
+  defp do_release(
+         state,
+         %{ownership: :owned, owner_death_deletion_disabled: true} = lease,
+         :remove
+       ) do
+    # Exact task+principal can resume a quarantine, but it cannot turn a path
+    # that was never identity-pinned into force-delete authority. Capture a
+    # currently registered identity immediately before the destructive call.
+    case capture_retention_identity(lease) do
+      {:ok, _identity} ->
+        do_release_after_identity_capture(state, lease)
+
+      {:error, _reason} ->
+        {:error, :quarantine_identity_unavailable, state}
+    end
+  end
+
+  defp do_release(state, lease, :remove), do: do_release_after_identity_capture(state, lease)
+
+  defp do_release_after_identity_capture(state, lease) do
     state = drop_lease(state, lease)
     Process.demonitor(lease.owner_ref, [:flush])
 
@@ -2729,7 +2878,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp capture_retention_identity(lease) do
     with {:ok, canonical_worktree_path} <- canonical_existing_path(lease.worktree_path),
          {:ok, lstat} <- File.lstat(canonical_worktree_path),
-         {:ok, registration} <- worktree_registration(lease.repo_path, canonical_worktree_path) do
+         {:ok, registration} <- worktree_registration(lease.repo_path, canonical_worktree_path),
+         true <- registration.branch == lease.branch,
+         {:ok, current_branch} <- current_branch(lease.repo_path, canonical_worktree_path),
+         true <- current_branch == lease.branch do
       {:ok,
        %{
          worktree_path: canonical_worktree_path,
