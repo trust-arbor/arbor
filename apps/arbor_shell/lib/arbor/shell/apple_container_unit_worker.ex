@@ -1014,7 +1014,13 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       state
     else
       sanitized = sanitize_result(result, state)
-      _ = ExecutionRegistry.finish(state.execution_id, sanitized)
+      # Registry projection is secondary: absence-proven terminals and drain
+      # receipts must still complete when the registry is gone or exits.
+      _ =
+        best_effort_registry_publish(fn ->
+          ExecutionRegistry.finish(state.execution_id, sanitized)
+        end)
+
       notify_controller(state, {:ok, sanitized})
       %{state | terminal_published: true, terminal: {:ok, sanitized}, status: :terminal}
     end
@@ -1029,10 +1035,28 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       state
     else
       bound = bound_reason(reason)
-      _ = ExecutionRegistry.fail(state.execution_id, bound)
+
+      _ =
+        best_effort_registry_publish(fn ->
+          ExecutionRegistry.fail(state.execution_id, bound)
+        end)
+
       terminal = terminal || {:error, bound}
       notify_controller(state, terminal)
       %{state | terminal_published: true, terminal: terminal, status: :terminal}
+    end
+  end
+
+  # ExecutionRegistry is a best-effort projection only. Catch exits/errors so a
+  # missing or restarting registry never aborts controller notification, terminal
+  # state transition, drain receipt emission, or normal worker stop.
+  defp best_effort_registry_publish(fun) when is_function(fun, 0) do
+    try do
+      fun.()
+    catch
+      :exit, _reason -> :registry_unavailable
+      :error, _reason -> :registry_unavailable
+      :throw, _reason -> :registry_unavailable
     end
   end
 

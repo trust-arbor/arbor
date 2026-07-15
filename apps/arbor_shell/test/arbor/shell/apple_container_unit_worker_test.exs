@@ -522,6 +522,43 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     end
   end
 
+  defp restore_execution_registry! do
+    case Process.whereis(ExecutionRegistry) do
+      pid when is_pid(pid) ->
+        :ok
+
+      _missing ->
+        case Supervisor.restart_child(Arbor.Shell.Supervisor, ExecutionRegistry) do
+          {:ok, _pid} ->
+            :ok
+
+          {:ok, _pid, _info} ->
+            :ok
+
+          {:error, :running} ->
+            :ok
+
+          {:error, {:already_started, _pid}} ->
+            :ok
+
+          {:error, :not_found} ->
+            {:ok, _} =
+              Supervisor.start_child(Arbor.Shell.Supervisor, {ExecutionRegistry, []})
+
+            :ok
+
+          {:error, _reason} ->
+            _ = Supervisor.terminate_child(Arbor.Shell.Supervisor, ExecutionRegistry)
+            _ = Supervisor.delete_child(Arbor.Shell.Supervisor, ExecutionRegistry)
+
+            {:ok, _} =
+              Supervisor.start_child(Arbor.Shell.Supervisor, {ExecutionRegistry, []})
+
+            :ok
+        end
+    end
+  end
+
   defp unit_child_pids do
     Arbor.Shell.AppleContainerUnitSupervisor
     |> DynamicSupervisor.which_children()
@@ -829,6 +866,72 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert exec.result.stdout == "cand"
       last_list = Enum.at(FakeRuntime.calls(), -1)
       assert last_list.args == ["list", "--all", "--format", "json"]
+      refute Process.alive?(worker)
+    end
+
+    test "security regression: registry absence does not drop drain receipt or terminal", %{
+      spec: spec,
+      executable: executable
+    } do
+      on_exit(fn -> restore_execution_registry!() end)
+
+      # Full lifecycle to create-attempted success, then hold exact absence so we
+      # can remove ExecutionRegistry before the worker publishes terminal.
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0, stdout: "candidate-out"}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        {:hold, success_list([])}
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      worker_ref = Process.monitor(worker)
+
+      # Reach create-attempted cleanup and hold the final exact-absence list.
+      eventually!(fn -> FakeRuntime.held_count() >= 1 end, 15_000)
+
+      receipt_ref = make_ref()
+      parent = self()
+
+      drain_caller =
+        spawn(fn ->
+          reply = Worker.request_drain(worker, receipt_ref, 15_000)
+          send(parent, {:drain_reply, reply})
+
+          receive do
+            {:apple_container_unit_drained, _, _, _} = msg ->
+              send(parent, {:drain_receipt, msg})
+          after
+            30_000 ->
+              send(parent, {:drain_receipt, :timeout})
+          end
+        end)
+
+      assert_receive {:drain_reply, :ok}, 5_000
+
+      # Positive absence not yet proven — no terminal and no drain receipt.
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 100
+      refute_receive {:drain_receipt, _}, 50
+      assert Process.alive?(worker)
+      assert Process.alive?(drain_caller)
+
+      # Make the named ExecutionRegistry unavailable before absence is released.
+      assert is_pid(Process.whereis(ExecutionRegistry))
+      assert :ok = Supervisor.terminate_child(Arbor.Shell.Supervisor, ExecutionRegistry)
+      assert Process.whereis(ExecutionRegistry) == nil
+
+      assert :ok = FakeRuntime.release_held()
+
+      assert_receive {:apple_container_unit_terminal, ^execution_id, {:ok, result}}, 10_000
+      assert result.stdout == "candidate-out"
+
+      assert_receive {:drain_receipt,
+                      {:apple_container_unit_drained, ^worker, ^execution_id, ^receipt_ref}},
+                     10_000
+
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, :normal}, 10_000
       refute Process.alive?(worker)
     end
 
