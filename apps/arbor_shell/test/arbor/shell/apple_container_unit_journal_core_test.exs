@@ -878,6 +878,21 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
                Core.new(%{schema_version: 1, generation: "0", active: []})
     end
 
+    test "rejects a generation older than the active record set" do
+      assert {:error, :invalid_generation} =
+               Core.new(%{
+                 schema_version: 1,
+                 generation: 0,
+                 active: [
+                   snapshot_record(
+                     unit_name: @unit_a,
+                     execution_id: @exec_a,
+                     token: @token_a
+                   )
+                 ]
+               })
+    end
+
     test "rejects invalid active collection" do
       assert {:error, :invalid_active} =
                Core.new(%{schema_version: 1, generation: 0, active: %{}})
@@ -924,6 +939,41 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
 
       assert {:error, :invalid_journal_state} = Core.complete(%{}, @unit_a, @token_a)
       assert {:error, :invalid_journal_state} = Core.recovery_entries(%{})
+    end
+
+    test "deeply malformed internal state cannot crash or project an empty journal" do
+      malformed_record = %{
+        schema_version: 1,
+        generation: 1,
+        by_name: %{@unit_a => %{unit_name: @unit_a}}
+      }
+
+      mismatched_index = %{
+        schema_version: 1,
+        generation: 1,
+        by_name: %{
+          @unit_b => reserve_attrs(unit_name: @unit_a, execution_id: @exec_a, token: @token_a)
+        }
+      }
+
+      extra_state_key = Map.put(empty!(), :active, [])
+
+      for invalid <- [malformed_record, mismatched_index, extra_state_key] do
+        assert {:error, :invalid_journal_state} = Core.show(invalid)
+        assert {:error, :invalid_journal_state} = Core.recovery_entries(invalid)
+
+        assert {:error, :invalid_journal_state} =
+                 Core.reserve(
+                   invalid,
+                   reserve_attrs(
+                     unit_name: @unit_b,
+                     execution_id: @exec_b,
+                     token: @token_b
+                   )
+                 )
+
+        assert {:error, :invalid_journal_state} = Core.complete(invalid, @unit_a, @token_a)
+      end
     end
   end
 

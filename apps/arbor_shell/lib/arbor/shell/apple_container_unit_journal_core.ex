@@ -33,6 +33,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
                             Enum.map(@logical_journal_keys, &Atom.to_string/1)
                         )
 
+  @logical_state_keys [:schema_version, :generation, :by_name]
+
   @logical_record_keys [:unit_name, :execution_id, :token, :reserved_at_ms]
   @allowed_record_keys MapSet.new(
                          @logical_record_keys ++
@@ -83,7 +85,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
          {:ok, schema_version} <- fetch_schema_version(input),
          {:ok, generation} <- fetch_generation(input),
          {:ok, active_list} <- fetch_active_list(input),
-         {:ok, by_name} <- normalize_active_records(active_list) do
+         {:ok, by_name} <- normalize_active_records(active_list),
+         :ok <- validate_generation_consistency(generation, by_name) do
       {:ok,
        %{
          schema_version: schema_version,
@@ -175,24 +178,10 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
   Keys are strings; `active` is sorted by `unit_name` bytewise. Suitable for
   durable persistence and round-trip through `new/1`.
   """
-  @spec show(state()) :: map()
-  def show(state) when is_map(state) do
-    case require_state(state) do
-      :ok ->
-        %{
-          "schema_version" => state.schema_version,
-          "generation" => state.generation,
-          "active" => Enum.map(sorted_records(state), &show_record/1)
-        }
-
-      {:error, _} ->
-        # Fail-closed empty projection for non-state maps; callers that need
-        # validation use new/1 on external data.
-        %{
-          "schema_version" => @schema_version,
-          "generation" => 0,
-          "active" => []
-        }
+  @spec show(term()) :: map() | {:error, :invalid_journal_state}
+  def show(state) do
+    with :ok <- require_state(state) do
+      snapshot(state)
     end
   end
 
@@ -206,13 +195,23 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
     }
   end
 
-  defp require_state(%{
-         schema_version: @schema_version,
-         generation: generation,
-         by_name: by_name
-       })
+  defp require_state(
+         %{
+           schema_version: @schema_version,
+           generation: generation,
+           by_name: by_name
+         } = state
+       )
        when is_integer(generation) and generation >= 0 and is_map(by_name) do
-    :ok
+    with true <- Map.keys(state) |> MapSet.new() |> MapSet.equal?(MapSet.new(@logical_state_keys)),
+         true <- map_size(by_name) <= @max_active,
+         {:ok, normalized_by_name} <- normalize_active_records(Map.values(by_name)),
+         true <- normalized_by_name == by_name,
+         :ok <- validate_generation_consistency(generation, by_name) do
+      :ok
+    else
+      _ -> {:error, :invalid_journal_state}
+    end
   end
 
   defp require_state(_), do: {:error, :invalid_journal_state}
@@ -260,6 +259,14 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
 
       {:ok, _other} ->
         {:error, :invalid_active}
+    end
+  end
+
+  defp validate_generation_consistency(generation, by_name) do
+    if generation >= map_size(by_name) do
+      :ok
+    else
+      {:error, :invalid_generation}
     end
   end
 
@@ -467,7 +474,15 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
 
   # --- Projection -------------------------------------------------------------
 
-  defp persist_effect(state), do: [{:persist_snapshot, show(state)}]
+  defp persist_effect(state), do: [{:persist_snapshot, snapshot(state)}]
+
+  defp snapshot(state) do
+    %{
+      "schema_version" => state.schema_version,
+      "generation" => state.generation,
+      "active" => Enum.map(sorted_records(state), &show_record/1)
+    }
+  end
 
   defp sorted_records(%{by_name: by_name}) do
     by_name
