@@ -594,28 +594,39 @@ defmodule Arbor.Orchestrator.EngineEffectOwnerOrderingTest do
       assert loop_rec.effect_generation >= 2
     end
 
-    test "successful journaled execution does not write new legacy pending_intents/execution_digests",
+    test "successful journaled execution writes visit execution_digests, not legacy pending_intents",
          ctx do
       jopts = [server: ctx.journal_name]
       logs_root = tmp_logs("eo_legacy")
+      parent = self()
 
       assert {:ok, _} =
                Engine.run(parse!(side_effect_dot()),
                  run_id: ctx.run_id,
                  logs_root: logs_root,
                  journal_opts: jopts,
-                 parent: self(),
+                 parent: parent,
                  resumable: true
                )
 
       assert {:ok, checkpoint} =
                Checkpoint.load(Path.join(logs_root, "checkpoint.json"), run_id: ctx.run_id)
 
+      # Legacy pending_intents remain unused on the journaled path.
       assert checkpoint.pending_intents == %{}
-      assert checkpoint.execution_digests == %{}
 
+      # execution_digests is the bounded current-visit recovery marker.
       rec = PipelineStatus.get_record(ctx.run_id, jopts)
       assert rec.current_effect["status"] == "settled"
+      exec_id = rec.current_effect["execution_id"]
+      assert is_binary(exec_id)
+
+      marker = checkpoint.execution_digests["task"]
+      assert is_map(marker)
+      assert marker.execution_id == exec_id
+      assert is_binary(marker.input_hash)
+      assert marker.outcome_status == :success
+      assert is_binary(marker.completed_at)
     end
 
     test "resumable:false still journals receipt, progress, and settle before completion", ctx do

@@ -7,6 +7,12 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   for the Engine shell to interpret — no IO, no journal calls, no process
   state, no wall clock.
 
+  Recovery proof for a completed/settled effect is bound to the **current
+  effect visit**, not `node_id` alone (DOT nodes can repeat). The checkpoint's
+  per-node `execution_digests` marker is the visit identity: `execution_id`,
+  `input_hash`, `outcome_status`, and timestamp. Settlement also requires the
+  checkpoint `Outcome` result digest to match the journal receipt.
+
   Canonical effect safety is **not** bypassable by `force_replay` or DOT
   `on_resume="retry"` (those apply only to legacy checkpoint pending_intents).
   """
@@ -16,10 +22,13 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   alias Arbor.Orchestrator.RunLifecycle.EffectEnvelope
   alias Arbor.Orchestrator.RunLifecycle.Record
 
+  @type execution_marker :: map()
+
   @type checkpoint_view :: %{
           optional(:completed_nodes) => [String.t()],
           optional(:outcomes) => %{optional(String.t()) => Outcome.t()},
-          optional(:node_outcomes) => %{optional(String.t()) => Outcome.t()}
+          optional(:node_outcomes) => %{optional(String.t()) => Outcome.t()},
+          optional(:execution_digests) => %{optional(String.t()) => execution_marker()}
         }
 
   @type reconcile_action ::
@@ -42,7 +51,7 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
 
   `checkpoint` must already be authenticated by the Engine. Accepts either a
   `%Checkpoint{}`-shaped map or the Engine resume state fields
-  (`completed_nodes` + `outcomes`).
+  (`completed_nodes` + `outcomes` + `execution_digests`).
   """
   @spec decide(Record.t() | map() | nil, checkpoint_view() | map() | nil) :: decision()
   def decide(record, checkpoint)
@@ -85,6 +94,7 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   defp decide_effect(_effect, _record_nodes, _checkpoint),
     do: {:error, {:invalid_current_effect, :invalid_type}}
 
+  # Pending is always indeterminate — never settle, never replay.
   defp classify(%{"status" => "pending"} = effect, _record_nodes, _checkpoint) do
     {:error, {:indeterminate_effect, effect["node_id"], effect["execution_id"]}}
   end
@@ -93,63 +103,37 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
     node_id = effect["node_id"]
     execution_id = effect["execution_id"]
     generation = effect["generation"]
-    in_record? = node_completed?(record_nodes, node_id)
-    in_checkpoint? = node_completed?(checkpoint.completed_nodes, node_id)
 
-    case exact_checkpoint_completion(effect, checkpoint, in_checkpoint?) do
-      {:ok, :match} ->
-        cond do
-          # Matching receipt but durable progress disagrees with checkpoint identity.
-          in_record? and not in_checkpoint? ->
-            {:error, {:effect_recovery_inconsistent, :progress_disagree}}
-
-          not in_record? ->
-            # Checkpoint is ahead of durable journal progress — sync then settle.
-            {:ok, :reconcile,
-             [
-               {:sync_progress, checkpoint.completed_nodes},
-               {:settle, generation, execution_id}
-             ]}
-
-          true ->
-            {:ok, :reconcile, [{:settle, generation, execution_id}]}
-        end
-
-      {:error, :missing_outcome} ->
-        # Handler may have completed (receipt) but checkpoint never applied the node.
-        if in_record? and not in_checkpoint? do
-          {:error, {:effect_recovery_inconsistent, :progress_disagree}}
-        else
-          {:error, {:completed_effect_unapplied, node_id, execution_id}}
-        end
-
-      {:error, :status_mismatch} ->
-        {:error, {:effect_recovery_inconsistent, :outcome_status_mismatch}}
-
-      {:error, :digest_mismatch} ->
-        {:error, {:effect_recovery_inconsistent, :result_digest_mismatch}}
+    case match_current_execution_marker(effect, checkpoint) do
+      {:error, :missing_or_stale_marker} ->
+        # Absent marker or a different visit's marker — completed but checkpoint
+        # never applied *this* execution. Halt without replay.
+        {:error, {:completed_effect_unapplied, node_id, execution_id}}
 
       {:error, reason} when is_atom(reason) ->
+        # Same execution_id present but fields disagree / are malformed.
         {:error, {:effect_recovery_inconsistent, reason}}
-    end
-  end
 
-  defp classify(%{"status" => "settled"} = effect, record_nodes, checkpoint) do
-    node_id = effect["node_id"]
-    in_record? = node_completed?(record_nodes, node_id)
-    in_checkpoint? = node_completed?(checkpoint.completed_nodes, node_id)
-
-    cond do
-      not in_record? or not in_checkpoint? ->
-        {:error, {:effect_recovery_inconsistent, :settled_progress_missing}}
-
-      true ->
-        case exact_checkpoint_completion(effect, checkpoint, true) do
+      {:ok, :marker_match} ->
+        case exact_outcome_match(effect, checkpoint) do
           {:ok, :match} ->
-            {:ok, :continue}
+            case ordered_progress_relation(record_nodes, checkpoint.completed_nodes) do
+              :equal ->
+                {:ok, :reconcile, [{:settle, generation, execution_id}]}
+
+              :record_prefix ->
+                {:ok, :reconcile,
+                 [
+                   {:sync_progress, checkpoint.completed_nodes},
+                   {:settle, generation, execution_id}
+                 ]}
+
+              :inconsistent ->
+                {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}}
+            end
 
           {:error, :missing_outcome} ->
-            {:error, {:effect_recovery_inconsistent, :settled_outcome_missing}}
+            {:error, {:effect_recovery_inconsistent, :outcome_missing}}
 
           {:error, :status_mismatch} ->
             {:error, {:effect_recovery_inconsistent, :outcome_status_mismatch}}
@@ -163,19 +147,118 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
     end
   end
 
-  defp classify(_effect, _record_nodes, _checkpoint),
-    do: {:error, {:invalid_current_effect, :invalid_status}}
+  defp classify(%{"status" => "settled"} = effect, record_nodes, checkpoint) do
+    # Settled requires exact marker + outcome evidence and ordered-progress equality.
+    case ordered_progress_relation(record_nodes, checkpoint.completed_nodes) do
+      :equal ->
+        case match_current_execution_marker(effect, checkpoint) do
+          {:ok, :marker_match} ->
+            case exact_outcome_match(effect, checkpoint) do
+              {:ok, :match} ->
+                {:ok, :continue}
 
-  # Exact reconciliation requires the effect node in checkpoint completed_nodes
-  # and an Outcome whose status + result digest match the retained receipt.
-  defp exact_checkpoint_completion(effect, checkpoint, in_checkpoint?) do
-    if not in_checkpoint? do
-      {:error, :missing_outcome}
-    else
-      exact_outcome_match(effect, checkpoint)
+              {:error, :missing_outcome} ->
+                {:error, {:effect_recovery_inconsistent, :settled_outcome_missing}}
+
+              {:error, :status_mismatch} ->
+                {:error, {:effect_recovery_inconsistent, :outcome_status_mismatch}}
+
+              {:error, :digest_mismatch} ->
+                {:error, {:effect_recovery_inconsistent, :result_digest_mismatch}}
+
+              {:error, reason} when is_atom(reason) ->
+                {:error, {:effect_recovery_inconsistent, reason}}
+            end
+
+          {:error, :missing_or_stale_marker} ->
+            {:error, {:effect_recovery_inconsistent, :settled_marker_missing}}
+
+          {:error, reason} when is_atom(reason) ->
+            {:error, {:effect_recovery_inconsistent, reason}}
+        end
+
+      :record_prefix ->
+        # Settled must already have durable progress caught up — never sync from settled.
+        {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}}
+
+      :inconsistent ->
+        {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}}
     end
   end
 
+  defp classify(_effect, _record_nodes, _checkpoint),
+    do: {:error, {:invalid_current_effect, :invalid_status}}
+
+  # ---------------------------------------------------------------------------
+  # Execution visit marker (Checkpoint.execution_digests)
+  # ---------------------------------------------------------------------------
+
+  # Returns:
+  # - {:ok, :marker_match} — marker.execution_id == effect.execution_id and fields agree
+  # - {:error, :missing_or_stale_marker} — absent or different execution_id
+  # - {:error, atom} — same execution_id with malformed / mismatching fields
+  defp match_current_execution_marker(effect, checkpoint) do
+    node_id = effect["node_id"]
+    execution_id = effect["execution_id"]
+    digests = checkpoint.execution_digests || %{}
+
+    case Map.fetch(digests, node_id) do
+      :error ->
+        {:error, :missing_or_stale_marker}
+
+      {:ok, marker} when is_map(marker) ->
+        marker_exec = marker_get(marker, :execution_id)
+
+        cond do
+          not is_binary(marker_exec) ->
+            {:error, :missing_or_stale_marker}
+
+          marker_exec != execution_id ->
+            # Stale visit evidence for a different execution of the same node.
+            {:error, :missing_or_stale_marker}
+
+          true ->
+            validate_marker_fields(effect, marker)
+        end
+
+      {:ok, _} ->
+        {:error, :invalid_execution_marker}
+    end
+  end
+
+  defp validate_marker_fields(effect, marker) do
+    marker_hash = marker_get(marker, :input_hash)
+    marker_status = marker_get(marker, :outcome_status)
+    expected_hash = effect["input_hash"]
+    expected_status = effect["outcome_status"]
+
+    cond do
+      not is_binary(marker_hash) or marker_hash == "" ->
+        {:error, :invalid_execution_marker}
+
+      not is_binary(expected_hash) ->
+        {:error, :invalid_effect_input_hash}
+
+      marker_hash != expected_hash ->
+        {:error, :input_hash_mismatch}
+
+      not is_binary(expected_status) ->
+        {:error, :invalid_effect_outcome_status}
+
+      normalize_status_string(marker_status) != expected_status ->
+        {:error, :outcome_status_mismatch}
+
+      true ->
+        {:ok, :marker_match}
+    end
+  end
+
+  defp marker_get(marker, key) when is_atom(key) do
+    Map.get(marker, key) || Map.get(marker, Atom.to_string(key))
+  end
+
+  # Exact reconciliation requires an Outcome whose status + result digest match
+  # the retained receipt for this node.
   defp exact_outcome_match(effect, checkpoint) do
     node_id = effect["node_id"]
 
@@ -206,26 +289,60 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
     end
   end
 
+  # Ordered list comparison including duplicates.
+  # :equal — consistent
+  # :record_prefix — durable record is a strict prefix of checkpoint (may sync)
+  # :inconsistent — checkpoint-behind or divergent (never overwrite durable progress)
+  defp ordered_progress_relation(record_nodes, checkpoint_nodes)
+       when is_list(record_nodes) and is_list(checkpoint_nodes) do
+    cond do
+      record_nodes == checkpoint_nodes ->
+        :equal
+
+      list_strict_prefix?(record_nodes, checkpoint_nodes) ->
+        :record_prefix
+
+      true ->
+        :inconsistent
+    end
+  end
+
+  defp ordered_progress_relation(_, _), do: :inconsistent
+
+  defp list_strict_prefix?(prefix, list)
+       when is_list(prefix) and is_list(list) and length(prefix) < length(list) do
+    Enum.take(list, length(prefix)) == prefix
+  end
+
+  defp list_strict_prefix?(_, _), do: false
+
   defp outcome_status_string(status) when is_atom(status), do: Atom.to_string(status)
   defp outcome_status_string(status) when is_binary(status), do: status
   defp outcome_status_string(_), do: nil
 
-  defp node_completed?(nodes, node_id) when is_list(nodes) and is_binary(node_id) do
-    node_id in nodes
+  defp normalize_status_string(status) when is_atom(status), do: Atom.to_string(status)
+  defp normalize_status_string(status) when is_binary(status), do: status
+  defp normalize_status_string(_), do: nil
+
+  defp checkpoint_view(nil),
+    do: %{completed_nodes: [], outcomes: %{}, execution_digests: %{}}
+
+  defp checkpoint_view(%{completed_nodes: nodes, outcomes: outcomes} = checkpoint)
+       when is_list(nodes) and is_map(outcomes) do
+    %{
+      completed_nodes: nodes,
+      outcomes: outcomes,
+      execution_digests: normalize_digests(Map.get(checkpoint, :execution_digests, %{}))
+    }
   end
 
-  defp node_completed?(_, _), do: false
-
-  defp checkpoint_view(nil), do: %{completed_nodes: [], outcomes: %{}}
-
-  defp checkpoint_view(%{completed_nodes: nodes, outcomes: outcomes})
+  defp checkpoint_view(%{completed_nodes: nodes, node_outcomes: outcomes} = checkpoint)
        when is_list(nodes) and is_map(outcomes) do
-    %{completed_nodes: nodes, outcomes: outcomes}
-  end
-
-  defp checkpoint_view(%{completed_nodes: nodes, node_outcomes: outcomes})
-       when is_list(nodes) and is_map(outcomes) do
-    %{completed_nodes: nodes, outcomes: outcomes}
+    %{
+      completed_nodes: nodes,
+      outcomes: outcomes,
+      execution_digests: normalize_digests(Map.get(checkpoint, :execution_digests, %{}))
+    }
   end
 
   defp checkpoint_view(checkpoint) when is_map(checkpoint) do
@@ -240,11 +357,21 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
         Map.get(checkpoint, "node_outcomes") ||
         %{}
 
+    digests =
+      Map.get(checkpoint, :execution_digests) ||
+        Map.get(checkpoint, "execution_digests") ||
+        %{}
+
     %{
       completed_nodes: if(is_list(nodes), do: nodes, else: []),
-      outcomes: if(is_map(outcomes), do: outcomes, else: %{})
+      outcomes: if(is_map(outcomes), do: outcomes, else: %{}),
+      execution_digests: normalize_digests(digests)
     }
   end
 
-  defp checkpoint_view(_), do: %{completed_nodes: [], outcomes: %{}}
+  defp checkpoint_view(_),
+    do: %{completed_nodes: [], outcomes: %{}, execution_digests: %{}}
+
+  defp normalize_digests(digests) when is_map(digests), do: digests
+  defp normalize_digests(_), do: %{}
 end

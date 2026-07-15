@@ -784,7 +784,9 @@ defmodule Arbor.Orchestrator.Engine do
 
   # Normal node visit: journaled handlers (:idempotent_with_key / :side_effecting)
   # follow the PipelineStatus effect-owner protocol. Other classes keep the
-  # lightweight path (no effect envelope; no new pending_intents/execution_digests).
+  # lightweight path (no effect envelope; no new pending_intents).
+  # Journaled visits write Checkpoint.execution_digests as the current-visit
+  # recovery marker after a successful receipt and before checkpoint persist.
   defp execute_node_visit(
          node,
          handler,
@@ -843,8 +845,9 @@ defmodule Arbor.Orchestrator.Engine do
                 if execution_id, do: Keyword.put(opts, :execution_id, execution_id), else: opts
               end)
 
-            # No new legacy checkpoint WAL entries on this path. Loaded legacy
-            # pending_intents / execution_digests remain in tracking for resume compat.
+            # No new legacy pending_intents on this path. Loaded legacy
+            # pending_intents remain for resume compat; execution_digests are
+            # updated after receipt as the current-visit recovery marker.
             tracking = state.tracking
 
             handler_context =
@@ -949,7 +952,8 @@ defmodule Arbor.Orchestrator.Engine do
            execution_id: execution_id,
            generation: generation,
            run_id: run_id,
-           journal_opts: journal_opts
+           journal_opts: journal_opts,
+           input_hash: computed_hash
          }}
 
       {:error, reason} ->
@@ -983,7 +987,20 @@ defmodule Arbor.Orchestrator.Engine do
       {:error, reason} ->
         fail_from_engine_state(base_state, reason)
 
-      :ok ->
+      {:ok, effect_ctx_after_receipt} ->
+        # After successful journal receipt and before checkpoint persistence,
+        # bind the current visit marker in execution_digests (execution_id,
+        # input_hash, outcome_status, timestamp). Recovery requires this exact
+        # visit identity — node_id alone is insufficient when DOT nodes repeat.
+        tracking =
+          put_effect_execution_digest(
+            journaled?,
+            tracking,
+            node,
+            effect_ctx_after_receipt,
+            outcome
+          )
+
         case apply_outcome_and_checkpoint(
                node,
                outcome,
@@ -1054,7 +1071,7 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  defp maybe_record_effect_receipt(false, _effect_ctx, _outcome), do: :ok
+  defp maybe_record_effect_receipt(false, effect_ctx, _outcome), do: {:ok, effect_ctx}
 
   defp maybe_record_effect_receipt(true, effect_ctx, outcome) do
     %{run_id: run_id, generation: generation, execution_id: execution_id, journal_opts: jopts} =
@@ -1075,13 +1092,40 @@ defmodule Arbor.Orchestrator.Engine do
                jopts
              ) do
           {:ok, tag, _effect} when tag in [:recorded, :already_recorded] ->
-            :ok
+            {:ok, Map.put(effect_ctx, :completed_at, completed_at)}
 
           {:error, reason} ->
             {:error, {:effect_receipt_failed, reason}}
         end
     end
   end
+
+  # Per-node current-visit recovery marker (overwrites prior visit for same node_id).
+  defp put_effect_execution_digest(false, tracking, _node, _effect_ctx, _outcome), do: tracking
+
+  defp put_effect_execution_digest(true, tracking, node, effect_ctx, outcome)
+       when is_map(effect_ctx) and is_map(tracking) do
+    input_hash = Map.get(effect_ctx, :input_hash)
+    execution_id = Map.get(effect_ctx, :execution_id)
+    completed_at = Map.get(effect_ctx, :completed_at)
+
+    if is_binary(input_hash) and is_binary(execution_id) and is_binary(completed_at) and
+         is_atom(outcome.status) do
+      digest = %{
+        input_hash: input_hash,
+        outcome_status: outcome.status,
+        completed_at: completed_at,
+        execution_id: execution_id
+      }
+
+      put_in(tracking, [:execution_digests, node.id], digest)
+    else
+      tracking
+    end
+  end
+
+  defp put_effect_execution_digest(_journaled?, tracking, _node, _effect_ctx, _outcome),
+    do: tracking
 
   defp apply_outcome_and_checkpoint(
          node,
@@ -1143,7 +1187,8 @@ defmodule Arbor.Orchestrator.Engine do
           content_hashes: tracking.content_hashes,
           run_id: Keyword.get(state.opts, :run_id),
           graph_hash: Keyword.get(state.opts, :graph_hash),
-          # Preserve any loaded legacy maps; do not create new WAL entries.
+          # Preserve loaded legacy pending_intents; execution_digests hold the
+          # current-visit recovery marker written after effect receipt.
           pending_intents: tracking.pending_intents,
           execution_digests: tracking.execution_digests,
           pipeline_started_at: Context.pipeline_started_at(context),
@@ -2020,7 +2065,8 @@ defmodule Arbor.Orchestrator.Engine do
         %Arbor.Orchestrator.RunLifecycle.Record{} = record ->
           checkpoint_view = %{
             completed_nodes: state.completed_nodes || [],
-            outcomes: state.outcomes || %{}
+            outcomes: state.outcomes || %{},
+            execution_digests: Map.get(state, :execution_digests, %{})
           }
 
           case EffectRecoveryCore.decide(record, checkpoint_view) do
