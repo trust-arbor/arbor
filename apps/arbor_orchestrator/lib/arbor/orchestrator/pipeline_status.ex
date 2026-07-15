@@ -159,6 +159,71 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   def delete(run_id, opts \\ []), do: RunJournal.delete(run_id, opts)
 
   # ===========================================================================
+  # Effect owner APIs (typed wrappers — no generic arbitrary effect write)
+  # ===========================================================================
+
+  @doc """
+  Prepare a pending effect envelope for a run (owner API).
+
+  Delegates to `RunJournal.prepare_effect/3`. Preserves the exact return
+  contract and optional journal target opts (`server:`).
+
+  Returns:
+
+  - `{:ok, :prepared, effect}` — new pending envelope written
+  - `{:ok, :already_prepared, effect}` — exact retry of the same pending envelope
+  - `{:error, reason}` — missing run, conflict, generation ceiling, malformed
+    attrs, journal unavailable, or durable write failure
+  """
+  @spec prepare_effect(String.t(), map(), keyword()) ::
+          {:ok, :prepared | :already_prepared, map()} | {:error, term()}
+  def prepare_effect(run_id, attrs, opts \\ [])
+      when is_binary(run_id) and is_map(attrs) do
+    RunJournal.prepare_effect(run_id, attrs, opts)
+  end
+
+  @doc """
+  Record a completed effect receipt (owner API).
+
+  Delegates to `RunJournal.record_effect_receipt/5`. Requires the current
+  effect to be pending with the exact `generation` and `execution_id`.
+  Preserves optional journal target opts (`server:`).
+
+  Returns:
+
+  - `{:ok, :recorded, effect}` — receipt written
+  - `{:ok, :already_recorded, effect}` — exact retry of the same receipt
+  - `{:error, reason}` — conflict, missing run, malformed attrs, or durable failure
+  """
+  @spec record_effect_receipt(String.t(), pos_integer(), String.t(), map(), keyword()) ::
+          {:ok, :recorded | :already_recorded, map()} | {:error, term()}
+  def record_effect_receipt(run_id, generation, execution_id, attrs, opts \\ [])
+      when is_binary(run_id) and is_integer(generation) and is_binary(execution_id) and
+             is_map(attrs) do
+    RunJournal.record_effect_receipt(run_id, generation, execution_id, attrs, opts)
+  end
+
+  @doc """
+  Settle a completed effect (owner API).
+
+  Delegates to `RunJournal.settle_effect/4`. Requires the current effect to
+  be completed with the exact `generation` and `execution_id`. Preserves
+  optional journal target opts (`server:`).
+
+  Returns:
+
+  - `{:ok, :settled, effect}` — effect marked settled
+  - `{:ok, :already_settled, effect}` — exact retry after settle
+  - `{:error, reason}` — conflict, missing run, or durable failure
+  """
+  @spec settle_effect(String.t(), pos_integer(), String.t(), keyword()) ::
+          {:ok, :settled | :already_settled, map()} | {:error, term()}
+  def settle_effect(run_id, generation, execution_id, opts \\ [])
+      when is_binary(run_id) and is_integer(generation) and is_binary(execution_id) do
+    RunJournal.settle_effect(run_id, generation, execution_id, opts)
+  end
+
+  # ===========================================================================
   # Reads
   # ===========================================================================
 

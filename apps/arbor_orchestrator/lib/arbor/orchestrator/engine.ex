@@ -54,6 +54,13 @@ defmodule Arbor.Orchestrator.Engine do
   - `:validate` — run structural validation before execution (default: `false`).
     When called via `Orchestrator.run/2`, validation runs at the facade level.
     Set this to `true` when calling `Engine.run/2` directly.
+  - `:journal_opts` — keyword list selecting the RunJournal target for this
+    run's lifecycle operations (e.g. `server:` for an isolated journal).
+    Defaults to `[]` (process-global journal), matching
+    `RecoveryCoordinator`. Validated once before lifecycle admission;
+    invalid values fail closed with `{:error, :invalid_journal_opts}` and
+    never silently fall back to the global journal. Kept process-local —
+    never written into Engine context or checkpoints.
   """
   @spec run(Graph.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(%Graph{} = graph, opts \\ []) do
@@ -134,6 +141,32 @@ defmodule Arbor.Orchestrator.Engine do
          max_steps,
          pipeline_started_at
        ) do
+    # Validate journal target once before any lifecycle read/write or handler
+    # dispatch. Invalid values fail closed — never fall back to the global journal.
+    case validate_and_normalize_journal_opts(opts) do
+      {:ok, opts} ->
+        do_prepared_run_with_journal(
+          graph,
+          run_authorization,
+          opts,
+          logs_root,
+          max_steps,
+          pipeline_started_at
+        )
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp do_prepared_run_with_journal(
+         %Graph{} = graph,
+         run_authorization,
+         opts,
+         logs_root,
+         max_steps,
+         pipeline_started_at
+       ) do
     pipeline_started_at_dt = Keyword.get(opts, :pipeline_started_at, DateTime.utc_now())
     run_id = Keyword.fetch!(opts, :run_id)
 
@@ -170,8 +203,9 @@ defmodule Arbor.Orchestrator.Engine do
       |> put_execution_principal_meta(opts, run_authorization)
 
     admission = if resume_or_recovery?(opts), do: :resume, else: :fresh
+    journal_opts = journal_opts_from(opts)
 
-    case admit_and_sync_run_state(run_state, lifecycle_meta, admission) do
+    case admit_and_sync_run_state(run_state, lifecycle_meta, admission, journal_opts) do
       :ok ->
         # Catch recoverable raise/throw/exit. Terminalization always uses the
         # journal's latest progress (atomic finalize), not a stale lexical RunState.
@@ -288,7 +322,13 @@ defmodule Arbor.Orchestrator.Engine do
         # Fold checkpoint-completed progress into process-local RunState and journal
         # so resume never drops completed_count/nodes after load.
         run_state =
-          seed_run_state_from_checkpoint(run_state, state, run_id, lifecycle_meta)
+          seed_run_state_from_checkpoint(
+            run_state,
+            state,
+            run_id,
+            lifecycle_meta,
+            journal_opts_from(opts)
+          )
 
         engine_state = %State{
           graph: graph,
@@ -704,7 +744,8 @@ defmodule Arbor.Orchestrator.Engine do
           sync_run_state(
             Keyword.get(state.opts, :run_id),
             rs,
-            lifecycle_meta_from_state(state)
+            lifecycle_meta_from_state(state),
+            journal_opts_from(state.opts)
           )
 
           rs
@@ -768,16 +809,21 @@ defmodule Arbor.Orchestrator.Engine do
       # RecoveryCoordinator would spam warnings every 30s. The ticker below
       # refreshes the canonical PipelineStatus/RunJournal entry while the
       # handler runs; it's killed as soon as the call returns.
+      # Journal target stays process-local on the ticker (not in context).
       {outcome, retries} =
-        with_in_call_heartbeat(Keyword.get(state.opts, :run_id), fn ->
-          Executor.execute_with_retry(
-            node,
-            handler_context,
-            state.graph,
-            state.retries,
-            handler_opts
-          )
-        end)
+        with_in_call_heartbeat(
+          Keyword.get(state.opts, :run_id),
+          journal_opts_from(state.opts),
+          fn ->
+            Executor.execute_with_retry(
+              node,
+              handler_context,
+              state.graph,
+              state.retries,
+              handler_opts
+            )
+          end
+        )
 
       # auto_status: when enabled and handler didn't produce a success,
       # synthesize SUCCESS so the pipeline continues (spec §4.5)
@@ -812,7 +858,8 @@ defmodule Arbor.Orchestrator.Engine do
           sync_run_state(
             Keyword.get(state.opts, :run_id),
             rs,
-            lifecycle_meta_from_state(state)
+            lifecycle_meta_from_state(state),
+            journal_opts_from(state.opts)
           )
 
           rs
@@ -1029,7 +1076,8 @@ defmodule Arbor.Orchestrator.Engine do
           sync_run_state(
             Keyword.get(state.opts, :run_id),
             rs,
-            lifecycle_meta_from_state(state)
+            lifecycle_meta_from_state(state),
+            journal_opts_from(state.opts)
           )
 
           rs
@@ -1313,9 +1361,18 @@ defmodule Arbor.Orchestrator.Engine do
   @doc false
   # Test-only thin wrappers around the private heartbeat helpers. Lets
   # `EngineInCallHeartbeatTest` exercise the refresh mechanics without
-  # standing up the full engine.
-  def touch_in_call_heartbeat_for_test(run_id), do: touch_in_call_heartbeat(run_id)
-  def with_in_call_heartbeat_for_test(run_id, fun), do: with_in_call_heartbeat(run_id, fun)
+  # standing up the full engine. Optional second arg is journal target opts.
+  def touch_in_call_heartbeat_for_test(run_id, journal_opts \\ []) do
+    touch_in_call_heartbeat(run_id, journal_opts)
+  end
+
+  def with_in_call_heartbeat_for_test(run_id, fun) do
+    with_in_call_heartbeat(run_id, [], fun)
+  end
+
+  def with_in_call_heartbeat_for_test(run_id, journal_opts, fun) do
+    with_in_call_heartbeat(run_id, journal_opts, fun)
+  end
 
   # Refresh heartbeat every 30 s while a single handler call is in flight.
   # Picked to be < the 90 s stale threshold (and < the 30 s check cadence)
@@ -1323,12 +1380,13 @@ defmodule Arbor.Orchestrator.Engine do
   # heartbeat warning.
   @in_call_heartbeat_interval_ms 30_000
 
-  defp with_in_call_heartbeat(nil, fun), do: fun.()
+  defp with_in_call_heartbeat(nil, _journal_opts, fun), do: fun.()
 
-  defp with_in_call_heartbeat(run_id, fun) when is_binary(run_id) do
+  defp with_in_call_heartbeat(run_id, journal_opts, fun)
+       when is_binary(run_id) and is_list(journal_opts) do
     ticker_pid =
       spawn(fn ->
-        in_call_heartbeat_loop(run_id, @in_call_heartbeat_interval_ms)
+        in_call_heartbeat_loop(run_id, journal_opts, @in_call_heartbeat_interval_ms)
       end)
 
     try do
@@ -1338,26 +1396,29 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  defp with_in_call_heartbeat(_run_id, fun), do: fun.()
+  defp with_in_call_heartbeat(_run_id, _journal_opts, fun), do: fun.()
 
-  defp in_call_heartbeat_loop(run_id, interval_ms) do
+  defp in_call_heartbeat_loop(run_id, journal_opts, interval_ms) do
     receive do
     after
       interval_ms ->
-        touch_in_call_heartbeat(run_id)
-        in_call_heartbeat_loop(run_id, interval_ms)
+        touch_in_call_heartbeat(run_id, journal_opts)
+        in_call_heartbeat_loop(run_id, journal_opts, interval_ms)
     end
   end
 
-  defp touch_in_call_heartbeat(run_id) do
+  defp touch_in_call_heartbeat(run_id, journal_opts)
+       when is_binary(run_id) and is_list(journal_opts) do
     try do
-      Arbor.Orchestrator.PipelineStatus.touch_heartbeat(run_id)
+      Arbor.Orchestrator.PipelineStatus.touch_heartbeat(run_id, journal_opts)
     rescue
       _ -> :ok
     catch
       :exit, _ -> :ok
     end
   end
+
+  defp touch_in_call_heartbeat(_run_id, _journal_opts), do: :ok
 
   # Atomic terminal transition via RunJournal.finalize/5.
   # Uses the latest stored Record for progress (not a stale lexical RunState).
@@ -1394,12 +1455,15 @@ defmodule Arbor.Orchestrator.Engine do
       |> Map.merge(progress_meta_from_run_state(run_state))
       |> Map.merge(progress_meta_from_event_opts(event_opts))
 
+    journal_opts = journal_opts_from(opts)
+
     case Arbor.Orchestrator.PipelineStatus.finalize(
            run_id,
            status,
            reason,
            duration_ms,
-           meta
+           meta,
+           journal_opts
          ) do
       {:ok, :transitioned, _record} ->
         case status do
@@ -1434,16 +1498,45 @@ defmodule Arbor.Orchestrator.Engine do
       Keyword.get(opts, :recovery, false)
   end
 
+  # Validate once: must be a keyword list (or omitted → []). Fail closed —
+  # never silently fall back to the process-global journal on bad shapes.
+  defp validate_and_normalize_journal_opts(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :journal_opts) do
+      :error ->
+        {:ok, Keyword.put(opts, :journal_opts, [])}
+
+      {:ok, list} when is_list(list) ->
+        if Keyword.keyword?(list) do
+          {:ok, Keyword.put(opts, :journal_opts, list)}
+        else
+          {:error, :invalid_journal_opts}
+        end
+
+      {:ok, _} ->
+        {:error, :invalid_journal_opts}
+    end
+  end
+
+  defp validate_and_normalize_journal_opts(_), do: {:error, :invalid_journal_opts}
+
+  defp journal_opts_from(opts) when is_list(opts) do
+    Keyword.fetch!(opts, :journal_opts)
+  end
+
   # Atomic admit + initial lifecycle publication at the journal owner.
   # Maps journal errors to Engine public shapes (no silent overwrite).
-  defp admit_and_sync_run_state(%Arbor.Orchestrator.RunState.Core{} = run_state, meta, admission)
-       when admission in [:fresh, :resume] do
+  defp admit_and_sync_run_state(
+         %Arbor.Orchestrator.RunState.Core{} = run_state,
+         meta,
+         admission,
+         journal_opts
+       )
+       when admission in [:fresh, :resume] and is_list(journal_opts) do
     now = DateTime.utc_now()
     synced = Arbor.Orchestrator.RunState.Core.mark_synced(run_state, now)
+    admit_opts = Keyword.put(journal_opts, :admission, admission)
 
-    case Arbor.Orchestrator.PipelineStatus.admit_and_put_run_state(synced, meta,
-           admission: admission
-         ) do
+    case Arbor.Orchestrator.PipelineStatus.admit_and_put_run_state(synced, meta, admit_opts) do
       :ok ->
         :ok
 
@@ -1555,7 +1648,7 @@ defmodule Arbor.Orchestrator.Engine do
         Keyword.get(opts, :recovery, false)
 
     if resuming? do
-      case Arbor.Orchestrator.PipelineStatus.get_record(run_id) do
+      case Arbor.Orchestrator.PipelineStatus.get_record(run_id, journal_opts_from(opts)) do
         %Arbor.Orchestrator.RunLifecycle.Record{} = record ->
           %{
             base
@@ -1575,7 +1668,7 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  defp seed_run_state_from_checkpoint(run_state, state, run_id, lifecycle_meta) do
+  defp seed_run_state_from_checkpoint(run_state, state, run_id, lifecycle_meta, journal_opts) do
     completed = state.completed_nodes || []
 
     if length(completed) > (run_state.completed_count || 0) do
@@ -1586,7 +1679,7 @@ defmodule Arbor.Orchestrator.Engine do
           completed_nodes: Enum.reverse(completed)
       }
 
-      _ = sync_run_state(run_id, rs, lifecycle_meta)
+      _ = sync_run_state(run_id, rs, lifecycle_meta, journal_opts)
       rs
     else
       run_state
@@ -1644,11 +1737,17 @@ defmodule Arbor.Orchestrator.Engine do
   # finalization: write errors are returned to callers and must be observed,
   # but L1/L2 does not claim durable-first completion of every mid-run
   # progress tick (that remains L3 work when a fenced durable backend lands).
-  defp sync_run_state(_run_id, %Arbor.Orchestrator.RunState.Core{} = run_state, meta) do
+  defp sync_run_state(
+         _run_id,
+         %Arbor.Orchestrator.RunState.Core{} = run_state,
+         meta,
+         journal_opts
+       )
+       when is_list(journal_opts) do
     now = DateTime.utc_now()
     synced = Arbor.Orchestrator.RunState.Core.mark_synced(run_state, now)
 
-    case Arbor.Orchestrator.PipelineStatus.put_run_state(synced, meta) do
+    case Arbor.Orchestrator.PipelineStatus.put_run_state(synced, meta, journal_opts) do
       :ok -> :ok
       {:error, _} = err -> err
     end
