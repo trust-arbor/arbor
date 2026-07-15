@@ -90,7 +90,7 @@ defmodule Arbor.Orchestrator.RunJournal do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @doc "Put a full lifecycle record (durable-first when backed, then hot)."
+  @doc "Put a full lifecycle record (backend-first when configured, then hot)."
   @spec put(Record.t() | map(), keyword()) :: :ok | {:error, term()}
   def put(record_or_map, opts \\ [])
 
@@ -163,7 +163,7 @@ defmodule Arbor.Orchestrator.RunJournal do
 
   Only interrupted records are claimable. On success status becomes
   `:recovering` and `owner_node` is set. Durable claim writes are
-  durable-first: backend failure returns error and leaves the record
+  backend-first: backend failure returns error and leaves the record
   interrupted (retryable after storage recovers).
   """
   @spec claim_for_recovery(String.t(), node(), keyword()) ::
@@ -307,7 +307,7 @@ defmodule Arbor.Orchestrator.RunJournal do
   end
 
   @doc """
-  Durably prepare a pending effect envelope for a run (owner API).
+  Prepare a pending effect envelope for a run (owner API).
 
   When `current_effect` is `nil` or `settled`, increments `effect_generation`
   and writes a pending envelope via the backend-first `write_record` path.
@@ -327,7 +327,7 @@ defmodule Arbor.Orchestrator.RunJournal do
   end
 
   @doc """
-  Durably record a completed effect receipt (owner API).
+  Record a completed effect receipt (owner API).
 
   Requires the current effect to be pending with the exact `generation` and
   `execution_id`. Writes a completed envelope; does not clear evidence.
@@ -347,7 +347,7 @@ defmodule Arbor.Orchestrator.RunJournal do
   end
 
   @doc """
-  Durably settle a completed effect (owner API).
+  Settle a completed effect (owner API).
 
   Requires the current effect to be completed with the exact `generation` and
   `execution_id`. Marks it settled without clearing receipt evidence. A later
@@ -1053,7 +1053,7 @@ defmodule Arbor.Orchestrator.RunJournal do
   end
 
   # ---------------------------------------------------------------------------
-  # Durable effect owner operations (backend-first via write_record/2)
+  # Effect owner operations (backend-first via write_record/2 when configured)
   # ---------------------------------------------------------------------------
 
   defp do_prepare_effect(run_id, attrs, state) do
