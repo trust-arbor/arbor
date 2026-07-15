@@ -426,6 +426,181 @@ defmodule Arbor.Orchestrator.Config do
     )
   end
 
+  # ===========================================================================
+  # Engine checkpoint persistence (code-owned store selection)
+  # ===========================================================================
+
+  # Preserves today's Application child + Checkpoint defaults exactly:
+  # BufferedStore named `:arbor_orchestrator_checkpoints` with collection
+  # `"orchestrator_checkpoints"`, process-lifetime honesty (not crash-durable).
+  @default_engine_checkpoints [
+    store: Arbor.Persistence.BufferedStore,
+    store_name: :arbor_orchestrator_checkpoints,
+    store_opts: [],
+    start_store: true,
+    store_child_opts: [collection: "orchestrator_checkpoints"],
+    durability_class: :process_lifetime
+  ]
+
+  @allowed_durability_classes [
+    :volatile,
+    :process_lifetime,
+    :application_restart,
+    :node_restart
+  ]
+
+  @doc """
+  Validated Engine checkpoint-store configuration (operator / Application env).
+
+  Reads `config :arbor_orchestrator, :engine_checkpoints, [...]` and merges over
+  the historical BufferedStore defaults. Malformed values fail closed with
+  `{:error, reason}` rather than silently selecting another backend.
+
+  Keys:
+
+  - `:store` — backend module, or `nil` for explicit file-only mode
+  - `:store_name` — Persistence store name atom
+  - `:store_opts` — extra opts for `Arbor.Persistence.*`
+  - `:start_store` — when true, Application supervises the backend child
+  - `:store_child_opts` — opts for the supervised `start_link/1` child
+  - `:durability_class` — honesty ceiling only (never elevates backend)
+
+  Raises `ArgumentError` on invalid configuration (for live Config accessors).
+  Prefer `fetch_engine_checkpoints/0` when you need a tagged error.
+  """
+  @spec engine_checkpoints() :: keyword()
+  def engine_checkpoints do
+    case fetch_engine_checkpoints() do
+      {:ok, opts} ->
+        opts
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "invalid :arbor_orchestrator :engine_checkpoints config: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Same as `engine_checkpoints/0` but returns `{:ok, opts}` or `{:error, reason}`.
+  """
+  @spec fetch_engine_checkpoints() :: {:ok, keyword()} | {:error, term()}
+  def fetch_engine_checkpoints do
+    raw = Application.get_env(@app, :engine_checkpoints, [])
+    normalize_engine_checkpoints(raw)
+  end
+
+  @doc """
+  Keyword options suitable for `Engine.Checkpoint` load/persist/write/cleanup.
+
+  Subset of `engine_checkpoints/0` that Checkpoint's store resolver accepts:
+  `:store`, `:store_name`, `:store_opts`, and optional `:durability_class`.
+  Does not include Application supervision keys (`:start_store`,
+  `:store_child_opts`).
+  """
+  @spec engine_checkpoint_store_opts() :: keyword()
+  def engine_checkpoint_store_opts do
+    case fetch_engine_checkpoint_store_opts() do
+      {:ok, opts} ->
+        opts
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "invalid :arbor_orchestrator :engine_checkpoints config: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Tagged form of `engine_checkpoint_store_opts/0`.
+  """
+  @spec fetch_engine_checkpoint_store_opts() :: {:ok, keyword()} | {:error, term()}
+  def fetch_engine_checkpoint_store_opts do
+    with {:ok, cps} <- fetch_engine_checkpoints() do
+      opts =
+        [
+          store: Keyword.fetch!(cps, :store),
+          store_name: Keyword.fetch!(cps, :store_name),
+          store_opts: Keyword.fetch!(cps, :store_opts)
+        ]
+
+      opts =
+        case Keyword.get(cps, :durability_class) do
+          nil -> opts
+          class -> Keyword.put(opts, :durability_class, class)
+        end
+
+      # File-only: Checkpoint treats store: nil specially; drop unused name/opts
+      # noise only when store is nil? Keep name for consistency with explicit nil
+      # mode tests that still pass store: nil alone.
+      {:ok, opts}
+    end
+  end
+
+  defp normalize_engine_checkpoints(raw) do
+    cond do
+      is_nil(raw) ->
+        {:ok, @default_engine_checkpoints}
+
+      not is_list(raw) or not Keyword.keyword?(raw) ->
+        {:error, :not_keyword}
+
+      true ->
+        # Keyword.merge keeps explicit `store: nil` from raw over the default module.
+        merged = Keyword.merge(@default_engine_checkpoints, raw)
+        validate_engine_checkpoints(merged)
+    end
+  end
+
+  defp validate_engine_checkpoints(opts) when is_list(opts) do
+    store = Keyword.get(opts, :store)
+    store_name = Keyword.get(opts, :store_name)
+    store_opts = Keyword.get(opts, :store_opts)
+    start_store = Keyword.get(opts, :start_store)
+    store_child_opts = Keyword.get(opts, :store_child_opts)
+    durability_class = Keyword.get(opts, :durability_class)
+
+    cond do
+      not (is_atom(store) or is_nil(store)) ->
+        {:error, :store_not_atom_or_nil}
+
+      not is_atom(store_name) ->
+        {:error, :store_name_not_atom}
+
+      not is_list(store_opts) or not Keyword.keyword?(store_opts) ->
+        {:error, :store_opts_not_keyword}
+
+      not is_boolean(start_store) ->
+        {:error, :start_store_not_boolean}
+
+      not is_list(store_child_opts) or not Keyword.keyword?(store_child_opts) ->
+        {:error, :store_child_opts_not_keyword}
+
+      not is_nil(durability_class) and durability_class not in @allowed_durability_classes ->
+        {:error, :invalid_durability_class}
+
+      true ->
+        # Reject unknown top-level keys so typos fail closed instead of being ignored.
+        allowed = [
+          :store,
+          :store_name,
+          :store_opts,
+          :start_store,
+          :store_child_opts,
+          :durability_class
+        ]
+
+        unknown =
+          opts
+          |> Keyword.keys()
+          |> Enum.reject(&(&1 in allowed))
+
+        if unknown == [] do
+          {:ok, opts}
+        else
+          {:error, {:unknown_keys, unknown}}
+        end
+    end
+  end
+
   defp default_coding_pipeline_path do
     candidates =
       case :code.priv_dir(@app) do

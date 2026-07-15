@@ -26,6 +26,7 @@ defmodule Arbor.Orchestrator.Engine do
     State
   }
 
+  alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Event
   alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Graph
@@ -115,31 +116,40 @@ defmodule Arbor.Orchestrator.Engine do
     # persists PIDs.
     opts = Keyword.put(opts, :spawning_pid, self())
 
-    # Derive checkpoint HMAC secret from the operator's identity, if one
-    # was supplied. The HMAC binds checkpoint integrity to the identity
-    # that started the run — only the same operator can resume.
-    #
-    # SigningAuthority path uses Arbor.Security.derive_secret_with_authority/2
-    # with domain label :engine_checkpoint_hmac_v3. Derivation failure aborts
-    # the authorized run/resume — it must not silently disable resumability.
-    #
-    # Legacy identity_private_key path uses the pinned v2 HMAC derivation.
-    # If no identity is supplied (unsigned dev/test runs), no secret is
-    # derived. Checkpoints are written unsigned and resume accepts them
-    # only when authorization is off.
-    case apply_checkpoint_hmac_secret(opts) do
-      {:ok, opts} ->
-        do_prepared_run_with_hmac(
-          graph,
-          run_authorization,
-          opts,
-          logs_root,
-          max_steps,
-          pipeline_started_at
-        )
-
-      {:error, _reason} = error ->
+    # Code-owned checkpoint store selection. Capture Config authority and
+    # drop any caller-supplied store target so DOT/context/Engine opts cannot
+    # redirect persist/load/cleanup to an arbitrary backend.
+    case bind_checkpoint_store_opts(opts) do
+      {:error, _} = error ->
         error
+
+      {:ok, opts} ->
+        # Derive checkpoint HMAC secret from the operator's identity, if one
+        # was supplied. The HMAC binds checkpoint integrity to the identity
+        # that started the run — only the same operator can resume.
+        #
+        # SigningAuthority path uses Arbor.Security.derive_secret_with_authority/2
+        # with domain label :engine_checkpoint_hmac_v3. Derivation failure aborts
+        # the authorized run/resume — it must not silently disable resumability.
+        #
+        # Legacy identity_private_key path uses the pinned v2 HMAC derivation.
+        # If no identity is supplied (unsigned dev/test runs), no secret is
+        # derived. Checkpoints are written unsigned and resume accepts them
+        # only when authorization is off.
+        case apply_checkpoint_hmac_secret(opts) do
+          {:ok, opts} ->
+            do_prepared_run_with_hmac(
+              graph,
+              run_authorization,
+              opts,
+              logs_root,
+              max_steps,
+              pipeline_started_at
+            )
+
+          {:error, _reason} = error ->
+            error
+        end
     end
   end
 
@@ -387,7 +397,7 @@ defmodule Arbor.Orchestrator.Engine do
            completed_nodes: completed
          ) do
       :ok ->
-        Checkpoint.cleanup(run_id)
+        Checkpoint.cleanup(run_id, checkpoint_call_opts(opts))
 
         {:ok,
          %{
@@ -549,9 +559,12 @@ defmodule Arbor.Orchestrator.Engine do
 
       with :ok <- require_identity_on_resume(opts),
            {:ok, checkpoint} <-
-             Checkpoint.load(checkpoint_path,
-               run_id: Keyword.get(opts, :run_id),
-               hmac_secret: Keyword.get(opts, :hmac_secret)
+             Checkpoint.load(
+               checkpoint_path,
+               checkpoint_call_opts(opts,
+                 run_id: Keyword.get(opts, :run_id),
+                 hmac_secret: Keyword.get(opts, :hmac_secret)
+               )
              ),
            :ok <-
              RunAuthorization.verify_checkpoint(
@@ -811,8 +824,12 @@ defmodule Arbor.Orchestrator.Engine do
           )
 
         :ok =
-          Checkpoint.write(checkpoint, state.logs_root,
-            hmac_secret: Keyword.get(state.opts, :hmac_secret)
+          Checkpoint.write(
+            checkpoint,
+            state.logs_root,
+            checkpoint_call_opts(state.opts,
+              hmac_secret: Keyword.get(state.opts, :hmac_secret)
+            )
           )
       end
 
@@ -1295,8 +1312,12 @@ defmodule Arbor.Orchestrator.Engine do
           run_authorization: RunAuthorization.projection(state.run_authorization)
         )
 
-      case Checkpoint.persist(checkpoint, state.logs_root,
-             hmac_secret: Keyword.get(state.opts, :hmac_secret)
+      case Checkpoint.persist(
+             checkpoint,
+             state.logs_root,
+             checkpoint_call_opts(state.opts,
+               hmac_secret: Keyword.get(state.opts, :hmac_secret)
+             )
            ) do
         {:ok, _receipt} ->
           emit(
@@ -1435,8 +1456,8 @@ defmodule Arbor.Orchestrator.Engine do
            completed_nodes: ordered
          ) do
       :ok ->
-        # Clean up checkpoint from durable store (no longer needed)
-        if run_id, do: Checkpoint.cleanup(run_id)
+        # Clean up checkpoint from configured store (no longer needed)
+        if run_id, do: Checkpoint.cleanup(run_id, checkpoint_call_opts(state.opts))
 
         {:ok,
          %{
@@ -2272,6 +2293,34 @@ defmodule Arbor.Orchestrator.Engine do
 
   defp apply_effect_recovery_action(_action, _run_state, _state, _run_id, _meta, _jopts) do
     {:error, {:effect_recovery_inconsistent, :unknown_recovery_action}}
+  end
+
+  # Capture Config-owned checkpoint store selection at the trusted Engine
+  # boundary and overwrite any caller-supplied store target keys. Owner-issued
+  # run_id / HMAC are merged later via checkpoint_call_opts/2.
+  defp bind_checkpoint_store_opts(opts) when is_list(opts) do
+    case Config.fetch_engine_checkpoint_store_opts() do
+      {:ok, store_opts} ->
+        opts =
+          opts
+          |> Keyword.drop([:store, :store_name, :store_opts, :checkpoint_store_opts])
+          |> Keyword.put(:checkpoint_store_opts, store_opts)
+
+        {:ok, opts}
+
+      {:error, reason} ->
+        {:error, {:invalid_engine_checkpoints, reason}}
+    end
+  end
+
+  # Merge the captured store opts with owner-issued fields. Owner fields
+  # (run_id, hmac_secret, …) always win over any store-config keys.
+  defp checkpoint_call_opts(opts, fields \\ []) when is_list(opts) and is_list(fields) do
+    store_opts = Keyword.get(opts, :checkpoint_store_opts, [])
+    store_opts = if is_list(store_opts) and Keyword.keyword?(store_opts), do: store_opts, else: []
+
+    store_opts
+    |> Keyword.merge(fields)
   end
 
   defp lifecycle_meta_from_opts(opts, logs_root, graph_hash, dot_source_path) do
