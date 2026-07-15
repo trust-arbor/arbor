@@ -1151,6 +1151,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
 
     test "resume without claim status is rejected" do
       run_id = "takeover_unclaimed_#{System.unique_integer([:positive])}"
+      identity = :crypto.strong_rand_bytes(32)
       on_exit(fn -> PipelineStatus.delete(run_id) end)
 
       assert :ok =
@@ -1172,12 +1173,14 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
                  resume: true,
                  recovery: true,
                  execution_principal: "agent_owner",
+                 identity_private_key: identity,
                  authorization: false
                )
     end
 
     test "claimed resume with mismatched execution_principal is rejected" do
       run_id = "takeover_principal_#{System.unique_integer([:positive])}"
+      identity = :crypto.strong_rand_bytes(32)
       on_exit(fn -> PipelineStatus.delete(run_id) end)
 
       assert :ok =
@@ -1202,6 +1205,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
                  resume: true,
                  recovery: true,
                  execution_principal: "agent_attacker",
+                 identity_private_key: identity,
                  authorization: false
                )
 
@@ -1212,6 +1216,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
 
     test "claimed resume with matching principal is admitted past lifecycle gate" do
       run_id = "takeover_ok_#{System.unique_integer([:positive])}"
+      identity = :crypto.strong_rand_bytes(32)
       on_exit(fn -> PipelineStatus.delete(run_id) end)
 
       assert :ok =
@@ -1236,6 +1241,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
           resume: true,
           recovery: true,
           execution_principal: "agent_owner",
+          identity_private_key: identity,
           authorization: false
         )
 

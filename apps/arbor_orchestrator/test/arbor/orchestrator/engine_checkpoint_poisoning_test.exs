@@ -139,7 +139,7 @@ defmodule Arbor.Orchestrator.EngineCheckpointPoisoningTest do
              "identity_private_key provided. Got: #{inspect(result)}"
   end
 
-  test "resume without identity_private_key is REJECTED (no more legacy fail-open)" do
+  test "security regression: resume without identity is rejected before lifecycle lookup" do
     # Security regression: as of the CLI identity migration, the engine's
     # initial_state/3 refuses to resume without identity. There's no
     # legacy "accept unsigned" path anymore — closing the fail-open

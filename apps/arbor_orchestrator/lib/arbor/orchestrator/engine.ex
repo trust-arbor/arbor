@@ -146,19 +146,18 @@ defmodule Arbor.Orchestrator.Engine do
        ) do
     # Validate journal target once before any lifecycle read/write or handler
     # dispatch. Invalid values fail closed — never fall back to the global journal.
-    case validate_and_normalize_journal_opts(opts) do
-      {:ok, opts} ->
-        do_prepared_run_with_journal(
-          graph,
-          run_authorization,
-          opts,
-          logs_root,
-          max_steps,
-          pipeline_started_at
-        )
-
-      {:error, _} = err ->
-        err
+    # Resume identity is checked first so lifecycle admission cannot expose
+    # whether a caller-selected run exists before checkpoint authentication.
+    with :ok <- require_resume_identity_before_admission(opts),
+         {:ok, opts} <- validate_and_normalize_journal_opts(opts) do
+      do_prepared_run_with_journal(
+        graph,
+        run_authorization,
+        opts,
+        logs_root,
+        max_steps,
+        pipeline_started_at
+      )
     end
   end
 
@@ -2325,6 +2324,10 @@ defmodule Arbor.Orchestrator.Engine do
   # checkpoint file can substitute a poisoned payload undetected.
   # The legacy fail-open (accept any unsigned checkpoint) is now
   # closed — callers must thread :identity_private_key through.
+  defp require_resume_identity_before_admission(opts) do
+    if resume_or_recovery?(opts), do: require_identity_on_resume(opts), else: :ok
+  end
+
   defp require_identity_on_resume(opts) do
     if Keyword.get(opts, :hmac_secret) do
       :ok
