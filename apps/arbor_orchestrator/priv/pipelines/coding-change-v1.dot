@@ -173,13 +173,6 @@ digraph CodingChangeV1 {
     output_key="worker_send_recovery_count"
   ]
 
-  reset_worker_turn_protocol_retry_count [
-    type="transform",
-    transform="constant",
-    expression="0",
-    output_key="worker_turn_protocol_retry_count"
-  ]
-
   classify_profile [
     type="transform",
     transform="constant",
@@ -276,7 +269,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="You are implementing an Arbor code change inside worktree {ctx.worktree_path}. Task: {value}. Requirements: work only in the worktree; produce a reviewable diff; do not merge, push, or open a PR. Respond with ONLY a JSON object: {\"status\":\"implemented\"} or {\"status\":\"declined\"} plus optional \"summary\".",
+    expression="You are implementing an Arbor code change inside worktree {ctx.worktree_path}. Task: {value}. Requirements: work only in the worktree; produce a reviewable diff; do not merge, push, or open a PR. Respond with a concise implementation summary of what you changed (or why you made no change).",
     output_key="prompt"
   ]
 
@@ -289,58 +282,9 @@ digraph CodingChangeV1 {
     max_retries="0"
   ]
 
-  extract_worker_status [
-    type="transform",
-    transform="json_extract",
-    source_key="worker_msg.text",
-    expression="status",
-    output_key="worker_status"
-  ]
-
-  route_worker_status [
-    type="branch",
-    shape=diamond,
-    fan_out="false"
-  ]
-
-  // A malformed response or unknown/missing status gets one same-session
-  // protocol repair per fresh worker turn. The cumulative counter remains
-  // independent from implementation rework and is retained for metrics.
-
-  inc_protocol_retry_count [
-    type="transform",
-    transform="increment",
-    source_key="protocol_retry_count",
-    output_key="protocol_retry_count"
-  ]
-
-  inc_worker_turn_protocol_retry_count [
-    type="transform",
-    transform="increment",
-    source_key="worker_turn_protocol_retry_count",
-    output_key="worker_turn_protocol_retry_count"
-  ]
-
-  check_protocol_retry_budget [
-    type="branch",
-    shape=diamond
-  ]
-
-  build_protocol_repair_prompt [
-    type="transform",
-    transform="constant",
-    expression="Your previous response was not valid protocol JSON. Respond now with ONLY one JSON object and no prose or markdown: {\"status\":\"implemented\"} or {\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}.",
-    output_key="prompt"
-  ]
-
-  repair_worker_protocol [
-    type="exec",
-    target="action",
-    action="acp_send_message",
-    context_keys="worker_session_id,prompt",
-    output_prefix="worker_msg",
-    max_retries="0"
-  ]
+  // After a successful worker turn, Arbor owns outcome authority: hoist the
+  // provider session id for continuity, then inspect the workspace. Worker
+  // free-form text is advisory evidence only — never protocol JSON.
 
   // One-shot send recovery. The current prompt remains in `prompt` until a
   // fresh-conversation summary deliberately replaces it.
@@ -572,7 +516,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Validation failed after your previous edit. Task: {value}. Structured validation feedback JSON: {ctx.validation.feedback_json}. Fix the issues in the same worktree. Respond with ONLY one JSON object and no prose or markdown: {\"status\":\"implemented\"} or {\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}.",
+    expression="Validation failed after your previous edit. Task: {value}. Structured validation feedback JSON: {ctx.validation.feedback_json}. Fix the issues in the same worktree. Respond with a concise implementation summary of what you changed.",
     output_key="prompt"
   ]
 
@@ -580,7 +524,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Code review requested rework. Task: {value}. Structured review feedback JSON: {ctx.review.feedback_json}. Address the review feedback in the same worktree. Respond with ONLY one JSON object and no prose or markdown: {\"status\":\"implemented\"} or {\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}.",
+    expression="Code review requested rework. Task: {value}. Structured review feedback JSON: {ctx.review.feedback_json}. Address the review feedback in the same worktree. Respond with a concise implementation summary of what you changed.",
     output_key="prompt"
   ]
 
@@ -588,7 +532,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Operator requested rework of the commit. Task: {value}. Operator note: {ctx.approval_note}. Address the operator feedback in the same worktree. Respond with ONLY one JSON object and no prose or markdown: {\"status\":\"implemented\"} or {\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}.",
+    expression="Operator requested rework of the commit. Task: {value}. Operator note: {ctx.approval_note}. Address the operator feedback in the same worktree. Respond with a concise implementation summary of what you changed.",
     output_key="prompt"
   ]
 
@@ -1103,13 +1047,6 @@ digraph CodingChangeV1 {
 
   // Terminal status markers
 
-  status_declined [
-    type="transform",
-    transform="constant",
-    expression="declined",
-    output_key="status"
-  ]
-
   status_no_changes [
     type="transform",
     transform="constant",
@@ -1232,13 +1169,6 @@ digraph CodingChangeV1 {
     type="transform",
     transform="constant",
     expression="draft_pr_failed",
-    output_key="error"
-  ]
-
-  error_worker_protocol_invalid [
-    type="transform",
-    transform="constant",
-    expression="worker_protocol_invalid_json_after_retry",
     output_key="error"
   ]
 
@@ -1380,12 +1310,10 @@ digraph CodingChangeV1 {
 
   open_worker -> hoist_worker_session_id [condition="outcome=success"]
   hoist_worker_session_id -> hoist_worker_provider_session_id
-  hoist_worker_provider_session_id -> build_implement_prompt -> reset_worker_turn_protocol_retry_count
-  reset_worker_turn_protocol_retry_count -> implement
+  hoist_worker_provider_session_id -> build_implement_prompt -> implement
 
-  // Both send sites use one engine-attempt and converge on one recovery gate.
+  // Worker send sites use one engine-attempt and converge on one recovery gate.
   implement -> check_worker_send_recovery_budget [condition="outcome=fail"]
-  repair_worker_protocol -> check_worker_send_recovery_budget [condition="outcome=fail"]
   check_worker_send_recovery_budget -> error_worker_send_recovery_exhausted [condition="context.worker_send_recovery_count>=1"]
   check_worker_send_recovery_budget -> inc_worker_send_recovery_count [condition="context.worker_send_recovery_count<1"]
   inc_worker_send_recovery_count -> acp_session_status
@@ -1423,17 +1351,10 @@ digraph CodingChangeV1 {
   error_worker_recovery_send_failed -> status_pipeline_error_then_close
   status_pipeline_error_then_close -> close_worker
 
+  // Owner-observed outcome: successful turns inspect the workspace; worker
+  // prose never gates validation/review/commit vs no_changes.
   implement -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
-  hoist_worker_provider_session_id_from_message -> extract_worker_status
-  extract_worker_status -> inc_protocol_retry_count [condition="outcome=fail"]
-  extract_worker_status -> route_worker_status [condition="outcome=success"]
-  inc_protocol_retry_count -> inc_worker_turn_protocol_retry_count
-  inc_worker_turn_protocol_retry_count -> check_protocol_retry_budget
-  check_protocol_retry_budget -> build_protocol_repair_prompt [condition="context.worker_turn_protocol_retry_count<2"]
-  build_protocol_repair_prompt -> repair_worker_protocol
-  repair_worker_protocol -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
-  check_protocol_retry_budget -> error_worker_protocol_invalid [condition="context.worker_turn_protocol_retry_count>=2"]
-  error_worker_protocol_invalid -> status_pipeline_error_then_close
+  hoist_worker_provider_session_id_from_message -> inspect_workspace
 
   // Impossible seed edges keep the reviewed dormant subgraph structurally
   // reachable. The compiler removes them before activating the security profile;
@@ -1476,12 +1397,8 @@ digraph CodingChangeV1 {
   route_validated_review -> route_publish [condition="context.review.tier_decision=auto_proceed"]
   route_validated_review -> error_review_tier_invalid
 
-  // Strict worker protocol routing. Unknown/missing statuses use the same
-  // bounded repair path as malformed JSON; no status fails open to inspect.
-  route_worker_status -> status_declined [condition="context.worker_status=declined"]
-  status_declined -> close_worker
-  route_worker_status -> inspect_workspace [condition="context.worker_status=implemented"]
-  route_worker_status -> inc_protocol_retry_count
+  // Owner-observed workspace inspection is the control authority after every
+  // successful worker turn (initial, recovery, and rework).
   inspect_workspace -> status_pipeline_error_then_close [condition="outcome=fail"]
   inspect_workspace -> hoist_dirty [condition="outcome=success"]
   hoist_dirty -> hoist_changed -> hoist_head_commit
@@ -1510,7 +1427,7 @@ digraph CodingChangeV1 {
   inc_validation_total_rework_count -> mark_validation_rework_kind
   mark_validation_rework_kind -> mark_validation_rework_iteration
   mark_validation_rework_iteration -> build_validation_rework_prompt
-  build_validation_rework_prompt -> reset_worker_turn_protocol_retry_count
+  build_validation_rework_prompt -> implement
 
   // Validation passed -> commit or adopt HEAD
   check_validation_passed -> prep_commit_path [condition="outcome=success"]
@@ -1564,7 +1481,7 @@ digraph CodingChangeV1 {
   inc_operator_total_rework_count -> mark_operator_rework_kind
   mark_operator_rework_kind -> mark_operator_rework_iteration
   mark_operator_rework_iteration -> build_operator_rework_prompt
-  build_operator_rework_prompt -> reset_worker_turn_protocol_retry_count
+  build_operator_rework_prompt -> implement
 
   // Unknown interaction_outcome fails closed (not success, not silent deny).
   route_commit_interaction -> status_pipeline_error_then_close
@@ -1644,7 +1561,7 @@ digraph CodingChangeV1 {
   inc_review_total_rework_count -> mark_review_rework_kind
   mark_review_rework_kind -> mark_review_rework_iteration
   mark_review_rework_iteration -> build_review_rework_prompt
-  build_review_rework_prompt -> reset_worker_turn_protocol_retry_count
+  build_review_rework_prompt -> implement
 
   // Publish: optional draft PR
   route_publish -> prep_pr_path [condition="context.open_pr=true"]

@@ -454,7 +454,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp rewrite_prompt_budgets(graph) do
     Enum.reduce_while(
-      ["implement", "repair_worker_protocol", "retry_recovered_send"],
+      ["implement", "retry_recovered_send"],
       {:ok, graph},
       fn node_id, {:ok, graph} ->
         case rewrite_prompt_budget_node(graph, node_id) do
@@ -630,9 +630,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            "expression",
            "Security regression validation failed after your previous commit. Task: {value}. " <>
              "Validation reason: {ctx.validation.reason}. Fix the issue in the same worktree " <>
-             "and leave a fresh commit or uncommitted change. Respond with ONLY one JSON object " <>
-             "and no prose or markdown: {\"status\":\"implemented\"} or " <>
-             "{\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}."
+             "and leave a fresh commit or uncommitted change. Respond with a concise " <>
+             "implementation summary of what you changed."
          )}
       end
     end)

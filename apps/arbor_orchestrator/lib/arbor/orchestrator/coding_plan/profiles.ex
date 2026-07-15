@@ -284,13 +284,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "required_dominator_sets" => []
                                 },
                                 %{
-                                  "node_id" => "repair_worker_protocol",
-                                  "action" => "acp_send_message",
-                                  "required_dominators" => ["open_worker"],
-                                  "review_required_dominators" => [],
-                                  "required_dominator_sets" => []
-                                },
-                                %{
                                   "node_id" => "retry_recovered_send",
                                   "action" => "acp_send_message",
                                   "required_dominators" => [
@@ -529,7 +522,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "edges" => [
       ["acp_session_status", "check_recovery_provider_id", "outcome=fail"],
       ["acp_session_status", "check_worker_status_session_id", "outcome=success"],
-      ["build_protocol_repair_prompt", "repair_worker_protocol", nil],
       [
         "check_recovery_provider_id",
         "copy_worker_provider_session_id_to_session_id",
@@ -577,12 +569,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ["inc_worker_send_recovery_count", "acp_session_status", nil],
       ["open_recovery_worker", "error_worker_recovery_reopen_failed", "outcome=fail"],
       ["open_recovery_worker", "hoist_recovery_worker_session_id", "outcome=success"],
-      ["repair_worker_protocol", "check_worker_send_recovery_budget", "outcome=fail"],
-      [
-        "repair_worker_protocol",
-        "hoist_worker_provider_session_id_from_message",
-        "outcome=success"
-      ],
       ["retry_recovered_send", "error_worker_recovery_send_failed", "outcome=fail"],
       [
         "retry_recovered_send",
@@ -1060,10 +1046,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "mark_validation_rework_iteration",
       nil
     ],
-    ["build_operator_rework_prompt", "reset_worker_turn_protocol_retry_count", nil],
-    ["build_review_rework_prompt", "reset_worker_turn_protocol_retry_count", nil],
-    ["build_validation_rework_prompt", "reset_worker_turn_protocol_retry_count", nil],
-    ["reset_worker_turn_protocol_retry_count", "implement", nil]
+    ["build_operator_rework_prompt", "implement", nil],
+    ["build_review_rework_prompt", "implement", nil],
+    ["build_validation_rework_prompt", "implement", nil]
   ]
 
   @review_convergence_edges [

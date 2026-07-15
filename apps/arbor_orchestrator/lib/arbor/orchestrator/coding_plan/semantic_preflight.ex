@@ -916,7 +916,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   @approval_cleanup_node "close_worker"
   @rework_exhaustion_marker "mark_operator_rework_exhausted_error"
   @rework_exhaustion_status "status_rework_exhausted"
-  @rework_dispatch_node "reset_worker_turn_protocol_retry_count"
+  @rework_dispatch_node "build_operator_rework_prompt"
   @rework_dispatch_target "implement"
 
   @workspace_cleanup_node_attrs %{
@@ -1064,7 +1064,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   @precommit_abort_origins %{
-    "status_declined" => "route_worker_status",
     "status_no_changes" => "inspect_workspace",
     "status_pipeline_error_then_close" => "implement",
     "status_validation_failed" => "validate"
@@ -1894,9 +1893,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"hoist_worker_session_id", "hoist_worker_provider_session_id", nil},
       {"hoist_worker_provider_session_id", "build_implement_prompt", nil},
       {"implement", "hoist_worker_provider_session_id_from_message", "outcome=success"},
-      {"repair_worker_protocol", "hoist_worker_provider_session_id_from_message",
-       "outcome=success"},
-      {"hoist_worker_provider_session_id_from_message", "extract_worker_status", nil}
+      {"hoist_worker_provider_session_id_from_message", "inspect_workspace", nil}
     ]
 
     errors =
@@ -2954,7 +2951,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     )
     |> require_dominates(
       "hoist_worker_provider_session_id_from_message",
-      "extract_worker_status",
+      "inspect_workspace",
       reachable,
       dominators,
       "worker_provider_session_message_capture"

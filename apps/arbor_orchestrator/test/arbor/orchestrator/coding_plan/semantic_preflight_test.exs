@@ -222,14 +222,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       replace_edge_target(
         graph,
         "build_review_rework_prompt",
-        "reset_worker_turn_protocol_retry_count",
+        "implement",
         nil,
         "route_publish"
       ),
       replace_edge_target(
         graph,
         "build_validation_rework_prompt",
-        "reset_worker_turn_protocol_retry_count",
+        "implement",
         nil,
         "commit_change"
       )
@@ -935,7 +935,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     bypassed =
       inject_edge(
         ctx.template_source,
-        "build_operator_rework_prompt -> reset_worker_turn_protocol_retry_count",
+        "build_operator_rework_prompt -> implement",
         "build_operator_rework_prompt -> hoist_commit_hash [condition=\"context.bypass_fresh_gate=true\"]"
       )
 
@@ -1223,7 +1223,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
-  test "provider session capture must dominate worker protocol projection", ctx do
+  test "provider session capture must dominate owner-observed workspace inspect", ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)
     assert {:ok, profile} = Profiles.fetch_executable("default")
@@ -1234,7 +1234,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
           Enum.map(graph.edges, fn edge ->
             if edge.from == "implement" and
                  edge.to == "hoist_worker_provider_session_id_from_message" do
-              %{edge | to: "extract_worker_status"}
+              %{edge | to: "inspect_workspace"}
             else
               edge
             end
@@ -1297,7 +1297,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
     forbidden_handler =
-      update_in(graph.nodes["status_declined"].attrs, &Map.put(&1, "type", "compute"))
+      update_in(graph.nodes["status_no_changes"].attrs, &Map.put(&1, "type", "compute"))
 
     # Recompile IR so handler_types/registry match the mutated attrs.
     {:ok, handler_graph} =

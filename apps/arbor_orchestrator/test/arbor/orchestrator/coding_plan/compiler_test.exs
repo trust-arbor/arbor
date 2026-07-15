@@ -192,10 +192,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute Map.has_key?(node_attrs(graph, "open_recovery_worker"), "param.session_id")
     assert node_attrs(graph, "close_worker")["param.return_to_pool"] == true
 
-    for node_id <- ~w[implement repair_worker_protocol] do
+    for node_id <- ~w[implement retry_recovered_send] do
       assert node_attrs(graph, node_id)["context_keys"] ==
                "worker_session_id,prompt,timeout,inactivity_timeout_ms"
     end
+
+    refute Map.has_key?(graph.nodes, "repair_worker_protocol")
+    refute Map.has_key?(graph.nodes, "extract_worker_status")
+    refute Map.has_key?(graph.nodes, "route_worker_status")
 
     assert compilation.initial_values["model"] == "grok-code"
     assert compilation.initial_values["submit_review"] == "true"
@@ -656,12 +660,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     unknown_handler =
       String.replace(
         ctx.template_source,
-        "  status_declined [\n    type=\"transform\",",
-        "  status_declined [\n    type=\"unknown_handler\",",
+        "  status_no_changes [\n    type=\"transform\",",
+        "  status_no_changes [\n    type=\"unknown_handler\",",
         global: false
       )
 
-    assert {:error, {:unknown_handler_types, [["status_declined", "unknown_handler"]]}} =
+    assert {:error, {:unknown_handler_types, [["status_no_changes", "unknown_handler"]]}} =
              compile(plan!(), ctx, unknown_handler)
 
     unknown_action =
