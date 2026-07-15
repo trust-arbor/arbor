@@ -1,13 +1,20 @@
 defmodule Arbor.Orchestrator.RecoveryCoordinator do
   @moduledoc """
-  Discovers and resumes interrupted pipelines on boot.
+  Discovers and resumes interrupted pipelines on boot and while running.
 
-  Starts after RunJournal/PipelineStatus in the supervision tree. On init,
-  queries the canonical lifecycle boundary for `status: :interrupted`
-  (including dead-owner liveness corrections and durable rehydrate
-  boot-normalization). Bounded historical JobRegistry records are merged
-  for discovery only via `RunLifecycle.LegacyJobAdapter` when the journal
-  is available — never as an outage fall-through.
+  Starts after RunJournal/PipelineStatus in the supervision tree. While
+  recovery is enabled, periodically refreshes hot lifecycle rows from
+  durable backend authority (`PipelineStatus.refresh_from_durable/1`),
+  recomputes automatic-recovery eligibility from current durability
+  status, and discovers `status: :interrupted` records (including
+  dead-owner liveness corrections). Bounded historical JobRegistry
+  records are merged for discovery only via
+  `RunLifecycle.LegacyJobAdapter` when the journal is available — never
+  as an outage fall-through.
+
+  Runtime refresh is **not** boot rehydrate: live local rows keep their
+  in-flight status and local `spawning_pid` when ownership still matches.
+  Hot rows are never deleted merely because one durable list omits them.
 
   ## Authenticated resume
 
@@ -27,12 +34,18 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   ## Automatic crash recovery vs manual resume
 
-  Automatic **local boot** discovery / stale recovery runs **only** when
-  `RunJournal.durability_status/0` reports a healthy crash-durable class
-  (`:application_restart` or `:node_restart` with `durable: true`). A
-  volatile or `:process_lifetime` backend may still support **explicit
-  manual resume** while the journal is alive, but is never treated as
-  automatic crash recovery.
+  Automatic discovery / stale recovery runs **only** when
+  `PipelineStatus.durability_status/0` reports a healthy crash-durable
+  class (`:application_restart` or `:node_restart` with `durable: true`).
+  Eligibility is re-evaluated on every discovery tick so an initially
+  unhealthy backend can become eligible without a force flag. A volatile
+  or `:process_lifetime` backend may still support **explicit manual
+  resume** while the journal is alive, but is never treated as automatic
+  crash recovery.
+
+  Discovered runs are **appended** to the recovery queue and deduplicated
+  by `run_id` across pending and recovering work — discovery never
+  replaces or clobbers an existing queue.
 
   **Nodedown / remote-owner** recovery is inactive unless
   `cross_node_atomic_recovery: true` (healthy `:node_restart` backend with
@@ -47,12 +60,17 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.PipelineStatus
-  alias Arbor.Orchestrator.RunJournal
   alias Arbor.Orchestrator.RunLifecycle.LegacyJobAdapter
   alias Arbor.Orchestrator.RunLifecycle.Record
 
   @default_max_concurrent 3
+  # Spacing between recover_next work items (not discovery cadence).
   @default_delay_ms 1_000
+  # Conservative recurring discovery interval — re-evaluates durable authority
+  # without hot-looping failed candidates every delay_ms tick.
+  @discovery_interval_ms 30_000
+  # Bounded failure history (deduped by run_id).
+  @max_failed_history 64
   @heartbeat_check_interval_ms 30_000
   @stale_heartbeat_ms 90_000
   # If a pipeline has completed 0 nodes for longer than this, mark it
@@ -151,10 +169,10 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         )
 
     # Optional journal server opts (tests / multi-journal). Default is the
-    # process-global RunJournal queried via durability_status/0.
+    # process-global journal queried via PipelineStatus.durability_status/1.
     journal_opts = Keyword.get(opts, :journal_opts, [])
 
-    durability = RunJournal.durability_status(journal_opts)
+    durability = PipelineStatus.durability_status(journal_opts)
 
     {automatic_recovery, automatic_recovery_disabled_reason} =
       case automatic_recovery_eligibility(durability) do
@@ -188,14 +206,19 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
       :net_kernel.monitor_nodes(true)
       Process.send_after(self(), :retry_settlements, @settlement_retry_interval_ms)
 
-      if automatic_recovery do
-        Process.send_after(self(), :discover_interrupted, delay_ms)
-        Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
-      else
+      # Always schedule discovery/heartbeat while enabled so an initially
+      # unhealthy durable backend can re-evaluate automatic recovery later.
+      # Preserve the configured startup delay; later discovery ticks use the
+      # conservative fixed interval to avoid hot-looping failed candidates.
+      Process.send_after(self(), :discover_interrupted, delay_ms)
+      Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
+
+      unless automatic_recovery do
         Logger.warning(
           "[RecoveryCoordinator] Automatic crash recovery disabled: " <>
             inspect(automatic_recovery_disabled_reason) <>
-            " (manual resume while journal is alive remains available)"
+            " (manual resume while journal is alive remains available; " <>
+            "eligibility rechecked on discovery ticks)"
         )
       end
     end
@@ -228,19 +251,31 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   @impl true
   def handle_info(:discover_interrupted, state) do
-    if automatic_recovery_active?(state) do
-      interrupted = list_interrupted_for_recovery(journal_opts(state))
+    if state.enabled do
+      state = refresh_journal_from_durable(state)
+      state = recompute_automatic_recovery(state)
 
-      if interrupted == [] do
-        Logger.debug("[RecoveryCoordinator] No interrupted pipelines found")
-        {:noreply, state}
-      else
-        Logger.info("[RecoveryCoordinator] Found #{length(interrupted)} interrupted pipeline(s)")
+      state =
+        if automatic_recovery_active?(state) do
+          interrupted = list_interrupted_for_recovery(journal_opts(state))
 
-        state = %{state | pending: interrupted}
-        send(self(), :recover_next)
-        {:noreply, state}
-      end
+          if interrupted == [] do
+            Logger.debug("[RecoveryCoordinator] No interrupted pipelines found")
+            state
+          else
+            Logger.info(
+              "[RecoveryCoordinator] Found #{length(interrupted)} interrupted pipeline(s)"
+            )
+
+            enqueue_discovered(state, interrupted)
+          end
+        else
+          state
+        end
+
+      # Recurring discovery while recovery remains enabled (bounded cadence).
+      Process.send_after(self(), :discover_interrupted, @discovery_interval_ms)
+      {:noreply, state}
     else
       {:noreply, state}
     end
@@ -287,7 +322,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                   "[RecoveryCoordinator] Auth unavailable for #{key}; leaving interrupted"
                 )
 
-                {acc, [{key, elem(err, 1)} | fails], settlements}
+                {acc, remember_failure(fails, key, elem(err, 1)), settlements}
 
               {:error, {:resume_settlement_failed, settle_reason, reason}} ->
                 Logger.warning(
@@ -302,13 +337,17 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                   attempts: 1
                 }
 
-                {acc, [{key, {:resume_settlement_failed, settle_reason, reason}} | fails],
-                 [failure | settlements]}
+                {acc,
+                 remember_failure(
+                   fails,
+                   key,
+                   {:resume_settlement_failed, settle_reason, reason}
+                 ), [failure | settlements]}
 
               {:error, reason} ->
                 Logger.warning("[RecoveryCoordinator] Cannot recover #{key}: #{inspect(reason)}")
 
-                {acc, [{key, reason} | fails], settlements}
+                {acc, remember_failure(fails, key, reason), settlements}
             end
           end
         )
@@ -349,7 +388,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                   %{
                     state
                     | recovering: recovering,
-                      failed: [{pipeline_id, reason} | state.failed]
+                      failed: remember_failure(state.failed, pipeline_id, reason)
                   },
                   meta,
                   reason
@@ -382,7 +421,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
             %{
               state
               | recovering: recovering,
-                failed: [{pipeline_id, {:crashed, reason}} | state.failed]
+                failed: remember_failure(state.failed, pipeline_id, {:crashed, reason})
             },
             meta,
             {:crashed, reason}
@@ -407,8 +446,12 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   end
 
   def handle_info({:nodedown, dead_node}, state) do
+    # Refresh durable authority before owner scans so remote rows written by
+    # another journal after our boot rehydrate are visible.
+    state = refresh_journal_from_durable(state)
+    state = recompute_automatic_recovery(state)
+
     # Remote-owner recovery requires node-restart + linearizable CAS fencing.
-    # Local application-restart discovery remains on the boot path only.
     # Legacy JobRegistry rows have no RunJournal CAS fence — never auto-enqueue.
     if automatic_recovery_active?(state) and cross_node_atomic_recovery?(state) do
       Logger.info(
@@ -457,13 +500,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
             end
           end)
 
-        if pending_orphans != [] do
-          state = %{state | pending: state.pending ++ pending_orphans}
-          send(self(), :recover_next)
-          {:noreply, state}
-        else
-          {:noreply, state}
-        end
+        {:noreply, enqueue_discovered(state, pending_orphans)}
       else
         {:noreply, state}
       end
@@ -475,130 +512,20 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   def handle_info({:nodeup, _node}, state), do: {:noreply, state}
 
   def handle_info(:check_stale_heartbeats, state) do
-    if automatic_recovery_active?(state) do
-      now = DateTime.utc_now()
-      jopts = journal_opts(state)
+    if state.enabled do
+      state = refresh_journal_from_durable(state)
+      state = recompute_automatic_recovery(state)
 
-      current_stale =
-        case PipelineStatus.list_stale_heartbeat_records(@stale_heartbeat_ms, now, jopts) do
-          {:ok, records} ->
-            Enum.map(records, fn %Record{} = r -> %{record: r, source: :current} end)
-
-          {:error, reason} ->
-            Logger.warning(
-              "[RecoveryCoordinator] journal unavailable during stale heartbeat scan: " <>
-                inspect(reason)
-            )
-
-            []
+      state =
+        if automatic_recovery_active?(state) do
+          scan_stale_heartbeats(state)
+        else
+          state
         end
 
-      legacy_stale =
-        LegacyJobAdapter.list_stale_heartbeats(@stale_heartbeat_ms, now)
-        |> Enum.map(fn %Record{} = r -> %{record: r, source: :legacy} end)
-
-      stale =
-        (current_stale ++ legacy_stale)
-        |> Enum.uniq_by(fn %{record: %Record{run_id: id}} -> id end)
-
-      if stale != [] do
-        connected = MapSet.new([Kernel.node() | Node.list()])
-
-        recoverable =
-          Enum.flat_map(stale, fn candidate ->
-            %Record{} = entry = candidate.record
-            owner_connected = MapSet.member?(connected, entry.owner_node)
-
-            if not owner_connected do
-              cond do
-                # Legacy never participates in distributed remote takeover.
-                candidate.source == :legacy and remote_owner_recovery?(entry, state) ->
-                  []
-
-                remote_owner_recovery?(entry, state) and not cross_node_atomic_recovery?(state) ->
-                  []
-
-                true ->
-                  case mark_interrupted_entry(candidate, jopts) do
-                    :ok ->
-                      [
-                        %{
-                          candidate
-                          | record: %Record{entry | status: :interrupted, owner_node: nil}
-                        }
-                      ]
-
-                    {:error, reason} ->
-                      Logger.warning(
-                        "[RecoveryCoordinator] mark_interrupted failed for #{entry.run_id}: " <>
-                          inspect(reason) <> "; not enqueueing fabricated interrupted candidate"
-                      )
-
-                      []
-
-                    _other ->
-                      []
-                  end
-              end
-            else
-              spawner_alive = spawning_process_alive?(entry.spawning_pid)
-
-              age_ms =
-                if entry.started_at do
-                  DateTime.diff(now, entry.started_at, :millisecond)
-                else
-                  0
-                end
-
-              cond do
-                entry.spawning_pid != nil and not spawner_alive ->
-                  mark_abandoned_entry(candidate, jopts)
-
-                  Logger.info(
-                    "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
-                      "spawning process #{inspect(entry.spawning_pid)} is dead"
-                  )
-
-                (entry.completed_count || 0) == 0 and age_ms > @zero_progress_abandon_ms ->
-                  mark_abandoned_entry(candidate, jopts)
-
-                  Logger.info(
-                    "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
-                      "zero progress for #{div(age_ms, 60_000)} min, likely orphaned"
-                  )
-
-                true ->
-                  Logger.warning(
-                    "[RecoveryCoordinator] Pipeline #{entry.run_id} has stale heartbeat " <>
-                      "but owner #{entry.owner_node} is still connected"
-                  )
-              end
-
-              []
-            end
-          end)
-
-        state =
-          if recoverable != [] do
-            send(self(), :recover_next)
-            %{state | pending: state.pending ++ recoverable}
-          else
-            state
-          end
-
-        Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
-        {:noreply, state}
-      else
-        Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
-        {:noreply, state}
-      end
+      Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
+      {:noreply, state}
     else
-      # Keep the ticker only while automatic recovery remains eligible so a
-      # later healthy durability class can be re-evaluated without force flags.
-      if state.enabled and Map.get(state, :automatic_recovery, false) do
-        Process.send_after(self(), :check_stale_heartbeats, @heartbeat_check_interval_ms)
-      end
-
       {:noreply, state}
     end
   end
@@ -611,6 +538,183 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   defp cross_node_atomic_recovery?(state) do
     durability = Map.get(state, :durability) || %{}
     Map.get(durability, :cross_node_atomic_recovery, false) == true
+  end
+
+  # Durable → hot refresh via the public PipelineStatus boundary (never
+  # import RunJournal internals from coordinator code).
+  defp refresh_journal_from_durable(state) do
+    case PipelineStatus.refresh_from_durable(journal_opts(state)) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[RecoveryCoordinator] durable runtime refresh failed: " <> inspect(reason)
+        )
+    end
+
+    state
+  end
+
+  defp recompute_automatic_recovery(state) do
+    durability = PipelineStatus.durability_status(journal_opts(state))
+
+    {automatic_recovery, automatic_recovery_disabled_reason} =
+      case automatic_recovery_eligibility(durability) do
+        :ok ->
+          {true, nil}
+
+        {:error, reason} ->
+          {false, reason}
+      end
+
+    %{
+      state
+      | durability: durability,
+        automatic_recovery: automatic_recovery,
+        automatic_recovery_disabled_reason: automatic_recovery_disabled_reason
+    }
+  end
+
+  # Append + dedupe by run_id across pending and recovering. Never replace
+  # the existing queue on rediscovery.
+  defp enqueue_discovered(state, candidates) when is_list(candidates) do
+    occupied =
+      MapSet.new(state.pending, fn
+        %{record: %Record{run_id: id}} -> id
+        _ -> nil
+      end)
+      |> MapSet.union(
+        MapSet.new(Map.values(state.recovering), fn
+          %{run_id: id} when is_binary(id) -> id
+          _ -> nil
+        end)
+      )
+      |> MapSet.delete(nil)
+
+    new_ones =
+      candidates
+      |> Enum.filter(fn
+        %{record: %Record{run_id: id}} -> not MapSet.member?(occupied, id)
+        _ -> false
+      end)
+      |> Enum.uniq_by(fn %{record: %Record{run_id: id}} -> id end)
+
+    if new_ones == [] do
+      state
+    else
+      send(self(), :recover_next)
+      %{state | pending: state.pending ++ new_ones}
+    end
+  end
+
+  defp scan_stale_heartbeats(state) do
+    now = DateTime.utc_now()
+    jopts = journal_opts(state)
+
+    current_stale =
+      case PipelineStatus.list_stale_heartbeat_records(@stale_heartbeat_ms, now, jopts) do
+        {:ok, records} ->
+          Enum.map(records, fn %Record{} = r -> %{record: r, source: :current} end)
+
+        {:error, reason} ->
+          Logger.warning(
+            "[RecoveryCoordinator] journal unavailable during stale heartbeat scan: " <>
+              inspect(reason)
+          )
+
+          []
+      end
+
+    legacy_stale =
+      LegacyJobAdapter.list_stale_heartbeats(@stale_heartbeat_ms, now)
+      |> Enum.map(fn %Record{} = r -> %{record: r, source: :legacy} end)
+
+    stale =
+      (current_stale ++ legacy_stale)
+      |> Enum.uniq_by(fn %{record: %Record{run_id: id}} -> id end)
+
+    if stale == [] do
+      state
+    else
+      connected = MapSet.new([Kernel.node() | Node.list()])
+
+      recoverable =
+        Enum.flat_map(stale, fn candidate ->
+          %Record{} = entry = candidate.record
+          owner_connected = MapSet.member?(connected, entry.owner_node)
+
+          if not owner_connected do
+            cond do
+              # Legacy never participates in distributed remote takeover.
+              candidate.source == :legacy and remote_owner_recovery?(entry, state) ->
+                []
+
+              remote_owner_recovery?(entry, state) and not cross_node_atomic_recovery?(state) ->
+                []
+
+              true ->
+                case mark_interrupted_entry(candidate, jopts) do
+                  :ok ->
+                    [
+                      %{
+                        candidate
+                        | record: %Record{entry | status: :interrupted, owner_node: nil}
+                      }
+                    ]
+
+                  {:error, reason} ->
+                    Logger.warning(
+                      "[RecoveryCoordinator] mark_interrupted failed for #{entry.run_id}: " <>
+                        inspect(reason) <> "; not enqueueing fabricated interrupted candidate"
+                    )
+
+                    []
+
+                  _other ->
+                    []
+                end
+            end
+          else
+            spawner_alive = spawning_process_alive?(entry.spawning_pid)
+
+            age_ms =
+              if entry.started_at do
+                DateTime.diff(now, entry.started_at, :millisecond)
+              else
+                0
+              end
+
+            cond do
+              entry.spawning_pid != nil and not spawner_alive ->
+                mark_abandoned_entry(candidate, jopts)
+
+                Logger.info(
+                  "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
+                    "spawning process #{inspect(entry.spawning_pid)} is dead"
+                )
+
+              (entry.completed_count || 0) == 0 and age_ms > @zero_progress_abandon_ms ->
+                mark_abandoned_entry(candidate, jopts)
+
+                Logger.info(
+                  "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
+                    "zero progress for #{div(age_ms, 60_000)} min, likely orphaned"
+                )
+
+              true ->
+                Logger.warning(
+                  "[RecoveryCoordinator] Pipeline #{entry.run_id} has stale heartbeat " <>
+                    "but owner #{entry.owner_node} is still connected"
+                )
+            end
+
+            []
+          end
+        end)
+
+      enqueue_discovered(state, recoverable)
+    end
   end
 
   # True when the entry's owner is a non-local node — nodedown/remote takeover.
@@ -1270,7 +1374,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   # Distributed nodedown / remote-owner takeover: current journal only.
   # Legacy JobRegistry has no generation+revision CAS fence — never merge here.
   defp list_current_by_owner_for_recovery(node_name, journal_opts) do
-    case RunJournal.list_records(journal_opts) do
+    case PipelineStatus.list_records(journal_opts) do
       {:ok, _} ->
         node_name
         |> PipelineStatus.list_by_owner_records(journal_opts)
@@ -1285,6 +1389,19 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         []
     end
   end
+
+  # Deduplicate failure history by run_id and bound growth so recurring
+  # discovery/retry cannot unbounded-append the same candidate forever.
+  # A later successful recovery still clears pending/recovering; failures
+  # remain retriable via future discovery ticks.
+  defp remember_failure(failed, key, reason)
+       when is_list(failed) and is_binary(key) do
+    [{key, reason} | Enum.reject(failed, fn {k, _} -> k == key end)]
+    |> Enum.take(@max_failed_history)
+  end
+
+  defp remember_failure(failed, _key, _reason) when is_list(failed), do: failed
+  defp remember_failure(_, _key, _reason), do: []
 
   defp classify_recovery_exit(:normal), do: "normal"
   defp classify_recovery_exit(:shutdown), do: "shutdown"

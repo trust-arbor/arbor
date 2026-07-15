@@ -154,6 +154,36 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   @spec durability_status(keyword()) :: map()
   def durability_status(opts \\ []), do: RunJournal.durability_status(opts)
 
+  @doc """
+  Typed list of all current lifecycle records via the journal facade.
+
+  Recovery/coordinator ownership scans must use this rather than importing
+  `RunJournal` internals. Returns `{:ok, records}` or a journal error
+  (never silently empty on unavailability).
+  """
+  @spec list_records(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
+  def list_records(opts \\ []) do
+    RunJournal.list_records(journal_target_opts(opts))
+  end
+
+  @doc """
+  Runtime refresh of hot lifecycle rows from durable backend authority.
+
+  Public recovery/coordinator boundary — does not require importing
+  `RunJournal` internals. Delegates to `RunJournal.refresh_from_durable/1`
+  and preserves that contract:
+
+  - no boot-normalization of live in-flight statuses
+  - no deletion of hot rows absent from one durable list
+  - fail-closed bounded errors with durability health updates
+  - optional `server:` journal target opts
+  """
+  @spec refresh_from_durable(keyword()) ::
+          {:ok, %{upserted: non_neg_integer()}} | {:error, term()}
+  def refresh_from_durable(opts \\ []) do
+    RunJournal.refresh_from_durable(journal_target_opts(opts))
+  end
+
   @doc "Delete a lifecycle entry via the journal (tests/ops)."
   @spec delete(String.t(), keyword()) :: :ok | {:error, term()}
   def delete(run_id, opts \\ []), do: RunJournal.delete(run_id, opts)

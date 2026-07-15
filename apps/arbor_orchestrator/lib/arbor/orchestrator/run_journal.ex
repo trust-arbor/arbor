@@ -243,6 +243,32 @@ defmodule Arbor.Orchestrator.RunJournal do
   end
 
   @doc """
+  Runtime refresh: upsert durable lifecycle rows into the hot journal.
+
+  Uses the configured durable backend as authority and merges each decoded
+  row into the private hot table **without boot-time normalization**. In
+  particular, a local `:running` row is not rewritten to `:interrupted`
+  merely because it is refreshed while the app is running.
+
+  Runtime-only `spawning_pid` is preserved only when the durable owner and
+  status still match the same local hot ownership. Remote rows and
+  ownership/status changes clear the PID. Hot rows absent from one durable
+  list result are **not** deleted.
+
+  Backend/list/decode failures fail closed: return a bounded typed error,
+  mark durability degraded, and leave hot state unchanged for that attempt
+  (no partial upsert batch).
+
+  Returns `{:ok, %{upserted: n}}` on success. Journals without a backend
+  return `{:ok, %{upserted: 0}}`.
+  """
+  @spec refresh_from_durable(keyword()) ::
+          {:ok, %{upserted: non_neg_integer()}} | {:error, term()}
+  def refresh_from_durable(opts \\ []) do
+    call_server(opts, :refresh_from_durable)
+  end
+
+  @doc """
   Import durable JSON-clean maps into the hot store (ops/tests).
 
   Running entries are normalized to `:interrupted` with runtime-only PID cleared.
@@ -588,6 +614,11 @@ defmodule Arbor.Orchestrator.RunJournal do
     {:reply, build_durability_status(state), state}
   end
 
+  def handle_call(:refresh_from_durable, _from, state) do
+    {reply, state} = do_refresh_from_durable(state)
+    {:reply, reply, state}
+  end
+
   def handle_call({:import_durable, maps}, _from, state) do
     {state, errors} =
       Enum.reduce(maps, {state, []}, fn data, {st, errs} when is_map(data) ->
@@ -772,20 +803,21 @@ defmodule Arbor.Orchestrator.RunJournal do
   defp maybe_reload_from_durable(state), do: {:ok, state}
 
   # Fail closed on rehydrate: never start durable mode with a silently empty
-  # hot view when the backend cannot be listed/read.
+  # hot view when the backend cannot be listed/read. Identity binding (listed
+  # key / envelope key / payload run_id) is required before any hot insert.
   defp reload_from_durable(state) do
     case durable_list_keys(state) do
       {:ok, keys} when is_list(keys) ->
         Enum.reduce_while(keys, {:ok, state}, fn key, {:ok, st} ->
-          case durable_get(key, st) do
-            {:ok, data} when is_map(data) ->
-              case decode_durable_record(data, st.local_node) do
+          case durable_fetch_raw(key, st) do
+            {:ok, raw} ->
+              case bind_and_decode_lifecycle_row(key, raw, st.local_node, :boot) do
                 {:ok, record} ->
                   hot_insert(st.table, record)
                   {:cont, {:ok, st}}
 
                 {:error, reason} ->
-                  # Fail closed: never drop/normalize corrupt effect evidence into hot ETS.
+                  # Fail closed: never drop/normalize corrupt or miskeyed rows.
                   {:halt, {:error, bound_rehydrate_error(key, reason)}}
               end
 
@@ -806,21 +838,258 @@ defmodule Arbor.Orchestrator.RunJournal do
   catch
     :exit, reason ->
       {:error, {:durable_rehydrate_exit, reason}}
+
+    :throw, reason ->
+      {:error, {:durable_rehydrate_throw, bound_effect_reason(reason)}}
   end
 
-  # Rehydrate only through Adapter validation so effect envelopes cannot bypass
-  # schema checks and enter the private hot table.
-  defp decode_durable_record(data, local_node) when is_map(data) do
-    record = Adapter.from_durable_map(data)
+  # Runtime refresh (L4B2): durable is authority for row content, but unlike
+  # boot rehydrate we do **not** rewrite in-flight statuses to :interrupted
+  # and we never delete hot rows missing from a single list snapshot.
+  # Collect + validate the full batch first so a mid-batch failure cannot leave
+  # a partial upsert view of durable authority.
+  defp do_refresh_from_durable(%{backend: nil} = state) do
+    {{:ok, %{upserted: 0}}, state}
+  end
 
-    case Adapter.validate_and_normalize_record(record) do
-      {:ok, %Record{} = validated} ->
-        {:ok, boot_normalize(validated, local_node)}
+  defp do_refresh_from_durable(%{durable_mode: :ets_only} = state) do
+    {{:ok, %{upserted: 0}}, state}
+  end
+
+  defp do_refresh_from_durable(state) do
+    case collect_runtime_refresh_batch(state) do
+      {:ok, records} ->
+        Enum.each(records, fn %Record{} = record ->
+          hot_insert(state.table, record)
+        end)
+
+        healthy = %{
+          state
+          | durable_error: nil,
+            last_write_error: nil,
+            durable_mode: :backed
+        }
+
+        {{:ok, %{upserted: length(records)}}, healthy}
 
       {:error, reason} ->
-        {:error, reason}
+        bound = bound_runtime_refresh_error(reason)
+
+        degraded = %{
+          state
+          | durable_error: bound,
+            last_write_error: bound,
+            durable_mode: :degraded
+        }
+
+        {{:error, bound}, degraded}
+    end
+  rescue
+    e ->
+      bound = bound_runtime_refresh_error({:refresh_raised, Exception.message(e)})
+
+      degraded = %{
+        state
+        | durable_error: bound,
+          last_write_error: bound,
+          durable_mode: :degraded
+      }
+
+      {{:error, bound}, degraded}
+  catch
+    :exit, reason ->
+      bound = bound_runtime_refresh_error({:refresh_exit, reason})
+
+      degraded = %{
+        state
+        | durable_error: bound,
+          last_write_error: bound,
+          durable_mode: :degraded
+      }
+
+      {{:error, bound}, degraded}
+
+    :throw, reason ->
+      bound = bound_runtime_refresh_error({:refresh_throw, reason})
+
+      degraded = %{
+        state
+        | durable_error: bound,
+          last_write_error: bound,
+          durable_mode: :degraded
+      }
+
+      {{:error, bound}, degraded}
+  end
+
+  defp collect_runtime_refresh_batch(state) do
+    case durable_list_keys(state) do
+      {:ok, keys} when is_list(keys) ->
+        Enum.reduce_while(keys, {:ok, []}, fn key, {:ok, acc} ->
+          case durable_fetch_raw(key, state) do
+            {:ok, raw} ->
+              case bind_and_decode_lifecycle_row(key, raw, state.local_node, :runtime) do
+                {:ok, %Record{} = decoded} ->
+                  hot = lookup_record(state.table, decoded.run_id)
+                  merged = maybe_preserve_local_spawning_pid(decoded, hot, state.local_node)
+                  {:cont, {:ok, [merged | acc]}}
+
+                {:error, reason} ->
+                  # Fail closed before any hot write — no partial batch upsert.
+                  {:halt, {:error, bound_rehydrate_error(key, reason)}}
+              end
+
+            {:error, :not_found} ->
+              # List/get race — skip missing key; never delete hot for absence.
+              {:cont, {:ok, acc}}
+
+            {:error, reason} ->
+              {:halt, {:error, {:durable_refresh_failed, bound_refresh_key(key), reason}}}
+          end
+        end)
+        |> case do
+          {:ok, acc} -> {:ok, Enum.reverse(acc)}
+          {:error, _} = err -> err
+        end
+
+      {:error, reason} ->
+        {:error, {:durable_refresh_list_failed, reason}}
     end
   end
+
+  # Preserve runtime PID only when durable *owner* (authoritative) and status still
+  # match the same local hot ownership. source_node is origin provenance only —
+  # a remote source with local owner after takeover must not clear a live PID.
+  defp maybe_preserve_local_spawning_pid(%Record{} = decoded, hot, local_node) do
+    case hot do
+      %Record{spawning_pid: pid} = existing when is_pid(pid) ->
+        local = to_string(local_node)
+        hot_owner = existing.owner_node && to_string(existing.owner_node)
+        durable_owner = decoded.owner_node && to_string(decoded.owner_node)
+
+        same_local_ownership? =
+          hot_owner != nil and
+            hot_owner == local and
+            durable_owner == local and
+            decoded.status == existing.status
+
+        if same_local_ownership? do
+          %Record{decoded | spawning_pid: pid}
+        else
+          decoded
+        end
+
+      _ ->
+        decoded
+    end
+  end
+
+  defp bound_runtime_refresh_error(reason) do
+    case reason do
+      {:durable_refresh_list_failed, detail} ->
+        {:durable_refresh_list_failed, bound_effect_reason(detail)}
+
+      {:durable_refresh_failed, key, detail} ->
+        {:durable_refresh_failed, bound_refresh_key(key), bound_effect_reason(detail)}
+
+      {:durable_rehydrate_invalid_effect, key, detail} ->
+        {:durable_refresh_invalid_effect, bound_refresh_key(key), bound_effect_reason(detail)}
+
+      {:durable_rehydrate_identity_mismatch, key, detail} ->
+        {:durable_refresh_identity_mismatch, bound_refresh_key(key), detail}
+
+      {:durable_rehydrate_failed, key, detail} ->
+        {:durable_refresh_failed, bound_refresh_key(key), bound_effect_reason(detail)}
+
+      {:refresh_raised, msg} when is_binary(msg) ->
+        {:durable_refresh_raised, bound_effect_reason(msg)}
+
+      {:refresh_exit, detail} ->
+        {:durable_refresh_exit, bound_effect_reason(detail)}
+
+      {:refresh_throw, detail} ->
+        {:durable_refresh_throw, bound_effect_reason(detail)}
+
+      other ->
+        bound_effect_reason(other)
+    end
+  end
+
+  defp bound_refresh_key(key) do
+    cond do
+      is_binary(key) and byte_size(key) <= 256 -> key
+      is_binary(key) -> binary_part(key, 0, 256)
+      true -> "unknown"
+    end
+  end
+
+  # Shared durable read validation for boot rehydrate and runtime refresh:
+  # listed key K, structured envelope key, and decoded lifecycle run_id must
+  # all match exactly. Legacy raw maps are accepted only when payload run_id == K.
+  defp bind_and_decode_lifecycle_row(listed_key, raw, local_node, mode)
+       when is_binary(listed_key) and mode in [:boot, :runtime] do
+    with {:ok, envelope_key, payload} <- unwrap_durable_payload(listed_key, raw),
+         :ok <- require_exact_key(listed_key, envelope_key, :envelope_key_mismatch),
+         record = Adapter.from_durable_map(payload),
+         {:ok, %Record{} = validated} <- Adapter.validate_and_normalize_record(record),
+         :ok <- require_exact_key(listed_key, validated.run_id, :run_id_key_mismatch) do
+      cleared = %Record{validated | spawning_pid: nil}
+
+      case mode do
+        :boot -> {:ok, boot_normalize(cleared, local_node)}
+        :runtime -> {:ok, cleared}
+      end
+    else
+      {:error, _} = err -> err
+    end
+  end
+
+  defp bind_and_decode_lifecycle_row(_listed_key, _raw, _local_node, _mode),
+    do: {:error, :invalid_listed_key}
+
+  defp unwrap_durable_payload(_listed_key, %PersistenceRecord{key: env_key, data: data})
+       when is_map(data) and is_binary(env_key) do
+    {:ok, env_key, data}
+  end
+
+  defp unwrap_durable_payload(_listed_key, %PersistenceRecord{}) do
+    {:error, :unstructured_durable_record}
+  end
+
+  defp unwrap_durable_payload(listed_key, data) when is_map(data) do
+    cond do
+      # Serialized structured envelope: %{"key" => ..., "data" => lifecycle_map}
+      (Map.has_key?(data, "key") or Map.has_key?(data, :key)) and
+          is_map(Map.get(data, "data") || Map.get(data, :data)) ->
+        env_key = Map.get(data, "key") || Map.get(data, :key)
+        inner = Map.get(data, "data") || Map.get(data, :data)
+
+        if is_binary(env_key) do
+          {:ok, env_key, inner}
+        else
+          {:error, :invalid_envelope_key}
+        end
+
+      # Legacy raw lifecycle map: envelope key is the listed key only when
+      # payload run_id will also match (checked after decode).
+      Map.has_key?(data, "run_id") or Map.has_key?(data, :run_id) ->
+        {:ok, listed_key, data}
+
+      true ->
+        case Map.get(data, :data) || Map.get(data, "data") do
+          inner when is_map(inner) ->
+            {:ok, listed_key, inner}
+
+          _ ->
+            {:error, :unstructured_durable_record}
+        end
+    end
+  end
+
+  defp unwrap_durable_payload(_listed_key, _raw), do: {:error, :unstructured_durable_record}
+
+  defp require_exact_key(expected, actual, _tag) when expected == actual, do: :ok
+  defp require_exact_key(_expected, _actual, tag), do: {:error, tag}
 
   defp bound_rehydrate_error(key, reason) do
     bounded_key =
@@ -836,6 +1105,12 @@ defmodule Arbor.Orchestrator.RunJournal do
 
       {:invalid_effect_generation, detail} ->
         {:durable_rehydrate_invalid_effect, bounded_key, bound_effect_reason(detail)}
+
+      :envelope_key_mismatch ->
+        {:durable_rehydrate_identity_mismatch, bounded_key, :envelope_key_mismatch}
+
+      :run_id_key_mismatch ->
+        {:durable_rehydrate_identity_mismatch, bounded_key, :run_id_key_mismatch}
 
       other ->
         {:durable_rehydrate_failed, bounded_key, bound_effect_reason(other)}
@@ -884,16 +1159,22 @@ defmodule Arbor.Orchestrator.RunJournal do
     boot_normalize(record, Kernel.node())
   end
 
+  # owner_node is authoritative when present. source_node is origin provenance
+  # only and decides remote-ness solely when owner_node is nil (e.g. post-claim
+  # interrupted rows may keep a remote source while owner is local).
   defp remote_ownership?(%Record{} = record, local_node) do
     local = to_string(local_node)
 
-    owner_remote? =
-      not is_nil(record.owner_node) and to_string(record.owner_node) != local
+    cond do
+      not is_nil(record.owner_node) ->
+        to_string(record.owner_node) != local
 
-    source_remote? =
-      not is_nil(record.source_node) and to_string(record.source_node) != local
+      not is_nil(record.source_node) ->
+        to_string(record.source_node) != local
 
-    owner_remote? or source_remote?
+      true ->
+        false
+    end
   end
 
   # Claim eligibility for interrupted rows.
@@ -2017,39 +2298,26 @@ defmodule Arbor.Orchestrator.RunJournal do
   catch
     :exit, reason ->
       {:error, {:list_exit, reason}}
+
+    :throw, reason ->
+      {:error, {:list_throw, bound_effect_reason(reason)}}
   end
 
   defp durable_list_keys(_), do: {:ok, []}
 
-  defp durable_get(key, %{backend: backend, store_name: store_name} = state)
+  # Raw backend get (keeps PersistenceRecord envelope for identity binding).
+  defp durable_fetch_raw(key, %{backend: backend, store_name: store_name} = state)
        when not is_nil(backend) do
     backend_opts = Map.get(state, :backend_opts, [])
 
     case Arbor.Persistence.get(store_name, backend, key, backend_opts) do
-      {:ok, %PersistenceRecord{data: data}} when is_map(data) ->
-        {:ok, data}
-
-      {:ok, %{__struct__: PersistenceRecord, data: data}} when is_map(data) ->
-        {:ok, data}
-
-      {:ok, %{"data" => data}} when is_map(data) ->
-        {:ok, data}
-
-      {:ok, data} when is_map(data) ->
-        if Map.has_key?(data, "run_id") or Map.has_key?(data, :run_id) do
-          {:ok, data}
-        else
-          case Map.get(data, :data) || Map.get(data, "data") do
-            inner when is_map(inner) -> {:ok, inner}
-            _ -> {:ok, data}
-          end
-        end
+      {:ok, value} ->
+        {:ok, value}
 
       {:error, :not_found} ->
         {:error, :not_found}
 
       {:error, reason} ->
-        # Surface transport/backend outages distinctly from missing keys.
         {:error, {:durable_unavailable, reason}}
 
       other ->
@@ -2061,9 +2329,12 @@ defmodule Arbor.Orchestrator.RunJournal do
   catch
     :exit, reason ->
       {:error, {:durable_unavailable, reason}}
+
+    :throw, reason ->
+      {:error, {:durable_unavailable, {:throw, bound_effect_reason(reason)}}}
   end
 
-  defp durable_get(_key, _state), do: {:error, :not_found}
+  defp durable_fetch_raw(_key, _state), do: {:error, :not_found}
 
   defp build_durability_status(state) do
     class = Map.get(state, :durability_class, :volatile)
