@@ -208,6 +208,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       end
     end
 
+    @impl true
     def handle_info(_, state), do: {:noreply, state}
 
     defp start_delay_session(id, result, stream_to, ms) do
@@ -777,7 +778,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       refute Process.alive?(worker)
     end
 
-    test "security regression: unit supervisor shutdown waits for exact absence", %{
+    test "security regression: request_drain waits for exact absence before receipt", %{
       spec: spec,
       executable: executable
     } do
@@ -793,54 +794,61 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
         {:hold, success_list([])}
       ]
 
-      sessions_before = Process.whereis(Arbor.Shell.PortSessionSupervisor)
-      units_before = Process.whereis(Arbor.Shell.AppleContainerUnitSupervisor)
-      assert is_pid(sessions_before)
-      assert is_pid(units_before)
-
       {execution_id, worker, _} = start_and_begin(spec, executable, script)
       eventually!(fn -> length(FakeRuntime.calls()) >= 3 end)
       worker_ref = Process.monitor(worker)
+      receipt_ref = make_ref()
+      parent = self()
 
-      task =
-        Task.async(fn ->
-          Supervisor.terminate_child(
-            Arbor.Shell.Supervisor,
-            Arbor.Shell.AppleContainerUnitSupervisor
-          )
+      drain_caller =
+        spawn(fn ->
+          reply = Worker.request_drain(worker, receipt_ref, 15_000)
+          send(parent, {:drain_reply, reply})
+
+          receive do
+            {:apple_container_unit_drained, _, _, _} = msg ->
+              send(parent, {:drain_receipt, msg})
+          after
+            30_000 ->
+              send(parent, {:drain_receipt, :timeout})
+          end
         end)
+
+      assert_receive {:drain_reply, :ok}, 5_000
+
+      # A different request (other process or other ref) is rejected while the
+      # accepted drain is outstanding. Same caller+ref replay is covered by the
+      # public API accepting only one stored receipt pair.
+      assert {:error, :drain_already_requested} =
+               Task.async(fn -> Worker.request_drain(worker, make_ref()) end)
+               |> Task.await(5_000)
+
+      assert {:error, :drain_already_requested} =
+               Worker.request_drain(worker, make_ref())
 
       eventually!(fn -> FakeRuntime.held_count() >= 1 end, 15_000)
 
-      assert Task.yield(task, 150) == nil
-      assert Process.whereis(Arbor.Shell.PortSessionSupervisor) == sessions_before
-      assert Process.alive?(sessions_before)
+      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 100
+      refute_receive {:drain_receipt, _}, 50
       assert Process.alive?(worker)
+      assert Process.alive?(drain_caller)
       assert nonterminal_registry?(execution_id)
-      refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 50
 
       assert :ok = FakeRuntime.release_held()
 
-      assert :ok = Task.await(task, 15_000)
+      assert_receive {:drain_receipt,
+                      {:apple_container_unit_drained, ^worker, ^execution_id, ^receipt_ref}},
+                     15_000
+
+      assert_receive {:apple_container_unit_terminal, ^execution_id, {:ok, result}}, 5_000
+      assert result.cancelled == true
+
       assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 10_000
       refute Process.alive?(worker)
-      assert Process.whereis(Arbor.Shell.PortSessionSupervisor) == sessions_before
 
       exec = await_registry_terminal(execution_id, 5_000)
       assert exec.status == :completed
       assert exec.result.cancelled == true
-
-      _ =
-        Supervisor.delete_child(
-          Arbor.Shell.Supervisor,
-          Arbor.Shell.AppleContainerUnitSupervisor
-        )
-
-      {:ok, _} =
-        Supervisor.start_child(
-          Arbor.Shell.Supervisor,
-          Worker.supervisor_child_spec()
-        )
     end
 
     test "security regression: controller death holds absence before terminal", %{

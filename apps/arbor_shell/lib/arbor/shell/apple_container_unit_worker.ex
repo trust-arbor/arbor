@@ -8,9 +8,15 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   # text. Publishes nothing to ExecutionRegistry until positive unit absence is
   # proven. Production spawn facade remains fail-closed.
   #
-  # Supervisor shutdown (`shutdown: :infinity`) requests cancellation once and
-  # keeps this GenServer alive through PortSession cleanup, UnitCore retry_after
-  # loops, and final list absence. Stop only after UnitCore reaches terminal.
+  # Drain protocol (`request_drain/3`): a sibling drain coordinator (not the
+  # parent supervisor EXIT — OTP consumes parent exit into terminate/2 and does
+  # not deliver it to handle_info) calls this GenServer with an exact receipt
+  # ref. Caller identity is taken only from the GenServer `from` tuple. The
+  # worker requests cancellation once through the ordinary async UnitCore /
+  # PortSession lifecycle, stays nonterminal through cleanup retries, and emits
+  # `{:apple_container_unit_drained, worker_pid, execution_id, receipt_ref}` only
+  # when (a) create was never attempted or (b) UnitCore reached terminal after
+  # exact positive absence. terminate/2 is final defense only.
 
   use GenServer
 
@@ -138,12 +144,26 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   @doc false
   @spec begin(pid(), reference(), timeout()) :: :ok | {:error, term()}
   def begin(worker, start_ref, timeout \\ 5_000)
+
+  def begin(worker, start_ref, timeout)
       when is_pid(worker) and is_reference(start_ref) and
              (is_integer(timeout) or timeout == :infinity) do
     GenServer.call(worker, {:begin, start_ref}, timeout)
   end
 
   def begin(_worker, _start_ref, _timeout), do: {:error, :invalid_begin}
+
+  @doc false
+  @spec request_drain(pid(), reference(), timeout()) :: :ok | {:error, term()}
+  def request_drain(worker, receipt_ref, timeout \\ 5_000)
+
+  def request_drain(worker, receipt_ref, timeout)
+      when is_pid(worker) and is_reference(receipt_ref) and
+             (is_integer(timeout) or timeout == :infinity) do
+    GenServer.call(worker, {:request_drain, receipt_ref}, timeout)
+  end
+
+  def request_drain(_worker, _receipt_ref, _timeout), do: {:error, :invalid_drain}
 
   defp start_waiting(spec, executable, execution_id, start_ref, controller_pid, runtime) do
     with :ok <- validate_spec(spec),
@@ -199,8 +219,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       pending_result: false,
       cancel_requested: false,
       cancel_applied: false,
-      shutdown_requested: false,
-      shutdown_reason: nil,
+      drain_receipt: nil,
       cleanup_timer: nil,
       cleanup_timer_effect: nil,
       terminal_published: false,
@@ -225,6 +244,24 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   def handle_call({:begin, _wrong_or_replayed}, _from, state) do
     # Wrong or replayed ref runs nothing.
     {:reply, {:error, :invalid_begin_ref}, state}
+  end
+
+  def handle_call({:request_drain, receipt_ref}, {caller_pid, _tag}, state)
+      when is_reference(receipt_ref) and is_pid(caller_pid) do
+    case accept_drain_request(state, caller_pid, receipt_ref) do
+      {:ok, next} ->
+        {:reply, :ok, next}
+
+      {:stop, reason, next} ->
+        {:stop, reason, :ok, next}
+
+      {:error, reason, next} ->
+        {:reply, {:error, reason}, next}
+    end
+  end
+
+  def handle_call({:request_drain, _invalid}, _from, state) do
+    {:reply, {:error, :invalid_drain_ref}, state}
   end
 
   def handle_call(_request, _from, state), do: {:reply, {:error, :unsupported_call}, state}
@@ -287,18 +324,19 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     {:noreply, state}
   end
 
-  def handle_info({:EXIT, _from, reason}, state) do
-    # Parent supervisor shutdown: keep authority until UnitCore terminal.
-    # shutdown: :infinity exists so this worker can finish asynchronous cleanup.
-    state = request_shutdown_cleanup(state, reason)
-    continue_or_stop_after_shutdown(state)
+  def handle_info({:EXIT, _from, _reason}, state) do
+    # OTP consumes a supervised GenServer's parent exit into terminate/2; it is
+    # not a reachable coordinated-cleanup path. Drain is explicit via
+    # request_drain/3. Linked-session EXIT messages are ignored here.
+    {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
-    # Final defense only — normal cleanup is the async EXIT/cancel path.
+    # Final defense only — coordinated cleanup is request_drain / cancel, not
+    # a finite terminate loop. Do not weaken positive-absence gating here.
     _ = cancel_cleanup_timer(state)
     _ = kill_active_session(state)
     :ok
@@ -361,7 +399,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
   defp apply_effect(state, {:terminal, terminal}) do
     state = publish_terminal(state, terminal)
-    {:stop, stop_reason(state), state}
+    stop_after_terminal(state)
   end
 
   defp apply_effect(state, {:retry_after, delay_ms, next_effect})
@@ -382,12 +420,6 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   end
 
   defp apply_effect(state, _other), do: {:noreply, state}
-
-  defp stop_reason(%{shutdown_requested: true, shutdown_reason: reason})
-       when reason != nil,
-       do: reason
-
-  defp stop_reason(_), do: :normal
 
   defp launch_phase(state, phase, argv) do
     with :ok <- require_no_pending(state),
@@ -539,7 +571,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
         {:error, reason} ->
           state = publish_error(state, reason)
-          {:stop, stop_reason(state), state}
+          stop_after_terminal(state)
       end
     end
   end
@@ -623,7 +655,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
           apply_cancel_once(%{state | cancel_requested: true}, reason)
         else
           state = publish_error(state, reason)
-          {:stop, stop_reason(state), state}
+          stop_after_terminal(state)
         end
     end
   end
@@ -655,7 +687,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     cond do
       is_nil(state.core) ->
         state = publish_error(state, :unit_error)
-        {:stop, stop_reason(state), state}
+        stop_after_terminal(state)
 
       expected == phase ->
         apply_core_result(state, phase, result)
@@ -675,13 +707,39 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   defp expected_phase(_), do: nil
 
   # ---------------------------------------------------------------------------
-  # Cancellation / shutdown
+  # Cancellation / drain
   # ---------------------------------------------------------------------------
+
+  defp accept_drain_request(state, caller_pid, receipt_ref) do
+    case state.drain_receipt do
+      {^caller_pid, ^receipt_ref} ->
+        # Same caller + exact ref is idempotent.
+        {:ok, state}
+
+      {_other_caller, _other_ref} ->
+        {:error, :drain_already_requested, state}
+
+      nil ->
+        if state.terminal_published do
+          {:error, :already_terminal, state}
+        else
+          state = %{state | drain_receipt: {caller_pid, receipt_ref}}
+
+          case handle_cancel(state) do
+            {:noreply, next} ->
+              {:ok, next}
+
+            {:stop, reason, next} ->
+              {:stop, reason, next}
+          end
+        end
+    end
+  end
 
   defp handle_cancel(%{status: :waiting} = state) do
     # Preflight not begun — no create attempted.
     state = publish_error(state, :preflight_cancelled)
-    {:stop, stop_reason(state), state}
+    stop_after_terminal(state)
   end
 
   defp handle_cancel(%{terminal_published: true} = state), do: {:noreply, state}
@@ -704,7 +762,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
   defp handle_cancel(state) do
     state = publish_error(state, :cancelled)
-    {:stop, stop_reason(state), state}
+    stop_after_terminal(state)
   end
 
   defp apply_cancel_once(%{cancel_applied: true} = state, _fallback_reason) do
@@ -723,72 +781,57 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
       {:error, reason} ->
         state = publish_error(state, reason || fallback_reason)
-        {:stop, stop_reason(state), state}
+        stop_after_terminal(state)
     end
   end
 
   defp apply_cancel_once(state, fallback_reason) do
     state = publish_error(state, fallback_reason)
-    {:stop, stop_reason(state), state}
+    stop_after_terminal(state)
   end
 
-  defp request_shutdown_cleanup(%{shutdown_requested: true} = state, _reason), do: state
-
-  defp request_shutdown_cleanup(%{terminal_published: true} = state, reason) do
-    %{state | shutdown_requested: true, shutdown_reason: reason}
-  end
-
-  defp request_shutdown_cleanup(%{status: :waiting} = state, reason) do
-    state = %{state | shutdown_requested: true, shutdown_reason: reason}
-    state = publish_error(state, :preflight_cancelled)
-    state
-  end
-
-  defp request_shutdown_cleanup(state, reason) do
-    state = %{state | shutdown_requested: true, shutdown_reason: reason, cancel_requested: true}
-
+  defp stop_after_terminal(state) do
     cond do
-      state.pending_result ->
-        _ = request_session_cancel(state)
-        state
+      is_nil(state.drain_receipt) ->
+        {:stop, :normal, state}
 
-      state.cancel_applied ->
-        state
-
-      is_map(state.core) and state.core.stage != :terminal ->
-        case UnitCore.cancel(state.core) do
-          {:ok, core, effects} ->
-            # Dispatch effects asynchronously (no sync drain). May start sessions
-            # or schedule retry_after; GenServer stays alive until terminal.
-            case dispatch_effects(
-                   %{state | core: core, cancel_applied: true},
-                   effects
-                 ) do
-              {:noreply, next} -> next
-              {:stop, _stop_reason, next} -> next
-            end
-
-          {:error, :lifecycle_already_terminal} ->
-            %{state | cancel_applied: true}
-
-          {:error, err} ->
-            publish_error(state, err)
-        end
+      drain_emission_allowed?(state) ->
+        state = emit_drain_receipt(state)
+        {:stop, :normal, state}
 
       true ->
-        state
+        # Drain requested after create without Core absence proof — never emit a
+        # drain receipt and never stop on a raw post-create error.
+        {:noreply, state}
     end
   end
 
-  defp continue_or_stop_after_shutdown(%{terminal_published: true} = state) do
-    {:stop, stop_reason(state), state}
+  defp drain_emission_allowed?(%{core: nil}), do: true
+
+  defp drain_emission_allowed?(%{core: %{create_attempted: false}}), do: true
+
+  defp drain_emission_allowed?(%{
+         core: %{create_attempted: true, stage: :terminal, terminal: {:ok, _}}
+       }),
+       do: true
+
+  defp drain_emission_allowed?(_), do: false
+
+  defp emit_drain_receipt(
+         %{drain_receipt: {caller_pid, receipt_ref}, execution_id: execution_id} = state
+       )
+       when is_pid(caller_pid) and is_reference(receipt_ref) and is_binary(execution_id) do
+    if Process.alive?(caller_pid) do
+      send(
+        caller_pid,
+        {:apple_container_unit_drained, self(), execution_id, receipt_ref}
+      )
+    end
+
+    %{state | drain_receipt: :sent}
   end
 
-  defp continue_or_stop_after_shutdown(state) do
-    # Keep the GenServer alive for PortSession completion, retry_after, and
-    # final absence proof. Stop only when UnitCore reaches terminal.
-    {:noreply, state}
-  end
+  defp emit_drain_receipt(state), do: state
 
   defp request_session_cancel(%{active_session: session, runtime: runtime, active_session_id: id})
        when is_pid(session) do
@@ -1015,7 +1058,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       terminal_published: Map.get(state, :terminal_published) == true,
       cancel_requested: Map.get(state, :cancel_requested) == true,
       cancel_applied: Map.get(state, :cancel_applied) == true,
-      shutdown_requested: Map.get(state, :shutdown_requested) == true,
+      drain_requested: match?({_pid, _ref}, Map.get(state, :drain_receipt)),
       pending_result: Map.get(state, :pending_result) == true,
       active_phase: Map.get(state, :active_phase),
       # Authority-bearing / sensitive fields always redacted.
@@ -1032,7 +1075,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       cleanup_timer: :redacted,
       cleanup_timer_effect: :redacted,
       operation_deadline: :redacted,
-      shutdown_reason: :redacted,
+      drain_receipt: :redacted,
       spec: :redacted,
       core: :redacted,
       terminal: :redacted,
