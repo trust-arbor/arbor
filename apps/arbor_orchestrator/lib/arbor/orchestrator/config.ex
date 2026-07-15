@@ -593,11 +593,37 @@ defmodule Arbor.Orchestrator.Config do
           |> Keyword.keys()
           |> Enum.reject(&(&1 in allowed))
 
-        if unknown == [] do
-          {:ok, opts}
-        else
-          {:error, {:unknown_keys, unknown}}
+        cond do
+          unknown != [] ->
+            {:error, {:unknown_keys, unknown}}
+
+          true ->
+            # store_name is the code-owned operation target. A conflicting
+            # store_child_opts[:name] would start the child under a different
+            # registration than Engine/Checkpoint use for put/get/delete.
+            case store_child_name_ok?(store_name, store_child_opts) do
+              :ok ->
+                # Normalize: always pin child :name to store_name (no silent drift).
+                normalized_child_opts = Keyword.put(store_child_opts, :name, store_name)
+                {:ok, Keyword.put(opts, :store_child_opts, normalized_child_opts)}
+
+              {:error, _} = error ->
+                error
+            end
         end
+    end
+  end
+
+  defp store_child_name_ok?(store_name, store_child_opts) do
+    case Keyword.get(store_child_opts, :name) do
+      nil ->
+        :ok
+
+      ^store_name ->
+        :ok
+
+      other ->
+        {:error, {:store_child_name_conflict, other, store_name}}
     end
   end
 

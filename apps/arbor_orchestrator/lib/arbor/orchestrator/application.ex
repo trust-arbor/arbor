@@ -27,45 +27,62 @@ defmodule Arbor.Orchestrator.Application do
         {:error, {:invalid_engine_checkpoints, reason}}
 
       {:ok, checkpoint_opts} ->
-        children =
-          maybe_run_journal_store_child(journal_opts) ++
-            maybe_checkpoint_store_child(checkpoint_opts) ++
-            [
-              Arbor.Common.HandlerRegistry,
-              {event_log_backend, name: event_log_name},
-              {Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry},
-              Arbor.Orchestrator.SignalsBridge,
-              # Canonical current-run lifecycle store (optional durable Store via config)
-              {Arbor.Orchestrator.RunJournal, journal_opts},
-              # Historical JobRegistry only — no current-run lifecycle dual-write
-              Arbor.Orchestrator.JobRegistry,
-              Arbor.Orchestrator.DotCache,
-              {DynamicSupervisor,
-               name: Arbor.Orchestrator.PipelineSupervisor, strategy: :one_for_one},
-              {Registry, keys: :unique, name: Arbor.Orchestrator.SessionRegistry},
-              Arbor.Orchestrator.Session.Supervisor,
-              Arbor.Orchestrator.Session.TaskSupervisor,
-              Arbor.Orchestrator.RecoveryCoordinator
-            ]
+        case checkpoint_store_child_spec(checkpoint_opts) do
+          {:error, reason} ->
+            # start_store: true with an unloadable / non-startable store must not
+            # leave Application up while Engine targets a missing process.
+            {:error, reason}
 
-        result =
-          Supervisor.start_link(children,
-            strategy: :one_for_one,
-            name: Arbor.Orchestrator.Supervisor
-          )
-
-        # Populate handler DI registries with core entries after supervision tree is up
-        case result do
-          {:ok, _pid} ->
-            Arbor.Orchestrator.Registrar.register_core()
-            maybe_preflight_models()
-
-          _ ->
-            :ok
+          {:ok, checkpoint_children} ->
+            start_with_children(
+              journal_opts,
+              checkpoint_children,
+              event_log_backend,
+              event_log_name
+            )
         end
-
-        result
     end
+  end
+
+  defp start_with_children(journal_opts, checkpoint_children, event_log_backend, event_log_name) do
+    children =
+      maybe_run_journal_store_child(journal_opts) ++
+        checkpoint_children ++
+        [
+          Arbor.Common.HandlerRegistry,
+          {event_log_backend, name: event_log_name},
+          {Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry},
+          Arbor.Orchestrator.SignalsBridge,
+          # Canonical current-run lifecycle store (optional durable Store via config)
+          {Arbor.Orchestrator.RunJournal, journal_opts},
+          # Historical JobRegistry only — no current-run lifecycle dual-write
+          Arbor.Orchestrator.JobRegistry,
+          Arbor.Orchestrator.DotCache,
+          {DynamicSupervisor,
+           name: Arbor.Orchestrator.PipelineSupervisor, strategy: :one_for_one},
+          {Registry, keys: :unique, name: Arbor.Orchestrator.SessionRegistry},
+          Arbor.Orchestrator.Session.Supervisor,
+          Arbor.Orchestrator.Session.TaskSupervisor,
+          Arbor.Orchestrator.RecoveryCoordinator
+        ]
+
+    result =
+      Supervisor.start_link(children,
+        strategy: :one_for_one,
+        name: Arbor.Orchestrator.Supervisor
+      )
+
+    # Populate handler DI registries with core entries after supervision tree is up
+    case result do
+      {:ok, _pid} ->
+        Arbor.Orchestrator.Registrar.register_core()
+        maybe_preflight_models()
+
+      _ ->
+        :ok
+    end
+
+    result
   end
 
   defp run_journal_opts do
@@ -100,35 +117,66 @@ defmodule Arbor.Orchestrator.Application do
     end
   end
 
-  # Derive the Engine checkpoint store child from the same Config authority
-  # Engine uses for persist/load/cleanup. Placed before Engine consumers
-  # (RunJournal/RecoveryCoordinator/sessions). Supports store:nil and
-  # start_store:false (externally managed).
-  defp maybe_checkpoint_store_child(opts) when is_list(opts) do
+  @doc false
+  # Pure startup decision for the Engine checkpoint store child.
+  #
+  # Returns:
+  #   `{:ok, []}` — no supervised child (`store: nil` or `start_store: false`)
+  #   `{:ok, [{module, child_opts}]}` — child to place before Engine consumers
+  #   `{:error, {:checkpoint_store_unstartable, reason}}` — fail closed when
+  #     `start_store: true` but the module cannot be loaded / has no start_link/1
+  #
+  # `store_name` always wins over any `store_child_opts[:name]`.
+  # Does not start processes; safe to call from tests without touching the live app.
+  @spec checkpoint_store_child_spec(keyword()) ::
+          {:ok, [tuple()]} | {:error, {:checkpoint_store_unstartable, term()}}
+  def checkpoint_store_child_spec(opts) when is_list(opts) do
     store = Keyword.get(opts, :store)
     start_store? = Keyword.get(opts, :start_store, true)
     store_name = Keyword.get(opts, :store_name)
     store_child_opts = Keyword.get(opts, :store_child_opts, [])
 
     cond do
-      is_nil(store) or not start_store? ->
-        []
+      # Explicit file-only or externally managed store — no Application child.
+      is_nil(store) or start_store? == false ->
+        {:ok, []}
 
       not is_atom(store) ->
-        # Validated by Config already; belt-and-braces.
-        []
+        {:error, {:checkpoint_store_unstartable, :store_not_atom}}
 
-      function_exported?(store, :start_link, 1) ->
-        child_opts =
-          store_child_opts
-          |> Keyword.put_new(:name, store_name)
+      not is_atom(store_name) ->
+        {:error, {:checkpoint_store_unstartable, :store_name_not_atom}}
 
-        [{store, child_opts}]
+      not is_list(store_child_opts) or not Keyword.keyword?(store_child_opts) ->
+        {:error, {:checkpoint_store_unstartable, :store_child_opts_not_keyword}}
 
       true ->
-        # Configured store cannot be supervised here — operator must start it
-        # externally (start_store: false is the explicit form of that).
-        []
+        case ensure_module_exports_start_link(store) do
+          :ok ->
+            # store_name is the code-owned operation target; never start under a
+            # conflicting child name from store_child_opts.
+            child_opts = Keyword.put(store_child_opts, :name, store_name)
+            {:ok, [{store, child_opts}]}
+
+          {:error, reason} ->
+            {:error, {:checkpoint_store_unstartable, reason}}
+        end
+    end
+  end
+
+  defp ensure_module_exports_start_link(store) when is_atom(store) do
+    # Must load before function_exported?/3 — a valid but not-yet-loaded module
+    # would otherwise look like a missing export and be silently omitted.
+    case Code.ensure_loaded(store) do
+      {:module, ^store} ->
+        if function_exported?(store, :start_link, 1) do
+          :ok
+        else
+          {:error, :missing_start_link}
+        end
+
+      {:error, reason} ->
+        {:error, {:module_not_loadable, reason}}
     end
   end
 

@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.EngineCheckpointStoreConfigL4Test do
   use ExUnit.Case, async: false
   @moduletag :fast
 
+  alias Arbor.Orchestrator.Application, as: OrchestratorApp
   alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.Outcome
@@ -210,6 +211,8 @@ defmodule Arbor.Orchestrator.EngineCheckpointStoreConfigL4Test do
       assert opts[:store_opts] == []
       assert opts[:start_store] == true
       assert opts[:store_child_opts][:collection] == "orchestrator_checkpoints"
+      # store_name is pinned into store_child_opts[:name] during validation.
+      assert opts[:store_child_opts][:name] == :arbor_orchestrator_checkpoints
       assert opts[:durability_class] == :process_lifetime
 
       assert {:ok, store_opts} = Config.fetch_engine_checkpoint_store_opts()
@@ -229,6 +232,28 @@ defmodule Arbor.Orchestrator.EngineCheckpointStoreConfigL4Test do
 
       assert {:ok, store_opts} = Config.fetch_engine_checkpoint_store_opts()
       assert store_opts[:store] == nil
+    end
+
+    test "conflicting store_child_opts[:name] fails closed" do
+      Application.put_env(:arbor_orchestrator, :engine_checkpoints,
+        store_name: :canonical_checkpoint_store,
+        store_child_opts: [name: :other_name, collection: "x"]
+      )
+
+      assert {:error, {:store_child_name_conflict, :other_name, :canonical_checkpoint_store}} =
+               Config.fetch_engine_checkpoints()
+    end
+
+    test "matching store_child_opts[:name] is accepted and re-pinned to store_name" do
+      Application.put_env(:arbor_orchestrator, :engine_checkpoints,
+        store_name: :canonical_checkpoint_store,
+        store_child_opts: [name: :canonical_checkpoint_store, collection: "x"]
+      )
+
+      assert {:ok, opts} = Config.fetch_engine_checkpoints()
+      assert opts[:store_name] == :canonical_checkpoint_store
+      assert opts[:store_child_opts][:name] == :canonical_checkpoint_store
+      assert opts[:store_child_opts][:collection] == "x"
     end
 
     test "malformed config fails closed" do
@@ -259,14 +284,13 @@ defmodule Arbor.Orchestrator.EngineCheckpointStoreConfigL4Test do
   end
 
   describe "Application checkpoint child derivation" do
-    test "invalid env fails Application.start closed before supervision" do
+    test "invalid env fails closed before supervision (same branch as Application.start)" do
       Application.put_env(:arbor_orchestrator, :engine_checkpoints, store: "nope")
 
       # Application.start/2 is already running under test; exercise the same
-      # validation branch the start callback uses.
+      # validation branch the start callback uses without restarting the live app.
       assert {:error, :store_not_atom_or_nil} = Config.fetch_engine_checkpoints()
 
-      # Reconstruct the Application start decision without restarting the live app.
       assert match?(
                {:error, {:invalid_engine_checkpoints, :store_not_atom_or_nil}},
                case Config.fetch_engine_checkpoints() do
@@ -274,6 +298,74 @@ defmodule Arbor.Orchestrator.EngineCheckpointStoreConfigL4Test do
                  {:ok, _} -> :ok
                end
              )
+    end
+
+    test "default BufferedStore is startable and names the child after store_name" do
+      Application.delete_env(:arbor_orchestrator, :engine_checkpoints)
+      assert {:ok, opts} = Config.fetch_engine_checkpoints()
+
+      assert {:ok, [{BufferedStore, child_opts}]} =
+               OrchestratorApp.checkpoint_store_child_spec(opts)
+
+      assert child_opts[:name] == :arbor_orchestrator_checkpoints
+      assert child_opts[:collection] == "orchestrator_checkpoints"
+    end
+
+    test "store:nil and start_store:false yield no supervised child" do
+      assert {:ok, []} =
+               OrchestratorApp.checkpoint_store_child_spec(
+                 store: nil,
+                 store_name: :unused,
+                 start_store: true,
+                 store_child_opts: []
+               )
+
+      assert {:ok, []} =
+               OrchestratorApp.checkpoint_store_child_spec(
+                 store: MemoryStore,
+                 store_name: :external_store,
+                 start_store: false,
+                 store_child_opts: [name: :spoof]
+               )
+    end
+
+    test "start_store:true fails closed when module has no start_link/1" do
+      # String is a loaded atom module that does not export start_link/1.
+      assert {:error, {:checkpoint_store_unstartable, :missing_start_link}} =
+               OrchestratorApp.checkpoint_store_child_spec(
+                 store: String,
+                 store_name: :nope,
+                 start_store: true,
+                 store_child_opts: []
+               )
+    end
+
+    test "start_store:true fails closed when module cannot be loaded" do
+      missing = :"Elixir.Arbor.NonexistentCheckpointStore#{System.unique_integer([:positive])}"
+
+      assert {:error, {:checkpoint_store_unstartable, {:module_not_loadable, _}}} =
+               OrchestratorApp.checkpoint_store_child_spec(
+                 store: missing,
+                 store_name: :nope,
+                 start_store: true,
+                 store_child_opts: []
+               )
+    end
+
+    test "store_name overwrites conflicting store_child_opts[:name] in child spec" do
+      # Config rejects conflicts; the pure Application helper still enforces
+      # store_name as the registration name when handed raw opts.
+      assert {:ok, [{MemoryStore, child_opts}]} =
+               OrchestratorApp.checkpoint_store_child_spec(
+                 store: MemoryStore,
+                 store_name: :canonical_name,
+                 start_store: true,
+                 store_child_opts: [name: :attacker_name, collection: "x"]
+               )
+
+      assert child_opts[:name] == :canonical_name
+      refute child_opts[:name] == :attacker_name
+      assert child_opts[:collection] == "x"
     end
   end
 
