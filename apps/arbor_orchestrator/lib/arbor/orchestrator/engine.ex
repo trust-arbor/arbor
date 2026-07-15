@@ -108,6 +108,13 @@ defmodule Arbor.Orchestrator.Engine do
     opts = Keyword.put_new(opts, :pipeline_id, run_id)
     opts = Keyword.put(opts, :pipeline_started_at, pipeline_started_at_dt)
 
+    # Bind runtime-only lifecycle owner identity to the process executing
+    # Engine.run/2 (fresh and resume). Caller-supplied :spawning_pid must not
+    # spoof liveness ownership. This value flows through opts into RunState,
+    # lifecycle meta, and start events; Adapter durable serialization never
+    # persists PIDs.
+    opts = Keyword.put(opts, :spawning_pid, self())
+
     # Derive checkpoint HMAC secret from the operator's identity, if one
     # was supplied. The HMAC binds checkpoint integrity to the identity
     # that started the run — only the same operator can resume.
@@ -1812,9 +1819,22 @@ defmodule Arbor.Orchestrator.Engine do
 
   defp with_in_call_heartbeat(run_id, journal_opts, fun)
        when is_binary(run_id) and is_list(journal_opts) do
+    # Unlinked ticker: ticker failure must not kill the Engine owner.
+    # Explicit after cleanup handles normal return; independent owner monitor
+    # terminates the ticker when Process.exit(owner, :kill) bypasses after.
+    owner = self()
+
     ticker_pid =
       spawn(fn ->
-        in_call_heartbeat_loop(run_id, journal_opts, @in_call_heartbeat_interval_ms)
+        mon = Process.monitor(owner)
+
+        in_call_heartbeat_loop(
+          run_id,
+          journal_opts,
+          @in_call_heartbeat_interval_ms,
+          mon,
+          owner
+        )
       end)
 
     try do
@@ -1826,12 +1846,14 @@ defmodule Arbor.Orchestrator.Engine do
 
   defp with_in_call_heartbeat(_run_id, _journal_opts, fun), do: fun.()
 
-  defp in_call_heartbeat_loop(run_id, journal_opts, interval_ms) do
+  defp in_call_heartbeat_loop(run_id, journal_opts, interval_ms, mon, owner) do
     receive do
+      {:DOWN, ^mon, :process, ^owner, _reason} ->
+        :ok
     after
       interval_ms ->
         touch_in_call_heartbeat(run_id, journal_opts)
-        in_call_heartbeat_loop(run_id, journal_opts, interval_ms)
+        in_call_heartbeat_loop(run_id, journal_opts, interval_ms, mon, owner)
     end
   end
 

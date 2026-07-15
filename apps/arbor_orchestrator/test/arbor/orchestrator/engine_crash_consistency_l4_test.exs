@@ -351,7 +351,8 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
       assert :ok = HoldStore.release(harness.store_name)
       await_effect!(harness.run_id, jopts, "pending", exec_id)
 
-      rec = PipelineStatus.get_record(harness.run_id, jopts)
+      # Process death observed via public liveness correction — not a manual rewrite.
+      rec = assert_owner_death_interrupted!(harness.run_id, jopts, engine_pid)
       assert rec.current_effect["status"] == "pending"
       assert rec.current_effect["execution_id"] == exec_id
       assert rec.current_effect["node_id"] == "task"
@@ -429,13 +430,13 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
 
       # Partial progress remains; effect never completed.
       assert File.read!(marker_path) == "partial:#{exec_id}\n"
-      rec = PipelineStatus.get_record(harness.run_id, jopts)
+      rec = assert_owner_death_interrupted!(harness.run_id, jopts, engine_pid)
       assert rec.current_effect["status"] == "pending"
       assert rec.current_effect["execution_id"] == exec_id
       refute rec.current_effect["status"] == "completed"
       refute rec.current_effect["status"] == "settled"
 
-      reopen_as_recovering!(harness.run_id, jopts, logs_root)
+      claim_for_recovery_only!(harness.run_id, jopts)
 
       assert {:error, {:indeterminate_effect, "task", ^exec_id}} =
                Engine.run(parse!(multi_dot()),
@@ -501,12 +502,12 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
       kill_engine!(engine_pid, mon)
 
       # External effect completed, but durable receipt was never recorded.
-      rec = PipelineStatus.get_record(harness.run_id, jopts)
+      rec = assert_owner_death_interrupted!(harness.run_id, jopts, engine_pid)
       assert rec.current_effect["status"] == "pending"
       assert rec.current_effect["execution_id"] == exec_id
       refute is_binary(rec.current_effect["result_digest"])
 
-      reopen_as_recovering!(harness.run_id, jopts, logs_root)
+      claim_for_recovery_only!(harness.run_id, jopts)
 
       assert {:error, {:indeterminate_effect, "task", ^exec_id}} =
                Engine.run(parse!(block_dot()),
@@ -586,7 +587,7 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
       assert :ok = HoldStore.release(harness.store_name)
       await_effect!(harness.run_id, jopts, "completed", exec_id)
 
-      rec = PipelineStatus.get_record(harness.run_id, jopts)
+      rec = assert_owner_death_interrupted!(harness.run_id, jopts, engine_pid)
       assert rec.current_effect["status"] == "completed"
       assert rec.current_effect["execution_id"] == exec_id
       assert is_binary(rec.current_effect["result_digest"])
@@ -654,14 +655,14 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
       assert :ok = HoldStore.release(harness.store_name)
       await_effect!(harness.run_id, jopts, "completed", exec_id)
 
-      rec = PipelineStatus.get_record(harness.run_id, jopts)
+      rec = assert_owner_death_interrupted!(harness.run_id, jopts, engine_pid)
       assert rec.current_effect["status"] == "completed"
       assert rec.current_effect["execution_id"] == exec_id
       assert is_binary(rec.current_effect["result_digest"])
 
       # Seed only pre-task checkpoint so resume authenticates without this visit.
       seed_start_checkpoint!(logs_root, harness.run_id, identity)
-      reopen_as_recovering!(harness.run_id, jopts, logs_root)
+      claim_for_recovery_only!(harness.run_id, jopts)
 
       assert {:error, {:completed_effect_unapplied, "task", ^exec_id}} =
                Engine.run(parse!(side_dot()),
@@ -683,6 +684,73 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
       assert rec2.current_effect["status"] == "completed"
       assert rec2.current_effect["execution_id"] == exec_id
       refute rec2.status == :completed
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Owner PID binding (spoofed caller spawning_pid)
+  # ---------------------------------------------------------------------------
+
+  describe "L4A2 Engine owner spawning_pid binding" do
+    test "caller-supplied :spawning_pid cannot replace the actual Engine owner" do
+      harness = start_isolated_journal("l4_owner_pid")
+      jopts = [server: harness.journal_name]
+      logs_root = tmp_logs("l4_owner_pid")
+      parent = self()
+
+      # Spoof PID stays alive so a naive copy of opts would keep status :running.
+      {spoof_pid, spoof_mon} =
+        spawn_monitor(fn ->
+          receive do
+            :stop -> :ok
+          after
+            60_000 -> :ok
+          end
+        end)
+
+      on_exit(fn ->
+        if Process.alive?(spoof_pid), do: Process.exit(spoof_pid, :kill)
+
+        receive do
+          {:DOWN, ^spoof_mon, :process, ^spoof_pid, _} -> :ok
+        after
+          100 -> :ok
+        end
+      end)
+
+      {engine_pid, mon} =
+        spawn_engine_run(parse!(multi_dot()),
+          run_id: harness.run_id,
+          logs_root: logs_root,
+          journal_opts: jopts,
+          parent: parent,
+          resumable: true,
+          spawning_pid: spoof_pid,
+          effect_marker_path: tmp_marker("l4_owner_pid")
+        )
+
+      assert_receive {:l4_partial, "task", _exec_id, _}, 5_000
+
+      # Live owner is the Engine process, not the spoofed caller PID.
+      mid = PipelineStatus.get_record(harness.run_id, jopts)
+      assert mid.status == :running
+      assert mid.spawning_pid == engine_pid
+      refute mid.spawning_pid == spoof_pid
+      assert Process.alive?(spoof_pid)
+
+      # Killing only the spoof must not mark the live run interrupted.
+      Process.exit(spoof_pid, :kill)
+      assert_receive {:DOWN, ^spoof_mon, :process, ^spoof_pid, :killed}, 2_000
+
+      still = PipelineStatus.get_record(harness.run_id, jopts)
+      assert still.status == :running
+      assert still.spawning_pid == engine_pid
+      assert still.current_effect["status"] == "pending"
+
+      kill_engine!(engine_pid, mon)
+
+      dead = assert_owner_death_interrupted!(harness.run_id, jopts, engine_pid)
+      assert dead.current_effect["status"] == "pending"
     end
   end
 
@@ -823,24 +891,26 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
     end
   end
 
-  defp reopen_as_recovering!(run_id, jopts, logs_root) do
+  # Public liveness correction after real Engine death. Must not manually rewrite
+  # isolated journal status/effect before asserting owner-death evidence.
+  defp assert_owner_death_interrupted!(run_id, jopts, engine_pid) do
+    refute Process.alive?(engine_pid)
     rec = PipelineStatus.get_record(run_id, jopts)
-    assert %Record{} = rec
+    assert %Record{status: :interrupted} = rec
+    # Exact effect evidence retained across the liveness persist.
+    assert is_map(rec.current_effect)
+    rec
+  end
 
-    reopened = %Record{
-      rec
-      | status: :interrupted,
-        failure_reason: nil,
-        finished_at: nil,
-        duration_ms: nil,
-        owner_node: nil,
-        logs_root: logs_root || rec.logs_root
-    }
-
-    assert :ok = PipelineStatus.put(reopened, jopts)
+  # Claim only — status must already be :interrupted via PipelineStatus liveness.
+  defp claim_for_recovery_only!(run_id, jopts) do
+    rec = PipelineStatus.get_record(run_id, jopts)
+    assert %Record{status: :interrupted} = rec
     assert {:ok, _} = PipelineStatus.claim_for_recovery_record(run_id, node(), jopts)
   end
 
+  # Publish a liveness-corrected isolated record into the canonical default journal
+  # so public Orchestrator.resume/2 can exercise the same effect evidence.
   defp publish_interrupted_for_public_resume!(run_id, jopts, logs_root, dot, label) do
     dir =
       Path.join(
@@ -856,12 +926,11 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
     hash = :crypto.hash(:sha256, dot) |> Base.encode16(case: :lower)
 
     rec = PipelineStatus.get_record(run_id, jopts)
-    assert %Record{} = rec
+    assert %Record{status: :interrupted} = rec
 
-    reopened = %Record{
+    published = %Record{
       rec
-      | status: :interrupted,
-        failure_reason: nil,
+      | failure_reason: nil,
         finished_at: nil,
         duration_ms: nil,
         owner_node: nil,
@@ -870,7 +939,7 @@ defmodule Arbor.Orchestrator.EngineCrashConsistencyL4Test do
         graph_hash: hash
     }
 
-    assert :ok = PipelineStatus.put(reopened)
+    assert :ok = PipelineStatus.put(published)
 
     on_exit(fn ->
       try do
