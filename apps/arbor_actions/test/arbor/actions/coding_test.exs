@@ -1622,14 +1622,19 @@ defmodule Arbor.Actions.CodingTest do
 
       # Cleanup via exact task+principal reactivation so the shared registry
       # and worktree do not leak past this test.
-      assert {:ok, reactivated} =
-               WorkspaceLeaseRegistry.acquire(%{
-                 repo_path: repo,
-                 branch: branch,
-                 worktree_base_dir: worktree_base,
-                 task_id: task_id,
-                 principal_id: principal_id
-               })
+      reactivated =
+        assert_eventually(fn ->
+          assert {:ok, reactivated} =
+                   WorkspaceLeaseRegistry.acquire(%{
+                     repo_path: repo,
+                     branch: branch,
+                     worktree_base_dir: worktree_base,
+                     task_id: task_id,
+                     principal_id: principal_id
+                   })
+
+          reactivated
+        end)
 
       assert File.exists?(Path.join(reactivated.worktree_path, "dirty.txt"))
 

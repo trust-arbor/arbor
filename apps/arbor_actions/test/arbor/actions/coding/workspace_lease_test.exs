@@ -537,6 +537,187 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       refute File.dir?(lease.worktree_path)
     end
 
+    test "owner death sees untracked work even when repository status config hides it", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/workspace-owner-death-hidden-untracked"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-hidden-untracked-#{System.unique_integer([:positive])}"
+      principal_id = "agent-hidden-untracked-#{System.unique_integer([:positive])}"
+      parent = self()
+      server = :"workspace_hidden_untracked_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         retention_ttl_ms: 5_000,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
+
+      owner =
+        spawn(fn ->
+          {:ok, lease} =
+            WorkspaceLeaseRegistry.acquire(
+              %{
+                repo_path: repo,
+                branch: branch,
+                worktree_base_dir: worktree_base,
+                task_id: task_id,
+                principal_id: principal_id
+              },
+              server: server
+            )
+
+          git!(lease.worktree_path, ["config", "status.showUntrackedFiles", "no"])
+          File.write!(Path.join(lease.worktree_path, "hidden-by-config.txt"), "keep me\n")
+          assert git!(lease.worktree_path, ["status", "--porcelain"]) == ""
+          send(parent, {:leased, lease})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:leased, lease}, 2_000
+      assert Workspace.inspect_worktree(lease.worktree_path, lease.base_commit).dirty
+      Process.exit(owner, :kill)
+
+      assert_eventually(fn ->
+        assert File.read!(Path.join(lease.worktree_path, "hidden-by-config.txt")) == "keep me\n"
+        assert map_size(:sys.get_state(server).retained_by_id) == 1
+      end)
+
+      assert {:ok, reactivated} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: branch,
+                   worktree_base_dir: worktree_base,
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release(reactivated.workspace_id, :remove, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+    end
+
+    test "identity-failure quarantine retries and exact task+principal can reactivate", %{
+      tmp_dir: tmp_dir
+    } do
+      fake_repo = Path.join(tmp_dir, "fake-repo")
+      fake_worktree = Path.join(tmp_dir, "fake-worktree")
+      File.mkdir_p!(fake_repo)
+      File.mkdir_p!(fake_worktree)
+      File.write!(Path.join(fake_worktree, "partial.txt"), "recoverable\n")
+
+      branch = "test/workspace-owner-death-quarantine"
+      workspace_id = "ws_quarantine_#{System.unique_integer([:positive])}"
+      task_id = "task-quarantine-#{System.unique_integer([:positive])}"
+      principal_id = "agent-quarantine-#{System.unique_integer([:positive])}"
+      parent = self()
+      server = :"workspace_quarantine_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         retention_ttl_ms: 50,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
+
+      create_worktree = fn _repo, _branch, _params ->
+        {:ok, fake_worktree, :owned, String.duplicate("a", 40)}
+      end
+
+      owner =
+        spawn(fn ->
+          result =
+            WorkspaceLeaseRegistry.acquire(
+              %{
+                workspace_id: workspace_id,
+                repo_path: fake_repo,
+                branch: branch,
+                worktree_path: fake_worktree,
+                task_id: task_id,
+                principal_id: principal_id,
+                create_worktree: create_worktree
+              },
+              server: server
+            )
+
+          send(parent, {:leased, result})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:leased, {:ok, lease}}, 2_000
+      Process.exit(owner, :kill)
+
+      assert_eventually(fn ->
+        state = :sys.get_state(server)
+        quarantined = Map.fetch!(state.leases, workspace_id)
+        assert quarantined.cleanup_armed == false
+        assert is_reference(quarantined.owner_death_retry_ref)
+        assert map_size(state.retained_by_id) == 0
+        assert File.read!(Path.join(fake_worktree, "partial.txt")) == "recoverable\n"
+      end)
+
+      quarantined = Map.fetch!(:sys.get_state(server).leases, workspace_id)
+      assert quarantined.owner_death_policy == :retention_identity_unavailable
+      assert quarantined.task_id == task_id
+      assert quarantined.principal_id == principal_id
+      assert quarantined.repo_path == Path.expand(fake_repo)
+      assert quarantined.branch == branch
+      assert Path.expand(quarantined.worktree_path) == Path.expand(fake_worktree)
+      refute Process.alive?(quarantined.owner_pid)
+
+      assert {:error, :workspace_in_use} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   workspace_id: workspace_id,
+                   repo_path: fake_repo,
+                   branch: branch,
+                   worktree_path: fake_worktree,
+                   task_id: "task-other",
+                   principal_id: "agent-other",
+                   create_worktree: create_worktree
+                 },
+                 server: server
+               )
+
+      assert {:ok, reactivated} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   workspace_id: workspace_id,
+                   repo_path: fake_repo,
+                   branch: branch,
+                   worktree_path: fake_worktree,
+                   task_id: task_id,
+                   principal_id: principal_id,
+                   create_worktree: create_worktree
+                 },
+                 server: server
+               )
+
+      state = :sys.get_state(server)
+      active = Map.fetch!(state.leases, workspace_id)
+      assert active.cleanup_armed == true
+      assert Map.has_key?(state.by_ref, active.owner_ref)
+      refute Map.has_key?(active, :owner_death_retry_ref)
+      assert reactivated.workspace_id == lease.workspace_id
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release(workspace_id, :remove, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      refute File.dir?(fake_worktree)
+    end
+
     test "owner death retains clean committed HEAD ahead of base for exact task+principal", %{
       tmp_dir: tmp_dir
     } do
@@ -620,10 +801,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                })
     end
 
-    test "owner death removes pristine unchanged owned worktrees", %{tmp_dir: tmp_dir} do
+    test "owner death retains pristine owned worktrees until recovery or expiry", %{
+      tmp_dir: tmp_dir
+    } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       branch = "test/workspace-owner-death-pristine"
       worktree_base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-pristine-#{System.unique_integer([:positive])}"
+      principal_id = "agent-pristine-#{System.unique_integer([:positive])}"
       parent = self()
 
       server = :"workspace_owner_death_pristine_#{System.unique_integer([:positive])}"
@@ -642,7 +827,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
               %{
                 repo_path: repo,
                 branch: branch,
-                worktree_base_dir: worktree_base
+                worktree_base_dir: worktree_base,
+                task_id: task_id,
+                principal_id: principal_id
               },
               server: server
             )
@@ -661,14 +848,35 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       Process.exit(owner, :kill)
       assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}, 2_000
 
-      assert_eventually(
-        fn ->
-          refute File.dir?(lease.worktree_path)
-          assert map_size(:sys.get_state(server).leases) == 0
-          assert map_size(:sys.get_state(server).retained_by_id) == 0
-        end,
-        250
-      )
+      assert_eventually(fn ->
+        assert File.dir?(lease.worktree_path)
+        assert map_size(:sys.get_state(server).leases) == 0
+        assert map_size(:sys.get_state(server).retained_by_id) == 1
+      end)
+
+      assert {:ok, reactivated} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   repo_path: repo,
+                   branch: branch,
+                   worktree_base_dir: worktree_base,
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      assert reactivated.workspace_id == lease.workspace_id
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release(reactivated.workspace_id, :remove, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      refute File.dir?(lease.worktree_path)
     end
 
     test "owner death preserves reused worktrees", %{tmp_dir: tmp_dir} do
@@ -724,7 +932,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
   end
 
   describe "registry-owned acquisition boundary" do
-    test "caller death during acquire cleans the newly stored owned worktree", %{tmp_dir: tmp_dir} do
+    test "caller death during acquire defers owned cleanup to bounded retention expiry", %{
+      tmp_dir: tmp_dir
+    } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       repo_root = git!(repo, ["rev-parse", "--show-toplevel"])
       branch = "test/workspace-acquire-cancel"
@@ -737,6 +947,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       start_supervised!(
         {WorkspaceLeaseRegistry,
          name: server,
+         retention_ttl_ms: 300,
          linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
       )
 
@@ -773,14 +984,24 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       Process.exit(owner, :kill)
       send(registry_pid, :proceed)
 
-      # Dead caller's GenServer reply is dropped; worktree must still be cleaned.
+      # Dead caller's GenServer reply is dropped. The newly created tree enters
+      # bounded retention instead of being deleted in the owner-DOWN callback.
       refute_receive {:acquire_result, _}, 200
 
       expected_path = expected_worktree_path(worktree_base, branch)
 
       assert_eventually(fn ->
-        refute File.dir?(expected_path)
+        assert File.dir?(expected_path)
+        assert map_size(:sys.get_state(server).retained_by_id) == 1
       end)
+
+      assert_eventually(
+        fn ->
+          refute File.dir?(expected_path)
+          assert map_size(:sys.get_state(server).retained_by_id) == 0
+        end,
+        150
+      )
 
       assert is_pid(registry_pid)
       assert Process.alive?(registry_pid)

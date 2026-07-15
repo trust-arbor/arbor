@@ -13,7 +13,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   the GenServer caller, monitored **before** any git worktree side effect,
   and create+register run as one call. Caller-supplied `owner_pid` is never
   authority. If the caller dies while acquisition is in progress, the queued
-  DOWN cleans an owned lease once it is stored. Post-create failures remove
+  DOWN retains an owned lease once it is stored. Post-create failures remove
   invocation-owned worktrees before returning.
 
   ## Owner-death cleanup
@@ -24,23 +24,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   * **reused** leases — drop the lease record only; reused paths are never
     deletion authority and always survive
-  * **owned** leases — inspect live worktree state against the lease
-    `base_commit` while serialized inside the registry:
-    * pristine (`!dirty` and `HEAD == base_commit`): attempt a non-forcing Git
-      removal (keeps abandoned empty acquisitions deterministic without
-      deleting work that appears after inspection)
-    * dirty **or** clean `HEAD != base_commit`: convert atomically to the
-      existing bounded-TTL retained lease, preserving exact `task_id` +
-      `principal_id` reactivation authority
-    * inspection, removal, or retention-identity uncertainty: fail safe against
-      data loss — do not remove a potentially useful worktree; keep
-      task+principal-authorized lease/retained authority and record the failure
-      explicitly
+  * **owned** leases — always convert atomically to the existing bounded-TTL
+    retained lease, preserving exact `task_id` + `principal_id` reactivation
+    authority. Owner death cannot prove that an external ACP worker has stopped;
+    even a currently pristine worktree may receive a late write after an
+    inspect-then-remove check.
 
-  Normal useful-work conversion reuses the bounded `:retain` identity/TTL
-  machinery. If that identity cannot be proven, the lease remains as an
-  explicit non-destructive quarantine for authorized inspection/release rather
-  than becoming deletion authority.
+  Owner-death conversion reuses the bounded `:retain` identity/TTL machinery.
+  If that identity cannot be proven, the lease remains as an explicit
+  non-destructive quarantine for authorized inspection/release and retries
+  identity capture rather than becoming deletion authority.
 
   Two-revision validation resources are child leases. Their private staging,
   isolated build directories, and detached base worktree are monitored against
@@ -413,21 +406,17 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   @impl true
   def handle_call({:acquire, attrs}, {owner_pid, _tag}, state) do
     # Owner authority is always the GenServer caller, never a supplied pid.
-    case prepare_acquire(attrs, owner_pid, state) do
+    case prepare_acquire_identity(attrs, owner_pid) do
       {:ok, prepared} ->
-        case retained_acquire(state, prepared) do
-          :none ->
-            if Map.has_key?(state.retained_by_id, prepared.workspace_id) do
-              {:reply, {:error, :workspace_id_collision}, state}
-            else
-              perform_acquire(prepared, state)
-            end
+        case quarantined_acquire(state, prepared) do
+          {:ok, lease} ->
+            reactivate_quarantined(lease, prepared, state)
 
           {:error, reason} ->
             {:reply, {:error, reason}, state}
 
-          {:ok, retained} ->
-            reactivate_retained(retained, prepared, state)
+          :none ->
+            continue_acquire(state, prepared)
         end
 
       {:error, reason} ->
@@ -723,6 +712,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   def handle_info({:retained_expire, _target, _generation}, state), do: {:noreply, state}
+
+  @impl true
+  def handle_info({:owner_death_retention_retry, workspace_id, generation}, state)
+      when is_binary(workspace_id) and is_reference(generation) do
+    state = retry_owner_death_retention(state, workspace_id, generation)
+    {:noreply, state}
+  end
+
+  def handle_info({:owner_death_retention_retry, _workspace_id, _generation}, state),
+    do: {:noreply, state}
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
@@ -1709,74 +1708,18 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         drop_lease(state, lease)
 
       lease.ownership == :owned ->
-        apply_owned_owner_death_policy(state, lease)
+        # Unexpected owner termination is not evidence that an external ACP
+        # worker is quiescent. Never grant immediate deletion authority here.
+        retain_on_owner_death(state, lease, :owner_terminated)
 
       true ->
         drop_lease(state, lease)
-    end
-  end
-
-  defp apply_owned_owner_death_policy(state, lease) do
-    case classify_owner_death_worktree(lease) do
-      :absent ->
-        drop_lease(state, lease)
-
-      :remove ->
-        case remove_pristine_owned_worktree(lease.repo_path, lease.worktree_path) do
-          :ok -> drop_lease(state, lease)
-          {:error, detail} -> retain_on_owner_death(state, lease, {:remove_uncertain, detail})
-        end
-
-      :retain ->
-        retain_on_owner_death(state, lease, :useful_progress)
-
-      :retain_uncertain ->
-        retain_on_owner_death(state, lease, :inspection_uncertain)
-    end
-  end
-
-  defp classify_owner_death_worktree(lease) do
-    inspection = Workspace.inspect_worktree(lease.worktree_path, lease.base_commit)
-    base = lease.base_commit
-    head = Map.get(inspection, :head_commit)
-
-    cond do
-      inspection.exists != true ->
-        :absent
-
-      # Dirty uncommitted work is always useful progress.
-      inspection.dirty == true ->
-        :retain
-
-      # Clean HEAD advanced past acquire base is also useful progress.
-      is_binary(head) and head != "" and is_binary(base) and base != "" and head != base ->
-        :retain
-
-      # Proven pristine: clean worktree still at the acquire base commit.
-      is_binary(head) and head != "" and is_binary(base) and base != "" and head == base and
-          inspection.dirty == false ->
-        :remove
-
-      # Missing HEAD, missing base, or other incomplete inspection — fail safe.
-      true ->
-        :retain_uncertain
     end
   end
 
   defp retain_on_owner_death(state, lease, reason) do
     case do_release(state, lease, :retain) do
       {:ok, _result, state} ->
-        if reason != :useful_progress do
-          Logger.warning(
-            "workspace owner-death retained lease after uncertain cleanup",
-            workspace_id: lease.workspace_id,
-            task_id: lease.task_id,
-            principal_id: lease.principal_id,
-            ownership: lease.ownership,
-            reason: reason
-          )
-        end
-
         state
 
       {:error, :retention_identity_unavailable, state} ->
@@ -1810,7 +1753,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         detail: inspect(detail)
       )
 
-      put_lease(state, preserve_lease_after_owner_death(lease, reason, policy, detail))
+      lease =
+        lease
+        |> preserve_lease_after_owner_death(reason, policy, detail)
+        |> schedule_owner_death_retention_retry()
+
+      put_lease(state, lease)
     else
       # Path already gone (common teardown race): drop the lease only.
       drop_lease(state, lease)
@@ -1824,6 +1772,34 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     |> Map.put(:owner_death_policy, policy)
     |> Map.put(:owner_death_policy_reason, reason)
     |> Map.put(:owner_death_policy_error, detail)
+  end
+
+  defp schedule_owner_death_retention_retry(lease) do
+    retry_count = Map.get(lease, :owner_death_retry_count, 0)
+    delay_ms = min(1_000 * Integer.pow(2, min(retry_count, 5)), 60_000)
+    generation = make_ref()
+
+    retry_ref =
+      Process.send_after(
+        self(),
+        {:owner_death_retention_retry, lease.workspace_id, generation},
+        delay_ms
+      )
+
+    lease
+    |> Map.put(:owner_death_retry_count, retry_count + 1)
+    |> Map.put(:owner_death_retry_generation, generation)
+    |> Map.put(:owner_death_retry_ref, retry_ref)
+  end
+
+  defp retry_owner_death_retention(state, workspace_id, generation) do
+    case Map.get(state.leases, workspace_id) do
+      %{cleanup_armed: false, owner_death_retry_generation: ^generation} = lease ->
+        retain_on_owner_death(state, lease, :identity_retry)
+
+      _ ->
+        state
+    end
   end
 
   defp ensure_material_matches_lease(material, lease) do
@@ -2189,15 +2165,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     }
   end
 
-  defp prepare_acquire(attrs, owner_pid, state) do
+  defp prepare_acquire_identity(attrs, owner_pid) do
     with true <- is_pid(owner_pid) || {:error, :invalid_owner_pid},
          :ok <- require_binary(attrs.repo_path, :repo_path),
          :ok <- require_binary(attrs.branch, :branch),
          {:ok, repo_path} <- canonical_repo_path(attrs.repo_path, attrs.create_worktree),
          {:ok, branch} <- validate_branch(attrs.branch),
          {:ok, workspace_id} <- resolve_workspace_id(attrs.workspace_id),
-         :ok <- ensure_workspace_id_free(state, workspace_id),
-         :ok <- ensure_target_free(state, repo_path, branch),
          {:ok, candidate_path} <- candidate_worktree_path(attrs, branch) do
       {:ok,
        %{
@@ -2216,6 +2190,88 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:error, reason} -> {:error, reason}
       false -> {:error, :invalid_owner_pid}
     end
+  end
+
+  defp continue_acquire(state, prepared) do
+    with :ok <- ensure_workspace_id_free(state, prepared.workspace_id),
+         :ok <- ensure_target_free(state, prepared.repo_path, prepared.branch) do
+      case retained_acquire(state, prepared) do
+        :none ->
+          if Map.has_key?(state.retained_by_id, prepared.workspace_id) do
+            {:reply, {:error, :workspace_id_collision}, state}
+          else
+            perform_acquire(prepared, state)
+          end
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+
+        {:ok, retained} ->
+          reactivate_retained(retained, prepared, state)
+      end
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp quarantined_acquire(state, prepared) do
+    quarantine =
+      Enum.find_value(state.leases, fn {_workspace_id, lease} ->
+        if quarantined_target?(lease, prepared), do: lease
+      end)
+
+    case quarantine do
+      nil ->
+        :none
+
+      lease ->
+        cond do
+          prepared.workspace_id_explicit and prepared.workspace_id != lease.workspace_id ->
+            {:error, :workspace_in_use}
+
+          canonical_path_or_expanded(prepared.candidate_path) !=
+              canonical_path_or_expanded(lease.worktree_path) ->
+            {:error, :workspace_in_use}
+
+          principal_task_match?(lease, prepared) ->
+            {:ok, lease}
+
+          true ->
+            {:error, :workspace_in_use}
+        end
+    end
+  end
+
+  defp quarantined_target?(lease, prepared) do
+    lease.cleanup_armed == false and
+      Map.has_key?(lease, :owner_death_policy) and
+      lease.repo_path == prepared.repo_path and lease.branch == prepared.branch and
+      (not is_pid(lease.owner_pid) or not Process.alive?(lease.owner_pid))
+  end
+
+  defp reactivate_quarantined(lease, prepared, state) do
+    cancel_owner_death_retry(lease)
+    owner_ref = Process.monitor(prepared.owner_pid)
+
+    lease =
+      lease
+      |> Map.drop([
+        :owner_death_policy,
+        :owner_death_policy_reason,
+        :owner_death_policy_error,
+        :owner_death_retry_count,
+        :owner_death_retry_generation,
+        :owner_death_retry_ref
+      ])
+      |> Map.merge(%{
+        owner_pid: prepared.owner_pid,
+        owner_ref: owner_ref,
+        active: true,
+        cleanup_armed: true
+      })
+
+    state = state |> put_lease(lease) |> put_ref(lease)
+    {:reply, {:ok, public_view(lease)}, state}
   end
 
   defp create_params(attrs) do
@@ -2375,8 +2431,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                   |> put_lease(lease)
                   |> put_ref(lease)
 
-                # If the owner already died, DOWN is queued and will clean an
-                # owned worktree before any other process can observe a leak.
+                # If the owner already died, DOWN is queued and will move an
+                # owned worktree into bounded retention.
                 {:reply, {:ok, public_view(lease)}, state}
 
               {:error, reason} ->
@@ -2630,11 +2686,20 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp drop_lease(state, lease) do
+    cancel_owner_death_retry(lease)
+
     %{
       state
       | leases: Map.delete(state.leases, lease.workspace_id),
         by_ref: Map.delete(state.by_ref, lease.owner_ref)
     }
+  end
+
+  defp cancel_owner_death_retry(lease) do
+    case Map.get(lease, :owner_death_retry_ref) do
+      ref when is_reference(ref) -> Process.cancel_timer(ref)
+      _ -> :ok
+    end
   end
 
   defp put_retained(state, retained) do
@@ -2910,40 +2975,6 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp require_binary(value, _field) when is_binary(value) and value != "", do: :ok
   defp require_binary(_value, field), do: {:error, {:invalid, field}}
-
-  # Owner-death uses Git's non-forcing removal so a dirty-after-inspection race
-  # cannot fall through to rm_rf.
-  defp remove_pristine_owned_worktree(repo_root, worktree_path)
-       when is_binary(repo_root) and is_binary(worktree_path) do
-    if File.dir?(worktree_path) do
-      result =
-        Git.with_storage_authority(repo_root, worktree_path, fn ->
-          Git.execute(repo_root, ["worktree", "remove", worktree_path])
-        end)
-
-      case result do
-        {:ok, %{exit_code: 0}} ->
-          if File.dir?(worktree_path),
-            do: {:error, :worktree_remove_unconfirmed},
-            else: :ok
-
-        {:ok, %{exit_code: exit_code}} ->
-          {:error, {:git_worktree_remove_failed, exit_code}}
-
-        {:error, reason} ->
-          {:error, reason}
-
-        _ ->
-          {:error, :git_worktree_remove_failed}
-      end
-    else
-      :ok
-    end
-  rescue
-    _ -> {:error, :git_worktree_remove_failed}
-  catch
-    :exit, reason -> {:error, {:git_worktree_remove_exit, reason}}
-  end
 
   # Destructive: explicit remove-of-owned and failed-create cleanup only.
   defp remove_owned_worktree(repo_root, worktree_path)

@@ -813,7 +813,10 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   defp worktree_dirty?(worktree_path) do
-    case git(worktree_path, ["status", "--porcelain"]) do
+    # Command-line policy overrides repository/user config such as
+    # status.showUntrackedFiles=no so authoritative workspace inspection never
+    # hides useful untracked files.
+    case git(worktree_path, ["status", "--porcelain", "--untracked-files=all"]) do
       {:ok, ""} -> false
       {:ok, output} -> String.trim(output) != ""
       {:error, _reason} -> true
