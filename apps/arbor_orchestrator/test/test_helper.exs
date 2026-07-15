@@ -1,7 +1,10 @@
 # :integration_lm_studio tests require a running LM Studio with a model loaded
 # (they make real LLM calls); excluded by default like :llm/:llm_local. Run them
 # explicitly with `--include integration_lm_studio` when LM Studio is up.
-ExUnit.start(exclude: [:llm, :llm_local, :integration_lm_studio])
+#
+# :distributed tests require LocalCluster / multi-BEAM setup. Run them
+# explicitly with `--include distributed`.
+ExUnit.start(exclude: [:llm, :llm_local, :integration_lm_studio, :distributed])
 
 if Process.whereis(Arbor.Shell.ExecutablePolicy) == nil and
      Process.whereis(Arbor.Shell.Supervisor) != nil do
