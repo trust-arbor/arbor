@@ -208,9 +208,11 @@ defmodule Arbor.Orchestrator.RunJournal do
   @doc """
   Explicit durability/backend diagnostics.
 
-  Never reports application-restart durability for ETS-only, Agent, or
-  asynchronous buffering backends. `durable: true` only when the configured
-  class is `:application_restart` or `:node_restart` and the backend is healthy.
+  Writes are backend-first when a backend is configured. Never reports
+  crash durability for the default volatile/process-lifetime classes
+  (ETS-only, Agent, async buffers). `durable: true` only when the
+  configured class is `:application_restart` or `:node_restart` and the
+  backend is healthy.
   """
   @spec durability_status(keyword()) :: map()
   def durability_status(opts \\ []) do
@@ -1070,16 +1072,24 @@ defmodule Arbor.Orchestrator.RunJournal do
           %{"status" => "pending"} = pending ->
             case normalize_effect_attrs(attrs) do
               {:ok, normalized} ->
-                match_attrs = Map.put_new(normalized, "run_id", record.run_id)
+                case apply_owner_prepare_fields(
+                       normalized,
+                       record.run_id,
+                       record.effect_generation
+                     ) do
+                  {:ok, match_attrs} ->
+                    if EffectEnvelope.matches_prepare_attrs?(
+                         pending,
+                         match_attrs,
+                         record.effect_generation
+                       ) do
+                      {{:ok, :already_prepared, pending}, state}
+                    else
+                      {{:error, {:effect_conflict, :pending}}, state}
+                    end
 
-                if EffectEnvelope.matches_prepare_attrs?(
-                     pending,
-                     match_attrs,
-                     record.effect_generation
-                   ) do
-                  {{:ok, :already_prepared, pending}, state}
-                else
-                  {{:error, {:effect_conflict, :pending}}, state}
+                  {:error, reason} ->
+                    {{:error, {:invalid_effect_attrs, reason}}, state}
                 end
 
               {:error, reason} ->
@@ -1109,25 +1119,26 @@ defmodule Arbor.Orchestrator.RunJournal do
       true ->
         case normalize_effect_attrs(attrs) do
           {:ok, normalized} ->
-            prepare_attrs =
-              normalized
-              |> Map.put("generation", next_gen)
-              |> Map.put("run_id", record.run_id)
+            case apply_owner_prepare_fields(normalized, record.run_id, next_gen) do
+              {:ok, prepare_attrs} ->
+                case EffectEnvelope.new_pending(prepare_attrs) do
+                  {:ok, effect} ->
+                    updated = %Record{
+                      record
+                      | effect_generation: next_gen,
+                        current_effect: effect
+                    }
 
-            case EffectEnvelope.new_pending(prepare_attrs) do
-              {:ok, effect} ->
-                updated = %Record{
-                  record
-                  | effect_generation: next_gen,
-                    current_effect: effect
-                }
+                    case write_record(updated, state) do
+                      {:ok, new_state} ->
+                        {{:ok, :prepared, effect}, new_state}
 
-                case write_record(updated, state) do
-                  {:ok, new_state} ->
-                    {{:ok, :prepared, effect}, new_state}
+                      {{:error, reason}, new_state} ->
+                        {{:error, reason}, new_state}
+                    end
 
-                  {{:error, reason}, new_state} ->
-                    {{:error, reason}, new_state}
+                  {:error, reason} ->
+                    {{:error, {:invalid_effect_attrs, reason}}, state}
                 end
 
               {:error, reason} ->
@@ -1182,16 +1193,29 @@ defmodule Arbor.Orchestrator.RunJournal do
           status in ["completed", "settled"] ->
             case normalize_effect_attrs(attrs) do
               {:ok, normalized} ->
-                if EffectEnvelope.matches_receipt?(effect, generation, execution_id, normalized) do
-                  {{:ok, :already_recorded, effect}, state}
-                else
-                  conflict =
-                    case status do
-                      "completed" -> :completed
-                      "settled" -> :settled
+                # Reject malformed/extra receipt attrs before identity match so
+                # retries cannot launder unknowns into :already_recorded.
+                case EffectEnvelope.validate_receipt_attrs(normalized) do
+                  :ok ->
+                    if EffectEnvelope.matches_receipt?(
+                         effect,
+                         generation,
+                         execution_id,
+                         normalized
+                       ) do
+                      {{:ok, :already_recorded, effect}, state}
+                    else
+                      conflict =
+                        case status do
+                          "completed" -> :completed
+                          "settled" -> :settled
+                        end
+
+                      {{:error, {:effect_conflict, conflict}}, state}
                     end
 
-                  {{:error, {:effect_conflict, conflict}}, state}
+                  {:error, reason} ->
+                    {{:error, {:invalid_effect_attrs, reason}}, state}
                 end
 
               {:error, reason} ->
@@ -1271,34 +1295,92 @@ defmodule Arbor.Orchestrator.RunJournal do
 
   defp valid_generation?(_), do: false
 
+  # Closed full-envelope key ceiling (pending 10 + receipt 3) — O(1) before scans.
+  @max_effect_attr_keys 13
+
   # Normalize caller attrs to string keys; reject atom/string aliases and
-  # non-map/non-string-key inputs before envelope construction.
+  # non-map/non-string-key inputs before envelope construction. Never drops
+  # malformed keys — non-atom/non-binary keys fail closed.
   defp normalize_effect_attrs(attrs) when is_map(attrs) do
-    keys = Map.keys(attrs)
-
     cond do
-      Enum.any?(keys, fn
-        k when is_atom(k) -> Map.has_key?(attrs, Atom.to_string(k))
-        _ -> false
-      end) ->
-        {:error, :atom_string_key_alias}
-
-      Enum.any?(keys, &(not is_binary(&1) and not is_atom(&1))) ->
-        {:error, :non_string_keys}
+      map_size(attrs) > @max_effect_attr_keys ->
+        {:error, {:oversized, :map}}
 
       true ->
-        normalized =
-          Enum.reduce(attrs, %{}, fn
-            {k, v}, acc when is_binary(k) -> Map.put(acc, k, v)
-            {k, v}, acc when is_atom(k) -> Map.put(acc, Atom.to_string(k), v)
-            _, acc -> acc
-          end)
+        keys = Map.keys(attrs)
 
-        {:ok, normalized}
+        cond do
+          Enum.any?(keys, fn
+            k when is_atom(k) -> Map.has_key?(attrs, Atom.to_string(k))
+            _ -> false
+          end) ->
+            {:error, :atom_string_key_alias}
+
+          Enum.any?(keys, &(not is_binary(&1) and not is_atom(&1))) ->
+            {:error, :non_string_keys}
+
+          true ->
+            normalized =
+              Enum.reduce(attrs, %{}, fn
+                {k, v}, acc when is_binary(k) -> Map.put(acc, k, v)
+                {k, v}, acc when is_atom(k) -> Map.put(acc, Atom.to_string(k), v)
+              end)
+
+            {:ok, normalized}
+        end
     end
   end
 
   defp normalize_effect_attrs(_), do: {:error, :invalid_type}
+
+  # Owner-assigned fields: generation/status/schema cannot be overridden by the
+  # caller. Missing run_id is filled; explicit mismatched run_id fails.
+  defp apply_owner_prepare_fields(attrs, run_id, generation)
+       when is_map(attrs) and is_binary(run_id) and is_integer(generation) do
+    with :ok <- reject_caller_generation_override(attrs, generation),
+         :ok <- reject_caller_status_override(attrs),
+         :ok <- reject_caller_schema_override(attrs),
+         {:ok, with_run_id} <- apply_owner_run_id(attrs, run_id) do
+      {:ok, Map.put(with_run_id, "generation", generation)}
+    end
+  end
+
+  defp reject_caller_generation_override(attrs, generation) do
+    case Map.fetch(attrs, "generation") do
+      :error -> :ok
+      {:ok, ^generation} -> :ok
+      {:ok, _} -> {:error, :invalid_generation}
+    end
+  end
+
+  defp reject_caller_status_override(attrs) do
+    case Map.fetch(attrs, "status") do
+      :error -> :ok
+      {:ok, "pending"} -> :ok
+      {:ok, _} -> {:error, :invalid_status}
+    end
+  end
+
+  defp reject_caller_schema_override(attrs) do
+    case Map.fetch(attrs, "schema_version") do
+      :error -> :ok
+      {:ok, 1} -> :ok
+      {:ok, _} -> {:error, :invalid_schema_version}
+    end
+  end
+
+  defp apply_owner_run_id(attrs, run_id) do
+    case Map.fetch(attrs, "run_id") do
+      :error ->
+        {:ok, Map.put(attrs, "run_id", run_id)}
+
+      {:ok, ^run_id} ->
+        {:ok, attrs}
+
+      {:ok, _} ->
+        {:error, :invalid_run_id}
+    end
+  end
 
   # Backend-first when configured: persist before publishing to the private hot
   # table. On backend failure, leave the prior hot record/claim unchanged.

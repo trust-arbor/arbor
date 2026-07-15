@@ -8,7 +8,9 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectEnvelope do
 
   Status machine (owner-driven; this module only constructs/validates maps):
 
-  - `pending` — pre-effect intent durably recorded
+  - `pending` — pre-effect intent recorded by the journal owner
+    (backend-first when a store is configured; default journal storage is
+    volatile/process-lifetime and is **not** crash durable)
   - `completed` — receipt recorded (outcome + result digest)
   - `settled` — terminal acknowledgment; evidence retained
 
@@ -23,6 +25,8 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectEnvelope do
   @max_handler_bytes 256
   @max_iso_bytes 64
   @hash_hex_bytes 64
+  # Closed full-envelope key count: 10 pending identity + 3 receipt fields.
+  @max_envelope_keys 13
 
   @idempotency_classes MapSet.new([
                          "read_only",
@@ -135,15 +139,17 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectEnvelope do
   @doc """
   Complete a pending envelope with a receipt.
 
-  `attrs` must supply exact `completed_at`, closed `outcome_status`, and
-  exact 64-lower-hex `result_digest`. Pending identity fields are preserved
-  exactly — no rebuild from partial attrs.
+  `attrs` must supply **exactly** `completed_at`, closed `outcome_status`, and
+  exact 64-lower-hex `result_digest`. Unknown/control fields, atom keys,
+  atom/string aliases, and oversized maps are rejected before projection.
+  Pending identity fields are preserved exactly — no rebuild from partial attrs.
   """
   @spec complete(effect(), map()) :: {:ok, effect()} | {:error, error_reason()}
   def complete(pending, attrs) when is_map(pending) and is_map(attrs) do
     with {:ok, pending} <- validate(pending),
          :ok <- require_status(pending, "pending"),
          :ok <- preflight_keys(attrs, allow_empty?: false),
+         :ok <- reject_unknown_receipt_keys(attrs),
          {:ok, completed_at} <- fetch_iso8601(attrs, "completed_at", :completed_at),
          {:ok, outcome_status} <- fetch_outcome_status(attrs),
          {:ok, result_digest} <- fetch_hash(attrs, "result_digest", :result_digest) do
@@ -159,6 +165,25 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectEnvelope do
   end
 
   def complete(_, _), do: {:error, :invalid_type}
+
+  @doc """
+  Validate receipt attrs in isolation (exact three string keys, closed values).
+
+  Used by owner retry paths so unknown/control fields fail as invalid attrs
+  rather than silently mismatching into a conflict or already_recorded.
+  """
+  @spec validate_receipt_attrs(map()) :: :ok | {:error, error_reason()}
+  def validate_receipt_attrs(attrs) when is_map(attrs) do
+    with :ok <- preflight_keys(attrs, allow_empty?: false),
+         :ok <- reject_unknown_receipt_keys(attrs),
+         {:ok, _} <- fetch_iso8601(attrs, "completed_at", :completed_at),
+         {:ok, _} <- fetch_outcome_status(attrs),
+         {:ok, _} <- fetch_hash(attrs, "result_digest", :result_digest) do
+      :ok
+    end
+  end
+
+  def validate_receipt_attrs(_), do: {:error, :invalid_type}
 
   @doc """
   Mark a completed envelope as settled without clearing receipt evidence.
@@ -252,20 +277,22 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectEnvelope do
   @doc """
   Match a pending effect against prepare attrs (generation already assigned).
 
-  Builds the expected pending envelope from attrs + generation and compares
-  exactly to the stored pending map.
+  Validates the **original** attrs map (no stringify/drop of malformed keys).
+  Owner generation is filled only when absent; an explicit mismatched
+  generation fails rather than being overwritten.
   """
   @spec matches_prepare_attrs?(effect(), map(), pos_integer()) :: boolean()
   def matches_prepare_attrs?(effect, attrs, generation)
       when is_map(effect) and is_map(attrs) and is_integer(generation) do
-    prepare_attrs =
-      attrs
-      |> stringify_prepare_attrs()
-      |> Map.put("generation", generation)
+    case apply_owner_generation(attrs, generation) do
+      {:ok, prepare_attrs} ->
+        case new_pending(prepare_attrs) do
+          {:ok, expected} -> same_pending?(effect, expected)
+          {:error, _} -> false
+        end
 
-    case new_pending(prepare_attrs) do
-      {:ok, expected} -> same_pending?(effect, expected)
-      {:error, _} -> false
+      {:error, _} ->
+        false
     end
   end
 
@@ -321,19 +348,6 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectEnvelope do
   # Private
   # ---------------------------------------------------------------------------
 
-  defp stringify_prepare_attrs(attrs) when is_map(attrs) do
-    # Only used for retry matching after attrs already validated on first write.
-    # Prefer string keys; atom keys are accepted only when no string alias exists
-    # and are normalized here for rebuild. Validation of caller attrs happens in
-    # new_pending via preflight on the merged map.
-    attrs
-    |> Enum.reduce(%{}, fn
-      {k, v}, acc when is_binary(k) -> Map.put(acc, k, v)
-      {k, v}, acc when is_atom(k) -> Map.put_new(acc, Atom.to_string(k), v)
-      _, acc -> acc
-    end)
-  end
-
   @prepare_allowed MapSet.new([
                      "schema_version",
                      "generation",
@@ -347,6 +361,21 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectEnvelope do
                      # status is owner-assigned; reject if caller supplies another value later
                      "status"
                    ])
+
+  @receipt_allowed MapSet.new(@receipt_required)
+
+  defp apply_owner_generation(attrs, generation) when is_map(attrs) do
+    case Map.fetch(attrs, "generation") do
+      :error ->
+        {:ok, Map.put(attrs, "generation", generation)}
+
+      {:ok, ^generation} ->
+        {:ok, attrs}
+
+      {:ok, _} ->
+        {:error, :invalid_generation}
+    end
+  end
 
   defp reject_unknown_prepare_keys(map) do
     unknown =
@@ -365,6 +394,19 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectEnvelope do
     end
   end
 
+  defp reject_unknown_receipt_keys(map) do
+    unknown =
+      map
+      |> Map.keys()
+      |> Enum.reject(&MapSet.member?(@receipt_allowed, &1))
+
+    if unknown == [] do
+      :ok
+    else
+      {:error, :unknown_keys}
+    end
+  end
+
   defp optional_schema_version(map) do
     case Map.fetch(map, "schema_version") do
       :error -> :ok
@@ -377,13 +419,18 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectEnvelope do
 
   defp preflight_keys(map, opts) when is_map(map) do
     allow_empty? = Keyword.get(opts, :allow_empty?, true)
-    keys = Map.keys(map)
 
+    # O(1) ceiling before Map.keys/scans — closed full-envelope maximum.
     cond do
-      keys == [] and not allow_empty? ->
+      map_size(map) > @max_envelope_keys ->
+        {:error, {:oversized, :map}}
+
+      map_size(map) == 0 and not allow_empty? ->
         {:error, :missing_keys}
 
       true ->
+        keys = Map.keys(map)
+
         with :ok <- reject_atom_string_aliases(keys, map),
              :ok <- require_string_keys(keys) do
           :ok

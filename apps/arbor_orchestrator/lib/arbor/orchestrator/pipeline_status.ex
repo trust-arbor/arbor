@@ -21,8 +21,9 @@ defmodule Arbor.Orchestrator.PipelineStatus do
   - **Trust-zone filtering**: callers may pass `principal_id`; field
     stripping based on granular trust policy / trust zone is deferred
     (currently returns all metadata).
-  - **Durability is explicit**: see `durability_status/0`. ETS-only
-    mode is not claimed durable across restart.
+  - **Durability is explicit**: see `durability_status/0`. Writes are
+    backend-first when a backend is configured; the default
+    volatile/process-lifetime journal is **not** crash durable.
   - **Public maps are not JSON-clean**: runtime views may contain
     `DateTime`, atoms, and `PID`. Durable JSON is owned by RunJournal's
     adapter path.

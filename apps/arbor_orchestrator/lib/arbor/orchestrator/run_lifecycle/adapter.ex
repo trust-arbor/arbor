@@ -933,22 +933,67 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
 
   # ---- effect evidence (exact or reject; never truncate) ----
 
+  # Strict dual-key decode for effect fields only. Generic `fetch/2` keeps
+  # legacy `||` semantics for other lifecycle fields; effect fields must not
+  # default over explicit null or silently pick one of two alias keys.
+  defp fetch_effect_field(map, atom_key) when is_atom(atom_key) do
+    string_key = Atom.to_string(atom_key)
+    has_atom? = Map.has_key?(map, atom_key)
+    has_string? = Map.has_key?(map, string_key)
+
+    cond do
+      has_atom? and has_string? ->
+        :conflict
+
+      has_atom? ->
+        {:ok, Map.get(map, atom_key)}
+
+      has_string? ->
+        {:ok, Map.get(map, string_key)}
+
+      true ->
+        :absent
+    end
+  end
+
   defp fetch_effect_generation(data) do
-    case fetch(data, :effect_generation) do
-      n when is_integer(n) and n >= 0 and n <= @max_json_safe_int -> n
-      # Leave invalid values for validate_and_normalize_record to reject.
-      n when is_integer(n) -> n
-      nil -> 0
-      _ -> :invalid_effect_generation
+    case fetch_effect_field(data, :effect_generation) do
+      :absent ->
+        0
+
+      :conflict ->
+        :invalid_effect_generation
+
+      {:ok, n} when is_integer(n) and n >= 0 and n <= @max_json_safe_int ->
+        n
+
+      # Leave out-of-range integers for validate_and_normalize_record.
+      {:ok, n} when is_integer(n) ->
+        n
+
+      # Explicit null/wrong type — never default to 0.
+      {:ok, _} ->
+        :invalid_effect_generation
     end
   end
 
   defp fetch_current_effect(data) do
-    case fetch(data, :current_effect) do
-      nil -> nil
-      effect when is_map(effect) -> effect
+    case fetch_effect_field(data, :current_effect) do
+      :absent ->
+        nil
+
+      :conflict ->
+        :invalid_current_effect
+
+      {:ok, nil} ->
+        nil
+
+      {:ok, effect} when is_map(effect) ->
+        effect
+
       # Sentinel so validate_and_normalize_record fails closed.
-      _ -> :invalid_current_effect
+      {:ok, _} ->
+        :invalid_current_effect
     end
   end
 
@@ -969,16 +1014,25 @@ defmodule Arbor.Orchestrator.RunLifecycle.Adapter do
       effect == :invalid_current_effect ->
         {:error, {:invalid_current_effect, :invalid_type}}
 
+      # Valid legacy absence: generation 0 + nil evidence only.
+      is_nil(effect) and gen == 0 ->
+        {:ok, 0, nil}
+
       is_nil(effect) ->
-        {:ok, gen, nil}
+        {:error, {:invalid_current_effect, :missing_for_generation}}
 
       is_map(effect) ->
         case EffectEnvelope.validate(effect) do
           {:ok, validated} ->
-            if validated["generation"] == gen do
-              {:ok, gen, validated}
-            else
-              {:error, {:invalid_current_effect, :generation_mismatch}}
+            cond do
+              validated["generation"] != gen ->
+                {:error, {:invalid_current_effect, :generation_mismatch}}
+
+              validated["run_id"] != record.run_id ->
+                {:error, {:invalid_current_effect, :run_id_mismatch}}
+
+              true ->
+                {:ok, gen, validated}
             end
 
           {:error, reason} ->

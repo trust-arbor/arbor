@@ -76,6 +76,7 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectEnvelopeTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
+  alias Arbor.Orchestrator.PipelineStatus
   alias Arbor.Orchestrator.RunJournal
   alias Arbor.Orchestrator.RunLifecycle.Adapter
   alias Arbor.Orchestrator.RunLifecycle.EffectEnvelope
@@ -171,6 +172,76 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectEnvelopeTest do
         assert completed["outcome_status"] == outcome
       end
     end
+
+    test "complete accepts exactly receipt fields and rejects extras/atoms/oversized" do
+      assert {:ok, pending} = EffectEnvelope.new_pending(pending_attrs(generation: 1))
+      exact = receipt_attrs()
+
+      assert {:ok, completed} = EffectEnvelope.complete(pending, exact)
+      assert completed["status"] == "completed"
+
+      # Unknown/control fields cannot be projected or ignored.
+      assert {:error, :unknown_keys} =
+               EffectEnvelope.complete(pending, Map.put(exact, "extra", "nope"))
+
+      assert {:error, :unknown_keys} =
+               EffectEnvelope.complete(pending, Map.put(exact, "status", "completed"))
+
+      assert {:error, :unknown_keys} =
+               EffectEnvelope.complete(pending, Map.put(exact, "generation", 1))
+
+      # Atom keys / aliases rejected before projection.
+      assert {:error, :non_string_keys} =
+               EffectEnvelope.complete(pending, %{
+                 completed_at: @completed_at,
+                 outcome_status: "success",
+                 result_digest: @hash_b
+               })
+
+      assert {:error, :atom_string_key_alias} =
+               EffectEnvelope.complete(
+                 pending,
+                 Map.merge(exact, %{completed_at: @completed_at})
+               )
+
+      # O(1) map_size ceiling before key scans (closed full-envelope max = 13).
+      oversized =
+        Map.new(for i <- 1..14, do: {"k#{i}", "v"})
+
+      assert {:error, {:oversized, :map}} = EffectEnvelope.complete(pending, oversized)
+      assert {:error, {:oversized, :map}} = EffectEnvelope.new_pending(oversized)
+      assert {:error, {:oversized, :map}} = EffectEnvelope.validate(oversized)
+    end
+
+    test "matches_prepare_attrs validates original map without dropping keys" do
+      assert {:ok, pending} = EffectEnvelope.new_pending(pending_attrs(generation: 2))
+
+      good =
+        pending_attrs(generation: 2)
+        |> Map.delete("schema_version")
+
+      assert EffectEnvelope.matches_prepare_attrs?(pending, good, 2)
+
+      # Explicit mismatched generation fails (not overwritten).
+      refute EffectEnvelope.matches_prepare_attrs?(
+               pending,
+               Map.put(good, "generation", 9),
+               2
+             )
+
+      # Malformed / non-string keys are not stringified or dropped — mismatch.
+      refute EffectEnvelope.matches_prepare_attrs?(
+               pending,
+               Map.put(good, {:tuple_key}, "x"),
+               2
+             )
+
+      refute EffectEnvelope.matches_prepare_attrs?(
+               pending,
+               Map.merge(good, %{run_id: "run_1"}),
+               2
+             )
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -179,7 +250,8 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectEnvelopeTest do
 
   describe "Adapter effect field preservation" do
     test "durable roundtrip and public projection retain effect evidence" do
-      assert {:ok, pending} = EffectEnvelope.new_pending(pending_attrs(generation: 3))
+      assert {:ok, pending} =
+               EffectEnvelope.new_pending(pending_attrs(generation: 3, run_id: "run_effect_1"))
 
       record = %Record{
         run_id: "run_effect_1",
@@ -230,12 +302,138 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectEnvelopeTest do
                  pipeline_id: "mismatch",
                  status: :running,
                  effect_generation: 2,
-                 current_effect: elem(EffectEnvelope.new_pending(pending_attrs(generation: 1)), 1)
+                 current_effect:
+                   elem(
+                     EffectEnvelope.new_pending(pending_attrs(generation: 1, run_id: "mismatch")),
+                     1
+                   )
                })
     end
 
+    test "legacy absence is only generation 0 + nil; positive gen with nil fails" do
+      absent = %Record{
+        run_id: "legacy_absent",
+        pipeline_id: "legacy_absent",
+        status: :running,
+        effect_generation: 0,
+        current_effect: nil
+      }
+
+      assert {:ok, validated} = Adapter.validate_and_normalize_record(absent)
+      assert validated.effect_generation == 0
+      assert validated.current_effect == nil
+
+      assert {:error, {:invalid_current_effect, :missing_for_generation}} =
+               Adapter.validate_and_normalize_record(%Record{
+                 run_id: "gen_without_effect",
+                 pipeline_id: "gen_without_effect",
+                 status: :running,
+                 effect_generation: 3,
+                 current_effect: nil
+               })
+    end
+
+    test "present envelope must match record effect_generation and run_id" do
+      assert {:ok, pending} =
+               EffectEnvelope.new_pending(pending_attrs(generation: 2, run_id: "run_match"))
+
+      assert {:ok, ok} =
+               Adapter.validate_and_normalize_record(%Record{
+                 run_id: "run_match",
+                 pipeline_id: "run_match",
+                 status: :running,
+                 effect_generation: 2,
+                 current_effect: pending
+               })
+
+      assert ok.current_effect["run_id"] == "run_match"
+
+      assert {:error, {:invalid_current_effect, :run_id_mismatch}} =
+               Adapter.validate_and_normalize_record(%Record{
+                 run_id: "other_run",
+                 pipeline_id: "other_run",
+                 status: :running,
+                 effect_generation: 2,
+                 current_effect: pending
+               })
+
+      assert {:error, {:invalid_current_effect, :generation_mismatch}} =
+               Adapter.validate_and_normalize_record(%Record{
+                 run_id: "run_match",
+                 pipeline_id: "run_match",
+                 status: :running,
+                 effect_generation: 9,
+                 current_effect: pending
+               })
+    end
+
+    test "durable decode defaults generation only when both keys absent; null/alias conflict fail" do
+      # Truly absent → default 0 + nil current_effect (legacy).
+      from_absent = Adapter.from_durable_map(%{"run_id" => "d1", "pipeline_id" => "d1"})
+      assert from_absent.effect_generation == 0
+      assert from_absent.current_effect == nil
+
+      # Explicit null generation fails closed (not defaulted).
+      from_null =
+        Adapter.from_durable_map(%{
+          "run_id" => "d2",
+          "pipeline_id" => "d2",
+          "effect_generation" => nil
+        })
+
+      assert from_null.effect_generation == :invalid_effect_generation
+
+      assert {:error, {:invalid_effect_generation, :invalid_type}} =
+               Adapter.validate_and_normalize_record(from_null)
+
+      # Wrong type fails.
+      from_wrong =
+        Adapter.from_durable_map(%{
+          "run_id" => "d3",
+          "pipeline_id" => "d3",
+          "effect_generation" => "1"
+        })
+
+      assert from_wrong.effect_generation == :invalid_effect_generation
+
+      # Conflicting atom/string aliases fail (effect fields only).
+      from_conflict =
+        Adapter.from_lifecycle_map(%{
+          "run_id" => "d4",
+          "pipeline_id" => "d4",
+          "effect_generation" => 1,
+          effect_generation: 2
+        })
+
+      assert from_conflict.effect_generation == :invalid_effect_generation
+
+      from_effect_conflict =
+        Adapter.from_lifecycle_map(%{
+          "run_id" => "d5",
+          "pipeline_id" => "d5",
+          "effect_generation" => 1,
+          "current_effect" => %{"status" => "pending"},
+          current_effect: nil
+        })
+
+      assert from_effect_conflict.current_effect == :invalid_current_effect
+
+      # Generic legacy fields still use ordinary fetch (not effect-strict).
+      # Explicit null status remains a decode path, not an effect-field failure.
+      generic =
+        Adapter.from_lifecycle_map(%{
+          "run_id" => "d6",
+          "pipeline_id" => "d6",
+          "status" => nil
+        })
+
+      assert generic.run_id == "d6"
+      assert generic.effect_generation == 0
+    end
+
     test "minimal payload compaction retains effect evidence and fails closed if too large" do
-      assert {:ok, pending} = EffectEnvelope.new_pending(pending_attrs(generation: 1))
+      assert {:ok, pending} =
+               EffectEnvelope.new_pending(pending_attrs(generation: 1, run_id: "compact_ok"))
 
       # Normal compact path keeps effect fields.
       record = %Record{
@@ -683,6 +881,108 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectEnvelopeTest do
                  Map.put(prepare_attrs(run_id), "input_hash", "nope"),
                  server: j
                )
+    end
+
+    test "prepare fills missing run_id but rejects explicit mismatch and owner overrides", ctx do
+      %{journal_name: j, run_id: run_id} = ctx
+      attrs = prepare_attrs(run_id) |> Map.delete("run_id")
+
+      assert {:ok, :prepared, effect} = RunJournal.prepare_effect(run_id, attrs, server: j)
+      assert effect["run_id"] == run_id
+      assert effect["generation"] == 1
+      assert effect["status"] == "pending"
+      assert effect["schema_version"] == 1
+
+      # Exact retry without run_id still matches (owner fills).
+      assert {:ok, :already_prepared, ^effect} =
+               RunJournal.prepare_effect(run_id, attrs, server: j)
+
+      # Explicit mismatched run_id fails instead of being overwritten.
+      assert {:error, {:invalid_effect_attrs, :invalid_run_id}} =
+               RunJournal.prepare_effect(
+                 run_id,
+                 Map.put(attrs, "run_id", "other_run"),
+                 server: j
+               )
+
+      # Caller generation/status/schema cannot override owner values.
+      assert {:error, {:invalid_effect_attrs, :invalid_generation}} =
+               RunJournal.prepare_effect(
+                 run_id,
+                 Map.put(attrs, "generation", 99),
+                 server: j
+               )
+
+      assert {:error, {:invalid_effect_attrs, :invalid_status}} =
+               RunJournal.prepare_effect(
+                 run_id,
+                 Map.put(attrs, "status", "completed"),
+                 server: j
+               )
+
+      assert {:error, {:invalid_effect_attrs, :invalid_schema_version}} =
+               RunJournal.prepare_effect(
+                 run_id,
+                 Map.put(attrs, "schema_version", 99),
+                 server: j
+               )
+
+      assert {:ok, still} = RunJournal.get_record(run_id, server: j)
+      assert still.current_effect == effect
+      assert still.effect_generation == 1
+    end
+
+    test "receipt extras cannot launder into already_recorded", ctx do
+      %{journal_name: j, run_id: run_id} = ctx
+      attrs = prepare_attrs(run_id)
+
+      assert {:ok, :prepared, _} = RunJournal.prepare_effect(run_id, attrs, server: j)
+
+      receipt = receipt_attrs()
+
+      assert {:ok, :recorded, completed} =
+               RunJournal.record_effect_receipt(run_id, 1, "exec_1", receipt, server: j)
+
+      assert {:ok, :already_recorded, ^completed} =
+               RunJournal.record_effect_receipt(run_id, 1, "exec_1", receipt, server: j)
+
+      # Extra/control fields on retry must not match/launder into already_recorded.
+      dirty = Map.put(receipt, "extra", "launder")
+
+      assert {:error, {:invalid_effect_attrs, :unknown_keys}} =
+               RunJournal.record_effect_receipt(run_id, 1, "exec_1", dirty, server: j)
+
+      dirty_status = Map.put(receipt, "status", "completed")
+
+      assert {:error, {:invalid_effect_attrs, :unknown_keys}} =
+               RunJournal.record_effect_receipt(run_id, 1, "exec_1", dirty_status, server: j)
+
+      assert {:ok, still} = RunJournal.get_record(run_id, server: j)
+      assert still.current_effect == completed
+    end
+
+    test "prepare rejects oversized attr maps before scans", ctx do
+      %{journal_name: j, run_id: run_id} = ctx
+      oversized = Map.new(for i <- 1..14, do: {"k#{i}", "v"})
+
+      assert {:error, {:invalid_effect_attrs, {:oversized, :map}}} =
+               RunJournal.prepare_effect(run_id, oversized, server: j)
+    end
+
+    test "durability_status stays honest for default volatile/process-lifetime", ctx do
+      %{journal_name: j} = ctx
+      status = RunJournal.durability_status(server: j)
+
+      # Backend configured here is StoreETS → process_lifetime, not crash durable.
+      assert status.durable == false
+      assert status.durability_class in [:volatile, :process_lifetime]
+      refute status.mode in [:durable_declared]
+
+      default_status = PipelineStatus.durability_status()
+      assert default_status.durable == false
+
+      assert default_status.durability_class in [:volatile, :process_lifetime, nil] or
+               is_atom(default_status.durability_class)
     end
   end
 
