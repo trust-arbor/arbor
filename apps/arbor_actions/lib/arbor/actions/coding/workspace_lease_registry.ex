@@ -763,8 +763,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             {:noreply, %{state | validation_by_ref: Map.delete(state.validation_by_ref, ref)}}
 
           resource ->
-            {_result, state} =
+            {result, state} =
               do_release_validation_resource(state, resource, demonitor: false)
+
+            state =
+              complete_owner_death_validation_cleanup(state, resource.workspace_id, result)
 
             {:noreply, state}
         end
@@ -2382,6 +2385,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     cancel_owner_death_retry(lease)
     owner_ref = Process.monitor(prepared.owner_pid)
 
+    deletion_identity =
+      case capture_quarantine_deletion_identity(lease) do
+        {:ok, identity} -> identity
+        {:error, _reason} -> nil
+      end
+
     lease =
       lease
       |> Map.merge(%{
@@ -2393,7 +2402,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         owner_death_retry_count: 0,
         owner_death_retry_exhausted: false,
         owner_death_retry_generation: nil,
-        owner_death_retry_ref: nil
+        owner_death_retry_ref: nil,
+        owner_death_deletion_identity: deletion_identity
       })
 
     state = state |> put_lease(lease) |> put_ref(lease)
@@ -2804,13 +2814,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          :remove
        ) do
     # Exact task+principal can resume a quarantine, but it cannot turn a path
-    # that was never identity-pinned into force-delete authority. Capture a
-    # currently registered identity immediately before the destructive call.
-    case capture_retention_identity(lease) do
-      {:ok, _identity} ->
-        do_release_after_identity_capture(state, lease)
-
-      {:error, _reason} ->
+    # that was never identity-pinned into force-delete authority. Reactivation
+    # pins a stable filesystem + registration identity; removal must prove the
+    # same identity still occupies the target.
+    with expected when is_map(expected) <- Map.get(lease, :owner_death_deletion_identity),
+         {:ok, current} <- capture_quarantine_deletion_identity(lease),
+         true <- current == expected do
+      do_release_after_identity_capture(state, lease)
+    else
+      _ ->
         {:error, :quarantine_identity_unavailable, state}
     end
   end
@@ -2891,6 +2903,20 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     else
       {:error, reason} -> {:error, reason}
       other -> {:error, {:unexpected_identity, other}}
+    end
+  end
+
+  # HEAD is intentionally excluded: an authorized resumed worker may commit
+  # between reactivation and release, while the directory inode, canonical
+  # path, and registered branch must remain stable.
+  defp capture_quarantine_deletion_identity(lease) do
+    with {:ok, identity} <- capture_retention_identity(lease) do
+      {:ok,
+       %{
+         worktree_path: identity.worktree_path,
+         lstat_identity: identity.lstat_identity,
+         worktree_registration: Map.take(identity.worktree_registration, [:path, :branch])
+       }}
     end
   end
 

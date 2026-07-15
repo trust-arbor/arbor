@@ -919,6 +919,109 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                })
     end
 
+    test "security regression: reactivated quarantine pins deletion identity against path replacement",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      fake_repo = Path.join(tmp_dir, "pinned-fake-repo")
+      fake_worktree = Path.join(tmp_dir, "pinned-fake-worktree")
+      original_copy = fake_worktree <> "-original"
+      create_git_repo(fake_repo)
+      File.mkdir_p!(fake_worktree)
+
+      branch = "test/workspace-owner-death-pinned"
+      workspace_id = "ws_pinned_#{System.unique_integer([:positive])}"
+      task_id = "task-pinned-#{System.unique_integer([:positive])}"
+      principal_id = "agent-pinned-#{System.unique_integer([:positive])}"
+      parent = self()
+      server = :"workspace_quarantine_pinned_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         owner_death_retry_limit: 0,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
+
+      create_worktree = fn _repo, _branch, _params ->
+        {:ok, fake_worktree, :owned, String.duplicate("a", 40)}
+      end
+
+      owner =
+        spawn(fn ->
+          result =
+            WorkspaceLeaseRegistry.acquire(
+              %{
+                workspace_id: workspace_id,
+                repo_path: fake_repo,
+                branch: branch,
+                worktree_path: fake_worktree,
+                task_id: task_id,
+                principal_id: principal_id,
+                create_worktree: create_worktree
+              },
+              server: server
+            )
+
+          send(parent, {:leased, result})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:leased, {:ok, _lease}}, 2_000
+      Process.exit(owner, :kill)
+
+      assert_eventually(fn ->
+        dormant = Map.get(:sys.get_state(server).leases, workspace_id)
+        assert is_map(dormant)
+        assert Map.get(dormant, :owner_death_quarantine_state) == :dormant
+      end)
+
+      {:ok, _removed} = File.rm_rf(fake_worktree)
+      git!(fake_repo, ["worktree", "add", "-b", branch, fake_worktree])
+
+      recovery_owner =
+        spawn(fn ->
+          result =
+            WorkspaceLeaseRegistry.acquire(
+              %{
+                workspace_id: workspace_id,
+                repo_path: fake_repo,
+                branch: branch,
+                worktree_path: fake_worktree,
+                task_id: task_id,
+                principal_id: principal_id,
+                create_worktree: create_worktree
+              },
+              server: server
+            )
+
+          send(parent, {:reactivated, result})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:reactivated, {:ok, _reactivated}}, 2_000
+
+      active = Map.fetch!(:sys.get_state(server).leases, workspace_id)
+      assert is_map(active.owner_death_deletion_identity)
+
+      File.rename!(fake_worktree, original_copy)
+      File.cp_r!(original_copy, fake_worktree)
+      assert git!(fake_worktree, ["branch", "--show-current"]) == branch
+
+      assert {:error, :quarantine_identity_unavailable} =
+               WorkspaceLeaseRegistry.release(workspace_id, :remove, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      assert File.dir?(fake_worktree)
+
+      Process.exit(recovery_owner, :kill)
+      _ = System.cmd("git", ["-C", fake_repo, "worktree", "remove", "--force", fake_worktree])
+      {:ok, _removed} = File.rm_rf(original_copy)
+    end
+
     test "identity-invalid quarantine becomes dormant after bounded retries without losing exact authority",
          %{
            tmp_dir: tmp_dir

@@ -1029,6 +1029,96 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
              WorkspaceLeaseRegistry.release(reactivated.workspace_id, :remove, recovery)
   end
 
+  test "security regression: child DOWN resumes a dormant parent quarantine", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = create_base_project(Path.join(tmp_dir, "child-down-repo"), valid_module())
+    server = :"child_down_owner_death_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {WorkspaceLeaseRegistry,
+       name: server,
+       retention_ttl_ms: 5_000,
+       owner_death_retry_limit: 0,
+       linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+    )
+
+    task_id = "task-child-down"
+    principal_id = "agent-child-down"
+    recovery = %{server: server, task_id: task_id, principal_id: principal_id}
+    parent = self()
+
+    owner =
+      spawn(fn ->
+        result =
+          WorkspaceLeaseRegistry.acquire(
+            %{
+              repo_path: repo,
+              branch: "test/child-down-owner-death",
+              task_id: task_id,
+              principal_id: principal_id,
+              worktree_base_dir: Path.join(tmp_dir, "child-down-worktrees")
+            },
+            server: server
+          )
+
+        send(parent, {:owner_lease, result})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:owner_lease, {:ok, lease}}, 5_000
+
+    resource_owner =
+      spawn(fn ->
+        result =
+          WorkspaceLeaseRegistry.acquire_validation_resource(
+            lease.workspace_id,
+            Map.put(recovery, :force_cleanup_failure_once, true)
+          )
+
+        send(parent, {:validation_resource, result})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:validation_resource, {:ok, resource}}, 5_000
+    Process.exit(owner, :kill)
+
+    assert_eventually(fn ->
+      state = :sys.get_state(server)
+      dormant = Map.get(state.leases, lease.workspace_id)
+
+      is_map(dormant) and
+        Map.get(dormant, :owner_death_quarantine_state) == :validation_cleanup_dormant and
+        Map.get(dormant, :owner_death_retry_exhausted) == true and
+        map_size(state.validation_resources) == 1
+    end)
+
+    Process.exit(resource_owner, :kill)
+
+    assert_eventually(fn ->
+      state = :sys.get_state(server)
+
+      map_size(state.leases) == 0 and map_size(state.retained_by_id) == 1 and
+        map_size(state.validation_resources) == 0 and not File.dir?(resource.root_path)
+    end)
+
+    assert {:ok, reactivated} =
+             WorkspaceLeaseRegistry.acquire(
+               %{
+                 workspace_id: lease.workspace_id,
+                 repo_path: repo,
+                 branch: "test/child-down-owner-death",
+                 task_id: task_id,
+                 principal_id: principal_id,
+                 worktree_base_dir: Path.join(tmp_dir, "child-down-worktrees")
+               },
+               server: server
+             )
+
+    assert {:ok, _released} =
+             WorkspaceLeaseRegistry.release(reactivated.workspace_id, :remove, recovery)
+  end
+
   test "council issues only after approved quorum routing and compares the reviewed full diff", %{
     tmp_dir: tmp_dir
   } do
