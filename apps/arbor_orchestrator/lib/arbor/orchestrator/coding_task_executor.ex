@@ -34,9 +34,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   to Engine handlers and bounds the complete runner invocation.
 
   Steering never accepts a worker handle or principal override. It binds the
-  persisted control's exact task id to the execution context, wraps the user
-  correction as JSON data in the existing worker protocol, and resolves the
-  active session only through the public managed ACP task/principal facade.
+  persisted control's exact task id to the execution context, embeds the user
+  correction as bounded JSON data in a same-session instruction, and resolves
+  the active session only through the public managed ACP task/principal facade.
   """
 
   @behaviour Arbor.Contracts.Agent.TaskExecutor

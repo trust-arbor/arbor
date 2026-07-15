@@ -26,17 +26,21 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     deletion authority and always survive
   * **owned** leases — inspect live worktree state against the lease
     `base_commit` while serialized inside the registry:
-    * pristine (`!dirty` and `HEAD == base_commit`): remove the worktree
-      immediately (keeps abandoned empty acquisitions deterministic)
+    * pristine (`!dirty` and `HEAD == base_commit`): attempt a non-forcing Git
+      removal (keeps abandoned empty acquisitions deterministic without
+      deleting work that appears after inspection)
     * dirty **or** clean `HEAD != base_commit`: convert atomically to the
       existing bounded-TTL retained lease, preserving exact `task_id` +
       `principal_id` reactivation authority
-    * inspection or retention-identity uncertainty: fail safe against data
-      loss — do not remove a potentially useful worktree; keep recoverable
-      lease/retained authority and record the failure explicitly
+    * inspection, removal, or retention-identity uncertainty: fail safe against
+      data loss — do not remove a potentially useful worktree; keep
+      task+principal-authorized lease/retained authority and record the failure
+      explicitly
 
-  Retained conversion reuses the normal `:retain` identity/TTL machinery; it
-  does not introduce a second unbounded retention path.
+  Normal useful-work conversion reuses the bounded `:retain` identity/TTL
+  machinery. If that identity cannot be proven, the lease remains as an
+  explicit non-destructive quarantine for authorized inspection/release rather
+  than becoming deletion authority.
 
   Two-revision validation resources are child leases. Their private staging,
   isolated build directories, and detached base worktree are monitored against
@@ -1328,19 +1332,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       _ ->
         case System.cmd("realpath", [path], stderr_to_stdout: true) do
-          {resolved, 0} ->
-            {:ok, String.trim(resolved)}
-
-          _ ->
-            # Prefer a live expanded path over failing closed when the tree
-            # still exists but component-wise realpath cannot complete (e.g.
-            # mid-cleanup races). Retention identity still re-checks lstat and
-            # worktree registration before any delete authority is taken.
-            if File.exists?(path) or File.dir?(path) do
-              {:ok, Path.expand(path)}
-            else
-              {:error, :path_resolve_failed}
-            end
+          {resolved, 0} -> {:ok, String.trim(resolved)}
+          _ -> {:error, :path_resolve_failed}
         end
     end
   rescue
@@ -1729,9 +1722,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         drop_lease(state, lease)
 
       :remove ->
-        state = drop_lease(state, lease)
-        remove_owned_worktree(lease.repo_path, lease.worktree_path)
-        state
+        case remove_pristine_owned_worktree(lease.repo_path, lease.worktree_path) do
+          :ok -> drop_lease(state, lease)
+          {:error, detail} -> retain_on_owner_death(state, lease, {:remove_uncertain, detail})
+        end
 
       :retain ->
         retain_on_owner_death(state, lease, :useful_progress)
@@ -1772,9 +1766,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp retain_on_owner_death(state, lease, reason) do
     case do_release(state, lease, :retain) do
       {:ok, _result, state} ->
-        if reason == :inspection_uncertain do
+        if reason != :useful_progress do
           Logger.warning(
-            "workspace owner-death retained lease after uncertain inspection",
+            "workspace owner-death retained lease after uncertain cleanup",
             workspace_id: lease.workspace_id,
             task_id: lease.task_id,
             principal_id: lease.principal_id,
@@ -1803,8 +1797,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     path = lease.worktree_path
 
     if is_binary(path) and path != "" and File.dir?(path) do
-      # Path still present: fail safe against data loss. Keep recoverable
-      # task+principal authority with cleanup disarmed (no second retention system).
+      # Path still present: fail safe against data loss. Keep task+principal
+      # authority with cleanup disarmed as an explicit quarantine.
       Logger.warning(
         "workspace owner-death retain failed while worktree still present; preserving lease",
         workspace_id: lease.workspace_id,
@@ -2823,7 +2817,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         |> String.split("\n\n", trim: true)
         |> Enum.map(&parse_worktree_registration/1)
         |> Enum.find(fn
-          {:ok, %{path: path}} -> worktree_paths_match?(path, worktree_path)
+          {:ok, %{path: path}} -> path == worktree_path
           _ -> false
         end)
 
@@ -2834,33 +2828,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp worktree_paths_match?(left, right) when is_binary(left) and is_binary(right) do
-    left == right or Path.expand(left) == Path.expand(right) or
-      case {canonical_existing_path(left), canonical_existing_path(right)} do
-        {{:ok, a}, {:ok, b}} -> a == b
-        _ -> false
-      end
-  end
-
-  defp worktree_paths_match?(_left, _right), do: false
-
   defp parse_worktree_registration(entry) do
     lines = String.split(entry, "\n", trim: true)
     path = line_value(lines, "worktree ")
     head = line_value(lines, "HEAD ")
     branch = line_value(lines, "branch refs/heads/")
-    detached? = Enum.any?(lines, &(&1 == "detached"))
 
-    cond do
-      is_binary(path) and is_binary(head) and is_binary(branch) ->
-        {:ok, %{path: canonical_path_or_expanded(path), head: head, branch: branch}}
-
-      # Detached worktrees still have a stable path+HEAD identity for retention.
-      is_binary(path) and is_binary(head) and detached? ->
-        {:ok, %{path: canonical_path_or_expanded(path), head: head, branch: "detached"}}
-
-      true ->
-        :error
+    if is_binary(path) and is_binary(head) and is_binary(branch) do
+      {:ok, %{path: canonical_path_or_expanded(path), head: head, branch: branch}}
+    else
+      :error
     end
   end
 
@@ -2934,7 +2911,41 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp require_binary(value, _field) when is_binary(value) and value != "", do: :ok
   defp require_binary(_value, field), do: {:error, {:invalid, field}}
 
-  # Destructive: only owner-death cleanup and explicit remove-of-owned may call this.
+  # Owner-death uses Git's non-forcing removal so a dirty-after-inspection race
+  # cannot fall through to rm_rf.
+  defp remove_pristine_owned_worktree(repo_root, worktree_path)
+       when is_binary(repo_root) and is_binary(worktree_path) do
+    if File.dir?(worktree_path) do
+      result =
+        Git.with_storage_authority(repo_root, worktree_path, fn ->
+          Git.execute(repo_root, ["worktree", "remove", worktree_path])
+        end)
+
+      case result do
+        {:ok, %{exit_code: 0}} ->
+          if File.dir?(worktree_path),
+            do: {:error, :worktree_remove_unconfirmed},
+            else: :ok
+
+        {:ok, %{exit_code: exit_code}} ->
+          {:error, {:git_worktree_remove_failed, exit_code}}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        _ ->
+          {:error, :git_worktree_remove_failed}
+      end
+    else
+      :ok
+    end
+  rescue
+    _ -> {:error, :git_worktree_remove_failed}
+  catch
+    :exit, reason -> {:error, {:git_worktree_remove_exit, reason}}
+  end
+
+  # Destructive: explicit remove-of-owned and failed-create cleanup only.
   defp remove_owned_worktree(repo_root, worktree_path)
        when is_binary(repo_root) and is_binary(worktree_path) do
     if File.dir?(worktree_path) do

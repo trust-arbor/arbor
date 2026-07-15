@@ -48,17 +48,18 @@
 //   approval_request_id  - last operator approval request id (deny/rework)
 //   approval_note        - bounded operator note from the last deny/rework
 //
-// Worker output contract (acp_send_message text): pure JSON
-//   {"status":"implemented"|"declined","summary":"..."}
+// Worker output (acp_send_message text) is advisory prose. Arbor observes the
+// workspace after every successful worker turn and owns the control outcome.
 //
 // Resource policy: every terminal path that acquired a workspace releases it.
-// Declined/no-change terminals remove; failures retain under the registry TTL;
+// No-change terminals remove; failures retain under the registry TTL;
 // successful changes, PRs, and human handoffs retain only when the reviewed
 // plan's retain_workspace=true. Release enforces ownership, so reused paths
 // are never physically removed. Worker sessions are closed when opened; close
 // success and failure both pass through exactly one cleanup-mode decision.
-// Registry owner-death and cancellation cleanup remain immediate defense in
-// depth outside this graph.
+// Registry owner-death and cancellation cleanup preserve dirty or advanced
+// owned work under a bounded retained lease; only proven-pristine owned work is
+// removed. Reused paths are never deletion authority.
 //
 // Does NOT call coding_produce_reviewable_change.
 //
