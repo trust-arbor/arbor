@@ -15,6 +15,7 @@ defmodule Arbor.Shell.ExecutionRegistryTest do
     assert {:ok, execution} = ExecutionRegistry.get(id)
     assert execution.id == id
     assert execution.status == :completed
+    assert execution.terminal_source == :owner_published
     assert execution.result.pid == :redacted
     assert execution.result.nested.port == :redacted
     assert execution.sandbox == :strict
@@ -29,6 +30,51 @@ defmodule Arbor.Shell.ExecutionRegistryTest do
     assert {:ok, listed} = ExecutionRegistry.list(status: :completed)
     assert Enum.any?(listed, &(&1.id == id))
     refute contains_process_handle?(listed)
+  end
+
+  test "terminal_source is nil while pending/running and owner-published on finish/fail" do
+    {:ok, pending_id} = ExecutionRegistry.register("echo pending")
+
+    assert {:ok, %{status: :pending, terminal_source: nil, result: nil}} =
+             ExecutionRegistry.get(pending_id)
+
+    :ok = ExecutionRegistry.mark_running(pending_id)
+
+    assert {:ok, %{status: :running, terminal_source: nil, result: nil}} =
+             ExecutionRegistry.get(pending_id)
+
+    :ok = ExecutionRegistry.finish(pending_id, %{exit_code: 0})
+
+    assert {:ok, %{status: :completed, terminal_source: :owner_published}} =
+             ExecutionRegistry.get(pending_id)
+
+    {:ok, fail_id} = ExecutionRegistry.register("echo fail")
+    :ok = ExecutionRegistry.mark_running(fail_id)
+    :ok = ExecutionRegistry.fail(fail_id, :boom)
+
+    assert {:ok, %{status: :failed, terminal_source: :owner_published, result: %{error: :boom}}} =
+             ExecutionRegistry.get(fail_id)
+
+    {:ok, killed_id} = ExecutionRegistry.register("echo killed")
+    :ok = ExecutionRegistry.mark_running(killed_id)
+
+    :ok =
+      ExecutionRegistry.finish(killed_id, %{
+        exit_code: 137,
+        killed: true,
+        cancelled: true,
+        timed_out: false
+      })
+
+    assert {:ok, %{status: :killed, terminal_source: :owner_published}} =
+             ExecutionRegistry.get(killed_id)
+
+    {:ok, timeout_id} = ExecutionRegistry.register("echo timeout")
+    :ok = ExecutionRegistry.mark_running(timeout_id)
+    :ok = ExecutionRegistry.finish(timeout_id, %{exit_code: nil, timed_out: true, killed: false})
+
+    assert {:ok, %{status: :timed_out, terminal_source: :owner_published}} =
+             ExecutionRegistry.get(timeout_id)
   end
 
   test "security regression: foreign callers cannot forge lifecycle mutations" do
@@ -125,9 +171,55 @@ defmodule Arbor.Shell.ExecutionRegistryTest do
     :ok = ExecutionRegistry.adopt(id, owner)
     Process.exit(owner, :kill)
 
-    assert eventually?(fn -> match?({:ok, %{status: :failed}}, ExecutionRegistry.get(id)) end)
+    assert eventually?(fn ->
+             match?(
+               {:ok, %{status: :failed, terminal_source: :owner_down}},
+               ExecutionRegistry.get(id)
+             )
+           end)
+
+    assert {:ok, %{terminal_source: :owner_down, result: %{error: error}}} =
+             ExecutionRegistry.get(id)
+
+    # sanitize_public projects nested tuples as lists; provenance is the contract.
+    assert error == [:execution_owner_down, :killed] or
+             match?({:execution_owner_down, _}, error)
+
     ExecutionRegistry.cleanup(0)
     assert eventually?(fn -> ExecutionRegistry.get(id) == {:error, :not_found} end)
+  end
+
+  test "controller cancel remains nil provenance; later owner death is owner_down" do
+    {:ok, id} = ExecutionRegistry.register("sleep 5")
+    parent = self()
+
+    owner =
+      spawn(fn ->
+        receive do
+          {:cancel_shell_execution, ^id} ->
+            send(parent, :owner_saw_cancel)
+            Process.sleep(:infinity)
+        end
+      end)
+
+    :ok = ExecutionRegistry.adopt(id, owner)
+    :ok = ExecutionRegistry.request_cancel(id)
+    assert_receive :owner_saw_cancel
+
+    assert {:ok, %{status: :cancelling, terminal_source: nil, completed_at: nil}} =
+             ExecutionRegistry.get(id)
+
+    Process.exit(owner, :kill)
+
+    assert eventually?(fn ->
+             match?(
+               {:ok, %{status: :killed, terminal_source: :owner_down}},
+               ExecutionRegistry.get(id)
+             )
+           end)
+
+    assert {:ok, %{terminal_source: :owner_down, result: %{killed: true, cancelled: true}}} =
+             ExecutionRegistry.get(id)
   end
 
   defp raw_call(registry, request) do

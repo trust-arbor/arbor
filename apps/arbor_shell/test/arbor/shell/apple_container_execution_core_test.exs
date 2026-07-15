@@ -660,6 +660,103 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
     end
   end
 
+  describe "validate_request/3 preflight" do
+    test "accepts a valid facade request without admission or unit_name" do
+      assert :ok = Core.validate_request(@mix_wrapper, ["compile"], valid_opts())
+      assert :ok = Core.validate_request(@mix_wrapper, ["test", "--only", "fast"], valid_opts())
+      assert :ok = Core.validate_request(@mix_wrapper, ["quality"], valid_opts())
+    end
+
+    test "returns :ok only — never a prepared authority object" do
+      assert :ok == Core.validate_request(@mix_wrapper, ["compile"], valid_opts())
+      refute match?({:ok, _}, Core.validate_request(@mix_wrapper, ["compile"], valid_opts()))
+    end
+
+    test "rejects malformed tool_name, args, and opts before admission is needed" do
+      assert {:error, :invalid_tool_name} =
+               Core.validate_request(:not_a_path, ["compile"], valid_opts())
+
+      assert {:error, {:invalid_tool_name, _}} =
+               Core.validate_request("relative/mix", ["compile"], valid_opts())
+
+      assert {:error, :invalid_args} =
+               Core.validate_request(@mix_wrapper, "compile", valid_opts())
+
+      assert {:error, :empty_command_args} =
+               Core.validate_request(@mix_wrapper, [], valid_opts())
+
+      assert {:error, :unsupported_mix_command} =
+               Core.validate_request(@mix_wrapper, ["deps.get"], valid_opts())
+
+      assert {:error, :invalid_opts} =
+               Core.validate_request(@mix_wrapper, ["compile"], %{cwd: @worktree})
+
+      assert {:error, :stdin_not_supported} =
+               Core.validate_request(@mix_wrapper, ["compile"], valid_opts() ++ [stdin: "x"])
+
+      assert {:error, {:missing_opt_keys, _}} =
+               Core.validate_request(
+                 @mix_wrapper,
+                 ["compile"],
+                 timeout: 1,
+                 sandbox: :basic,
+                 env: %{},
+                 clear_env: true,
+                 filesystem_projections: base_projections()
+               )
+    end
+
+    test "rejects projection, tool/cwd, and MIX_ENV failures without admission" do
+      assert {:error, flat_reason} =
+               Core.validate_request(
+                 @mix_wrapper,
+                 ["compile"],
+                 valid_opts(filesystem_projections: legacy_flat_projections())
+               )
+
+      assert flat_reason in [
+               :invalid_filesystem_projections,
+               :unsupported_filesystem_projection_keys,
+               :missing_filesystem_projection_key
+             ] or match?({:unsupported_filesystem_projection_keys, _}, flat_reason) or
+               match?({:missing_filesystem_projection_key, _}, flat_reason)
+
+      assert {:error, :tool_name_mix_wrapper_mismatch} =
+               Core.validate_request("/usr/bin/mix", ["compile"], valid_opts())
+
+      assert {:error, :cwd_worktree_mismatch} =
+               Core.validate_request(
+                 @mix_wrapper,
+                 ["compile"],
+                 valid_opts(cwd: "/private/tmp/other")
+               )
+
+      assert {:error, :disallowed_mix_env} =
+               Core.validate_request(
+                 @mix_wrapper,
+                 ["compile"],
+                 valid_opts(env: %{"MIX_ENV" => "staging"})
+               )
+    end
+
+    test "preflight and new/1 share the same error reasons for request faults" do
+      bad_args = ["run", "-e", "1"]
+
+      assert {:error, preflight_reason} =
+               Core.validate_request(@mix_wrapper, bad_args, valid_opts())
+
+      assert {:error, ^preflight_reason} = Core.new(valid_request(%{args: bad_args}))
+
+      bad_opts = valid_opts(sandbox: :none)
+
+      assert {:error, :invalid_sandbox} =
+               Core.validate_request(@mix_wrapper, ["compile"], bad_opts)
+
+      assert {:error, :invalid_sandbox} =
+               Core.new(valid_request(%{opts: bad_opts}))
+    end
+  end
+
   describe "facade remains fail-closed" do
     test "execute_spawn_capable stays production_backend_missing" do
       assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =

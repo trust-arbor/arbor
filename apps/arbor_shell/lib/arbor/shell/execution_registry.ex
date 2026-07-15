@@ -17,6 +17,10 @@ defmodule Arbor.Shell.ExecutionRegistry do
 
   @type status :: :pending | :running | :cancelling | :completed | :failed | :timed_out | :killed
 
+  # Explicit terminal provenance set in the same transition as status/result.
+  # nil while nonterminal; never inferred from result.error shape.
+  @type terminal_source :: nil | :owner_published | :owner_down
+
   @type execution :: %{
           id: String.t(),
           command: String.t(),
@@ -25,7 +29,8 @@ defmodule Arbor.Shell.ExecutionRegistry do
           completed_at: DateTime.t() | nil,
           result: map() | nil,
           sandbox: atom(),
-          cwd: String.t() | nil
+          cwd: String.t() | nil,
+          terminal_source: terminal_source()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -108,6 +113,7 @@ defmodule Arbor.Shell.ExecutionRegistry do
       result: nil,
       sandbox: Keyword.get(opts, :sandbox, :basic),
       cwd: Keyword.get(opts, :cwd),
+      terminal_source: nil,
       owner_pid: controller_pid,
       owner_ref: controller_ref,
       controller_pid: controller_pid,
@@ -257,11 +263,12 @@ defmodule Arbor.Shell.ExecutionRegistry do
                 %{error: {:execution_owner_down, bounded_reason(reason)}}
               end
 
-            {id, apply_terminal(execution, status, result)}
+            {id, apply_terminal(execution, status, result, :owner_down)}
 
           controller_down? ->
             send(execution.owner_pid, {:cancel_shell_execution, id})
 
+            # Cancellation request only — remains nonterminal with nil provenance.
             {id,
              %{
                execution
@@ -310,17 +317,19 @@ defmodule Arbor.Shell.ExecutionRegistry do
             {:reply, {:error, {:invalid_status, execution.status}}, state}
 
           status in @terminal_statuses ->
-            updated = apply_terminal(execution, status, result)
+            updated = apply_terminal(execution, status, result, :owner_published)
             {:reply, :ok, put_in(state, [:executions, id], updated)}
 
           true ->
+            # Nonterminal transitions keep nil terminal_source.
             updated = %{execution | status: status}
             {:reply, :ok, put_in(state, [:executions, id], updated)}
         end
     end
   end
 
-  defp apply_terminal(execution, status, result) do
+  defp apply_terminal(execution, status, result, terminal_source)
+       when terminal_source in [:owner_published, :owner_down] do
     execution
     |> monitor_refs()
     |> Enum.each(&Process.demonitor(&1, [:flush]))
@@ -329,6 +338,7 @@ defmodule Arbor.Shell.ExecutionRegistry do
     |> Map.put(:status, status)
     |> Map.put(:result, result)
     |> Map.put(:completed_at, DateTime.utc_now())
+    |> Map.put(:terminal_source, terminal_source)
   end
 
   defp monitor_refs(execution) do
@@ -369,7 +379,8 @@ defmodule Arbor.Shell.ExecutionRegistry do
       :completed_at,
       :result,
       :sandbox,
-      :cwd
+      :cwd,
+      :terminal_source
     ])
     |> sanitize_public()
   end

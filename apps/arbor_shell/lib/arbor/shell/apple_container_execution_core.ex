@@ -140,25 +140,42 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
          {:ok, opts} <- fetch_opts(input),
          {:ok, admission} <- fetch_admission(input),
          {:ok, unit_name} <- fetch_unit_name(input),
-         {:ok, settings} <- validate_opts(opts),
-         {:ok, projections} <- parse_filesystem_projections(settings.filesystem_projections),
-         :ok <- match_tool_and_cwd(tool_name, settings.cwd, projections),
-         {:ok, command_args} <- validate_mix_argv(args),
-         {:ok, mix_env} <- select_mix_env(settings.env, command_args),
+         {:ok, prepared} <- prepare_caller_request(tool_name, args, opts),
          {:ok, authority} <- extract_admission_authority(admission),
          plan_request <-
-           build_plan_request(authority, unit_name, projections, mix_env, command_args),
+           build_plan_request(
+             authority,
+             unit_name,
+             prepared.projections,
+             prepared.mix_env,
+             prepared.command_args
+           ),
          {:ok, plan} <- AppleContainerPlanCore.new(plan_request) do
       {:ok,
        %{
          plan: plan,
-         timeout_ms: settings.timeout,
-         max_output_bytes: settings.max_output_bytes
+         timeout_ms: prepared.timeout,
+         max_output_bytes: prepared.max_output_bytes
        }}
     end
   end
 
   def new(_), do: {:error, :invalid_execution_request}
+
+  # Pure preflight for future Shell facade args (`tool_name`, `args`, `opts`).
+  # Validates every caller-controlled request check that does not require an
+  # admitted receipt or generated unit name. Returns `:ok` or the same bounded
+  # errors as `new/1`. Validation only — not authority; no prepared plan object.
+  @doc false
+  @spec validate_request(term(), term(), term()) :: :ok | {:error, term()}
+  def validate_request(tool_name, args, opts) do
+    with {:ok, tool_name} <- normalize_tool_name(tool_name),
+         {:ok, args} <- normalize_args(args),
+         {:ok, opts} <- normalize_opts(opts),
+         {:ok, _prepared} <- prepare_caller_request(tool_name, args, opts) do
+      :ok
+    end
+  end
 
   @doc """
   JSON-clean view of an execution spec.
@@ -202,39 +219,52 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
-  defp fetch_tool_name(input) do
-    case get_field(input, :tool_name) do
-      path when is_binary(path) ->
-        case validate_absolute_canonical_path(path) do
-          {:ok, path} -> {:ok, path}
-          {:error, reason} -> {:error, {:invalid_tool_name, reason}}
-        end
-
-      _other ->
-        {:error, :invalid_tool_name}
+  # Shared pure pipeline for facade args after tool/args/opts are normalized.
+  # Returns settings needed by `new/1` only; public preflight discards this map.
+  defp prepare_caller_request(tool_name, args, opts) do
+    with {:ok, settings} <- validate_opts(opts),
+         {:ok, projections} <- parse_filesystem_projections(settings.filesystem_projections),
+         :ok <- match_tool_and_cwd(tool_name, settings.cwd, projections),
+         {:ok, command_args} <- validate_mix_argv(args),
+         {:ok, mix_env} <- select_mix_env(settings.env, command_args) do
+      {:ok,
+       %{
+         command_args: command_args,
+         mix_env: mix_env,
+         projections: projections,
+         timeout: settings.timeout,
+         max_output_bytes: settings.max_output_bytes
+       }}
     end
   end
 
-  defp fetch_args(input) do
-    case get_field(input, :args) do
-      args when is_list(args) -> {:ok, args}
-      _other -> {:error, :invalid_args}
+  defp fetch_tool_name(input), do: normalize_tool_name(get_field(input, :tool_name))
+
+  defp fetch_args(input), do: normalize_args(get_field(input, :args))
+
+  defp fetch_opts(input), do: normalize_opts(get_field(input, :opts))
+
+  defp normalize_tool_name(path) when is_binary(path) do
+    case validate_absolute_canonical_path(path) do
+      {:ok, path} -> {:ok, path}
+      {:error, reason} -> {:error, {:invalid_tool_name, reason}}
     end
   end
 
-  defp fetch_opts(input) do
-    case get_field(input, :opts) do
-      opts when is_list(opts) ->
-        if Keyword.keyword?(opts) do
-          {:ok, opts}
-        else
-          {:error, :invalid_opts}
-        end
+  defp normalize_tool_name(_other), do: {:error, :invalid_tool_name}
 
-      _other ->
-        {:error, :invalid_opts}
+  defp normalize_args(args) when is_list(args), do: {:ok, args}
+  defp normalize_args(_other), do: {:error, :invalid_args}
+
+  defp normalize_opts(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      {:ok, opts}
+    else
+      {:error, :invalid_opts}
     end
   end
+
+  defp normalize_opts(_other), do: {:error, :invalid_opts}
 
   defp fetch_admission(input) do
     case get_field(input, :admission) do
