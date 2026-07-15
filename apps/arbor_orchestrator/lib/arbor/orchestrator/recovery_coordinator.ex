@@ -409,21 +409,23 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   def handle_info({:nodedown, dead_node}, state) do
     # Remote-owner recovery requires node-restart + linearizable CAS fencing.
     # Local application-restart discovery remains on the boot path only.
+    # Legacy JobRegistry rows have no RunJournal CAS fence — never auto-enqueue.
     if automatic_recovery_active?(state) and cross_node_atomic_recovery?(state) do
       Logger.info(
         "[RecoveryCoordinator] Node #{dead_node} went down, scanning for orphaned pipelines"
       )
 
       jopts = journal_opts(state)
-      orphaned = list_by_owner_for_recovery(dead_node, jopts)
+      # Current journal only — no legacy merge for distributed takeover.
+      orphaned = list_current_by_owner_for_recovery(dead_node, jopts)
 
       if orphaned != [] do
         Logger.info(
           "[RecoveryCoordinator] Found #{length(orphaned)} orphaned pipeline(s) from #{dead_node}"
         )
 
-        # Only mark interrupted here; atomic claim happens in attempt_recovery.
-        # Never enqueue a fabricated interrupted candidate when the mutation fails.
+        # CAS-fenced interrupt first; claim happens in attempt_recovery.
+        # Never enqueue when mark_interrupted fails or conflicts.
         pending_orphans =
           Enum.flat_map(orphaned, fn candidate ->
             case mark_interrupted_entry(candidate, jopts) do
@@ -491,9 +493,15 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
             []
         end
 
+      # Legacy is only considered for non-distributed (local) automatic recovery.
+      # Distributed remote-owner takeover never auto-handles unfenced legacy rows.
       legacy_stale =
-        LegacyJobAdapter.list_stale_heartbeats(@stale_heartbeat_ms, now)
-        |> Enum.map(fn %Record{} = r -> %{record: r, source: :legacy} end)
+        if cross_node_atomic_recovery?(state) do
+          []
+        else
+          LegacyJobAdapter.list_stale_heartbeats(@stale_heartbeat_ms, now)
+          |> Enum.map(fn %Record{} = r -> %{record: r, source: :legacy} end)
+        end
 
       stale =
         (current_stale ++ legacy_stale)
@@ -508,31 +516,35 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
             owner_connected = MapSet.member?(connected, entry.owner_node)
 
             if not owner_connected do
-              # Disconnected remote owners are distributed recovery — require
-              # cross_node_atomic_recovery. Local nil/local-owner cases may proceed.
-              if remote_owner_recovery?(entry, state) and not cross_node_atomic_recovery?(state) do
-                []
-              else
-                case mark_interrupted_entry(candidate, jopts) do
-                  :ok ->
-                    [
-                      %{
-                        candidate
-                        | record: %Record{entry | status: :interrupted, owner_node: nil}
-                      }
-                    ]
+              cond do
+                # Legacy never participates in distributed remote takeover.
+                candidate.source == :legacy and remote_owner_recovery?(entry, state) ->
+                  []
 
-                  {:error, reason} ->
-                    Logger.warning(
-                      "[RecoveryCoordinator] mark_interrupted failed for #{entry.run_id}: " <>
-                        inspect(reason) <> "; not enqueueing fabricated interrupted candidate"
-                    )
+                remote_owner_recovery?(entry, state) and not cross_node_atomic_recovery?(state) ->
+                  []
 
-                    []
+                true ->
+                  case mark_interrupted_entry(candidate, jopts) do
+                    :ok ->
+                      [
+                        %{
+                          candidate
+                          | record: %Record{entry | status: :interrupted, owner_node: nil}
+                        }
+                      ]
 
-                  _other ->
-                    []
-                end
+                    {:error, reason} ->
+                      Logger.warning(
+                        "[RecoveryCoordinator] mark_interrupted failed for #{entry.run_id}: " <>
+                          inspect(reason) <> "; not enqueueing fabricated interrupted candidate"
+                      )
+
+                      []
+
+                    _other ->
+                      []
+                  end
               end
             else
               spawner_alive = spawning_process_alive?(entry.spawning_pid)
@@ -1261,24 +1273,14 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
-  defp list_by_owner_for_recovery(node_name, journal_opts) do
-    # Probe the configured journal first so outages refuse legacy fall-through
-    # (list_by_owner_records degrades to [] for dashboard callers).
+  # Distributed nodedown / remote-owner takeover: current journal only.
+  # Legacy JobRegistry has no generation+revision CAS fence — never merge here.
+  defp list_current_by_owner_for_recovery(node_name, journal_opts) do
     case RunJournal.list_records(journal_opts) do
       {:ok, _} ->
-        current =
-          node_name
-          |> PipelineStatus.list_by_owner_records(journal_opts)
-          |> Enum.map(fn %Record{} = r -> %{record: r, source: :current} end)
-
-        current_ids = MapSet.new(current, & &1.record.run_id)
-
-        legacy =
-          LegacyJobAdapter.list_by_owner(node_name)
-          |> Enum.reject(fn %Record{run_id: id} -> MapSet.member?(current_ids, id) end)
-          |> Enum.map(fn %Record{} = r -> %{record: r, source: :legacy} end)
-
-        current ++ legacy
+        node_name
+        |> PipelineStatus.list_by_owner_records(journal_opts)
+        |> Enum.map(fn %Record{} = r -> %{record: r, source: :current} end)
 
       {:error, reason} ->
         Logger.warning(
@@ -1316,12 +1318,14 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
-  defp mark_interrupted_entry(%{record: %Record{run_id: key}, source: source}, journal_opts) do
-    if source == :legacy do
-      LegacyJobAdapter.mark_interrupted(key)
-    else
-      PipelineStatus.mark_interrupted(key, journal_opts)
-    end
+  defp mark_interrupted_entry(%{record: %Record{run_id: key}, source: :legacy}, _journal_opts) do
+    # Legacy has no durable CAS fence — distributed paths must not reach here.
+    # Local non-distributed callers may still mark legacy explicitly.
+    LegacyJobAdapter.mark_interrupted(key)
+  end
+
+  defp mark_interrupted_entry(%{record: %Record{run_id: key}, source: _source}, journal_opts) do
+    PipelineStatus.mark_interrupted(key, journal_opts)
   end
 
   defp mark_abandoned_entry(%{record: %Record{run_id: key}, source: source}, journal_opts) do

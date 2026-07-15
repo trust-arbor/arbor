@@ -297,6 +297,7 @@ defmodule Arbor.Orchestrator.RunJournalFencedClaimL4Test do
   @moduletag :fast
 
   alias Arbor.Contracts.Persistence.Record, as: PersistenceRecord
+  alias Arbor.Orchestrator.JobRegistry
   alias Arbor.Orchestrator.PipelineStatus
   alias Arbor.Orchestrator.RecoveryCoordinator
   alias Arbor.Orchestrator.RunJournal
@@ -748,7 +749,7 @@ defmodule Arbor.Orchestrator.RunJournalFencedClaimL4Test do
       assert RecoveryCoordinator.status(coord_name).pending == 0
     end
 
-    test "node_restart+CAS nodedown mutates journal; PipelineStatus reads exact state", %{
+    test "node_restart+CAS nodedown mutates journal to exact interrupted state", %{
       suffix: suffix
     } do
       store_name = :"l4b_rc_nr_store_#{suffix}"
@@ -814,6 +815,7 @@ defmodule Arbor.Orchestrator.RunJournalFencedClaimL4Test do
                  journal_opts: jopts,
                  recovery_root: recovery_root,
                  # Delay discover; nodedown still schedules recover_next immediately.
+                 # Without execution_principal, recover_next leaves interrupted (no claim).
                  delay_ms: 60_000
                ]
              ]}
@@ -825,18 +827,284 @@ defmodule Arbor.Orchestrator.RunJournalFencedClaimL4Test do
       assert st.fenced_claim == true
 
       send(coord, {:nodedown, remote})
-      # Drain coordinator mailbox past nodedown (+ optional recover_next claim attempt).
+      # Drain nodedown + recover_next (auth unavailable → leave interrupted).
       _ = RecoveryCoordinator.status(coord_name)
 
       entry = PipelineStatus.get(run_id, jopts)
-      # Coordinator mark_interrupted clears remote owner; claim may advance to recovering.
-      assert entry.status in [:interrupted, :recovering]
-      refute to_string(entry.owner_node || "") == to_string(remote)
+      assert entry.status == :interrupted
+      assert entry.owner_node == nil
 
-      record = PipelineStatus.get_record(run_id, jopts)
-      assert %Record{} = record
-      assert record.status in [:interrupted, :recovering]
-      refute to_string(record.owner_node || "") == to_string(remote)
+      assert %Record{status: :interrupted, owner_node: nil} =
+               PipelineStatus.get_record(run_id, jopts)
+
+      assert {:ok, %PersistenceRecord{data: data}} =
+               Persistence.get(store_name, FencedNodeRestartStore, run_id)
+
+      assert data["status"] == "interrupted"
+      assert data["owner_node"] in [nil, ""]
+    end
+
+    test "concurrent remote interrupt+claim elects one owner; loser cannot revert recovering",
+         %{
+           suffix: suffix
+         } do
+      store_name = :"l4b_race_store_#{suffix}"
+      remote = :dead_race@other
+      node_a = :race_a@test
+      node_b = :race_b@test
+      run_id = "l4b_race_run_#{suffix}"
+      journal_a = :"l4b_race_ja_#{suffix}"
+      journal_b = :"l4b_race_jb_#{suffix}"
+
+      {:ok, _} =
+        start_supervised(%{
+          id: store_name,
+          start: {FencedNodeRestartStore, :start_link, [[name: store_name]]}
+        })
+
+      {:ok, _} =
+        start_supervised(%{
+          id: journal_a,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_a,
+                 ets_table: :"l4b_race_hot_a_#{suffix}",
+                 backend: FencedNodeRestartStore,
+                 store_name: store_name,
+                 start_store: false,
+                 local_node: node_a
+               ]
+             ]}
+        })
+
+      # Seed remote-owned running; journal B rehydrates from shared durable store.
+      assert :ok =
+               RunJournal.put(
+                 %Record{
+                   run_id: run_id,
+                   pipeline_id: run_id,
+                   status: :running,
+                   started_at: DateTime.utc_now(),
+                   total_nodes: 1,
+                   completed_count: 0,
+                   owner_node: remote,
+                   source_node: remote
+                 },
+                 server: journal_a
+               )
+
+      {:ok, _} =
+        start_supervised(%{
+          id: journal_b,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_b,
+                 ets_table: :"l4b_race_hot_b_#{suffix}",
+                 backend: FencedNodeRestartStore,
+                 store_name: store_name,
+                 start_store: false,
+                 local_node: node_b
+               ]
+             ]}
+        })
+
+      parent = self()
+
+      # Race full takeover: interrupt then claim on each survivor journal.
+      tasks =
+        for {journal, node, idx} <- [{journal_a, node_a, 1}, {journal_b, node_b, 2}] do
+          Task.async(fn ->
+            send(parent, {:ready, idx})
+
+            receive do
+              :go -> :ok
+            after
+              5_000 -> flunk("barrier timeout")
+            end
+
+            interrupt = RunJournal.mark_interrupted(run_id, server: journal)
+
+            claim =
+              case interrupt do
+                :ok -> RunJournal.claim_for_recovery(run_id, node, server: journal)
+                err -> err
+              end
+
+            {interrupt, claim}
+          end)
+        end
+
+      for _ <- 1..2, do: assert_receive({:ready, _}, 5_000)
+      Enum.each(tasks, &send(&1.pid, :go))
+      results = Enum.map(tasks, &Task.await(&1, 5_000))
+
+      claim_wins =
+        Enum.filter(results, fn
+          {:ok, {:ok, %Record{status: :recovering}}} -> true
+          _ -> false
+        end)
+
+      assert length(claim_wins) == 1
+
+      # Canonical durable must be recovering with exactly one owner — never interrupted after a claim win.
+      assert {:ok, %PersistenceRecord{data: data}} =
+               Persistence.get(store_name, FencedNodeRestartStore, run_id)
+
+      assert data["status"] == "recovering"
+      assert data["owner_node"] in [to_string(node_a), to_string(node_b)]
+
+      # Loser (or any subsequent writer) must not revert durable recovering → interrupted.
+      loser_journal =
+        if data["owner_node"] == to_string(node_a), do: journal_b, else: journal_a
+
+      winner_journal = if loser_journal == journal_a, do: journal_b, else: journal_a
+
+      # Refresh loser hot to the durable recovering owner (simulates late observation).
+      assert {:ok, %Record{status: :recovering}} =
+               RunJournal.get_record(run_id, server: winner_journal)
+
+      # Direct fenced interrupt against recovering durable must fail closed.
+      # Seed loser hot with remote-owned running shape via put is blocked by
+      # terminal/nonterminal rules — instead re-fetch after claim conflict path:
+      # call mark_interrupted on the journal that still sees remote ownership by
+      # re-putting is wrong; use the winner journal's recovering row observation
+      # on the loser after rehydrate from durable.
+      :ok = stop_supervised(loser_journal)
+
+      {:ok, _} =
+        start_supervised(%{
+          id: :"#{loser_journal}_re",
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: loser_journal,
+                 ets_table: :"l4b_race_hot_loser2_#{suffix}",
+                 backend: FencedNodeRestartStore,
+                 store_name: store_name,
+                 start_store: false,
+                 local_node: if(loser_journal == journal_a, do: node_a, else: node_b)
+               ]
+             ]}
+        })
+
+      assert {:ok, %Record{status: :recovering}} =
+               RunJournal.get_record(run_id, server: loser_journal)
+
+      assert {:error, :interrupt_conflict} =
+               RunJournal.mark_interrupted(run_id, server: loser_journal)
+
+      assert {:ok, %PersistenceRecord{data: still}} =
+               Persistence.get(store_name, FencedNodeRestartStore, run_id)
+
+      assert still["status"] == "recovering"
+      assert still["owner_node"] == data["owner_node"]
+
+      assert {:ok, %Record{status: :recovering, owner_node: owner}} =
+               RunJournal.get_record(run_id, server: loser_journal)
+
+      assert to_string(owner) == data["owner_node"]
+    end
+
+    test "nodedown does not mutate or enqueue legacy JobRegistry rows", %{suffix: suffix} do
+      store_name = :"l4b_legacy_store_#{suffix}"
+      journal_name = :"l4b_legacy_journal_#{suffix}"
+      coord_name = :"l4b_legacy_coord_#{suffix}"
+      remote = :legacy_peer@other
+      local = Kernel.node()
+      legacy_run = "l4b_legacy_only_#{suffix}"
+      jobs_store = :arbor_orchestrator_jobs
+
+      {:ok, _} =
+        start_supervised(%{
+          id: store_name,
+          start: {FencedNodeRestartStore, :start_link, [[name: store_name]]}
+        })
+
+      {:ok, _} =
+        start_supervised(%{
+          id: journal_name,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_name,
+                 ets_table: :"l4b_legacy_hot_#{suffix}",
+                 backend: FencedNodeRestartStore,
+                 store_name: store_name,
+                 start_store: false,
+                 local_node: local
+               ]
+             ]}
+        })
+
+      jopts = [server: journal_name]
+
+      # Seed legacy-only remote-owned running row (no current journal entry).
+      entry = %JobRegistry.Entry{
+        pipeline_id: legacy_run,
+        run_id: legacy_run,
+        graph_id: "legacy_graph",
+        started_at: DateTime.utc_now(),
+        completed_count: 0,
+        total_nodes: 1,
+        status: :running,
+        source_node: remote,
+        owner_node: remote,
+        last_heartbeat: DateTime.utc_now(),
+        node_durations: %{}
+      }
+
+      assert :ok = Arbor.Persistence.BufferedStore.put(legacy_run, entry, name: jobs_store)
+
+      on_exit(fn ->
+        try do
+          Arbor.Persistence.BufferedStore.delete(legacy_run, name: jobs_store)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      recovery_root = Path.join(System.tmp_dir!(), "l4b_legacy_root_#{suffix}")
+      File.mkdir_p!(recovery_root)
+      on_exit(fn -> File.rm_rf(recovery_root) end)
+
+      {:ok, coord} =
+        start_supervised(%{
+          id: coord_name,
+          start:
+            {RecoveryCoordinator, :start_link,
+             [
+               [
+                 name: coord_name,
+                 enabled: true,
+                 journal_opts: jopts,
+                 recovery_root: recovery_root,
+                 delay_ms: 60_000
+               ]
+             ]}
+        })
+
+      st = RecoveryCoordinator.status(coord_name)
+      assert st.cross_node_atomic_recovery == true
+
+      send(coord, {:nodedown, remote})
+      status_after = RecoveryCoordinator.status(coord_name)
+
+      assert status_after.pending == 0
+
+      # Legacy row unchanged — still running under remote owner.
+      legacy = JobRegistry.get(legacy_run)
+      assert legacy != nil
+      assert legacy.status == :running
+      assert to_string(legacy.owner_node) == to_string(remote)
+
+      # Current journal never adopted the legacy identity.
+      assert {:error, :not_found} = RunJournal.get_record(legacy_run, server: journal_name)
     end
   end
 

@@ -394,17 +394,23 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       st = RecoveryCoordinator.status(coord_name)
       assert st.automatic_recovery == true
       assert st.durability_class == :application_restart
+      assert st.cross_node_atomic_recovery == false
       assert st.pending == 0
 
-      # Coordinator itself discovers by owner and mutates only the injected journal.
+      # L4B: nodedown/remote-owner recovery is inactive without cross_node_atomic_recovery.
       send(coord_pid, {:nodedown, dead_owner})
+      _ = RecoveryCoordinator.status(coord_name)
 
-      assert_eventually(fn ->
-        match?(
-          {:ok, %Record{status: :interrupted}},
-          RunJournal.get_record(shared_run, server: journal_name)
-        )
-      end)
+      assert {:ok, %Record{status: :running, owner_node: ^dead_owner}} =
+               RunJournal.get_record(shared_run, server: journal_name)
+
+      assert {:ok, %Record{status: :running, owner_node: ^dead_owner}} =
+               RunJournal.get_record(shared_run)
+
+      assert RecoveryCoordinator.status(coord_name).pending == 0
+
+      # Local application-restart path: interrupt only the custom journal, then discover.
+      assert :ok = RunJournal.mark_interrupted(shared_run, server: journal_name)
 
       assert {:ok, %Record{status: :interrupted, run_id: ^shared_run}} =
                RunJournal.get_record(shared_run, server: journal_name)
@@ -413,7 +419,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       assert {:ok, %Record{status: :running, run_id: ^shared_run}} =
                RunJournal.get_record(shared_run)
 
-      # recover_next with max_concurrent: 0 leaves pending after nodedown enqueue.
+      send(coord_pid, :discover_interrupted)
+
       assert_eventually(fn ->
         RecoveryCoordinator.status(coord_name).pending >= 1
       end)
@@ -421,13 +428,6 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       pending_status = RecoveryCoordinator.status(coord_name)
       assert pending_status.pending >= 1
       assert pending_status.recovering == 0
-
-      # Explicit interrupted discovery also targets only the custom journal.
-      send(coord_pid, :discover_interrupted)
-
-      assert_eventually(fn ->
-        RecoveryCoordinator.status(coord_name).pending >= 1
-      end)
 
       # Isolation still holds for claim: global run is not in custom journal
       # under a different id, and custom-only claim path does not touch global.

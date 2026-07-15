@@ -147,6 +147,16 @@ defmodule Arbor.Orchestrator.RunJournal do
     call_server(opts, {:touch_heartbeat, run_id, now || DateTime.utc_now()})
   end
 
+  @doc """
+  Mark a pipeline interrupted (eligible for recovery).
+
+  Local / application-restart interruption uses backend-first put under the
+  journal lock. Remote-owner takeover on a `cross_node_atomic_recovery`
+  backend publishes interrupted via generation+revision CAS so a concurrent
+  survivor cannot overwrite another journal's recovering claim with an
+  ordinary put. CAS conflicts refresh hot state from durable authority and
+  return a typed error (coordinator must not enqueue losers).
+  """
   @spec mark_interrupted(String.t(), keyword()) :: :ok | {:error, term()}
   def mark_interrupted(run_id, opts \\ []) when is_binary(run_id) do
     call_server(opts, {:mark_interrupted, run_id})
@@ -468,20 +478,7 @@ defmodule Arbor.Orchestrator.RunJournal do
   end
 
   def handle_call({:mark_interrupted, run_id}, _from, state) do
-    {reply, state} =
-      update_record(run_id, state, fn %Record{} = record ->
-        if record.status in [:running, :degraded, :suspended, :recovering] do
-          %Record{
-            record
-            | status: :interrupted,
-              current_node: nil,
-              owner_node: nil
-          }
-        else
-          record
-        end
-      end)
-
+    {reply, state} = do_mark_interrupted(run_id, state)
     {:reply, reply, state}
   end
 
@@ -937,6 +934,96 @@ defmodule Arbor.Orchestrator.RunJournal do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # mark_interrupted — local put vs remote-owner CAS takeover
+  # ---------------------------------------------------------------------------
+
+  defp do_mark_interrupted(run_id, state) do
+    case lookup_record(state.table, run_id) do
+      nil ->
+        {{:error, :not_found}, state}
+
+      %Record{} = record ->
+        if fenced_remote_interrupt?(record, state) do
+          fenced_mark_interrupted(run_id, state)
+        else
+          local_mark_interrupted(run_id, state)
+        end
+    end
+  end
+
+  # Remote-owner in-flight rows on node_restart+CAS must not use ordinary put:
+  # a stale put can overwrite a concurrent recovering claim.
+  defp fenced_remote_interrupt?(%Record{} = record, state) do
+    cross_node_atomic_recovery_enabled?(state) and remote_owner?(record, state.local_node)
+  end
+
+  defp remote_owner?(%Record{owner_node: nil}, _local_node), do: false
+
+  defp remote_owner?(%Record{owner_node: owner}, local_node) do
+    to_string(owner) != to_string(local_node)
+  end
+
+  defp local_mark_interrupted(run_id, state) do
+    update_record(run_id, state, fn %Record{} = record ->
+      if record.status in [:running, :degraded, :suspended, :recovering] do
+        %Record{
+          record
+          | status: :interrupted,
+            current_node: nil,
+            owner_node: nil
+        }
+      else
+        record
+      end
+    end)
+  end
+
+  # CAS in-flight remote-owned rows to interrupted. Never overwrite recovering
+  # or terminal durable authority with an ordinary interrupt put.
+  defp fenced_mark_interrupted(run_id, state) do
+    case durable_get_structured_record(run_id, state) do
+      {:ok, %PersistenceRecord{} = expected} ->
+        case decode_lifecycle_from_persistence(expected) do
+          {:ok, %Record{} = durable} ->
+            cond do
+              durable.status in [:running, :degraded, :suspended] and
+                  remote_owner?(durable, state.local_node) ->
+                interrupted = %Record{
+                  durable
+                  | status: :interrupted,
+                    current_node: nil,
+                    owner_node: nil
+                }
+
+                case cas_lifecycle_update(expected, interrupted, state, :interrupt) do
+                  {:ok, %Record{} = stored, new_state} ->
+                    hot_insert(new_state.table, stored)
+                    {:ok, new_state}
+
+                  {:error, :conflict, new_state} ->
+                    refresh_hot_after_fence_conflict(run_id, new_state, :interrupt_conflict)
+
+                  {:error, reason, new_state} ->
+                    {{:error, reason}, new_state}
+                end
+
+              true ->
+                # Already interrupted/recovering/terminal or ownership changed —
+                # refresh hot; never clobber durable with a stale interrupt put.
+                hot_insert(state.table, durable)
+                {{:error, :interrupt_conflict}, state}
+            end
+
+          {:error, reason} ->
+            {{:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
   defp do_claim_for_recovery(run_id, claiming_node, state) do
     case lookup_record(state.table, run_id) do
       nil ->
@@ -993,13 +1080,13 @@ defmodule Arbor.Orchestrator.RunJournal do
                     status: :recovering
                 }
 
-                case cas_lifecycle_claim(expected, claimed, state) do
+                case cas_lifecycle_update(expected, claimed, state, :claim) do
                   {:ok, %Record{} = stored_lifecycle, new_state} ->
                     hot_insert(new_state.table, stored_lifecycle)
                     {{:ok, stored_lifecycle}, new_state}
 
                   {:error, :conflict, new_state} ->
-                    refresh_hot_after_claim_conflict(run_id, new_state)
+                    refresh_hot_after_fence_conflict(run_id, new_state, :claim_conflict)
 
                   {:error, reason, new_state} ->
                     {{:error, reason}, new_state}
@@ -1024,8 +1111,9 @@ defmodule Arbor.Orchestrator.RunJournal do
     end
   end
 
-  defp cas_lifecycle_claim(%PersistenceRecord{} = expected, %Record{} = claimed, state) do
-    case Adapter.to_durable_map(claimed) do
+  defp cas_lifecycle_update(%PersistenceRecord{} = expected, %Record{} = next, state, kind)
+       when kind in [:claim, :interrupt] do
+    case Adapter.to_durable_map(next) do
       {:ok, payload} ->
         replacement =
           PersistenceRecord.new(expected.key, payload,
@@ -1060,7 +1148,7 @@ defmodule Arbor.Orchestrator.RunJournal do
 
           {:error, reason} ->
             Logger.warning(
-              "[RunJournal] fenced claim CAS failed for #{claimed.run_id}: #{inspect(reason)}"
+              "[RunJournal] fenced #{kind} CAS failed for #{next.run_id}: #{inspect(reason)}"
             )
 
             {:error, {:durable_write_failed, reason},
@@ -1100,20 +1188,21 @@ defmodule Arbor.Orchestrator.RunJournal do
        }}
   end
 
-  defp refresh_hot_after_claim_conflict(run_id, state) do
+  defp refresh_hot_after_fence_conflict(run_id, state, error_tag)
+       when error_tag in [:claim_conflict, :interrupt_conflict] do
     case durable_get_structured_record(run_id, state) do
       {:ok, %PersistenceRecord{} = pr} ->
         case decode_lifecycle_from_persistence(pr) do
           {:ok, %Record{} = lifecycle} ->
             hot_insert(state.table, lifecycle)
-            {{:error, :claim_conflict}, state}
+            {{:error, error_tag}, state}
 
           {:error, reason} ->
-            {{:error, {:claim_conflict, reason}}, state}
+            {{:error, {error_tag, reason}}, state}
         end
 
       {:error, reason} ->
-        {{:error, {:claim_conflict, reason}}, state}
+        {{:error, {error_tag, reason}}, state}
     end
   end
 
