@@ -385,6 +385,17 @@ must assert normal terminal status as well as exact bytes (found 2026-07-13 in
 
 **Verify the live source root before trusting `recompile`.** Tidewave or `arbor.recompile` may be attached to an isolated runtime snapshot such as `/private/tmp/arbor-runtime-current`, so `IEx.Helpers.recompile/0` can return `:ok` while the main checkout contains entirely new modules. Inspect both `Module.module_info(:compile)[:source]` and `:code.which/1` before interpreting behavior. When a restart would disrupt active work, hot-load only the exact reviewed source files in dependency order (nested struct definitions before modules that expand them); otherwise use the purpose-built restart. Never diagnose an old sentinel as a current-code failure until loaded identity is proven (expanded 2026-07-15 during the spawn-capable facade live proof).
 
+**A closed-envelope rejection can be live producer/consumer bytecode drift.**
+`mix_compile failed to execute: :extra_projections` does not necessarily mean
+the retained candidate added a mount. In the 2026-07-15 L3B run, the loaded
+`Arbor.Actions.Mix` still emitted the retired read-write `runtime` projection
+from an old runtime snapshot while the loaded Shell core correctly accepted
+only `worktree`, `home`, `tmp`, `build`, and `deps`. Read the task artifact's
+`validate/status.json`, inspect both loaded module source identities, and
+evaluate the live producer shape before blaming candidate code. Reconcile the
+reviewed producer between tasks; never widen the consumer's closed security
+envelope to accommodate stale code.
+
 **`Arbor.Shell.list_executions/0` returns `{:ok, executions}`, not a bare list.** Pattern-match the facade result before applying `length/1`, `MapSet`, or list transforms in live diagnostics; otherwise the diagnostic itself fails before the behavior under test runs (found 2026-07-15 during the spawn-capable facade registry proof).
 
 **Do not update the live node's build path during an execution-binding-pinned run.** A coding manifest can correctly pin the module object currently loaded by the server while a foreground Mix command has already written a newer BEAM to the main checkout's `_build/dev`; a later live reload then changes executable identity mid-run and the Engine correctly rejects the next node with `handler_binding_mismatch`. Run every verification in a worktree with an isolated build path, reconcile or restart the live node before dispatch, and preflight loaded-object versus `:code.which` file identity so stale runtime state fails before the worker starts (found 2026-07-10 while dogfooding the Phase 6 cross-app workflow).
