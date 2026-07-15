@@ -569,6 +569,247 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
     end
   end
 
+  describe "fetch_persisted/2" do
+    test "roundtrip persist then fetch returns unwrapped payload map", %{
+      tmp: tmp,
+      store_name: store_name
+    } do
+      run_id = "run_fetch_roundtrip"
+      cp = sample_checkpoint(run_id)
+      assert {:ok, _} = Checkpoint.persist(cp, tmp, store_opts(store_name))
+
+      assert {:ok, payload} = Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+      assert is_map(payload)
+      refute Map.has_key?(payload, :__struct__)
+      refute match?(%PersistenceRecord{}, payload)
+      assert payload["run_id"] == run_id
+      assert payload["current_node"] == "n1"
+      assert payload["graph_hash"] == "gh"
+      assert is_map(payload["context_values"])
+    end
+
+    test "uses exact checkpoint:<run_id> key; bare run_id is not found", %{
+      tmp: tmp,
+      store_name: store_name
+    } do
+      run_id = "run_fetch_exact_key"
+      cp = sample_checkpoint(run_id)
+      assert {:ok, _} = Checkpoint.persist(cp, tmp, store_opts(store_name))
+
+      data = MemoryStore.dump(store_name)
+      assert Map.has_key?(data, "checkpoint:#{run_id}")
+      refute Map.has_key?(data, run_id)
+
+      # Value stored under the bare run_id must not be readable via fetch.
+      :ok =
+        MemoryStore.put(run_id, PersistenceRecord.new(run_id, %{"run_id" => run_id}),
+          name: store_name
+        )
+
+      assert {:ok, _} = Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+
+      # After deleting only the prefixed key, fetch must miss even if bare key remains.
+      :ok = MemoryStore.delete("checkpoint:#{run_id}", name: store_name)
+      assert {:error, :not_found} = Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+      assert {:ok, _} = MemoryStore.get(run_id, name: store_name)
+    end
+
+    test "unwraps structured PersistenceRecord envelope", %{tmp: tmp, store_name: store_name} do
+      run_id = "run_fetch_record"
+      cp = sample_checkpoint(run_id)
+      assert {:ok, _} = Checkpoint.persist(cp, tmp, store_opts(store_name))
+
+      key = "checkpoint:#{run_id}"
+      assert %PersistenceRecord{} = Map.fetch!(MemoryStore.dump(store_name), key)
+
+      assert {:ok, payload} = Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+      assert payload["run_id"] == run_id
+      # Payload is the inner data map, not the Record wrapper fields.
+      refute Map.has_key?(payload, "metadata")
+      refute Map.has_key?(payload, "revision")
+    end
+
+    test "unwraps supported legacy raw-map payload", %{store_name: store_name} do
+      run_id = "run_fetch_legacy"
+      key = "checkpoint:#{run_id}"
+
+      raw = %{
+        "timestamp" => "2026-07-15T00:00:00Z",
+        "run_id" => run_id,
+        "current_node" => "n1",
+        "completed_nodes" => [],
+        "node_retries" => %{},
+        "context_values" => %{"k" => "v"},
+        "context_taint" => %{},
+        "node_outcomes" => %{},
+        "context_lineage" => %{},
+        "content_hashes" => %{},
+        "pending_intents" => %{},
+        "execution_digests" => %{}
+      }
+
+      :ok = MemoryStore.put(key, raw, name: store_name)
+
+      assert {:ok, payload} = Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+      assert payload["run_id"] == run_id
+      assert payload["context_values"]["k"] == "v"
+    end
+
+    test "unwraps serialized Record-shaped map envelope", %{store_name: store_name} do
+      run_id = "run_fetch_serialized_envelope"
+      key = "checkpoint:#{run_id}"
+
+      envelope = %{
+        "key" => key,
+        "id" => "rec_test",
+        "revision" => 1,
+        "data" => %{
+          "timestamp" => "2026-07-15T00:00:00Z",
+          "run_id" => run_id,
+          "current_node" => "n2",
+          "completed_nodes" => [],
+          "node_retries" => %{},
+          "context_values" => %{},
+          "context_taint" => %{},
+          "node_outcomes" => %{},
+          "context_lineage" => %{},
+          "content_hashes" => %{},
+          "pending_intents" => %{},
+          "execution_digests" => %{}
+        }
+      }
+
+      :ok = MemoryStore.put(key, envelope, name: store_name)
+
+      assert {:ok, payload} = Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+      assert payload["run_id"] == run_id
+      assert payload["current_node"] == "n2"
+      refute Map.has_key?(payload, "revision")
+    end
+
+    test "missing key returns :not_found", %{store_name: store_name} do
+      assert {:error, :not_found} =
+               Checkpoint.fetch_persisted("run_fetch_missing", store_opts(store_name))
+    end
+
+    test "wrong Record key fails closed", %{store_name: store_name} do
+      run_id = "run_fetch_wrong_key"
+      key = "checkpoint:#{run_id}"
+
+      mismatched =
+        PersistenceRecord.new("checkpoint:other_run", %{
+          "run_id" => run_id,
+          "current_node" => "n1",
+          "timestamp" => "2026-07-15T00:00:00Z"
+        })
+
+      :ok = MemoryStore.put(key, mismatched, name: store_name)
+
+      assert {:error, :checkpoint_key_mismatch} =
+               Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+    end
+
+    test "wrong serialized envelope key fails closed", %{store_name: store_name} do
+      run_id = "run_fetch_wrong_envelope_key"
+      key = "checkpoint:#{run_id}"
+
+      envelope = %{
+        "key" => "checkpoint:someone_else",
+        "id" => "rec_x",
+        "data" => %{"run_id" => run_id, "current_node" => "n1"}
+      }
+
+      :ok = MemoryStore.put(key, envelope, name: store_name)
+
+      assert {:error, :checkpoint_key_mismatch} =
+               Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+    end
+
+    test "corrupt non-map payload is rejected", %{store_name: store_name} do
+      run_id = "run_fetch_corrupt"
+      key = "checkpoint:#{run_id}"
+      :ok = MemoryStore.put(key, "not-a-map-payload", name: store_name)
+
+      assert {:error, :invalid_checkpoint_payload} =
+               Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+    end
+
+    test "Record with non-map data is rejected", %{store_name: store_name} do
+      run_id = "run_fetch_record_corrupt"
+      key = "checkpoint:#{run_id}"
+      # Bypass Record.new/2 which expects map data by building a bare struct shape
+      # the store may return after corruption.
+      corrupt = %{__struct__: PersistenceRecord, key: key, data: [1, 2, 3], metadata: %{}}
+      :ok = MemoryStore.put(key, corrupt, name: store_name)
+
+      assert {:error, reason} = Checkpoint.fetch_persisted(run_id, store_opts(store_name))
+      assert reason in [:invalid_checkpoint_payload, :checkpoint_key_mismatch]
+    end
+
+    test "store: nil yields typed store_not_configured, never file fallback", %{tmp: tmp} do
+      run_id = "run_fetch_file_only"
+      cp = sample_checkpoint(run_id)
+      assert :ok = Checkpoint.write(cp, tmp, store: nil)
+      assert File.exists?(Path.join(tmp, "checkpoint.json"))
+
+      assert {:error, :store_not_configured} =
+               Checkpoint.fetch_persisted(run_id, store: nil)
+    end
+
+    test "invalid store config fails closed", %{store_name: store_name} do
+      assert {:error, {:invalid_store_config, :store_not_atom_or_nil}} =
+               Checkpoint.fetch_persisted("run_x", store: "not-a-module")
+
+      assert {:error, {:invalid_store_config, :store_name_not_atom}} =
+               Checkpoint.fetch_persisted("run_x", store: MemoryStore, store_name: "bad")
+
+      assert {:error, {:invalid_store_config, :store_opts_not_keyword}} =
+               Checkpoint.fetch_persisted("run_x",
+                 store: MemoryStore,
+                 store_name: store_name,
+                 store_opts: %{not: :keyword}
+               )
+    end
+
+    test "nonbinary run_id fails closed" do
+      assert {:error, {:invalid_option, :run_id_not_binary}} =
+               Checkpoint.fetch_persisted(:atom_run_id, store: nil)
+    end
+
+    test "backend get outage is surfaced as store_unavailable", %{store_name: store_name} do
+      :ok = MemoryStore.set_fail(store_name, :get)
+
+      assert {:error, {:store_unavailable, _}} =
+               Checkpoint.fetch_persisted("run_fetch_outage", store_opts(store_name))
+    end
+
+    test "backend throw is bounded as store_unavailable" do
+      assert {:error, {:store_unavailable, reason}} =
+               Checkpoint.fetch_persisted("run_fetch_throw",
+                 store: ThrowingStore,
+                 store_name: :throwing_fetch_store
+               )
+
+      assert inspect(reason) =~ "backend_throw"
+      assert byte_size(inspect(reason)) <= 512
+    end
+
+    test "does not expose arbitrary key reads", %{store_name: store_name} do
+      # Foreign key under a different prefix must remain unreachable.
+      :ok =
+        MemoryStore.put(
+          "secret:run_foreign",
+          PersistenceRecord.new("secret:run_foreign", %{"secret" => true}),
+          name: store_name
+        )
+
+      assert {:error, :not_found} =
+               Checkpoint.fetch_persisted("run_foreign", store_opts(store_name))
+
+      assert {:ok, _} = MemoryStore.get("secret:run_foreign", name: store_name)
+    end
+  end
+
   describe "cleanup error surface" do
     test "cleanup is idempotent for missing keys", %{store_name: store_name} do
       assert :ok = Checkpoint.cleanup("missing_run", store_opts(store_name))

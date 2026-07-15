@@ -303,6 +303,56 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   end
 
   @doc """
+  Fetch the authenticated serialized checkpoint payload from the configured store.
+
+  Owner primitive for L4 application/node recovery. Unlike `load/2`, this:
+
+  - never falls back to a local `checkpoint.json`
+  - returns the unwrapped checkpoint **payload map** (not `%__MODULE__{}` and
+    not a `PersistenceRecord` wrapper)
+  - treats explicit `store: nil` as not configured (`:store_not_configured`)
+    rather than file-only success
+
+  Uses the same store config resolution, exact `"checkpoint:<run_id>"` key,
+  public `Arbor.Persistence` facade, and envelope-unwrapping path as
+  `persist/3` / `load/2`. Does not accept arbitrary keys or expose backend
+  internals.
+
+  ## Options
+
+  - `:store` / `:store_name` / `:store_opts` — same as `persist/3`
+  - `:hmac_secret` — optional HMAC verification of the payload
+
+  ## Errors (bounded, fail-closed)
+
+  - `{:invalid_option, :run_id_not_binary}` — non-binary run_id
+  - `{:invalid_store_config, _}` — malformed opts
+  - `:store_not_configured` — explicit file-only (`store: nil`)
+  - `:not_found` — missing exact prefixed key
+  - `{:store_unavailable, _}` — backend outage / raise / throw / exit / bad shape
+  - `:checkpoint_key_mismatch` — Record envelope key does not match store key
+  - `:invalid_checkpoint_payload` — non-map / corrupt / unreadable payload
+  - `:tampered` — HMAC verification failed (when secret provided)
+  """
+  @spec fetch_persisted(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def fetch_persisted(run_id, opts \\ [])
+
+  def fetch_persisted(run_id, opts) when is_binary(run_id) do
+    with {:ok, store_cfg} <- resolve_store_config(opts),
+         {:ok, cfg} <- require_configured_store(store_cfg) do
+      hmac_secret = Keyword.get(opts, :hmac_secret)
+      fetch_persisted_from_store(run_id, hmac_secret, cfg)
+    else
+      {:error, reason} ->
+        {:error, bound_reason(reason)}
+    end
+  end
+
+  def fetch_persisted(_run_id, _opts) do
+    {:error, bound_reason({:invalid_option, :run_id_not_binary})}
+  end
+
+  @doc """
   Report honest durability for the configured checkpoint store.
 
   - `durable` is true only for healthy `:application_restart` / `:node_restart`
@@ -824,6 +874,95 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
         {:error, reason}
     end
   end
+
+  # Explicit file-only config is unavailable for store-backed recovery fetch.
+  defp require_configured_store(nil), do: {:error, :store_not_configured}
+  defp require_configured_store(cfg) when is_map(cfg), do: {:ok, cfg}
+
+  defp fetch_persisted_from_store(run_id, hmac_secret, cfg) when is_binary(run_id) do
+    key = store_key(run_id)
+
+    case store_get(cfg, key) do
+      {:ok, value} ->
+        with :ok <- validate_persisted_record_key(value, key),
+             {:ok, data} <- unwrap_store_value(value),
+             {:ok, data} <- ensure_checkpoint_payload_map(data),
+             decoded <- normalize_keys(data),
+             {:ok, decoded} <- maybe_verify(decoded, hmac_secret),
+             {:ok, decoded} <- ensure_checkpoint_payload_map(decoded) do
+          {:ok, decoded}
+        else
+          {:error, reason} ->
+            {:error, bound_reason(reason)}
+        end
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, bound_reason(reason)}
+    end
+  end
+
+  # Record envelopes must bind the exact store key; mismatches fail closed so a
+  # swapped or mis-keyed PersistenceRecord cannot be accepted as this run_id.
+  defp validate_persisted_record_key(%PersistenceRecord{key: record_key}, expected_key)
+       when is_binary(record_key) and is_binary(expected_key) do
+    if record_key == expected_key do
+      :ok
+    else
+      {:error, :checkpoint_key_mismatch}
+    end
+  end
+
+  defp validate_persisted_record_key(%PersistenceRecord{}, _expected_key) do
+    {:error, :checkpoint_key_mismatch}
+  end
+
+  defp validate_persisted_record_key(%{__struct__: mod, key: record_key}, expected_key)
+       when is_atom(mod) and is_binary(record_key) and is_binary(expected_key) do
+    if mod == PersistenceRecord do
+      if record_key == expected_key, do: :ok, else: {:error, :checkpoint_key_mismatch}
+    else
+      :ok
+    end
+  end
+
+  defp validate_persisted_record_key(map, expected_key)
+       when is_map(map) and not is_map_key(map, :__struct__) and is_binary(expected_key) do
+    # Serialized Record-shaped envelopes carry an explicit key + data map.
+    data = Map.get(map, "data") || Map.get(map, :data)
+    key = Map.get(map, "key") || Map.get(map, :key)
+
+    envelope? =
+      is_map(data) and
+        (Map.has_key?(map, "key") or Map.has_key?(map, :key) or Map.has_key?(map, "id") or
+           Map.has_key?(map, :id) or Map.has_key?(map, "revision") or
+           Map.has_key?(map, :revision))
+
+    cond do
+      not envelope? ->
+        :ok
+
+      is_binary(key) and key == expected_key ->
+        :ok
+
+      true ->
+        {:error, :checkpoint_key_mismatch}
+    end
+  end
+
+  defp validate_persisted_record_key(_value, _expected_key), do: :ok
+
+  defp ensure_checkpoint_payload_map(data) when is_map(data) do
+    if Map.has_key?(data, :__struct__) do
+      {:error, :invalid_checkpoint_payload}
+    else
+      {:ok, data}
+    end
+  end
+
+  defp ensure_checkpoint_payload_map(_), do: {:error, :invalid_checkpoint_payload}
 
   # Postgres QueryableStore and Record-aware backends return %Record{}.
   # Legacy raw-map payloads remain readable for compatibility.
