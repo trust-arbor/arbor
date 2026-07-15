@@ -852,7 +852,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       refute Process.alive?(worker)
 
       exec = await_registry_terminal(execution_id, 5_000)
-      assert exec.status == :completed
+      assert exec.status == :killed
       assert exec.result.cancelled == true
     end
 
