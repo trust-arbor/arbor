@@ -64,6 +64,8 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
   @moduletag :security_regression
   @moduletag :fast
 
+  alias Arbor.Orchestrator.RunJournal
+  alias Arbor.Orchestrator.RunLifecycle.Record
   alias Arbor.Orchestrator.TestCapabilities
 
   # Single function-exec node so resume has somewhere to go after the gate.
@@ -84,43 +86,87 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
     )
   end
 
-  # Run the pipeline once (non-resume) to make the engine write a *signed*
-  # checkpoint (identity_private_key derives the HMAC secret), so resume can
-  # load it. The non-resume path does NOT call the capability gate, so any
-  # agent_id works for the write.
-  defp seed_signed_checkpoint(root, private_key) do
+  setup do
+    suffix = System.unique_integer([:positive, :monotonic])
+    journal_name = :"resume_authz_journal_#{suffix}"
+
+    start_supervised!(
+      {RunJournal, name: journal_name, ets_table: :"resume_authz_hot_#{suffix}", backend: nil}
+    )
+
+    %{journal_opts: [server: journal_name]}
+  end
+
+  # Run once to write a signed checkpoint, then stage the lifecycle claim that
+  # atomic resume admission now requires. The seed run has authorization off,
+  # so the capability gate is exercised only by the subsequent resume.
+  defp seed_signed_checkpoint(
+         root,
+         private_key,
+         run_id,
+         principal,
+         journal_opts
+       ) do
     ckpt_path = Path.join(root, "checkpoint.json")
 
     {:ok, _} =
       Arbor.Orchestrator.run(@resume_dot,
         logs_root: root,
+        run_id: run_id,
         authorization: false,
         identity_private_key: private_key,
+        agent_id: principal,
+        execution_principal: principal,
+        journal_opts: journal_opts,
         function_handler: fn _args -> {:ok, %{ran: true}} end
       )
 
     assert File.exists?(ckpt_path), "engine should have written a checkpoint to resume from"
+
+    assert {:ok, %Record{} = finished} =
+             RunJournal.get_record(run_id, journal_opts)
+
+    assert :ok =
+             RunJournal.put(
+               %Record{
+                 finished
+                 | status: :recovering,
+                   finished_at: nil,
+                   duration_ms: nil,
+                   failure_reason: nil,
+                   owner_node: node(),
+                   spawning_pid: nil
+               },
+               journal_opts
+             )
+
     ckpt_path
   end
 
-  test "resume DENIES an agent that lacks arbor://orchestrator/execute (gate fires)" do
+  test "resume DENIES an agent that lacks arbor://orchestrator/execute (gate fires)", ctx do
     root = logs_root()
     on_exit(fn -> File.rm_rf(root) end)
 
     private_key = :crypto.strong_rand_bytes(32)
-    ckpt_path = seed_signed_checkpoint(root, private_key)
 
     # This agent is NOT granted the capability anywhere (test_helper grants a
     # fixed allowlist; this id is not in it and we don't grant it).
     ungranted = "agent_resume_authz_denied_#{System.unique_integer([:positive])}"
+    run_id = "resume_authz_denied_#{System.unique_integer([:positive])}"
+
+    ckpt_path =
+      seed_signed_checkpoint(root, private_key, run_id, ungranted, ctx.journal_opts)
 
     result =
       Arbor.Orchestrator.run(@resume_dot,
         logs_root: root,
         resume_from: ckpt_path,
+        run_id: run_id,
         authorization: false,
         identity_private_key: private_key,
         agent_id: ungranted,
+        execution_principal: ungranted,
+        journal_opts: ctx.journal_opts,
         function_handler: fn _args -> {:ok, %{ran: true}} end
       )
 
@@ -129,30 +175,32 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
              "arbor://orchestrator/execute was allowed to resume. Got: #{inspect(result)}"
   end
 
-  test "resume ALLOWS an agent that holds arbor://orchestrator/execute (gate passes through)" do
+  test "resume ALLOWS an agent that holds arbor://orchestrator/execute (gate passes through)",
+       ctx do
     root = logs_root()
     on_exit(fn -> File.rm_rf(root) end)
 
     private_key = :crypto.strong_rand_bytes(32)
-    ckpt_path = seed_signed_checkpoint(root, private_key)
 
     granted = "agent_resume_authz_granted_#{System.unique_integer([:positive])}"
+    run_id = "resume_authz_granted_#{System.unique_integer([:positive])}"
     :ok = TestCapabilities.grant_orchestrator_access(granted)
+    on_exit(fn -> TestCapabilities.revoke_all(granted) end)
 
-    result =
-      Arbor.Orchestrator.run(@resume_dot,
-        logs_root: root,
-        resume_from: ckpt_path,
-        authorization: false,
-        identity_private_key: private_key,
-        agent_id: granted,
-        function_handler: fn _args -> {:ok, %{ran: true}} end
-      )
+    ckpt_path =
+      seed_signed_checkpoint(root, private_key, run_id, granted, ctx.journal_opts)
 
-    # The gate must NOT deny a properly-authorized agent. The run completes
-    # (or fails for some unrelated downstream reason) but never with the
-    # resume-authorization error.
-    refute match?({:error, {:unauthorized_resume, _}}, result),
-           "resume capability gate denied an authorized agent. Got: #{inspect(result)}"
+    assert {:ok, _result} =
+             Arbor.Orchestrator.run(@resume_dot,
+               logs_root: root,
+               resume_from: ckpt_path,
+               run_id: run_id,
+               authorization: false,
+               identity_private_key: private_key,
+               agent_id: granted,
+               execution_principal: granted,
+               journal_opts: ctx.journal_opts,
+               function_handler: fn _args -> {:ok, %{ran: true}} end
+             )
   end
 end
