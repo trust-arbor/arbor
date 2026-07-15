@@ -955,12 +955,21 @@ defmodule Arbor.Orchestrator.RunJournal do
   # Remote-owner in-flight rows on node_restart+CAS must not use ordinary put:
   # a stale put can overwrite a concurrent recovering claim.
   defp fenced_remote_interrupt?(%Record{} = record, state) do
-    cross_node_atomic_recovery_enabled?(state) and remote_owner?(record, state.local_node)
+    cross_node_atomic_recovery_enabled?(state) and
+      remote_takeover_record?(record, state.local_node)
   end
 
-  defp remote_owner?(%Record{owner_node: nil}, _local_node), do: false
+  # Owner is authoritative when present. Ownerless rows retain source provenance;
+  # a remote source must still take the CAS path so stale hot state cannot use an
+  # ordinary put to revert a recovering durable row.
+  defp remote_takeover_record?(%Record{owner_node: nil, source_node: nil}, _local_node),
+    do: false
 
-  defp remote_owner?(%Record{owner_node: owner}, local_node) do
+  defp remote_takeover_record?(%Record{owner_node: nil, source_node: source}, local_node) do
+    to_string(source) != to_string(local_node)
+  end
+
+  defp remote_takeover_record?(%Record{owner_node: owner}, local_node) do
     to_string(owner) != to_string(local_node)
   end
 
@@ -988,7 +997,7 @@ defmodule Arbor.Orchestrator.RunJournal do
           {:ok, %Record{} = durable} ->
             cond do
               durable.status in [:running, :degraded, :suspended] and
-                  remote_owner?(durable, state.local_node) ->
+                  remote_takeover_record?(durable, state.local_node) ->
                 interrupted = %Record{
                   durable
                   | status: :interrupted,

@@ -493,15 +493,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
             []
         end
 
-      # Legacy is only considered for non-distributed (local) automatic recovery.
-      # Distributed remote-owner takeover never auto-handles unfenced legacy rows.
       legacy_stale =
-        if cross_node_atomic_recovery?(state) do
-          []
-        else
-          LegacyJobAdapter.list_stale_heartbeats(@stale_heartbeat_ms, now)
-          |> Enum.map(fn %Record{} = r -> %{record: r, source: :legacy} end)
-        end
+        LegacyJobAdapter.list_stale_heartbeats(@stale_heartbeat_ms, now)
+        |> Enum.map(fn %Record{} = r -> %{record: r, source: :legacy} end)
 
       stale =
         (current_stale ++ legacy_stale)

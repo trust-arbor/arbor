@@ -1010,6 +1010,83 @@ defmodule Arbor.Orchestrator.RunJournalFencedClaimL4Test do
       assert to_string(owner) == data["owner_node"]
     end
 
+    test "ownerless remote-source stale writer cannot revert a recovering claim", %{
+      suffix: suffix
+    } do
+      store_name = :"l4b_ownerless_store_#{suffix}"
+      journal_a = :"l4b_ownerless_ja_#{suffix}"
+      journal_b = :"l4b_ownerless_jb_#{suffix}"
+      node_a = :ownerless_a@test
+      node_b = :ownerless_b@test
+      remote = :ownerless_source@other
+      run_id = "l4b_ownerless_#{suffix}"
+
+      {:ok, _} =
+        start_supervised(%{
+          id: store_name,
+          start: {FencedNodeRestartStore, :start_link, [[name: store_name]]}
+        })
+
+      for {journal, table, local} <- [
+            {journal_a, :"l4b_ownerless_hot_a_#{suffix}", node_a},
+            {journal_b, :"l4b_ownerless_hot_b_#{suffix}", node_b}
+          ] do
+        {:ok, _} =
+          start_supervised(%{
+            id: journal,
+            start:
+              {RunJournal, :start_link,
+               [
+                 [
+                   name: journal,
+                   ets_table: table,
+                   backend: FencedNodeRestartStore,
+                   store_name: store_name,
+                   start_store: false,
+                   local_node: local
+                 ]
+               ]}
+          })
+      end
+
+      ownerless_remote = %Record{
+        run_id: run_id,
+        pipeline_id: run_id,
+        status: :running,
+        started_at: DateTime.utc_now(),
+        total_nodes: 1,
+        owner_node: nil,
+        source_node: remote
+      }
+
+      assert :ok = RunJournal.put(ownerless_remote, server: journal_a)
+
+      # Journal B started before the seed, so give it the same stale ownerless
+      # hot view without changing durable authority after the claim below.
+      assert :ok = RunJournal.put(ownerless_remote, server: journal_b)
+      assert :ok = RunJournal.mark_interrupted(run_id, server: journal_a)
+
+      assert {:ok, %Record{status: :recovering, owner_node: ^node_a}} =
+               RunJournal.claim_for_recovery(run_id, node_a, server: journal_a)
+
+      # B still sees ownerless remote-source :running. This used to take the
+      # ordinary put path and overwrite A's recovering CAS.
+      assert {:ok, %Record{status: :running, owner_node: nil}} =
+               RunJournal.get_record(run_id, server: journal_b)
+
+      assert {:error, :interrupt_conflict} =
+               RunJournal.mark_interrupted(run_id, server: journal_b)
+
+      assert {:ok, %PersistenceRecord{data: durable}} =
+               Persistence.get(store_name, FencedNodeRestartStore, run_id)
+
+      assert durable["status"] == "recovering"
+      assert durable["owner_node"] == to_string(node_a)
+
+      assert {:ok, %Record{status: :recovering, owner_node: ^node_a}} =
+               RunJournal.get_record(run_id, server: journal_b)
+    end
+
     test "nodedown does not mutate or enqueue legacy JobRegistry rows", %{suffix: suffix} do
       store_name = :"l4b_legacy_store_#{suffix}"
       journal_name = :"l4b_legacy_journal_#{suffix}"
@@ -1104,6 +1181,93 @@ defmodule Arbor.Orchestrator.RunJournalFencedClaimL4Test do
       assert to_string(legacy.owner_node) == to_string(remote)
 
       # Current journal never adopted the legacy identity.
+      assert {:error, :not_found} = RunJournal.get_record(legacy_run, server: journal_name)
+    end
+
+    test "fenced capability preserves local legacy stale cleanup", %{suffix: suffix} do
+      store_name = :"l4b_local_legacy_store_#{suffix}"
+      journal_name = :"l4b_local_legacy_journal_#{suffix}"
+      coord_name = :"l4b_local_legacy_coord_#{suffix}"
+      legacy_run = "l4b_local_legacy_#{suffix}"
+      jobs_store = :arbor_orchestrator_jobs
+      now = DateTime.utc_now()
+      {dead_pid, dead_ref} = spawn_monitor(fn -> :ok end)
+      assert_receive {:DOWN, ^dead_ref, :process, ^dead_pid, :normal}, 1_000
+
+      {:ok, _} =
+        start_supervised(%{
+          id: store_name,
+          start: {FencedNodeRestartStore, :start_link, [[name: store_name]]}
+        })
+
+      {:ok, _} =
+        start_supervised(%{
+          id: journal_name,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_name,
+                 ets_table: :"l4b_local_legacy_hot_#{suffix}",
+                 backend: FencedNodeRestartStore,
+                 store_name: store_name,
+                 start_store: false,
+                 local_node: Kernel.node()
+               ]
+             ]}
+        })
+
+      entry = %JobRegistry.Entry{
+        pipeline_id: legacy_run,
+        run_id: legacy_run,
+        graph_id: "legacy_local_graph",
+        started_at: DateTime.add(now, -120, :second),
+        completed_count: 1,
+        total_nodes: 2,
+        status: :running,
+        source_node: Kernel.node(),
+        owner_node: Kernel.node(),
+        spawning_pid: dead_pid,
+        last_heartbeat: DateTime.add(now, -120, :second),
+        node_durations: %{}
+      }
+
+      assert :ok = Arbor.Persistence.BufferedStore.put(legacy_run, entry, name: jobs_store)
+
+      on_exit(fn ->
+        try do
+          Arbor.Persistence.BufferedStore.delete(legacy_run, name: jobs_store)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      recovery_root = Path.join(System.tmp_dir!(), "l4b_local_legacy_root_#{suffix}")
+      File.mkdir_p!(recovery_root)
+      on_exit(fn -> File.rm_rf(recovery_root) end)
+
+      {:ok, coord} =
+        start_supervised(%{
+          id: coord_name,
+          start:
+            {RecoveryCoordinator, :start_link,
+             [
+               [
+                 name: coord_name,
+                 enabled: true,
+                 journal_opts: [server: journal_name],
+                 recovery_root: recovery_root,
+                 delay_ms: 60_000
+               ]
+             ]}
+        })
+
+      assert RecoveryCoordinator.status(coord_name).cross_node_atomic_recovery == true
+
+      send(coord, :check_stale_heartbeats)
+      _ = RecoveryCoordinator.status(coord_name)
+
+      assert %JobRegistry.Entry{status: :abandoned} = JobRegistry.get(legacy_run)
       assert {:error, :not_found} = RunJournal.get_record(legacy_run, server: journal_name)
     end
   end
