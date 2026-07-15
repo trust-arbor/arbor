@@ -18,12 +18,25 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   ## Owner-death cleanup
 
-  The registry monitors the owner process. If it dies before a normal release:
+  Owner death is the authoritative fallback used by TaskStore hard cancellation
+  and unexpected crashes. The registry always cleans child validation resources
+  and private attestations/review snapshots first. Then:
 
-  * **owned** leases - immediately remove only the worktree path created by
-    that lease
-  * **reused** leases - drop the lease record only; never remove a pre-existing
-    worktree
+  * **reused** leases — drop the lease record only; reused paths are never
+    deletion authority and always survive
+  * **owned** leases — inspect live worktree state against the lease
+    `base_commit` while serialized inside the registry:
+    * pristine (`!dirty` and `HEAD == base_commit`): remove the worktree
+      immediately (keeps abandoned empty acquisitions deterministic)
+    * dirty **or** clean `HEAD != base_commit`: convert atomically to the
+      existing bounded-TTL retained lease, preserving exact `task_id` +
+      `principal_id` reactivation authority
+    * inspection or retention-identity uncertainty: fail safe against data
+      loss — do not remove a potentially useful worktree; keep recoverable
+      lease/retained authority and record the failure explicitly
+
+  Retained conversion reuses the normal `:retain` identity/TTL machinery; it
+  does not introduce a second unbounded retention path.
 
   Two-revision validation resources are child leases. Their private staging,
   isolated build directories, and detached base worktree are monitored against
@@ -53,6 +66,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   """
 
   use GenServer
+
+  require Logger
 
   alias Arbor.Actions.Config
   alias Arbor.Actions.Coding.Workspace
@@ -1313,8 +1328,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       _ ->
         case System.cmd("realpath", [path], stderr_to_stdout: true) do
-          {resolved, 0} -> {:ok, String.trim(resolved)}
-          _ -> {:error, :path_resolve_failed}
+          {resolved, 0} ->
+            {:ok, String.trim(resolved)}
+
+          _ ->
+            # Prefer a live expanded path over failing closed when the tree
+            # still exists but component-wise realpath cannot complete (e.g.
+            # mid-cleanup races). Retention identity still re-checks lstat and
+            # worktree registration before any delete authority is taken.
+            if File.exists?(path) or File.dir?(path) do
+              {:ok, Path.expand(path)}
+            else
+              {:error, :path_resolve_failed}
+            end
         end
     end
   rescue
@@ -1667,19 +1693,143 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
               |> cleanup_workspace_attestations(workspace_id)
               |> cleanup_workspace_review_snapshots(workspace_id)
 
-            case Map.pop(state.leases, workspace_id) do
-              {nil, _leases} ->
+            case Map.get(state.leases, workspace_id) do
+              nil ->
                 {:noreply, state}
 
-              {lease, leases} ->
-                if lease.cleanup_armed and lease.ownership == :owned do
-                  remove_owned_worktree(lease.repo_path, lease.worktree_path)
-                end
-
-                {:noreply, %{state | leases: leases}}
+              lease ->
+                {:noreply, apply_owner_death_workspace_policy(state, lease)}
             end
         end
     end
+  end
+
+  # Registry lifecycle policy for owner death (TaskStore hard cancel / crash).
+  # Serialized inside the GenServer — never a DOT node or Jido action.
+  defp apply_owner_death_workspace_policy(state, lease) do
+    cond do
+      lease.cleanup_armed != true ->
+        drop_lease(state, lease)
+
+      lease.ownership == :reused ->
+        # Reused paths are never deletion authority.
+        drop_lease(state, lease)
+
+      lease.ownership == :owned ->
+        apply_owned_owner_death_policy(state, lease)
+
+      true ->
+        drop_lease(state, lease)
+    end
+  end
+
+  defp apply_owned_owner_death_policy(state, lease) do
+    case classify_owner_death_worktree(lease) do
+      :absent ->
+        drop_lease(state, lease)
+
+      :remove ->
+        state = drop_lease(state, lease)
+        remove_owned_worktree(lease.repo_path, lease.worktree_path)
+        state
+
+      :retain ->
+        retain_on_owner_death(state, lease, :useful_progress)
+
+      :retain_uncertain ->
+        retain_on_owner_death(state, lease, :inspection_uncertain)
+    end
+  end
+
+  defp classify_owner_death_worktree(lease) do
+    inspection = Workspace.inspect_worktree(lease.worktree_path, lease.base_commit)
+    base = lease.base_commit
+    head = Map.get(inspection, :head_commit)
+
+    cond do
+      inspection.exists != true ->
+        :absent
+
+      # Dirty uncommitted work is always useful progress.
+      inspection.dirty == true ->
+        :retain
+
+      # Clean HEAD advanced past acquire base is also useful progress.
+      is_binary(head) and head != "" and is_binary(base) and base != "" and head != base ->
+        :retain
+
+      # Proven pristine: clean worktree still at the acquire base commit.
+      is_binary(head) and head != "" and is_binary(base) and base != "" and head == base and
+          inspection.dirty == false ->
+        :remove
+
+      # Missing HEAD, missing base, or other incomplete inspection — fail safe.
+      true ->
+        :retain_uncertain
+    end
+  end
+
+  defp retain_on_owner_death(state, lease, reason) do
+    case do_release(state, lease, :retain) do
+      {:ok, _result, state} ->
+        if reason == :inspection_uncertain do
+          Logger.warning(
+            "workspace owner-death retained lease after uncertain inspection",
+            workspace_id: lease.workspace_id,
+            task_id: lease.task_id,
+            principal_id: lease.principal_id,
+            ownership: lease.ownership,
+            reason: reason
+          )
+        end
+
+        state
+
+      {:error, :retention_identity_unavailable, state} ->
+        preserve_or_drop_after_failed_retain(
+          state,
+          lease,
+          reason,
+          :retention_identity_unavailable,
+          :retention_identity_unavailable
+        )
+
+      {:error, other, state} ->
+        preserve_or_drop_after_failed_retain(state, lease, reason, :retain_failed, other)
+    end
+  end
+
+  defp preserve_or_drop_after_failed_retain(state, lease, reason, policy, detail) do
+    path = lease.worktree_path
+
+    if is_binary(path) and path != "" and File.dir?(path) do
+      # Path still present: fail safe against data loss. Keep recoverable
+      # task+principal authority with cleanup disarmed (no second retention system).
+      Logger.warning(
+        "workspace owner-death retain failed while worktree still present; preserving lease",
+        workspace_id: lease.workspace_id,
+        task_id: lease.task_id,
+        principal_id: lease.principal_id,
+        ownership: lease.ownership,
+        reason: reason,
+        policy: policy,
+        detail: inspect(detail)
+      )
+
+      put_lease(state, preserve_lease_after_owner_death(lease, reason, policy, detail))
+    else
+      # Path already gone (common teardown race): drop the lease only.
+      drop_lease(state, lease)
+    end
+  end
+
+  defp preserve_lease_after_owner_death(lease, reason, policy, detail) do
+    lease
+    |> Map.put(:cleanup_armed, false)
+    |> Map.put(:active, true)
+    |> Map.put(:owner_death_policy, policy)
+    |> Map.put(:owner_death_policy_reason, reason)
+    |> Map.put(:owner_death_policy_error, detail)
   end
 
   defp ensure_material_matches_lease(material, lease) do
@@ -2411,53 +2561,60 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp do_release(state, lease, :retain) when lease.ownership == :owned do
-    with {:ok, canonical_worktree_path} <- canonical_existing_path(lease.worktree_path),
-         {:ok, lstat} <- File.lstat(canonical_worktree_path),
-         {:ok, registration} <- worktree_registration(lease.repo_path, canonical_worktree_path) do
-      now_ms = System.monotonic_time(:millisecond)
-      ttl_ms = state.retention_ttl_ms
-      expires_at_ms = now_ms + ttl_ms
-      expires_at = DateTime.add(DateTime.utc_now(), ttl_ms, :millisecond)
-      generation = make_ref()
-      target = target_key(lease.repo_path, lease.branch, canonical_worktree_path)
+    case capture_retention_identity(lease) do
+      {:ok, identity} ->
+        now_ms = System.monotonic_time(:millisecond)
+        ttl_ms = state.retention_ttl_ms
+        expires_at_ms = now_ms + ttl_ms
+        expires_at = DateTime.add(DateTime.utc_now(), ttl_ms, :millisecond)
+        generation = make_ref()
+        target = target_key(lease.repo_path, lease.branch, identity.worktree_path)
 
-      retained = %{
-        workspace_id: lease.workspace_id,
-        owner_pid: lease.owner_pid,
-        task_id: lease.task_id,
-        principal_id: lease.principal_id,
-        repo_path: lease.repo_path,
-        worktree_path: canonical_worktree_path,
-        display_worktree_path: lease.worktree_path,
-        branch: lease.branch,
-        base_commit: lease.base_commit,
-        ownership: :owned,
-        target: target,
-        lstat_identity: lstat_identity(lstat),
-        worktree_registration: registration,
-        expiry_generation: generation,
-        expiry_ref: nil,
-        expires_at: expires_at,
-        expires_at_ms: expires_at_ms,
-        retry_count: 0,
-        cleanup_failure: nil
-      }
+        retained = %{
+          workspace_id: lease.workspace_id,
+          owner_pid: lease.owner_pid,
+          task_id: lease.task_id,
+          principal_id: lease.principal_id,
+          repo_path: lease.repo_path,
+          worktree_path: identity.worktree_path,
+          display_worktree_path: lease.worktree_path,
+          branch: lease.branch,
+          base_commit: lease.base_commit,
+          ownership: :owned,
+          target: target,
+          lstat_identity: identity.lstat_identity,
+          worktree_registration: identity.worktree_registration,
+          expiry_generation: generation,
+          expiry_ref: nil,
+          expires_at: expires_at,
+          expires_at_ms: expires_at_ms,
+          retry_count: 0,
+          cleanup_failure: nil
+        }
 
-      expiry_ref = Process.send_after(self(), {:retained_expire, target, generation}, ttl_ms)
-      retained = %{retained | expiry_ref: expiry_ref}
-      state = drop_lease(state, lease) |> put_retained(retained)
-      Process.demonitor(lease.owner_ref, [:flush])
+        expiry_ref = Process.send_after(self(), {:retained_expire, target, generation}, ttl_ms)
+        retained = %{retained | expiry_ref: expiry_ref}
+        state = drop_lease(state, lease) |> put_retained(retained)
+        Process.demonitor(lease.owner_ref, [:flush])
 
-      result =
-        lease
-        |> public_view()
-        |> Map.put(:active, false)
-        |> Map.put(:status, "retained")
-        |> Map.put(:expires_at, DateTime.to_iso8601(expires_at))
+        result =
+          lease
+          |> public_view()
+          |> Map.put(:active, false)
+          |> Map.put(:status, "retained")
+          |> Map.put(:expires_at, DateTime.to_iso8601(expires_at))
 
-      {:ok, result, state}
-    else
-      {:error, _reason} -> {:error, :retention_identity_unavailable, state}
+        {:ok, result, state}
+
+      {:error, reason} ->
+        # Public release surface keeps the stable atom; owner-death logging uses the detail.
+        Logger.debug(
+          "workspace retain identity unavailable",
+          workspace_id: lease.workspace_id,
+          detail: inspect(reason)
+        )
+
+        {:error, :retention_identity_unavailable, state}
     end
   end
 
@@ -2508,6 +2665,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       active: false,
       status: "already_released"
     }
+  end
+
+  defp capture_retention_identity(lease) do
+    with {:ok, canonical_worktree_path} <- canonical_existing_path(lease.worktree_path),
+         {:ok, lstat} <- File.lstat(canonical_worktree_path),
+         {:ok, registration} <- worktree_registration(lease.repo_path, canonical_worktree_path) do
+      {:ok,
+       %{
+         worktree_path: canonical_worktree_path,
+         lstat_identity: lstat_identity(lstat),
+         worktree_registration: registration
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected_identity, other}}
+    end
   end
 
   defp expire_retained(state, target, generation) do
@@ -2650,7 +2823,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         |> String.split("\n\n", trim: true)
         |> Enum.map(&parse_worktree_registration/1)
         |> Enum.find(fn
-          {:ok, %{path: path}} -> path == worktree_path
+          {:ok, %{path: path}} -> worktree_paths_match?(path, worktree_path)
           _ -> false
         end)
 
@@ -2661,16 +2834,33 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  defp worktree_paths_match?(left, right) when is_binary(left) and is_binary(right) do
+    left == right or Path.expand(left) == Path.expand(right) or
+      case {canonical_existing_path(left), canonical_existing_path(right)} do
+        {{:ok, a}, {:ok, b}} -> a == b
+        _ -> false
+      end
+  end
+
+  defp worktree_paths_match?(_left, _right), do: false
+
   defp parse_worktree_registration(entry) do
     lines = String.split(entry, "\n", trim: true)
     path = line_value(lines, "worktree ")
     head = line_value(lines, "HEAD ")
     branch = line_value(lines, "branch refs/heads/")
+    detached? = Enum.any?(lines, &(&1 == "detached"))
 
-    if is_binary(path) and is_binary(head) and is_binary(branch) do
-      {:ok, %{path: canonical_path_or_expanded(path), head: head, branch: branch}}
-    else
-      :error
+    cond do
+      is_binary(path) and is_binary(head) and is_binary(branch) ->
+        {:ok, %{path: canonical_path_or_expanded(path), head: head, branch: branch}}
+
+      # Detached worktrees still have a stable path+HEAD identity for retention.
+      is_binary(path) and is_binary(head) and detached? ->
+        {:ok, %{path: canonical_path_or_expanded(path), head: head, branch: "detached"}}
+
+      true ->
+        :error
     end
   end
 

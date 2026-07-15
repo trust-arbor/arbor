@@ -244,6 +244,54 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     assert retained_path == realpath!(path)
   end
 
+  test "owner-death auto-retain of dirty work expires under the shared TTL cleanup path", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = create_git_repo(Path.join(tmp_dir, "repo"))
+    branch = "test/owner-death-ttl-cleanup"
+    base = Path.join(tmp_dir, "worktrees")
+    server = start_registry(50)
+    parent = self()
+    task_id = "task-ttl-#{System.unique_integer([:positive])}"
+    principal_id = "agent-ttl-#{System.unique_integer([:positive])}"
+
+    owner =
+      spawn(fn ->
+        {:ok, lease} =
+          acquire(server, repo, branch, tmp_dir, base,
+            task_id: task_id,
+            principal_id: principal_id
+          )
+
+        File.write!(Path.join(lease.worktree_path, "dirty.txt"), "expire me\n")
+        send(parent, {:leased, lease.worktree_path})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:leased, path}, 2_000
+    ref = Process.monitor(owner)
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^owner, :killed}, 2_000
+
+    assert_eventually(
+      fn ->
+        assert retained_count(server) == 1
+        assert File.dir?(path)
+        assert File.exists?(Path.join(path, "dirty.txt"))
+      end,
+      100
+    )
+
+    # Same retained-expire path used by explicit :retain release.
+    assert_eventually(
+      fn ->
+        refute File.dir?(path)
+        assert retained_state(server) == {[], []}
+      end,
+      100
+    )
+  end
+
   test "expiry cleanup failure retains and retries the exact record", %{tmp_dir: tmp_dir} do
     repo = create_git_repo(Path.join(tmp_dir, "repo"))
     branch = "test/retained-retry"

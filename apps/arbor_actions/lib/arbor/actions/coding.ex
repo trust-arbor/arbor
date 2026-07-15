@@ -20,8 +20,12 @@ defmodule Arbor.Actions.Coding do
     the requested task, runs validation commands, and commits the result. It can
     optionally open a draft PR, but never merges its own work.
 
-    On every normal return the worktree is retained. Cancellation via process
-    death removes only invocation-owned worktrees (reused paths survive).
+    On every normal return the worktree is retained. Owner-death / hard
+    cancellation is handled by `WorkspaceLeaseRegistry`: child validation
+    resources are cleaned, reused paths always survive, pristine owned
+    worktrees are removed, and dirty or advanced-HEAD owned work is converted
+    to the registry's bounded-TTL retained lease (exact task+principal
+    reactivation), rather than destroyed.
     """
 
     use Jido.Action,

@@ -2,6 +2,7 @@ defmodule Arbor.Actions.CodingTest do
   use Arbor.Actions.ActionCase, async: true
 
   alias Arbor.Actions.{Acp, Coding, Council, Git, Shell}
+  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Mix, as: MixActions
 
   @moduletag :fast
@@ -1557,8 +1558,12 @@ defmodule Arbor.Actions.CodingTest do
       refute stderr =~ "output limit"
     end
 
-    test "removes owned dirty worktree when the action process is cancelled", %{tmp_dir: tmp_dir} do
+    test "retains owned dirty worktree when the action process is cancelled", %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/cancel-worktree-retain-#{System.unique_integer([:positive])}"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-cancel-retain-#{System.unique_integer([:positive])}"
+      principal_id = "agent-cancel-retain-#{System.unique_integer([:positive])}"
       parent = self()
 
       runner = fn
@@ -1591,12 +1596,12 @@ defmodule Arbor.Actions.CodingTest do
             %{
               task: "Add dirty file",
               repo_path: repo,
-              branch_name: "test/cancel-worktree",
-              worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+              branch_name: branch,
+              worktree_base_dir: worktree_base,
               submit_review: false,
               skip_validation: true
             },
-            %{action_runner: runner}
+            %{action_runner: runner, task_id: task_id, principal_id: principal_id}
           )
         end)
 
@@ -1608,9 +1613,33 @@ defmodule Arbor.Actions.CodingTest do
       # :kill models TaskStore/Session cancel — try/after cannot run.
       Process.exit(action_pid, :kill)
 
+      # Useful dirty progress must not be deleted immediately on owner death.
       assert_eventually(fn ->
-        refute File.dir?(worktree_path)
+        assert File.dir?(worktree_path)
+        assert File.exists?(Path.join(worktree_path, "dirty.txt"))
+        assert File.read!(Path.join(worktree_path, "dirty.txt")) == "uncommitted\n"
       end)
+
+      # Cleanup via exact task+principal reactivation so the shared registry
+      # and worktree do not leak past this test.
+      assert {:ok, reactivated} =
+               WorkspaceLeaseRegistry.acquire(%{
+                 repo_path: repo,
+                 branch: branch,
+                 worktree_base_dir: worktree_base,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      assert File.exists?(Path.join(reactivated.worktree_path, "dirty.txt"))
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release(reactivated.workspace_id, :remove, %{
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      refute File.dir?(worktree_path)
     end
 
     test "does not remove a pre-registered worktree when the action process is cancelled", %{
