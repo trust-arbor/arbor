@@ -992,78 +992,81 @@ defmodule Arbor.Orchestrator.Engine do
         # bind the current visit marker in execution_digests (execution_id,
         # input_hash, outcome_status, timestamp). Recovery requires this exact
         # visit identity — node_id alone is insufficient when DOT nodes repeat.
-        tracking =
-          put_effect_execution_digest(
-            journaled?,
-            tracking,
-            node,
-            effect_ctx_after_receipt,
-            outcome
-          )
-
-        case apply_outcome_and_checkpoint(
-               node,
-               outcome,
-               retries,
-               context,
-               computed_hash,
-               step_now,
-               stage_duration,
-               run_state,
-               tracking,
+        case put_effect_execution_digest(
                journaled?,
-               state
+               tracking,
+               node,
+               effect_ctx_after_receipt,
+               outcome
              ) do
-          {:error, reason, partial_state} ->
-            fail_from_engine_state(partial_state, reason)
+          {:error, reason} ->
+            fail_from_engine_state(base_state, reason)
 
-          {:ok, applied} ->
-            partial_after_apply = %{
-              state
-              | graph: applied.graph,
-                context: applied.context,
-                completed: applied.completed,
-                retries: applied.retries,
-                outcomes: applied.outcomes,
-                tracking: applied.tracking,
-                run_state: applied.run_state
-            }
-
-            case sync_node_completed(
-                   applied.run_state,
-                   node.id,
+          {:ok, tracking} ->
+            case apply_outcome_and_checkpoint(
+                   node,
+                   outcome,
+                   retries,
+                   context,
+                   computed_hash,
+                   step_now,
                    stage_duration,
-                   Keyword.get(state.opts, :run_id),
-                   lifecycle_meta_from_state(partial_after_apply),
-                   journal_opts_from(state.opts),
-                   journaled?
+                   run_state,
+                   tracking,
+                   journaled?,
+                   state
                  ) do
-              {:error, reason, rs} ->
-                # Prefer the post-node_completed RunState even when journal sync fails.
-                fail_from_engine_state(%{partial_after_apply | run_state: rs}, reason)
+              {:error, reason, partial_state} ->
+                fail_from_engine_state(partial_state, reason)
 
-              {:error, reason} ->
-                fail_from_engine_state(partial_after_apply, reason)
+              {:ok, applied} ->
+                partial_after_apply = %{
+                  state
+                  | graph: applied.graph,
+                    context: applied.context,
+                    completed: applied.completed,
+                    retries: applied.retries,
+                    outcomes: applied.outcomes,
+                    tracking: applied.tracking,
+                    run_state: applied.run_state
+                }
 
-              {:ok, run_state2} ->
-                partial_after_progress = %{partial_after_apply | run_state: run_state2}
+                case sync_node_completed(
+                       applied.run_state,
+                       node.id,
+                       stage_duration,
+                       Keyword.get(state.opts, :run_id),
+                       lifecycle_meta_from_state(partial_after_apply),
+                       journal_opts_from(state.opts),
+                       journaled?
+                     ) do
+                  {:error, reason, rs} ->
+                    # Prefer the post-node_completed RunState even when journal sync fails.
+                    fail_from_engine_state(%{partial_after_apply | run_state: rs}, reason)
 
-                case maybe_settle_effect(journaled?, effect_ctx) do
                   {:error, reason} ->
-                    fail_from_engine_state(partial_after_progress, reason)
+                    fail_from_engine_state(partial_after_apply, reason)
 
-                  :ok ->
-                    # Status/artifact publication and graph routing only after
-                    # settle (or non-journaled path with no effect protocol).
-                    if status_files_enabled?(),
-                      do: :ok = write_node_status(node.id, outcome, state.logs_root)
+                  {:ok, run_state2} ->
+                    partial_after_progress = %{partial_after_apply | run_state: run_state2}
 
-                    maybe_store_artifact(state.opts, node.id, outcome)
+                    case maybe_settle_effect(journaled?, effect_ctx) do
+                      {:error, reason} ->
+                        fail_from_engine_state(partial_after_progress, reason)
 
-                    if Router.terminal?(node) do
-                      handle_terminal(node, outcome, partial_after_progress)
-                    else
-                      advance_with_fan_in(node, outcome, partial_after_progress)
+                      :ok ->
+                        # Status/artifact publication and graph routing only after
+                        # settle (or non-journaled path with no effect protocol).
+                        if status_files_enabled?(),
+                          do: :ok = write_node_status(node.id, outcome, state.logs_root)
+
+                        maybe_store_artifact(state.opts, node.id, outcome)
+
+                        if Router.terminal?(node) do
+                          handle_terminal(node, outcome, partial_after_progress)
+                        else
+                          advance_with_fan_in(node, outcome, partial_after_progress)
+                        end
                     end
                 end
             end
@@ -1103,50 +1106,69 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   # Per-node current-visit recovery marker (overwrites prior visit for same node_id).
-  # Built from the durable receipt envelope returned by record_effect_receipt so
-  # marker fields cannot diverge from journal evidence.
-  defp put_effect_execution_digest(false, tracking, _node, _effect_ctx, _outcome), do: tracking
+  # Durable effect supplies execution_id / input_hash / completed_at; Outcome.status
+  # is the atom written to the marker after it is proven equal to the receipt's
+  # outcome_status string. Fail closed before checkpoint/progress/settle when the
+  # envelope and Outcome disagree or required marker fields are invalid.
+  defp put_effect_execution_digest(false, tracking, _node, _effect_ctx, _outcome),
+    do: {:ok, tracking}
 
-  defp put_effect_execution_digest(true, tracking, node, effect_ctx, _outcome)
+  defp put_effect_execution_digest(true, tracking, node, effect_ctx, %Outcome{} = outcome)
        when is_map(effect_ctx) and is_map(tracking) do
     case Map.get(effect_ctx, :recorded_effect) do
       effect when is_map(effect) ->
-        exec_id = effect["execution_id"]
-        hash = effect["input_hash"]
-        status = effect["outcome_status"]
-        completed_at = effect["completed_at"]
-
-        if nonblank_binary?(exec_id) and nonblank_binary?(hash) and nonblank_binary?(status) and
-             nonblank_binary?(completed_at) do
-          digest = %{
-            input_hash: hash,
-            outcome_status: receipt_status_atom(status),
-            completed_at: completed_at,
-            execution_id: exec_id
-          }
-
-          put_in(tracking, [:execution_digests, node.id], digest)
-        else
-          tracking
-        end
+        build_effect_execution_digest(tracking, node, effect, outcome)
 
       _ ->
-        tracking
+        {:error, {:effect_execution_marker_failed, :recorded_effect_missing}}
     end
   end
 
-  defp put_effect_execution_digest(_journaled?, tracking, _node, _effect_ctx, _outcome),
-    do: tracking
+  defp put_effect_execution_digest(true, _tracking, _node, _effect_ctx, _outcome),
+    do: {:error, {:effect_execution_marker_failed, :invalid_marker_inputs}}
 
-  # Closed outcome status set from the durable receipt — never invent atoms.
-  defp receipt_status_atom("success"), do: :success
-  defp receipt_status_atom("fail"), do: :fail
-  defp receipt_status_atom("skip"), do: :skip
-  defp receipt_status_atom("error"), do: :error
-  defp receipt_status_atom(status) when is_atom(status), do: status
-  # Keep nonblank binary for unknown but still matchable via normalize_status_string.
-  defp receipt_status_atom(status) when is_binary(status), do: status
-  defp receipt_status_atom(_), do: :unknown
+  defp put_effect_execution_digest(_journaled?, tracking, _node, _effect_ctx, _outcome),
+    do: {:ok, tracking}
+
+  defp build_effect_execution_digest(tracking, node, effect, %Outcome{} = outcome)
+       when is_map(tracking) and is_map(effect) do
+    exec_id = effect["execution_id"]
+    hash = effect["input_hash"]
+    effect_status = effect["outcome_status"]
+    completed_at = effect["completed_at"]
+    outcome_status = outcome.status
+
+    cond do
+      not nonblank_binary?(exec_id) ->
+        {:error, {:effect_execution_marker_failed, :invalid_execution_id}}
+
+      not nonblank_binary?(hash) ->
+        {:error, {:effect_execution_marker_failed, :invalid_input_hash}}
+
+      not nonblank_binary?(completed_at) ->
+        {:error, {:effect_execution_marker_failed, :invalid_completed_at}}
+
+      not is_atom(outcome_status) ->
+        {:error, {:effect_execution_marker_failed, :invalid_outcome_status}}
+
+      not is_binary(effect_status) or effect_status == "" ->
+        {:error, {:effect_execution_marker_failed, :invalid_effect_outcome_status}}
+
+      Atom.to_string(outcome_status) != effect_status ->
+        {:error, {:effect_execution_marker_failed, :outcome_status_mismatch}}
+
+      true ->
+        digest = %{
+          input_hash: hash,
+          # Receipt-validated Outcome atom — never invent atoms or retain strings.
+          outcome_status: outcome_status,
+          completed_at: completed_at,
+          execution_id: exec_id
+        }
+
+        {:ok, put_in(tracking, [:execution_digests, node.id], digest)}
+    end
+  end
 
   defp nonblank_binary?(value) when is_binary(value), do: value != ""
   defp nonblank_binary?(_), do: false

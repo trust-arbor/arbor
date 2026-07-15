@@ -26,12 +26,53 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectRecoveryCoreTest do
   @input_hash_a String.duplicate("a", 64)
   @input_hash_b String.duplicate("b", 64)
 
-  describe "nil / absent current_effect" do
-    test "continues and leaves legacy intent handling to the Engine" do
-      record = base_record(current_effect: nil)
+  describe "nil / absent current_effect ordered progress" do
+    test "equal progress continues (legacy intent handling left to Engine)" do
+      record = base_record(current_effect: nil, completed_nodes: ["start"])
       checkpoint = %{completed_nodes: ["start"], outcomes: %{}, execution_digests: %{}}
 
       assert {:ok, :continue} = EffectRecoveryCore.decide(record, checkpoint)
+    end
+
+    test "empty equal progress continues" do
+      record = base_record(current_effect: nil, completed_nodes: [])
+      checkpoint = %{completed_nodes: [], outcomes: %{}, execution_digests: %{}}
+
+      assert {:ok, :continue} = EffectRecoveryCore.decide(record, checkpoint)
+    end
+
+    test "record strict prefix of checkpoint permits progress sync" do
+      record = base_record(current_effect: nil, completed_nodes: ["start"])
+
+      checkpoint = %{
+        completed_nodes: ["start", "task", "exit"],
+        outcomes: %{},
+        execution_digests: %{}
+      }
+
+      assert {:ok, :reconcile, [{:sync_progress, ["start", "task", "exit"]}]} =
+               EffectRecoveryCore.decide(record, checkpoint)
+    end
+
+    test "checkpoint-behind is structural inconsistency" do
+      record = base_record(current_effect: nil, completed_nodes: ["start", "task"])
+      checkpoint = %{completed_nodes: ["start"], outcomes: %{}, execution_digests: %{}}
+
+      assert {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}} =
+               EffectRecoveryCore.decide(record, checkpoint)
+    end
+
+    test "same-length divergent lists are structural inconsistency" do
+      record = base_record(current_effect: nil, completed_nodes: ["start", "task"])
+
+      checkpoint = %{
+        completed_nodes: ["start", "other"],
+        outcomes: %{},
+        execution_digests: %{}
+      }
+
+      assert {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}} =
+               EffectRecoveryCore.decide(record, checkpoint)
     end
   end
 
@@ -221,13 +262,13 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectRecoveryCoreTest do
       outcome = %Outcome{status: :success, context_updates: %{"k" => "v"}}
       effect = completed_effect("task", "exec_cb", outcome)
 
+      # Coherence requires task as last checkpoint node; ordered progress still
+      # fails because the durable record is strictly ahead of the checkpoint.
       record =
-        base_record(current_effect: effect, completed_nodes: ["start", "task"])
+        base_record(current_effect: effect, completed_nodes: ["start", "task", "task"])
 
-      # Checkpoint has only start, but marker+outcome claim task was applied —
-      # ordered lists disagree (record ahead).
       checkpoint = %{
-        completed_nodes: ["start"],
+        completed_nodes: ["start", "task"],
         outcomes: %{"task" => outcome},
         execution_digests: %{
           "task" => marker("exec_cb", @input_hash_a, :success)
@@ -242,11 +283,12 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectRecoveryCoreTest do
       outcome = %Outcome{status: :success, context_updates: %{"k" => "v"}}
       effect = completed_effect("task", "exec_div", outcome)
 
+      # Both lists end with the effect node (coherence ok) but diverge earlier.
       record =
         base_record(current_effect: effect, completed_nodes: ["start", "task"])
 
       checkpoint = %{
-        completed_nodes: ["start", "other"],
+        completed_nodes: ["other", "task"],
         outcomes: %{"task" => outcome},
         execution_digests: %{
           "task" => marker("exec_div", @input_hash_a, :success)
@@ -399,6 +441,21 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectRecoveryCoreTest do
           "task" => marker("exec_set_miss", @input_hash_a, :success)
         }
       }
+
+      assert {:error, {:effect_recovery_inconsistent, :effect_progress_incoherent}} =
+               EffectRecoveryCore.decide(record, checkpoint)
+    end
+
+    test "settled record missing effect node is structural and never repaired from checkpoint" do
+      outcome = %Outcome{status: :success, context_updates: %{"k" => "v"}}
+      effect = settled_effect("task", "exec_set_rec_miss", outcome)
+
+      # Durable journal settled task but omitted it from completed_nodes —
+      # must not sync/repair from an authenticated checkpoint that includes task.
+      record = base_record(current_effect: effect, completed_nodes: ["start"])
+
+      checkpoint =
+        matching_checkpoint(["start", "task", "exit"], "task", "exec_set_rec_miss", outcome)
 
       assert {:error, {:effect_recovery_inconsistent, :effect_progress_incoherent}} =
                EffectRecoveryCore.decide(record, checkpoint)

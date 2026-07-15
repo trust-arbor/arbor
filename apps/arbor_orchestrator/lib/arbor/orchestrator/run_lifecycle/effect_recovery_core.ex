@@ -79,7 +79,22 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   def decide(_record, _checkpoint),
     do: {:error, {:effect_recovery_inconsistent, :invalid_record}}
 
-  defp decide_effect(nil, _record_nodes, _checkpoint), do: {:ok, :continue}
+  # No current effect: still require ordered progress coherence so a divergent
+  # or checkpoint-behind journal cannot enter Engine with checkpoint traversal
+  # disagreeing with durable completed_nodes. Equal continues; record strict
+  # prefix may sync from authenticated checkpoint; never overwrite durable progress.
+  defp decide_effect(nil, record_nodes, checkpoint) do
+    case ordered_progress_relation(record_nodes, checkpoint.completed_nodes) do
+      :equal ->
+        {:ok, :continue}
+
+      :record_prefix ->
+        {:ok, :reconcile, [{:sync_progress, checkpoint.completed_nodes}]}
+
+      :inconsistent ->
+        {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}}
+    end
+  end
 
   defp decide_effect(effect, record_nodes, checkpoint) when is_map(effect) do
     case EffectEnvelope.validate(effect) do
@@ -155,15 +170,18 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
 
   defp classify(%{"status" => "settled"} = effect, record_nodes, checkpoint) do
     # Settled proves its own node was durably settled. Exact marker + outcome
-    # evidence is required; ordered progress may be equal or a strict prefix
-    # of an authenticated checkpoint that advanced past non-journaled nodes
-    # while best-effort journal progress lagged. Never re-settle.
+    # evidence is required; the effect node must appear in BOTH record and
+    # checkpoint completed_nodes before equal progress may continue or a
+    # record-as-strict-prefix may sync the authenticated later suffix.
+    # A settled record missing its own effect node is structural and must
+    # never be repaired from checkpoint. Never re-settle.
     case match_current_execution_marker(effect, checkpoint) do
       {:ok, :marker_match} ->
         case exact_outcome_match(effect, checkpoint) do
           {:ok, :match} ->
             case settled_effect_progress_coherence(
                    effect["node_id"],
+                   record_nodes,
                    checkpoint.completed_nodes
                  ) do
               :ok ->
@@ -300,18 +318,24 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   defp completed_effect_progress_coherence(_node_id, _completed_nodes),
     do: {:error, :effect_progress_incoherent}
 
-  # Settled effects require the effect node somewhere in checkpoint progress
-  # (may not be last — later non-journaled nodes can advance the checkpoint).
-  defp settled_effect_progress_coherence(node_id, completed_nodes)
-       when is_binary(node_id) and is_list(completed_nodes) do
-    if node_id in completed_nodes do
-      :ok
-    else
-      {:error, :effect_progress_incoherent}
+  # Settled effects require the effect node in BOTH stores' progress lists.
+  # Record omission is structural (never repair from checkpoint). Checkpoint
+  # may advance past the effect with later non-journaled nodes.
+  defp settled_effect_progress_coherence(node_id, record_nodes, checkpoint_nodes)
+       when is_binary(node_id) and is_list(record_nodes) and is_list(checkpoint_nodes) do
+    cond do
+      node_id not in record_nodes ->
+        {:error, :effect_progress_incoherent}
+
+      node_id not in checkpoint_nodes ->
+        {:error, :effect_progress_incoherent}
+
+      true ->
+        :ok
     end
   end
 
-  defp settled_effect_progress_coherence(_node_id, _completed_nodes),
+  defp settled_effect_progress_coherence(_node_id, _record_nodes, _checkpoint_nodes),
     do: {:error, :effect_progress_incoherent}
 
   # Exact reconciliation requires an Outcome whose status + result digest match

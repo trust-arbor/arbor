@@ -631,6 +631,17 @@ defmodule Arbor.Orchestrator do
     is_binary(logs_root) and File.exists?(Path.join(logs_root, "checkpoint.json"))
   end
 
+  # Drop internal journal-target selectors so a claimed default record cannot
+  # be resumed/settled against a different RunJournal. list/status/resume/
+  # abandon all stay on the canonical default journal surface.
+  defp sanitize_public_resume_opts(opts) when is_list(opts) do
+    opts
+    |> Keyword.delete(:journal_opts)
+    |> Keyword.delete(:server)
+  end
+
+  defp sanitize_public_resume_opts(_), do: []
+
   defp do_resume_candidate(%{record: %Record{} = entry, source: source}, opts) do
     logs_root = entry.logs_root
     run_id = entry.run_id
@@ -652,9 +663,14 @@ defmodule Arbor.Orchestrator do
                {:ok, _claimed} <- claim_for_resume(run_id, source) do
             settle_after_claim(run_id, source, fn ->
               with {:ok, graph} <- load_graph_for_record(entry) do
-                # Caller opts first; record identity/claim fields win.
+                # Caller opts first (minus journal-target selectors); record
+                # identity/claim fields win. Public resume always drives Engine
+                # against the canonical default journal — never a caller-chosen
+                # alternate target after the default record was claimed.
                 resume_opts =
-                  Keyword.merge(opts,
+                  opts
+                  |> sanitize_public_resume_opts()
+                  |> Keyword.merge(
                     resume_from: checkpoint_path,
                     run_id: run_id,
                     logs_root: logs_root,
