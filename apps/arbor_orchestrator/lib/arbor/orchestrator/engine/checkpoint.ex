@@ -331,6 +331,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   - `:not_found` — missing exact prefixed key
   - `{:store_unavailable, _}` — backend outage / raise / throw / exit / bad shape
   - `:checkpoint_key_mismatch` — Record envelope key does not match store key
+  - `:checkpoint_run_id_mismatch` — payload `run_id` missing/nonbinary/not equal
+    to the requested run_id (after unwrap + optional HMAC verification)
   - `:invalid_checkpoint_payload` — non-map / corrupt / unreadable payload
   - `:tampered` — HMAC verification failed (when secret provided)
   """
@@ -879,8 +881,12 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   defp require_configured_store(nil), do: {:error, :store_not_configured}
   defp require_configured_store(cfg) when is_map(cfg), do: {:ok, cfg}
 
-  defp fetch_persisted_from_store(run_id, hmac_secret, cfg) when is_binary(run_id) do
-    key = store_key(run_id)
+  defp fetch_persisted_from_store(requested_run_id, hmac_secret, cfg)
+       when is_binary(requested_run_id) do
+    # Bind all three identities: lookup key, envelope key (when present), and
+    # authenticated payload run_id. HMAC verifies payload integrity under the
+    # payload's own AAD and does not alone prove lookup-key binding.
+    key = store_key(requested_run_id)
 
     case store_get(cfg, key) do
       {:ok, value} ->
@@ -889,7 +895,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
              {:ok, data} <- ensure_checkpoint_payload_map(data),
              decoded <- normalize_keys(data),
              {:ok, decoded} <- maybe_verify(decoded, hmac_secret),
-             {:ok, decoded} <- ensure_checkpoint_payload_map(decoded) do
+             {:ok, decoded} <- ensure_checkpoint_payload_map(decoded),
+             :ok <- validate_payload_run_id(decoded, requested_run_id) do
           {:ok, decoded}
         else
           {:error, reason} ->
@@ -903,6 +910,22 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
         {:error, bound_reason(reason)}
     end
   end
+
+  # After unwrap + key normalization + optional HMAC, payload run_id must be an
+  # exact binary match to the requested run. Missing/nonbinary/different fail closed.
+  defp validate_payload_run_id(payload, requested_run_id)
+       when is_map(payload) and is_binary(requested_run_id) do
+    case Map.get(payload, "run_id") do
+      ^requested_run_id ->
+        :ok
+
+      _mismatch ->
+        {:error, :checkpoint_run_id_mismatch}
+    end
+  end
+
+  defp validate_payload_run_id(_payload, _requested_run_id),
+    do: {:error, :checkpoint_run_id_mismatch}
 
   # Record envelopes must bind the exact store key; mismatches fail closed so a
   # swapped or mis-keyed PersistenceRecord cannot be accepted as this run_id.

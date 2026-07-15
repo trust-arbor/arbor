@@ -168,6 +168,17 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
     def list(_opts), do: throw({:backend_throw, :list})
   end
 
+  defmodule UnexpectedGetShapeStore do
+    @moduledoc false
+
+    def durability_class(_opts), do: :process_lifetime
+    def put(_key, _value, _opts), do: :ok
+    # Intentionally not {:ok, value} | {:error, reason}.
+    def get(_key, _opts), do: :unexpected_get_shape
+    def delete(_key, _opts), do: :ok
+    def list(_opts), do: {:ok, []}
+  end
+
   setup do
     tmp =
       Path.join(
@@ -725,6 +736,107 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
                Checkpoint.fetch_persisted(run_id, store_opts(store_name))
     end
 
+    test "payload under correct key but foreign run_id fails closed", %{store_name: store_name} do
+      requested = "run_fetch_requested"
+      foreign = "run_fetch_foreign"
+      key = "checkpoint:#{requested}"
+
+      foreign_payload = %{
+        "timestamp" => "2026-07-15T00:00:00Z",
+        "run_id" => foreign,
+        "current_node" => "n1",
+        "completed_nodes" => [],
+        "node_retries" => %{},
+        "context_values" => %{},
+        "context_taint" => %{},
+        "node_outcomes" => %{},
+        "context_lineage" => %{},
+        "content_hashes" => %{},
+        "pending_intents" => %{},
+        "execution_digests" => %{}
+      }
+
+      :ok =
+        MemoryStore.put(key, PersistenceRecord.new(key, foreign_payload), name: store_name)
+
+      assert {:error, :checkpoint_run_id_mismatch} =
+               Checkpoint.fetch_persisted(requested, store_opts(store_name))
+    end
+
+    test "missing or nonbinary payload run_id fails closed", %{store_name: store_name} do
+      requested = "run_fetch_missing_payload_id"
+      key = "checkpoint:#{requested}"
+
+      without_run_id = %{
+        "timestamp" => "2026-07-15T00:00:00Z",
+        "current_node" => "n1",
+        "completed_nodes" => [],
+        "node_retries" => %{},
+        "context_values" => %{},
+        "context_taint" => %{},
+        "node_outcomes" => %{},
+        "context_lineage" => %{},
+        "content_hashes" => %{},
+        "pending_intents" => %{},
+        "execution_digests" => %{}
+      }
+
+      :ok =
+        MemoryStore.put(key, PersistenceRecord.new(key, without_run_id), name: store_name)
+
+      assert {:error, :checkpoint_run_id_mismatch} =
+               Checkpoint.fetch_persisted(requested, store_opts(store_name))
+
+      nonbinary = Map.put(without_run_id, "run_id", :atom_run_id)
+
+      :ok =
+        MemoryStore.put(key, PersistenceRecord.new(key, nonbinary), name: store_name)
+
+      assert {:error, :checkpoint_run_id_mismatch} =
+               Checkpoint.fetch_persisted(requested, store_opts(store_name))
+    end
+
+    test "HMAC-valid foreign-run payload under requested key still fails closed", %{
+      store_name: store_name
+    } do
+      # HMAC verifies integrity using AAD derived from the *payload* fields.
+      # A correctly signed foreign-run payload stored under the requested key
+      # must still be rejected by the payload run_id binding check.
+      requested = "run_fetch_hmac_requested"
+      foreign = "run_fetch_hmac_foreign"
+      secret = "test_secret_32_bytes_xxxxxxxxxxxx"
+      key = "checkpoint:#{requested}"
+
+      foreign_payload = %{
+        "timestamp" => "2026-07-15T00:00:00Z",
+        "run_id" => foreign,
+        "graph_hash" => "gh_foreign",
+        "current_node" => "n_foreign",
+        "completed_nodes" => [],
+        "node_retries" => %{},
+        "context_values" => %{},
+        "context_taint" => %{},
+        "node_outcomes" => %{},
+        "context_lineage" => %{},
+        "content_hashes" => %{},
+        "pending_intents" => %{},
+        "execution_digests" => %{}
+      }
+
+      signed =
+        Checkpoint.sign(foreign_payload, secret,
+          run_id: foreign,
+          current_node: "n_foreign",
+          graph_hash: "gh_foreign"
+        )
+
+      :ok =
+        MemoryStore.put(key, PersistenceRecord.new(key, signed), name: store_name)
+
+      assert {:error, :checkpoint_run_id_mismatch} =
+               Checkpoint.fetch_persisted(requested, store_opts(store_name, hmac_secret: secret))
+    end
+
     test "corrupt non-map payload is rejected", %{store_name: store_name} do
       run_id = "run_fetch_corrupt"
       key = "checkpoint:#{run_id}"
@@ -792,6 +904,19 @@ defmodule Arbor.Orchestrator.Engine.CheckpointHonestPersistenceTest do
 
       assert inspect(reason) =~ "backend_throw"
       assert byte_size(inspect(reason)) <= 512
+    end
+
+    test "unexpected backend get shape is store_unavailable" do
+      assert {:error, {:store_unavailable, reason}} =
+               Checkpoint.fetch_persisted("run_fetch_bad_shape",
+                 store: UnexpectedGetShapeStore,
+                 store_name: :unexpected_get_shape_store
+               )
+
+      assert match?({:unexpected_get_result, _}, reason) or
+               is_binary(reason) or is_atom(reason) or is_tuple(reason)
+
+      refute match?(%{__exception__: true}, reason)
     end
 
     test "does not expose arbitrary key reads", %{store_name: store_name} do
