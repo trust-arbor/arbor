@@ -8,7 +8,12 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   # This coordinator is shut down first under reverse rest_for_one order and
   # uses each worker's explicit request_drain protocol while UnitSupervisor and
   # PortSessionSupervisor are still alive. It blocks without a finite cleanup
-  # budget until every accepted drain yields an exact positive-absence receipt.
+  # budget until every snapshotted live worker yields an exact positive-absence
+  # receipt.
+  #
+  # Handshake attempts are bounded, but a timeout/error/exit never settles or
+  # drops a worker: the coordinator retries acceptance until :ok, then waits
+  # for the exact drain receipt. Worker DOWN before receipt is never success.
   #
   # Carries no caller authority and no configurable module callback. Does not
   # terminate UnitSupervisor or PortSessionSupervisor.
@@ -69,27 +74,23 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   # ---------------------------------------------------------------------------
 
   defp drain_live_workers do
-    workers = snapshot_live_workers()
+    case snapshot_live_workers() do
+      [] ->
+        :ok
 
-    if workers == [] do
-      :ok
-    else
-      pending =
-        Enum.reduce(workers, %{}, fn worker, acc ->
-          receipt_ref = make_ref()
-          _ = Process.monitor(worker)
+      workers ->
+        pending =
+          Map.new(workers, fn worker ->
+            _ = Process.monitor(worker)
 
-          case request_drain_handshake(worker, receipt_ref) do
-            :ok ->
-              Map.put(acc, receipt_ref, worker)
+            {worker,
+             %{
+               receipt_ref: make_ref(),
+               accepted: false
+             }}
+          end)
 
-            _other ->
-              # Only :ok handshakes are pending exact absence receipts.
-              acc
-          end
-        end)
-
-      await_drain_receipts(pending)
+        drain_until_resolved(pending)
     end
   end
 
@@ -111,6 +112,63 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     end
   end
 
+  # Every snapshotted worker stays unresolved until its exact drain receipt.
+  # Bounded handshakes may fail; failures never settle or drop the worker.
+  defp drain_until_resolved(pending) when map_size(pending) == 0, do: :ok
+
+  defp drain_until_resolved(pending) do
+    pending = attempt_handshakes(pending)
+
+    if map_size(pending) == 0 do
+      :ok
+    else
+      # While any handshake is outstanding, re-enter promptly after each
+      # bounded attempt. Once every worker has accepted, wait indefinitely
+      # for exact receipts (no teardown deadline).
+      wait_ms = if any_unaccepted?(pending), do: 0, else: :infinity
+
+      receive do
+        {:apple_container_unit_drained, worker_pid, execution_id, receipt_ref}
+        when is_pid(worker_pid) and is_reference(receipt_ref) ->
+          drain_until_resolved(settle_if_exact(pending, worker_pid, execution_id, receipt_ref))
+
+        {:DOWN, _ref, :process, _pid, _reason} ->
+          # Worker death without an exact drain receipt is NOT success.
+          drain_until_resolved(pending)
+
+        _unrelated ->
+          drain_until_resolved(pending)
+      after
+        wait_ms ->
+          drain_until_resolved(pending)
+      end
+    end
+  end
+
+  defp attempt_handshakes(pending) do
+    Enum.reduce(pending, %{}, fn {worker, meta}, acc ->
+      if meta.accepted do
+        Map.put(acc, worker, meta)
+      else
+        case request_drain_handshake(worker, meta.receipt_ref) do
+          :ok ->
+            Map.put(acc, worker, %{meta | accepted: true})
+
+          _other ->
+            # Timeout, exit, noproc, or error — keep unresolved and retry.
+            # Brief yield only avoids a tight noproc spin; it is not a teardown
+            # deadline and never settles the worker.
+            Process.sleep(50)
+            Map.put(acc, worker, meta)
+        end
+      end
+    end)
+  end
+
+  defp any_unaccepted?(pending) do
+    Enum.any?(pending, fn {_worker, meta} -> meta.accepted == false end)
+  end
+
   defp request_drain_handshake(worker, receipt_ref) do
     Worker.request_drain(worker, receipt_ref, @drain_handshake_timeout_ms)
   catch
@@ -118,33 +176,21 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       {:error, :drain_handshake_failed}
   end
 
-  defp await_drain_receipts(pending) when map_size(pending) == 0, do: :ok
-
-  defp await_drain_receipts(pending) do
-    receive do
-      {:apple_container_unit_drained, worker_pid, execution_id, receipt_ref}
-      when is_pid(worker_pid) and is_reference(receipt_ref) ->
-        case Map.fetch(pending, receipt_ref) do
-          {:ok, ^worker_pid} ->
-            if valid_execution_id?(execution_id) do
-              await_drain_receipts(Map.delete(pending, receipt_ref))
-            else
-              # Nonempty bounded execution_id required — ignore malformed.
-              await_drain_receipts(pending)
-            end
-
-          _mismatch ->
-            # Wrong worker, unknown/stale ref, or already settled.
-            await_drain_receipts(pending)
+  defp settle_if_exact(pending, worker_pid, execution_id, receipt_ref) do
+    case Map.get(pending, worker_pid) do
+      %{receipt_ref: ^receipt_ref} ->
+        # Exact worker + receipt_ref. A timed-out :ok reply may have been
+        # discarded while the worker still accepted and later emitted this
+        # receipt — settle only on valid execution_id proof.
+        if valid_execution_id?(execution_id) do
+          Map.delete(pending, worker_pid)
+        else
+          pending
         end
 
-      {:DOWN, _ref, :process, _pid, _reason} ->
-        # Worker death without an exact drain receipt is NOT success. Keep
-        # waiting so supervised shutdown cannot proceed past incomplete drain.
-        await_drain_receipts(pending)
-
-      _unrelated ->
-        await_drain_receipts(pending)
+      _mismatch ->
+        # Unknown/stale ref, wrong worker, or already settled.
+        pending
     end
   end
 

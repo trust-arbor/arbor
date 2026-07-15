@@ -978,6 +978,107 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       end
     end
 
+    test "security regression: suspended worker handshake timeout does not bypass drain", %{
+      spec: spec,
+      executable: executable
+    } do
+      # Active start is cancelled after resume; one present cleanup round then
+      # held final absence so post-resume progress is observable.
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        {:hang, success(%{exit_code: 0, stdout: "partial"})},
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([%{"configuration" => %{"id" => @name}}]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        {:hold, success_list([])}
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeRuntime.calls()) >= 3 end)
+
+      worker_ref = Process.monitor(worker)
+      coordinator = Process.whereis(DrainCoordinator)
+      unit_sup = Process.whereis(Arbor.Shell.AppleContainerUnitSupervisor)
+      port_sup = Process.whereis(Arbor.Shell.PortSessionSupervisor)
+
+      assert is_pid(coordinator)
+      assert is_pid(unit_sup)
+      assert is_pid(port_sup)
+
+      # Suspend before coordinator termination so request_drain handshake times out.
+      assert :ok = :sys.suspend(worker)
+
+      task =
+        Task.async(fn ->
+          Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
+        end)
+
+      try do
+        # Cross at least one bounded handshake timeout (5_000ms). A prior bug
+        # dropped unresponsive workers and let terminate_child return.
+        assert is_nil(Task.yield(task, 5_500))
+        assert Process.alive?(task.pid)
+        assert Process.alive?(coordinator)
+        assert Process.alive?(worker)
+        assert Process.alive?(unit_sup)
+        assert Process.alive?(port_sup)
+        assert nonterminal_registry?(execution_id)
+        refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 50
+
+        # Still blocked after the timeout window; supervisors remain up.
+        assert is_nil(Task.yield(task, 500))
+        assert Process.alive?(task.pid)
+        assert Process.alive?(coordinator)
+        assert Process.alive?(unit_sup)
+        assert Process.alive?(port_sup)
+
+        assert :ok = :sys.resume(worker)
+
+        eventually!(fn -> FakeRuntime.held_count() >= 1 end, 30_000)
+
+        assert is_nil(Task.yield(task, 200))
+        assert Process.alive?(coordinator)
+        assert Process.alive?(worker)
+        assert nonterminal_registry?(execution_id)
+        refute_receive {:apple_container_unit_terminal, ^execution_id, _}, 50
+
+        assert :ok = FakeRuntime.release_held()
+
+        assert :ok = Task.await(task, 30_000)
+        assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 15_000
+        refute Process.alive?(worker)
+        refute Process.alive?(coordinator)
+
+        assert_receive {:apple_container_unit_terminal, ^execution_id, {:ok, result}}, 5_000
+        assert result.cancelled == true
+
+        exec = await_registry_terminal(execution_id, 10_000)
+        assert exec.status == :killed
+        assert exec.result.cancelled == true
+      after
+        # Resume/release before waiting so assertion failure cannot leave the
+        # coordinator stuck mid-handshake or mid-absence wait.
+        if is_pid(worker) and Process.alive?(worker) do
+          try do
+            :sys.resume(worker)
+          catch
+            :exit, _ -> :ok
+          end
+        end
+
+        _ = FakeRuntime.release_held()
+
+        if Process.alive?(task.pid) do
+          _ = Task.yield(task, 30_000) || Task.shutdown(task, :brutal_kill)
+        end
+
+        restore_drain_coordinator!()
+      end
+    end
+
     test "security regression: controller death holds absence before terminal", %{
       spec: spec,
       executable: executable
