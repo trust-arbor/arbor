@@ -340,10 +340,10 @@ defmodule Arbor.Orchestrator.Engine.CheckpointTest do
       assert Checkpoint.orphaned_intents(cp) == []
     end
 
-    test "returns empty list when all intents have digests" do
+    test "returns empty list when all intents have exact matching digests" do
       cp = %Checkpoint{
-        pending_intents: %{"n1" => %{execution_id: "e1"}},
-        execution_digests: %{"n1" => %{execution_id: "e1"}}
+        pending_intents: %{"n1" => %{execution_id: "e1", input_hash: "h1"}},
+        execution_digests: %{"n1" => %{execution_id: "e1", input_hash: "h1"}}
       }
 
       assert Checkpoint.orphaned_intents(cp) == []
@@ -353,13 +353,65 @@ defmodule Arbor.Orchestrator.Engine.CheckpointTest do
       intent = %{handler: "ToolHandler", execution_id: "e1", input_hash: "h", started_at: "t"}
 
       cp = %Checkpoint{
-        pending_intents: %{"n1" => intent, "n2" => %{execution_id: "e2"}},
-        execution_digests: %{"n2" => %{execution_id: "e2"}}
+        pending_intents: %{"n1" => intent, "n2" => %{execution_id: "e2", input_hash: "h2"}},
+        execution_digests: %{"n2" => %{execution_id: "e2", input_hash: "h2"}}
       }
 
       orphaned = Checkpoint.orphaned_intents(cp)
       assert length(orphaned) == 1
       assert {"n1", ^intent} = hd(orphaned)
+    end
+
+    test "different execution_id for same node_id leaves legacy intent orphaned" do
+      intent = %{execution_id: "exec_old", input_hash: "hash_a"}
+
+      cp = %Checkpoint{
+        pending_intents: %{"task" => intent},
+        execution_digests: %{
+          "task" => %{execution_id: "exec_new", input_hash: "hash_a"}
+        }
+      }
+
+      assert [{"task", ^intent}] = Checkpoint.orphaned_intents(cp)
+    end
+
+    test "same execution_id but different input_hash leaves intent orphaned" do
+      intent = %{execution_id: "exec_1", input_hash: "hash_a"}
+
+      cp = %Checkpoint{
+        pending_intents: %{"task" => intent},
+        execution_digests: %{
+          "task" => %{execution_id: "exec_1", input_hash: "hash_b"}
+        }
+      }
+
+      assert [{"task", ^intent}] = Checkpoint.orphaned_intents(cp)
+    end
+
+    test "string-keyed digest matching atom-keyed intent resolves the intent" do
+      intent = %{execution_id: "exec_s", input_hash: "hash_s"}
+
+      cp = %Checkpoint{
+        pending_intents: %{"task" => intent},
+        execution_digests: %{
+          "task" => %{"execution_id" => "exec_s", "input_hash" => "hash_s"}
+        }
+      }
+
+      assert Checkpoint.orphaned_intents(cp) == []
+    end
+
+    test "malformed digest (blank execution_id) leaves intent orphaned" do
+      intent = %{execution_id: "exec_1", input_hash: "hash_a"}
+
+      cp = %Checkpoint{
+        pending_intents: %{"task" => intent},
+        execution_digests: %{
+          "task" => %{execution_id: "", input_hash: "hash_a"}
+        }
+      }
+
+      assert [{"task", ^intent}] = Checkpoint.orphaned_intents(cp)
     end
   end
 

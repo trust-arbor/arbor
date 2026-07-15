@@ -1075,6 +1075,35 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       refute RecoveryCoordinator.__test_non_retryable_recovery_error__(
                {:dot_file_unavailable, :enxio}
              )
+
+      # L3C effect recovery classification via the same classifier surface.
+      assert RecoveryCoordinator.__test_non_retryable_recovery_error__(
+               {:effect_recovery_inconsistent, :ordered_progress_inconsistent}
+             )
+
+      assert RecoveryCoordinator.__test_non_retryable_recovery_error__(
+               {:invalid_current_effect, :invalid_type}
+             )
+
+      refute RecoveryCoordinator.__test_non_retryable_recovery_error__(
+               {:indeterminate_effect, "task", "exec_1"}
+             )
+
+      refute RecoveryCoordinator.__test_non_retryable_recovery_error__(
+               {:completed_effect_unapplied, "task", "exec_1"}
+             )
+
+      refute RecoveryCoordinator.__test_non_retryable_recovery_error__(
+               {:effect_recovery_progress_sync_failed, :store_down}
+             )
+
+      refute RecoveryCoordinator.__test_non_retryable_recovery_error__(
+               {:effect_recovery_settle_failed, :store_down}
+             )
+
+      refute RecoveryCoordinator.__test_non_retryable_recovery_error__(
+               {:effect_recovery_record_unavailable, :journal_unavailable}
+             )
     end
   end
 

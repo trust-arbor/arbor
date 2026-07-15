@@ -462,17 +462,46 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   end
 
   @doc """
-  Check for orphaned PendingIntents (intents without matching execution digests).
+  Check for orphaned PendingIntents (intents without a matching current-visit digest).
 
-  Returns a list of `{node_id, pending_intent}` tuples for nodes that started
-  executing but never completed — indicating indeterminate state.
+  A legacy pending_intent is resolved only when `execution_digests[node_id]`
+  carries the **same nonblank** `execution_id` and matching `input_hash`
+  (atom or string map keys). A later/different visit marker for the same
+  `node_id` must not mask an older indeterminate intent — that would bypass
+  the legacy side-effect gate on resume. Malformed digests also leave the
+  intent orphaned.
   """
   @spec orphaned_intents(t()) :: [{String.t(), pending_intent()}]
   def orphaned_intents(%__MODULE__{} = checkpoint) do
-    Enum.filter(checkpoint.pending_intents, fn {node_id, _intent} ->
-      not Map.has_key?(checkpoint.execution_digests, node_id)
+    digests = checkpoint.execution_digests || %{}
+
+    Enum.filter(checkpoint.pending_intents, fn {node_id, intent} ->
+      not matching_execution_digest?(Map.get(digests, node_id), intent)
     end)
   end
+
+  # Resolve a legacy intent only against an exact visit identity. Presence of
+  # any digest for the node_id is insufficient once L3C writes current-visit
+  # markers into the same map.
+  defp matching_execution_digest?(digest, intent) when is_map(digest) and is_map(intent) do
+    digest_exec = digest_field(digest, :execution_id)
+    digest_hash = digest_field(digest, :input_hash)
+    intent_exec = digest_field(intent, :execution_id)
+    intent_hash = digest_field(intent, :input_hash)
+
+    nonblank_binary?(digest_exec) and nonblank_binary?(digest_hash) and
+      nonblank_binary?(intent_exec) and nonblank_binary?(intent_hash) and
+      digest_exec == intent_exec and digest_hash == intent_hash
+  end
+
+  defp matching_execution_digest?(_digest, _intent), do: false
+
+  defp digest_field(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp nonblank_binary?(value) when is_binary(value), do: value != ""
+  defp nonblank_binary?(_), do: false
 
   # ---------------------------------------------------------------------------
   # Private — payload / serialization

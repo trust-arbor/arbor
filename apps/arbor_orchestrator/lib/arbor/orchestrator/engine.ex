@@ -1091,8 +1091,10 @@ defmodule Arbor.Orchestrator.Engine do
                receipt,
                jopts
              ) do
-          {:ok, tag, _effect} when tag in [:recorded, :already_recorded] ->
-            {:ok, Map.put(effect_ctx, :completed_at, completed_at)}
+          {:ok, tag, effect} when tag in [:recorded, :already_recorded] and is_map(effect) ->
+            # Keep the durable receipt envelope so the visit marker cannot drift
+            # from journal-recorded completed_at / outcome_status / digests.
+            {:ok, Map.put(effect_ctx, :recorded_effect, effect)}
 
           {:error, reason} ->
             {:error, {:effect_receipt_failed, reason}}
@@ -1101,31 +1103,53 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   # Per-node current-visit recovery marker (overwrites prior visit for same node_id).
+  # Built from the durable receipt envelope returned by record_effect_receipt so
+  # marker fields cannot diverge from journal evidence.
   defp put_effect_execution_digest(false, tracking, _node, _effect_ctx, _outcome), do: tracking
 
-  defp put_effect_execution_digest(true, tracking, node, effect_ctx, outcome)
+  defp put_effect_execution_digest(true, tracking, node, effect_ctx, _outcome)
        when is_map(effect_ctx) and is_map(tracking) do
-    input_hash = Map.get(effect_ctx, :input_hash)
-    execution_id = Map.get(effect_ctx, :execution_id)
-    completed_at = Map.get(effect_ctx, :completed_at)
+    case Map.get(effect_ctx, :recorded_effect) do
+      effect when is_map(effect) ->
+        exec_id = effect["execution_id"]
+        hash = effect["input_hash"]
+        status = effect["outcome_status"]
+        completed_at = effect["completed_at"]
 
-    if is_binary(input_hash) and is_binary(execution_id) and is_binary(completed_at) and
-         is_atom(outcome.status) do
-      digest = %{
-        input_hash: input_hash,
-        outcome_status: outcome.status,
-        completed_at: completed_at,
-        execution_id: execution_id
-      }
+        if nonblank_binary?(exec_id) and nonblank_binary?(hash) and nonblank_binary?(status) and
+             nonblank_binary?(completed_at) do
+          digest = %{
+            input_hash: hash,
+            outcome_status: receipt_status_atom(status),
+            completed_at: completed_at,
+            execution_id: exec_id
+          }
 
-      put_in(tracking, [:execution_digests, node.id], digest)
-    else
-      tracking
+          put_in(tracking, [:execution_digests, node.id], digest)
+        else
+          tracking
+        end
+
+      _ ->
+        tracking
     end
   end
 
   defp put_effect_execution_digest(_journaled?, tracking, _node, _effect_ctx, _outcome),
     do: tracking
+
+  # Closed outcome status set from the durable receipt — never invent atoms.
+  defp receipt_status_atom("success"), do: :success
+  defp receipt_status_atom("fail"), do: :fail
+  defp receipt_status_atom("skip"), do: :skip
+  defp receipt_status_atom("error"), do: :error
+  defp receipt_status_atom(status) when is_atom(status), do: status
+  # Keep nonblank binary for unknown but still matchable via normalize_status_string.
+  defp receipt_status_atom(status) when is_binary(status), do: status
+  defp receipt_status_atom(_), do: :unknown
+
+  defp nonblank_binary?(value) when is_binary(value), do: value != ""
+  defp nonblank_binary?(_), do: false
 
   defp apply_outcome_and_checkpoint(
          node,

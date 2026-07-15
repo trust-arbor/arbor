@@ -535,7 +535,7 @@ defmodule Arbor.Orchestrator do
   """
   @spec resume(String.t(), keyword()) :: run_result()
   def resume(run_id, opts \\ []) when is_binary(run_id) do
-    case lookup_lifecycle_candidate(run_id, opts) do
+    case lookup_lifecycle_candidate(run_id) do
       nil ->
         {:error, :not_found}
 
@@ -610,10 +610,8 @@ defmodule Arbor.Orchestrator do
     end
   end
 
-  defp lookup_lifecycle_candidate(run_id, opts) do
-    journal_opts = resume_journal_opts(opts)
-
-    case PipelineStatus.get_record(run_id, journal_opts) do
+  defp lookup_lifecycle_candidate(run_id) do
+    case PipelineStatus.get_record(run_id) do
       %Record{} = record ->
         %{record: record, source: :current}
 
@@ -629,23 +627,6 @@ defmodule Arbor.Orchestrator do
     end
   end
 
-  # Prefer explicit `journal_opts:`; also accept bare `server:` at the top level
-  # for tests and operator surfaces that already use PipelineStatus opts.
-  defp resume_journal_opts(opts) when is_list(opts) do
-    case Keyword.get(opts, :journal_opts) do
-      jopts when is_list(jopts) ->
-        jopts
-
-      _ ->
-        case Keyword.get(opts, :server) do
-          nil -> []
-          server -> [server: server]
-        end
-    end
-  end
-
-  defp resume_journal_opts(_), do: []
-
   defp resumable_checkpoint_record?(%Record{logs_root: logs_root}) do
     is_binary(logs_root) and File.exists?(Path.join(logs_root, "checkpoint.json"))
   end
@@ -653,7 +634,6 @@ defmodule Arbor.Orchestrator do
   defp do_resume_candidate(%{record: %Record{} = entry, source: source}, opts) do
     logs_root = entry.logs_root
     run_id = entry.run_id
-    journal_opts = resume_journal_opts(opts)
 
     if not is_binary(logs_root) do
       {:error, :checkpoint_not_found}
@@ -666,14 +646,15 @@ defmodule Arbor.Orchestrator do
 
         true ->
           # Non-mutating preflight first, then claim, then settle every post-claim exit.
+          # Public resume always uses the canonical default journal — same surface
+          # as list/status/abandon. Callers cannot select an alternate journal.
           with :ok <- verify_graph_unchanged_record(entry),
-               {:ok, _claimed} <- claim_for_resume(run_id, source, journal_opts) do
-            settle_after_claim(run_id, source, journal_opts, fn ->
+               {:ok, _claimed} <- claim_for_resume(run_id, source) do
+            settle_after_claim(run_id, source, fn ->
               with {:ok, graph} <- load_graph_for_record(entry) do
                 # Caller opts first; record identity/claim fields win.
                 resume_opts =
-                  opts
-                  |> Keyword.merge(
+                  Keyword.merge(opts,
                     resume_from: checkpoint_path,
                     run_id: run_id,
                     logs_root: logs_root,
@@ -683,13 +664,6 @@ defmodule Arbor.Orchestrator do
                     resume: true,
                     recovery: true
                   )
-                  |> then(fn ropts ->
-                    if journal_opts == [] do
-                      ropts
-                    else
-                      Keyword.put(ropts, :journal_opts, journal_opts)
-                    end
-                  end)
 
                 Engine.run(graph, resume_opts)
               end
@@ -705,14 +679,14 @@ defmodule Arbor.Orchestrator do
   # - retryable credential/backend unavailability → :interrupted
   # Exactly one settlement per claimed resume attempt.
   # Settlement failure is first-class: never hide a stuck :recovering row.
-  defp settle_after_claim(run_id, source, journal_opts, fun) do
+  defp settle_after_claim(run_id, source, fun) do
     try do
       case fun.() do
         {:ok, _} = ok ->
           ok
 
         {:error, reason} = err ->
-          case release_resume_claim(run_id, source, reason, journal_opts) do
+          case release_resume_claim(run_id, source, reason) do
             :ok ->
               err
 
@@ -724,7 +698,7 @@ defmodule Arbor.Orchestrator do
       e ->
         reason = {:resume_exception, Exception.message(e)}
 
-        case release_resume_claim(run_id, source, reason, journal_opts) do
+        case release_resume_claim(run_id, source, reason) do
           :ok -> {:error, reason}
           {:error, settle_reason} -> {:error, {:resume_settlement_failed, settle_reason, reason}}
         end
@@ -732,7 +706,7 @@ defmodule Arbor.Orchestrator do
       :throw, value ->
         reason = {:resume_throw, inspect(value, limit: 20, printable_limit: 200)}
 
-        case release_resume_claim(run_id, source, reason, journal_opts) do
+        case release_resume_claim(run_id, source, reason) do
           :ok -> {:error, reason}
           {:error, settle_reason} -> {:error, {:resume_settlement_failed, settle_reason, reason}}
         end
@@ -740,7 +714,7 @@ defmodule Arbor.Orchestrator do
       :exit, reason ->
         settled = {:resume_exit, classify_resume_exit(reason)}
 
-        case release_resume_claim(run_id, source, settled, journal_opts) do
+        case release_resume_claim(run_id, source, settled) do
           :ok -> {:error, settled}
           {:error, settle_reason} -> {:error, {:resume_settlement_failed, settle_reason, settled}}
         end
@@ -754,16 +728,16 @@ defmodule Arbor.Orchestrator do
   defp classify_resume_exit(reason) when is_binary(reason), do: reason
   defp classify_resume_exit(reason), do: inspect(reason, limit: 20, printable_limit: 200)
 
-  defp claim_for_resume(run_id, :current, journal_opts) do
-    PipelineStatus.claim_for_recovery_record(run_id, node(), journal_opts)
+  defp claim_for_resume(run_id, :current) do
+    PipelineStatus.claim_for_recovery_record(run_id, node())
   end
 
-  defp claim_for_resume(run_id, :legacy, _journal_opts) do
+  defp claim_for_resume(run_id, :legacy) do
     LegacyJobAdapter.claim_for_recovery(run_id)
   end
 
-  defp release_resume_claim(run_id, :legacy, reason, _journal_opts) do
-    case resume_record_status(run_id, :legacy, []) do
+  defp release_resume_claim(run_id, :legacy, reason) do
+    case resume_record_status(run_id, :legacy) do
       status when status in [:completed, :failed, :abandoned] ->
         # Never reopen an already-terminal/failed record.
         :ok
@@ -783,8 +757,8 @@ defmodule Arbor.Orchestrator do
     end
   end
 
-  defp release_resume_claim(run_id, source, reason, journal_opts) do
-    case resume_record_status(run_id, source, journal_opts) do
+  defp release_resume_claim(run_id, source, reason) do
+    case resume_record_status(run_id, source) do
       status when status in [:completed, :failed, :abandoned] ->
         :ok
 
@@ -794,9 +768,9 @@ defmodule Arbor.Orchestrator do
       _ ->
         result =
           if non_retryable_resume_error?(reason) do
-            PipelineStatus.mark_failed(run_id, reason, journal_opts)
+            PipelineStatus.mark_failed(run_id, reason)
           else
-            PipelineStatus.mark_interrupted(run_id, journal_opts)
+            PipelineStatus.mark_interrupted(run_id)
           end
 
         normalize_settlement_result(result)
@@ -807,15 +781,15 @@ defmodule Arbor.Orchestrator do
   defp normalize_settlement_result({:error, _} = err), do: err
   defp normalize_settlement_result(other), do: {:error, {:unexpected_settlement_result, other}}
 
-  defp resume_record_status(run_id, :legacy, _journal_opts) do
+  defp resume_record_status(run_id, :legacy) do
     case LegacyJobAdapter.get(run_id) do
       %Record{status: status} -> status
       _ -> nil
     end
   end
 
-  defp resume_record_status(run_id, _, journal_opts) do
-    case PipelineStatus.get_record(run_id, journal_opts) do
+  defp resume_record_status(run_id, _) do
+    case PipelineStatus.get_record(run_id) do
       %Record{status: status} -> status
       _ -> nil
     end

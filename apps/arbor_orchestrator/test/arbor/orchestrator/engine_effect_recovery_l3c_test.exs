@@ -579,6 +579,147 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
   end
 
   # ---------------------------------------------------------------------------
+  # Legacy intent visit binding (security regression)
+  # ---------------------------------------------------------------------------
+
+  describe "legacy pending_intent visit binding (security regression)" do
+    test "different execution marker cannot bypass indeterminate side-effect gate or invoke handler" do
+      # A later/different L3C visit marker for the same node_id must not resolve
+      # a legacy pending_intent. force_replay remains the deliberate override;
+      # without it, resume must halt before any handler call.
+      ctx = start_isolated_journal("l3c_legacy_mask")
+      jopts = [server: ctx.journal_name]
+      parent = self()
+      identity = :crypto.strong_rand_bytes(32)
+      logs_root = tmp_logs("l3c_legacy_mask")
+
+      input_hash = String.duplicate("a", 64)
+      legacy_exec = "exec_legacy_old"
+      later_exec = "exec_later_visit"
+
+      seed_legacy_intent_checkpoint!(
+        logs_root,
+        ctx.run_id,
+        identity,
+        intent_execution_id: legacy_exec,
+        intent_input_hash: input_hash,
+        digest_execution_id: later_exec,
+        digest_input_hash: input_hash
+      )
+
+      # No current_effect — L3C continues; legacy intent gate must still fire.
+      put_minimal_interrupted!(ctx.run_id, jopts, logs_root, completed_nodes: ["start"])
+
+      assert {:error, {:indeterminate_side_effect, "task", ^legacy_exec}} =
+               Engine.run(parse!(side_dot()),
+                 run_id: ctx.run_id,
+                 logs_root: logs_root,
+                 journal_opts: jopts,
+                 parent: parent,
+                 identity_private_key: identity,
+                 resume: true,
+                 recovery: true
+               )
+
+      refute_receive {:l3c_probe, _, _}, 150
+
+      # force_replay remains the deliberate legacy override (not a security hole).
+      reopen_as_recovering!(ctx.run_id, jopts, logs_root)
+
+      assert {:ok, _result} =
+               Engine.run(parse!(side_dot()),
+                 run_id: ctx.run_id,
+                 logs_root: logs_root,
+                 journal_opts: jopts,
+                 parent: parent,
+                 identity_private_key: identity,
+                 resume: true,
+                 recovery: true,
+                 force_replay: true
+               )
+
+      # Handler may run under force_replay; that is intentional legacy override.
+      assert_receive {:l3c_probe, "task", _}, 1_000
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Settled checkpoint-ahead progress
+  # ---------------------------------------------------------------------------
+
+  describe "settled checkpoint-ahead progress" do
+    test "syncs journal progress from authenticated checkpoint without re-settling or replaying" do
+      # First run settles task, then fails after exit checkpoint advances while
+      # journal progress lags — settled effect + record prefix of checkpoint.
+      ctx = start_backed_journal("l3c_settled_ahead", :completed_progress)
+      jopts = [server: ctx.journal_name]
+      parent = self()
+      identity = :crypto.strong_rand_bytes(32)
+      logs_root = tmp_logs("l3c_settled_ahead")
+
+      # Complete through task with settle failure disabled: use settle fail once
+      # then manually settle and leave progress behind checkpoint.
+      # Simpler: run with completed_progress fail leaves completed effect + checkpoint.
+      assert {:error, {:effect_completed_progress_failed, _}} =
+               Engine.run(parse!(side_dot()),
+                 run_id: ctx.run_id,
+                 logs_root: logs_root,
+                 journal_opts: jopts,
+                 parent: parent,
+                 identity_private_key: identity,
+                 resumable: true
+               )
+
+      assert_receive {:l3c_probe, "task", exec_id}, 1_000
+      flush_probes()
+
+      rec = PipelineStatus.get_record(ctx.run_id, jopts)
+      assert rec.current_effect["status"] == "completed"
+      assert File.exists?(Path.join(logs_root, "checkpoint.json"))
+
+      # Manually settle the effect and leave journal progress at ["start"] while
+      # checkpoint already includes task (and optionally more). Authenticated
+      # checkpoint is the progress source for sync.
+      settled = settle_effect_in_record!(rec)
+
+      behind = %Record{
+        settled
+        | status: :interrupted,
+          failure_reason: nil,
+          finished_at: nil,
+          duration_ms: nil,
+          owner_node: nil,
+          logs_root: logs_root,
+          completed_nodes: ["start"],
+          completed_count: 1
+      }
+
+      assert :ok = PipelineStatus.put(behind, jopts)
+      assert {:ok, _} = PipelineStatus.claim_for_recovery_record(ctx.run_id, node(), jopts)
+
+      assert {:ok, result} =
+               Engine.run(parse!(side_dot()),
+                 run_id: ctx.run_id,
+                 logs_root: logs_root,
+                 journal_opts: jopts,
+                 parent: parent,
+                 identity_private_key: identity,
+                 resume: true,
+                 recovery: true
+               )
+
+      refute_receive {:l3c_probe, "task", _}, 150
+      assert "exit" in result.completed_nodes
+
+      final = PipelineStatus.get_record(ctx.run_id, jopts)
+      assert final.status == :completed
+      assert final.current_effect["status"] == "settled"
+      assert final.current_effect["execution_id"] == exec_id
+      assert "task" in (final.completed_nodes || [])
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Public Arbor.Orchestrator.resume/2 owner settlement
   # ---------------------------------------------------------------------------
 
@@ -605,7 +746,7 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
       assert_receive {:l3c_probe, "task", exec_id}, 1_000
       flush_probes()
 
-      prepare_interrupted_for_public_resume!(
+      publish_to_default_journal!(
         ctx.run_id,
         jopts,
         logs_root,
@@ -615,13 +756,12 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
 
       assert {:error, {:indeterminate_effect, "task", ^exec_id}} =
                Orchestrator.resume(ctx.run_id,
-                 journal_opts: jopts,
                  parent: parent,
                  identity_private_key: identity
                )
 
       refute_receive {:l3c_probe, _, _}, 150
-      rec = PipelineStatus.get_record(ctx.run_id, jopts)
+      rec = PipelineStatus.get_record(ctx.run_id)
       assert rec.status == :interrupted
       assert rec.current_effect["status"] == "pending"
     end
@@ -652,7 +792,7 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
       :ok = File.mkdir_p(logs_root)
       seed_start_checkpoint!(logs_root, ctx.run_id, identity)
 
-      prepare_interrupted_for_public_resume!(
+      publish_to_default_journal!(
         ctx.run_id,
         jopts,
         logs_root,
@@ -662,13 +802,12 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
 
       assert {:error, {:completed_effect_unapplied, "task", ^exec_id}} =
                Orchestrator.resume(ctx.run_id,
-                 journal_opts: jopts,
                  parent: parent,
                  identity_private_key: identity
                )
 
       refute_receive {:l3c_probe, _, _}, 150
-      rec = PipelineStatus.get_record(ctx.run_id, jopts)
+      rec = PipelineStatus.get_record(ctx.run_id)
       assert rec.status == :interrupted
       assert rec.current_effect["status"] == "completed"
     end
@@ -695,7 +834,9 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
       assert_receive {:l3c_probe, "task", _exec_id}, 1_000
       flush_probes()
 
-      prepare_interrupted_for_public_resume!(
+      corrupt_effect_digest!(ctx.run_id, jopts)
+
+      publish_to_default_journal!(
         ctx.run_id,
         jopts,
         logs_root,
@@ -703,17 +844,14 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
         graph_hash
       )
 
-      corrupt_effect_digest!(ctx.run_id, jopts)
-
       assert {:error, {:effect_recovery_inconsistent, :result_digest_mismatch}} =
                Orchestrator.resume(ctx.run_id,
-                 journal_opts: jopts,
                  parent: parent,
                  identity_private_key: identity
                )
 
       refute_receive {:l3c_probe, "task", _}, 150
-      rec = PipelineStatus.get_record(ctx.run_id, jopts)
+      rec = PipelineStatus.get_record(ctx.run_id)
       assert rec.status == :failed
     end
 
@@ -739,7 +877,7 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
       assert_receive {:l3c_probe, "task", exec_id}, 1_000
       flush_probes()
 
-      prepare_interrupted_for_public_resume!(
+      publish_to_default_journal!(
         ctx.run_id,
         jopts,
         logs_root,
@@ -749,7 +887,6 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
 
       assert {:ok, result} =
                Orchestrator.resume(ctx.run_id,
-                 journal_opts: jopts,
                  parent: parent,
                  identity_private_key: identity
                )
@@ -757,7 +894,7 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
       refute_receive {:l3c_probe, "task", _}, 150
       assert "exit" in result.completed_nodes
 
-      final = PipelineStatus.get_record(ctx.run_id, jopts)
+      final = PipelineStatus.get_record(ctx.run_id)
       assert final.status == :completed
       assert final.current_effect["status"] == "settled"
       assert final.current_effect["execution_id"] == exec_id
@@ -855,7 +992,10 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
     assert {:ok, _} = PipelineStatus.claim_for_recovery_record(run_id, node(), jopts)
   end
 
-  defp prepare_interrupted_for_public_resume!(run_id, jopts, logs_root, dot_path, graph_hash) do
+  # Publish the prepared unique record into the canonical default journal so
+  # public Orchestrator.resume/2 (no journal target) observes the same state
+  # as list/status/abandon. Clean up the default entry after the test.
+  defp publish_to_default_journal!(run_id, jopts, logs_root, dot_path, graph_hash) do
     rec = PipelineStatus.get_record(run_id, jopts)
     assert %Record{} = rec
 
@@ -871,7 +1011,89 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
         graph_hash: graph_hash
     }
 
-    assert :ok = PipelineStatus.put(reopened, jopts)
+    assert :ok = PipelineStatus.put(reopened)
+
+    on_exit(fn ->
+      try do
+        _ = PipelineStatus.delete(run_id)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+
+    reopened
+  end
+
+  defp put_minimal_interrupted!(run_id, jopts, logs_root, opts) do
+    completed = Keyword.get(opts, :completed_nodes, ["start"])
+
+    rec = %Record{
+      run_id: run_id,
+      pipeline_id: run_id,
+      status: :interrupted,
+      total_nodes: 3,
+      completed_count: length(completed),
+      completed_nodes: completed,
+      effect_generation: 1,
+      current_effect: nil,
+      logs_root: logs_root,
+      started_at: DateTime.utc_now()
+    }
+
+    assert :ok = PipelineStatus.put(rec, jopts)
+    assert {:ok, _} = PipelineStatus.claim_for_recovery_record(run_id, node(), jopts)
+  end
+
+  defp settle_effect_in_record!(%Record{} = rec) do
+    alias Arbor.Orchestrator.RunLifecycle.EffectEnvelope
+
+    effect = rec.current_effect
+    assert is_map(effect)
+    assert effect["status"] == "completed"
+    assert {:ok, settled} = EffectEnvelope.settle(effect)
+    %Record{rec | current_effect: settled}
+  end
+
+  defp seed_legacy_intent_checkpoint!(logs_root, run_id, identity, opts) do
+    alias Arbor.Orchestrator.Engine.Checkpoint
+    alias Arbor.Orchestrator.Engine.Context
+    alias Arbor.Orchestrator.Engine.Outcome
+
+    intent_exec = Keyword.fetch!(opts, :intent_execution_id)
+    intent_hash = Keyword.fetch!(opts, :intent_input_hash)
+    digest_exec = Keyword.fetch!(opts, :digest_execution_id)
+    digest_hash = Keyword.fetch!(opts, :digest_input_hash)
+
+    context = Context.new(%{"outcome" => "success"})
+    outcomes = %{"start" => %Outcome{status: :success}}
+
+    hmac = Engine.derive_checkpoint_hmac_secret(identity_private_key: identity)
+    assert is_binary(hmac)
+
+    pending_intent = %{
+      handler: "Arbor.Orchestrator.Handlers.ExecHandler",
+      input_hash: intent_hash,
+      started_at: "2026-07-15T12:00:00.000000Z",
+      execution_id: intent_exec
+    }
+
+    # Later/different visit marker for the same node_id — must NOT resolve intent.
+    later_digest = %{
+      input_hash: digest_hash,
+      outcome_status: :success,
+      completed_at: "2026-07-15T12:00:01.000000Z",
+      execution_id: digest_exec
+    }
+
+    checkpoint =
+      Checkpoint.from_state("start", ["start"], %{}, context, outcomes,
+        run_id: run_id,
+        pipeline_started_at: DateTime.utc_now(),
+        pending_intents: %{"task" => pending_intent},
+        execution_digests: %{"task" => later_digest}
+      )
+
+    assert {:ok, _} = Checkpoint.persist(checkpoint, logs_root, hmac_secret: hmac)
   end
 
   defp prepare_resumable_graph!(label, dot) do

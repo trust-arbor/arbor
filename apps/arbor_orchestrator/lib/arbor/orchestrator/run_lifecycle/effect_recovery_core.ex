@@ -117,19 +117,25 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
       {:ok, :marker_match} ->
         case exact_outcome_match(effect, checkpoint) do
           {:ok, :match} ->
-            case ordered_progress_relation(record_nodes, checkpoint.completed_nodes) do
-              :equal ->
-                {:ok, :reconcile, [{:settle, generation, execution_id}]}
+            case completed_effect_progress_coherence(node_id, checkpoint.completed_nodes) do
+              :ok ->
+                case ordered_progress_relation(record_nodes, checkpoint.completed_nodes) do
+                  :equal ->
+                    {:ok, :reconcile, [{:settle, generation, execution_id}]}
 
-              :record_prefix ->
-                {:ok, :reconcile,
-                 [
-                   {:sync_progress, checkpoint.completed_nodes},
-                   {:settle, generation, execution_id}
-                 ]}
+                  :record_prefix ->
+                    {:ok, :reconcile,
+                     [
+                       {:sync_progress, checkpoint.completed_nodes},
+                       {:settle, generation, execution_id}
+                     ]}
 
-              :inconsistent ->
-                {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}}
+                  :inconsistent ->
+                    {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}}
+                end
+
+              {:error, reason} ->
+                {:error, {:effect_recovery_inconsistent, reason}}
             end
 
           {:error, :missing_outcome} ->
@@ -148,41 +154,54 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   end
 
   defp classify(%{"status" => "settled"} = effect, record_nodes, checkpoint) do
-    # Settled requires exact marker + outcome evidence and ordered-progress equality.
-    case ordered_progress_relation(record_nodes, checkpoint.completed_nodes) do
-      :equal ->
-        case match_current_execution_marker(effect, checkpoint) do
-          {:ok, :marker_match} ->
-            case exact_outcome_match(effect, checkpoint) do
-              {:ok, :match} ->
-                {:ok, :continue}
+    # Settled proves its own node was durably settled. Exact marker + outcome
+    # evidence is required; ordered progress may be equal or a strict prefix
+    # of an authenticated checkpoint that advanced past non-journaled nodes
+    # while best-effort journal progress lagged. Never re-settle.
+    case match_current_execution_marker(effect, checkpoint) do
+      {:ok, :marker_match} ->
+        case exact_outcome_match(effect, checkpoint) do
+          {:ok, :match} ->
+            case settled_effect_progress_coherence(
+                   effect["node_id"],
+                   checkpoint.completed_nodes
+                 ) do
+              :ok ->
+                case ordered_progress_relation(record_nodes, checkpoint.completed_nodes) do
+                  :equal ->
+                    {:ok, :continue}
 
-              {:error, :missing_outcome} ->
-                {:error, {:effect_recovery_inconsistent, :settled_outcome_missing}}
+                  :record_prefix ->
+                    # Checkpoint-ahead after settle is recoverable: sync journal
+                    # progress from authenticated checkpoint and continue.
+                    {:ok, :reconcile, [{:sync_progress, checkpoint.completed_nodes}]}
 
-              {:error, :status_mismatch} ->
-                {:error, {:effect_recovery_inconsistent, :outcome_status_mismatch}}
+                  :inconsistent ->
+                    {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}}
+                end
 
-              {:error, :digest_mismatch} ->
-                {:error, {:effect_recovery_inconsistent, :result_digest_mismatch}}
-
-              {:error, reason} when is_atom(reason) ->
+              {:error, reason} ->
                 {:error, {:effect_recovery_inconsistent, reason}}
             end
 
-          {:error, :missing_or_stale_marker} ->
-            {:error, {:effect_recovery_inconsistent, :settled_marker_missing}}
+          {:error, :missing_outcome} ->
+            {:error, {:effect_recovery_inconsistent, :settled_outcome_missing}}
+
+          {:error, :status_mismatch} ->
+            {:error, {:effect_recovery_inconsistent, :outcome_status_mismatch}}
+
+          {:error, :digest_mismatch} ->
+            {:error, {:effect_recovery_inconsistent, :result_digest_mismatch}}
 
           {:error, reason} when is_atom(reason) ->
             {:error, {:effect_recovery_inconsistent, reason}}
         end
 
-      :record_prefix ->
-        # Settled must already have durable progress caught up — never sync from settled.
-        {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}}
+      {:error, :missing_or_stale_marker} ->
+        {:error, {:effect_recovery_inconsistent, :settled_marker_missing}}
 
-      :inconsistent ->
-        {:error, {:effect_recovery_inconsistent, :ordered_progress_inconsistent}}
+      {:error, reason} when is_atom(reason) ->
+        {:error, {:effect_recovery_inconsistent, reason}}
     end
   end
 
@@ -229,8 +248,10 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   defp validate_marker_fields(effect, marker) do
     marker_hash = marker_get(marker, :input_hash)
     marker_status = marker_get(marker, :outcome_status)
+    marker_completed_at = marker_get(marker, :completed_at)
     expected_hash = effect["input_hash"]
     expected_status = effect["outcome_status"]
+    expected_completed_at = effect["completed_at"]
 
     cond do
       not is_binary(marker_hash) or marker_hash == "" ->
@@ -248,6 +269,15 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
       normalize_status_string(marker_status) != expected_status ->
         {:error, :outcome_status_mismatch}
 
+      not is_binary(marker_completed_at) or marker_completed_at == "" ->
+        {:error, :invalid_execution_marker}
+
+      not is_binary(expected_completed_at) or expected_completed_at == "" ->
+        {:error, :invalid_effect_completed_at}
+
+      marker_completed_at != expected_completed_at ->
+        {:error, :completed_at_mismatch}
+
       true ->
         {:ok, :marker_match}
     end
@@ -256,6 +286,33 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   defp marker_get(marker, key) when is_atom(key) do
     Map.get(marker, key) || Map.get(marker, Atom.to_string(key))
   end
+
+  # Completed effects cannot advance past settle: the effect node must be the
+  # last chronological completed node (duplicates allowed earlier in the list).
+  defp completed_effect_progress_coherence(node_id, completed_nodes)
+       when is_binary(node_id) and is_list(completed_nodes) do
+    case List.last(completed_nodes) do
+      ^node_id -> :ok
+      _ -> {:error, :effect_progress_incoherent}
+    end
+  end
+
+  defp completed_effect_progress_coherence(_node_id, _completed_nodes),
+    do: {:error, :effect_progress_incoherent}
+
+  # Settled effects require the effect node somewhere in checkpoint progress
+  # (may not be last — later non-journaled nodes can advance the checkpoint).
+  defp settled_effect_progress_coherence(node_id, completed_nodes)
+       when is_binary(node_id) and is_list(completed_nodes) do
+    if node_id in completed_nodes do
+      :ok
+    else
+      {:error, :effect_progress_incoherent}
+    end
+  end
+
+  defp settled_effect_progress_coherence(_node_id, _completed_nodes),
+    do: {:error, :effect_progress_incoherent}
 
   # Exact reconciliation requires an Outcome whose status + result digest match
   # the retained receipt for this node.
