@@ -805,6 +805,11 @@ defmodule Arbor.Orchestrator.RunJournal do
   # Fail closed on rehydrate: never start durable mode with a silently empty
   # hot view when the backend cannot be listed/read. Identity binding (listed
   # key / envelope key / payload run_id) is required before any hot insert.
+  #
+  # Local/dead-owner in-flight → :interrupted normalization is **backend-first**:
+  # the durable row is corrected before hot publish so runtime refresh cannot
+  # re-import a stale :running status after boot. Remote-owner rows are never
+  # rewritten (L4 fenced recovery).
   defp reload_from_durable(state) do
     case durable_list_keys(state) do
       {:ok, keys} when is_list(keys) ->
@@ -813,8 +818,15 @@ defmodule Arbor.Orchestrator.RunJournal do
             {:ok, raw} ->
               case bind_and_decode_lifecycle_row(key, raw, st.local_node, :boot) do
                 {:ok, record} ->
-                  hot_insert(st.table, record)
-                  {:cont, {:ok, st}}
+                  case publish_boot_normalized_row(key, raw, record, st) do
+                    {:ok, published, st2} ->
+                      hot_insert(st2.table, published)
+                      {:cont, {:ok, st2}}
+
+                    {:error, reason, _st2} ->
+                      # Fail closed: never publish a fabricated hot-only interrupt.
+                      {:halt, {:error, bound_rehydrate_error(key, reason)}}
+                  end
 
                 {:error, reason} ->
                   # Fail closed: never drop/normalize corrupt or miskeyed rows.
@@ -1130,6 +1142,9 @@ defmodule Arbor.Orchestrator.RunJournal do
   # Boot-normalize rehydrated rows. Do **not** rewrite in-flight rows owned or
   # sourced by another potentially-live node — leave them for L4 fenced recovery.
   # Only normalize records proven local (or ownerless/dead-local).
+  #
+  # Status rewrites must be published durable-first via
+  # `publish_boot_normalized_row/4` before hot insert.
   defp boot_normalize(%Record{} = record, local_node) do
     record = %Record{record | spawning_pid: nil}
 
@@ -1157,6 +1172,143 @@ defmodule Arbor.Orchestrator.RunJournal do
   # Import path (tests/ops) uses the local-node view.
   defp boot_normalize(%Record{} = record) do
     boot_normalize(record, Kernel.node())
+  end
+
+  # When boot_normalize rewrote a local/dead-owner in-flight row to
+  # :interrupted, persist that correction before hot publish. Remote rows and
+  # rows that did not change status are left durable-as-is.
+  defp publish_boot_normalized_row(key, raw, %Record{} = normalized, state)
+       when is_binary(key) do
+    case bind_and_decode_lifecycle_row(key, raw, state.local_node, :runtime) do
+      {:ok, %Record{} = original} ->
+        cond do
+          remote_ownership?(original, state.local_node) ->
+            # Never ordinary-put or CAS-rewrite remote ownership at boot.
+            {:ok, normalized, state}
+
+          not needs_durable_boot_interrupt?(original, normalized) ->
+            {:ok, normalized, state}
+
+          true ->
+            durable_publish_boot_interrupt(key, raw, original, normalized, state)
+        end
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp needs_durable_boot_interrupt?(%Record{} = original, %Record{} = normalized) do
+    original.status in @ownerless_inflight_statuses and
+      normalized.status == :interrupted and
+      original.status != :interrupted
+  end
+
+  # Backend-first local interrupt at boot. Prefer structured PersistenceRecord
+  # CAS when available so a concurrent durable update cannot be last-write-wins
+  # overwritten. Legacy/raw maps and non-CAS backends use ordinary put only for
+  # proven-local rows. Conflicts refresh durable authority or fail closed —
+  # never fabricate a hot-only normalized row.
+  defp durable_publish_boot_interrupt(
+         key,
+         raw,
+         %Record{} = original,
+         %Record{} = interrupted,
+         state
+       ) do
+    if remote_ownership?(original, state.local_node) do
+      {:error, :boot_normalize_remote_rewrite_refused, state}
+    else
+      case try_boot_interrupt_write(key, raw, interrupted, state) do
+        {:ok, %Record{} = stored, new_state} ->
+          {:ok, stored, new_state}
+
+        {:error, :conflict, new_state} ->
+          resolve_boot_interrupt_conflict(key, new_state)
+
+        {:error, reason, new_state} ->
+          {:error, reason, new_state}
+      end
+    end
+  end
+
+  defp try_boot_interrupt_write(key, raw, %Record{} = interrupted, state) do
+    case structured_cas_expected(raw, key, state) do
+      {:ok, %PersistenceRecord{} = expected} ->
+        cas_lifecycle_update(expected, interrupted, state, :interrupt)
+
+      :not_structured ->
+        # Legacy/raw or unfenced backend: local ordinary put only.
+        case write_record(interrupted, state) do
+          {:ok, new_state} ->
+            {:ok, interrupted, new_state}
+
+          {{:error, reason}, new_state} ->
+            {:error, reason, new_state}
+        end
+    end
+  end
+
+  # Structured versioned PersistenceRecord + CAS-capable backend → fence the
+  # boot interrupt. Otherwise fall back to ordinary put for local rows only.
+  defp structured_cas_expected(
+         %PersistenceRecord{generation: gen, revision: rev, key: env_key} = record,
+         key,
+         state
+       )
+       when is_integer(gen) and gen >= 1 and is_integer(rev) and rev >= 1 and is_binary(env_key) and
+              env_key == key do
+    backend = state.backend
+
+    if not is_nil(backend) and Arbor.Persistence.supports_compare_and_swap?(backend) do
+      {:ok, record}
+    else
+      :not_structured
+    end
+  end
+
+  defp structured_cas_expected(_raw, _key, _state), do: :not_structured
+
+  # After a CAS conflict, durable authority wins. Accept the refreshed row when
+  # it no longer needs a local boot interrupt; otherwise fail closed rather than
+  # last-write-wins a fabricated normalized status.
+  defp resolve_boot_interrupt_conflict(key, state) do
+    case durable_fetch_raw(key, state) do
+      {:ok, raw} ->
+        case bind_and_decode_lifecycle_row(key, raw, state.local_node, :runtime) do
+          {:ok, %Record{} = durable} ->
+            if needs_local_boot_interrupt?(durable, state.local_node) do
+              # Still local in-flight after concurrent write — one CAS/put retry
+              # against the new expected, then fail closed.
+              interrupted = boot_normalize(durable, state.local_node)
+
+              case try_boot_interrupt_write(key, raw, interrupted, state) do
+                {:ok, %Record{} = stored, new_state} ->
+                  {:ok, stored, new_state}
+
+                {:error, :conflict, new_state} ->
+                  {:error, :boot_interrupt_conflict, new_state}
+
+                {:error, reason, new_state} ->
+                  {:error, reason, new_state}
+              end
+            else
+              # Already interrupted / recovering / terminal / remote — use durable.
+              {:ok, durable, state}
+            end
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp needs_local_boot_interrupt?(%Record{} = record, local_node) do
+    record.status in @ownerless_inflight_statuses and
+      not remote_ownership?(record, local_node)
   end
 
   # owner_node is authoritative when present. source_node is origin provenance

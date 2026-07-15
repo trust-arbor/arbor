@@ -263,6 +263,70 @@ defmodule Arbor.Orchestrator.RunJournalDurabilityTest do
     assert RunJournal.durability_status(server: journal_name).durable == false
   end
 
+  test "crash consistency regression: boot rehydrate durably publishes local running as interrupted",
+       ctx do
+    %{
+      journal_name: journal_name,
+      store_name: store_name,
+      ets_table: ets_table
+    } = ctx
+
+    run_id = "boot_durable_interrupt_#{System.unique_integer([:positive])}"
+
+    assert :ok =
+             RunJournal.put(
+               %Record{
+                 run_id: run_id,
+                 pipeline_id: run_id,
+                 status: :running,
+                 total_nodes: 3,
+                 completed_count: 1,
+                 completed_nodes: ["start"],
+                 current_node: "work",
+                 started_at: DateTime.utc_now(),
+                 owner_node: node(),
+                 source_node: node(),
+                 spawning_pid: self()
+               },
+               server: journal_name
+             )
+
+    assert {:ok, pre} = durable_lifecycle_status(store_name, run_id)
+    assert pre == :running
+
+    :ok = stop_supervised(journal_name)
+    assert :ets.info(ets_table) == :undefined
+
+    {:ok, _} =
+      start_supervised(
+        {RunJournal,
+         name: journal_name,
+         ets_table: ets_table,
+         backend: StoreETS,
+         store_name: store_name,
+         start_store: false}
+      )
+
+    # Hot view is claimable interrupted…
+    assert {:ok, %Record{status: :interrupted, owner_node: nil, spawning_pid: nil}} =
+             RunJournal.get_record(run_id, server: journal_name)
+
+    # …and the durable row itself was corrected before hot publish, so runtime
+    # refresh cannot re-import a stale :running status.
+    assert {:ok, :interrupted} = durable_lifecycle_status(store_name, run_id)
+
+    assert {:ok, %{upserted: n}} = RunJournal.refresh_from_durable(server: journal_name)
+    assert n >= 1
+
+    assert {:ok, %Record{status: :interrupted, run_id: ^run_id}} =
+             RunJournal.get_record(run_id, server: journal_name)
+
+    assert {:ok, claimed} =
+             RunJournal.claim_for_recovery(run_id, node(), server: journal_name)
+
+    assert claimed.status == :recovering
+  end
+
   test "backend write failure leaves prior hot record unchanged" do
     suffix = System.unique_integer([:positive, :monotonic])
     store_name = :"rj_fail_store_#{suffix}"
@@ -758,6 +822,8 @@ defmodule Arbor.Orchestrator.RunJournalDurabilityTest do
                server: journal_name
              )
 
+    assert {:ok, :running} = durable_lifecycle_status(store_name, run_id)
+
     :ok = stop_supervised(journal_name)
 
     {:ok, _} =
@@ -776,6 +842,11 @@ defmodule Arbor.Orchestrator.RunJournalDurabilityTest do
     assert to_string(remote.owner_node) == "peer@remote"
     assert to_string(remote.source_node) == "peer@remote"
     assert remote.spawning_pid == nil
+
+    # Durable remote row must remain untouched (no boot ordinary-put / CAS rewrite).
+    assert {:ok, :running} = durable_lifecycle_status(store_name, run_id)
+    assert {:ok, remote_owner} = durable_lifecycle_owner(store_name, run_id)
+    assert to_string(remote_owner) == "peer@remote"
 
     # Claim fails closed until L4 fencing.
     assert {:error, reason} =
@@ -1371,6 +1442,55 @@ defmodule Arbor.Orchestrator.RunJournalDurabilityTest do
 
       # Keep dialyzer/unused quiet if stop was partial
       _ = journal
+    end
+  end
+
+  # Read lifecycle status/owner directly from the durable backend (not hot ETS),
+  # using only the public Arbor.Persistence facade.
+  defp durable_lifecycle_status(store_name, run_id) do
+    case durable_lifecycle_payload(store_name, run_id) do
+      {:ok, payload} ->
+        record = Adapter.from_durable_map(payload)
+        {:ok, record.status}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp durable_lifecycle_owner(store_name, run_id) do
+    case durable_lifecycle_payload(store_name, run_id) do
+      {:ok, payload} ->
+        record = Adapter.from_durable_map(payload)
+        {:ok, record.owner_node}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp durable_lifecycle_payload(store_name, run_id) do
+    case Arbor.Persistence.get(store_name, StoreETS, run_id) do
+      {:ok, %Arbor.Contracts.Persistence.Record{data: data}} when is_map(data) ->
+        {:ok, data}
+
+      {:ok, data} when is_map(data) ->
+        cond do
+          Map.has_key?(data, "status") or Map.has_key?(data, :status) ->
+            {:ok, data}
+
+          is_map(Map.get(data, "data") || Map.get(data, :data)) ->
+            {:ok, Map.get(data, "data") || Map.get(data, :data)}
+
+          true ->
+            {:error, :unstructured_durable_record}
+        end
+
+      {:error, _} = err ->
+        err
+
+      other ->
+        {:error, {:unexpected_durable_value, other}}
     end
   end
 end
