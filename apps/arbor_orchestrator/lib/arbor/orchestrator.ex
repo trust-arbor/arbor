@@ -57,6 +57,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.Conformance
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Engine
+  alias Arbor.Orchestrator.Engine.Checkpoint
   alias Arbor.Orchestrator.Engine.RunAuthorization
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.IR
@@ -493,8 +494,20 @@ defmodule Arbor.Orchestrator do
   @doc """
   List pipelines that were interrupted by a crash and may be resumable.
 
-  Returns `{:ok, public_maps}` for interrupted records with checkpoint files,
-  or `{:error, :journal_unavailable}` on journal outage (never confuses
+  Returns `{:ok, public_maps}` for interrupted records that have either a local
+  `logs_root/checkpoint.json` compatibility file **or** a valid Config-owned
+  durable checkpoint for `record.run_id`.
+
+  Listing may validate exact store-key / envelope / payload `run_id` identity
+  **without HMAC** — it does not claim or execute. `resume/2` still
+  authenticates the checkpoint before claim/execution.
+
+  Config/backend outages, malformed envelopes, key mismatches, and payload
+  `run_id` mismatches are bounded surfaced errors (never silent empty/smaller
+  lists). Missing checkpoints (`:not_found`) and explicit file-only config
+  (`:store_not_configured`) mean that record is simply not resumable.
+
+  Journal outage returns `{:error, :journal_unavailable}` (never confuses
   outage with empty). Only **interrupted** records are resumable. Bounded
   legacy jobs are merged only when the journal is available.
   """
@@ -502,20 +515,17 @@ defmodule Arbor.Orchestrator do
   def list_resumable do
     case PipelineStatus.list_interrupted_records() do
       {:ok, records} ->
-        current =
-          records
-          |> Enum.filter(&resumable_checkpoint_record?/1)
-          |> Enum.map(&Adapter.to_public_map/1)
+        with {:ok, current} <- collect_resumable_public_maps(records) do
+          current_ids = MapSet.new(current, & &1.run_id)
 
-        current_ids = MapSet.new(current, & &1.run_id)
+          legacy_records =
+            LegacyJobAdapter.list_interrupted()
+            |> Enum.reject(fn %Record{run_id: id} -> MapSet.member?(current_ids, id) end)
 
-        legacy =
-          LegacyJobAdapter.list_interrupted()
-          |> Enum.reject(fn %Record{run_id: id} -> MapSet.member?(current_ids, id) end)
-          |> Enum.filter(&resumable_checkpoint_record?/1)
-          |> Enum.map(&Adapter.to_public_map/1)
-
-        {:ok, current ++ legacy}
+          with {:ok, legacy} <- collect_resumable_public_maps(legacy_records) do
+            {:ok, current ++ legacy}
+          end
+        end
 
       {:error, :journal_unavailable} = err ->
         err
@@ -528,10 +538,18 @@ defmodule Arbor.Orchestrator do
   @doc """
   Resume an interrupted pipeline by run_id.
 
-  Preflights non-mutating checks (status, checkpoint, graph hash), then
-  **atomically claims** via PipelineStatus (current) or LegacyJobAdapter
+  Preflights non-mutating checks (status, checkpoint availability, graph hash),
+  then **atomically claims** via PipelineStatus (current) or LegacyJobAdapter
   (historical) before `Engine.run/2`. Only `:interrupted` records are
   resumable — failed runs must be re-marked interrupted first.
+
+  Checkpoint availability is either the local `logs_root/checkpoint.json`
+  compatibility file, or (when that file is absent) a Config-owned durable
+  store entry looked up as exact `"checkpoint:<run_id>"` via
+  `Checkpoint.fetch_persisted/2`. Durable preflight uses trusted resume
+  credentials for HMAC verification and never accepts caller-selected store
+  targets. A durable preflight failure leaves the lifecycle row interrupted
+  (never `:recovering`).
   """
   @spec resume(String.t(), keyword()) :: run_result()
   def resume(run_id, opts \\ []) when is_binary(run_id) do
@@ -627,17 +645,90 @@ defmodule Arbor.Orchestrator do
     end
   end
 
-  defp resumable_checkpoint_record?(%Record{logs_root: logs_root}) do
-    is_binary(logs_root) and File.exists?(Path.join(logs_root, "checkpoint.json"))
+  # Collect public maps for records that are resumable. Propagates store/config
+  # failures rather than silently omitting the affected records.
+  defp collect_resumable_public_maps(records) when is_list(records) do
+    Enum.reduce_while(records, {:ok, []}, fn record, {:ok, acc} ->
+      case resumable_checkpoint_status(record) do
+        :resumable ->
+          {:cont, {:ok, [Adapter.to_public_map(record) | acc]}}
+
+        :not_resumable ->
+          {:cont, {:ok, acc}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      {:error, _} = err -> err
+    end
   end
 
-  # Drop internal journal-target selectors so a claimed default record cannot
-  # be resumed/settled against a different RunJournal. list/status/resume/
-  # abandon all stay on the canonical default journal surface.
+  # Local compatibility file OR exact Config-owned durable checkpoint.
+  # Listing validates store-key / envelope / payload run_id identity without HMAC.
+  defp resumable_checkpoint_status(%Record{logs_root: logs_root})
+       when not is_binary(logs_root),
+       do: :not_resumable
+
+  defp resumable_checkpoint_status(%Record{logs_root: logs_root, run_id: run_id}) do
+    if local_checkpoint_present?(logs_root) do
+      :resumable
+    else
+      durable_checkpoint_list_status(run_id)
+    end
+  end
+
+  defp local_checkpoint_present?(logs_root) when is_binary(logs_root) do
+    File.exists?(Path.join(logs_root, "checkpoint.json"))
+  end
+
+  defp local_checkpoint_present?(_), do: false
+
+  # Listing path: exact `"checkpoint:<run_id>"` via Config-owned opts only.
+  # No HMAC — execution still authenticates on resume/2.
+  # `:not_found` / `:store_not_configured` → not resumable.
+  # Config/backend outage, key mismatch, payload run_id mismatch, corrupt
+  # envelope → bounded error for the whole list_resumable/0 call.
+  defp durable_checkpoint_list_status(run_id) when is_binary(run_id) do
+    case Config.fetch_engine_checkpoint_store_opts() do
+      {:ok, store_opts} ->
+        case Checkpoint.fetch_persisted(run_id, store_opts) do
+          {:ok, _payload} ->
+            :resumable
+
+          {:error, :not_found} ->
+            :not_resumable
+
+          {:error, :store_not_configured} ->
+            :not_resumable
+
+          {:error, reason} ->
+            {:error, {:durable_checkpoint, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:invalid_engine_checkpoints, reason}}
+    end
+  end
+
+  defp durable_checkpoint_list_status(_), do: :not_resumable
+
+  # Drop internal journal-target and store-target selectors so a claimed default
+  # record cannot be resumed against a different RunJournal or checkpoint store.
+  # list/status/resume/abandon stay on the canonical default journal surface;
+  # Engine still overwrites any residual store spoof at its trusted boundary.
   defp sanitize_public_resume_opts(opts) when is_list(opts) do
     opts
-    |> Keyword.delete(:journal_opts)
-    |> Keyword.delete(:server)
+    |> Keyword.drop([
+      :journal_opts,
+      :server,
+      :store,
+      :store_name,
+      :store_opts,
+      :checkpoint_store_opts
+    ])
   end
 
   defp sanitize_public_resume_opts(_), do: []
@@ -651,43 +742,129 @@ defmodule Arbor.Orchestrator do
     else
       checkpoint_path = Path.join(logs_root, "checkpoint.json")
 
-      cond do
-        not File.exists?(checkpoint_path) ->
-          {:error, :checkpoint_not_found}
+      # Non-mutating preflight first (local file or durable store), then graph,
+      # then claim, then settle every post-claim exit. Public resume always uses
+      # the canonical default journal — same surface as list/status/abandon.
+      # Callers cannot select an alternate journal or checkpoint store.
+      with :ok <- preflight_resume_checkpoint(run_id, checkpoint_path, opts),
+           :ok <- verify_graph_unchanged_record(entry),
+           {:ok, _claimed} <- claim_for_resume(run_id, source) do
+        settle_after_claim(run_id, source, fn ->
+          with {:ok, graph} <- load_graph_for_record(entry) do
+            # Caller opts first (minus journal/store selectors); record
+            # identity/claim fields win. Engine binds Config-owned store opts
+            # and loads by run_id when the compatibility file is absent.
+            resume_opts =
+              opts
+              |> sanitize_public_resume_opts()
+              |> Keyword.merge(
+                resume_from: checkpoint_path,
+                run_id: run_id,
+                logs_root: logs_root,
+                graph_hash: entry.graph_hash,
+                dot_source_path: entry.dot_source_path,
+                execution_principal: entry.execution_principal,
+                resume: true,
+                recovery: true
+              )
 
-        true ->
-          # Non-mutating preflight first, then claim, then settle every post-claim exit.
-          # Public resume always uses the canonical default journal — same surface
-          # as list/status/abandon. Callers cannot select an alternate journal.
-          with :ok <- verify_graph_unchanged_record(entry),
-               {:ok, _claimed} <- claim_for_resume(run_id, source) do
-            settle_after_claim(run_id, source, fn ->
-              with {:ok, graph} <- load_graph_for_record(entry) do
-                # Caller opts first (minus journal-target selectors); record
-                # identity/claim fields win. Public resume always drives Engine
-                # against the canonical default journal — never a caller-chosen
-                # alternate target after the default record was claimed.
-                resume_opts =
-                  opts
-                  |> sanitize_public_resume_opts()
-                  |> Keyword.merge(
-                    resume_from: checkpoint_path,
-                    run_id: run_id,
-                    logs_root: logs_root,
-                    graph_hash: entry.graph_hash,
-                    dot_source_path: entry.dot_source_path,
-                    execution_principal: entry.execution_principal,
-                    resume: true,
-                    recovery: true
-                  )
-
-                Engine.run(graph, resume_opts)
-              end
-            end)
+            Engine.run(graph, resume_opts)
           end
+        end)
       end
     end
   end
+
+  # Local file: preserve existing behavior (no durable fetch required).
+  # Absent file: Config-owned durable preflight with HMAC before claim.
+  # Failures here never claim — lifecycle stays :interrupted.
+  defp preflight_resume_checkpoint(run_id, checkpoint_path, opts)
+       when is_binary(run_id) and is_binary(checkpoint_path) do
+    if File.exists?(checkpoint_path) do
+      :ok
+    else
+      preflight_durable_resume_checkpoint(run_id, opts)
+    end
+  end
+
+  defp preflight_durable_resume_checkpoint(run_id, opts) when is_binary(run_id) do
+    with {:ok, store_opts} <- fetch_config_checkpoint_store_opts(),
+         {:ok, _payload} <- fetch_durable_resume_checkpoint(run_id, store_opts, opts) do
+      :ok
+    else
+      {:error, :not_found} ->
+        {:error, :checkpoint_not_found}
+
+      {:error, :store_not_configured} ->
+        {:error, :checkpoint_not_found}
+
+      {:error, reason} ->
+        {:error, map_durable_resume_preflight_error(reason)}
+    end
+  end
+
+  defp fetch_config_checkpoint_store_opts do
+    case Config.fetch_engine_checkpoint_store_opts() do
+      {:ok, opts} -> {:ok, opts}
+      {:error, reason} -> {:error, {:invalid_engine_checkpoints, reason}}
+    end
+  end
+
+  # Honor explicit :hmac_secret; otherwise derive from trusted resume credentials.
+  # Caller-selected store/store_name/store_opts are never merged in. When no
+  # identity is present, probe exact presence first to preserve the established
+  # checkpoint_not_found ordering, but never return an unverified payload.
+  defp fetch_durable_resume_checkpoint(run_id, store_opts, opts)
+       when is_binary(run_id) and is_list(store_opts) and is_list(opts) do
+    case resolve_resume_hmac_secret(opts) do
+      {:ok, nil} ->
+        case Checkpoint.fetch_persisted(run_id, store_opts) do
+          {:ok, _unverified_payload} -> {:error, :identity_required_for_resume}
+          {:error, _} = error -> error
+        end
+
+      {:ok, secret} when is_binary(secret) ->
+        Checkpoint.fetch_persisted(run_id, Keyword.put(store_opts, :hmac_secret, secret))
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resolve_resume_hmac_secret(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :hmac_secret) do
+      {:ok, secret} when is_binary(secret) and byte_size(secret) > 0 ->
+        {:ok, secret}
+
+      {:ok, _} ->
+        {:error, :checkpoint_hmac_invalid}
+
+      :error ->
+        case Engine.derive_checkpoint_hmac_secret(opts) do
+          secret when is_binary(secret) and byte_size(secret) > 0 ->
+            {:ok, secret}
+
+          nil ->
+            {:ok, nil}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  end
+
+  defp resolve_resume_hmac_secret(_), do: {:ok, nil}
+
+  defp map_durable_resume_preflight_error(:tampered), do: :checkpoint_hmac_invalid
+  defp map_durable_resume_preflight_error(:checkpoint_hmac_invalid), do: :checkpoint_hmac_invalid
+
+  defp map_durable_resume_preflight_error(:identity_required_for_resume),
+    do: :identity_required_for_resume
+
+  defp map_durable_resume_preflight_error({:invalid_engine_checkpoints, _} = reason),
+    do: reason
+
+  defp map_durable_resume_preflight_error(reason), do: {:durable_checkpoint, reason}
 
   # Claim settlement classifier:
   # - non-retryable (graph identity / load / structural checkpoint corruption)
