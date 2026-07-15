@@ -452,11 +452,41 @@ defmodule Arbor.Shell.AppleContainerUnitCore do
   @spec phase_output_limit(phase()) :: pos_integer()
   def phase_output_limit(phase), do: stdout_limit_for_phase(phase)
 
+  @doc false
+  @spec classify_exact_absence(term(), term()) ::
+          :absent | :present | {:error, term()}
+  def classify_exact_absence(unit_name, raw_result) do
+    with {:ok, name} <- admit_classifier_unit_name(unit_name),
+         {:ok, normalized} <- normalize_result(raw_result, :verify_absent) do
+      classify_list_absence(normalized, name)
+    end
+  rescue
+    _ -> {:error, :invalid_command_result}
+  end
+
   defp stdout_limit_for_phase(:start), do: @max_candidate_stdout_bytes
   defp stdout_limit_for_phase(:verify_absent), do: @max_list_json_bytes
   defp stdout_limit_for_phase(:create), do: @max_setup_cleanup_stdout_bytes
   defp stdout_limit_for_phase(:force_stop), do: @max_setup_cleanup_stdout_bytes
   defp stdout_limit_for_phase(:delete), do: @max_setup_cleanup_stdout_bytes
+
+  defp admit_classifier_unit_name(name) when is_binary(name) do
+    cond do
+      name == "" ->
+        {:error, :invalid_unit_name}
+
+      not String.valid?(name) ->
+        {:error, :invalid_unit_name}
+
+      byte_size(name) > @max_id_bytes ->
+        {:error, :invalid_unit_name}
+
+      true ->
+        {:ok, name}
+    end
+  end
+
+  defp admit_classifier_unit_name(_), do: {:error, :invalid_unit_name}
 
   defp fetch_boolean_flags(result) do
     Enum.reduce_while(@boolean_result_keys, {:ok, %{}}, fn key, {:ok, acc} ->

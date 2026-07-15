@@ -646,6 +646,82 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
     end
   end
 
+  describe "classify_exact_absence/2" do
+    test "classifies absent, present, and error classes from raw shell results" do
+      assert :absent = Unit.classify_exact_absence(@name, success_list([]))
+
+      assert :absent =
+               Unit.classify_exact_absence(
+                 @name,
+                 success_list([%{"configuration" => %{"id" => "other"}}])
+               )
+
+      assert :present =
+               Unit.classify_exact_absence(
+                 @name,
+                 success_list([%{"configuration" => %{"id" => @name}}])
+               )
+
+      assert {:error, :list_nonzero_exit} =
+               Unit.classify_exact_absence(@name, success(%{exit_code: 1, stdout: "[]"}))
+
+      assert {:error, :list_invalid_json} =
+               Unit.classify_exact_absence(@name, success(%{stdout: "not-json"}))
+
+      assert {:error, :list_timeout} =
+               Unit.classify_exact_absence(@name, success(%{timed_out: true, stdout: "[]"}))
+
+      assert {:error, :list_cancelled} =
+               Unit.classify_exact_absence(@name, success(%{cancelled: true, stdout: "[]"}))
+
+      assert {:error, :list_output_limit} =
+               Unit.classify_exact_absence(
+                 @name,
+                 success(%{output_limit_exceeded: true, stdout: "[]"})
+               )
+
+      assert {:error, :list_containment_failure} =
+               Unit.classify_exact_absence(
+                 @name,
+                 success(%{containment_failure: true, stdout: "[]"})
+               )
+    end
+
+    test "malformed names and results fail closed without raising" do
+      assert {:error, :invalid_unit_name} = Unit.classify_exact_absence("", success_list([]))
+      assert {:error, :invalid_unit_name} = Unit.classify_exact_absence(nil, success_list([]))
+      assert {:error, :invalid_unit_name} = Unit.classify_exact_absence(123, success_list([]))
+
+      too_long = String.duplicate("x", 257)
+
+      assert {:error, :invalid_unit_name} =
+               Unit.classify_exact_absence(too_long, success_list([]))
+
+      assert {:error, :invalid_command_result} = Unit.classify_exact_absence(@name, "nope")
+      assert {:error, :invalid_command_result} = Unit.classify_exact_absence(@name, nil)
+      assert {:error, :missing_exit_code} = Unit.classify_exact_absence(@name, %{stdout: "[]"})
+
+      assert {:error, :unsupported_result_keys} =
+               Unit.classify_exact_absence(@name, %{exit_code: 0, evil: true})
+    end
+
+    test "matches lifecycle cleanup absence classification", %{plan: plan} do
+      state = through_cleanup_verify_pending(plan)
+
+      raw = success_list([])
+      assert :absent = Unit.classify_exact_absence(@name, raw)
+
+      assert {:ok, _state, [{:terminal, {:ok, _}}]} =
+               Unit.apply_result(state, :verify_absent, raw)
+
+      present = success_list([%{"configuration" => %{"id" => @name}}])
+      assert :present = Unit.classify_exact_absence(@name, present)
+
+      assert {:ok, _state, [{:retry_after, _, {:run, :force_stop, _}}]} =
+               Unit.apply_result(state, :verify_absent, present)
+    end
+  end
+
   describe "show and purity" do
     test "show never leaks setup or cleanup stdout", %{plan: plan} do
       state = through_start_success_cleanup(plan)
