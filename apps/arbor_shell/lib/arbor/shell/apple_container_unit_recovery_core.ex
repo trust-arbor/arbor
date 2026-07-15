@@ -25,6 +25,23 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryCore do
   @cleanup_retry_initial_ms 50
   @cleanup_retry_max_ms 2_000
 
+  @allowed_cleanup_diagnostics MapSet.new([
+                                 :force_stop_ok,
+                                 :force_stop_failed,
+                                 :force_stop_timeout,
+                                 :force_stop_cancelled,
+                                 :force_stop_output_limit,
+                                 :force_stop_containment_failure,
+                                 :delete_ok,
+                                 :delete_failed,
+                                 :delete_timeout,
+                                 :delete_cancelled,
+                                 :delete_output_limit,
+                                 :delete_containment_failure,
+                                 :unit_still_present,
+                                 :verify_absent_error
+                               ])
+
   @logical_state_keys [
     :unit_name,
     :argv,
@@ -101,15 +118,15 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryCore do
   """
   @spec apply_result(state(), phase(), term()) ::
           {:ok, state(), [effect()]} | {:error, term()}
-  def apply_result(%{stage: :terminal} = state, _phase, _result) do
-    _ = state
-    {:error, :recovery_already_terminal}
-  end
-
   def apply_result(state, phase, result) when is_map(state) and is_atom(phase) do
-    with :ok <- require_state(state),
-         :ok <- expect_phase(state, phase) do
-      reduce(state, phase, result)
+    with :ok <- require_state(state) do
+      if state.stage == :terminal do
+        {:error, :recovery_already_terminal}
+      else
+        with :ok <- expect_phase(state, phase) do
+          reduce(state, phase, result)
+        end
+      end
     end
   rescue
     _ -> {:error, :invalid_command_result}
@@ -205,7 +222,7 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryCore do
          true <-
            cleanup_retry_ms >= @cleanup_retry_initial_ms and
              cleanup_retry_ms <= @cleanup_retry_max_ms,
-         true <- Enum.all?(cleanup_diagnostics, &is_atom/1),
+         true <- Enum.all?(cleanup_diagnostics, &MapSet.member?(@allowed_cleanup_diagnostics, &1)),
          true <- length(cleanup_diagnostics) <= @max_cleanup_diagnostics,
          true <- valid_stage_shape?(stage, cleanup_step, terminal) do
       :ok
@@ -299,7 +316,6 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryCore do
     {:ok, state, [{:retry_after, delay, {:run, :force_stop, state.argv.force_stop}}]}
   end
 
-  defp normalize_verify_diag(reason) when is_atom(reason), do: reason
   defp normalize_verify_diag(_reason), do: :verify_absent_error
 
   # --- Diagnostics ------------------------------------------------------------

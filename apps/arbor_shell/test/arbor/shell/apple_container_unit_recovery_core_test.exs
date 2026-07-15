@@ -354,7 +354,9 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryCoreTest do
         %{good | cleanup_step: :create},
         %{good | terminal: :reconciled},
         %{good | cleanup_diagnostics: ["not-atom"]},
+        %{good | cleanup_diagnostics: [:fabricated]},
         %{good | cleanup_retry_ms: 1},
+        %{stage: :terminal},
         "nope",
         nil
       ]
