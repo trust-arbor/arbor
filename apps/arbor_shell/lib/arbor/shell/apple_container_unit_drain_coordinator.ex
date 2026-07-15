@@ -11,6 +11,12 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   # budget until every snapshotted live worker yields an exact positive-absence
   # receipt.
   #
+  # Production unit starts also linearize through this process: a successful
+  # GenServer start reply completes before supervised terminate/2 begins, so
+  # every admitted worker is present in the unit supervisor before the drain
+  # snapshot. Calls arriving once terminate starts are not serviced and cannot
+  # create a late worker.
+  #
   # Handshake attempts are bounded, but a timeout/error/exit never settles or
   # drops a worker: the coordinator retries acceptance until :ok, then waits
   # for the exact drain receipt. Worker DOWN before receipt is never success.
@@ -27,6 +33,9 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   # Handshake only — acceptance of request_drain, not absence proof.
   @drain_handshake_timeout_ms 5_000
   @max_execution_id_bytes 256
+  # Bounded production start admission call (not absence proof).
+  @start_unit_timeout_ms 5_000
+  @max_start_unit_timeout_ms 60_000
 
   @doc false
   @spec start_link(term()) :: GenServer.on_start()
@@ -46,10 +55,66 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     }
   end
 
+  @doc """
+  Admit a production unit worker start through this coordinator.
+
+  Controller identity is taken only from the GenServer `from` tuple inside the
+  owner process — never from a caller-supplied pid. Timeout/exit while this
+  process is unavailable or terminating becomes `{:error, :unit_start_unavailable}`.
+  """
+  @spec start_unit(map(), term(), String.t(), reference(), pos_integer()) ::
+          {:ok, pid()} | {:error, term()}
+  def start_unit(spec, executable, execution_id, start_ref, timeout \\ @start_unit_timeout_ms)
+
+  def start_unit(spec, executable, execution_id, start_ref, timeout)
+      when is_map(spec) and is_binary(execution_id) and is_reference(start_ref) and
+             is_integer(timeout) and timeout > 0 and timeout <= @max_start_unit_timeout_ms do
+    GenServer.call(
+      @name,
+      {:start_unit, spec, executable, execution_id, start_ref},
+      timeout
+    )
+  catch
+    :exit, _reason ->
+      {:error, :unit_start_unavailable}
+  end
+
+  def start_unit(_spec, _executable, _execution_id, _start_ref, _timeout),
+    do: {:error, :invalid_unit_start}
+
   @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
     {:ok, %{}}
+  end
+
+  @impl true
+  def handle_call(
+        {:start_unit, spec, executable, execution_id, start_ref},
+        {controller_pid, _tag},
+        state
+      )
+      when is_pid(controller_pid) and is_map(spec) and is_binary(execution_id) and
+             is_reference(start_ref) do
+    # Derive original controller only from the GenServer from tuple.
+    reply =
+      Worker.start_under_coordinator(
+        spec,
+        executable,
+        execution_id,
+        start_ref,
+        controller_pid
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:start_unit, _spec, _executable, _execution_id, _start_ref}, _from, state) do
+    {:reply, {:error, :invalid_unit_start}, state}
+  end
+
+  def handle_call(_request, _from, state) do
+    {:reply, {:error, :unsupported_call}, state}
   end
 
   @impl true

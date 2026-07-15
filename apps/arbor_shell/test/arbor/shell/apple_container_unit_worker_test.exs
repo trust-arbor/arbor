@@ -522,6 +522,17 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     end
   end
 
+  defp unit_child_pids do
+    Arbor.Shell.AppleContainerUnitSupervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.flat_map(fn
+      {_id, child, _type, _modules} when is_pid(child) -> [child]
+      _other -> []
+    end)
+  end
+
+  defp unit_child_count, do: length(unit_child_pids())
+
   describe "happy path" do
     test "nonzero candidate then cleanup/absence publishes success", %{
       spec: spec,
@@ -978,6 +989,133 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       end
     end
 
+    test "security regression: coordinator-only start seam rejects non-coordinator callers", %{
+      spec: spec,
+      executable: executable
+    } do
+      before = unit_child_count()
+      start_ref = make_ref()
+
+      assert {:error, :coordinator_start_required} =
+               Worker.start_under_coordinator(
+                 spec,
+                 executable,
+                 "exec_direct_bypass",
+                 start_ref,
+                 self()
+               )
+
+      assert unit_child_count() == before
+      assert unit_child_pids() == []
+    end
+
+    test "security regression: production start unavailable while coordinator drain in progress",
+         %{
+           spec: spec,
+           executable: executable
+         } do
+      script = [
+        success_list([]),
+        success(%{exit_code: 0}),
+        {:hang, success(%{exit_code: 0, stdout: "partial"})},
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([%{"configuration" => %{"id" => @name}}]),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        {:hold, success_list([])}
+      ]
+
+      {execution_id, worker, _} = start_and_begin(spec, executable, script)
+      eventually!(fn -> length(FakeRuntime.calls()) >= 3 end)
+
+      worker_ref = Process.monitor(worker)
+      coordinator = Process.whereis(DrainCoordinator)
+      unit_sup = Process.whereis(Arbor.Shell.AppleContainerUnitSupervisor)
+      port_sup = Process.whereis(Arbor.Shell.PortSessionSupervisor)
+
+      assert is_pid(coordinator)
+      assert is_pid(unit_sup)
+      assert is_pid(port_sup)
+      assert unit_child_count() == 1
+
+      drain_task =
+        Task.async(fn ->
+          Supervisor.terminate_child(Arbor.Shell.Supervisor, DrainCoordinator)
+        end)
+
+      try do
+        eventually!(fn -> FakeRuntime.held_count() >= 1 end, 30_000)
+
+        # Drain is mid-absence wait; coordinator is in terminate/2.
+        assert is_nil(Task.yield(drain_task, 200))
+        assert Process.alive?(coordinator)
+        assert unit_child_count() == 1
+
+        assert {:error, :unit_start_unavailable} =
+                 Task.async(fn ->
+                   Worker.start(spec, executable, "exec_late_after_snapshot", make_ref())
+                 end)
+                 |> Task.await(15_000)
+
+        assert unit_child_count() == 1
+        assert unit_child_pids() == [worker]
+        assert Process.alive?(unit_sup)
+        assert Process.alive?(port_sup)
+        assert Process.alive?(coordinator)
+        assert Process.alive?(worker)
+        assert nonterminal_registry?(execution_id)
+
+        assert :ok = FakeRuntime.release_held()
+        assert :ok = Task.await(drain_task, 30_000)
+
+        assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 15_000
+        refute Process.alive?(worker)
+        refute Process.alive?(coordinator)
+
+        exec = await_registry_terminal(execution_id, 10_000)
+        assert exec.status == :killed
+        assert exec.result.cancelled == true
+      after
+        _ = FakeRuntime.release_held()
+
+        if Process.alive?(drain_task.pid) do
+          _ = Task.yield(drain_task, 30_000) || Task.shutdown(drain_task, :brutal_kill)
+        end
+
+        restore_drain_coordinator!()
+      end
+    end
+
+    test "pre-begin expiry stops waiting worker without create or start commands", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([])
+      start_ref = make_ref()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      assert {:ok, worker} =
+               Worker.start_for_test(spec, executable, execution_id, start_ref,
+                 runtime: FakeRuntime,
+                 pre_begin_timeout_ms: 50
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+      worker_ref = Process.monitor(worker)
+
+      assert {:error, :preflight_cancelled} = await_terminal(execution_id, 5_000)
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 5_000
+      refute Process.alive?(worker)
+      assert FakeRuntime.calls() == []
+
+      exec = await_registry_terminal(execution_id, 5_000)
+      assert exec.status == :failed
+      assert exec.result.error == :preflight_cancelled
+    end
+
     test "security regression: suspended worker handshake timeout does not bypass drain", %{
       spec: spec,
       executable: executable
@@ -1237,6 +1375,37 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     test "execute_spawn_capable remains fail closed" do
       assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
                Shell.execute_spawn_capable("mix", ["test"], [])
+    end
+
+    test "begin and request_drain reject non-positive and infinite timeouts", %{
+      spec: spec,
+      executable: executable
+    } do
+      :ok = FakeRuntime.reset([{:hang, success(%{exit_code: 0})}])
+      start_ref = make_ref()
+
+      {:ok, execution_id} =
+        ExecutionRegistry.register("container unit", sandbox: :basic, cwd: "/")
+
+      assert {:ok, worker} =
+               Worker.start_for_test(spec, executable, execution_id, start_ref,
+                 runtime: FakeRuntime
+               )
+
+      assert :ok = ExecutionRegistry.adopt(execution_id, worker)
+
+      assert {:error, :invalid_begin} = Worker.begin(worker, start_ref, 0)
+      assert {:error, :invalid_begin} = Worker.begin(worker, start_ref, -1)
+      assert {:error, :invalid_begin} = Worker.begin(worker, start_ref, :infinity)
+      assert {:error, :invalid_begin} = Worker.begin(worker, start_ref, 60_001)
+
+      assert {:error, :invalid_drain} = Worker.request_drain(worker, make_ref(), 0)
+      assert {:error, :invalid_drain} = Worker.request_drain(worker, make_ref(), -1)
+      assert {:error, :invalid_drain} = Worker.request_drain(worker, make_ref(), :infinity)
+      assert {:error, :invalid_drain} = Worker.request_drain(worker, make_ref(), 60_001)
+
+      send(worker, {:cancel_shell_execution, execution_id})
+      _ = await_terminal(execution_id, 10_000)
     end
 
     test "production start rejects non-container executable path", %{spec: spec} do

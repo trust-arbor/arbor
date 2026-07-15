@@ -17,19 +17,31 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   # `{:apple_container_unit_drained, worker_pid, execution_id, receipt_ref}` only
   # when (a) create was never attempted or (b) UnitCore reached terminal after
   # exact positive absence. terminate/2 is final defense only.
+  #
+  # Production `start/4` linearizes through AppleContainerUnitDrainCoordinator
+  # so every admitted worker is present before a drain snapshot. A fixed
+  # pre-begin timer expires waiting workers that never receive exact begin,
+  # closing orphaned start replies without caller-configurable policy.
 
   use GenServer
 
   alias Arbor.Shell.AppleContainerExecutionCore
   alias Arbor.Shell.AppleContainerUnitCore, as: UnitCore
+  alias Arbor.Shell.AppleContainerUnitDrainCoordinator
   alias Arbor.Shell.AppleContainerUnitRuntime
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutionRegistry
 
   @supervisor Arbor.Shell.AppleContainerUnitSupervisor
+  @coordinator AppleContainerUnitDrainCoordinator
   @runtime_path "/usr/local/bin/container"
   @display_command "container unit"
   @cleanup_attempt_timeout_ms 30_000
+  # Fixed production wait for exact begin after admission (not caller policy).
+  @pre_begin_timeout_ms 30_000
+  @max_pre_begin_timeout_ms 60_000
+  @default_call_timeout_ms 5_000
+  @max_call_timeout_ms 60_000
   @max_reason_bytes 512
   # Secondary controller notification only — registry keeps the full primary result.
   @max_secondary_notification_bytes 512
@@ -48,7 +60,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
           required(:execution_id) => String.t(),
           required(:start_ref) => reference(),
           required(:controller_pid) => pid(),
-          optional(:runtime) => module()
+          optional(:runtime) => module(),
+          optional(:pre_begin_timeout_ms) => pos_integer()
         }
 
   # ---------------------------------------------------------------------------
@@ -97,9 +110,10 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   @doc """
   Start a waiting unit owner under the dedicated unit supervisor.
 
-  Captures the controller from `self()` — never accepts a caller-supplied owner
-  pid. The controller must register the execution, `adopt/2` this worker, then
-  call `begin/3` with the exact opaque ref.
+  Production starts admit only through `AppleContainerUnitDrainCoordinator`,
+  which derives the controller from its GenServer `from` tuple — never from a
+  caller-supplied owner pid. The controller must register the execution,
+  `adopt/2` this worker, then call `begin/3` with the exact opaque ref.
   """
   @spec start(
           AppleContainerExecutionCore.execution_spec(),
@@ -109,11 +123,48 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         ) :: {:ok, pid()} | {:error, term()}
   def start(spec, executable, execution_id, start_ref)
       when is_map(spec) and is_binary(execution_id) and is_reference(start_ref) do
-    start_waiting(spec, executable, execution_id, start_ref, self(), AppleContainerUnitRuntime)
+    # Never fall back to a direct DynamicSupervisor start.
+    AppleContainerUnitDrainCoordinator.start_unit(
+      spec,
+      executable,
+      execution_id,
+      start_ref
+    )
   end
 
   def start(_spec, _executable, _execution_id, _start_ref),
     do: {:error, :invalid_unit_start}
+
+  @doc false
+  @spec start_under_coordinator(
+          AppleContainerExecutionCore.execution_spec(),
+          ExecutablePolicy.Executable.t(),
+          String.t(),
+          reference(),
+          pid()
+        ) :: {:ok, pid()} | {:error, term()}
+  def start_under_coordinator(spec, executable, execution_id, start_ref, controller_pid)
+      when is_map(spec) and is_binary(execution_id) and is_reference(start_ref) and
+             is_pid(controller_pid) do
+    case Process.whereis(@coordinator) do
+      pid when is_pid(pid) and pid == self() ->
+        start_waiting(
+          spec,
+          executable,
+          execution_id,
+          start_ref,
+          controller_pid,
+          AppleContainerUnitRuntime,
+          @pre_begin_timeout_ms
+        )
+
+      _other ->
+        {:error, :coordinator_start_required}
+    end
+  end
+
+  def start_under_coordinator(_spec, _executable, _execution_id, _start_ref, _controller_pid),
+    do: {:error, :coordinator_start_required}
 
   @doc false
   @spec start_for_test(
@@ -129,9 +180,19 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       when is_map(spec) and is_binary(execution_id) and is_reference(start_ref) and is_list(opts) do
     if Keyword.keyword?(opts) do
       runtime = Keyword.get(opts, :runtime, AppleContainerUnitRuntime)
+      pre_begin_timeout_ms = Keyword.get(opts, :pre_begin_timeout_ms, @pre_begin_timeout_ms)
 
-      with :ok <- validate_runtime_module(runtime) do
-        start_waiting(spec, executable, execution_id, start_ref, self(), runtime)
+      with :ok <- validate_runtime_module(runtime),
+           :ok <- validate_pre_begin_timeout(pre_begin_timeout_ms) do
+        start_waiting(
+          spec,
+          executable,
+          execution_id,
+          start_ref,
+          self(),
+          runtime,
+          pre_begin_timeout_ms
+        )
       end
     else
       {:error, :invalid_unit_start_options}
@@ -142,41 +203,51 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     do: {:error, :invalid_unit_start}
 
   @doc false
-  @spec begin(pid(), reference(), timeout()) :: :ok | {:error, term()}
-  def begin(worker, start_ref, timeout \\ 5_000)
+  @spec begin(pid(), reference(), pos_integer()) :: :ok | {:error, term()}
+  def begin(worker, start_ref, timeout \\ @default_call_timeout_ms)
 
   def begin(worker, start_ref, timeout)
-      when is_pid(worker) and is_reference(start_ref) and
-             (is_integer(timeout) or timeout == :infinity) do
+      when is_pid(worker) and is_reference(start_ref) and is_integer(timeout) and timeout > 0 and
+             timeout <= @max_call_timeout_ms do
     GenServer.call(worker, {:begin, start_ref}, timeout)
   end
 
   def begin(_worker, _start_ref, _timeout), do: {:error, :invalid_begin}
 
   @doc false
-  @spec request_drain(pid(), reference(), timeout()) :: :ok | {:error, term()}
-  def request_drain(worker, receipt_ref, timeout \\ 5_000)
+  @spec request_drain(pid(), reference(), pos_integer()) :: :ok | {:error, term()}
+  def request_drain(worker, receipt_ref, timeout \\ @default_call_timeout_ms)
 
   def request_drain(worker, receipt_ref, timeout)
-      when is_pid(worker) and is_reference(receipt_ref) and
-             (is_integer(timeout) or timeout == :infinity) do
+      when is_pid(worker) and is_reference(receipt_ref) and is_integer(timeout) and timeout > 0 and
+             timeout <= @max_call_timeout_ms do
     GenServer.call(worker, {:request_drain, receipt_ref}, timeout)
   end
 
   def request_drain(_worker, _receipt_ref, _timeout), do: {:error, :invalid_drain}
 
-  defp start_waiting(spec, executable, execution_id, start_ref, controller_pid, runtime) do
+  defp start_waiting(
+         spec,
+         executable,
+         execution_id,
+         start_ref,
+         controller_pid,
+         runtime,
+         pre_begin_timeout_ms
+       ) do
     with :ok <- validate_spec(spec),
          :ok <- validate_executable(executable),
          :ok <- validate_execution_id(execution_id),
-         :ok <- validate_runtime_module(runtime) do
+         :ok <- validate_runtime_module(runtime),
+         :ok <- validate_pre_begin_timeout(pre_begin_timeout_ms) do
       args = %{
         spec: spec,
         executable: executable,
         execution_id: execution_id,
         start_ref: start_ref,
         controller_pid: controller_pid,
-        runtime: runtime
+        runtime: runtime,
+        pre_begin_timeout_ms: pre_begin_timeout_ms
       }
 
       case DynamicSupervisor.start_child(@supervisor, {__MODULE__, args}) do
@@ -200,6 +271,10 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     spec = Map.fetch!(args, :spec)
     executable = Map.fetch!(args, :executable)
     runtime = Map.get(args, :runtime, AppleContainerUnitRuntime)
+    pre_begin_timeout_ms = Map.get(args, :pre_begin_timeout_ms, @pre_begin_timeout_ms)
+
+    pre_begin_timer =
+      :erlang.start_timer(pre_begin_timeout_ms, self(), :pre_begin_timeout)
 
     state = %{
       status: :waiting,
@@ -222,6 +297,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       drain_receipt: nil,
       cleanup_timer: nil,
       cleanup_timer_effect: nil,
+      pre_begin_timer: pre_begin_timer,
       terminal_published: false,
       terminal: nil
     }
@@ -235,6 +311,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     # Exact waiting ref is an accepted begin. Synchronous Core terminals
     # (e.g. preflight list_containment_failure) publish via registry/controller;
     # accepted begin itself is not an invalid-begin error.
+    state = cancel_pre_begin_timer(state)
+
     case begin_lifecycle(state) do
       {:ok, started} ->
         {:reply, :ok, started}
@@ -322,6 +400,25 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     dispatch_effects(state, [effect])
   end
 
+  def handle_info(
+        {:timeout, timer_ref, :pre_begin_timeout},
+        %{pre_begin_timer: timer_ref, status: :waiting} = state
+      )
+      when is_reference(timer_ref) do
+    # Exact begin never arrived — stop safely before create.
+    state = %{state | pre_begin_timer: nil}
+    handle_cancel(state)
+  end
+
+  def handle_info(
+        {:timeout, timer_ref, :pre_begin_timeout},
+        %{pre_begin_timer: timer_ref} = state
+      )
+      when is_reference(timer_ref) do
+    # Already past waiting (e.g. race with begin) — clear only.
+    {:noreply, %{state | pre_begin_timer: nil}}
+  end
+
   def handle_info({:timeout, _other_ref, _effect}, state) do
     # Stale or foreign timer — ignore.
     {:noreply, state}
@@ -340,6 +437,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   def terminate(_reason, state) do
     # Final defense only — coordinated cleanup is request_drain / cancel, not
     # a finite terminate loop. Do not weaken positive-absence gating here.
+    state = cancel_pre_begin_timer(state)
     _ = cancel_cleanup_timer(state)
     _ = kill_active_session(state)
     :ok
@@ -735,31 +833,37 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     end
   end
 
-  defp handle_cancel(%{status: :waiting} = state) do
+  defp handle_cancel(state) do
+    state
+    |> cancel_pre_begin_timer()
+    |> do_handle_cancel()
+  end
+
+  defp do_handle_cancel(%{status: :waiting} = state) do
     # Preflight not begun — no create attempted.
     state = publish_error(state, :preflight_cancelled)
     stop_after_terminal(state)
   end
 
-  defp handle_cancel(%{terminal_published: true} = state), do: {:noreply, state}
+  defp do_handle_cancel(%{terminal_published: true} = state), do: {:noreply, state}
 
-  defp handle_cancel(%{pending_result: true} = state) do
+  defp do_handle_cancel(%{pending_result: true} = state) do
     # Request PortSession cancellation and wait for its terminal cleanup before
     # advancing core. Never change Core phase while an old result is pending.
     _ = request_session_cancel(state)
     {:noreply, %{state | cancel_requested: true}}
   end
 
-  defp handle_cancel(%{cancel_applied: true} = state) do
+  defp do_handle_cancel(%{cancel_applied: true} = state) do
     {:noreply, %{state | cancel_requested: true}}
   end
 
-  defp handle_cancel(%{core: core} = state) when is_map(core) do
+  defp do_handle_cancel(%{core: core} = state) when is_map(core) do
     state = cancel_cleanup_timer(state)
     apply_cancel_once(%{state | cancel_requested: true}, :cancelled)
   end
 
-  defp handle_cancel(state) do
+  defp do_handle_cancel(state) do
     state = publish_error(state, :cancelled)
     stop_after_terminal(state)
   end
@@ -885,6 +989,21 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   end
 
   defp cancel_cleanup_timer(state), do: state
+
+  defp cancel_pre_begin_timer(%{pre_begin_timer: timer_ref} = state)
+       when is_reference(timer_ref) do
+    _ = :erlang.cancel_timer(timer_ref)
+
+    receive do
+      {:timeout, ^timer_ref, :pre_begin_timeout} -> :ok
+    after
+      0 -> :ok
+    end
+
+    %{state | pre_begin_timer: nil}
+  end
+
+  defp cancel_pre_begin_timer(state), do: state
 
   # ---------------------------------------------------------------------------
   # Registry publish / secondary notification
@@ -1026,6 +1145,13 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
   defp validate_execution_id(_), do: {:error, :invalid_execution_id}
 
+  defp validate_pre_begin_timeout(ms)
+       when is_integer(ms) and ms > 0 and ms <= @max_pre_begin_timeout_ms do
+    :ok
+  end
+
+  defp validate_pre_begin_timeout(_), do: {:error, :invalid_pre_begin_timeout}
+
   defp validate_runtime_module(AppleContainerUnitRuntime), do: :ok
 
   defp validate_runtime_module(runtime) when is_atom(runtime) do
@@ -1073,6 +1199,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
       active_session_ref: :redacted,
       cleanup_timer: :redacted,
       cleanup_timer_effect: :redacted,
+      pre_begin_timer: :redacted,
       operation_deadline: :redacted,
       drain_receipt: :redacted,
       spec: :redacted,
