@@ -3,8 +3,9 @@ defmodule Arbor.Shell.AppleContainerProber do
   Internal imperative Apple Container admission prober.
 
   Collects bounded read-only host/control-plane/image evidence, projects it
-  through pure cores, and returns a normalized admitted receipt. Never wires
-  `Arbor.Shell.execute_spawn_capable/3` and is not production spawn authority.
+  through pure cores, and returns a normalized admitted receipt. Invoked by
+  the internal Apple Container executor that backs
+  `Arbor.Shell.execute_spawn_capable/3`; this module is not a public facade.
 
   Production entry accepts only a positive deadline duration in milliseconds
   up to 300_000. Narrow same-library test injection uses `probe_for_test/2`.

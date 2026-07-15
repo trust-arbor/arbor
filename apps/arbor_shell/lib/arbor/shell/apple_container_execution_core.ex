@@ -7,9 +7,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   `AppleContainerPlanCore` plan and bounded execution settings.
 
   Performs no IO, process execution, filesystem access, environment reads,
-  Application config reads, or GenServer calls. Does not wire
-  `Arbor.Shell.execute_spawn_capable/3` — the production facade remains
-  fail-closed until a later imperative adapter exists.
+  Application config reads, or GenServer calls. Used by the internal
+  `AppleContainerExecutor` that backs `Arbor.Shell.execute_spawn_capable/3`.
   """
 
   alias Arbor.Shell.AppleContainerPlanCore

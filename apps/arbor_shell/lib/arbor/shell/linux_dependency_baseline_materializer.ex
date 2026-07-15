@@ -9,7 +9,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
 
   Destinations are private writable copies (0600/0700). The receipt is evidence
   only — never executable authority, never source/manifest paths or inventory
-  names. Production spawn remains fail-closed via
+  names. Used by the spawn-capable admission path behind
   `Arbor.Shell.execute_spawn_capable/3`.
   """
 

@@ -12,9 +12,8 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCore do
   module — never as caller options.
 
   Service-status evidence is corroboration only and never establishes
-  version, path, or signing authority. A returned receipt is evidence for a
-  later imperative adapter; the production spawn facade remains fail-closed
-  until that adapter exists.
+  version, path, or signing authority. A returned receipt is evidence for the
+  imperative admission path behind `Arbor.Shell.execute_spawn_capable/3`.
   """
 
   import Bitwise

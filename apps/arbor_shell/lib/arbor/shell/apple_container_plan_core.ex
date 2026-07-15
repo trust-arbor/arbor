@@ -17,8 +17,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   makes a missing alias fail locally instead of pulling. Operator provisioning
   that materializes those aliases is outside this pure planner.
 
-  The production `Arbor.Shell.execute_spawn_capable/3` facade remains fail-closed
-  until a later imperative adapter interprets these plans.
+  Plans are data only. The imperative `AppleContainerExecutor` (via
+  `Arbor.Shell.execute_spawn_capable/3`) interprets admitted plans after pure
+  preflight and admission.
   """
 
   @runtime_executable "/usr/local/bin/container"

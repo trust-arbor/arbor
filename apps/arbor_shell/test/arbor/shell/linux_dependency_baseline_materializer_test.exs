@@ -4,7 +4,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializerTest do
 
   Covers exact candidate/base copy, modes, drift, hostile plans/sources,
   cleanup ownership, rest_for_one turnover, status redaction, and facade
-  fail-closed behavior. Does not enable execute_spawn_capable/3.
+  fail-closed behavior. Materializer unit tests; public spawn is separate.
   """
 
   use ExUnit.Case, async: false
@@ -820,8 +820,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializerTest do
       end
     end
 
-    test "execute_spawn_capable remains production_backend_missing" do
-      assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
+    test "relative tool is pure preflight before admission" do
+      assert {:error, {:invalid_tool_name, :relative_path}} =
                Shell.execute_spawn_capable("mix", ["test"], [])
     end
 

@@ -772,43 +772,6 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     end
   end
 
-  defp restore_execution_registry! do
-    case Process.whereis(ExecutionRegistry) do
-      pid when is_pid(pid) ->
-        :ok
-
-      _missing ->
-        case Supervisor.restart_child(Arbor.Shell.Supervisor, ExecutionRegistry) do
-          {:ok, _pid} ->
-            :ok
-
-          {:ok, _pid, _info} ->
-            :ok
-
-          {:error, :running} ->
-            :ok
-
-          {:error, {:already_started, _pid}} ->
-            :ok
-
-          {:error, :not_found} ->
-            {:ok, _} =
-              Supervisor.start_child(Arbor.Shell.Supervisor, {ExecutionRegistry, []})
-
-            :ok
-
-          {:error, _reason} ->
-            _ = Supervisor.terminate_child(Arbor.Shell.Supervisor, ExecutionRegistry)
-            _ = Supervisor.delete_child(Arbor.Shell.Supervisor, ExecutionRegistry)
-
-            {:ok, _} =
-              Supervisor.start_child(Arbor.Shell.Supervisor, {ExecutionRegistry, []})
-
-            :ok
-        end
-    end
-  end
-
   defp unit_child_pids do
     Arbor.Shell.AppleContainerUnitSupervisor
     |> DynamicSupervisor.which_children()
@@ -1827,8 +1790,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       refute exec.cwd =~ "arbor-val"
     end
 
-    test "execute_spawn_capable remains fail closed" do
-      assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
+    test "relative tool is pure preflight before admission" do
+      assert {:error, {:invalid_tool_name, :relative_path}} =
                Shell.execute_spawn_capable("mix", ["test"], [])
     end
 

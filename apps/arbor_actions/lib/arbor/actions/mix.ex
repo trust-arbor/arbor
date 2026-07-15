@@ -9,9 +9,10 @@ defmodule Arbor.Actions.Mix do
   whereas raw shell access would conflate them.
 
   In production, all actions execute through `Arbor.Shell` with `:basic`
-  sandboxing and emit `Arbor.Signals` events for observability. Shell's
-  spawn-capable path currently fails closed until a production streaming
-  handle/control plane can provide synchronous teardown receipts.
+  sandboxing and emit `Arbor.Signals` events for observability. Contained Mix
+  validation uses Shell's spawn-capable Apple Container path
+  (`execute_spawn_capable/3`), which fails closed on pure preflight and
+  host admission rather than a missing-backend gate.
 
   ## Actions
 

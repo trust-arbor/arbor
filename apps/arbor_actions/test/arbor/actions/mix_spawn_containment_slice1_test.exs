@@ -6,15 +6,14 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
   validation-time mutation. Does not claim process-tree or platform containment
   (Slice 2).
 
-  Platform-enforcement tests that require a real production spawn backend are
-  intentionally left for Slice 2. Metadata-construction tests use TestMixShell
-  as a fixture double but still construct owner-issued leases/projections.
+  Contained Mix uses Shell `execute_spawn_capable/3` (Apple Container). These
+  Slice 1 tests keep TestMixShell as a fixture double for lease/projection
+  construction and do not require a provisioned host container.
   """
 
   use Arbor.Actions.ActionCase, async: false
 
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
-  alias Arbor.Actions.Config
   alias Arbor.Actions.Mix, as: MixAction
   alias Arbor.Common.SafePath
 
@@ -1197,35 +1196,6 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     assert {:ok, still_evil} = MixAction.commit_tree_oid(wt, evil_commit)
     assert still_evil == evil_tree
     refute still_evil == before.tree_oid
-  end
-
-  test "production Shell still fails closed for spawn_backend under owner workspace", %{
-    tmp_dir: tmp_dir
-  } do
-    fixture = leased_fixture(tmp_dir)
-    create_tiny_project(fixture.lease.worktree_path)
-    git!(fixture.lease.worktree_path, ["add", "-A"])
-    git!(fixture.lease.worktree_path, ["commit", "-m", "project"])
-    previous = Application.get_env(:arbor_actions, :mix_shell_module)
-
-    try do
-      Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Shell)
-      assert {:ok, Arbor.Shell} = Config.mix_shell_module()
-
-      assert {:error, reason} =
-               MixAction.run_with_required_workspace(
-                 fixture.lease.worktree_path,
-                 ["compile"],
-                 %{path: fixture.lease.worktree_path, workspace_id: fixture.lease.workspace_id},
-                 fixture.context,
-                 timeout: 1_000
-               )
-
-      assert reason =~ "spawn_backend_unavailable"
-      assert reason =~ "production_backend_missing"
-    after
-      restore_env(:arbor_actions, :mix_shell_module, previous)
-    end
   end
 
   defp leased_fixture(tmp_dir) do

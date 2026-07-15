@@ -50,6 +50,7 @@ defmodule Arbor.Shell do
   @behaviour Arbor.Contracts.API.Shell
 
   alias Arbor.Shell.{
+    AppleContainerExecutor,
     CapShell,
     ExecutablePolicy,
     ExecutionRegistry,
@@ -348,11 +349,10 @@ defmodule Arbor.Shell do
   timeout, cancellation, launcher failure, or owner loss becomes terminal.
 
   The native backend is deliberately childless. Commands that need descendants
-  must use `execute_spawn_capable/3`, which currently fails closed until Shell
-  has a production streaming handle/control-plane implementation with a
-  synchronous teardown receipt. Repository policy, config auditing, and
-  workspace authorization belong in the higher caller, not in this Shell
-  contract.
+  must use `execute_spawn_capable/3`, which routes through the internal Apple
+  Container unit executor with pure preflight, admission, ownership, and
+  positive settlement. Repository policy, config auditing, and workspace
+  authorization belong in the higher caller, not in this Shell contract.
 
   Options are the same as `execute/2` (`:timeout`, `:max_output_bytes`,
   `:cwd`, `:env`, `:sandbox`, `:stdin`).
@@ -424,22 +424,23 @@ defmodule Arbor.Shell do
     do: {:error, :invalid_prepared_shell_command}
 
   @doc """
-  Fail closed for descendant-spawning tools.
+  Execute a descendant-spawning Mix tool via the internal Apple Container unit.
 
-  The public API remains stable for schema-bounded callers, but no production
-  backend currently provides the streaming process handle and control plane
-  needed to enforce whole-unit lifetime. Re-enabling execution requires that
-  implementation to return a synchronous teardown receipt proving the entire
-  unit is gone before Shell reports any terminal result.
+  Thin public facade over `Arbor.Shell.AppleContainerExecutor.execute/3`.
+  Production dependencies (prober, runtime pin, registry, unit worker, drain
+  coordinator) are hardcoded inside that adapter — Application env cannot
+  select a backend, inject modules, or re-enable the retired
+  `:spawn_backend` / `:spawn_executable_manifest` configuration.
 
-  Configuration cannot enable this path. The error is returned before input or
-  path resolution, executable-policy lookup, callback dispatch, or process
-  creation.
+  Pure preflight runs first: relative tool names (for example `"mix"`),
+  malformed opts, and other request shape errors fail closed before admission,
+  registry ownership, or candidate unit work.
   """
   @spec execute_spawn_capable(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}
-  def execute_spawn_capable(_tool_name, _args, _opts \\ []),
-    do: {:error, {:spawn_backend_unavailable, :production_backend_missing}}
+  def execute_spawn_capable(tool_name, args, opts \\ []) do
+    AppleContainerExecutor.execute(tool_name, args, opts)
+  end
 
   @doc """
   Acquire a Shell-owned Linux dependency-baseline materialization lease.

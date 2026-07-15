@@ -315,34 +315,6 @@ defmodule Arbor.Actions.MixTest do
       )
     end
 
-    test "security regression: production Shell still fails closed for spawn_backend", %{
-      fixture: fixture
-    } do
-      previous_shell_module = Application.get_env(:arbor_actions, :mix_shell_module)
-
-      try do
-        Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Shell)
-        assert {:ok, Arbor.Shell} = Config.mix_shell_module()
-
-        assert {:error, reason} =
-                 MixAction.run_with_required_workspace(
-                   fixture.project_path,
-                   ["compile"],
-                   %{
-                     path: fixture.project_path,
-                     workspace_id: fixture.lease.workspace_id
-                   },
-                   fixture.context,
-                   timeout: 1_000
-                 )
-
-        assert reason =~ "spawn_backend_unavailable"
-        assert reason =~ "production_backend_missing"
-      after
-        restore_env(:arbor_actions, :mix_shell_module, previous_shell_module)
-      end
-    end
-
     test "security regression: structured test path keeps inert shell metacharacters", %{
       project_path: project_path,
       fixture: fixture
@@ -422,49 +394,6 @@ defmodule Arbor.Actions.MixTest do
 
       assert reason =~ "rejected invalid test_paths"
       assert reason =~ "external_test.exs"
-    end
-
-    test "security regression: production Shell cannot run candidate Mix code", %{
-      project_path: project_path,
-      fixture: fixture
-    } do
-      marker = Path.join(project_path, "mix-ran")
-      test_path = "test/production_spawn_backend_required_test.exs"
-
-      File.write!(Path.join(project_path, test_path), """
-      defmodule ProductionSpawnBackendRequiredTest do
-        use ExUnit.Case
-
-        test "must not run on the host" do
-          File.write!(#{inspect(marker)}, "executed")
-        end
-      end
-      """)
-
-      commit_worktree!(fixture)
-      previous_shell_module = Application.get_env(:arbor_actions, :mix_shell_module)
-
-      try do
-        Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Shell)
-        assert {:ok, Arbor.Shell} = Config.mix_shell_module()
-
-        assert {:error, reason} =
-                 MixAction.Test.run(
-                   %{
-                     path: project_path,
-                     workspace_id: fixture.lease.workspace_id,
-                     test_paths: [test_path],
-                     timeout: 1_000
-                   },
-                   fixture.context
-                 )
-
-        assert reason =~ "spawn_backend_unavailable"
-        assert reason =~ "production_backend_missing"
-        refute File.exists?(marker)
-      after
-        restore_env(:arbor_actions, :mix_shell_module, previous_shell_module)
-      end
     end
   end
 

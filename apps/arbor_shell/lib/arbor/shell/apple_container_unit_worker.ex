@@ -8,7 +8,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   # text. Holds Core terminals privately until durable journal completion, then
   # publishes once to ExecutionRegistry / controller. Never publishes or
   # completes the journal before positive unit absence when create was
-  # attempted. Production spawn facade remains fail-closed.
+  # attempted. Owned by AppleContainerExecutor via execute_spawn_capable/3.
   #
   # Terminal publication is two-stage: hold a bounded terminal, call the stored
   # production AppleContainerUnitJournal.complete/3 with the exact journal
@@ -1447,19 +1447,6 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         _other ->
           state
       end
-    end
-  end
-
-  # ExecutionRegistry is a best-effort projection only. Catch exits/errors so a
-  # missing or restarting registry never aborts controller notification, terminal
-  # state transition, drain receipt emission, or normal worker stop.
-  defp best_effort_registry_publish(fun) when is_function(fun, 0) do
-    try do
-      fun.()
-    catch
-      :exit, _reason -> :registry_unavailable
-      :error, _reason -> :registry_unavailable
-      :throw, _reason -> :registry_unavailable
     end
   end
 

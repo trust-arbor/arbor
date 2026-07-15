@@ -539,8 +539,8 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthorityTest do
   end
 
   describe "production invariants and rest_for_one" do
-    test "execute_spawn_capable remains production_backend_missing" do
-      assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
+    test "relative tool is pure preflight before admission" do
+      assert {:error, {:invalid_tool_name, :relative_path}} =
                Shell.execute_spawn_capable("mix", ["test"], [])
     end
 

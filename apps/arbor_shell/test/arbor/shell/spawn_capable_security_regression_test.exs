@@ -1,4 +1,13 @@
 defmodule Arbor.Shell.SpawnCapableSecurityRegressionTest do
+  @moduledoc """
+  Security regressions for the public spawn-capable facade.
+
+  Proves retired Application-configured `:spawn_backend` /
+  `:spawn_executable_manifest` paths are never consulted. Uses only
+  malformed/relative facade input so tests never depend on host Apple Container
+  state.
+  """
+
   use ExUnit.Case, async: false
 
   alias Arbor.Shell
@@ -7,7 +16,7 @@ defmodule Arbor.Shell.SpawnCapableSecurityRegressionTest do
   @moduletag :fast
   @moduletag :security_regression
 
-  @unavailable {:error, {:spawn_backend_unavailable, :production_backend_missing}}
+  @relative_preflight {:error, {:invalid_tool_name, :relative_path}}
   @legacy_process Arbor.Shell.LegacySpawnRegressionProcess
 
   defmodule BlockingLegacyBackend do
@@ -104,18 +113,23 @@ defmodule Arbor.Shell.SpawnCapableSecurityRegressionTest do
     :ok
   end
 
-  test "security regression: spawn facade returns before path resolution or policy lookup" do
+  test "security regression: relative tool is pure preflight before path or policy lookup" do
     root = fixture_root("early-return")
     on_exit(fn -> File.rm_rf!(root) end)
     configure_legacy_backend!(BlockingLegacyBackend, root)
 
-    assert @unavailable ==
-             Shell.execute_spawn_capable("legacy-tool", [], cwd: Path.join(root, "missing"))
+    # Relative tool name is rejected by pure preflight; never touches legacy
+    # backend, path resolution, or executable-policy membership.
+    assert @relative_preflight ==
+             Shell.execute_spawn_capable("mix", ["compile"], cwd: Path.join(root, "missing"))
 
     remove_executable_policy!()
 
-    assert @unavailable == Shell.execute_spawn_capable("legacy-tool", [], cwd: root)
+    assert @relative_preflight ==
+             Shell.execute_spawn_capable("mix", ["compile"], cwd: root)
+
     refute_receive :legacy_admission_called, 50
+    refute_receive :legacy_execute_called, 50
   end
 
   test "security regression: configured blocking legacy admission is never called" do
@@ -123,7 +137,10 @@ defmodule Arbor.Shell.SpawnCapableSecurityRegressionTest do
     on_exit(fn -> File.rm_rf!(root) end)
     configure_legacy_backend!(BlockingLegacyBackend, root)
 
-    task = Task.async(fn -> Shell.execute_spawn_capable("legacy-tool", [], cwd: root) end)
+    task =
+      Task.async(fn ->
+        Shell.execute_spawn_capable("legacy-tool", [], cwd: root)
+      end)
 
     yielded =
       case Task.yield(task, 200) do
@@ -135,7 +152,9 @@ defmodule Arbor.Shell.SpawnCapableSecurityRegressionTest do
           result
       end
 
-    assert yielded == {:ok, @unavailable}
+    # Relative legacy-tool name fails pure preflight without blocking on
+    # available?/1 — proves Application-configured backend is ignored.
+    assert yielded == {:ok, @relative_preflight}
     refute_receive :legacy_admission_called, 50
     refute_receive :legacy_execute_called, 50
   end
@@ -146,7 +165,8 @@ defmodule Arbor.Shell.SpawnCapableSecurityRegressionTest do
     marker = Path.join(root, "legacy-executed")
     configure_legacy_backend!(NoisyLegacyBackend, root, marker)
 
-    assert @unavailable == Shell.execute_spawn_capable("legacy-tool", [], cwd: root)
+    assert @relative_preflight ==
+             Shell.execute_spawn_capable("legacy-tool", [], cwd: root)
 
     refute_receive {:legacy_execute_called, _pid}, 50
     refute File.exists?(marker)

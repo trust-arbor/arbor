@@ -1096,9 +1096,9 @@ defmodule Arbor.Shell.AppleContainerProberTest do
     end
   end
 
-  describe "facade remains fail-closed" do
-    test "execute_spawn_capable stays production_backend_missing" do
-      assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
+  describe "public spawn facade preflight" do
+    test "relative tool is pure preflight before admission" do
+      assert {:error, {:invalid_tool_name, :relative_path}} =
                Shell.execute_spawn_capable("mix", ["test"], [])
     end
   end

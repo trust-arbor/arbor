@@ -2,8 +2,8 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
   @moduledoc """
   Focused hermetic tests for the internal Apple Container spawn-capable adapter.
 
-  Uses only deterministic same-library fakes. Does not open the production
-  `Arbor.Shell.execute_spawn_capable/3` facade.
+  Uses only deterministic same-library fakes for the internal adapter. Public
+  facade coverage is limited to pure preflight (no host Apple Container).
   """
 
   use ExUnit.Case, async: false
@@ -1371,9 +1371,9 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
   end
 
   describe "production facade" do
-    test "remains production_backend_missing" do
-      assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
-               Shell.execute_spawn_capable(@mix_wrapper, ["compile"], valid_opts())
+    test "relative tool is pure preflight before admission or candidate work" do
+      assert {:error, {:invalid_tool_name, :relative_path}} =
+               Shell.execute_spawn_capable("mix", ["compile"], valid_opts())
     end
 
     test "rejects incomplete test deps" do

@@ -3,12 +3,12 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
   Focused pure adversarial tests for Apple Container admission evidence core.
 
   Composes nested control-plane admission via startup-owner bindings +
-  `evidence.control_plane`. Does not wire `Arbor.Shell.execute_spawn_capable/3`
-  (still production_backend_missing).
+  `evidence.control_plane`. Pure core only; public spawn facade is `Arbor.Shell.execute_spawn_capable/3`.
   """
 
   use ExUnit.Case, async: true
 
+  alias Arbor.Shell
   alias Arbor.Shell.AppleContainerAdmissionCore
   alias Arbor.Shell.AppleContainerControlPlaneAdmissionCore, as: ControlPlane
   alias Arbor.Shell.TrustedPath.Identity
@@ -746,10 +746,10 @@ defmodule Arbor.Shell.AppleContainerAdmissionCoreTest do
     end
   end
 
-  describe "facade remains unwired" do
-    test "execute_spawn_capable stays production_backend_missing" do
-      assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
-               Arbor.Shell.execute_spawn_capable("mix", ["test"], cwd: "/tmp")
+  describe "public spawn facade preflight" do
+    test "relative tool is pure preflight before admission" do
+      assert {:error, {:invalid_tool_name, :relative_path}} =
+               Shell.execute_spawn_capable("mix", ["test"], [])
     end
   end
 

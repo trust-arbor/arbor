@@ -3,8 +3,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
   Focused pure adversarial tests for Apple Container control-plane admission.
 
   Slice ownership is limited to the pure core. The production
-  `Arbor.Shell.execute_spawn_capable/3` facade remains
-  `production_backend_missing`.
+  `Arbor.Shell.execute_spawn_capable/3` is the public Apple Container spawn facade.
   """
 
   use ExUnit.Case, async: true
@@ -886,9 +885,9 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAdmissionCoreTest do
     end
   end
 
-  describe "production facade remains fail-closed" do
-    test "execute_spawn_capable stays production_backend_missing" do
-      assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
+  describe "public spawn facade preflight" do
+    test "relative tool is pure preflight before admission" do
+      assert {:error, {:invalid_tool_name, :relative_path}} =
                Shell.execute_spawn_capable("mix", ["test"], [])
     end
   end

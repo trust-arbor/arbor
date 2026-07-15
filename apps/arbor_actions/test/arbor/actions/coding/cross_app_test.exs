@@ -14,8 +14,9 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
       _pid -> :ok
     end
 
-    # Fixture Mix double for executable project code (same seam as Mix action /
-    # security-regression tests). Production Arbor.Shell remains fail-closed.
+    # TestMixShell keeps this suite hermetic and independent of host Apple
+    # Container admission. Production execute_spawn_capable is wired and
+    # fails closed only when request/admission/containment checks fail.
     previous_shell = Application.get_env(:arbor_actions, :mix_shell_module)
     Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Actions.TestMixShell)
 

@@ -3,7 +3,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
   Focused pure adversarial tests for Apple Container request/command-plan core.
 
   Slice 2A only: validates immutable argv plans as data. Does not wire
-  `Arbor.Shell.execute_spawn_capable/3` (still production_backend_missing).
+  `Arbor.Shell.execute_spawn_capable/3` public spawn facade.
 
   `:image` / `:init_image` are local execution aliases under the non-connectable
   sink `127.0.0.1:0/...@sha256:...` — never externally routable provisioning refs.
@@ -11,6 +11,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
   use ExUnit.Case, async: true
 
+  alias Arbor.Shell
   alias Arbor.Shell.AppleContainerPlanCore
 
   @moduletag :fast
@@ -1049,10 +1050,10 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       refute_forbidden_tokens(plan)
     end
 
-    test "facade remains fail-closed and unwired to this planner" do
-      # Slice 2A does not wire the planner into execute_spawn_capable/3.
-      assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
-               Arbor.Shell.execute_spawn_capable("mix", ["test"], cwd: "/tmp")
+    test "relative tool is pure preflight before admission" do
+      # Pure preflight only — no host Apple Container dependency.
+      assert {:error, {:invalid_tool_name, :relative_path}} =
+               Shell.execute_spawn_capable("mix", ["test"], [])
     end
   end
 

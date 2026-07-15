@@ -3,7 +3,7 @@ defmodule Arbor.Shell.AppleContainerProbeCoreTest do
   Focused pure projection tests for Apple Container 1.1.x probe evidence.
 
   Slice ownership is limited to the pure probe core. The production
-  `Arbor.Shell.execute_spawn_capable/3` facade remains fail-closed.
+  `Arbor.Shell.execute_spawn_capable/3` is the public Apple Container spawn facade.
   """
 
   use ExUnit.Case, async: true
@@ -467,8 +467,8 @@ defmodule Arbor.Shell.AppleContainerProbeCoreTest do
       end
     end
 
-    test "production facade remains fail-closed" do
-      assert {:error, {:spawn_backend_unavailable, :production_backend_missing}} =
+    test "relative tool is pure preflight before admission" do
+      assert {:error, {:invalid_tool_name, :relative_path}} =
                Shell.execute_spawn_capable("mix", ["test"], [])
     end
   end

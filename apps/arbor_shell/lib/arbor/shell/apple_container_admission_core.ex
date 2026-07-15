@@ -18,9 +18,9 @@ defmodule Arbor.Shell.AppleContainerAdmissionCore do
   `service_status` fields remain as corroborating compatibility evidence and
   never establish authority over the signed control-plane receipt.
 
-  Do not treat a caller-provided receipt as executable authority. The production
-  `Arbor.Shell.execute_spawn_capable/3` facade remains fail-closed until a later
-  imperative adapter interprets admitted receipts.
+  Do not treat a caller-provided receipt as executable authority. The imperative
+  `AppleContainerExecutor` interprets admitted receipts after pure preflight
+  when invoked through `Arbor.Shell.execute_spawn_capable/3`.
   """
 
   alias Arbor.Shell.AppleContainerControlPlaneAdmissionCore, as: ControlPlane

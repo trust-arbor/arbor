@@ -6,8 +6,8 @@ defmodule Arbor.Shell.AppleContainerExecutor do
   # Composes pure AppleContainerExecutionCore preflight with Prober admission,
   # ExecutionRegistry ownership, AppleContainerUnitWorker lifecycle, and
   # AppleContainerUnitDrainCoordinator settlement. Production dependencies are
-  # hardcoded. This module is not wired into Arbor.Shell.execute_spawn_capable/3
-  # — the public facade remains fail-closed until a later slice opens it.
+  # hardcoded. Arbor.Shell.execute_spawn_capable/3 is the thin public facade
+  # that calls execute/3 — Application env cannot select another backend.
   #
   # Terminal success/error requires BOTH exact worker process DOWN and an
   # authoritative ExecutionRegistry terminal projection with

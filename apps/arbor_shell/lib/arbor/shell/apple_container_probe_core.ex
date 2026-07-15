@@ -8,9 +8,9 @@ defmodule Arbor.Shell.AppleContainerProbeCore do
   process execution, filesystem access, environment reads, Application config
   reads, GenServer calls, ETS, time, randomness, or logging.
 
-  Raw outputs are evidence only — never executable authority. The production
-  spawn facade remains fail-closed until a later imperative adapter combines
-  these projections with identity/signing/baseline authority.
+  Raw outputs are evidence only — never executable authority. The imperative
+  prober combines these projections with identity/signing/baseline authority
+  for admission behind `Arbor.Shell.execute_spawn_capable/3`.
   """
 
   # --- Closed request surface ---
