@@ -15,6 +15,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     acquire_workspace
                     capture_pre_turn_recovery
                     capture_pre_turn_workspace
+                    check_pre_turn_recovery_exists
+                    check_pre_turn_workspace_exists
                     check_operator_rework_category_budget
                     check_operator_rework_total_budget
                     check_review_category_budget
@@ -233,6 +235,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "action" => "acp_send_message",
                                   "required_dominators" => [
                                     "capture_pre_turn_workspace",
+                                    "check_pre_turn_workspace_exists",
                                     "open_worker"
                                   ],
                                   "review_required_dominators" => [],
@@ -321,6 +324,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "action" => "acp_send_message",
                                   "required_dominators" => [
                                     "capture_pre_turn_recovery",
+                                    "check_pre_turn_recovery_exists",
                                     "open_recovery_worker",
                                     "route_recovery_continuity"
                                   ],
@@ -367,6 +371,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
           "output_prefix" => "pre_turn",
           "max_retries" => "0"
         }
+      },
+      %{
+        "node_id" => "check_pre_turn_recovery_exists",
+        "attrs" => %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}
       },
       %{
         "node_id" => "check_recovery_provider_id",
@@ -582,10 +590,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ["acp_session_status", "check_worker_status_session_id", "outcome=success"],
       [
         "capture_pre_turn_recovery",
-        "hoist_baseline_fingerprint_recovery",
+        "check_pre_turn_recovery_exists",
         "outcome=success"
       ],
       ["capture_pre_turn_recovery", "status_pipeline_error_then_close", "outcome=fail"],
+      [
+        "check_pre_turn_recovery_exists",
+        "error_workspace_missing",
+        "context.pre_turn.exists!=true"
+      ],
+      [
+        "check_pre_turn_recovery_exists",
+        "hoist_baseline_fingerprint_recovery",
+        "context.pre_turn.exists=true"
+      ],
       [
         "check_recovery_provider_id",
         "copy_worker_provider_session_id_to_session_id",

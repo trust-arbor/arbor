@@ -1253,6 +1253,42 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "pre- and post-turn workspace existence gates cannot be bypassed", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      replace_edge_target(
+        graph,
+        "capture_pre_turn_workspace",
+        "check_pre_turn_workspace_exists",
+        "outcome=success",
+        "hoist_baseline_fingerprint"
+      ),
+      replace_edge_target(
+        graph,
+        "inspect_workspace",
+        "check_workspace_exists",
+        "outcome=success",
+        "hoist_dirty"
+      )
+    ]
+
+    for bypassed <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(bypassed, profile["semantic_policy"],
+                 review_profile: "binding",
+                 worker_use_pool: true,
+                 worker_resume_session_id: nil
+               )
+
+      assert Enum.any?(errors, fn err ->
+               err["code"] in ["worker_continuity_missing_edge", "dominance_violation"]
+             end)
+    end
+  end
+
   test "adversarial: bypass of check_validation_passed fails closed", ctx do
     # Keep validate reachable, but route success straight to commit prep so the
     # validation-result gate no longer dominates commit/publication routing.

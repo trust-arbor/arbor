@@ -20,6 +20,13 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   alias Arbor.Actions.Git
   alias Arbor.Actions.Coding.Workspace.DeltaRanges
+  alias Arbor.Common.SafePath
+
+  @fingerprint_max_manifest_bytes 16 * 1024 * 1024
+  @fingerprint_max_path_bytes 4 * 1024 * 1024
+  @fingerprint_max_paths 20_000
+  @fingerprint_max_content_bytes 256 * 1024 * 1024
+  @fingerprint_chunk_bytes 64 * 1024
 
   @doc false
   def resolve_repo_root(path) when is_binary(path) do
@@ -206,7 +213,13 @@ defmodule Arbor.Actions.Coding.Workspace do
     if exists do
       dirty = worktree_dirty?(worktree_path)
       head_commit = head_commit(worktree_path)
-      fingerprint = worktree_fingerprint(worktree_path, head_commit)
+      fingerprint_result = worktree_fingerprint(worktree_path, head_commit)
+
+      {fingerprint, fingerprint_valid, fingerprint_error} =
+        case fingerprint_result do
+          {:ok, value} -> {value, true, nil}
+          {:error, reason} -> {nil, false, fingerprint_error(reason)}
+        end
 
       changed_from_base =
         dirty or
@@ -219,6 +232,8 @@ defmodule Arbor.Actions.Coding.Workspace do
         head_commit: head_commit,
         changed_from_base: changed_from_base,
         fingerprint: fingerprint,
+        fingerprint_valid: fingerprint_valid,
+        fingerprint_error: fingerprint_error,
         turn_progressed: turn_progressed?(fingerprint, baseline)
       }
     else
@@ -230,6 +245,8 @@ defmodule Arbor.Actions.Coding.Workspace do
         head_commit: nil,
         changed_from_base: false,
         fingerprint: fingerprint,
+        fingerprint_valid: true,
+        fingerprint_error: nil,
         turn_progressed: turn_progressed?(fingerprint, baseline)
       }
     end
@@ -237,35 +254,260 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   @doc false
   # Bounded, deterministic owner-observed workspace identity for turn-progress
-  # detection. Hashes HEAD plus porcelain status (tracked/staged/untracked/
-  # deleted/renamed) without retaining unbounded diff contents.
-  @spec worktree_fingerprint(String.t() | term(), String.t() | nil) :: String.t()
+  # detection. The fixed digest covers HEAD, every staged index entry, and the
+  # content/metadata of every unstaged or untracked path. No diff or file body
+  # crosses the action/Engine boundary.
+  @spec worktree_fingerprint(String.t() | term(), String.t() | nil) ::
+          {:ok, String.t()} | {:error, term()}
   def worktree_fingerprint(worktree_path, head_commit \\ nil)
 
   def worktree_fingerprint(worktree_path, head_commit) when is_binary(worktree_path) do
-    head =
-      cond do
-        is_binary(head_commit) and head_commit != "" -> head_commit
-        true -> head_commit(worktree_path) || ""
-      end
-
-    status =
-      case git(worktree_path, ["status", "--porcelain", "--untracked-files=all"]) do
-        {:ok, output} when is_binary(output) -> normalize_fingerprint_status(output)
-        {:error, reason} -> "status-error:#{normalize_fingerprint_status(to_string(reason))}"
-      end
-
-    # Include a bounded tree listing so renames/mode bits that status reports
-    # stay covered while the payload remains a fixed-size digest.
-    digest_input = ["arbor-coding-ws-fp-v1", head, status] |> Enum.join("\0")
-
-    digest_input
-    |> then(&:crypto.hash(:sha256, &1))
-    |> Base.encode16(case: :lower)
-    |> then(&("sha256:" <> &1))
+    with {:ok, canonical_root} <- SafePath.resolve_real(worktree_path),
+         {:ok, before} <- fingerprint_manifest(canonical_root, head_commit),
+         {:ok, hash, content_bytes} <- hash_fingerprint_manifest(canonical_root, before),
+         true <- content_bytes <= @fingerprint_max_content_bytes,
+         {:ok, after_manifest} <- fingerprint_manifest(canonical_root, nil),
+         true <- stable_fingerprint_manifest?(before, after_manifest) do
+      digest = hash |> :crypto.hash_final() |> Base.encode16(case: :lower)
+      {:ok, "sha256:" <> digest}
+    else
+      false -> {:error, :workspace_fingerprint_changed}
+      {:error, _reason} = error -> error
+      _ -> {:error, :workspace_fingerprint_failed}
+    end
   end
 
-  def worktree_fingerprint(_worktree_path, _head_commit), do: missing_worktree_fingerprint()
+  def worktree_fingerprint(_worktree_path, _head_commit),
+    do: {:error, :workspace_fingerprint_invalid_path}
+
+  defp fingerprint_manifest(root, supplied_head) do
+    with {:ok, head} <- fingerprint_head(root, supplied_head),
+         {:ok, index} <- git(root, ["ls-files", "--stage", "-z"]),
+         :ok <- require_bounded_binary(index, @fingerprint_max_manifest_bytes),
+         {:ok, unstaged} <-
+           git(root, [
+             "diff",
+             "--no-ext-diff",
+             "--no-textconv",
+             "--ignore-submodules=none",
+             "--name-only",
+             "-z",
+             "HEAD",
+             "--"
+           ]),
+         {:ok, untracked} <-
+           git(root, ["ls-files", "--others", "--exclude-standard", "-z"]),
+         :ok <- require_bounded_binary(unstaged, @fingerprint_max_path_bytes),
+         :ok <- require_bounded_binary(untracked, @fingerprint_max_path_bytes),
+         {:ok, paths} <- fingerprint_paths(unstaged, untracked) do
+      {:ok, %{head: head, index: index, paths: paths}}
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :workspace_fingerprint_manifest_failed}
+    end
+  end
+
+  defp fingerprint_head(_root, supplied) when is_binary(supplied) and supplied != "",
+    do: {:ok, supplied}
+
+  defp fingerprint_head(root, _supplied) do
+    case git(root, ["rev-parse", "HEAD"]) do
+      {:ok, output} ->
+        head = String.trim(output)
+        if head == "", do: {:error, :workspace_fingerprint_head_missing}, else: {:ok, head}
+
+      {:error, _reason} ->
+        {:error, :workspace_fingerprint_head_failed}
+    end
+  end
+
+  defp require_bounded_binary(value, max_bytes)
+       when is_binary(value) and byte_size(value) <= max_bytes,
+       do: :ok
+
+  defp require_bounded_binary(_value, _max_bytes),
+    do: {:error, :workspace_fingerprint_manifest_too_large}
+
+  defp fingerprint_paths(unstaged, untracked) do
+    paths =
+      [unstaged, untracked]
+      |> Enum.flat_map(&:binary.split(&1, <<0>>, [:global]))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    cond do
+      length(paths) > @fingerprint_max_paths ->
+        {:error, :workspace_fingerprint_too_many_paths}
+
+      Enum.all?(paths, &safe_fingerprint_relative_path?/1) ->
+        {:ok, paths}
+
+      true ->
+        {:error, :workspace_fingerprint_unsafe_path}
+    end
+  end
+
+  defp safe_fingerprint_relative_path?(path) when is_binary(path) and path != "" do
+    String.valid?(path) and not String.starts_with?(path, "/") and
+      path
+      |> :binary.split("/", [:global])
+      |> Enum.all?(&(&1 not in ["", ".", ".."]))
+  end
+
+  defp safe_fingerprint_relative_path?(_), do: false
+
+  defp hash_fingerprint_manifest(root, manifest) do
+    hash = :crypto.hash_init(:sha256)
+
+    hash =
+      hash
+      |> hash_fingerprint_field("arbor-coding-ws-fp-v2")
+      |> hash_fingerprint_field(manifest.head)
+      |> hash_fingerprint_field(manifest.index)
+
+    Enum.reduce_while(manifest.paths, {:ok, hash, 0}, fn path, {:ok, acc, bytes} ->
+      case hash_fingerprint_path(root, path, acc, bytes) do
+        {:ok, next_hash, next_bytes} -> {:cont, {:ok, next_hash, next_bytes}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp hash_fingerprint_path(root, relative_path, hash, content_bytes) do
+    full_path = Path.join(root, relative_path)
+    hash = hash_fingerprint_field(hash, relative_path)
+
+    case File.lstat(full_path, time: :posix) do
+      {:error, :enoent} ->
+        {:ok, hash_fingerprint_field(hash, "missing"), content_bytes}
+
+      {:ok, %File.Stat{type: :regular} = before} ->
+        hash_regular_fingerprint_path(root, full_path, before, hash, content_bytes)
+
+      {:ok, %File.Stat{type: :symlink} = before} ->
+        with {:ok, target} <- File.read_link(full_path),
+             true <- byte_size(target) <= @fingerprint_max_path_bytes,
+             {:ok, after_stat} <- File.lstat(full_path, time: :posix),
+             true <- same_fingerprint_stat?(before, after_stat) do
+          hash =
+            hash
+            |> hash_fingerprint_field("symlink")
+            |> hash_fingerprint_field(Integer.to_string(before.mode))
+            |> hash_fingerprint_field(target)
+
+          {:ok, hash, content_bytes}
+        else
+          _ -> {:error, :workspace_fingerprint_source_changed}
+        end
+
+      {:ok, %File.Stat{type: :directory} = before} ->
+        with {:ok, submodule_head} <- git(full_path, ["rev-parse", "HEAD"]),
+             {:ok, after_stat} <- File.lstat(full_path, time: :posix),
+             true <- same_fingerprint_stat?(before, after_stat) do
+          hash =
+            hash
+            |> hash_fingerprint_field("directory")
+            |> hash_fingerprint_field(Integer.to_string(before.mode))
+            |> hash_fingerprint_field(String.trim(submodule_head))
+
+          {:ok, hash, content_bytes}
+        else
+          _ -> {:error, :workspace_fingerprint_unsupported_directory}
+        end
+
+      {:ok, _other} ->
+        {:error, :workspace_fingerprint_unsupported_file_type}
+
+      {:error, _reason} ->
+        {:error, :workspace_fingerprint_lstat_failed}
+    end
+  end
+
+  defp hash_regular_fingerprint_path(root, path, before, hash, content_bytes) do
+    hash =
+      hash
+      |> hash_fingerprint_field("regular")
+      |> hash_fingerprint_field(Integer.to_string(before.mode))
+      |> hash_fingerprint_field(Integer.to_string(before.size))
+
+    with {:ok, canonical_path} <- SafePath.resolve_real(path),
+         true <- within_fingerprint_root?(canonical_path, root),
+         true <- content_bytes + before.size <= @fingerprint_max_content_bytes,
+         {:ok, hash, read_bytes} <- hash_fingerprint_file(canonical_path, hash, content_bytes),
+         true <- read_bytes - content_bytes == before.size,
+         {:ok, after_stat} <- File.lstat(path, time: :posix),
+         true <- same_fingerprint_stat?(before, after_stat) do
+      {:ok, hash, read_bytes}
+    else
+      false -> {:error, :workspace_fingerprint_content_too_large}
+      {:error, _reason} = error -> error
+      _ -> {:error, :workspace_fingerprint_source_changed}
+    end
+  end
+
+  defp hash_fingerprint_file(path, hash, content_bytes) do
+    case File.open(path, [:read, :binary], fn io ->
+           hash_fingerprint_stream(io, hash, content_bytes)
+         end) do
+      {:ok, {:ok, next_hash, next_bytes}} -> {:ok, next_hash, next_bytes}
+      {:ok, {:error, _reason} = error} -> error
+      {:error, _reason} -> {:error, :workspace_fingerprint_read_failed}
+    end
+  rescue
+    _ -> {:error, :workspace_fingerprint_read_failed}
+  end
+
+  defp hash_fingerprint_stream(io, hash, content_bytes) do
+    case IO.binread(io, @fingerprint_chunk_bytes) do
+      :eof ->
+        {:ok, hash, content_bytes}
+
+      {:error, _reason} ->
+        {:error, :workspace_fingerprint_read_failed}
+
+      chunk when is_binary(chunk) ->
+        next_bytes = content_bytes + byte_size(chunk)
+
+        if next_bytes <= @fingerprint_max_content_bytes do
+          hash_fingerprint_stream(io, :crypto.hash_update(hash, chunk), next_bytes)
+        else
+          {:error, :workspace_fingerprint_content_too_large}
+        end
+    end
+  end
+
+  defp hash_fingerprint_field(hash, value) when is_binary(value) do
+    :crypto.hash_update(hash, <<byte_size(value)::unsigned-big-64, value::binary>>)
+  end
+
+  defp within_fingerprint_root?(path, root),
+    do: path == root or String.starts_with?(path, root <> "/")
+
+  defp same_fingerprint_stat?(left, right) do
+    fingerprint_stat_identity(left) == fingerprint_stat_identity(right)
+  end
+
+  defp fingerprint_stat_identity(%File.Stat{} = stat) do
+    Map.take(Map.from_struct(stat), [
+      :type,
+      :major_device,
+      :minor_device,
+      :inode,
+      :mode,
+      :size,
+      :mtime,
+      :ctime
+    ])
+  end
+
+  defp stable_fingerprint_manifest?(before, after_manifest) do
+    before.head == after_manifest.head and before.index == after_manifest.index and
+      before.paths == after_manifest.paths
+  end
+
+  defp fingerprint_error(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp fingerprint_error(_reason), do: "workspace_fingerprint_failed"
 
   defp missing_worktree_fingerprint, do: "sha256:missing-worktree"
 
@@ -292,21 +534,7 @@ defmodule Arbor.Actions.Coding.Workspace do
   defp turn_progressed?(fingerprint, baseline) when is_binary(fingerprint),
     do: fingerprint != baseline
 
-  defp turn_progressed?(_fingerprint, _baseline), do: true
-
-  defp normalize_fingerprint_status(output) when is_binary(output) do
-    # Cap retained status bytes before hashing so a hostile worktree cannot
-    # force unbounded memory into the action result path. The digest still
-    # covers the truncated window plus an explicit overflow marker.
-    max_bytes = 65_536
-    trimmed = String.trim(output)
-
-    if byte_size(trimmed) <= max_bytes do
-      trimmed
-    else
-      binary_part(trimmed, 0, max_bytes) <> "\n#truncated:#{byte_size(trimmed)}"
-    end
-  end
+  defp turn_progressed?(_fingerprint, _baseline), do: false
 
   @doc false
   def json_clean?(value) do
@@ -1115,8 +1343,13 @@ defmodule Arbor.Actions.Coding.Workspace do
                 )
               )
 
-            Actions.emit_completed(__MODULE__, %{workspace_id: workspace_id})
-            {:ok, view}
+            if view.exists == true and view.fingerprint_valid != true do
+              Actions.emit_failed(__MODULE__, :workspace_fingerprint_failed)
+              {:error, :workspace_fingerprint_failed}
+            else
+              Actions.emit_completed(__MODULE__, %{workspace_id: workspace_id})
+              {:ok, view}
+            end
 
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)

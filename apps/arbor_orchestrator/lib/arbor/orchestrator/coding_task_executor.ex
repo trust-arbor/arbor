@@ -465,7 +465,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     #{correction_json}
     TASK_OWNER_CORRECTION_JSON_END
 
-    Respond with a concise implementation summary of what you changed (or why you made no change). Arbor inspects the workspace for the authoritative outcome; do not wrap the response as protocol JSON.
+    For compatibility with archived coding graphs, respond with ONLY one valid JSON object and no prose or Markdown: {"status":"implemented","summary":"what changed"} or {"status":"declined","summary":"why no change was made"}. Arbor inspects the workspace for the authoritative outcome, so this object is advisory only.
     """
     |> String.trim()
   end

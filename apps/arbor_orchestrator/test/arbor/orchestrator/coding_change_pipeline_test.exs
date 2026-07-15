@@ -368,6 +368,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:missing_workspace, _} ->
                 "Implement claimed success but worktree is gone."
 
+              {:missing_workspace_before_send, _} ->
+                "This send must never be reached."
+
               {:close_failed, _} ->
                 "Implement complete on close-failure path."
 
@@ -471,6 +474,15 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                   fingerprint: fingerprint
                 })
 
+              :missing_workspace_before_send when not post_turn? ->
+                Map.merge(base, %{
+                  exists: false,
+                  dirty: false,
+                  head_commit: nil,
+                  changed_from_base: false,
+                  fingerprint: fingerprint
+                })
+
               :self_commit_adopt ->
                 Map.merge(base, %{
                   dirty: false,
@@ -507,6 +519,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           "fp-clean"
 
         :missing_workspace when post_turn? ->
+          "sha256:missing-worktree"
+
+        :missing_workspace_before_send when not post_turn? ->
           "sha256:missing-worktree"
 
         :self_commit_adopt ->
@@ -1213,7 +1228,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute load_dot() =~ "worker_protocol_invalid_json_after_retry"
       # Steering prompts still request one terminal JSON object for old-graph
       # compatibility, but never require JSON-only protocol output.
-      assert load_dot() =~ "exactly one valid terminal JSON object"
+      assert load_dot() =~ "ONLY one valid JSON object and no prose or Markdown"
       refute load_dot() =~ "ONLY one JSON object"
       refute load_dot() =~ "ONLY a JSON object"
       refute load_dot() =~ "source_key=\"rework_count\""
@@ -1348,6 +1363,18 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_closed_and_released(calls)
     end
 
+    test "missing workspace before a worker send is pipeline_error and never dispatches the turn" do
+      assert {{:ok, result}, calls} = run_fixture(:missing_workspace_before_send)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "workspace_missing"
+      assert "check_pre_turn_workspace_exists" in result.completed_nodes
+      assert "error_workspace_missing" in result.completed_nodes
+      refute called?(calls, "acp_send_message")
+      refute called?(calls, "mix_compile")
+      assert_release_mode(calls, "retain")
+      assert_closed_and_released(calls)
+    end
+
     test "rework no-op after candidate is pipeline_error and does not re-present prior work" do
       assert {{:ok, result}, calls} = run_fixture(:rework_no_progress)
       assert result.context["status"] == "pipeline_error"
@@ -1378,9 +1405,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert {{:ok, result}, calls} = run_fixture(:change_committed)
       assert result.context["status"] == "change_committed"
       prompts = action_prompts(calls)
-      assert Enum.at(prompts, 0) =~ "exactly one valid terminal JSON object"
-      assert Enum.at(prompts, 0) =~ ~s({"status":"implemented"})
-      assert Enum.at(prompts, 0) =~ ~s({"status":"declined"})
+      assert Enum.at(prompts, 0) =~ "ONLY one valid JSON object and no prose or Markdown"
+      assert Enum.at(prompts, 0) =~ ~s({\"status\":\"implemented\",\"summary\":\"what changed\"})
+
+      assert Enum.at(prompts, 0) =~
+               ~s({\"status\":\"declined\",\"summary\":\"why no change was made\"})
+
       assert Enum.at(prompts, 0) =~ "advisory only"
       refute Enum.at(prompts, 0) =~ "ONLY one JSON object"
       refute called_with_prompt?(calls, "ONLY a JSON object")
@@ -1405,8 +1435,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert Enum.at(prompts, 1) =~ "bounded compile feedback"
       refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDOUT_SENTINEL"
       refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDERR_SENTINEL"
-      assert Enum.at(prompts, 1) =~ "concise implementation summary"
-      assert Enum.at(prompts, 1) =~ "exactly one valid terminal JSON object"
+      assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
       refute called?(calls, "coding_reviewed_commit")
     end
@@ -1428,8 +1457,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_single_worker_session(calls, 3)
       assert Enum.at(prompts, 1) =~ "Structured review feedback JSON"
       assert Enum.at(prompts, 1) =~ "bounded council feedback"
-      assert Enum.at(prompts, 1) =~ "concise implementation summary"
-      assert Enum.at(prompts, 1) =~ "exactly one valid terminal JSON object"
+      assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
     end
 
@@ -1553,7 +1581,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDERR_SENTINEL"
       assert Enum.at(prompts, 2) =~ "Structured review feedback JSON"
       assert Enum.at(prompts, 2) =~ "bounded council feedback"
-      assert Enum.all?(prompts, &String.contains?(&1, "concise implementation summary"))
+
+      assert Enum.all?(
+               prompts,
+               &String.contains?(&1, "ONLY one valid JSON object and no prose or Markdown")
+             )
+
       refute Enum.any?(prompts, &String.contains?(&1, "ONLY one JSON"))
       refute "error_review_tier_invalid" in result.completed_nodes
       assert_closed_and_released(calls)
@@ -1603,7 +1636,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_single_worker_session(calls, 2)
       assert Enum.at(prompts, 1) =~ "Operator requested rework"
       assert Enum.at(prompts, 1) =~ "please fix the public API name"
-      assert Enum.at(prompts, 1) =~ "concise implementation summary"
+      assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
 
       commit_calls = Enum.filter(calls, fn {n, _} -> n == "coding_reviewed_commit" end)
@@ -1818,8 +1851,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       prompts = action_prompts(calls)
       assert_single_worker_session(calls, 2)
       assert Enum.at(prompts, 1) =~ "Structured validation feedback JSON"
-      assert Enum.at(prompts, 1) =~ "concise implementation summary"
-      assert Enum.at(prompts, 1) =~ "exactly one valid terminal JSON object"
+      assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
       # Two turns × (pre-turn capture + post-turn inspect)
       assert Enum.count(calls, fn {name, _} -> name == "coding_workspace_inspect" end) == 4
@@ -1840,8 +1872,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       prompts = action_prompts(calls)
       assert_single_worker_session(calls, 2)
       assert Enum.at(prompts, 1) =~ "Structured review feedback JSON"
-      assert Enum.at(prompts, 1) =~ "concise implementation summary"
-      assert Enum.at(prompts, 1) =~ "exactly one valid terminal JSON object"
+      assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
       assert Enum.count(calls, fn {name, _} -> name == "coding_workspace_inspect" end) == 4
       assert_closed_and_released(calls)

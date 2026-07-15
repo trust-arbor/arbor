@@ -1876,6 +1876,24 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp check_worker_continuity_bindings(errors, graph, continuity) do
     expected_nodes = [
+      {"capture_pre_turn_workspace",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_workspace_inspect",
+         "context_keys" => "workspace_id",
+         "output_prefix" => "pre_turn",
+         "max_retries" => "0"
+       }},
+      {"check_pre_turn_workspace_exists",
+       %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+      {"hoist_baseline_fingerprint",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "pre_turn.fingerprint",
+         "output_key" => "baseline_fingerprint"
+       }},
       {"hoist_worker_provider_session_id",
        %{
          "type" => "transform",
@@ -1889,16 +1907,43 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "transform" => "identity",
          "source_key" => "worker_msg.session_id",
          "output_key" => "worker_provider_session_id"
-       }}
+       }},
+      {"check_worker_stop_reason",
+       %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+      {"inspect_workspace",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_workspace_inspect",
+         "context_keys" => "workspace_id,baseline_fingerprint",
+         "output_prefix" => "inspect",
+         "max_retries" => "0"
+       }},
+      {"check_workspace_exists",
+       %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}}
     ]
 
     expected_edges = [
       {"open_worker", "hoist_worker_session_id", "outcome=success"},
       {"hoist_worker_session_id", "hoist_worker_provider_session_id", nil},
       {"hoist_worker_provider_session_id", "build_implement_prompt", nil},
+      {"build_implement_prompt", "capture_pre_turn_workspace", nil},
+      {"capture_pre_turn_workspace", "status_pipeline_error_then_close", "outcome=fail"},
+      {"capture_pre_turn_workspace", "check_pre_turn_workspace_exists", "outcome=success"},
+      {"check_pre_turn_workspace_exists", "error_workspace_missing",
+       "context.pre_turn.exists!=true"},
+      {"check_pre_turn_workspace_exists", "hoist_baseline_fingerprint",
+       "context.pre_turn.exists=true"},
+      {"hoist_baseline_fingerprint", "implement", nil},
       {"implement", "hoist_worker_provider_session_id_from_message", "outcome=success"},
       {"hoist_worker_provider_session_id_from_message", "check_worker_stop_reason", nil},
-      {"check_worker_stop_reason", "inspect_workspace", "context.worker_msg.stop_reason=end_turn"}
+      {"check_worker_stop_reason", "inspect_workspace",
+       "context.worker_msg.stop_reason=end_turn"},
+      {"check_worker_stop_reason", "error_worker_stop_reason_not_end_turn", nil},
+      {"inspect_workspace", "status_pipeline_error_then_close", "outcome=fail"},
+      {"inspect_workspace", "check_workspace_exists", "outcome=success"},
+      {"check_workspace_exists", "error_workspace_missing", "context.inspect.exists!=true"},
+      {"check_workspace_exists", "hoist_dirty", "context.inspect.exists=true"}
     ]
 
     errors =
@@ -2948,6 +2993,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   defp check_worker_continuity_dominance(errors, reachable, dominators) do
     errors
     |> require_dominates(
+      "check_pre_turn_workspace_exists",
+      "implement",
+      reachable,
+      dominators,
+      "worker_pre_turn_workspace_exists_gate"
+    )
+    |> require_dominates(
       "hoist_worker_provider_session_id",
       "implement",
       reachable,
@@ -2967,6 +3019,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       reachable,
       dominators,
       "worker_stop_reason_gate"
+    )
+    |> require_dominates(
+      "check_workspace_exists",
+      "route_turn_progress",
+      reachable,
+      dominators,
+      "worker_post_turn_workspace_exists_gate"
     )
   end
 

@@ -130,6 +130,48 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
       assert no_progress.turn_progressed == false
       assert no_progress.fingerprint == dirty_view.fingerprint
+
+      File.write!(Path.join(lease.worktree_path, "dirty.txt"), "different content\n")
+
+      assert {:ok, edited_dirty_view} =
+               Workspace.Inspect.run(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   baseline_fingerprint: dirty_view.fingerprint
+                 },
+                 %{}
+               )
+
+      assert edited_dirty_view.turn_progressed == true
+      assert edited_dirty_view.fingerprint != dirty_view.fingerprint
+
+      git!(lease.worktree_path, ["add", "dirty.txt"])
+
+      assert {:ok, staged_view} =
+               Workspace.Inspect.run(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   baseline_fingerprint: edited_dirty_view.fingerprint
+                 },
+                 %{}
+               )
+
+      assert staged_view.turn_progressed == true
+      assert staged_view.fingerprint != edited_dirty_view.fingerprint
+
+      File.write!(Path.join(lease.worktree_path, "dirty.txt"), "staged plus unstaged\n")
+
+      assert {:ok, staged_and_edited_view} =
+               Workspace.Inspect.run(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   baseline_fingerprint: staged_view.fingerprint
+                 },
+                 %{}
+               )
+
+      assert staged_and_edited_view.turn_progressed == true
+      assert staged_and_edited_view.fingerprint != staged_view.fingerprint
     end
 
     test "inspect_worktree reports missing path without treating it as no_changes", %{

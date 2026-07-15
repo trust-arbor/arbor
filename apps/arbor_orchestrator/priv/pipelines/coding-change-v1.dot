@@ -57,9 +57,9 @@
 // plan's retain_workspace=true. Release enforces ownership, so reused paths
 // are never physically removed. Worker sessions are closed when opened; close
 // success and failure both pass through exactly one cleanup-mode decision.
-// Registry owner-death and cancellation cleanup preserve dirty or advanced
-// owned work under a bounded retained lease; only proven-pristine owned work is
-// removed. Reused paths are never deletion authority.
+// Registry owner-death and cancellation cleanup move every owned worktree into
+// bounded retention because an external ACP worker can outlive its owner and
+// write after an inspect/remove check. Reused paths are never deletion authority.
 //
 // Does NOT call coding_produce_reviewable_change.
 //
@@ -274,7 +274,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="You are implementing an Arbor code change inside worktree {ctx.worktree_path}. Task: {value}. Requirements: work only in the worktree; produce a reviewable diff; do not merge, push, or open a PR. Respond with a concise implementation summary of what you changed (or why you made no change). Also emit exactly one valid terminal JSON object for compatibility with archived graphs, for example {\"status\":\"implemented\"} or {\"status\":\"declined\"}; Arbor treats worker prose and that JSON as advisory only and decides outcomes from the owned workspace.",
+    expression="You are implementing an Arbor code change inside worktree {ctx.worktree_path}. Task: {value}. Requirements: work only in the worktree; produce a reviewable diff; do not merge, push, or open a PR. For compatibility with archived graphs, respond with ONLY one valid JSON object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this object as advisory only and decides the outcome from the owned workspace.",
     output_key="prompt"
   ]
 
@@ -287,6 +287,12 @@ digraph CodingChangeV1 {
     context_keys="workspace_id",
     output_prefix="pre_turn",
     max_retries="0"
+  ]
+
+  check_pre_turn_workspace_exists [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
   ]
 
   hoist_baseline_fingerprint [
@@ -307,6 +313,12 @@ digraph CodingChangeV1 {
     max_retries="0"
   ]
 
+  check_pre_turn_recovery_exists [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
   hoist_baseline_fingerprint_recovery [
     type="transform",
     transform="identity",
@@ -325,8 +337,8 @@ digraph CodingChangeV1 {
 
   // After a successful worker turn, Arbor owns outcome authority: require an
   // explicit trusted stop_reason=end_turn, hoist the provider session id for
-  // continuity, then inspect the workspace. Worker free-form text is advisory
-  // evidence only — never protocol JSON.
+  // continuity, then inspect the workspace. The compatibility JSON object is
+  // advisory evidence only; it never decides the pipeline outcome.
 
   check_worker_stop_reason [
     type="branch",
@@ -596,7 +608,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Validation failed after your previous edit. Task: {value}. Structured validation feedback JSON: {ctx.validation.feedback_json}. Fix the issues in the same worktree. Respond with a concise implementation summary of what you changed. Also emit exactly one valid terminal JSON object for compatibility with archived graphs, for example {\"status\":\"implemented\"} or {\"status\":\"declined\"}; Arbor treats worker prose and that JSON as advisory only and decides outcomes from the owned workspace.",
+    expression="Validation failed after your previous edit. Task: {value}. Structured validation feedback JSON: {ctx.validation.feedback_json}. Fix the issues in the same worktree. For compatibility with archived graphs, respond with ONLY one valid JSON object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this object as advisory only and decides the outcome from the owned workspace.",
     output_key="prompt"
   ]
 
@@ -604,7 +616,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Code review requested rework. Task: {value}. Structured review feedback JSON: {ctx.review.feedback_json}. Address the review feedback in the same worktree. Respond with a concise implementation summary of what you changed. Also emit exactly one valid terminal JSON object for compatibility with archived graphs, for example {\"status\":\"implemented\"} or {\"status\":\"declined\"}; Arbor treats worker prose and that JSON as advisory only and decides outcomes from the owned workspace.",
+    expression="Code review requested rework. Task: {value}. Structured review feedback JSON: {ctx.review.feedback_json}. Address the review feedback in the same worktree. For compatibility with archived graphs, respond with ONLY one valid JSON object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this object as advisory only and decides the outcome from the owned workspace.",
     output_key="prompt"
   ]
 
@@ -612,7 +624,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Operator requested rework of the commit. Task: {value}. Operator note: {ctx.approval_note}. Address the operator feedback in the same worktree. Respond with a concise implementation summary of what you changed. Also emit exactly one valid terminal JSON object for compatibility with archived graphs, for example {\"status\":\"implemented\"} or {\"status\":\"declined\"}; Arbor treats worker prose and that JSON as advisory only and decides outcomes from the owned workspace.",
+    expression="Operator requested rework of the commit. Task: {value}. Operator note: {ctx.approval_note}. Address the operator feedback in the same worktree. For compatibility with archived graphs, respond with ONLY one valid JSON object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this object as advisory only and decides the outcome from the owned workspace.",
     output_key="prompt"
   ]
 
@@ -1414,7 +1426,9 @@ digraph CodingChangeV1 {
   hoist_worker_provider_session_id -> build_implement_prompt
   build_implement_prompt -> capture_pre_turn_workspace
   capture_pre_turn_workspace -> status_pipeline_error_then_close [condition="outcome=fail"]
-  capture_pre_turn_workspace -> hoist_baseline_fingerprint [condition="outcome=success"]
+  capture_pre_turn_workspace -> check_pre_turn_workspace_exists [condition="outcome=success"]
+  check_pre_turn_workspace_exists -> error_workspace_missing [condition="context.pre_turn.exists!=true"]
+  check_pre_turn_workspace_exists -> hoist_baseline_fingerprint [condition="context.pre_turn.exists=true"]
   hoist_baseline_fingerprint -> implement
 
   // Worker send sites use one engine-attempt and converge on one recovery gate.
@@ -1446,7 +1460,9 @@ digraph CodingChangeV1 {
   coding_workspace_recovery_summary -> hoist_recovery_prompt [condition="outcome=success"]
   hoist_recovery_prompt -> capture_pre_turn_recovery
   capture_pre_turn_recovery -> status_pipeline_error_then_close [condition="outcome=fail"]
-  capture_pre_turn_recovery -> hoist_baseline_fingerprint_recovery [condition="outcome=success"]
+  capture_pre_turn_recovery -> check_pre_turn_recovery_exists [condition="outcome=success"]
+  check_pre_turn_recovery_exists -> error_workspace_missing [condition="context.pre_turn.exists!=true"]
+  check_pre_turn_recovery_exists -> hoist_baseline_fingerprint_recovery [condition="context.pre_turn.exists=true"]
   hoist_baseline_fingerprint_recovery -> retry_recovered_send
   retry_recovered_send -> error_worker_recovery_send_failed [condition="outcome=fail"]
   retry_recovered_send -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]

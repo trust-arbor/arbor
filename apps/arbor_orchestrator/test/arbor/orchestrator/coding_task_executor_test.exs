@@ -2406,12 +2406,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert instruction =~ "current worktree and current ACP session"
       assert instruction =~ "continue the existing coding task"
       assert instruction =~ "target_stage value below is non-authority context only"
-      assert instruction =~ "concise implementation summary"
+      assert instruction =~ "ONLY one valid JSON object and no prose or Markdown"
       assert instruction =~ "Arbor inspects the workspace for the authoritative outcome"
-      refute instruction =~ "ONLY the existing worker protocol JSON"
-      # Payload may embed operator text that mentions legacy JSON shapes; the
-      # instruction itself must not re-impose an ONLY-JSON worker protocol.
-      refute instruction =~ "Respond with ONLY the existing worker protocol JSON"
+      assert instruction =~ ~s({"status":"implemented","summary":"what changed"})
+      assert instruction =~ ~s({"status":"declined","summary":"why no change was made"})
       refute instruction =~ "worker_session_id"
       refute instruction =~ "acp_worker_"
       assert byte_size(instruction) <= 16_384

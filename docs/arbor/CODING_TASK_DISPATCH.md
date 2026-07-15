@@ -121,6 +121,9 @@ worker narrative or terminal JSON:
    never `no_changes`.
 3. Progress is measured against a bounded workspace fingerprint captured
    immediately before **each** implement/rework send (not only the lease base).
+   The digest binds HEAD, staged index identities, and actual content/metadata
+   for every changed or untracked path; Git status text alone is not sufficient.
+   Inspection fails closed on command, read, race, or configured bound errors.
    Initial no-op => `no_changes`. Rework no-op => `pipeline_error`
    (`worker_turn_no_progress`) so a prior candidate is not re-presented as
    fresh work.
