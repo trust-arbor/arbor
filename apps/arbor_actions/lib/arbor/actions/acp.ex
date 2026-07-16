@@ -774,7 +774,8 @@ defmodule Arbor.Actions.Acp do
     # JSON-clean consumers and graph conditions can distinguish omission from a
     # trusted end_turn. Empty string is Engine-condition-safe (nil is not).
     defp normalize_stop_reason(response) when is_map(response) do
-      case map_get(response, :stop_reason) || map_get(response, "stop_reason") do
+      case map_get(response, :stop_reason) || map_get(response, "stop_reason") ||
+             map_get(response, :stopReason) || map_get(response, "stopReason") do
         reason when is_binary(reason) ->
           String.trim(reason)
 

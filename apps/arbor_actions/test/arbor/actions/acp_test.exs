@@ -684,6 +684,30 @@ defmodule Arbor.Actions.AcpTest do
       assert json_clean?(response)
     end
 
+    test "preserves explicit camelCase ACP stopReason" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           "text" => "done",
+           "stopReason" => "end_turn",
+           "session_id" => "provider_sess_1",
+           "usage" => %{}
+         }}
+      )
+
+      assert {:ok, response} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_camel_stop", prompt: "continue"},
+                 %{agent_id: "agent_owner", task_id: "task_owner"}
+               )
+
+      assert response.stop_reason == "end_turn"
+      assert json_clean?(response)
+    end
+
     test "security regression: preserves explicit max_tokens stop_reason" do
       install_fake_ai()
 
