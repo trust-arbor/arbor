@@ -290,6 +290,43 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
     assert String.match?(fingerprint, ~r/^[0-9a-f]{64}$/)
   end
 
+  test "identity remediation uses indexed keyset pages for staging and verification" do
+    insert_event!("evt-a", "stream-a", 1, 1, "2026-07-01 00:00:00")
+    insert_event!("evt-b", "stream-b", 1, 2, "2026-07-01 00:00:01")
+
+    RepairRepo.query!("""
+    ALTER TABLE events
+    ADD CONSTRAINT events_operation_fingerprint_present
+    CHECK (operation_fingerprint IS NOT NULL) NOT VALID
+    """)
+
+    assert {:ok, %{staged_count: 2}} =
+             PostgresRepair.stage_identity(
+               RepairRepo,
+               "identity-keyset-pages",
+               String.duplicate("d", 64),
+               1
+             )
+
+    assert {:ok, %{batch_id: "identity-keyset-pages"}} =
+             PostgresRepair.apply_staged_identity(RepairRepo, "identity-keyset-pages", 1)
+
+    assert %{rows: [[2]]} =
+             RepairRepo.query!(
+               "SELECT COUNT(*) FROM events WHERE operation_id IS NOT NULL AND operation_fingerprint IS NOT NULL"
+             )
+
+    source =
+      File.read!(
+        Path.expand("../../../../lib/arbor/persistence/event_log/postgres_repair.ex", __DIR__)
+      )
+
+    refute source =~ "IS NULL OR id >"
+    refute source =~ "IS NULL OR staged.event_id >"
+    assert source =~ "AND event.id > $1"
+    assert source =~ "AND staged.event_id > $2"
+  end
+
   test "identity remediation rejects global position tampering after staging" do
     insert_event!("evt-a", "stream-a", 1, 1, "2026-07-01 00:00:00")
 

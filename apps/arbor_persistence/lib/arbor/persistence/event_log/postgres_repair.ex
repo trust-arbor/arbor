@@ -811,24 +811,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
   end
 
   defp stage_identity_pages!(repo, batch_id, digest, batch_size, last_id, staged_count) do
-    rows =
-      query!(
-        repo,
-        """
-        SELECT event.id, event.stream_id, event.event_number, event.global_position,
-               event.type, event.data, event.metadata, event.agent_id,
-               event.causation_id, event.correlation_id, event.event_timestamp,
-               #{identity_source_checksum_sql("event")}
-        FROM #{table(repo, "events")}
-        AS event
-        WHERE operation_id IS NULL
-          AND operation_fingerprint IS NULL
-          AND ($1::text IS NULL OR id > $1)
-        ORDER BY id
-        LIMIT $2
-        """,
-        [last_id, batch_size]
-      )
+    rows = stage_identity_page!(repo, batch_size, last_id)
 
     case rows do
       [] ->
@@ -847,6 +830,43 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
           staged_count + length(staged)
         )
     end
+  end
+
+  defp stage_identity_page!(repo, batch_size, nil) do
+    query!(
+      repo,
+      """
+      SELECT event.id, event.stream_id, event.event_number, event.global_position,
+             event.type, event.data, event.metadata, event.agent_id,
+             event.causation_id, event.correlation_id, event.event_timestamp,
+             #{identity_source_checksum_sql("event")}
+      FROM #{table(repo, "events")} AS event
+      WHERE event.operation_id IS NULL
+        AND event.operation_fingerprint IS NULL
+      ORDER BY event.id
+      LIMIT $1
+      """,
+      [batch_size]
+    )
+  end
+
+  defp stage_identity_page!(repo, batch_size, last_id) when is_binary(last_id) do
+    query!(
+      repo,
+      """
+      SELECT event.id, event.stream_id, event.event_number, event.global_position,
+             event.type, event.data, event.metadata, event.agent_id,
+             event.causation_id, event.correlation_id, event.event_timestamp,
+             #{identity_source_checksum_sql("event")}
+      FROM #{table(repo, "events")} AS event
+      WHERE event.operation_id IS NULL
+        AND event.operation_fingerprint IS NULL
+        AND event.id > $1
+      ORDER BY event.id
+      LIMIT $2
+      """,
+      [last_id, batch_size]
+    )
   end
 
   defp identity_stage_row!(
@@ -1023,7 +1043,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       else: raise("identity staging row count changed during verification")
   end
 
-  defp identity_verification_page!(repo, batch_id, batch_size, last_id) do
+  defp identity_verification_page!(repo, batch_id, batch_size, nil) do
     query!(
       repo,
       """
@@ -1035,7 +1055,28 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
              event.operation_fingerprint, #{identity_source_checksum_sql("event")}
       FROM #{table(repo, @identity_rows)} staged
       JOIN #{table(repo, "events")} event ON event.id = staged.event_id
-      WHERE staged.batch_id = $1 AND ($2::text IS NULL OR staged.event_id > $2)
+      WHERE staged.batch_id = $1
+      ORDER BY staged.event_id
+      LIMIT $2
+      """,
+      [batch_id, batch_size]
+    )
+  end
+
+  defp identity_verification_page!(repo, batch_id, batch_size, last_id) when is_binary(last_id) do
+    query!(
+      repo,
+      """
+      SELECT staged.event_id, staged.operation_id, staged.operation_fingerprint,
+             staged.source_row_sha256,
+             event.stream_id, event.event_number, event.global_position, event.type,
+             event.data, event.metadata, event.agent_id, event.causation_id,
+             event.correlation_id, event.event_timestamp, event.operation_id,
+             event.operation_fingerprint, #{identity_source_checksum_sql("event")}
+      FROM #{table(repo, @identity_rows)} staged
+      JOIN #{table(repo, "events")} event ON event.id = staged.event_id
+      WHERE staged.batch_id = $1
+        AND staged.event_id > $2
       ORDER BY staged.event_id
       LIMIT $3
       """,
