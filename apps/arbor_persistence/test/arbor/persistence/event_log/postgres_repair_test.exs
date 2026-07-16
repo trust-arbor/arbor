@@ -324,7 +324,11 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
     refute source =~ "IS NULL OR id >"
     refute source =~ "IS NULL OR staged.event_id >"
     assert source =~ "AND event.id > $1"
-    assert source =~ "AND staged.event_id > $2"
+    assert source =~ "AND event_id > $2"
+    assert source =~ "WITH staged_page AS MATERIALIZED"
+    assert source =~ "(batch_id, event_id)"
+    assert source =~ ~S|ANALYZE #{table(repo, @identity_rows)}|
+    refute source =~ "ORDER BY staged.event_id"
   end
 
   test "identity remediation rejects global position tampering after staging" do

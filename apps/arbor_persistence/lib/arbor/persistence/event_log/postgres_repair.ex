@@ -18,6 +18,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
   @position_rows "arbor_event_log_position_repair_rows"
   @identity_batches "arbor_event_log_identity_repair_batches"
   @identity_rows "arbor_event_log_identity_repair_rows"
+  @identity_cursor_index "arbor_event_log_identity_repair_rows_batch_event_id_index"
   @position_disposition "operator_reviewed_backup_bound_position_repair_v1"
   @position_algorithm "row_number_global_position_created_at_id_v1"
   @identity_provenance "legacy_trusted_cutover_snapshot_v1"
@@ -190,6 +191,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
           stage_identity_pages!(repo, batch_id, source_backup_digest, batch_size, nil, 0)
 
         update_identity_batch_count!(repo, batch_id, staged_count)
+        analyze_identity_rows!(repo)
 
         %{
           batch_id: batch_id,
@@ -228,6 +230,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       transaction(repo, fn ->
         lock_events!(repo)
         create_identity_tables(repo)
+        analyze_identity_rows!(repo)
         ensure_identity_schema!(repo)
         batch = fetch_staged_identity_batch!(repo, batch_id)
         reject_half_present_identities!(repo)
@@ -756,7 +759,15 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
     ALTER TABLE #{table(repo, @identity_rows)}
     ADD COLUMN IF NOT EXISTS source_row_sha256 text
     """)
+
+    query!(repo, """
+    CREATE INDEX IF NOT EXISTS #{table(repo, @identity_cursor_index)}
+    ON #{table(repo, @identity_rows)} (batch_id, event_id)
+    """)
   end
+
+  defp analyze_identity_rows!(repo),
+    do: query!(repo, "ANALYZE #{table(repo, @identity_rows)}")
 
   defp ensure_identity_schema!(repo) do
     [[columns, fingerprint_constraint]] =
@@ -1011,7 +1022,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
           repo,
           batch_id,
           batch_size,
-          rows |> List.last() |> hd(),
+          identity_page_cursor(rows),
           verified_count + length(rows)
         )
     end
@@ -1031,7 +1042,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
           repo,
           batch_id,
           batch_size,
-          rows |> List.last() |> hd(),
+          identity_page_cursor(rows),
           verified_count + length(rows)
         )
     end
@@ -1047,17 +1058,21 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
     query!(
       repo,
       """
+      WITH staged_page AS MATERIALIZED (
+        SELECT event_id, operation_id, operation_fingerprint, source_row_sha256
+        FROM #{table(repo, @identity_rows)}
+        WHERE batch_id = $1
+        ORDER BY event_id
+        LIMIT $2
+      )
       SELECT staged.event_id, staged.operation_id, staged.operation_fingerprint,
              staged.source_row_sha256,
              event.stream_id, event.event_number, event.global_position, event.type,
              event.data, event.metadata, event.agent_id, event.causation_id,
              event.correlation_id, event.event_timestamp, event.operation_id,
              event.operation_fingerprint, #{identity_source_checksum_sql("event")}
-      FROM #{table(repo, @identity_rows)} staged
+      FROM staged_page staged
       JOIN #{table(repo, "events")} event ON event.id = staged.event_id
-      WHERE staged.batch_id = $1
-      ORDER BY staged.event_id
-      LIMIT $2
       """,
       [batch_id, batch_size]
     )
@@ -1067,22 +1082,28 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
     query!(
       repo,
       """
+      WITH staged_page AS MATERIALIZED (
+        SELECT event_id, operation_id, operation_fingerprint, source_row_sha256
+        FROM #{table(repo, @identity_rows)}
+        WHERE batch_id = $1
+          AND event_id > $2
+        ORDER BY event_id
+        LIMIT $3
+      )
       SELECT staged.event_id, staged.operation_id, staged.operation_fingerprint,
              staged.source_row_sha256,
              event.stream_id, event.event_number, event.global_position, event.type,
              event.data, event.metadata, event.agent_id, event.causation_id,
              event.correlation_id, event.event_timestamp, event.operation_id,
              event.operation_fingerprint, #{identity_source_checksum_sql("event")}
-      FROM #{table(repo, @identity_rows)} staged
+      FROM staged_page staged
       JOIN #{table(repo, "events")} event ON event.id = staged.event_id
-      WHERE staged.batch_id = $1
-        AND staged.event_id > $2
-      ORDER BY staged.event_id
-      LIMIT $3
       """,
       [batch_id, last_id, batch_size]
     )
   end
+
+  defp identity_page_cursor(rows), do: rows |> Enum.max_by(&hd/1) |> hd()
 
   defp verify_identity_row!(
          [
