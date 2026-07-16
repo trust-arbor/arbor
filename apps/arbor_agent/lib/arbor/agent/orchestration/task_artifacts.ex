@@ -30,13 +30,17 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     produce_reviewable_change
   ))
 
-  @coding_artifact_keys MapSet.new(~w(
-                          coding_plan_path
-                          coding_pipeline_path
-                          compile_manifest_path
-                          compiler_version
-                          graph_hash
-                        ))
+  @coding_artifact_required_keys MapSet.new(~w(
+                                   coding_plan_path
+                                   coding_pipeline_path
+                                   compile_manifest_path
+                                   compiler_version
+                                   graph_hash
+                                 ))
+  @coding_artifact_optional_keys MapSet.new(~w(
+                                   acp_transcript
+                                   workspace_release
+                                 ))
   @coding_artifact_path_keys ~w(
     coding_plan_path
     coding_pipeline_path
@@ -47,6 +51,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   @max_provider_session_id_length 200
 
   alias Arbor.Contracts.Comms.ApprovalAnswer
+  alias Arbor.Contracts.Coding.{TranscriptDescriptor, WorkspaceReleaseDescriptor}
 
   @doc "Normalize a runner result into the public task-result artifact shape."
   @spec normalize(term()) :: map()
@@ -391,7 +396,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   defp coding_artifacts(raw) do
     case value(raw, :artifacts) do
       artifacts when is_map(artifacts) ->
-        if valid_coding_artifacts?(artifacts), do: artifacts
+        if valid_coding_artifacts?(artifacts), do: normalize_coding_artifacts(artifacts)
 
       _other ->
         nil
@@ -400,13 +405,65 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
   defp valid_coding_artifacts?(artifacts)
        when is_map(artifacts) and not is_struct(artifacts) do
-    MapSet.new(Map.keys(artifacts)) == @coding_artifact_keys and
+    keys = Map.keys(artifacts) |> MapSet.new()
+    required_ok? = MapSet.subset?(@coding_artifact_required_keys, keys)
+
+    unknown =
+      MapSet.difference(
+        keys,
+        MapSet.union(@coding_artifact_required_keys, @coding_artifact_optional_keys)
+      )
+
+    required_ok? and MapSet.size(unknown) == 0 and
       Enum.all?(@coding_artifact_path_keys, &nonblank_string?(Map.get(artifacts, &1))) and
       nonblank_string?(Map.get(artifacts, "compiler_version")) and
-      lowercase_sha256?(Map.get(artifacts, "graph_hash"))
+      lowercase_sha256?(Map.get(artifacts, "graph_hash")) and
+      optional_artifact_fields_valid?(artifacts)
   end
 
   defp valid_coding_artifacts?(_artifacts), do: false
+
+  defp optional_artifact_fields_valid?(artifacts) do
+    Enum.all?(@coding_artifact_optional_keys, fn key ->
+      case Map.fetch(artifacts, key) do
+        :error -> true
+        {:ok, value} -> valid_optional_artifact_field?(key, value)
+      end
+    end)
+  end
+
+  defp valid_optional_artifact_field?("acp_transcript", value),
+    do: TranscriptDescriptor.valid?(value)
+
+  defp valid_optional_artifact_field?("workspace_release", value),
+    do: WorkspaceReleaseDescriptor.valid?(value)
+
+  defp valid_optional_artifact_field?(_key, _value), do: false
+
+  defp normalize_coding_artifacts(artifacts) do
+    # Preserve required compile descriptors and validated optional evidence only.
+    normalized =
+      Map.take(
+        artifacts,
+        MapSet.to_list(@coding_artifact_required_keys) ++
+          MapSet.to_list(@coding_artifact_optional_keys)
+      )
+
+    normalized
+    |> normalize_optional_artifact("acp_transcript", TranscriptDescriptor)
+    |> normalize_optional_artifact("workspace_release", WorkspaceReleaseDescriptor)
+  end
+
+  defp normalize_optional_artifact(artifacts, key, contract) do
+    case Map.fetch(artifacts, key) do
+      {:ok, descriptor} ->
+        {:ok, projected} = contract.normalize(descriptor)
+        Map.put(artifacts, key, projected)
+
+      :error ->
+        artifacts
+    end
+  end
 
   defp coding_metrics(raw) do
     case value(raw, :metrics) do

@@ -82,14 +82,63 @@ defmodule Arbor.AI.AcpTaskControlTest do
     end
   end
 
+  defmodule CaptureSink do
+    @moduledoc false
+    @parent_key {__MODULE__, :parent}
+
+    def set_parent(pid), do: :persistent_term.put(@parent_key, pid)
+    def clear_parent, do: :persistent_term.erase(@parent_key)
+
+    def append(mode, turn) do
+      parent = :persistent_term.get(@parent_key)
+      send(parent, {:transcript_sink_turn, self(), turn})
+
+      case mode do
+        :ok ->
+          {:ok, descriptor(turn)}
+
+        :fail ->
+          {:error, :disk_unavailable}
+
+        :stall ->
+          Process.sleep(:infinity)
+
+        :gated ->
+          receive do
+            :ack_durable -> {:ok, descriptor(turn)}
+          end
+      end
+    end
+
+    defp descriptor(turn) do
+      seen = get_in(turn, ["execution", "capture_index"]) + 1
+
+      %{
+        "path" => "/tmp/acp-task-control-transcript.json",
+        "sha256" => String.duplicate("a", 64),
+        "byte_size" => 1_024,
+        "turns_retained" => seen,
+        "turns_seen" => seen,
+        "turns_omitted" => 0,
+        "turns_truncated" => false,
+        "aggregate_truncated" => false,
+        "schema_version" => 1,
+        "task_id" => "task-1"
+      }
+    end
+  end
+
   setup do
     original = Application.get_env(:arbor_ai, :acp_client_module)
     Application.put_env(:arbor_ai, :acp_client_module, FakeClient)
+    CaptureSink.set_parent(self())
 
     on_exit(fn ->
       if original,
         do: Application.put_env(:arbor_ai, :acp_client_module, original),
         else: Application.delete_env(:arbor_ai, :acp_client_module)
+
+      CaptureSink.clear_parent()
     end)
 
     :ok
@@ -127,6 +176,18 @@ defmodule Arbor.AI.AcpTaskControlTest do
 
   defp control(id, message),
     do: %{"control_id" => id, "message" => message, "task_id" => "task-1"}
+
+  defp capture_opts(mode, extra \\ []) do
+    Keyword.merge(
+      [
+        transcript_sink: {CaptureSink, :append, [mode]},
+        transcript_execution_id: "exec_task_control_capture",
+        transcript_sink_timeout_ms: 100,
+        timeout: 1_000
+      ],
+      extra
+    )
+  end
 
   defp subscribe_to_task_control_signals do
     test_pid = self()
@@ -258,6 +319,244 @@ defmodule Arbor.AI.AcpTaskControlTest do
     else
       Process.sleep(5)
       eventually(fun, attempts - 1)
+    end
+  end
+
+  test "source sink captures initial and queued follow-up prompts separately in order" do
+    session = start_session()
+    caller = Task.async(fn -> AcpSession.send_message(session, "initial", capture_opts(:ok)) end)
+
+    assert_receive {:prompt_started, initial_worker, client, "same-session", "initial"}
+
+    assert {:ok, :queued, :same_session_follow_up} =
+             AcpSession.deliver_task_control(session, control("capture-1", "follow-up"))
+
+    send(initial_worker, {:release, {:ok, %{"text" => "initial-response"}}})
+
+    assert_receive {:transcript_sink_turn, _sink_worker, initial_turn}
+    assert initial_turn["execution"]["capture_index"] == 0
+    assert initial_turn["prompt"]["kind"] == "initial"
+    assert initial_turn["prompt"]["content"]["text"] == "initial"
+    assert initial_turn["terminal"]["response"]["text"] == "initial-response"
+    assert initial_turn["stream_tail"]["events_seen"] == 0
+
+    assert_receive {:prompt_started, follow_worker, ^client, "same-session", "follow-up"}
+    send(follow_worker, {:release, {:ok, %{"text" => "follow-response"}}})
+
+    assert_receive {:transcript_sink_turn, _sink_worker, follow_turn}
+    assert follow_turn["execution"]["capture_index"] == 1
+    assert follow_turn["prompt"]["kind"] == "task_control"
+    assert follow_turn["prompt"]["control_id"]["text"] == "capture-1"
+    assert follow_turn["prompt"]["content"]["text"] == "follow-up"
+    assert follow_turn["terminal"]["response"]["text"] == "follow-response"
+    assert follow_turn["turn_id"] != initial_turn["turn_id"]
+
+    assert {:ok, result} = Task.await(caller)
+    assert result["text"] == "follow-response"
+    assert result["transcript"]["turns_seen"] == 2
+    refute Map.has_key?(result, "stream_tail")
+  end
+
+  test "controls arriving during durability acknowledgement run as same-session follow-ups" do
+    session = start_session()
+
+    caller =
+      Task.async(fn ->
+        AcpSession.send_message(
+          session,
+          "initial",
+          capture_opts(:gated, timeout: 2_000, transcript_sink_timeout_ms: 1_000)
+        )
+      end)
+
+    assert_receive {:prompt_started, initial_worker, client, "same-session", "initial"}
+    send(initial_worker, {:release, {:ok, %{"text" => "initial-response"}}})
+
+    assert_receive {:transcript_sink_turn, initial_sink_worker, initial_turn}
+    assert initial_turn["execution"]["capture_index"] == 0
+
+    control_delivery =
+      Task.async(fn ->
+        AcpSession.deliver_task_control(
+          session,
+          control("during-durability", "follow-up"),
+          timeout: 1_000
+        )
+      end)
+
+    assert eventually(fn ->
+             {:messages, messages} = Process.info(session, :messages)
+
+             Enum.any?(messages, fn
+               {:acp_task_control, _ref, _reply_to, %{"control_id" => "during-durability"}} ->
+                 true
+
+               _other ->
+                 false
+             end)
+           end)
+
+    send(initial_sink_worker, :ack_durable)
+
+    assert {:ok, :queued, :same_session_follow_up} = Task.await(control_delivery)
+    assert_receive {:prompt_started, follow_worker, ^client, "same-session", "follow-up"}
+    send(follow_worker, {:release, {:ok, %{"text" => "follow-response"}}})
+
+    assert_receive {:transcript_sink_turn, follow_sink_worker, follow_turn}
+    assert follow_turn["execution"]["capture_index"] == 1
+    assert follow_turn["prompt"]["control_id"]["text"] == "during-durability"
+    send(follow_sink_worker, :ack_durable)
+
+    assert {:ok, result} = Task.await(caller)
+    assert result["text"] == "follow-response"
+    assert result["transcript"]["turns_seen"] == 2
+  end
+
+  test "provider error captures the associated prompt and source stream tail" do
+    session = start_session()
+
+    caller =
+      Task.async(fn -> AcpSession.send_message(session, "will-error", capture_opts(:ok)) end)
+
+    assert_receive {:prompt_started, worker, _client, "same-session", "will-error"}
+
+    send(session, {
+      :acp_session_update,
+      "same-session",
+      %{
+        "sessionUpdate" => "agent_message_chunk",
+        "content" => %{"text" => "partial"}
+      }
+    })
+
+    send(worker, {:release, {:error, :provider_failed}})
+
+    assert_receive {:transcript_sink_turn, _sink_worker, turn}
+    assert turn["terminal"]["status"] == "provider_error"
+    assert turn["terminal"]["error"]["text"] == ":provider_failed"
+    assert turn["prompt"]["content"]["text"] == "will-error"
+
+    assert get_in(turn, ["stream_tail", "events", Access.at(0), "content", "text"]) ==
+             "partial"
+
+    assert {:error, :provider_failed} = Task.await(caller)
+  end
+
+  test "hard timeout captures the prompt and stream tail before replying" do
+    session = start_session()
+
+    caller =
+      Task.async(fn ->
+        AcpSession.send_message(session, "will-timeout", capture_opts(:ok, timeout: 40))
+      end)
+
+    assert_receive {:prompt_started, _worker, _client, "same-session", "will-timeout"}
+
+    send(session, {
+      :acp_session_update,
+      "same-session",
+      %{"kind" => "text", "content" => "before-timeout"}
+    })
+
+    assert_receive {:transcript_sink_turn, _sink_worker, turn}, 500
+    assert turn["terminal"]["status"] == "timeout"
+    assert turn["prompt"]["content"]["text"] == "will-timeout"
+
+    assert get_in(turn, ["stream_tail", "events", Access.at(0), "content", "text"]) ==
+             "before-timeout"
+
+    assert {:error, :timeout} = Task.await(caller)
+  end
+
+  test "sink failure prevents a queued follow-up and success reply" do
+    session = start_session()
+
+    caller =
+      Task.async(fn -> AcpSession.send_message(session, "initial", capture_opts(:fail)) end)
+
+    assert_receive {:prompt_started, worker, _client, "same-session", "initial"}
+
+    assert {:ok, :queued, :same_session_follow_up} =
+             AcpSession.deliver_task_control(session, control("blocked", "must-not-run"))
+
+    send(worker, {:release, {:ok, %{"text" => "provider-success"}}})
+    assert_receive {:transcript_sink_turn, _sink_worker, _turn}
+
+    assert {:error, {:transcript_durability_failed, {:transcript_sink_failed, :disk_unavailable}}} =
+             Task.await(caller)
+
+    refute_receive {:prompt_started, _worker, _client, "same-session", "must-not-run"}, 50
+  end
+
+  test "sink timeout is monitored and prevents return success" do
+    session = start_session()
+
+    caller =
+      Task.async(fn ->
+        AcpSession.send_message(
+          session,
+          "initial",
+          capture_opts(:stall, transcript_sink_timeout_ms: 20)
+        )
+      end)
+
+    assert_receive {:prompt_started, worker, _client, "same-session", "initial"}
+    send(worker, {:release, {:ok, %{"text" => "provider-success"}}})
+    assert_receive {:transcript_sink_turn, sink_worker, _turn}
+
+    assert {:error, {:transcript_durability_failed, :transcript_sink_timeout}} =
+             Task.await(caller)
+
+    assert eventually(fn -> not Process.alive?(sink_worker) end)
+  end
+
+  test "security regression: sink failure cannot weaken caller-cancellation teardown" do
+    session = start_session()
+    session_ref = Process.monitor(session)
+
+    caller =
+      spawn(fn ->
+        _ = AcpSession.send_message(session, "cancel-me", capture_opts(:fail))
+      end)
+
+    assert_receive {:prompt_started, _worker, client, "same-session", "cancel-me"}
+    Process.exit(caller, :kill)
+
+    assert_receive {:transcript_sink_turn, _sink_worker, turn}
+    assert turn["terminal"]["status"] == "cancelled"
+    assert_receive {:cancelled, ^client, "same-session"}
+    assert_receive {:disconnected, ^client}
+    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
+  end
+
+  test "security regression: sink failure preserves hard and inactivity timeout recovery" do
+    scenarios = [
+      {:timeout, [timeout: 35]},
+      {:inactivity_timeout, [timeout: 1_000, inactivity_timeout_ms: 20]}
+    ]
+
+    for {timeout_kind, timeout_opts} <- scenarios do
+      session = start_session()
+
+      caller =
+        Task.async(fn ->
+          AcpSession.send_message(
+            session,
+            "timeout-#{timeout_kind}",
+            capture_opts(:fail, timeout_opts)
+          )
+        end)
+
+      assert_receive {:prompt_started, _worker, client, "same-session", _prompt}
+      assert_receive {:transcript_sink_turn, _sink_worker, turn}, 500
+      assert turn["terminal"]["status"] == Atom.to_string(timeout_kind)
+
+      assert {:error,
+              {:transcript_durability_failed, ^timeout_kind,
+               {:transcript_sink_failed, :disk_unavailable}}} = Task.await(caller)
+
+      assert_receive {:cancelled, ^client, "same-session"}
+      assert %{status: :recovery_required} = AcpSession.status(session)
     end
   end
 

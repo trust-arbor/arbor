@@ -43,6 +43,8 @@ defmodule Arbor.Actions.Acp do
   Capability URIs follow the pattern `arbor://acp/tool`.
   """
 
+  alias Arbor.Contracts.Coding.TranscriptDescriptor
+
   # Fallback allowlist used only when the Arbor.AI ACP catalog can't be reached
   # (e.g. arbor_ai not loaded). The authoritative list is the runtime catalog;
   # see allowed_providers/0. Adding an agent to `config :arbor_ai, :acp_providers`
@@ -137,6 +139,34 @@ defmodule Arbor.Actions.Acp do
   end
 
   def authority_opts(_), do: []
+
+  @doc false
+  def transcript_capture_opts(context) when is_map(context) do
+    case {
+      Map.get(context, :transcript_capture_error),
+      Map.get(context, :transcript_sink),
+      Map.get(context, :transcript_execution_id)
+    } do
+      {nil, nil, nil} ->
+        {:ok, []}
+
+      {nil, {module, function, fixed_args} = sink, execution_id}
+      when is_atom(module) and is_atom(function) and is_list(fixed_args) and
+             is_binary(execution_id) and execution_id != "" ->
+        {:ok, [transcript_sink: sink, transcript_execution_id: execution_id]}
+
+      _ ->
+        {:error, :invalid_trusted_transcript_capture}
+    end
+  end
+
+  def transcript_capture_opts(_context), do: {:ok, []}
+
+  @doc false
+  def valid_transcript_descriptor?(descriptor), do: TranscriptDescriptor.valid?(descriptor)
+
+  @doc false
+  def normalize_transcript_descriptor(descriptor), do: TranscriptDescriptor.normalize(descriptor)
 
   @doc false
   # Prefer trusted AuthContext principal, then injected agent_id/principal_id.
@@ -702,10 +732,14 @@ defmodule Arbor.Actions.Acp do
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, context) do
       with :ok <- Acp.require_acp!(),
-           {:ok, target} <- Acp.resolve_session_target(params) do
+           {:ok, target} <- Acp.resolve_session_target(params),
+           {:ok, transcript_opts} <- Acp.transcript_capture_opts(context) do
         case target do
-          {:worker, worker_session_id} -> do_managed_send(worker_session_id, params, context)
-          {:pid, pid} -> do_legacy_send(pid, params)
+          {:worker, worker_session_id} ->
+            do_managed_send(worker_session_id, params, context, transcript_opts)
+
+          {:pid, pid} ->
+            do_legacy_send(pid, params, transcript_opts)
         end
       else
         {:error, reason} -> {:error, Acp.format_error(reason)}
@@ -716,7 +750,7 @@ defmodule Arbor.Actions.Acp do
       :exit, reason -> {:error, Acp.format_error(reason)}
     end
 
-    defp do_managed_send(worker_session_id, params, context) do
+    defp do_managed_send(worker_session_id, params, context, transcript_opts) do
       prompt = get_param(params, :prompt)
 
       opts =
@@ -724,6 +758,7 @@ defmodule Arbor.Actions.Acp do
         |> maybe_add(:timeout, get_param(params, :timeout))
         |> maybe_add(:inactivity_timeout_ms, get_param(params, :inactivity_timeout_ms))
         |> Keyword.merge(Acp.authority_opts(context))
+        |> Keyword.merge(transcript_opts)
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Acp.ai_module(), :acp_managed_send_message, [worker_session_id, prompt, opts]) do
@@ -732,41 +767,55 @@ defmodule Arbor.Actions.Acp do
 
           # Preserve the ACP stop_reason fact. Never default missing/blank values
           # to "end_turn" — owner graphs must gate on an explicit trusted end_turn.
-          {:ok,
-           %{
-             text: map_get(response, :text) || map_get(response, "text") || "",
-             stop_reason: normalize_stop_reason(response),
-             session_id: provider_session_id(response, status),
-             context_pressure:
-               map_get(status, :context_pressure) || map_get(status, "context_pressure") || false,
-             usage: map_get(response, :usage) || map_get(response, "usage") || %{}
-           }}
+          project_send_result(response, transcript_opts, %{
+            text: map_get(response, :text) || map_get(response, "text") || "",
+            stop_reason: normalize_stop_reason(response),
+            session_id: provider_session_id(response, status),
+            context_pressure:
+              map_get(status, :context_pressure) || map_get(status, "context_pressure") || false,
+            usage: map_get(response, :usage) || map_get(response, "usage") || %{}
+          })
 
         {:error, reason} ->
           {:error, Acp.format_error(reason)}
       end
     end
 
-    defp do_legacy_send(pid, params) do
+    defp do_legacy_send(pid, params, transcript_opts) do
       opts =
         []
         |> maybe_add(:timeout, get_param(params, :timeout))
         |> maybe_add(:inactivity_timeout_ms, get_param(params, :inactivity_timeout_ms))
+        |> Keyword.merge(transcript_opts)
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Acp.ai_module(), :acp_send_message, [pid, get_param(params, :prompt), opts]) do
         {:ok, response} ->
-          {:ok,
-           %{
-             text: map_get(response, :text) || map_get(response, "text") || "",
-             stop_reason: normalize_stop_reason(response),
-             session_id: map_get(response, :session_id) || map_get(response, "session_id") || "",
-             context_pressure: Acp.check_context_pressure(pid),
-             usage: map_get(response, :usage) || map_get(response, "usage") || %{}
-           }}
+          project_send_result(response, transcript_opts, %{
+            text: map_get(response, :text) || map_get(response, "text") || "",
+            stop_reason: normalize_stop_reason(response),
+            session_id: map_get(response, :session_id) || map_get(response, "session_id") || "",
+            context_pressure: Acp.check_context_pressure(pid),
+            usage: map_get(response, :usage) || map_get(response, "usage") || %{}
+          })
 
         {:error, reason} ->
           {:error, Acp.format_error(reason)}
+      end
+    end
+
+    defp project_send_result(_response, [], base) when is_map(base), do: {:ok, base}
+
+    defp project_send_result(response, _transcript_opts, base) when is_map(base) do
+      case map_get(response, :transcript) || map_get(response, "transcript") do
+        descriptor when is_map(descriptor) ->
+          case Acp.normalize_transcript_descriptor(descriptor) do
+            {:ok, canonical} -> {:ok, Map.put(base, :transcript, canonical)}
+            {:error, _reason} -> {:error, Acp.format_error(:invalid_transcript_descriptor)}
+          end
+
+        _ ->
+          {:error, Acp.format_error(:missing_transcript_descriptor)}
       end
     end
 

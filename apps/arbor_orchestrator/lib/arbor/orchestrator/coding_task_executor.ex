@@ -42,12 +42,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @behaviour Arbor.Contracts.Agent.TaskExecutor
 
   alias Arbor.Common.SafePath
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, TranscriptDescriptor, WorkspaceReleaseDescriptor}
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Config
 
   alias Arbor.Orchestrator.CodingPlan.{
     ActionCatalog,
+    ArtifactStore,
     Compilation,
     ExecutionManifest,
     Normalizer,
@@ -243,9 +244,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              {:ok, engine_result} <-
                invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
              {:ok, result} <-
-               adapt_result(engine_result, started_at, Map.fetch!(plan.worker, "provider")) do
-          {:ok,
-           Map.put(result, "artifacts", attach_workspace_release_artifact(artifacts, result))}
+               adapt_result(engine_result, started_at, Map.fetch!(plan.worker, "provider")),
+             release_artifacts = attach_workspace_release_artifact(artifacts, result),
+             {:ok, public_artifacts} <-
+               attach_transcript_artifact(
+                 release_artifacts,
+                 logs_root,
+                 exec_ctx.task_id,
+                 engine_result
+               ) do
+          {:ok, Map.put(result, "artifacts", public_artifacts)}
         end
       after
         # The broker monitors this run process, but normal terminal outcomes
@@ -1333,6 +1341,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         signing_authority: authority,
         initial_values: initial_values,
         logs_root: logs_root,
+        transcript_sink: {
+          ArtifactStore,
+          :append_transcript_turn,
+          [logs_root, task_id]
+        },
         graph_hash: compilation.graph_hash,
         execution_manifest: compilation.execution_manifest,
         execution_manifest_digest: compilation.execution_manifest_digest,
@@ -1957,12 +1970,76 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         artifacts
 
       release ->
-        Map.put(artifacts, "workspace_release", release)
+        case WorkspaceReleaseDescriptor.normalize(release) do
+          {:ok, descriptor} -> Map.put(artifacts, "workspace_release", descriptor)
+          {:error, _reason} -> artifacts
+        end
+    end
+  end
+
+  # Public results expose only the descriptor read back through the owning
+  # ArtifactStore surface, never action context or inline turn content.
+  defp attach_transcript_artifact(artifacts, logs_root, task_id, engine_result)
+       when is_map(artifacts) do
+    expected = expected_transcript_descriptor(engine_result)
+
+    case ArtifactStore.transcript_descriptor(logs_root, task_id) do
+      {:ok, descriptor} when is_nil(expected) or descriptor == expected ->
+        {:ok, Map.put(artifacts, "acp_transcript", descriptor)}
+
+      {:ok, _descriptor} ->
+        {:error, :transcript_artifact_descriptor_mismatch}
+
+      {:error, :absent} when is_map(expected) ->
+        {:error, :transcript_artifact_missing}
+
+      {:error, :absent} ->
+        {:ok, artifacts}
+
+      {:error, reason} ->
+        {:error, {:transcript_artifact_unavailable, reason}}
+    end
+  end
+
+  defp attach_transcript_artifact(_artifacts, _logs_root, _task_id, _engine_result),
+    do: {:error, :invalid_transcript_artifacts}
+
+  # The action result descriptor is already bounded checkpoint data. Matching
+  # it to the final store read catches deletion or replacement across resume.
+  defp expected_transcript_descriptor(engine_result) do
+    case engine_result_field(engine_result, :context, "context") do
+      context when is_map(context) ->
+        Enum.reduce(context, nil, fn
+          {key, value}, best when is_binary(key) and is_map(value) ->
+            if String.ends_with?(key, ".transcript") do
+              choose_latest_transcript_descriptor(best, value)
+            else
+              best
+            end
+
+          _entry, best ->
+            best
+        end)
+
+      _other ->
+        nil
+    end
+  end
+
+  defp choose_latest_transcript_descriptor(best, candidate) do
+    case TranscriptDescriptor.normalize(candidate) do
+      {:ok, normalized} ->
+        if is_nil(best) or normalized["turns_seen"] > best["turns_seen"],
+          do: normalized,
+          else: best
+
+      {:error, _reason} ->
+        best
     end
   end
 
   defp workspace_release_projection(context) do
-    status = clean_metric_status(context_get(context, "release.status"))
+    status = workspace_release_status(context_get(context, "release.status"))
 
     %{}
     |> maybe_put_metric("workspace_release_status", status)
@@ -1990,6 +2067,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp workspace_release_expires_at(_context, _status), do: nil
+
+  defp workspace_release_status(status) when status in ["retained", "removed"], do: status
+
+  defp workspace_release_status(status) when status in [:retained, :removed],
+    do: Atom.to_string(status)
+
+  defp workspace_release_status(_status), do: nil
 
   defp extract_review(context) do
     cond do

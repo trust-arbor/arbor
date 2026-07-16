@@ -93,7 +93,11 @@ defmodule Arbor.Actions.AcpTest.FakeAI do
 
   def acp_send_message(pid, content, opts) do
     notify({:legacy_send, pid, content, opts})
-    {:ok, %{text: "legacy", stop_reason: "end_turn", session_id: "", usage: %{}}}
+
+    :persistent_term.get(
+      {__MODULE__, :send_result},
+      {:ok, %{text: "legacy", stop_reason: "end_turn", session_id: "", usage: %{}}}
+    )
   end
 
   def acp_close_session(pid), do: notify({:legacy_close, pid})
@@ -636,6 +640,181 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(opts, :timeout) == 30_000
       # worker_session_id wins over live session_pid; no legacy PID path is used.
       refute_received {:legacy_send, _, _, _}
+    end
+
+    test "threads trusted MFA capture metadata and projects only its closed descriptor" do
+      install_fake_ai()
+
+      descriptor = %{
+        "path" => "/tmp/task/acp-transcript.json",
+        "sha256" => String.duplicate("a", 64),
+        "byte_size" => 256,
+        "turns_retained" => 1,
+        "turns_seen" => 1,
+        "turns_omitted" => 0,
+        "turns_truncated" => false,
+        "aggregate_truncated" => false,
+        "schema_version" => 1,
+        "task_id" => "task-capture"
+      }
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           "text" => "done",
+           "stop_reason" => "end_turn",
+           "session_id" => "provider_sess_1",
+           "usage" => %{},
+           "transcript" => descriptor,
+           "stream_tail" => %{"events" => [%{"content" => "must-not-leak"}]}
+         }}
+      )
+
+      sink = {__MODULE__, :unused_sink, ["/tmp", "task-capture"]}
+
+      assert {:ok, result} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_capture", prompt: "continue"},
+                 %{
+                   agent_id: "agent-capture",
+                   task_id: "task-capture",
+                   transcript_sink: sink,
+                   transcript_execution_id: "exec-capture"
+                 }
+               )
+
+      assert result.transcript == descriptor
+      refute Map.has_key?(result, :stream_tail)
+      refute inspect(result) =~ "must-not-leak"
+      assert {:ok, _json} = Jason.encode(result)
+
+      assert_receive {:managed_send, "acp_worker_capture", "continue", opts}
+      assert Keyword.fetch!(opts, :transcript_sink) == sink
+      assert Keyword.fetch!(opts, :transcript_execution_id) == "exec-capture"
+    end
+
+    test "security regression: requested managed capture requires a valid descriptor" do
+      install_fake_ai()
+      sink = {__MODULE__, :unused_sink, ["/tmp", "task-capture"]}
+
+      context = %{
+        agent_id: "agent-capture",
+        task_id: "task-capture",
+        transcript_sink: sink,
+        transcript_execution_id: "exec-capture"
+      }
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok, %{"text" => "done", "stop_reason" => "end_turn", "usage" => %{}}}
+      )
+
+      assert {:error, "ACP error: :missing_transcript_descriptor"} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_missing_capture", prompt: "continue"},
+                 context
+               )
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           "text" => "done",
+           "stop_reason" => "end_turn",
+           "usage" => %{},
+           "transcript" => %{"path" => "relative.json"}
+         }}
+      )
+
+      assert {:error, "ACP error: :invalid_transcript_descriptor"} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_invalid_capture", prompt: "continue"},
+                 context
+               )
+    end
+
+    test "security regression: requested legacy capture requires a valid descriptor" do
+      install_fake_ai()
+      session = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(session, :kill) end)
+
+      context = %{
+        transcript_sink: {__MODULE__, :unused_sink, ["/tmp", "task-capture"]},
+        transcript_execution_id: "exec-capture"
+      }
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok, %{text: "done", stop_reason: "end_turn", usage: %{}}}
+      )
+
+      assert {:error, "ACP error: :missing_transcript_descriptor"} =
+               Acp.SendMessage.run(%{session_pid: session, prompt: "continue"}, context)
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           text: "done",
+           stop_reason: "end_turn",
+           usage: %{},
+           transcript: %{"path" => "/tmp/incomplete.json"}
+         }}
+      )
+
+      assert {:error, "ACP error: :invalid_transcript_descriptor"} =
+               Acp.SendMessage.run(%{session_pid: session, prompt: "continue"}, context)
+    end
+
+    test "bounded capture-error sentinel rejects ACP send before the AI facade" do
+      install_fake_ai()
+
+      assert {:error, "ACP error: :invalid_trusted_transcript_capture"} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_invalid_sink", prompt: "continue"},
+                 %{transcript_capture_error: :invalid_trusted_transcript_capture}
+               )
+
+      refute_receive {:managed_send, "acp_worker_invalid_sink", _, _}
+    end
+
+    test "standalone response never exposes internal stream capture" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           "text" => "done",
+           "stop_reason" => "end_turn",
+           "session_id" => "provider_sess_1",
+           "usage" => %{},
+           "transcript" => %{
+             "path" => "/tmp/internal/acp-transcript.json",
+             "sha256" => String.duplicate("d", 64),
+             "byte_size" => 1,
+             "turns_retained" => 1,
+             "turns_seen" => 1,
+             "turns_omitted" => 0,
+             "turns_truncated" => false,
+             "aggregate_truncated" => false,
+             "schema_version" => 1,
+             "task_id" => "internal"
+           },
+           "stream_tail" => %{"events" => [%{"content" => "internal"}]}
+         }}
+      )
+
+      assert {:ok, result} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_standalone", prompt: "continue"},
+                 %{agent_id: "agent", task_id: "task"}
+               )
+
+      refute Map.has_key?(result, :stream_tail)
+      refute Map.has_key?(result, :transcript)
+      refute inspect(result) =~ "internal"
     end
 
     test "preserves provider continuity from owner-bound status when the response ID is blank" do

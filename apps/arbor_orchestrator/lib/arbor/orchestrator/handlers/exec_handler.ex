@@ -168,6 +168,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
             |> maybe_put_nested_engine_controls(opts, authority)
             |> maybe_put_approval_timeout(opts)
             |> maybe_put_execution_id(opts)
+            |> maybe_put_transcript_sink(opts)
 
           try do
             case executor.execute(action_name, action_args, workdir, executor_opts) do
@@ -439,6 +440,29 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
       _ ->
         executor_opts
+    end
+  end
+
+  # Reload-stable process-local capture data comes only from trusted Engine opts.
+  # It never enters node attrs, action params, Context, or checkpoints.
+  defp maybe_put_transcript_sink(executor_opts, engine_opts) do
+    case Keyword.fetch(engine_opts, :transcript_sink) do
+      :error ->
+        executor_opts
+
+      {:ok, nil} ->
+        executor_opts
+
+      {:ok, {module, function, fixed_args} = sink}
+      when is_atom(module) and is_atom(function) and is_list(fixed_args) ->
+        Keyword.put(executor_opts, :transcript_sink, sink)
+
+      {:ok, _malformed} ->
+        Keyword.put(
+          executor_opts,
+          :transcript_capture_error,
+          :invalid_trusted_transcript_capture
+        )
     end
   end
 

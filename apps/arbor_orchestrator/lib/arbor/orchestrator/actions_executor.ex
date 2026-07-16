@@ -226,6 +226,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                 # Owner-issued effect execution ID from Engine/ExecHandler opts only.
                 # Never derived here; omit when the owner did not supply one.
                 |> maybe_put_context(:execution_id, Keyword.get(opts, :execution_id))
+                |> maybe_put_acp_transcript_capture(action_module, opts)
                 # Engine-pinned graph execution may resolve pipeline_internal actions.
                 |> Map.put(:allow_pipeline_internal, true)
                 |> maybe_put_file_workspace(action_module, workdir)
@@ -1131,6 +1132,36 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp maybe_put_file_workspace(context, _action_module, _workdir), do: context
+
+  defp maybe_put_acp_transcript_capture(
+         context,
+         Arbor.Actions.Acp.SendMessage,
+         opts
+       ) do
+    case {
+      Keyword.get(opts, :transcript_capture_error),
+      Keyword.get(opts, :transcript_sink),
+      Keyword.get(opts, :execution_id)
+    } do
+      {error, _sink, _execution_id} when not is_nil(error) ->
+        Map.put(context, :transcript_capture_error, :invalid_trusted_transcript_capture)
+
+      {nil, nil, _execution_id} ->
+        context
+
+      {nil, {module, function, fixed_args} = sink, execution_id}
+      when is_atom(module) and is_atom(function) and is_list(fixed_args) and
+             is_binary(execution_id) and execution_id != "" ->
+        context
+        |> Map.put(:transcript_sink, sink)
+        |> Map.put(:transcript_execution_id, execution_id)
+
+      {nil, _sink, _execution_id} ->
+        Map.put(context, :transcript_capture_error, :invalid_trusted_transcript_capture)
+    end
+  end
+
+  defp maybe_put_acp_transcript_capture(context, _action_module, _opts), do: context
 
   defp maybe_put_context(context, _key, nil), do: context
   defp maybe_put_context(context, _key, ""), do: context

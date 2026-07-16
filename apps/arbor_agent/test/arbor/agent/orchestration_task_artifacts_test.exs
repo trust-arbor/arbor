@@ -169,6 +169,118 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
     assert result.raw === raw
   end
 
+  test "promotes optional bounded acp_transcript descriptor only" do
+    transcript = %{
+      "path" => "/tmp/task/acp-transcript.json",
+      "sha256" => String.duplicate("b", 64),
+      "byte_size" => 128,
+      "turns_retained" => 2,
+      "turns_seen" => 2,
+      "turns_omitted" => 0,
+      "turns_truncated" => false,
+      "aggregate_truncated" => false,
+      "schema_version" => 1,
+      "task_id" => "task-1"
+    }
+
+    artifacts = coding_artifacts(%{"acp_transcript" => transcript})
+    raw = %{status: "change_committed", branch: "agent/x", artifacts: artifacts}
+
+    result = TaskArtifacts.normalize(raw)
+
+    assert result.result_type == :coding_change
+    assert result.payload.artifacts["acp_transcript"] === transcript
+    refute Map.has_key?(result.payload.artifacts["acp_transcript"], "turns")
+  end
+
+  test "security regression: rejects inline unknown and malformed acp transcript descriptors" do
+    valid = %{
+      "path" => "/tmp/t.json",
+      "sha256" => String.duplicate("c", 64),
+      "byte_size" => 1,
+      "turns_retained" => 1,
+      "turns_seen" => 1,
+      "turns_omitted" => 0,
+      "turns_truncated" => false,
+      "aggregate_truncated" => false,
+      "schema_version" => 1,
+      "task_id" => "task-1"
+    }
+
+    for bad <- [
+          coding_artifacts(%{"acp_transcript" => Map.put(valid, "turns", [])}),
+          coding_artifacts(%{"acp_transcript" => Map.put(valid, "authority", "no")}),
+          coding_artifacts(%{"acp_transcript" => Map.put(valid, "sha256", "not-a-digest")}),
+          coding_artifacts(%{"acp_transcript" => Map.put(valid, "turns_omitted", 4)}),
+          coding_artifacts(%{"acp_transcript" => Map.delete(valid, "task_id")})
+        ] do
+      raw = %{"status" => "no_changes", "artifacts" => bad}
+
+      assert TaskArtifacts.normalize(raw) == %{
+               result_type: :value,
+               payload: %{value: raw},
+               raw: raw
+             }
+    end
+  end
+
+  test "promotes only the canonical workspace release descriptor" do
+    artifacts =
+      coding_artifacts(%{
+        "workspace_release" => %{
+          workspace_release_status: :retained,
+          workspace_expires_at: "2026-07-16T12:00:00+00:00"
+        }
+      })
+
+    raw = %{"status" => "change_committed", "artifacts" => artifacts}
+    result = TaskArtifacts.normalize(raw)
+
+    assert result.payload.artifacts["workspace_release"] == %{
+             "workspace_release_status" => "retained",
+             "workspace_expires_at" => "2026-07-16T12:00:00Z"
+           }
+
+    removed =
+      coding_artifacts(%{
+        "workspace_release" => %{"workspace_release_status" => "removed"}
+      })
+
+    removed_result =
+      TaskArtifacts.normalize(%{"status" => "no_changes", "artifacts" => removed})
+
+    assert removed_result.payload.artifacts["workspace_release"] == %{
+             "workspace_release_status" => "removed"
+           }
+  end
+
+  test "security regression: rejects hostile workspace release descriptors" do
+    valid = %{"workspace_release_status" => "retained"}
+
+    for bad <- [
+          Map.put(valid, "workspace_id", "workspace_authority"),
+          Map.put(valid, "workspace_expires_at", String.duplicate("2", 65)),
+          Map.put(valid, "workspace_expires_at", "not-iso8601"),
+          Map.put(valid, "workspace_expires_at", Integer.pow(10, 100)),
+          %{
+            "workspace_release_status" => "removed",
+            "workspace_expires_at" => "2026-07-16T12:00:00Z"
+          },
+          Map.put(valid, :workspace_release_status, :retained)
+        ] do
+      raw = %{
+        "status" => "no_changes",
+        "artifacts" => coding_artifacts(%{"workspace_release" => bad})
+      }
+
+      assert TaskArtifacts.normalize(raw) == %{
+               result_type: :value,
+               payload: %{value: raw},
+               raw: raw
+             }
+    end
+  end
+
   test "accepts a valid descriptor under string-key result fields" do
     artifacts = coding_artifacts()
 

@@ -11,6 +11,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @pipeline_filename "coding-pipeline.dot"
   @manifest_filename "coding-compile-manifest.json"
 
+  alias Arbor.Orchestrator.CodingPlan.TranscriptStore
+
   @typedoc "JSON-clean descriptor for an archived coding-plan compilation."
   @type descriptor :: %{required(String.t()) => String.t()}
 
@@ -46,6 +48,25 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
        }}
     end
   end
+
+  @doc "Append one source-captured ACP turn under this artifact root."
+  @spec append_transcript_turn(String.t(), String.t(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def append_transcript_turn(root, task_id, turn),
+    do: TranscriptStore.append_turn(root, task_id, turn)
+
+  @doc "Read and verify the task-bound ACP transcript artifact."
+  @spec read_transcript(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def read_transcript(root, task_id), do: TranscriptStore.read(root, task_id)
+
+  @doc "Return the closed descriptor for a verified task-bound ACP transcript."
+  @spec transcript_descriptor(String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def transcript_descriptor(root, task_id), do: TranscriptStore.descriptor(root, task_id)
+
+  @doc "Validate the exact public ACP transcript descriptor schema."
+  @spec valid_transcript_descriptor?(term()) :: boolean()
+  def valid_transcript_descriptor?(descriptor), do: TranscriptStore.valid_descriptor?(descriptor)
 
   defp normalize_root(root) when is_binary(root) do
     cond do

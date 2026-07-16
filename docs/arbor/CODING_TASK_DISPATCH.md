@@ -133,6 +133,70 @@ worker narrative or terminal JSON:
 5. The shared `STATUS: declined` contract remains on the legacy direct
    `coding_produce_reviewable_change` path only.
 
+### ACP transcript artifact
+
+When the coding executor binds its trusted transcript sink, `AcpSession`
+appends one record for every prompt it actually sends to the provider. This
+includes the action's initial prompt and each queued same-session task-control
+follow-up that the session starts internally. Records are written to the
+task-owned transcript file under the coding pipeline logs root:
+
+```
+<coding_pipeline_logs_root>/task-<sha256(task_id)>/acp-transcript.json
+```
+
+Each turn records:
+
+- a bounded text projection of the prompt, with its original byte count,
+  truncation flag, and SHA-256
+- prompt kind and task-control ID, when applicable
+- terminal status plus bounded response, stop-reason, and error facts
+- provider / provider-session continuity scalars (observational only)
+- the latest bounded normalized streaming updates captured at the ACP
+  source (not reconstructed from final prose)
+- the Engine-owned action execution ID and deterministic per-prompt capture
+  index used for idempotent retry/resume publication
+
+Success, provider error, hard timeout, inactivity timeout, callback timeout,
+prompt/client death, and cancellation terminal paths capture the evidence
+available at that observation boundary after provider handling. Bounded
+projection happens before transcript retention and persistence: retained turn
+count, prompt/response/error bytes, retained stream-event count, per-event
+bytes, identity count, and aggregate artifact bytes. These artifact limits do
+not claim to bound provider, client, or session-wide accumulation. Retention
+keeps the latest events and latest turns; seen/retained/omitted counts make
+truncation explicit. The file is mode `0600`, published atomically, and digests
+its canonical body.
+
+When the runner returns a normalized terminal result, including a later
+validation or review failure, the public task result (`arbor_task_result`)
+exposes only a bounded descriptor under `artifacts.acp_transcript`:
+
+| Field | Meaning |
+| --- | --- |
+| `path` | Absolute path to `acp-transcript.json` |
+| `sha256` | Digest of the canonical transcript body |
+| `byte_size` | On-disk size |
+| `turns_retained` | Turns currently retained in the bounded artifact |
+| `turns_seen` / `turns_omitted` | Unique captured identities observed and omitted |
+| `turns_truncated` / `aggregate_truncated` | Explicit truncation flags |
+| `schema_version` | Closed schema id (`1`) |
+| `task_id` | Exact task binding verified by the store |
+
+Inline transcript content never appears in the task result or Engine context.
+The descriptor is evidence for post-mortem inspection and fresh-session recovery
+planning; it does **not** silently replay prompts or grant provider-session
+authority. If the sink fails or misses its monitored deadline, the ACP send
+fails closed with an explicit durability error rather than claiming success.
+That evidence failure does not override prompt lifecycle: cancellation still
+tears down the session, and hard/inactivity timeout still enters
+`recovery_required` and runs provider-cancellation settlement.
+
+Owner cancellation or process-level runner loss can prevent any normalized
+result from returning, so no descriptor can be attached through that result
+path even when source capture already persisted the file. In that case the
+deterministic task-root path shown above remains the post-mortem lookup.
+
 ## Rollback (legacy executor)
 
 Rollback is operator-only, temporary for **one release window**, and selected

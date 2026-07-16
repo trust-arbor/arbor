@@ -42,6 +42,7 @@ defmodule Arbor.AI.AcpSession do
   require Logger
 
   alias Arbor.AI.AcpSession.Config
+  alias Arbor.AI.AcpTranscript
   alias Arbor.AI.OwnedOperation
 
   @default_acp_client ExMCP.ACP.Client
@@ -49,6 +50,8 @@ defmodule Arbor.AI.AcpSession do
   @default_operation_timeout_ms 120_000
   @default_close_timeout_ms 5_000
   @stream_callback_timeout_ms 5_000
+  @default_transcript_sink_timeout_ms 5_000
+  @max_transcript_sink_timeout_ms 30_000
   @task_control_timeout_ms 5_000
   @max_task_control_message_bytes 16_384
   @max_task_control_id_bytes 256
@@ -81,6 +84,7 @@ defmodule Arbor.AI.AcpSession do
     :startup_error,
     status: :starting,
     accumulated_text: "",
+    stream_tail: nil,
     context_tokens: 0,
     reconnect_attempted: false,
     usage: %{input_tokens: 0, output_tokens: 0},
@@ -997,8 +1001,12 @@ defmodule Arbor.AI.AcpSession do
       end
 
     # Accumulate streaming text chunks (Gemini/adapter sessions can deliver text
-    # via session/update instead of the prompt result).
-    state = accumulate_text(update, state)
+    # via session/update instead of the prompt result) and a bounded stream tail
+    # for task transcript artifacts.
+    state =
+      state
+      |> then(&accumulate_text(update, &1))
+      |> accumulate_stream_tail(update)
 
     Logger.debug(
       "ACP session #{Arbor.LLM.inspect_external_reason(session_id)} update: " <>
@@ -1084,6 +1092,21 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp accumulate_text(_, state), do: state
+
+  # A nil accumulator means this standalone call has no trusted durability sink.
+  defp accumulate_stream_tail(%{stream_tail: tail} = state, update) when is_map(tail) do
+    %{state | stream_tail: AcpTranscript.append_stream_event(tail, update)}
+  end
+
+  defp accumulate_stream_tail(state, _update), do: state
+
+  defp prepare_prompt_capture(state, nil),
+    do: %{state | accumulated_text: "", stream_tail: nil}
+
+  defp prepare_prompt_capture(state, _capture),
+    do: %{state | accumulated_text: "", stream_tail: AcpTranscript.empty_stream_tail()}
+
+  defp clear_prompt_capture(state), do: %{state | accumulated_text: "", stream_tail: nil}
 
   @doc false
   def merge_accumulated_text(result, "") when is_map(result), do: result
@@ -1435,7 +1458,8 @@ defmodule Arbor.AI.AcpSession do
   defp do_send_message(content, opts, from, state) do
     with {:ok, opts, hard_timeout} <- Arbor.AI.Timeout.remaining(opts),
          {:ok, deadline_ms} <- Arbor.AI.Timeout.deadline(opts) do
-      state = %{state | status: :busy, accumulated_text: ""}
+      capture = transcript_capture(opts)
+      state = prepare_prompt_capture(%{state | status: :busy}, capture)
       inactivity_timeout = inactivity_timeout(opts)
 
       # Monitor the GenServer.call owner for this prompt. When orchestration
@@ -1450,6 +1474,10 @@ defmodule Arbor.AI.AcpSession do
           caller_pid: caller_pid,
           caller_ref: caller_ref,
           control: nil,
+          prompt_text: content,
+          prompt_kind: "initial",
+          capture_index: 0,
+          transcript_capture: capture,
           deadline_ms: deadline_ms
         })
 
@@ -2001,13 +2029,7 @@ defmodule Arbor.AI.AcpSession do
         cleanup_prompt(prompt, timers)
 
         if Arbor.AI.Timeout.completed_before_deadline?(completed_at, prompt.deadline_ms) do
-          new_state =
-            state
-            |> settle_failed_prompt_task_controls(prompt, :provider_error)
-            |> Map.put(:status, :error)
-
-          emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
-          {:reply, error, new_state}
+          complete_prompt_error(prompt, :provider_error, reason, error, state)
         else
           timeout_prompt(:timeout, prompt, timers, state)
         end
@@ -2016,26 +2038,23 @@ defmodule Arbor.AI.AcpSession do
         cleanup_prompt(prompt, timers)
         reason = Arbor.LLM.sanitize_external_reason(reason)
 
-        new_state =
+        complete_prompt_error(
+          prompt,
+          :prompt_exit,
+          reason,
+          {:error, {:prompt_exit, reason}},
           state
-          |> settle_failed_prompt_task_controls(prompt, :prompt_exit)
-          |> Map.put(:status, :error)
-
-        emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
-        {:reply, {:error, {:prompt_exit, reason}}, new_state}
+        )
 
       {:DOWN, _ref, :process, pid, reason} when pid == state.client ->
         kill_prompt_worker(prompt)
         cleanup_prompt(prompt, timers)
         reason = Arbor.LLM.sanitize_external_reason(reason)
 
-        new_state =
+        complete_prompt_error(prompt, :client_down, reason, {:error, :client_down}, %{
           state
-          |> settle_failed_prompt_task_controls(prompt, :client_lost)
-          |> Map.merge(%{status: :error, client: nil})
-
-        emit_signal(:acp_session_error, new_state, %{error: :client_down, reason: reason})
-        {:reply, {:error, :client_down}, new_state}
+          | client: nil
+        })
 
       # Caller (GenServer.call owner) and/or session owner disappeared — cancel
       # the ACP prompt immediately. Prefer monitor DOWN only: EXIT is drained
@@ -2114,60 +2133,311 @@ defmodule Arbor.AI.AcpSession do
          max(completed_at, System.monotonic_time(:millisecond)),
          prompt.deadline_ms
        ) do
-      new_state =
-        %{state | status: :busy}
-        |> accumulate_usage(result)
-        |> mark_task_control_delivered(prompt)
-
-      case next_queued_task_control(new_state) do
-        {:none, new_state} ->
-          maybe_report_usage(new_state, result)
-          emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
-          demonitor_owner(prompt.caller_ref)
-          {:reply, {:ok, result}, %{new_state | status: :ready}}
-
-        {{control_id, control}, new_state} ->
-          case Arbor.AI.Timeout.remaining(prompt.prompt_opts) do
-            {:ok, follow_up_opts, remaining} ->
-              follow_up =
-                start_task_prompt(
-                  new_state,
-                  control.message,
-                  follow_up_opts,
-                  remaining,
-                  prompt.inactivity_timeout
-                )
-                |> Map.merge(%{
-                  caller_pid: prompt.caller_pid,
-                  caller_ref: prompt.caller_ref,
-                  control: control_id,
-                  deadline_ms: prompt.deadline_ms
-                })
-
-              follow_up_timers =
-                start_prompt_timers(follow_up.ref,
-                  hard_timeout: follow_up.hard_timeout,
-                  inactivity_timeout: follow_up.inactivity_timeout
-                )
-
-              await_prompt_result(follow_up, follow_up_timers, %{
-                new_state
-                | accumulated_text: ""
-              })
-
-            {:error, _reason} ->
-              timeout_prompt(:timeout, prompt, empty_prompt_timers(), new_state)
-          end
-      end
+      complete_durable_prompt_success(prompt, result, state)
     else
       timeout_prompt(:timeout, prompt, empty_prompt_timers(), state)
     end
   end
 
+  defp complete_durable_prompt_success(prompt, result, state) do
+    case capture_prompt_turn(prompt, :success, result, nil, state) do
+      {:ok, descriptor} ->
+        result = maybe_attach_transcript_descriptor(result, descriptor)
+
+        new_state =
+          %{state | status: :busy}
+          |> accumulate_usage(result)
+          |> mark_task_control_delivered(prompt)
+
+        continue_after_durable_prompt(prompt, result, new_state)
+
+      {:error, reason} ->
+        transcript_durability_failed(prompt, state, reason)
+    end
+  end
+
+  defp continue_after_durable_prompt(prompt, result, state) do
+    # The sink runs synchronously while this GenServer owns the prompt. Controls
+    # can arrive during that durability wait, so accept them against the still-
+    # busy state before deciding whether the prompt chain is complete.
+    state = drain_pending_task_controls(state)
+
+    case next_queued_task_control(state) do
+      {:none, state} ->
+        maybe_report_usage(state, result)
+        emit_signal(:acp_session_completed, state, %{result: summarize_result(result)})
+        demonitor_owner(prompt.caller_ref)
+        {:reply, {:ok, result}, clear_prompt_capture(%{state | status: :ready})}
+
+      {{control_id, control}, state} ->
+        case Arbor.AI.Timeout.remaining(prompt.prompt_opts) do
+          {:ok, follow_up_opts, remaining} ->
+            follow_up =
+              start_task_prompt(
+                state,
+                control.message,
+                follow_up_opts,
+                remaining,
+                prompt.inactivity_timeout
+              )
+              |> Map.merge(%{
+                caller_pid: prompt.caller_pid,
+                caller_ref: prompt.caller_ref,
+                control: control_id,
+                prompt_text: control.message,
+                prompt_kind: "task_control",
+                capture_index: prompt.capture_index + 1,
+                transcript_capture: prompt.transcript_capture,
+                deadline_ms: prompt.deadline_ms
+              })
+
+            follow_up_timers =
+              start_prompt_timers(follow_up.ref,
+                hard_timeout: follow_up.hard_timeout,
+                inactivity_timeout: follow_up.inactivity_timeout
+              )
+
+            capture_state = prepare_prompt_capture(state, prompt.transcript_capture)
+            await_prompt_result(follow_up, follow_up_timers, capture_state)
+
+          {:error, _reason} ->
+            timeout_before_follow_up(prompt, state)
+        end
+    end
+  end
+
+  defp complete_prompt_error(prompt, terminal_status, reason, reply, state) do
+    case capture_prompt_turn(prompt, terminal_status, nil, reason, state) do
+      {:ok, _descriptor} ->
+        settlement_failure =
+          case terminal_status do
+            :client_down -> :client_lost
+            other -> other
+          end
+
+        new_state =
+          state
+          |> settle_failed_prompt_task_controls(prompt, settlement_failure)
+          |> clear_prompt_capture()
+          |> Map.put(:status, :error)
+
+        emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
+        {:reply, reply, new_state}
+
+      {:error, sink_reason} ->
+        transcript_durability_failed(prompt, state, sink_reason, terminal_status)
+    end
+  end
+
+  defp capture_prompt_turn(%{transcript_capture: nil}, _status, _result, _error, _state),
+    do: {:ok, nil}
+
+  defp capture_prompt_turn(prompt, status, result, error, state) do
+    capture = prompt.transcript_capture
+
+    attrs = %{
+      execution_id: capture.execution_id,
+      capture_index: prompt.capture_index,
+      prompt_kind: prompt.prompt_kind,
+      control_id: prompt.control,
+      terminal_status: terminal_status_name(status),
+      prompt: prompt.prompt_text,
+      response_text: prompt_response_text(result, state),
+      error: capture_error(error),
+      stop_reason: prompt_stop_reason(result),
+      provider: state.provider,
+      provider_session_id: state.session_id || state.last_session_id,
+      stream_tail: state.stream_tail || AcpTranscript.empty_stream_tail(),
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601()
+    }
+
+    with {:ok, turn} <- AcpTranscript.build_turn(attrs) do
+      run_transcript_sink(capture, turn)
+    end
+  end
+
+  defp run_transcript_sink(capture, turn) do
+    result =
+      Arbor.LLM.run_with_deadline(
+        fn -> {:transcript_sink_result, invoke_transcript_sink(capture.sink, turn)} end,
+        capture.timeout_ms,
+        :transcript_sink_timeout
+      )
+
+    case result do
+      {:transcript_sink_result, {:ok, descriptor}} ->
+        if AcpTranscript.valid_descriptor?(descriptor),
+          do: {:ok, descriptor},
+          else: {:error, :invalid_transcript_descriptor_ack}
+
+      {:transcript_sink_result, {:error, reason}} ->
+        {:error, {:transcript_sink_failed, Arbor.LLM.sanitize_external_reason(reason)}}
+
+      {:transcript_sink_result, other} ->
+        {:error, {:invalid_transcript_sink_ack, Arbor.LLM.sanitize_external_reason(other)}}
+
+      {:error, :transcript_sink_timeout} ->
+        {:error, :transcript_sink_timeout}
+
+      {:error, reason} ->
+        {:error, {:transcript_sink_failed, Arbor.LLM.sanitize_external_reason(reason)}}
+    end
+  end
+
+  defp invoke_transcript_sink({module, function, fixed_args}, turn) do
+    # The sink remains reload-stable data. This short-lived apply executes only
+    # inside the monitored deadline worker and is never retained in session state.
+    apply(module, function, fixed_args ++ [turn])
+  end
+
+  defp maybe_attach_transcript_descriptor(result, nil), do: result
+
+  defp maybe_attach_transcript_descriptor(result, descriptor) when is_map(result),
+    do: Map.put(result, "transcript", descriptor)
+
+  defp transcript_durability_failed(prompt, state, reason, outcome \\ :provider_succeeded) do
+    previous_state = state
+
+    {new_state, lifecycle} =
+      case outcome do
+        :provider_succeeded ->
+          settled =
+            state
+            |> mark_task_control_delivered(prompt)
+            |> settle_task_controls(
+              [:queued],
+              :not_delivered,
+              :transcript_durability_failed_before_delivery
+            )
+
+          {settled |> clear_prompt_capture() |> Map.put(:status, :error), :reply}
+
+        cancellation when cancellation in [:caller_cancelled, :owner_cancelled] ->
+          settled =
+            settle_cancelled_prompt_task_controls(
+              state,
+              prompt,
+              cancellation,
+              emit?: false
+            )
+
+          {settled |> clear_prompt_capture() |> Map.put(:status, :error), :stop}
+
+        timeout when timeout in [:timeout, :inactivity_timeout] ->
+          settled =
+            state
+            |> settle_failed_prompt_task_controls(prompt, timeout, emit?: false)
+            |> clear_prompt_capture()
+            |> Map.put(:status, :recovery_required)
+
+          control_events = changed_task_control_events(previous_state, settled)
+          {enqueue_pending_settlement(settled, timeout, control_events), :timeout_reply}
+
+        :stream_callback_timeout ->
+          settled =
+            state
+            |> settle_failed_prompt_task_controls(prompt, :stream_callback_timeout, emit?: false)
+            |> clear_prompt_capture()
+            |> Map.put(:status, :error)
+
+          {settled, :stop}
+
+        failure ->
+          settlement_failure = if failure == :client_down, do: :client_lost, else: failure
+          settled = settle_failed_prompt_task_controls(state, prompt, settlement_failure)
+          {settled |> clear_prompt_capture() |> Map.put(:status, :error), :reply}
+      end
+
+    demonitor_owner(prompt.caller_ref)
+
+    emit_signal(:acp_session_error, new_state, %{
+      error: :transcript_durability_failed,
+      reason: Arbor.LLM.sanitize_external_reason(reason),
+      phase: :transcript_sink
+    })
+
+    case lifecycle do
+      :reply ->
+        {:reply, {:error, {:transcript_durability_failed, reason}}, new_state}
+
+      :timeout_reply ->
+        {:reply, {:error, {:transcript_durability_failed, outcome, reason}}, new_state}
+
+      :stop ->
+        _ = cancel_acp_prompt_owned(previous_state, internal_cleanup_opts())
+        _ = disconnect_client_owned(previous_state, internal_cleanup_opts())
+
+        emit_timeout_observability(
+          new_state,
+          outcome,
+          changed_task_control_events(previous_state, new_state)
+        )
+
+        {:stop, :normal, {:error, {:transcript_durability_failed, outcome, reason}}, new_state}
+    end
+  end
+
+  defp timeout_before_follow_up(prompt, state) do
+    previous_state = state
+
+    new_state =
+      state
+      |> settle_task_controls(
+        [:queued],
+        :not_delivered,
+        :provider_prompt_timed_out_before_delivery
+      )
+      |> clear_prompt_capture()
+      |> Map.put(:status, :recovery_required)
+
+    control_events = changed_task_control_events(previous_state, new_state)
+    new_state = enqueue_pending_settlement(new_state, :timeout, control_events)
+    demonitor_owner(prompt.caller_ref)
+    {:reply, {:error, :timeout}, new_state}
+  end
+
+  defp prompt_response_text(result, state) when is_map(result) do
+    Map.get(result, "text") || Map.get(result, :text) || state.accumulated_text || ""
+  end
+
+  defp prompt_response_text(_result, state), do: state.accumulated_text || ""
+
+  defp prompt_stop_reason(result) when is_map(result) do
+    Map.get(result, "stop_reason") || Map.get(result, :stop_reason) ||
+      Map.get(result, "stopReason") || Map.get(result, :stopReason) || ""
+  end
+
+  defp prompt_stop_reason(_result), do: ""
+
+  defp capture_error(nil), do: ""
+  defp capture_error(reason), do: Arbor.LLM.inspect_external_reason(reason)
+
+  defp terminal_status_name(:success), do: "success"
+  defp terminal_status_name(:provider_error), do: "provider_error"
+  defp terminal_status_name(:timeout), do: "timeout"
+  defp terminal_status_name(:inactivity_timeout), do: "inactivity_timeout"
+  defp terminal_status_name(:stream_callback_failure), do: "stream_callback_failure"
+  defp terminal_status_name(:stream_callback_timeout), do: "stream_callback_timeout"
+  defp terminal_status_name(:prompt_exit), do: "prompt_exit"
+  defp terminal_status_name(:client_down), do: "client_down"
+
+  defp terminal_status_name(status) when status in [:caller_cancelled, :owner_cancelled],
+    do: "cancelled"
+
   defp timeout_prompt(kind, prompt, timers, state) do
     kill_prompt_worker(prompt)
     cleanup_prompt(prompt, timers)
 
+    case capture_prompt_turn(prompt, kind, nil, kind, state) do
+      {:ok, _descriptor} ->
+        finish_timed_out_prompt(kind, prompt, state)
+
+      {:error, reason} ->
+        transcript_durability_failed(prompt, state, reason, kind)
+    end
+  end
+
+  defp finish_timed_out_prompt(kind, prompt, state) do
     previous_state = state
 
     new_state =
@@ -2178,7 +2448,7 @@ defmodule Arbor.AI.AcpSession do
         failure when failure in [:timeout, :inactivity_timeout, :stream_callback_timeout] ->
           settle_failed_prompt_task_controls(state, prompt, failure, emit?: false)
       end
-      |> Map.put(:accumulated_text, "")
+      |> clear_prompt_capture()
       |> Map.put(
         :status,
         if(kind in [:timeout, :inactivity_timeout], do: :recovery_required, else: :error)
@@ -2462,6 +2732,7 @@ defmodule Arbor.AI.AcpSession do
   defp prompt_client_opts(opts, hard_timeout) do
     opts
     |> Keyword.delete(:inactivity_timeout_ms)
+    |> drop_transcript_capture_opts()
     |> Keyword.put(:timeout, hard_timeout)
   end
 
@@ -2481,9 +2752,79 @@ defmodule Arbor.AI.AcpSession do
            Arbor.AI.Timeout.normalize_key(opts, :inactivity_timeout_ms, default_inactivity,
              minimum: 0,
              allow_infinity: true
-           ) do
+           ),
+         {:ok, opts} <- normalize_transcript_capture_opts(opts) do
       {:ok, opts}
     end
+  end
+
+  defp normalize_transcript_capture_opts(opts) do
+    sink = Keyword.get(opts, :transcript_sink)
+    execution_id = Keyword.get(opts, :transcript_execution_id)
+
+    cond do
+      is_nil(sink) and is_nil(execution_id) ->
+        {:ok, Keyword.delete(opts, :transcript_sink_timeout_ms)}
+
+      valid_transcript_sink?(sink) and valid_transcript_execution_id?(execution_id) ->
+        case Keyword.get(opts, :transcript_sink_timeout_ms, @default_transcript_sink_timeout_ms) do
+          timeout
+          when is_integer(timeout) and timeout > 0 and
+                 timeout <= @max_transcript_sink_timeout_ms ->
+            {:ok, Keyword.put(opts, :transcript_sink_timeout_ms, timeout)}
+
+          _ ->
+            {:error, :invalid_transcript_sink_timeout}
+        end
+
+      true ->
+        {:error, :invalid_transcript_capture}
+    end
+  end
+
+  defp transcript_capture(opts) do
+    case Keyword.get(opts, :transcript_sink) do
+      nil ->
+        nil
+
+      sink ->
+        %{
+          sink: sink,
+          execution_id: Keyword.fetch!(opts, :transcript_execution_id),
+          timeout_ms: Keyword.fetch!(opts, :transcript_sink_timeout_ms)
+        }
+    end
+  end
+
+  defp valid_transcript_sink?({module, function, fixed_args})
+       when is_atom(module) and is_atom(function) and is_list(fixed_args) and
+              length(fixed_args) <= 8 do
+    Enum.all?(fixed_args, &transcript_sink_arg?/1)
+  end
+
+  defp valid_transcript_sink?(_sink), do: false
+
+  defp transcript_sink_arg?(value)
+       when is_binary(value) or is_integer(value) or is_boolean(value) or is_nil(value),
+       do: true
+
+  defp transcript_sink_arg?(value) when is_atom(value), do: true
+  defp transcript_sink_arg?(_value), do: false
+
+  defp valid_transcript_execution_id?(execution_id) when is_binary(execution_id) do
+    String.valid?(execution_id) and String.trim(execution_id) != "" and
+      byte_size(execution_id) <= 512 and not String.contains?(execution_id, <<0>>) and
+      not String.match?(execution_id, ~r/[\x00-\x1F\x7F]/)
+  end
+
+  defp valid_transcript_execution_id?(_execution_id), do: false
+
+  defp drop_transcript_capture_opts(opts) do
+    Keyword.drop(opts, [
+      :transcript_sink,
+      :transcript_execution_id,
+      :transcript_sink_timeout_ms
+    ])
   end
 
   defp normalize_timeout(:infinity, _default), do: :infinity
@@ -2553,9 +2894,11 @@ defmodule Arbor.AI.AcpSession do
           opts
       end
 
+    provider_opts = drop_transcript_capture_opts(new_opts)
+
     result =
       OwnedOperation.run(
-        fn -> new_acp_session(state.client, cwd, new_opts) end,
+        fn -> new_acp_session(state.client, cwd, provider_opts) end,
         opts,
         :timeout
       )

@@ -152,6 +152,91 @@ defmodule Arbor.Orchestrator.ActionsExecutorTest do
 
       refute Map.has_key?(context, :run_authorization)
     end
+
+    test "threads transcript sink only into the exact ACP send action context" do
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+      on_exit(fn ->
+        :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+      end)
+
+      tracer = self()
+      sink = {Arbor.Orchestrator.CodingPlan.ArtifactStore, :append_transcript_turn, ["/tmp", "t"]}
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "acp_send_message",
+          %{"worker_session_id" => "acp_worker_missing", "prompt" => "continue"},
+          ".",
+          transcript_sink: sink,
+          execution_id: "exec-capture"
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [
+                         _agent_id,
+                         Arbor.Actions.Acp.SendMessage,
+                         _params,
+                         acp_context
+                       ]}}
+
+      assert acp_context.transcript_sink == sink
+      assert acp_context.transcript_execution_id == "exec-capture"
+
+      malformed_sink = %{callback: fn -> :unsafe end}
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "acp_send_message",
+          %{"worker_session_id" => "acp_worker_missing", "prompt" => "continue"},
+          ".",
+          transcript_capture_error: :invalid_trusted_transcript_capture,
+          transcript_sink: malformed_sink,
+          execution_id: "exec-capture"
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [
+                         _agent_id,
+                         Arbor.Actions.Acp.SendMessage,
+                         _params,
+                         rejected_context
+                       ]}}
+
+      assert rejected_context.transcript_capture_error == :invalid_trusted_transcript_capture
+      refute Map.has_key?(rejected_context, :transcript_sink)
+      refute inspect(rejected_context) =~ "callback"
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "file.read",
+          %{"path" => "mix.exs"},
+          ".",
+          transcript_sink: sink,
+          execution_id: "exec-file"
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [_agent_id, Arbor.Actions.File.Read, _params, file_context]}}
+
+      refute Map.has_key?(file_context, :transcript_sink)
+      refute Map.has_key?(file_context, :transcript_execution_id)
+    end
   end
 
   describe "normalize_name/1" do

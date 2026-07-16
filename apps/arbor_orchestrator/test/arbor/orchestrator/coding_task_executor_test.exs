@@ -1290,6 +1290,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert Path.dirname(opts[:logs_root]) == Config.coding_pipeline_logs_root()
       assert Path.basename(opts[:logs_root]) =~ ~r/^task-[0-9a-f]{64}$/
       assert opts[:logs_root] == Path.dirname(path)
+
+      assert {ArtifactStore, :append_transcript_turn, [sink_root, "task_abc"]} =
+               opts[:transcript_sink]
+
+      assert sink_root == opts[:logs_root]
       assert opts[:timeout] == 900_000
       assert opts[:approval_timeout_ms] == 300_000
       assert opts[:graph_hash] == artifacts["graph_hash"]
@@ -2209,6 +2214,153 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                })
 
       assert pr_failed["status"] == "pr_failed"
+    end
+
+    test "validation failure still publishes the verified transcript descriptor" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_runner_reply,
+        fn _path, opts ->
+          {:ok, turn} =
+            Arbor.AI.AcpTranscript.build_turn(%{
+              execution_id: "exec_validation_failure",
+              capture_index: 0,
+              prompt_kind: "initial",
+              terminal_status: "success",
+              prompt: "implement",
+              response_text: "candidate",
+              stop_reason: "end_turn",
+              provider: "codex",
+              provider_session_id: "provider-session",
+              captured_at: "2026-07-16T12:00:00Z"
+            })
+
+          {module, function, fixed_args} = Keyword.fetch!(opts, :transcript_sink)
+          assert {:ok, descriptor} = apply(module, function, fixed_args ++ [turn])
+
+          {:ok,
+           %{
+             run_id: Keyword.fetch!(opts, :run_id),
+             context: %{
+               "status" => "validation_failed",
+               "worktree_path" => "/tmp/ws",
+               "validation" => [%{"passed" => false}],
+               "exec.implement.transcript" => descriptor
+             },
+             completed_nodes: ["worker_message", "validate"],
+             final_outcome: nil,
+             taint: %{},
+             node_durations: %{}
+           }}
+        end
+      )
+
+      assert {:ok, result} =
+               CodingTaskExecutor.run(
+                 "agent_transcript",
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_transcript_validation"})
+               )
+
+      assert result["status"] == "validation_failed"
+      descriptor = result["artifacts"]["acp_transcript"]
+      assert descriptor["task_id"] == "task_transcript_validation"
+      assert descriptor["turns_seen"] == 1
+      assert descriptor["turns_retained"] == 1
+      refute Map.has_key?(descriptor, "turns")
+      assert {:ok, _json} = Jason.encode(result)
+    end
+
+    test "security regression: corrupt final transcript evidence fails explicitly" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_runner_reply,
+        fn _path, opts ->
+          {:ok, turn} =
+            Arbor.AI.AcpTranscript.build_turn(%{
+              execution_id: "exec_corrupt_transcript",
+              capture_index: 0,
+              prompt_kind: "initial",
+              terminal_status: "success",
+              prompt: "implement",
+              response_text: "candidate",
+              stop_reason: "end_turn",
+              provider: "codex",
+              provider_session_id: "provider-session",
+              captured_at: "2026-07-16T12:00:00Z"
+            })
+
+          {module, function, fixed_args} = Keyword.fetch!(opts, :transcript_sink)
+          assert {:ok, descriptor} = apply(module, function, fixed_args ++ [turn])
+          File.write!(descriptor["path"], "{}")
+
+          {:ok,
+           %{
+             run_id: Keyword.fetch!(opts, :run_id),
+             context: %{
+               "status" => "validation_failed",
+               "exec.implement.transcript" => descriptor
+             },
+             completed_nodes: ["worker_message", "validate"],
+             final_outcome: nil,
+             taint: %{},
+             node_durations: %{}
+           }}
+        end
+      )
+
+      assert {:error, {:transcript_artifact_unavailable, :invalid_transcript_shape}} =
+               CodingTaskExecutor.run(
+                 "agent_transcript",
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_corrupt_transcript"})
+               )
+    end
+
+    test "security regression: checkpoint descriptor makes deleted transcript explicit" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_runner_reply,
+        fn _path, opts ->
+          {:ok, turn} =
+            Arbor.AI.AcpTranscript.build_turn(%{
+              execution_id: "exec_deleted_transcript",
+              capture_index: 0,
+              prompt_kind: "initial",
+              terminal_status: "success",
+              prompt: "implement",
+              response_text: "candidate",
+              stop_reason: "end_turn",
+              provider: "codex",
+              provider_session_id: "provider-session",
+              captured_at: "2026-07-16T12:00:00Z"
+            })
+
+          {module, function, fixed_args} = Keyword.fetch!(opts, :transcript_sink)
+          assert {:ok, descriptor} = apply(module, function, fixed_args ++ [turn])
+          File.rm!(descriptor["path"])
+
+          {:ok,
+           %{
+             run_id: Keyword.fetch!(opts, :run_id),
+             context: %{
+               "status" => "validation_failed",
+               "exec.implement.transcript" => descriptor
+             },
+             completed_nodes: ["worker_message", "validate"],
+             final_outcome: nil,
+             taint: %{},
+             node_durations: %{}
+           }}
+        end
+      )
+
+      assert {:error, :transcript_artifact_missing} =
+               CodingTaskExecutor.run(
+                 "agent_transcript",
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_deleted_transcript"})
+               )
     end
 
     test "maps flat graph action outputs to legacy validation and response fields" do
