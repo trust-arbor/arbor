@@ -156,12 +156,13 @@ defmodule Arbor.Orchestrator.Engine.CheckpointTest do
           graph_hash: "g_atom"
         )
 
-      assert :ok = Checkpoint.write(cp, tmp, hmac_secret: @secret)
+      assert :ok = Checkpoint.write(cp, tmp, hmac_secret: @secret, store: nil)
 
       assert {:ok, loaded} =
                Checkpoint.load(Path.join(tmp, "checkpoint.json"),
                  hmac_secret: @secret,
-                 run_id: "run_atom_taint_digest"
+                 run_id: "run_atom_taint_digest",
+                 store: nil
                )
 
       loaded_outcome = loaded.node_outcomes["a"]
@@ -198,12 +199,13 @@ defmodule Arbor.Orchestrator.Engine.CheckpointTest do
           graph_hash: "g_struct"
         )
 
-      assert :ok = Checkpoint.write(cp, tmp, hmac_secret: @secret)
+      assert :ok = Checkpoint.write(cp, tmp, hmac_secret: @secret, store: nil)
 
       assert {:ok, loaded} =
                Checkpoint.load(Path.join(tmp, "checkpoint.json"),
                  hmac_secret: @secret,
-                 run_id: "run_struct_taint_digest"
+                 run_id: "run_struct_taint_digest",
+                 store: nil
                )
 
       loaded_outcome = loaded.node_outcomes["n"]
@@ -261,7 +263,14 @@ defmodule Arbor.Orchestrator.Engine.CheckpointTest do
       {:ok, decoded} = Jason.decode(raw)
 
       tampered =
-        put_in(decoded, ["node_outcomes", "n", "output_taint"], %{"weird" => true})
+        put_in(decoded, ["node_outcomes", "n", "output_taint"], %{
+          "level" => "derived",
+          "sensitivity" => "internal",
+          "sanitizations" => 0,
+          "confidence" => "plausible",
+          "source" => "untrusted-checkpoint",
+          "chain" => [%{"not" => "a string"}]
+        })
 
       File.write!(path, Jason.encode!(tampered))
 

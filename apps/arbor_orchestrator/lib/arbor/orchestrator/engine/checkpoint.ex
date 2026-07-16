@@ -1162,7 +1162,10 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   defp serialize_output_taint(level) when level in @output_taint_levels, do: level
 
   defp serialize_output_taint(%Taint{} = taint) do
-    Arbor.Signals.Taint.to_persistable(taint)
+    case parse_output_taint(taint) do
+      %Taint{} = validated -> Arbor.Signals.Taint.to_persistable(validated)
+      :hostile -> :hostile
+    end
   end
 
   # Unknown runtime values must not enter durable checkpoints as open atoms.
@@ -1178,7 +1181,12 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     Map.get(@output_taint_level_by_string, level, :hostile)
   end
 
-  defp parse_output_taint(%Taint{} = taint), do: taint
+  defp parse_output_taint(%Taint{} = taint) do
+    taint
+    |> Map.from_struct()
+    |> stringify_map_keys()
+    |> parse_output_taint_jason_struct()
+  end
 
   defp parse_output_taint(map) when is_map(map) do
     # normalize_keys already stringifies outer keys; still accept atom keys
@@ -1188,7 +1196,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     cond do
       # Signals.Taint.to_persistable / from_persistable form (serialize path)
       Map.has_key?(string_map, "taint_level") ->
-        Arbor.Signals.Taint.from_persistable(string_map)
+        parse_output_taint_persistable(string_map)
 
       # Jason.Encoder shape for %Taint{} (level/sensitivity/...) if a nested
       # struct was encoded without going through to_persistable.
@@ -1205,63 +1213,89 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
   defp parse_output_taint(_unknown), do: :hostile
 
+  defp parse_output_taint_persistable(map) when is_map(map) do
+    parse_output_taint_jason_struct(%{
+      "level" => Map.get(map, "taint_level"),
+      "sensitivity" => Map.get(map, "taint_sensitivity"),
+      "sanitizations" => Map.get(map, "taint_sanitizations"),
+      "confidence" => Map.get(map, "taint_confidence"),
+      "source" => Map.get(map, "taint_source"),
+      "chain" => Map.get(map, "taint_chain")
+    })
+  end
+
   defp parse_output_taint_jason_struct(map) when is_map(map) do
-    %Taint{
-      level:
-        parse_closed_atom(
-          Map.get(map, "level"),
-          @output_taint_level_by_string,
-          @output_taint_levels,
-          :hostile
-        ),
-      sensitivity:
-        parse_closed_atom(
-          Map.get(map, "sensitivity"),
-          @taint_sensitivity_by_string,
-          @taint_sensitivities,
-          :restricted
-        ),
-      sanitizations: parse_non_neg_integer(Map.get(map, "sanitizations"), 0),
-      confidence:
-        parse_closed_atom(
-          Map.get(map, "confidence"),
-          @taint_confidence_by_string,
-          @taint_confidences,
-          :unverified
-        ),
-      source: parse_optional_binary(Map.get(map, "source")),
-      chain: parse_string_list(Map.get(map, "chain"))
-    }
+    level =
+      parse_closed_atom(
+        Map.get(map, "level"),
+        @output_taint_level_by_string,
+        @output_taint_levels,
+        :hostile
+      )
+
+    sensitivity =
+      parse_closed_atom(
+        Map.get(map, "sensitivity"),
+        @taint_sensitivity_by_string,
+        @taint_sensitivities,
+        :restricted
+      )
+
+    sanitizations = parse_non_neg_integer(Map.get(map, "sanitizations"), 0)
+
+    confidence =
+      parse_closed_atom(
+        Map.get(map, "confidence"),
+        @taint_confidence_by_string,
+        @taint_confidences,
+        :unverified
+      )
+
+    source = parse_optional_binary(Map.get(map, "source"))
+    chain = parse_string_list(Map.get(map, "chain"))
+
+    if :invalid in [level, sensitivity, sanitizations, confidence, source, chain] do
+      :hostile
+    else
+      %Taint{
+        level: level,
+        sensitivity: sensitivity,
+        sanitizations: sanitizations,
+        confidence: confidence,
+        source: source,
+        chain: chain
+      }
+    end
   end
 
   defp parse_closed_atom(nil, _by_string, _allowed, fallback), do: fallback
 
-  defp parse_closed_atom(value, _by_string, allowed, fallback)
+  defp parse_closed_atom(value, _by_string, allowed, _fallback)
        when is_atom(value) and is_list(allowed) do
-    if value in allowed, do: value, else: fallback
+    if value in allowed, do: value, else: :invalid
   end
 
-  defp parse_closed_atom(value, by_string, _allowed, fallback) when is_binary(value) do
-    Map.get(by_string, value, fallback)
+  defp parse_closed_atom(value, by_string, _allowed, _fallback) when is_binary(value) do
+    Map.get(by_string, value, :invalid)
   end
 
-  defp parse_closed_atom(_value, _by_string, _allowed, fallback), do: fallback
+  defp parse_closed_atom(_value, _by_string, _allowed, _fallback), do: :invalid
 
+  defp parse_non_neg_integer(nil, default), do: default
   defp parse_non_neg_integer(value, _default) when is_integer(value) and value >= 0, do: value
-  defp parse_non_neg_integer(_value, default), do: default
+  defp parse_non_neg_integer(_value, _default), do: :invalid
 
   defp parse_optional_binary(nil), do: nil
   defp parse_optional_binary(value) when is_binary(value), do: value
-  defp parse_optional_binary(_), do: nil
+  defp parse_optional_binary(_), do: :invalid
+
+  defp parse_string_list(nil), do: []
 
   defp parse_string_list(list) when is_list(list) do
-    Enum.map(list, fn
-      s when is_binary(s) -> s
-      other -> to_string(other)
-    end)
+    if Enum.all?(list, &is_binary/1), do: list, else: :invalid
   end
 
-  defp parse_string_list(_), do: []
+  defp parse_string_list(_), do: :invalid
 
   defp stringify_map_keys(map) when is_map(map) do
     Map.new(map, fn
