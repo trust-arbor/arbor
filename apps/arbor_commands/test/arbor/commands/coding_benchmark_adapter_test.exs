@@ -785,6 +785,19 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
            "workspace_release_status" => String.duplicate("x", 257)
          })
        end},
+      {"workspace_release unknown status",
+       fn artifacts, _root ->
+         Map.put(artifacts, "workspace_release", %{
+           "workspace_release_status" => "pending"
+         })
+       end},
+      {"workspace_release non-ISO workspace_expires_at",
+       fn artifacts, _root ->
+         Map.put(artifacts, "workspace_release", %{
+           "workspace_release_status" => "retained",
+           "workspace_expires_at" => "not-a-timestamp"
+         })
+       end},
       {"inline transcript turns",
        transcript_mutation.(fn descriptor -> Map.put(descriptor, "turns", []) end)},
       {"inline transcript stream",
