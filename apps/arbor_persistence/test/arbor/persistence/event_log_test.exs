@@ -47,6 +47,29 @@ defmodule Arbor.Persistence.EventLogTest do
     assert canonical.metadata == %{"source" => "public"}
   end
 
+  test "fingerprinting permits bounded legacy persisted events without weakening append admission" do
+    event =
+      Event.new("legacy-large", "legacy.payload", %{
+        "payload" => String.duplicate("x", 1_200_000)
+      })
+
+    assert {:error, :event_too_large} = EventLog.validate_append("legacy-large", event, [])
+    assert {:error, :invalid_append_operation} = EventLog.build_operation("legacy-large", [event])
+
+    fingerprint = EventLog.event_fingerprint("legacy-large", event)
+    assert is_binary(fingerprint)
+    assert fingerprint == EventLog.event_fingerprint("legacy-large", event)
+  end
+
+  test "fingerprinting fails closed above the persisted identity byte ceiling" do
+    event =
+      Event.new("legacy-too-large", "legacy.payload", %{
+        "payload" => String.duplicate("x", 4_300_000)
+      })
+
+    assert is_nil(EventLog.event_fingerprint("legacy-too-large", event))
+  end
+
   test "build and reconciliation helpers are total and bounded" do
     event = Event.new("bounded", "created", %{value: 1})
 

@@ -1266,6 +1266,40 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
                ETS.replay_identity_history([remediated], name: name, complete: true)
     end
 
+    test "identity replay accepts a bounded legacy event above the append event limit", %{
+      name: name
+    } do
+      event =
+        %Event{
+          Event.new(
+            "legacy-large-replay",
+            "legacy.payload",
+            %{
+              "payload" => String.duplicate("x", 1_200_000)
+            },
+            id: "evt_legacy_large_replay"
+          )
+          | event_number: 1,
+            global_position: 1
+        }
+
+      fingerprint = Arbor.Persistence.EventLog.event_fingerprint(event.stream_id, event)
+      assert is_binary(fingerprint)
+
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{event.stream_id => 1}, global_position: 1},
+                 name: name
+               )
+
+      assert {:ok, %{accepted: 1, remaining: 0, status: :identity_history_complete}} =
+               ETS.replay_identity_history(
+                 [%Event{event | operation_fingerprint: fingerprint}],
+                 name: name,
+                 complete: true
+               )
+    end
+
     test "identity replay rejects duplicate stream positions atomically", %{name: name} do
       first =
         %Event{

@@ -29,6 +29,7 @@ defmodule Arbor.Persistence.EventLog do
   @max_append_events 1_000
   @max_event_bytes 1_048_576
   @max_append_bytes 4_194_304
+  @max_identity_event_bytes @max_append_bytes
   @max_precondition_integer 2_147_483_647
   @default_append_timeout_ms 5_000
   @max_append_timeout_ms 60_000
@@ -282,7 +283,14 @@ defmodule Arbor.Persistence.EventLog do
   def event_fingerprint(stream_id, event) do
     with :ok <- validate_stream_id(stream_id),
          %Event{} = event <- event,
-         :ok <- validate_event_list([event], false, true) do
+         :ok <-
+           validate_event_list(
+             [event],
+             false,
+             true,
+             @max_identity_event_bytes,
+             @max_identity_event_bytes
+           ) do
       do_event_fingerprint(stream_id, event)
     else
       _invalid -> nil
@@ -537,20 +545,57 @@ defmodule Arbor.Persistence.EventLog do
   defp event_list(_invalid), do: {:error, :invalid_events}
 
   defp validate_event_list(events, allow_empty?, enforce_unique?) do
+    validate_event_list(
+      events,
+      allow_empty?,
+      enforce_unique?,
+      @max_event_bytes,
+      @max_append_bytes
+    )
+  end
+
+  defp validate_event_list(
+         events,
+         allow_empty?,
+         enforce_unique?,
+         max_event_bytes,
+         max_total_bytes
+       ) do
     do_validate_event_list(
       events,
       0,
       0,
       MapSet.new(),
       allow_empty?,
-      enforce_unique?
+      enforce_unique?,
+      max_event_bytes,
+      max_total_bytes
     )
   end
 
-  defp do_validate_event_list([], 0, _total, _seen, false, _unique),
-    do: {:error, :invalid_events}
+  defp do_validate_event_list(
+         [],
+         0,
+         _total,
+         _seen,
+         false,
+         _unique,
+         _max_event_bytes,
+         _max_total_bytes
+       ),
+       do: {:error, :invalid_events}
 
-  defp do_validate_event_list([], _count, _total, _seen, _allow_empty, _unique), do: :ok
+  defp do_validate_event_list(
+         [],
+         _count,
+         _total,
+         _seen,
+         _allow_empty,
+         _unique,
+         _max_event_bytes,
+         _max_total_bytes
+       ),
+       do: :ok
 
   defp do_validate_event_list(
          _remaining,
@@ -558,7 +603,9 @@ defmodule Arbor.Persistence.EventLog do
          _total,
          _seen,
          _allow_empty,
-         _unique
+         _unique,
+         _max_event_bytes,
+         _max_total_bytes
        ),
        do: {:error, :too_many_events}
 
@@ -568,7 +615,9 @@ defmodule Arbor.Persistence.EventLog do
          total_bytes,
          seen,
          allow_empty?,
-         enforce_unique?
+         enforce_unique?,
+         max_event_bytes,
+         max_total_bytes
        ) do
     event_bytes = safe_external_size(event)
 
@@ -576,10 +625,10 @@ defmodule Arbor.Persistence.EventLog do
       not is_integer(event_bytes) ->
         {:error, :invalid_events}
 
-      event_bytes > @max_event_bytes ->
+      event_bytes > max_event_bytes ->
         {:error, :event_too_large}
 
-      total_bytes + event_bytes > @max_append_bytes ->
+      total_bytes + event_bytes > max_total_bytes ->
         {:error, :event_too_large}
 
       not valid_event_shape?(event) ->
@@ -595,7 +644,9 @@ defmodule Arbor.Persistence.EventLog do
           total_bytes + event_bytes,
           MapSet.put(seen, event.id),
           allow_empty?,
-          enforce_unique?
+          enforce_unique?,
+          max_event_bytes,
+          max_total_bytes
         )
     end
   end
@@ -606,7 +657,9 @@ defmodule Arbor.Persistence.EventLog do
          _total,
          _seen,
          _allow_empty,
-         _unique
+         _unique,
+         _max_event_bytes,
+         _max_total_bytes
        ),
        do: {:error, :invalid_events}
 
