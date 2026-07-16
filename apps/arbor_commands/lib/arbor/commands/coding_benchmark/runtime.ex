@@ -8,10 +8,12 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
   @workspace_root_key :coding_benchmark_workspace_root
   @artifact_root_key :coding_benchmark_artifact_root
   @timeout_key :coding_benchmark_execution_timeout_ms
+  @fixture_setup_timeout_key :coding_benchmark_fixture_setup_timeout_ms
   @cancellation_timeout_key :coding_benchmark_cancellation_timeout_ms
   @min_timeout_ms 10
   @max_timeout_ms 86_400_000
   @max_cancellation_timeout_ms 30_000
+  @default_fixture_setup_timeout_ms 300_000
   @broad_root_paths ["/", Path.expand("~")]
   @lease_schema "arbor.coding_benchmark.artifact_lease.v1"
   @lease_directory ".benchmark-leases"
@@ -20,6 +22,7 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
           workspace_root: String.t(),
           artifact_root: String.t(),
           execution_timeout_ms: pos_integer(),
+          fixture_setup_timeout_ms: pos_integer(),
           cancellation_timeout_ms: pos_integer()
         }
 
@@ -38,6 +41,13 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
          :ok <- require_distinct_child(artifact_root, workspace_root),
          {:ok, timeout} <-
            configured_timeout(@timeout_key, @min_timeout_ms, @max_timeout_ms),
+         {:ok, fixture_setup_timeout} <-
+           configured_timeout_or_default(
+             @fixture_setup_timeout_key,
+             @min_timeout_ms,
+             @max_timeout_ms,
+             @default_fixture_setup_timeout_ms
+           ),
          {:ok, cancellation_timeout} <-
            configured_timeout(
              @cancellation_timeout_key,
@@ -49,6 +59,7 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
          artifact_root: artifact_root,
          cancellation_timeout_ms: cancellation_timeout,
          execution_timeout_ms: timeout,
+         fixture_setup_timeout_ms: fixture_setup_timeout,
          workspace_root: workspace_root
        }}
     end
@@ -241,6 +252,19 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
 
       :error ->
         setup_error({key, :not_configured})
+    end
+  end
+
+  defp configured_timeout_or_default(key, min, max, default) do
+    case Application.fetch_env(@app, key) do
+      {:ok, timeout} when is_integer(timeout) and timeout >= min and timeout <= max ->
+        {:ok, timeout}
+
+      {:ok, _invalid} ->
+        setup_error({key, :out_of_bounds})
+
+      :error ->
+        {:ok, default}
     end
   end
 

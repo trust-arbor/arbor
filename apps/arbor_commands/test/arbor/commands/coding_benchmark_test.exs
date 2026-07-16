@@ -4,6 +4,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
   @moduletag :fast
 
   alias Arbor.Commands.CodingBenchmark
+  alias Arbor.Commands.CodingBenchmark.Catalog
   alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
   alias Arbor.Common.SafePath
   alias Mix.Tasks.Arbor.Coding.Benchmark, as: BenchmarkTask
@@ -20,6 +21,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
     {:arbor_commands, :coding_benchmark_workspace_root},
     {:arbor_commands, :coding_benchmark_artifact_root},
     {:arbor_commands, :coding_benchmark_execution_timeout_ms},
+    {:arbor_commands, :coding_benchmark_fixture_setup_timeout_ms},
     {:arbor_commands, :coding_benchmark_cancellation_timeout_ms},
     {:arbor_orchestrator, :coding_repo_roots},
     {:arbor_orchestrator, :coding_worktree_roots},
@@ -347,6 +349,90 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
     assert {:ok, ^report} = output_path |> File.read!() |> Jason.decode()
   end
 
+  test "Mix task validates a complete prepared publication before execution" do
+    scenario = scenario!(~w(happy))
+    _sidecars = write_prepared_sidecars!(scenario)
+
+    assert {:ok, %{report: report}} =
+             BenchmarkTask.execute(
+               [
+                 "--manifest",
+                 "manifest.json",
+                 "--dry-run",
+                 "--output",
+                 "prepared-report.json"
+               ],
+               root: scenario.root,
+               workspace_root: scenario.root
+             )
+
+    assert report["summary"]["pair_count"] == 1
+  end
+
+  test "Mix task rejects incomplete and malformed prepared publications" do
+    scenario = scenario!(~w(happy))
+    sidecars = write_prepared_sidecars!(scenario)
+    File.rm!(sidecars.publication_path)
+
+    assert {:error,
+            %{
+              "field" => "publication",
+              "reason" => "incomplete_or_unsafe_publication"
+            }} =
+             BenchmarkTask.execute(["--manifest", "manifest.json", "--dry-run"],
+               root: scenario.root,
+               workspace_root: scenario.root
+             )
+
+    write_canonical_json!(sidecars.publication_path, sidecars.publication)
+    File.write!(sidecars.publication_path, "{")
+
+    assert {:error, %{"field" => "publication", "reason" => "invalid_json"}} =
+             BenchmarkTask.execute(["--manifest", "manifest.json", "--dry-run"],
+               root: scenario.root,
+               workspace_root: scenario.root
+             )
+  end
+
+  test "Mix task rejects prepared publication digest mismatches" do
+    scenario = scenario!(~w(happy))
+    sidecars = write_prepared_sidecars!(scenario)
+
+    mismatched_publication =
+      Map.put(sidecars.publication, "manifest_digest", String.duplicate("0", 64))
+
+    write_canonical_json!(sidecars.publication_path, mismatched_publication)
+
+    assert {:error,
+            %{
+              "error" => "invalid_coding_benchmark_publication",
+              "field" => "publication.manifest_digest",
+              "reason" => "digest_or_binding_mismatch"
+            }} =
+             BenchmarkTask.execute(["--manifest", "manifest.json", "--dry-run"],
+               root: scenario.root,
+               workspace_root: scenario.root
+             )
+
+    write_canonical_json!(sidecars.publication_path, sidecars.publication)
+
+    tampered_evidence =
+      Map.put(sidecars.target_evidence, "source_repository_label", "tampered-arbor-test")
+
+    write_canonical_json!(sidecars.target_evidence_path, tampered_evidence)
+
+    assert {:error,
+            %{
+              "error" => "invalid_coding_benchmark_publication",
+              "field" => "publication.target_evidence_digest",
+              "reason" => "digest_or_binding_mismatch"
+            }} =
+             BenchmarkTask.execute(["--manifest", "manifest.json", "--dry-run"],
+               root: scenario.root,
+               workspace_root: scenario.root
+             )
+  end
+
   test "Mix task dry-run is deterministic and refuses unsafe paths and bounds" do
     scenario = scenario!(~w(happy))
     outside = Path.join(Path.dirname(scenario.root), "outside-benchmark.json")
@@ -466,6 +552,56 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
     Application.put_env(:arbor_orchestrator, :coding_repo_roots, [workspace_root])
     Application.put_env(:arbor_orchestrator, :coding_worktree_roots, [workspace_root])
     Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, artifact_root)
+  end
+
+  defp write_prepared_sidecars!(scenario) do
+    {:ok, normalized_manifest} = CodingBenchmark.validate_manifest(scenario.manifest)
+    catalog_digest = String.duplicate("c", 64)
+
+    fixtures =
+      Map.new(normalized_manifest["fixtures"], fn fixture ->
+        oid_size = byte_size(fixture["base_tree_oid"])
+
+        {fixture["fixture_id"],
+         %{
+           "base_commit_oid" => String.duplicate("a", oid_size),
+           "base_tree_oid" => fixture["base_tree_oid"],
+           "normalized_input_hash" => fixture["normalized_input_hash"],
+           "target_commit_oid" => String.duplicate("b", oid_size),
+           "target_tree_oid" => String.duplicate("c", oid_size)
+         }}
+      end)
+
+    target_evidence = %{
+      "catalog_digest" => catalog_digest,
+      "fixtures" => fixtures,
+      "manifest_digest" => Catalog.canonical_digest(scenario.manifest),
+      "schema" => "arbor.coding_benchmark.target_evidence.v1",
+      "source_repository_label" => "arbor-test"
+    }
+
+    publication = %{
+      "catalog_digest" => catalog_digest,
+      "manifest_digest" => Catalog.canonical_digest(scenario.manifest),
+      "schema" => "arbor.coding_benchmark.publication.v1",
+      "target_evidence_digest" => Catalog.canonical_digest(target_evidence)
+    }
+
+    target_evidence_path = Path.join(scenario.root, "target-evidence.json")
+    publication_path = Path.join(scenario.root, "publication.json")
+    write_canonical_json!(target_evidence_path, target_evidence)
+    write_canonical_json!(publication_path, publication)
+
+    %{
+      publication: publication,
+      publication_path: publication_path,
+      target_evidence: target_evidence,
+      target_evidence_path: target_evidence_path
+    }
+  end
+
+  defp write_canonical_json!(path, value) do
+    File.write!(path, Catalog.canonical_encode(value) <> "\n")
   end
 
   defp fetch_env({app, key}), do: Application.fetch_env(app, key)

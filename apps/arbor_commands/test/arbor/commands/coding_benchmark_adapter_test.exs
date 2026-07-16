@@ -16,6 +16,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     {:arbor_commands, :coding_benchmark_workspace_root},
     {:arbor_commands, :coding_benchmark_artifact_root},
     {:arbor_commands, :coding_benchmark_execution_timeout_ms},
+    {:arbor_commands, :coding_benchmark_fixture_setup_timeout_ms},
     {:arbor_commands, :coding_benchmark_cancellation_timeout_ms},
     {:arbor_commands, :coding_benchmark_test_observer},
     {:arbor_commands, :coding_benchmark_test_resource_registry},
@@ -324,6 +325,19 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
              PipelineAdapter.run(requests.pipeline)
 
     refute_receive {:executor_call, :pipeline, _principal, _task, _context}
+  end
+
+  test "fixture setup has an independent bounded deadline" do
+    _requests = benchmark_requests!()
+
+    assert {:ok, runtime} = Runtime.load()
+    assert runtime.fixture_setup_timeout_ms == 300_000
+
+    Application.put_env(:arbor_commands, :coding_benchmark_fixture_setup_timeout_ms, 9)
+
+    assert {:error,
+            {:benchmark_setup_error, {:coding_benchmark_fixture_setup_timeout_ms, :out_of_bounds}}} =
+             Runtime.load()
   end
 
   test "security regression: concurrent identical task scopes receive exclusive artifact roots" do

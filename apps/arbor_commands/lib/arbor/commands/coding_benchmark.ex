@@ -48,6 +48,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   @max_fixture_object_bytes 16_777_216
   @max_fixture_total_bytes 268_435_456
   @max_fixture_listing_bytes 8_388_608
+  @max_fixture_symlink_bytes 4_096
   @max_fixtures 100
   @max_repetitions 100
   @max_seed 2_147_483_647
@@ -84,6 +85,82 @@ defmodule Arbor.Commands.CodingBenchmark do
   def validate_manifest(_manifest), do: invalid_manifest("manifest", "expected_object")
 
   @doc """
+  Reconstruct a standalone fixture Git repository from OID-verified source objects.
+
+  This is the shared owner primitive used by the benchmark harness and catalog
+  materializer. It never uses linked worktrees, object alternates, network
+  access, hooks, replace refs, or copied source `.git` configuration.
+  """
+  @spec reconstruct_fixture_repository(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) :: :ok | {:error, String.t()}
+  def reconstruct_fixture_repository(source, destination, commit_oid, expected_tree, opts \\ [])
+
+  def reconstruct_fixture_repository(source, destination, commit_oid, expected_tree, opts)
+      when is_binary(source) and is_binary(destination) and is_binary(commit_oid) and
+             is_binary(expected_tree) and is_list(opts) do
+    timeout_ms = Keyword.get(opts, :timeout_ms, 300_000)
+
+    with true <- is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= 3_600_000,
+         {:ok, commit_oid} <- oid(commit_oid, "commit_oid"),
+         {:ok, expected_tree} <- oid(expected_tree, "base_tree_oid"),
+         {:ok, source} <- directory(source, "source"),
+         {:ok, destination} <- reconstruct_destination(destination, source) do
+      case clone_fixture(source, destination, commit_oid, expected_tree, timeout_ms) do
+        :ok -> :ok
+        {:error, reason} when is_binary(reason) -> {:error, reason}
+        {:error, reason} -> {:error, reason_string(reason)}
+      end
+    else
+      false ->
+        {:error, "invalid_reconstruct_request"}
+
+      {:error, %{"reason" => reason}} when is_binary(reason) ->
+        {:error, reason}
+
+      {:error, reason} when is_binary(reason) ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason_string(reason)}
+    end
+  end
+
+  def reconstruct_fixture_repository(_source, _destination, _commit_oid, _expected_tree, _opts),
+    do: {:error, "invalid_reconstruct_request"}
+
+  defp reconstruct_destination(destination, source) do
+    cond do
+      byte_size(destination) > 4_096 or not String.valid?(destination) or
+        String.contains?(destination, <<0>>) or Path.type(destination) != :absolute ->
+        {:error, "invalid_reconstruct_request"}
+
+      true ->
+        parent = Path.dirname(destination)
+
+        with {:ok, real_parent} <- SafePath.resolve_real(parent),
+             canonical = Path.join(real_parent, Path.basename(destination)),
+             false <- path_within_git_metadata?(canonical, source),
+             {:error, :enoent} <- File.lstat(canonical) do
+          {:ok, canonical}
+        else
+          _other -> {:error, "invalid_reconstruct_request"}
+        end
+    end
+  end
+
+  defp path_within_git_metadata?(path, source) do
+    case path |> Path.relative_to(source) |> Path.split() do
+      [first | _rest] -> String.downcase(first) == ".git"
+      [] -> false
+    end
+  end
+
+  @doc """
   Execute all manifest fixtures against the named legacy and pipeline adapters.
 
   Required non-dry options:
@@ -103,7 +180,9 @@ defmodule Arbor.Commands.CodingBenchmark do
   `:coding_benchmark_cancellation_timeout_ms`. The artifact root must be a
   distinct existing child of the workspace root. Production adapters also
   require the orchestrator repo/worktree roots to admit that workspace and its
-  pipeline logs root to equal the configured benchmark artifact root.
+  pipeline logs root to equal the configured benchmark artifact root. Optional
+  `:coding_benchmark_fixture_setup_timeout_ms` bounds each reconstruction with
+  one absolute deadline (default: 300 seconds), independently of worker timeouts.
   """
   @spec run(term(), keyword()) :: {:ok, json_map()} | {:error, json_map()}
   def run(manifest, opts \\ [])
@@ -558,7 +637,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   end
 
   defp prepare_pair(fixture, pair_root, fixture_root, benchmark) do
-    timeout_ms = benchmark.execution_timeout_ms
+    timeout_ms = benchmark.fixture_setup_timeout_ms
 
     with {:ok, source} <- fixture_source(fixture_root, fixture["fixture_path"]),
          {:ok, commit_oid} <-
@@ -608,8 +687,10 @@ defmodule Arbor.Commands.CodingBenchmark do
   end
 
   defp clone_fixture(source, destination, commit_oid, expected_tree, timeout_ms) do
-    with {:ok, entries} <- fixture_tree_entries(source, commit_oid, expected_tree, timeout_ms),
-         :ok <- initialize_fixture_repository(destination, commit_oid, timeout_ms),
+    deadline = Git.deadline(timeout_ms)
+
+    with {:ok, entries} <- fixture_tree_entries(source, commit_oid, expected_tree, deadline),
+         :ok <- initialize_fixture_repository(destination, commit_oid, deadline),
          :ok <-
            import_fixture_objects(
              source,
@@ -617,17 +698,16 @@ defmodule Arbor.Commands.CodingBenchmark do
              commit_oid,
              expected_tree,
              entries,
-             timeout_ms
+             deadline
            ),
-         :ok <- materialize_fixture_tree(source, destination, entries, timeout_ms),
-         :ok <- attach_fixture_commit(destination, commit_oid, timeout_ms),
+         :ok <- materialize_fixture_tree(source, destination, entries, deadline),
+         :ok <- attach_fixture_commit(destination, commit_oid, deadline),
          {:ok, ^commit_oid} <-
-           git_output(destination, ["rev-parse", "--verify", "HEAD^{commit}"], timeout_ms),
+           git_output(destination, ["rev-parse", "--verify", "HEAD^{commit}"], deadline),
          {:ok, actual_tree} <-
-           git_output(destination, ["rev-parse", "--verify", "HEAD^{tree}"], timeout_ms),
+           git_output(destination, ["rev-parse", "--verify", "HEAD^{tree}"], deadline),
          :ok <- matching_tree(actual_tree, expected_tree),
-         {:ok, ""} <- git_output(destination, ["status", "--porcelain=v1"], timeout_ms) do
-      _ = git_ok(destination, ["remote", "remove", "origin"], timeout_ms)
+         {:ok, ""} <- git_output(destination, ["status", "--porcelain=v1"], deadline) do
       :ok
     else
       {:ok, dirty} when is_binary(dirty) and dirty != "" ->
@@ -684,8 +764,9 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp supported_fixture_entry?(%{type: "tree", mode: "040000"}), do: true
 
-  defp supported_fixture_entry?(%{type: "blob", mode: mode}) when mode in ["100644", "100755"],
-    do: true
+  defp supported_fixture_entry?(%{type: "blob", mode: mode})
+       when mode in ["100644", "100755", "120000"],
+       do: true
 
   defp supported_fixture_entry?(_entry), do: false
 
@@ -808,14 +889,35 @@ defmodule Arbor.Commands.CodingBenchmark do
              Git.run(source, ["cat-file", "blob", entry.oid], timeout_ms,
                max_output_bytes: @max_fixture_object_bytes
              ),
-           :ok <- write_exclusive_file(path, content),
-           :ok <- File.chmod(path, if(entry.mode == "100755", do: 0o755, else: 0o644)) do
+           :ok <- materialize_fixture_entry(path, content, entry.mode, destination) do
         {:cont, :ok}
       else
         {:error, reason} when is_binary(reason) -> {:halt, {:error, reason}}
         _other -> {:halt, {:error, "fixture_materialization_failed"}}
       end
     end)
+  end
+
+  defp materialize_fixture_entry(path, content, "120000", destination) do
+    with true <- byte_size(content) in 1..@max_fixture_symlink_bytes,
+         true <- String.valid?(content) and not String.contains?(content, <<0>>),
+         true <- Path.type(content) == :relative,
+         resolved = Path.expand(content, Path.dirname(path)),
+         {:ok, ^resolved} <- SafePath.resolve_within(resolved, destination),
+         false <- path_within_git_metadata?(resolved, destination),
+         :ok <- File.ln_s(content, path) do
+      :ok
+    else
+      _other -> {:error, "unsafe_fixture_symlink"}
+    end
+  end
+
+  defp materialize_fixture_entry(path, content, mode, _destination)
+       when mode in ["100644", "100755"] do
+    with :ok <- write_exclusive_file(path, content),
+         :ok <- File.chmod(path, if(mode == "100755", do: 0o755, else: 0o644)) do
+      :ok
+    end
   end
 
   defp ensure_fixture_parent(parent, destination) do

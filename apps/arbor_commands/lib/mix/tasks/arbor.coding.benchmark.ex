@@ -34,6 +34,7 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
   use Mix.Task
 
   alias Arbor.Commands.CodingBenchmark
+  alias Arbor.Commands.CodingBenchmark.Catalog
   alias Arbor.Commands.CodingBenchmark.Runtime
   alias Arbor.Common.SafePath
 
@@ -66,6 +67,7 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
          {:ok, manifest_path} <- existing_json_path(cli.manifest, root, "manifest"),
          {:ok, manifest} <- read_manifest(manifest_path),
          {:ok, normalized_manifest} <- CodingBenchmark.validate_manifest(manifest),
+         :ok <- validate_prepared_publication(manifest_path, manifest, normalized_manifest),
          {:ok, output_path} <- output_json_path(cli.output, root),
          :ok <- distinct_paths(manifest_path, output_path),
          :ok <-
@@ -249,6 +251,79 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
       false -> task_error("manifest", "file_too_large")
       {:error, %Jason.DecodeError{}} -> task_error("manifest", "invalid_json")
       {:error, _reason} -> task_error("manifest", "unreadable")
+    end
+  end
+
+  defp validate_prepared_publication(manifest_path, manifest, normalized_manifest) do
+    root = Path.dirname(manifest_path)
+    evidence_path = Path.join(root, "target-evidence.json")
+    publication_path = Path.join(root, "publication.json")
+
+    case {sidecar_state(evidence_path), sidecar_state(publication_path)} do
+      {:absent, :absent} ->
+        :ok
+
+      {:regular, :regular} ->
+        with {:ok, target_evidence} <- read_publication_sidecar(evidence_path, "target_evidence"),
+             {:ok, publication} <- read_publication_sidecar(publication_path, "publication") do
+          Catalog.validate_publication(
+            manifest,
+            normalized_manifest,
+            target_evidence,
+            publication
+          )
+        end
+
+      {_evidence, _publication} ->
+        task_error("publication", "incomplete_or_unsafe_publication")
+    end
+  end
+
+  defp sidecar_state(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :regular}} -> :regular
+      {:error, :enoent} -> :absent
+      _other -> :unsafe
+    end
+  end
+
+  defp read_publication_sidecar(path, field) do
+    with {:ok, identity} <- regular_file_identity(path),
+         {:ok, json} <- read_bounded_file(path, Catalog.max_bytes()),
+         {:ok, ^identity} <- regular_file_identity(path),
+         {:ok, value} <- Jason.decode(json) do
+      {:ok, value}
+    else
+      {:error, :file_too_large} -> task_error(field, "file_too_large")
+      {:error, %Jason.DecodeError{}} -> task_error(field, "invalid_json")
+      {:error, _reason} -> task_error(field, "unreadable")
+    end
+  end
+
+  defp regular_file_identity(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok,
+       %File.Stat{
+         type: :regular,
+         major_device: device,
+         minor_device: minor_device,
+         inode: inode,
+         size: size
+       }} ->
+        {:ok, {device, minor_device, inode, size}}
+
+      _other ->
+        {:error, :unsafe_path}
+    end
+  end
+
+  defp read_bounded_file(path, maximum) do
+    case File.open(path, [:read, :binary], fn io -> IO.binread(io, maximum + 1) end) do
+      {:ok, data} when is_binary(data) and byte_size(data) <= maximum -> {:ok, data}
+      {:ok, data} when is_binary(data) -> {:error, :file_too_large}
+      {:ok, :eof} -> {:ok, ""}
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
     end
   end
 

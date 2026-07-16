@@ -1,0 +1,55 @@
+{
+  "schema": "arbor.coding_benchmark.catalog.v1",
+  "seed": 1,
+  "source_repository_label": "trust-arbor/arbor",
+  "fixtures": [
+    {
+      "fixture_id": "checkpoint-output-taint-round-trip",
+      "base_commit_oid": "e19b4f5320bd015030d3ba1b9a6121089ef579f9",
+      "base_tree_oid": "f671364664e3d6f1cbd12f2906d8cc3ca20ccb8a",
+      "target_commit_oid": "2bddcd0d96c9b3b37f6b87e037efeea71f303bf8",
+      "target_tree_oid": "61ca566d8ce8935158e62853b0dfa673d258c128",
+      "input": {
+        "objective": "Restore Outcome.output_taint through checkpoint deserialize so settled-effect recovery after max_steps keeps authentic result digests. Accept bare taint levels and full %Taint{} via a closed parser, keep transient taint_reductions empty, and repair resume fixtures without clearing authoritative effect evidence.",
+        "acceptance_criteria": [
+          "Checkpoint.deserialize restores output_taint for bare levels and full Taint structs so effect result digests match settled receipts.",
+          "Transient taint_reductions remain empty after rehydrate.",
+          "Resume fixtures and engine tests cover result_digest_mismatch regression without clearing current_effect evidence."
+        ]
+      },
+      "verifier_id": "exact_target_tree"
+    },
+    {
+      "fixture_id": "checkpoint-taint-decoder-hardening",
+      "base_commit_oid": "2bddcd0d96c9b3b37f6b87e037efeea71f303bf8",
+      "base_tree_oid": "61ca566d8ce8935158e62853b0dfa673d258c128",
+      "target_commit_oid": "7bf743dc333a47ae7e523bbcf714000bf6aa7b4f",
+      "target_tree_oid": "32fa5f8cd03501886fbb1f05bb3d3ec265f7f30a",
+      "input": {
+        "objective": "Harden checkpoint taint decoding so malformed or unexpected taint payloads fail closed while valid bare levels and structured Taint values continue to round-trip.",
+        "acceptance_criteria": [
+          "Checkpoint taint decoding rejects invalid shapes without raising unstructured errors that corrupt recovery.",
+          "Valid bare levels and structured Taint payloads still rehydrate for effect digests.",
+          "Focused checkpoint tests cover the hardened decoder paths."
+        ]
+      },
+      "verifier_id": "exact_target_tree"
+    },
+    {
+      "fixture_id": "workspace-release-descriptor-bounds",
+      "base_commit_oid": "0b3d0c8704c7486967bfe4289d22dcb7ebaa81f2",
+      "base_tree_oid": "0a72282510eb02619f26841e73f1cc23695cb752",
+      "target_commit_oid": "e19b4f5320bd015030d3ba1b9a6121089ef579f9",
+      "target_tree_oid": "f671364664e3d6f1cbd12f2906d8cc3ca20ccb8a",
+      "input": {
+        "objective": "Cover workspace release descriptor bounds in the coding benchmark adapter path so unknown workspace_release_status values and non-ISO workspace_expires_at timestamps are rejected.",
+        "acceptance_criteria": [
+          "Adapter artifact validation rejects workspace_release with an unknown status such as pending.",
+          "Adapter artifact validation rejects workspace_release with a non-ISO workspace_expires_at value.",
+          "Existing valid workspace_release descriptor cases continue to pass."
+        ]
+      },
+      "verifier_id": "exact_target_tree"
+    }
+  ]
+}
