@@ -58,6 +58,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
+  alias Arbor.Orchestrator.RunLifecycle.Adapter, as: RunLifecycleAdapter
 
   @allowed_context_keys MapSet.new(~w(task_id timeout caller_id metadata))
 
@@ -105,6 +106,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @max_metric_usage_key_bytes 128
   @max_metric_usage_string_bytes 1_024
   @max_metric_usage_encoded_bytes 16_384
+  @max_validation_failure_reason_bytes 512
 
   @terminal_control_errors MapSet.new([
                              :unsupported,
@@ -1591,7 +1593,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp adapt_result(_other, _started_at, _acp_agent), do: {:error, :invalid_engine_result}
 
   defp adapt_engine_result(context, engine_result, started_at, acp_agent) do
-    with {:ok, payload} <- adapt_context(context, acp_agent) do
+    with {:ok, payload} <- adapt_context(context, engine_result, acp_agent) do
       wall_clock_ms = max(System.monotonic_time(:millisecond) - started_at, 0)
 
       {:ok,
@@ -1602,7 +1604,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp adapt_context(context, worker_provider) when is_map(context) do
+  defp adapt_context(context, engine_result, worker_provider) when is_map(context) do
     clean = json_clean_map(context)
     status = context_get(clean, "status")
     legacy = context_get(clean, "legacy_status")
@@ -1618,9 +1620,49 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         {:error, {:unknown_terminal_status, status}}
 
       true ->
-        {:ok, build_coding_payload(clean, status, legacy)}
+        {:ok,
+         clean
+         |> build_coding_payload(status, legacy)
+         |> maybe_put_validation_failure(engine_result)}
     end
   end
+
+  defp maybe_put_validation_failure(
+         %{"canonical_status" => "validation_failed"} = payload,
+         engine_result
+       ) do
+    case engine_result_field(engine_result, :node_failure_reasons, "node_failure_reasons") do
+      %_{} ->
+        payload
+
+      reasons when is_map(reasons) ->
+        case Map.fetch(reasons, "validate") do
+          {:ok, reason} -> maybe_put_bounded_validation_failure(payload, reason)
+          :error -> payload
+        end
+
+      _other ->
+        payload
+    end
+  end
+
+  defp maybe_put_validation_failure(payload, _engine_result), do: payload
+
+  defp maybe_put_bounded_validation_failure(payload, reason) when is_binary(reason) do
+    valid =
+      byte_size(reason) in 1..@max_validation_failure_reason_bytes and String.valid?(reason)
+
+    if valid do
+      case RunLifecycleAdapter.bound_failure_reason(reason) do
+        bounded when is_binary(bounded) and bounded != "" -> Map.put(payload, "error", bounded)
+        _other -> payload
+      end
+    else
+      payload
+    end
+  end
+
+  defp maybe_put_bounded_validation_failure(payload, _reason), do: payload
 
   defp build_pipeline_metrics(engine_result, context, wall_clock_ms) do
     clean_context = json_clean_map(context)

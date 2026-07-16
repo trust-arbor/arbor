@@ -1224,12 +1224,16 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     verify(decoded, secret, aad_opts)
   end
 
+  defp parse_status(status)
+       when status in [:success, :partial_success, :retry, :fail, :skipped],
+       do: status
+
   defp parse_status("success"), do: :success
   defp parse_status("partial_success"), do: :partial_success
   defp parse_status("retry"), do: :retry
   defp parse_status("fail"), do: :fail
   defp parse_status("skipped"), do: :skipped
-  defp parse_status(_), do: :success
+  defp parse_status(_unknown), do: :fail
 
   defp parse_optional_datetime(nil), do: nil
 

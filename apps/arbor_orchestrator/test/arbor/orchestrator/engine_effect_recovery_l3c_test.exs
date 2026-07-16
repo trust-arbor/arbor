@@ -733,7 +733,7 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
   # ---------------------------------------------------------------------------
 
   describe "terminal checkpoint recovery" do
-    test "side-effecting terminal node recovers exact evidence, settles, never re-invokes" do
+    test "security regression: terminal recovery preserves routed failure evidence without re-invoking side effect" do
       # Terminal exec node id "end" is Router.terminal?/1 true. First run records
       # receipt + authenticated terminal checkpoint then fails before progress/settle.
       # Resume (next_node_id nil) must recover, sync, settle, and complete without
@@ -745,7 +745,7 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
       parent = self()
       identity = :crypto.strong_rand_bytes(32)
       logs_root = tmp_logs("l3c_term_recon")
-      graph = parse!(terminal_side_dot())
+      graph = parse!(terminal_side_after_failure_dot())
 
       assert {:error, {:effect_completed_progress_failed, _}} =
                Engine.run(graph,
@@ -766,6 +766,14 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
       assert rec.current_effect["node_id"] == "end"
       assert File.exists?(Path.join(logs_root, "checkpoint.json"))
 
+      assert {:ok, raw_checkpoint} =
+               logs_root
+               |> Path.join("checkpoint.json")
+               |> File.read!()
+               |> Jason.decode()
+
+      assert get_in(raw_checkpoint, ["node_outcomes", "failed", "status"]) == "fail"
+
       assert {:ok, checkpoint} =
                Arbor.Orchestrator.Engine.Checkpoint.load(
                  Path.join(logs_root, "checkpoint.json"),
@@ -774,7 +782,11 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
                )
 
       assert checkpoint.current_node == "end"
-      assert checkpoint.completed_nodes == ["start", "end"]
+      assert checkpoint.completed_nodes == ["start", "failed", "end"]
+
+      assert %Outcome{status: :fail, failure_reason: "simulated failure"} =
+               checkpoint.node_outcomes["failed"]
+
       assert checkpoint.execution_digests["end"].execution_id == exec_id
 
       reopen_as_recovering!(ctx.run_id, jopts, logs_root)
@@ -791,14 +803,16 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
                )
 
       refute_receive {:l3c_probe, "end", _}, 150
-      assert result.completed_nodes == ["start", "end"]
+      assert result.completed_nodes == ["start", "failed", "end"]
       assert result.final_outcome.status == :success
+      assert result.node_failure_reasons == %{"failed" => "simulated failure"}
+      assert {:ok, _json} = Jason.encode(result.node_failure_reasons)
 
       final = PipelineStatus.get_record(ctx.run_id, jopts)
       assert final.status == :completed
       assert final.current_effect["status"] == "settled"
       assert final.current_effect["execution_id"] == exec_id
-      assert final.completed_nodes == ["start", "end"]
+      assert final.completed_nodes == ["start", "failed", "end"]
     end
 
     test "pending effect on terminal checkpoint halts before completion or handler dispatch" do
@@ -1620,6 +1634,18 @@ defmodule Arbor.Orchestrator.EngineEffectRecoveryL3CTest do
       start [shape=Mdiamond]
       end [type="l3c_side"]
       start -> end
+    }
+    """
+  end
+
+  defp terminal_side_after_failure_dot do
+    """
+    digraph Flow {
+      start [shape=Mdiamond]
+      failed [simulate="fail"]
+      end [type="l3c_side"]
+      start -> failed
+      failed -> end [condition="outcome=fail"]
     }
     """
   end

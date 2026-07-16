@@ -69,6 +69,29 @@ defmodule Arbor.Orchestrator.Engine.CheckpointTest do
 
       assert %Outcome{status: :success} = loaded.node_outcomes["node1"]
     end
+
+    test "security regression: unknown persisted outcome status fails closed", %{tmp: tmp} do
+      checkpoint =
+        Checkpoint.from_state(
+          "untrusted_status",
+          ["start", "untrusted_status"],
+          %{},
+          Context.new(%{}),
+          %{
+            "untrusted_status" => %Outcome{
+              status: "unexpected_success_alias",
+              failure_reason: "invalid persisted status"
+            }
+          },
+          run_id: "run_unknown_status"
+        )
+
+      assert :ok = Checkpoint.write(checkpoint, tmp)
+      assert {:ok, loaded} = Checkpoint.load(Path.join(tmp, "checkpoint.json"))
+
+      assert %Outcome{status: :fail, failure_reason: "invalid persisted status"} =
+               loaded.node_outcomes["untrusted_status"]
+    end
   end
 
   describe "provenance taint survives checkpoint/resume (taint-rebuild)" do

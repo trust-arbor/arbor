@@ -34,6 +34,7 @@ defmodule Arbor.Orchestrator.Engine do
   alias Arbor.Orchestrator.Handlers.{Handler, Registry}
   alias Arbor.Orchestrator.JsonSafe
   alias Arbor.Orchestrator.PipelineStatus
+  alias Arbor.Orchestrator.RunLifecycle.Adapter, as: RunLifecycleAdapter
   alias Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore
   alias Arbor.Orchestrator.Validation.Validator
 
@@ -45,8 +46,13 @@ defmodule Arbor.Orchestrator.Engine do
           completed_nodes: [String.t()],
           context: map(),
           taint: %{String.t() => Arbor.Contracts.Security.Taint.t()},
-          node_durations: %{String.t() => non_neg_integer()}
+          node_durations: %{String.t() => non_neg_integer()},
+          node_failure_reasons: %{String.t() => String.t()}
         }
+
+  @max_result_failure_reasons 32
+  @max_result_failure_node_id_bytes 256
+  @max_result_failure_input_bytes 4_096
 
   # Public API delegations for backward compatibility
   defdelegate should_retry_exception?(exception), to: Executor
@@ -406,7 +412,8 @@ defmodule Arbor.Orchestrator.Engine do
            completed_nodes: completed,
            context: Context.snapshot(context),
            taint: Context.taint_map(context),
-           node_durations: %{}
+           node_durations: %{},
+           node_failure_reasons: node_failure_reasons(outcomes)
          }}
 
       {:error, reason} ->
@@ -1466,13 +1473,60 @@ defmodule Arbor.Orchestrator.Engine do
            completed_nodes: ordered,
            context: Context.snapshot(state.context),
            taint: Context.taint_map(state.context),
-           node_durations: state.tracking.node_durations
+           node_durations: state.tracking.node_durations,
+           node_failure_reasons: node_failure_reasons(state.outcomes)
          }}
 
       {:error, reason} ->
         {:error, {:lifecycle_finalize_failed, reason}}
     end
   end
+
+  defp node_failure_reasons(%_{}), do: %{}
+
+  defp node_failure_reasons(outcomes) when is_map(outcomes) do
+    outcomes
+    |> Enum.reduce([], fn
+      {node_id, %Outcome{status: :fail, failure_reason: reason}}, acc ->
+        case bounded_node_failure(node_id, reason) do
+          {:ok, entry} -> [entry | acc]
+          :drop -> acc
+        end
+
+      _other, acc ->
+        acc
+    end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.take(@max_result_failure_reasons)
+    |> Map.new()
+  rescue
+    _exception -> %{}
+  catch
+    _, _ -> %{}
+  end
+
+  defp node_failure_reasons(_outcomes), do: %{}
+
+  defp bounded_node_failure(node_id, reason)
+       when is_binary(node_id) and is_binary(reason) do
+    valid_node_id =
+      String.valid?(node_id) and node_id != "" and
+        byte_size(node_id) <= @max_result_failure_node_id_bytes
+
+    if valid_node_id do
+      bounded_input =
+        binary_part(reason, 0, min(byte_size(reason), @max_result_failure_input_bytes))
+
+      case RunLifecycleAdapter.bound_failure_reason(bounded_input) do
+        bounded when is_binary(bounded) and bounded != "" -> {:ok, {node_id, bounded}}
+        _other -> :drop
+      end
+    else
+      :drop
+    end
+  end
+
+  defp bounded_node_failure(_node_id, _reason), do: :drop
 
   # Restart the pipeline from a target node with a fresh log directory.
   # Used by loop_restart edges (spec §3.2 step 7). Context is preserved

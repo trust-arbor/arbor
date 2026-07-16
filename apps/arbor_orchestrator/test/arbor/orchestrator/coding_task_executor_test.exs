@@ -2216,6 +2216,57 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert pr_failed["status"] == "pr_failed"
     end
 
+    test "validation_failed exposes only the bounded validate-node failure reason" do
+      reason =
+        "Action mix_compile failed: mix compile failed to execute: " <>
+          ":linux_dependency_baseline_unavailable"
+
+      assert {:ok, result} =
+               run_with_engine_result(
+                 %{"status" => "validation_failed", "worktree_path" => "/tmp/ws"},
+                 %{
+                   node_failure_reasons: %{
+                     "validate" => reason,
+                     "unrelated" => "must not be exposed"
+                   }
+                 }
+               )
+
+      assert result["error"] == reason
+      refute Map.has_key?(result, "node_failure_reasons")
+      refute inspect(result) =~ "must not be exposed"
+      assert {:ok, _json} = Jason.encode(result)
+    end
+
+    test "validation failure projection drops malformed, oversized, and noncanonical data" do
+      invalid_projections = [
+        %{"validate" => 123},
+        %{validate: "atom-keyed reason"},
+        %{"validate" => String.duplicate("x", 513)},
+        %{"validate" => <<255>>},
+        %URI{scheme: "validate"}
+      ]
+
+      for projection <- invalid_projections do
+        assert {:ok, result} =
+                 run_with_engine_result(
+                   %{"status" => "validation_failed", "worktree_path" => "/tmp/ws"},
+                   %{node_failure_reasons: projection}
+                 )
+
+        refute Map.has_key?(result, "error")
+        assert {:ok, _json} = Jason.encode(result)
+      end
+
+      assert {:ok, non_validation} =
+               run_with_engine_result(
+                 %{"status" => "change_committed", "commit_hash" => "abc123"},
+                 %{node_failure_reasons: %{"validate" => "not applicable"}}
+               )
+
+      refute Map.has_key?(non_validation, "error")
+    end
+
     test "validation failure still publishes the verified transcript descriptor" do
       Application.put_env(
         :arbor_orchestrator,

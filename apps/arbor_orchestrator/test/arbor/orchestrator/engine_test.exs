@@ -160,10 +160,72 @@ defmodule Arbor.Orchestrator.EngineTest do
 
     assert "recovery" in result.completed_nodes
     assert result.final_outcome.status == :success
+    assert result.node_failure_reasons == %{"flaky" => "simulated failure"}
+    assert {:ok, _json} = Jason.encode(result.node_failure_reasons)
 
     assert_receive {:event, %{type: :stage_retrying, node_id: "flaky", attempt: 1}}
     assert_receive {:event, %{type: :stage_retrying, node_id: "flaky", attempt: 2}}
     assert_receive {:event, %{type: :stage_failed, node_id: "flaky", will_retry: false}}
+  end
+
+  test "bounds and deterministically selects node failure reasons" do
+    failure_nodes =
+      for index <- 1..40 do
+        id = "failure_#{index |> Integer.to_string() |> String.pad_leading(2, "0")}"
+        ~s(#{id} [simulate="fail"])
+      end
+
+    routed_failure_edges =
+      for index <- 1..39 do
+        current = index |> Integer.to_string() |> String.pad_leading(2, "0")
+        next = (index + 1) |> Integer.to_string() |> String.pad_leading(2, "0")
+        "failure_#{current} -> failure_#{next} [condition=\"outcome=fail\"]"
+      end
+
+    failure_edges =
+      ["start -> failure_01"] ++
+        routed_failure_edges ++ ["failure_40 -> exit [condition=\"outcome=fail\"]"]
+
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      #{Enum.join(failure_nodes, "\n  ")}
+      exit [shape=Msquare]
+      #{Enum.join(failure_edges, "\n  ")}
+    }
+    """
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot)
+
+    assert map_size(result.node_failure_reasons) == 32
+    assert Map.has_key?(result.node_failure_reasons, "failure_01")
+    assert Map.has_key?(result.node_failure_reasons, "failure_32")
+    refute Map.has_key?(result.node_failure_reasons, "failure_33")
+
+    assert Enum.all?(result.node_failure_reasons, fn {_node_id, reason} ->
+             reason == "simulated failure"
+           end)
+
+    assert {:ok, _json} = Jason.encode(result.node_failure_reasons)
+  end
+
+  test "bounds oversized failure reason text before returning it" do
+    oversized = String.duplicate("x", 2_000)
+
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      failing [simulate="#{oversized}"]
+      exit [shape=Msquare]
+      start -> failing -> exit
+    }
+    """
+
+    assert {:ok, result} = Arbor.Orchestrator.run(dot)
+    assert %{"failing" => reason} = result.node_failure_reasons
+    assert byte_size(reason) == 512
+    assert String.valid?(reason)
+    assert {:ok, _json} = Jason.encode(result.node_failure_reasons)
   end
 
   test "retry policy preset defines attempts when max_retries is omitted" do

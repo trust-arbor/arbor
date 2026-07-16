@@ -98,6 +98,13 @@ longer usable after the workflow closes it. To resume later, copy
 authorization again. Provider-session continuity does not currently reuse the
 retained Git worktree automatically.
 
+For a canonical `validation_failed` result, the public `error` field may contain
+the exact bounded binary failure reason emitted by the `validate` Engine node.
+The Engine projection is capped at 32 failed nodes, 256-byte node ids, and
+512-byte UTF-8 reasons; the coding facade consumes only the exact `validate`
+entry and revalidates that bound. Raw action output, arbitrary outcome terms,
+and unrelated node failures are not copied into the task result.
+
 ## Default execution path
 
 Structured `coding_change` dispatch runs the **compiled DOT pipeline** by
