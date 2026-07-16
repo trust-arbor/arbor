@@ -18,8 +18,8 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
 
   defmodule Lease do
     @moduledoc false
-    @enforce_keys [:token, :owner, :root_path, :candidate_path, :base_path]
-    defstruct [:token, :owner, :root_path, :candidate_path, :base_path]
+    @enforce_keys [:token, :owner, :worker, :root_path, :candidate_path, :base_path]
+    defstruct [:token, :owner, :worker, :root_path, :candidate_path, :base_path]
   end
 
   defimpl Inspect, for: Lease do
@@ -130,6 +130,20 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
 
   def acquire_linux_dependency_baseline_lease(_deadline_ms), do: {:error, :invalid_deadline}
 
+  @doc false
+  def acquire_linux_dependency_baseline_lease_with_cleanup_locator(deadline_ms) do
+    case acquire_linux_dependency_baseline_lease(deadline_ms) do
+      {:ok, %Lease{root_path: root_path} = lease, view} ->
+        {:ok, lease, view, %{root_path: root_path}}
+
+      {:error, {:cleanup_required, reason, %Lease{root_path: root_path} = lease}} ->
+        {:error, {:cleanup_required, reason, lease, %{root_path: root_path}}}
+
+      other ->
+        other
+    end
+  end
+
   @doc """
   Release a previously acquired lease.
 
@@ -164,6 +178,15 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
 
   def release_linux_dependency_baseline_lease(_lease), do: {:error, :invalid_lease}
 
+  @doc false
+  def release_linux_dependency_baseline_lease(lease, timeout_ms)
+      when is_integer(timeout_ms) and timeout_ms > 0 do
+    release_linux_dependency_baseline_lease(lease)
+  end
+
+  def release_linux_dependency_baseline_lease(_lease, _timeout_ms),
+    do: {:error, :invalid_lease}
+
   defp materialize_pair do
     # Owner is the registry GenServer that called acquire — release must match.
     owner = self()
@@ -175,10 +198,12 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
          candidate <- Path.join(root, "candidate"),
          base <- Path.join(root, "base"),
          :ok <- write_baseline_tree(candidate),
-         :ok <- write_baseline_tree(base) do
+         :ok <- write_baseline_tree(base),
+         worker <- start_cleanup_worker(owner, root, token) do
       lease = %Lease{
         token: token,
         owner: owner,
+        worker: worker,
         root_path: root,
         candidate_path: candidate,
         base_path: base
@@ -204,13 +229,46 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
     end
   end
 
-  defp do_release(%Lease{root_path: root}) do
-    _ = File.rm_rf(root)
+  defp do_release(%Lease{token: token, owner: owner, worker: worker, root_path: root}) do
+    if Process.alive?(worker) do
+      reply_ref = make_ref()
+      send(worker, {:release, token, owner, reply_ref})
 
+      receive do
+        {:released, ^reply_ref, result} -> result
+      after
+        5_000 -> {:error, :baseline_release_timeout}
+      end
+    else
+      prove_root_absent(root)
+    end
+  end
+
+  defp prove_root_absent(root) do
     case File.lstat(root) do
       {:error, :enoent} -> :ok
       _ -> {:error, :baseline_root_still_exists}
     end
+  end
+
+  defp start_cleanup_worker(owner, root, token) do
+    spawn(fn ->
+      owner_ref = Process.monitor(owner)
+
+      receive do
+        {:release, ^token, ^owner, reply_ref} ->
+          result = remove_root(root)
+          send(owner, {:released, reply_ref, result})
+
+        {:DOWN, ^owner_ref, :process, ^owner, _reason} ->
+          _ = remove_root(root)
+      end
+    end)
+  end
+
+  defp remove_root(root) do
+    _ = File.rm_rf(root)
+    prove_root_absent(root)
   end
 
   defp write_baseline_tree(path) do

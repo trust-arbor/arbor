@@ -24,6 +24,147 @@ defmodule Arbor.Actions.GitTest do
     {:ok, repo_path: repo_path}
   end
 
+  describe "closed worktree removal" do
+    @tag :security_regression
+    test "removes a registered linked worktree with its bound lstat identity", %{
+      repo_path: repo_path,
+      tmp_dir: tmp_dir
+    } do
+      worktree_path = Path.join(tmp_dir, "identity-bound-worktree")
+      create_linked_worktree(repo_path, worktree_path, "test/identity-bound-remove")
+      identity = worktree_removal_identity(repo_path, worktree_path)
+
+      assert :ok = Git.remove_worktree(repo_path, worktree_path, identity)
+      refute File.dir?(worktree_path)
+    end
+
+    @tag :security_regression
+    test "security regression: rejects a replacement inode at the registered path", %{
+      repo_path: repo_path,
+      tmp_dir: tmp_dir
+    } do
+      worktree_path = Path.join(tmp_dir, "identity-replaced-worktree")
+      replacement_path = Path.join(tmp_dir, "replacement-copy")
+      marker_path = Path.join(worktree_path, "replacement-marker.txt")
+      create_linked_worktree(repo_path, worktree_path, "test/identity-replaced-remove")
+
+      original_identity = worktree_removal_identity(repo_path, worktree_path)
+      git_pointer = File.read!(Path.join(worktree_path, ".git"))
+      File.cp_r!(worktree_path, replacement_path)
+      File.write!(Path.join(replacement_path, "replacement-marker.txt"), "replacement survives\n")
+      File.rm_rf!(worktree_path)
+      File.rename!(replacement_path, worktree_path)
+
+      replacement_identity = worktree_lstat_identity(worktree_path)
+      refute replacement_identity == original_identity.lstat_identity
+      assert File.read!(Path.join(worktree_path, ".git")) == git_pointer
+
+      assert {:error, :git_worktree_identity_mismatch} =
+               Git.remove_worktree(repo_path, worktree_path, original_identity)
+
+      assert worktree_lstat_identity(worktree_path) == replacement_identity
+      assert File.read!(marker_path) == "replacement survives\n"
+    end
+
+    test "rejects malformed bound lstat identities without removing the worktree", %{
+      repo_path: repo_path,
+      tmp_dir: tmp_dir
+    } do
+      worktree_path = Path.join(tmp_dir, "malformed-identity-worktree")
+      create_linked_worktree(repo_path, worktree_path, "test/malformed-identity-remove")
+      identity = worktree_removal_identity(repo_path, worktree_path)
+
+      malformed_identities = [
+        Map.update!(identity, :lstat_identity, &Map.delete(&1, :inode)),
+        Map.put(identity, :unexpected, true),
+        Map.update!(identity, :lstat_identity, &%{&1 | type: "directory"}),
+        Map.new(identity, fn {key, value} -> {Atom.to_string(key), value} end)
+      ]
+
+      for malformed_identity <- malformed_identities do
+        assert {:error, :invalid_git_worktree_identity} =
+                 Git.remove_worktree(repo_path, worktree_path, malformed_identity)
+
+        assert File.dir?(worktree_path)
+      end
+    end
+
+    @tag :security_regression
+    test "rejects primary and unrelated repositories without removing either", %{
+      repo_path: repo_path,
+      tmp_dir: tmp_dir
+    } do
+      unrelated_path = Path.join(tmp_dir, "unrelated-repo")
+      create_git_repo(unrelated_path)
+      primary_identity = worktree_removal_identity(repo_path, repo_path)
+      unrelated_identity = worktree_removal_identity(unrelated_path, unrelated_path)
+
+      assert {:error, :primary_checkout_not_removable} =
+               Git.remove_worktree(repo_path, repo_path, primary_identity)
+
+      assert {:error, :unrelated_git_worktree} =
+               Git.remove_worktree(repo_path, unrelated_path, unrelated_identity)
+
+      assert File.read!(Path.join(repo_path, "README.md")) == "# Test Repository\n"
+      assert File.read!(Path.join(unrelated_path, "README.md")) == "# Test Repository\n"
+    end
+
+    @tag :security_regression
+    test "security regression: final removal rejects a branch changed to detached", %{
+      repo_path: repo_path,
+      tmp_dir: tmp_dir
+    } do
+      worktree_path = Path.join(tmp_dir, "branch-bound-worktree")
+      create_linked_worktree(repo_path, worktree_path, "test/branch-bound-remove")
+      identity = worktree_removal_identity(repo_path, worktree_path)
+
+      {_, 0} = System.cmd("git", ["checkout", "--detach", "HEAD"], cd: worktree_path)
+
+      assert {:error, :git_worktree_registration_mismatch} =
+               Git.remove_worktree(repo_path, worktree_path, identity)
+
+      assert File.dir?(worktree_path)
+      assert {:ok, %{detached: true}} = Git.worktree_registration(repo_path, worktree_path)
+    end
+
+    @tag :security_regression
+    test "newline paths do not corrupt branch worktree lookup", %{
+      repo_path: repo_path,
+      tmp_dir: tmp_dir
+    } do
+      branch = "test/newline-worktree-lookup"
+      worktree_path = Path.join(tmp_dir, "linked\nworktree")
+      create_linked_worktree(repo_path, worktree_path, branch)
+
+      assert {:ok, registration} = Git.worktree_registration(repo_path, worktree_path)
+      assert registration.branch == branch
+      assert {:ok, registration.path} == Git.worktree_for_branch(repo_path, branch)
+    end
+
+    @tag :security_regression
+    test "generic execute still rejects worktree remove force", %{
+      repo_path: repo_path,
+      tmp_dir: tmp_dir
+    } do
+      target = Path.join(tmp_dir, "must-not-dispatch")
+
+      assert {:error, {:dangerous_flags, flags}} =
+               Git.execute(repo_path, ["worktree", "remove", "--force", target])
+
+      assert "--force" in flags
+      refute File.exists?(target)
+    end
+  end
+
+  defp worktree_removal_identity(repo_path, worktree_path) do
+    {:ok, registration} = Git.worktree_registration(repo_path, worktree_path)
+
+    %{
+      lstat_identity: worktree_lstat_identity(worktree_path),
+      worktree_registration: registration
+    }
+  end
+
   describe "Status" do
     test "returns clean status for clean repo", %{repo_path: repo_path} do
       assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
@@ -535,5 +676,22 @@ defmodule Arbor.Actions.GitTest do
       assert is_map(tool)
       assert tool[:name] == "git_log"
     end
+  end
+
+  defp create_linked_worktree(repo_path, worktree_path, branch) do
+    assert {_output, 0} =
+             System.cmd(
+               "git",
+               ["worktree", "add", "-b", branch, worktree_path],
+               cd: repo_path,
+               stderr_to_stdout: true
+             )
+  end
+
+  defp worktree_lstat_identity(path) do
+    path
+    |> File.lstat!()
+    |> Map.from_struct()
+    |> Map.take([:type, :major_device, :minor_device, :inode])
   end
 end

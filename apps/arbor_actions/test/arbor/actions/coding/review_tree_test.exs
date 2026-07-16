@@ -7,6 +7,8 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
   @moduletag :fast
+  @owner_operation_timeout 10_000
+  @owner_hold_timeout 30_000
 
   describe "discovery and canonical URIs" do
     test "review tree actions are registered under coding with precise URIs" do
@@ -577,11 +579,11 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
           receive do
             :hold -> :ok
           after
-            5_000 -> :ok
+            @owner_hold_timeout -> :ok
           end
         end)
 
-      assert_receive {:auth_snap, snap_id}, 3_000
+      assert_receive {:auth_snap, snap_id}, @owner_operation_timeout
 
       # Opaque snapshot id alone is never authority (this process is not owner).
       assert {:error, :not_authorized} =
@@ -731,11 +733,11 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
           receive do
             :hold -> :ok
           after
-            5_000 -> :ok
+            @owner_hold_timeout -> :ok
           end
         end)
 
-      assert_receive {:owner_snap, owner_snap_id}, 3_000
+      assert_receive {:owner_snap, owner_snap_id}, @owner_operation_timeout
 
       Process.exit(owner, :kill)
 

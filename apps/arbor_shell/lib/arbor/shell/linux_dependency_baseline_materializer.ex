@@ -20,6 +20,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
   alias Arbor.Common.SafePath
   alias Arbor.Shell.LinuxDependencyBaselineAuthority
   alias Arbor.Shell.LinuxDependencyBaselineCore, as: Core
+  alias Arbor.Shell.OwnedTree
 
   @supervisor Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor
   @chunk_size 65_536
@@ -27,12 +28,15 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
   @max_path_bytes 4_096
   @token_bytes 32
   @max_root_name_attempts 8
-  @max_identity_capture_attempts 5
   @max_reason_tuple_arity 4
   @cleanup_retry_initial_ms 50
   @cleanup_retry_max_ms 2_000
+  @default_cleanup_retry_limit 8
+  @max_cleanup_retry_limit 32
   @supervisor_cleanup_attempts 20
   @supervisor_cleanup_sleep_ms 25
+  @supervisor_cleanup_budget_ms 8_000
+  @cleanup_attempted_key {__MODULE__, :bounded_cleanup_attempted}
 
   @plan_keys MapSet.new([
                "kind",
@@ -148,6 +152,22 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
 
   def acquire(_deadline_ms, _opts), do: {:error, :invalid_deadline}
 
+  @doc false
+  @spec acquire_with_cleanup_locator(pos_integer(), keyword()) ::
+          {:ok, Lease.t(), map(), map()} | {:error, term()}
+  def acquire_with_cleanup_locator(deadline_ms, opts \\ []) do
+    case acquire(deadline_ms, opts) do
+      {:ok, %Lease{root_path: root_path} = lease, view} ->
+        {:ok, lease, view, %{root_path: root_path}}
+
+      {:error, {:cleanup_required, reason, %Lease{root_path: root_path} = lease}} ->
+        {:error, {:cleanup_required, reason, lease, %{root_path: root_path}}}
+
+      other ->
+        other
+    end
+  end
+
   @doc """
   Release a lease previously returned to the live caller process.
 
@@ -156,19 +176,26 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
   proven absent.
   """
   @spec release(term()) :: :ok | {:error, term()}
+  def release(lease), do: release(lease, :infinity)
+
+  @doc false
+  @spec release(term(), pos_integer() | :infinity) :: :ok | {:error, term()}
   def release(
         %Lease{
           token: token,
           worker: worker,
           owner: owner,
           root_path: root_path
-        } = lease
+        } = lease,
+        timeout
       )
-      when is_binary(token) and is_pid(worker) and is_pid(owner) and is_binary(root_path) do
+      when is_binary(token) and is_pid(worker) and is_pid(owner) and is_binary(root_path) and
+             (timeout == :infinity or
+                (is_integer(timeout) and timeout > 0 and timeout <= @max_deadline_ms)) do
     if self() != owner do
       {:error, :foreign_release}
     else
-      case try_worker_release(worker, token) do
+      case try_worker_release(worker, token, timeout) do
         :ok ->
           :ok
 
@@ -184,7 +211,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
     end
   end
 
-  def release(_lease), do: {:error, :invalid_lease}
+  def release(_lease, _timeout), do: {:error, :invalid_lease}
 
   # ---------------------------------------------------------------------------
   # GenServer
@@ -198,12 +225,18 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
     test_cleanup_failures = Keyword.get(opts, :__test_cleanup_failures, 0)
     test_cleanup_fail_after_identity = Keyword.get(opts, :__test_cleanup_fail_after_identity, 0)
     test_identity_capture_failures = Keyword.get(opts, :__test_identity_capture_failures, 0)
+
+    cleanup_retry_limit =
+      Keyword.get(opts, :__test_cleanup_retry_limit, @default_cleanup_retry_limit)
+
     test_verify = Keyword.get(opts, :__test_verify_hook, nil)
 
     if is_pid(owner) and is_integer(deadline) and is_atom(authority) and
          is_integer(test_cleanup_failures) and test_cleanup_failures >= 0 and
          is_integer(test_cleanup_fail_after_identity) and test_cleanup_fail_after_identity >= 0 and
-         is_integer(test_identity_capture_failures) and test_identity_capture_failures >= 0 do
+         is_integer(test_identity_capture_failures) and test_identity_capture_failures >= 0 and
+         is_integer(cleanup_retry_limit) and cleanup_retry_limit >= 0 and
+         cleanup_retry_limit <= @max_cleanup_retry_limit do
       # DynamicSupervisor child teardown may deliver {:EXIT, parent, :shutdown}
       # rather than GenServer.stop/1. Trap exits so cleanup always runs before stop.
       Process.flag(:trap_exit, true)
@@ -231,6 +264,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
       {:ok,
        %{
          status: :starting,
+         supervisor_pid: materializer_supervisor_pid(),
          owner_pid: owner,
          owner_ref: owner_ref,
          token: token,
@@ -244,6 +278,9 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
          plan_fingerprint: nil,
          owned: false,
          cleanup_retry_ms: @cleanup_retry_initial_ms,
+         cleanup_retry_count: 0,
+         cleanup_retry_limit: cleanup_retry_limit,
+         cleanup_dormant: false,
          cleanup_timer: nil,
          test_verify_hook: test_verify
        }}
@@ -328,25 +365,51 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
     {:noreply, %{state | cleanup_timer: nil}}
   end
 
-  def handle_info({:EXIT, _from, reason}, state) do
+  def handle_info({:EXIT, port, _reason}, state) when is_port(port) do
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:EXIT, supervisor_pid, reason},
+        %{supervisor_pid: supervisor_pid} = state
+      )
+      when is_pid(supervisor_pid) do
     # Parent DynamicSupervisor/application shutdown path: prove cleanup before stop.
-    case attempt_cleanup_with_bounded_retries(state, @supervisor_cleanup_attempts) do
+    deadline_ms = System.monotonic_time(:millisecond) + @supervisor_cleanup_budget_ms
+    Process.put(@cleanup_attempted_key, true)
+
+    case attempt_cleanup_with_bounded_retries(
+           state,
+           @supervisor_cleanup_attempts,
+           deadline_ms
+         ) do
       {:ok, cleaned} ->
         {:stop, reason, clear_ownership(cancel_cleanup_timer(cleaned))}
 
       {:error, failed} ->
-        # Do not clear ownership identity — terminate gets a final pass with state.
+        # Preserve ownership identity when the single shutdown budget is exhausted.
         {:stop, reason, cancel_cleanup_timer(failed)}
     end
   end
+
+  def handle_info({:EXIT, _from, _reason}, state), do: {:noreply, state}
 
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
-    # Final pass. Never claim success without absence proof; process exit may leave
-    # an on-disk root only if every retry failed (supervisor-forced death).
-    _ = attempt_cleanup(state)
+    unless Process.get(@cleanup_attempted_key, false) do
+      Process.put(@cleanup_attempted_key, true)
+      deadline_ms = System.monotonic_time(:millisecond) + @supervisor_cleanup_budget_ms
+
+      _ =
+        attempt_cleanup_with_bounded_retries(
+          state,
+          @supervisor_cleanup_attempts,
+          deadline_ms
+        )
+    end
+
     :ok
   end
 
@@ -376,6 +439,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
         :__test_cleanup_failures,
         :__test_cleanup_fail_after_identity,
         :__test_identity_capture_failures,
+        :__test_cleanup_retry_limit,
         :__test_verify_hook
       ])
 
@@ -387,6 +451,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
          test_cleanup_failures: 0,
          test_cleanup_fail_after_identity: 0,
          test_identity_capture_failures: 0,
+         cleanup_retry_limit: @default_cleanup_retry_limit,
          test_verify_hook: nil
        }, MapSet.new()},
       fn
@@ -444,6 +509,20 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
               {:halt, {:error, :invalid_materializer_options}}
           end
 
+        {:__test_cleanup_retry_limit, value}, {:ok, acc, seen} ->
+          cond do
+            MapSet.member?(seen, :__test_cleanup_retry_limit) ->
+              {:halt, {:error, :duplicate_materializer_option}}
+
+            is_integer(value) and value >= 0 and value <= @max_cleanup_retry_limit ->
+              {:cont,
+               {:ok, %{acc | cleanup_retry_limit: value},
+                MapSet.put(seen, :__test_cleanup_retry_limit)}}
+
+            true ->
+              {:halt, {:error, :invalid_materializer_options}}
+          end
+
         {:__test_verify_hook, value}, {:ok, acc, seen} ->
           cond do
             MapSet.member?(seen, :__test_verify_hook) ->
@@ -490,6 +569,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
               __test_cleanup_failures: normalized.test_cleanup_failures,
               __test_cleanup_fail_after_identity: normalized.test_cleanup_fail_after_identity,
               __test_identity_capture_failures: normalized.test_identity_capture_failures,
+              __test_cleanup_retry_limit: normalized.cleanup_retry_limit,
               __test_verify_hook: normalized.test_verify_hook
             )
 
@@ -548,19 +628,18 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
     end
   end
 
-  defp try_worker_release(worker, token)
+  defp try_worker_release(worker, token, timeout)
        when is_pid(worker) and is_binary(token) do
     if Process.alive?(worker) do
-      call_worker(worker, {:release, token})
+      call_worker(worker, {:release, token}, timeout)
     else
       {:error, :lease_worker_unavailable}
     end
   end
 
-  defp call_worker(worker, request) do
+  defp call_worker(worker, request, timeout) do
     if Process.alive?(worker) do
-      # Cleanup is bounded by absence proof; do not abandon a live cleanup worker.
-      GenServer.call(worker, request, :infinity)
+      GenServer.call(worker, request, timeout)
     else
       {:error, :lease_worker_unavailable}
     end
@@ -671,11 +750,30 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
 
   defp schedule_cleanup_retry(state) do
     state = cancel_cleanup_timer(state)
-    delay = Map.get(state, :cleanup_retry_ms, @cleanup_retry_initial_ms)
-    timer = Process.send_after(self(), :cleanup_retry, delay)
-    next_delay = min(delay * 2, @cleanup_retry_max_ms)
+    retry_count = Map.get(state, :cleanup_retry_count, 0)
+    retry_limit = Map.get(state, :cleanup_retry_limit, @default_cleanup_retry_limit)
 
-    %{state | cleanup_timer: timer, cleanup_retry_ms: next_delay, status: :cleanup_pending}
+    if retry_count >= retry_limit do
+      %{
+        state
+        | cleanup_timer: nil,
+          cleanup_dormant: true,
+          status: :cleanup_dormant
+      }
+    else
+      delay = Map.get(state, :cleanup_retry_ms, @cleanup_retry_initial_ms)
+      timer = Process.send_after(self(), :cleanup_retry, delay)
+      next_delay = min(delay * 2, @cleanup_retry_max_ms)
+
+      %{
+        state
+        | cleanup_timer: timer,
+          cleanup_retry_ms: next_delay,
+          cleanup_retry_count: retry_count + 1,
+          cleanup_dormant: false,
+          status: :cleanup_pending
+      }
+    end
   end
 
   defp cancel_cleanup_timer(%{cleanup_timer: timer} = state) when is_reference(timer) do
@@ -692,18 +790,30 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
 
   defp cancel_cleanup_timer(state), do: state
 
-  defp attempt_cleanup_with_bounded_retries(state, attempts_left) when attempts_left <= 0 do
+  defp attempt_cleanup_with_bounded_retries(state, attempts_left, _deadline_ms)
+       when attempts_left <= 0 do
     {:error, state}
   end
 
-  defp attempt_cleanup_with_bounded_retries(state, attempts_left) do
-    case attempt_cleanup(state) do
-      :ok ->
-        {:ok, state}
+  defp attempt_cleanup_with_bounded_retries(state, attempts_left, deadline_ms) do
+    remaining = remaining_ms(deadline_ms)
 
-      {:error, _} ->
-        Process.sleep(@supervisor_cleanup_sleep_ms)
-        attempt_cleanup_with_bounded_retries(state, attempts_left - 1)
+    if remaining <= 0 do
+      {:error, state}
+    else
+      case attempt_cleanup(state, timeout_ms: remaining) do
+        :ok ->
+          {:ok, state}
+
+        {:error, _} ->
+          sleep_ms = min(@supervisor_cleanup_sleep_ms, remaining_ms(deadline_ms))
+
+          if sleep_ms > 0 do
+            Process.sleep(sleep_ms)
+          end
+
+          attempt_cleanup_with_bounded_retries(state, attempts_left - 1, deadline_ms)
+      end
     end
   end
 
@@ -1075,36 +1185,42 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
   defp allocate_private_root_attempt(state, tmp, attempts_left) when attempts_left > 0 do
     root = Path.join(tmp, random_root_name())
 
-    case exclusive_mkdir(root) do
-      :ok ->
-        after_exclusive_root_create(state, root)
+    force_identity_capture_failure = consume_identity_capture_failure()
+
+    case OwnedTree.create_private(root,
+           force_identity_capture_failure: force_identity_capture_failure
+         ) do
+      {:ok, identity} ->
+        populate_owned_root(state, root, identity)
 
       {:error, :root_exists} ->
         allocate_private_root_attempt(state, tmp, attempts_left - 1)
 
-      {:error, reason} ->
-        {:error, reason, state}
-    end
-  end
-
-  defp after_exclusive_root_create(state, root) do
-    # Once mkdir succeeds we own cleanup responsibility for this path even if
-    # identity capture is briefly unavailable.
-    case capture_root_identity_with_retry(root, @max_identity_capture_attempts) do
-      {:ok, identity} ->
-        populate_owned_root(state, root, identity)
-
-      {:error, reason} ->
+      {:error, {:owned_tree_cleanup_retained, reason, evidence}} ->
         failed = %{
           state
-          | root_path: root,
-            root_identity: nil,
+          | root_path: evidence.path,
+            root_identity: evidence.identity,
             candidate_path: nil,
             base_path: nil,
             owned: true
         }
 
         {:error, reason, failed}
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp consume_identity_capture_failure do
+    case Process.get({__MODULE__, :test_identity_capture_failures}) do
+      n when is_integer(n) and n > 0 ->
+        Process.put({__MODULE__, :test_identity_capture_failures}, 0)
+        true
+
+      _ ->
+        false
     end
   end
 
@@ -1220,59 +1336,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
     end
   end
 
-  defp capture_root_identity_with_retry(path, attempts_left) do
-    case Process.get({__MODULE__, :test_identity_capture_failures}) do
-      n when is_integer(n) and n > 0 ->
-        # Test-only: force the entire bounded capture sequence to fail so
-        # root_identity remains nil. Production cleanup must not late-adopt.
-        Process.put({__MODULE__, :test_identity_capture_failures}, 0)
-        {:error, :root_identity_capture_failed}
-
-      _ ->
-        do_capture_root_identity_with_retry(path, attempts_left)
-    end
-  end
-
-  defp do_capture_root_identity_with_retry(_path, attempts_left) when attempts_left <= 0 do
-    # Exhausted bounded retries: never later capture whatever occupies the path.
-    {:error, :root_identity_capture_failed}
-  end
-
-  defp do_capture_root_identity_with_retry(path, attempts_left) do
-    case capture_root_identity(path) do
-      {:ok, identity} ->
-        {:ok, identity}
-
-      {:error, :stat_failed} when attempts_left > 1 ->
-        Process.sleep(1)
-        do_capture_root_identity_with_retry(path, attempts_left - 1)
-
-      {:error, :stat_failed} ->
-        {:error, :root_identity_capture_failed}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp capture_root_identity(path) do
-    case File.lstat(path, time: :posix) do
-      {:ok, %File.Stat{type: :directory, major_device: device, inode: inode}}
-      when is_integer(device) and device >= 0 and is_integer(inode) and inode >= 0 ->
-        {:ok, %{path: path, type: :directory, device: device, inode: inode}}
-
-      {:ok, %File.Stat{type: :symlink}} ->
-        {:error, :symlink_rejected}
-
-      {:ok, %File.Stat{}} ->
-        {:error, :not_a_directory}
-
-      {:error, _} ->
-        {:error, :stat_failed}
-    end
-  end
-
-  defp attempt_cleanup(state) do
+  defp attempt_cleanup(state, opts \\ []) do
     case Process.get({__MODULE__, :test_cleanup_failures}) do
       n when is_integer(n) and n > 0 ->
         # Test-only seam: force a bounded number of cleanup failures, then real cleanup.
@@ -1280,20 +1344,38 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
         {:error, :cleanup_forced_failure}
 
       _ ->
-        do_attempt_cleanup(state)
+        do_attempt_cleanup(state, opts)
     end
   end
 
-  defp do_attempt_cleanup(%{owned: true, root_path: path, root_identity: identity})
-       when is_binary(path) and is_map(identity) do
-    cleanup_owned_root(path, identity)
+  defp do_attempt_cleanup(
+         %{
+           owned: true,
+           root_path: path,
+           root_identity: %{path: path} = identity
+         },
+         opts
+       )
+       when is_binary(path) do
+    before_remove = fn ->
+      case Process.get({__MODULE__, :test_cleanup_fail_after_identity}) do
+        n when is_integer(n) and n > 0 ->
+          Process.put({__MODULE__, :test_cleanup_fail_after_identity}, n - 1)
+          {:error, :cleanup_forced_after_identity}
+
+        _ ->
+          :ok
+      end
+    end
+
+    OwnedTree.remove(identity, Keyword.put(opts, :before_remove, before_remove))
   rescue
     _ -> {:error, :cleanup_failed}
   catch
     _, _ -> {:error, :cleanup_failed}
   end
 
-  defp do_attempt_cleanup(%{owned: true, root_path: path, root_identity: nil})
+  defp do_attempt_cleanup(%{owned: true, root_path: path, root_identity: nil}, _opts)
        when is_binary(path) do
     # Fail-closed: never late-adopt whatever currently occupies the path.
     # With root_identity=nil, cleanup may only prove absence; an existing path
@@ -1309,112 +1391,9 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
     _, _ -> {:error, :cleanup_failed}
   end
 
-  defp do_attempt_cleanup(_state), do: :ok
+  defp do_attempt_cleanup(%{owned: true}, _opts), do: {:error, :cleanup_identity_mismatch}
 
-  defp cleanup_owned_root(path, %{path: path, type: :directory, device: device, inode: inode}) do
-    case File.lstat(path, time: :posix) do
-      {:error, :enoent} ->
-        :ok
-
-      {:ok, %File.Stat{type: :directory, major_device: ^device, inode: ^inode}} ->
-        # Identity matched. Never fall back to path-recursive rm_rf: a same-uid
-        # replacement race between identity check and recursive delete could
-        # remove a different tree. Unlink entries without following; on any
-        # failure return a retryable error and retain authority.
-        case Process.get({__MODULE__, :test_cleanup_fail_after_identity}) do
-          n when is_integer(n) and n > 0 ->
-            Process.put({__MODULE__, :test_cleanup_fail_after_identity}, n - 1)
-            {:error, :cleanup_forced_after_identity}
-
-          _ ->
-            with :ok <- delete_dir_contents(path),
-                 :ok <- prove_absence(path) do
-              :ok
-            else
-              {:error, reason} -> {:error, reason}
-            end
-        end
-
-      {:ok, %File.Stat{}} ->
-        {:error, :cleanup_identity_mismatch}
-
-      {:error, _} ->
-        {:error, :cleanup_stat_failed}
-    end
-  end
-
-  defp cleanup_owned_root(_path, _identity), do: {:error, :cleanup_identity_mismatch}
-
-  defp delete_dir_contents(path) do
-    case File.ls(path) do
-      {:ok, names} ->
-        Enum.reduce_while(names, :ok, fn name, :ok ->
-          child = Path.join(path, name)
-
-          case delete_entry(child) do
-            :ok -> {:cont, :ok}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
-        end)
-        |> case do
-          :ok ->
-            case File.rmdir(path) do
-              :ok -> :ok
-              {:error, :enoent} -> :ok
-              {:error, _} -> {:error, :cleanup_rmdir_failed}
-            end
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:error, :enoent} ->
-        :ok
-
-      {:error, _} ->
-        {:error, :cleanup_list_failed}
-    end
-  end
-
-  defp delete_entry(path) do
-    case File.lstat(path, time: :posix) do
-      {:ok, %File.Stat{type: :directory}} ->
-        delete_dir_contents(path)
-
-      {:ok, %File.Stat{type: :regular}} ->
-        unlink_path(path)
-
-      {:ok, %File.Stat{type: :symlink}} ->
-        # Unlink the symlink inode itself; never follow outside targets.
-        unlink_path(path)
-
-      {:ok, %File.Stat{}} ->
-        # FIFO/socket/device: remove the directory entry without opening it.
-        unlink_path(path)
-
-      {:error, :enoent} ->
-        :ok
-
-      {:error, _} ->
-        {:error, :cleanup_stat_failed}
-    end
-  end
-
-  defp unlink_path(path) do
-    case File.rm(path) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
-      {:error, _} -> {:error, :cleanup_rm_failed}
-    end
-  end
-
-  defp prove_absence(path) do
-    case File.lstat(path) do
-      {:error, :enoent} -> :ok
-      {:ok, _} -> {:error, :cleanup_path_remains}
-      {:error, _} -> {:error, :cleanup_status_unknown}
-    end
-  end
+  defp do_attempt_cleanup(_state, _opts), do: :ok
 
   defp clear_ownership(state) do
     %{
@@ -1428,7 +1407,9 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
         plan_fingerprint: nil,
         owned: false,
         token: nil,
-        cleanup_retry_ms: @cleanup_retry_initial_ms
+        cleanup_retry_ms: @cleanup_retry_initial_ms,
+        cleanup_retry_count: 0,
+        cleanup_dormant: false
     }
   end
 
@@ -2048,6 +2029,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
   defp redact_state(state) when is_map(state) do
     %{
       status: Map.get(state, :status),
+      supervisor_pid: if(is_pid(Map.get(state, :supervisor_pid)), do: :redacted, else: nil),
       owner_pid: if(is_pid(Map.get(state, :owner_pid)), do: :redacted, else: nil),
       owner_ref: if(is_reference(Map.get(state, :owner_ref)), do: :redacted, else: nil),
       token: if(is_binary(Map.get(state, :token)), do: :redacted, else: nil),
@@ -2062,6 +2044,9 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
         if(is_binary(Map.get(state, :plan_fingerprint)), do: :redacted, else: nil),
       owned: Map.get(state, :owned),
       cleanup_retry_ms: Map.get(state, :cleanup_retry_ms),
+      cleanup_retry_count: Map.get(state, :cleanup_retry_count),
+      cleanup_retry_limit: Map.get(state, :cleanup_retry_limit),
+      cleanup_dormant: Map.get(state, :cleanup_dormant),
       cleanup_timer: if(is_reference(Map.get(state, :cleanup_timer)), do: :redacted, else: nil),
       test_verify_hook:
         if(is_function(Map.get(state, :test_verify_hook)), do: :redacted, else: nil)
@@ -2072,6 +2057,14 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
 
   defp redact_status_field(status, key) do
     if Map.has_key?(status, key), do: Map.put(status, key, :redacted), else: status
+  end
+
+  defp materializer_supervisor_pid do
+    case Process.get(:"$ancestors") do
+      [pid | _rest] when is_pid(pid) -> pid
+      [name | _rest] when is_atom(name) -> Process.whereis(name)
+      _other -> nil
+    end
   end
 
   defp has_control_char?(value) when is_binary(value), do: has_control_char_bytes?(value)

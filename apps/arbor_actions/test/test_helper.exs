@@ -22,7 +22,10 @@ case Supervisor.terminate_child(
         Arbor.Actions.Supervisor,
         {Arbor.Actions.Coding.WorkspaceLeaseRegistry,
          [
-           linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
+           linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer,
+           # Never hydrate the application-owned registry from a durable journal
+           # under tests (production store is disabled in config/test.exs).
+           retention_journal: :disabled
          ]}
       )
 
@@ -32,7 +35,8 @@ case Supervisor.terminate_child(
         Arbor.Actions.Supervisor,
         {Arbor.Actions.Coding.WorkspaceLeaseRegistry,
          [
-           linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
+           linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer,
+           retention_journal: :disabled
          ]}
       )
 

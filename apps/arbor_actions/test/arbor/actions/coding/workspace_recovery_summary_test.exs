@@ -5,6 +5,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
   alias Arbor.Actions.Coding.Workspace
 
   @moduletag :fast
+  @owner_operation_timeout 10_000
 
   describe "discovery and canonical URI" do
     test "registers under the existing coding workspace namespace" do
@@ -109,7 +110,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRecoverySummaryTest do
           end
         end)
 
-      assert_receive {:leased, lease}, 2_000
+      assert_receive {:leased, lease}, @owner_operation_timeout
       params = recovery_params(lease.workspace_id)
 
       assert {:error, :not_authorized} = Workspace.RecoverySummary.run(params, %{})

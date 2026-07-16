@@ -1218,7 +1218,8 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
                branch: "slice1-#{System.unique_integer([:positive])}",
                task_id: task_id,
                principal_id: principal_id,
-               base_ref: base
+               base_ref: base,
+               worktree_base_dir: Path.join(tmp_dir, "worktrees")
              })
 
     context = %{task_id: task_id, principal_id: principal_id, agent_id: principal_id}

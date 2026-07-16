@@ -484,6 +484,7 @@ defmodule Arbor.Actions.MixTest do
              WorkspaceLeaseRegistry.acquire(%{
                repo_path: repo,
                branch: "mix-test-#{System.unique_integer([:positive])}",
+               worktree_base_dir: Path.join(tmp_dir, "worktrees"),
                task_id: task_id,
                principal_id: principal_id,
                base_ref: base

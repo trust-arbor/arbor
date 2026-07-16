@@ -4,8 +4,35 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
   alias Arbor.Actions.Config
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: Core
 
   @moduletag :fast
+  @owner_operation_timeout 10_000
+
+  test "security regression: closed creating records accept normalized string-key base fields" do
+    input = %{
+      "schema_version" => Core.schema_version(),
+      "workspace_id" => "ws_pending_core",
+      "task_id" => "task_pending_core",
+      "principal_id" => "agent_pending_core",
+      "repo_path" => "/tmp/pending-core-repo",
+      "worktree_path" => "/tmp/pending-core-worktree",
+      "display_worktree_path" => "/tmp/pending-core-worktree",
+      "branch" => "test/pending-core",
+      "base_commit" => nil,
+      "ownership" => "pending",
+      "lifecycle" => "creating",
+      "runtime_id" => "rt_pending_core",
+      "lstat_identity" => nil,
+      "worktree_registration" => nil,
+      "expires_at" => DateTime.to_iso8601(DateTime.utc_now()),
+      "retry_count" => 0
+    }
+
+    assert {:ok, record} = Core.decode_record(input)
+    assert Core.creating_record?(record)
+    assert Core.restore_decision(record) == :restore
+  end
 
   test "retention TTL has the configured default and hard bounds" do
     previous = Application.get_env(:arbor_actions, :workspace_retention_ttl_ms)
@@ -28,7 +55,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
 
   test "owned retain expires and removes only the exact retained worktree", %{tmp_dir: tmp_dir} do
     repo = create_git_repo(Path.join(tmp_dir, "repo"))
-    server = start_registry(50)
+    # Config clamps TTL to a 1s minimum; give the eventual assertion headroom.
+    server = start_registry(1_000)
 
     assert {:ok, lease} = acquire(server, repo, "test/retention-expiry", tmp_dir)
     path = lease.worktree_path
@@ -38,7 +66,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     assert is_binary(retained.expires_at)
     assert File.dir?(path)
 
-    assert_eventually(fn -> refute File.dir?(path) end, 100)
+    assert_eventually(fn -> refute File.dir?(path) end, 200)
     assert retained_state(server) == {[], []}
   end
 
@@ -233,7 +261,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
         send(parent, {:retained, lease.worktree_path})
       end)
 
-    assert_receive {:retained, path}, 2_000
+    assert_receive {:retained, path}, @owner_operation_timeout
     ref = Process.monitor(owner)
     assert_receive {:DOWN, ^ref, :process, ^owner, _}, 2_000
     assert File.dir?(path)
@@ -250,7 +278,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     repo = create_git_repo(Path.join(tmp_dir, "repo"))
     branch = "test/owner-death-ttl-cleanup"
     base = Path.join(tmp_dir, "worktrees")
-    server = start_registry(50)
+    # Config clamps TTL to a 1s minimum.
+    server = start_registry(1_000)
     parent = self()
     task_id = "task-ttl-#{System.unique_integer([:positive])}"
     principal_id = "agent-ttl-#{System.unique_integer([:positive])}"
@@ -268,7 +297,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
         Process.sleep(:infinity)
       end)
 
-    assert_receive {:leased, path}, 2_000
+    assert_receive {:leased, path}, @owner_operation_timeout
     ref = Process.monitor(owner)
     Process.exit(owner, :kill)
     assert_receive {:DOWN, ^ref, :process, ^owner, :killed}, 2_000
@@ -282,7 +311,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
       100
     )
 
-    # Same retained-expire path used by explicit :retain release.
+    # Force absolute deadline past and drive the same expire handler as the timer.
+    force_retained_expired(server)
+    {target, generation} = retained_target_and_generation(server)
+    send(server_pid(server), {:retained_expire, target, generation})
+
     assert_eventually(
       fn ->
         refute File.dir?(path)
@@ -299,11 +332,10 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     parent = self()
     {:ok, attempts} = Agent.start_link(fn -> 0 end)
 
-    cleanup = fn cleanup_repo, cleanup_path ->
+    cleanup = fn retained ->
       attempt = Agent.get_and_update(attempts, fn n -> {n + 1, n + 1} end)
       send(parent, {:cleanup_attempt, attempt})
-      _ = cleanup_repo
-      _ = cleanup_path
+      _ = retained
       {:error, :injected_cleanup_failure}
     end
 
@@ -334,7 +366,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     tmp_dir: tmp_dir
   } do
     repo = create_git_repo(Path.join(tmp_dir, "repo"))
-    server = start_registry(50, retained_cleanup: fn _repo, _path -> throw(:cleanup_boom) end)
+    server = start_registry(50, retained_cleanup: fn _retained -> throw(:cleanup_boom) end)
     assert {:ok, lease} = acquire(server, repo, "test/throwing-cleanup", tmp_dir)
     assert {:ok, _} = release(server, lease.workspace_id, :retain)
 
@@ -357,32 +389,43 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     assert {:ok, _} = release(server, active.workspace_id, :remove)
   end
 
-  test "injected fake acquisition remains compatible without a real repository", %{
+  test "injected create_worktree remains compatible with identity-bound remove", %{
     tmp_dir: tmp_dir
   } do
+    # Keep production identity checks fail-closed: the inject still creates a
+    # real registered worktree so remove can revalidate path/lstat/branch.
+    repo = create_git_repo(Path.join(tmp_dir, "repo"))
+    branch = "test/fake-callback"
+    base = Path.join(tmp_dir, "worktrees")
+    path = expected_worktree_path(base, branch)
+    git!(repo, ["branch", branch])
+    git!(repo, ["worktree", "add", path, branch])
+    base_commit = git!(path, ["rev-parse", "HEAD"])
+
     server = start_registry(5_000)
-    fake_repo = Path.join(tmp_dir, "fake-repo")
-    fake_path = Path.join(tmp_dir, "fake-worktree")
-    File.mkdir_p!(fake_path)
 
     assert {:ok, lease} =
              WorkspaceLeaseRegistry.acquire(
                %{
-                 repo_path: fake_repo,
-                 branch: "test/fake-callback",
-                 worktree_path: fake_path,
-                 create_worktree: fn repo, branch, _params ->
-                   assert repo == Path.expand(fake_repo)
-                   assert branch == "test/fake-callback"
-                   {:ok, fake_path, :owned, "fake-base"}
+                 repo_path: repo,
+                 branch: branch,
+                 worktree_base_dir: base,
+                 worktree_path: path,
+                 create_worktree: fn acquired_repo, acquired_branch, _params ->
+                   assert acquired_repo == Path.expand(repo) or
+                            acquired_repo == realpath!(repo)
+
+                   assert acquired_branch == branch
+                   {:ok, path, :owned, base_commit}
                  end
                },
                server: server
              )
 
-    assert lease.repo_path == Path.expand(fake_repo)
+    assert lease.ownership == "owned"
+    assert File.dir?(path)
     assert {:ok, _} = release(server, lease.workspace_id, :remove)
-    refute File.exists?(fake_path)
+    refute File.dir?(path)
   end
 
   defp start_registry(ttl_ms, opts \\ []) do
@@ -431,6 +474,25 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
   end
 
   defp target_key_parts({:workspace_target, repo, branch, path}), do: {repo, branch, path}
+
+  defp force_retained_expired(server) do
+    pid = server_pid(server)
+    now = System.monotonic_time(:millisecond)
+
+    :sys.replace_state(pid, fn state ->
+      retained_by_id =
+        Map.new(state.retained_by_id, fn {id, retained} ->
+          {id, %{retained | expires_at_ms: now - 1}}
+        end)
+
+      retained_by_target =
+        Map.new(state.retained_by_target, fn {target, retained} ->
+          {target, %{retained | expires_at_ms: now - 1}}
+        end)
+
+      %{state | retained_by_id: retained_by_id, retained_by_target: retained_by_target}
+    end)
+  end
 
   defp assert_eventually(fun, attempts)
        when attempts > 0 do

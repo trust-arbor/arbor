@@ -47,10 +47,46 @@ defmodule Arbor.Actions.Git do
   alias Arbor.Common.SafePath
 
   @storage_authority_key {__MODULE__, :storage_authority}
+  @git_deadline_key {__MODULE__, :command_deadline_ms}
+  @default_git_timeout_ms 30_000
+
+  @typedoc false
+  @type worktree_lstat_identity :: %{
+          required(:type) => :directory,
+          required(:major_device) => non_neg_integer(),
+          required(:minor_device) => non_neg_integer(),
+          required(:inode) => non_neg_integer()
+        }
+
+  @typedoc false
+  @type worktree_registration_identity :: %{
+          required(:path) => String.t(),
+          optional(:head) => String.t(),
+          optional(:branch) => String.t(),
+          optional(:detached) => true
+        }
+
+  @typedoc false
+  @type worktree_removal_identity :: %{
+          required(:lstat_identity) => worktree_lstat_identity(),
+          required(:worktree_registration) => worktree_registration_identity()
+        }
 
   # Git command defaults - used by all nested action modules
   @doc false
-  def git_timeout, do: 30_000
+  def git_timeout do
+    case Process.get(@git_deadline_key) do
+      deadline when is_integer(deadline) ->
+        deadline
+        |> Kernel.-(System.monotonic_time(:millisecond))
+        |> max(1)
+        |> min(@default_git_timeout_ms)
+
+      _other ->
+        @default_git_timeout_ms
+    end
+  end
+
   @doc false
   def git_sandbox, do: :basic
 
@@ -135,6 +171,102 @@ defmodule Arbor.Actions.Git do
   end
 
   def execute(_path, _args), do: {:error, :invalid_git_execution}
+
+  # Cleanup authority includes caller-captured filesystem and Git-registration
+  # identity. Carrying both through this final destructive facade closes the
+  # validation-to-Git gap; there is deliberately no unbound removal API.
+  # A malicious same-UID double-swap between path checks remains outside the
+  # guarantees available through portable BEAM filesystem APIs.
+  @doc false
+  @spec remove_worktree(String.t(), String.t(), worktree_removal_identity()) ::
+          :ok | {:error, term()}
+  def remove_worktree(repository_root, worktree_root, expected_identity)
+      when is_binary(repository_root) and is_binary(worktree_root) do
+    with :ok <- validate_worktree_removal_identity(expected_identity) do
+      do_remove_worktree(repository_root, worktree_root, expected_identity)
+    end
+  end
+
+  def remove_worktree(_repository_root, _worktree_root, _expected_identity),
+    do: {:error, :invalid_git_worktree_removal}
+
+  @doc false
+  @spec remove_worktree(
+          String.t(),
+          String.t(),
+          worktree_removal_identity(),
+          pos_integer()
+        ) :: :ok | {:error, term()}
+  def remove_worktree(repository_root, worktree_root, expected_identity, timeout_ms)
+      when is_binary(repository_root) and is_binary(worktree_root) and is_integer(timeout_ms) and
+             timeout_ms > 0 and timeout_ms <= @default_git_timeout_ms do
+    with_command_deadline(timeout_ms, fn ->
+      remove_worktree(repository_root, worktree_root, expected_identity)
+    end)
+  end
+
+  def remove_worktree(_repository_root, _worktree_root, _expected_identity, _timeout_ms),
+    do: {:error, :invalid_git_worktree_removal}
+
+  @doc false
+  @spec worktree_registration(String.t(), String.t()) ::
+          {:ok, worktree_registration_identity() | nil} | {:error, term()}
+  def worktree_registration(repository_root, worktree_root)
+      when is_binary(repository_root) and is_binary(worktree_root) do
+    with {:ok, expected_path} <- canonical_comparison_path(worktree_root),
+         {:ok, registrations} <- worktree_inventory(repository_root) do
+      {:ok, Enum.find(registrations, &(&1.path == expected_path))}
+    end
+  end
+
+  def worktree_registration(_repository_root, _worktree_root),
+    do: {:error, :invalid_git_worktree_lookup}
+
+  @doc false
+  @spec worktree_registration(String.t(), String.t(), pos_integer()) ::
+          {:ok, worktree_registration_identity() | nil} | {:error, term()}
+  def worktree_registration(repository_root, worktree_root, timeout_ms)
+      when is_binary(repository_root) and is_binary(worktree_root) and is_integer(timeout_ms) and
+             timeout_ms > 0 and timeout_ms <= @default_git_timeout_ms do
+    with_command_deadline(timeout_ms, fn ->
+      worktree_registration(repository_root, worktree_root)
+    end)
+  end
+
+  def worktree_registration(_repository_root, _worktree_root, _timeout_ms),
+    do: {:error, :invalid_git_worktree_lookup}
+
+  @doc false
+  @spec worktree_for_branch(String.t(), String.t()) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def worktree_for_branch(repository_root, branch)
+      when is_binary(repository_root) and is_binary(branch) do
+    with :ok <- validate_branch_name(branch),
+         {:ok, registrations} <- worktree_inventory(repository_root) do
+      case Enum.find(registrations, &(&1[:branch] == branch)) do
+        %{path: path} -> {:ok, path}
+        nil -> {:ok, nil}
+      end
+    end
+  end
+
+  def worktree_for_branch(_repository_root, _branch),
+    do: {:error, :invalid_git_worktree_lookup}
+
+  defp do_remove_worktree(repository_root, worktree_root, expected_identity) do
+    with {:ok, canonical_repository} <- authorized_root(repository_root),
+         {:ok, canonical_worktree} <- authorized_root(worktree_root),
+         :ok <- reject_primary_worktree(canonical_repository, canonical_worktree),
+         :ok <-
+           require_worktree_lstat_identity(
+             canonical_worktree,
+             expected_identity.lstat_identity
+           ) do
+      with_storage_authority(canonical_repository, canonical_worktree, fn ->
+        remove_bound_worktree(canonical_repository, canonical_worktree, expected_identity)
+      end)
+    end
+  end
 
   @doc false
   def with_storage_authority(repository_root, worktree_root, fun)
@@ -466,6 +598,300 @@ defmodule Arbor.Actions.Git do
     end
   end
 
+  defp reject_primary_worktree(repository_root, repository_root),
+    do: {:error, :primary_checkout_not_removable}
+
+  defp reject_primary_worktree(_repository_root, _worktree_root), do: :ok
+
+  defp remove_bound_worktree(repository_root, worktree_root, expected_identity) do
+    with {:ok, repository_guard} <-
+           validate_repository_storage(repository_root, storage_roots(repository_root)),
+         {:ok, worktree_guard} <-
+           validate_repository_storage(worktree_root, storage_roots(worktree_root)),
+         :ok <- ensure_shared_common_dir(repository_root, worktree_root),
+         :ok <- reject_configured_helpers(repository_root),
+         :ok <- reject_configured_helpers(worktree_root),
+         :ok <- verify_storage_guard(repository_guard),
+         :ok <- verify_storage_guard(worktree_guard),
+         :ok <-
+           require_worktree_registration_identity(
+             repository_root,
+             worktree_root,
+             expected_identity.worktree_registration
+           ),
+         :ok <-
+           require_worktree_lstat_identity(worktree_root, expected_identity.lstat_identity) do
+      execute_bound_worktree_remove(repository_root, worktree_root)
+    end
+  end
+
+  defp validate_worktree_removal_identity(
+         %{
+           lstat_identity: lstat_identity,
+           worktree_registration: worktree_registration
+         } = identity
+       )
+       when map_size(identity) == 2 do
+    with :ok <- validate_worktree_lstat_identity(lstat_identity),
+         :ok <- validate_worktree_registration_identity(worktree_registration) do
+      :ok
+    end
+  end
+
+  defp validate_worktree_removal_identity(_identity),
+    do: {:error, :invalid_git_worktree_identity}
+
+  defp validate_worktree_lstat_identity(
+         %{
+           type: :directory,
+           major_device: major_device,
+           minor_device: minor_device,
+           inode: inode
+         } = identity
+       )
+       when map_size(identity) == 4 and is_integer(major_device) and major_device >= 0 and
+              is_integer(minor_device) and minor_device >= 0 and is_integer(inode) and inode >= 0,
+       do: :ok
+
+  defp validate_worktree_lstat_identity(_identity),
+    do: {:error, :invalid_git_worktree_identity}
+
+  defp validate_worktree_registration_identity(%{path: path, branch: branch} = registration)
+       when map_size(registration) in [2, 3] and is_binary(path) and path != "" and
+              is_binary(branch) and branch != "" do
+    if Map.has_key?(registration, :detached) do
+      {:error, :invalid_git_worktree_identity}
+    else
+      validate_optional_registration_head(registration)
+    end
+  end
+
+  defp validate_worktree_registration_identity(%{path: path, detached: true} = registration)
+       when map_size(registration) in [2, 3] and is_binary(path) and path != "" do
+    if Map.has_key?(registration, :branch) do
+      {:error, :invalid_git_worktree_identity}
+    else
+      validate_optional_registration_head(registration)
+    end
+  end
+
+  defp validate_worktree_registration_identity(_registration),
+    do: {:error, :invalid_git_worktree_identity}
+
+  defp validate_optional_registration_head(%{head: head})
+       when is_binary(head) and head != "",
+       do: :ok
+
+  defp validate_optional_registration_head(registration) do
+    if Map.has_key?(registration, :head),
+      do: {:error, :invalid_git_worktree_identity},
+      else: :ok
+  end
+
+  defp require_worktree_lstat_identity(worktree_root, expected_identity) do
+    case File.lstat(worktree_root) do
+      {:ok, %File.Stat{} = stat} ->
+        current_identity =
+          Map.take(Map.from_struct(stat), [:type, :major_device, :minor_device, :inode])
+
+        if current_identity == expected_identity,
+          do: :ok,
+          else: {:error, :git_worktree_identity_mismatch}
+
+      _missing_or_invalid ->
+        {:error, :git_worktree_identity_mismatch}
+    end
+  end
+
+  defp ensure_shared_common_dir(repository_root, worktree_root) do
+    with {:ok, common_dir} <- query_repository_path(repository_root, "--git-common-dir"),
+         {:ok, ^common_dir} <- query_repository_path(worktree_root, "--git-common-dir") do
+      :ok
+    else
+      {:ok, _other_common_dir} -> {:error, :unrelated_git_worktree}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp require_worktree_registration_identity(
+         repository_root,
+         worktree_root,
+         expected_registration
+       ) do
+    case execute_without_audit(repository_root, ["worktree", "list", "--porcelain", "-z"]) do
+      {:ok, %{exit_code: 0, stdout: output}} ->
+        with {:ok, registrations} <- parse_worktree_inventory(output),
+             registration when is_map(registration) <-
+               Enum.find(registrations, &(&1.path == worktree_root)),
+             true <- registration_identity_matches?(registration, expected_registration) do
+          :ok
+        else
+          nil -> {:error, :unregistered_git_worktree}
+          false -> {:error, :git_worktree_registration_mismatch}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:ok, result} ->
+        {:error, {:git_worktree_list_failed, result.exit_code, result.stdout}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp registration_identity_matches?(current, expected) do
+    current.path == expected.path and registration_state(current) == registration_state(expected)
+  end
+
+  defp registration_state(%{branch: branch}) when is_binary(branch), do: {:branch, branch}
+  defp registration_state(%{detached: true}), do: :detached
+  defp registration_state(_registration), do: :invalid
+
+  defp worktree_inventory(repository_root) do
+    case execute(repository_root, ["worktree", "list", "--porcelain", "-z"]) do
+      {:ok, %{exit_code: 0, stdout: output}} ->
+        parse_worktree_inventory(output)
+
+      {:ok, %{exit_code: code, stdout: output}} ->
+        {:error, {:git_worktree_list_failed, code, output}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp parse_worktree_inventory(output) when is_binary(output) do
+    output
+    |> :binary.split(<<0, 0>>, [:global])
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.reduce_while({:ok, []}, fn record, {:ok, acc} ->
+      case parse_worktree_record(record) do
+        {:ok, registration} -> {:cont, {:ok, [registration | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, registrations} -> {:ok, Enum.reverse(registrations)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp parse_worktree_record(record) do
+    fields = :binary.split(record, <<0>>, [:global])
+
+    with false <- Enum.any?(fields, &(&1 == "")),
+         [path] <- field_values(fields, "worktree "),
+         {:ok, canonical_path} <- canonical_comparison_path(path),
+         [head] <- field_values(fields, "HEAD "),
+         {:ok, state} <- parse_worktree_state(fields),
+         :ok <- validate_worktree_fields(fields) do
+      {:ok, Map.merge(%{path: canonical_path, head: head}, state)}
+    else
+      _ -> {:error, :invalid_git_worktree_inventory}
+    end
+  end
+
+  defp parse_worktree_state(fields) do
+    branches = field_values(fields, "branch refs/heads/")
+    detached_count = Enum.count(fields, &(&1 == "detached"))
+
+    case {branches, detached_count} do
+      {[branch], 0} when branch != "" -> {:ok, %{branch: branch}}
+      {[], 1} -> {:ok, %{detached: true}}
+      _ -> {:error, :invalid_git_worktree_inventory}
+    end
+  end
+
+  defp validate_worktree_fields(fields) do
+    if Enum.all?(fields, &known_worktree_field?/1),
+      do: :ok,
+      else: {:error, :invalid_git_worktree_inventory}
+  end
+
+  defp known_worktree_field?(<<"worktree ", _::binary>>), do: true
+  defp known_worktree_field?(<<"HEAD ", _::binary>>), do: true
+  defp known_worktree_field?(<<"branch refs/heads/", _::binary>>), do: true
+  defp known_worktree_field?("detached"), do: true
+  defp known_worktree_field?("bare"), do: true
+  defp known_worktree_field?("locked"), do: true
+  defp known_worktree_field?(<<"locked ", _::binary>>), do: true
+  defp known_worktree_field?("prunable"), do: true
+  defp known_worktree_field?(<<"prunable ", _::binary>>), do: true
+  defp known_worktree_field?(_field), do: false
+
+  defp field_values(fields, prefix) do
+    Enum.flat_map(fields, fn field ->
+      if String.starts_with?(field, prefix) do
+        [binary_part(field, byte_size(prefix), byte_size(field) - byte_size(prefix))]
+      else
+        []
+      end
+    end)
+  end
+
+  defp canonical_comparison_path(path) when is_binary(path) and path != "" do
+    if String.valid?(path) and not String.contains?(path, <<0>>) do
+      expanded = Path.expand(path)
+
+      case SafePath.resolve_real(expanded) do
+        {:ok, canonical} -> {:ok, canonical}
+        {:error, _} -> canonical_missing_path(expanded)
+      end
+    else
+      {:error, :invalid_git_worktree_path}
+    end
+  end
+
+  defp canonical_comparison_path(_path), do: {:error, :invalid_git_worktree_path}
+
+  defp canonical_missing_path(expanded) do
+    ancestor = nearest_existing_ancestor(expanded)
+
+    case SafePath.resolve_real(ancestor) do
+      {:ok, canonical_ancestor} ->
+        suffix = Path.relative_to(expanded, ancestor)
+
+        {:ok,
+         if(suffix == ".", do: canonical_ancestor, else: Path.join(canonical_ancestor, suffix))}
+
+      {:error, _} ->
+        {:error, :invalid_git_worktree_path}
+    end
+  end
+
+  defp nearest_existing_ancestor(path) do
+    if match?({:ok, _}, File.lstat(path)) do
+      path
+    else
+      parent = Path.dirname(path)
+      if parent == path, do: path, else: nearest_existing_ancestor(parent)
+    end
+  end
+
+  # This is the sole destructive Git escape from the basic sandbox. The argv is
+  # fixed here after both roots, shared storage, config, and identities are bound.
+  defp execute_bound_worktree_remove(repository_root, worktree_root) do
+    env = Map.put(@git_env, "GIT_CEILING_DIRECTORIES", repository_root)
+
+    case Shell.execute_direct(
+           "git",
+           @git_prefix ++ ["worktree", "remove", "--force", worktree_root],
+           cwd: repository_root,
+           timeout: git_timeout(),
+           sandbox: :none,
+           env: env
+         ) do
+      {:ok, %{exit_code: 0}} ->
+        :ok
+
+      {:ok, result} ->
+        {:error, {:git_worktree_remove_failed, result.exit_code, result.stdout}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp execute_without_audit(path, args) do
     env = Map.put(@git_env, "GIT_CEILING_DIRECTORIES", path)
 
@@ -475,6 +901,29 @@ defmodule Arbor.Actions.Git do
       sandbox: git_sandbox(),
       env: env
     )
+  end
+
+  defp with_command_deadline(timeout_ms, fun)
+       when is_integer(timeout_ms) and timeout_ms > 0 and is_function(fun, 0) do
+    requested_deadline = System.monotonic_time(:millisecond) + timeout_ms
+    previous = Process.get(@git_deadline_key)
+
+    deadline =
+      case previous do
+        existing when is_integer(existing) -> min(existing, requested_deadline)
+        _other -> requested_deadline
+      end
+
+    Process.put(@git_deadline_key, deadline)
+
+    try do
+      fun.()
+    after
+      case previous do
+        nil -> Process.delete(@git_deadline_key)
+        existing -> Process.put(@git_deadline_key, existing)
+      end
+    end
   end
 
   defmodule Status do

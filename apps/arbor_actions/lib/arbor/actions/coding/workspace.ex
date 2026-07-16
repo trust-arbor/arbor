@@ -22,6 +22,8 @@ defmodule Arbor.Actions.Coding.Workspace do
   alias Arbor.Actions.Coding.Workspace.DeltaRanges
   alias Arbor.Common.SafePath
 
+  @detached_identity_capture_attempts 5
+
   @fingerprint_max_manifest_bytes 16 * 1024 * 1024
   @fingerprint_max_path_bytes 4 * 1024 * 1024
   @fingerprint_max_paths 20_000
@@ -39,6 +41,46 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   def resolve_repo_root(_), do: {:error, "repo_path must be a string"}
+
+  @doc false
+  @spec canonical_path_or_expanded(String.t()) :: String.t()
+  def canonical_path_or_expanded(path) when is_binary(path) do
+    expanded = Path.expand(path)
+
+    case SafePath.resolve_real(expanded) do
+      {:ok, canonical} -> canonical
+      {:error, _} -> canonical_missing_tail(expanded)
+    end
+  end
+
+  defp canonical_missing_tail(expanded) do
+    ancestor = nearest_existing_ancestor(expanded)
+
+    case SafePath.resolve_real(ancestor) do
+      {:ok, canonical_ancestor} ->
+        case Path.relative_to(expanded, ancestor) do
+          "." -> canonical_ancestor
+          suffix -> Path.join(canonical_ancestor, suffix)
+        end
+
+      {:error, _} ->
+        expanded
+    end
+  end
+
+  defp nearest_existing_ancestor(path) do
+    if match?({:ok, _}, File.lstat(path)) do
+      path
+    else
+      parent = Path.dirname(path)
+
+      if parent == path do
+        path
+      else
+        nearest_existing_ancestor(parent)
+      end
+    end
+  end
 
   @doc false
   def resolve_branch_name(params) do
@@ -81,7 +123,7 @@ defmodule Arbor.Actions.Coding.Workspace do
   #
   # Atomicity: if this invocation creates an owned worktree and a later
   # reset/clean step fails, the owned path and git worktree registration are
-  # removed before returning an error.
+  # removed only through the captured filesystem and Git-registration identity.
   def create_worktree(repo_root, branch_name, params) do
     base_dir =
       params
@@ -96,10 +138,28 @@ defmodule Arbor.Actions.Coding.Workspace do
         base_ref = get_param(params, :base_ref) || "HEAD"
         worktree_path = Path.join(base_dir, worktree_dir_name(branch_name))
 
+        require_reused? = get_param(params, :require_reused) == true
+
         with {:ok, base_commit} <- rev_parse(repo_root, base_ref),
              {:ok, path, ownership, reset?} <-
-               ensure_worktree(repo_root, branch_name, worktree_path, base_commit),
-             :ok <- finalize_created_worktree(repo_root, path, ownership, base_commit, reset?) do
+               ensure_worktree(
+                 repo_root,
+                 branch_name,
+                 worktree_path,
+                 base_commit,
+                 require_reused?
+               ),
+             {:ok, owned_identity} <-
+               capture_owned_removal_identity(repo_root, path, branch_name, ownership),
+             :ok <-
+               finalize_created_worktree(
+                 repo_root,
+                 path,
+                 ownership,
+                 base_commit,
+                 reset?,
+                 owned_identity
+               ) do
           {:ok, path, ownership, base_commit}
         end
 
@@ -109,64 +169,187 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   @doc false
+  @spec preflight_worktree_ownership(String.t(), String.t(), keyword() | map()) ::
+          :reused | :may_own
+  def preflight_worktree_ownership(repo_root, branch_name, params)
+      when is_binary(repo_root) and is_binary(branch_name) do
+    base_dir =
+      params
+      |> get_param(:worktree_base_dir)
+      |> case do
+        nil -> System.tmp_dir!()
+        path -> Path.expand(path)
+      end
+
+    worktree_path = Path.join(base_dir, worktree_dir_name(branch_name))
+
+    cond do
+      File.dir?(worktree_path) -> :reused
+      is_binary(worktree_for_branch(repo_root, branch_name)) -> :reused
+      true -> :may_own
+    end
+  rescue
+    _error -> :may_own
+  catch
+    _kind, _reason -> :may_own
+  end
+
+  def preflight_worktree_ownership(_repo_root, _branch_name, _params), do: :may_own
+
+  @doc false
+  @spec worktree_lstat_identity(String.t()) :: {:ok, map()} | {:error, term()}
+  def worktree_lstat_identity(path) when is_binary(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        {:ok, Map.take(Map.from_struct(stat), [:type, :major_device, :minor_device, :inode])}
+
+      {:ok, _stat} ->
+        {:error, :worktree_not_directory}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def worktree_lstat_identity(_path), do: {:error, :invalid_worktree_path}
+
+  @doc false
   @spec create_detached_worktree(String.t(), String.t(), String.t()) ::
           {:ok, String.t()} | {:error, term()}
   def create_detached_worktree(repo_root, worktree_path, commit)
       when is_binary(repo_root) and is_binary(worktree_path) and is_binary(commit) do
-    with :ok <- require_exact_commit_hash(commit),
-         :ok <- require_absent_path(worktree_path),
-         {_output, 0} <-
-           System.cmd(
-             "git",
-             ["-C", repo_root, "worktree", "add", "--detach", worktree_path, commit],
-             stderr_to_stdout: true
-           ),
-         {:ok, actual_commit} <- git(worktree_path, ["rev-parse", "HEAD"]),
-         true <- String.trim(actual_commit) == commit do
-      {:ok, worktree_path}
-    else
-      {_output, code} when is_integer(code) ->
-        remove_detached_worktree(repo_root, worktree_path)
-        {:error, :detached_snapshot_create_failed}
-
-      false ->
-        remove_detached_worktree(repo_root, worktree_path)
-        {:error, :detached_snapshot_commit_mismatch}
-
-      {:error, _reason} = error ->
-        remove_detached_worktree(repo_root, worktree_path)
-        error
+    case create_detached_worktree_with_identity(repo_root, worktree_path, commit) do
+      {:ok, %{path: path}} -> {:ok, path}
+      {:error, _reason} = error -> error
     end
-  rescue
-    _error ->
-      remove_detached_worktree(repo_root, worktree_path)
-      {:error, :detached_snapshot_create_failed}
-  catch
-    :exit, _reason ->
-      remove_detached_worktree(repo_root, worktree_path)
-      {:error, :detached_snapshot_create_failed}
   end
 
   def create_detached_worktree(_repo_root, _worktree_path, _commit),
     do: {:error, :invalid_detached_snapshot}
 
   @doc false
+  @spec create_detached_worktree_with_identity(String.t(), String.t(), String.t()) ::
+          {:ok, %{path: String.t(), removal_identity: map()}} | {:error, term()}
+  def create_detached_worktree_with_identity(repo_root, worktree_path, commit)
+      when is_binary(repo_root) and is_binary(worktree_path) and is_binary(commit) do
+    with :ok <- require_exact_commit_hash(commit),
+         :ok <- require_absent_path(worktree_path) do
+      case add_detached_worktree(repo_root, worktree_path, commit) do
+        {:ok, _output} ->
+          finish_added_detached_worktree(repo_root, worktree_path, commit)
+
+        {:error, reason} ->
+          recover_failed_detached_add(repo_root, worktree_path, reason)
+      end
+    else
+      {:error, _reason} = error -> error
+    end
+  rescue
+    _error -> {:error, :detached_snapshot_create_failed}
+  catch
+    :exit, _reason -> {:error, :detached_snapshot_create_failed}
+  end
+
+  def create_detached_worktree_with_identity(_repo_root, _worktree_path, _commit),
+    do: {:error, :invalid_detached_snapshot}
+
+  defp finish_added_detached_worktree(repo_root, worktree_path, commit) do
+    case capture_detached_identity_with_retry(repo_root, worktree_path) do
+      {:ok, removal_identity} ->
+        run_detached_snapshot_identity_test_hook(worktree_path, removal_identity)
+        finalize_detached_worktree(repo_root, worktree_path, commit, removal_identity)
+
+      {:error, reason} ->
+        retain_unidentified_detached_snapshot(
+          repo_root,
+          worktree_path,
+          :detached_snapshot_create_failed,
+          reason
+        )
+    end
+  end
+
+  defp recover_failed_detached_add(repo_root, worktree_path, create_reason) do
+    case capture_detached_identity_with_retry(repo_root, worktree_path) do
+      {:ok, removal_identity} ->
+        run_detached_snapshot_identity_test_hook(worktree_path, removal_identity)
+        detached_snapshot_failure(repo_root, worktree_path, removal_identity, create_reason)
+
+      {:error, identity_reason} ->
+        retain_unidentified_detached_snapshot(
+          repo_root,
+          worktree_path,
+          create_reason,
+          identity_reason
+        )
+    end
+  end
+
+  defp retain_unidentified_detached_snapshot(
+         repo_root,
+         worktree_path,
+         create_reason,
+         identity_reason
+       ) do
+    case detached_worktree_absent?(repo_root, worktree_path) do
+      {:ok, :absent} ->
+        {:error, create_reason}
+
+      {:ok, :present} ->
+        {:error,
+         {:detached_snapshot_cleanup_identity_unavailable, create_reason, identity_reason}}
+
+      {:error, absence_reason} ->
+        {:error,
+         {:detached_snapshot_cleanup_identity_unavailable, create_reason,
+          {identity_reason, absence_reason}}}
+    end
+  end
+
+  defp capture_detached_identity_with_retry(
+         repo_root,
+         worktree_path,
+         attempts_left \\ @detached_identity_capture_attempts
+       )
+
+  defp capture_detached_identity_with_retry(_repo_root, _worktree_path, 0),
+    do: {:error, :detached_snapshot_identity_unavailable}
+
+  defp capture_detached_identity_with_retry(repo_root, worktree_path, attempts_left) do
+    result =
+      case Process.get({__MODULE__, :test_force_detached_identity_capture_failure}) do
+        true -> {:error, :forced_identity_capture_failure}
+        _other -> capture_worktree_removal_identity(repo_root, worktree_path)
+      end
+
+    case result do
+      {:ok, identity} ->
+        {:ok, identity}
+
+      {:error, _reason} when attempts_left > 1 ->
+        Process.sleep(1)
+        capture_detached_identity_with_retry(repo_root, worktree_path, attempts_left - 1)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp run_detached_snapshot_identity_test_hook(worktree_path, removal_identity) do
+    case Process.delete({__MODULE__, :test_after_detached_snapshot_identity}) do
+      callback when is_function(callback, 2) -> callback.(worktree_path, removal_identity)
+      _other -> :ok
+    end
+  end
+
+  @doc false
   @spec remove_detached_worktree(String.t(), String.t()) :: :ok | {:error, term()}
   def remove_detached_worktree(repo_root, worktree_path)
       when is_binary(repo_root) and is_binary(worktree_path) do
-    _ =
-      System.cmd(
-        "git",
-        ["-C", repo_root, "worktree", "remove", "--force", worktree_path],
-        stderr_to_stdout: true
-      )
-
-    _ = File.rm_rf(worktree_path)
-    _ = System.cmd("git", ["-C", repo_root, "worktree", "prune"], stderr_to_stdout: true)
-
-    case File.lstat(worktree_path) do
-      {:error, :enoent} -> :ok
-      _other -> {:error, :detached_snapshot_cleanup_failed}
+    case detached_worktree_absent?(repo_root, worktree_path) do
+      {:ok, :absent} -> :ok
+      {:ok, :present} -> {:error, :detached_snapshot_cleanup_identity_required}
+      {:error, reason} -> {:error, {:detached_snapshot_cleanup_failed, reason}}
     end
   rescue
     _error -> {:error, :detached_snapshot_cleanup_failed}
@@ -176,6 +359,219 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   def remove_detached_worktree(_repo_root, _worktree_path),
     do: {:error, :invalid_detached_snapshot}
+
+  @doc false
+  @spec remove_detached_worktree(String.t(), String.t(), map() | nil) ::
+          :ok | {:error, term()}
+  def remove_detached_worktree(repo_root, worktree_path, removal_identity)
+      when is_binary(repo_root) and is_binary(worktree_path) do
+    do_remove_detached_worktree(repo_root, worktree_path, removal_identity, nil)
+  rescue
+    _error -> {:error, :detached_snapshot_cleanup_failed}
+  catch
+    :exit, _reason -> {:error, :detached_snapshot_cleanup_failed}
+  end
+
+  def remove_detached_worktree(_repo_root, _worktree_path, _removal_identity),
+    do: {:error, :invalid_detached_snapshot}
+
+  @doc false
+  @spec remove_detached_worktree(String.t(), String.t(), map() | nil, keyword()) ::
+          :ok | {:error, term()}
+  def remove_detached_worktree(repo_root, worktree_path, removal_identity, opts)
+      when is_binary(repo_root) and is_binary(worktree_path) and is_list(opts) do
+    with {:ok, deadline_ms} <- detached_cleanup_deadline(opts) do
+      do_remove_detached_worktree(repo_root, worktree_path, removal_identity, deadline_ms)
+    end
+  rescue
+    _error -> {:error, :detached_snapshot_cleanup_failed}
+  catch
+    :exit, _reason -> {:error, :detached_snapshot_cleanup_failed}
+  end
+
+  def remove_detached_worktree(_repo_root, _worktree_path, _removal_identity, _opts),
+    do: {:error, :invalid_detached_snapshot}
+
+  defp do_remove_detached_worktree(repo_root, worktree_path, removal_identity, deadline_ms) do
+    case File.lstat(worktree_path) do
+      {:error, :enoent} ->
+        confirm_detached_worktree_absent(repo_root, worktree_path, deadline_ms)
+
+      {:ok, _stat} when is_map(removal_identity) ->
+        remove_present_detached_worktree(
+          repo_root,
+          worktree_path,
+          removal_identity,
+          deadline_ms
+        )
+
+      {:ok, _stat} ->
+        {:error, :detached_snapshot_cleanup_identity_required}
+
+      {:error, reason} ->
+        {:error, {:detached_snapshot_cleanup_failed, reason}}
+    end
+  end
+
+  defp add_detached_worktree(repo_root, worktree_path, commit) do
+    result =
+      System.cmd(
+        "git",
+        ["-C", repo_root, "worktree", "add", "--detach", worktree_path, commit],
+        stderr_to_stdout: true
+      )
+
+    case {result, Process.delete({__MODULE__, :test_force_detached_add_failure})} do
+      {{_output, 0}, true} -> {:error, :detached_snapshot_create_failed}
+      {{_output, 0}, _other} -> {:ok, worktree_path}
+      {{_output, _code}, _other} -> {:error, :detached_snapshot_create_failed}
+    end
+  end
+
+  defp finalize_detached_worktree(repo_root, worktree_path, commit, removal_identity) do
+    with %{worktree_registration: %{detached: true}} <- removal_identity,
+         {:ok, actual_commit} <- git(worktree_path, ["rev-parse", "HEAD"]) do
+      if String.trim(actual_commit) == commit do
+        {:ok, %{path: worktree_path, removal_identity: removal_identity}}
+      else
+        detached_snapshot_failure(
+          repo_root,
+          worktree_path,
+          removal_identity,
+          :detached_snapshot_commit_mismatch
+        )
+      end
+    else
+      %{worktree_registration: _registration} ->
+        detached_snapshot_failure(
+          repo_root,
+          worktree_path,
+          removal_identity,
+          :detached_snapshot_registration_mismatch
+        )
+
+      {:error, reason} ->
+        detached_snapshot_failure(repo_root, worktree_path, removal_identity, reason)
+    end
+  end
+
+  defp detached_snapshot_failure(repo_root, worktree_path, removal_identity, reason) do
+    case remove_detached_worktree(repo_root, worktree_path, removal_identity) do
+      :ok ->
+        {:error, reason}
+
+      {:error, cleanup_reason} ->
+        {:error, {:detached_snapshot_cleanup_retained, reason, cleanup_reason, removal_identity}}
+    end
+  end
+
+  defp remove_present_detached_worktree(
+         repo_root,
+         worktree_path,
+         removal_identity,
+         deadline_ms
+       ) do
+    with :ok <-
+           remove_bound_worktree_with_deadline(
+             repo_root,
+             worktree_path,
+             removal_identity,
+             deadline_ms
+           ),
+         {:ok, :absent} <- detached_worktree_absent?(repo_root, worktree_path, deadline_ms) do
+      :ok
+    else
+      {:ok, :present} -> {:error, :detached_snapshot_cleanup_failed}
+      {:error, reason} -> {:error, {:detached_snapshot_cleanup_failed, reason}}
+    end
+  end
+
+  defp confirm_detached_worktree_absent(repo_root, worktree_path, deadline_ms) do
+    case detached_worktree_absent?(repo_root, worktree_path, deadline_ms) do
+      {:ok, :absent} -> :ok
+      {:ok, :present} -> {:error, {:detached_snapshot_cleanup_failed, :registration_present}}
+      {:error, reason} -> {:error, {:detached_snapshot_cleanup_failed, reason}}
+    end
+  end
+
+  defp detached_worktree_absent?(repo_root, worktree_path) do
+    detached_worktree_absent?(repo_root, worktree_path, nil)
+  end
+
+  defp detached_worktree_absent?(repo_root, worktree_path, deadline_ms) do
+    with {:error, :enoent} <- File.lstat(worktree_path),
+         {:ok, registration} <-
+           worktree_registration_with_deadline(repo_root, worktree_path, deadline_ms) do
+      if is_map(registration), do: {:ok, :present}, else: {:ok, :absent}
+    else
+      {:ok, _stat} -> {:ok, :present}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp remove_bound_worktree_with_deadline(repo_root, worktree_path, identity, nil) do
+    Git.remove_worktree(repo_root, worktree_path, identity)
+  end
+
+  defp remove_bound_worktree_with_deadline(repo_root, worktree_path, identity, deadline_ms) do
+    with {:ok, timeout_ms} <- remaining_detached_cleanup_timeout(deadline_ms) do
+      Git.remove_worktree(repo_root, worktree_path, identity, timeout_ms)
+    end
+  end
+
+  defp worktree_registration_with_deadline(repo_root, worktree_path, nil) do
+    Git.worktree_registration(repo_root, worktree_path)
+  end
+
+  defp worktree_registration_with_deadline(repo_root, worktree_path, deadline_ms) do
+    with {:ok, timeout_ms} <- remaining_detached_cleanup_timeout(deadline_ms) do
+      Git.worktree_registration(repo_root, worktree_path, timeout_ms)
+    end
+  end
+
+  defp detached_cleanup_deadline(opts) do
+    if Keyword.keyword?(opts) and Keyword.keys(opts) == [:timeout_ms] do
+      case Keyword.fetch!(opts, :timeout_ms) do
+        timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= 30_000 ->
+          {:ok, System.monotonic_time(:millisecond) + timeout_ms}
+
+        _other ->
+          {:error, :invalid_detached_cleanup_timeout}
+      end
+    else
+      {:error, :invalid_detached_cleanup_options}
+    end
+  end
+
+  defp remaining_detached_cleanup_timeout(deadline_ms) when is_integer(deadline_ms) do
+    remaining = deadline_ms - System.monotonic_time(:millisecond)
+
+    if remaining > 0,
+      do: {:ok, min(remaining, 30_000)},
+      else: {:error, :detached_cleanup_deadline_exceeded}
+  end
+
+  @doc false
+  @spec capture_worktree_removal_identity(String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def capture_worktree_removal_identity(repo_root, worktree_path)
+      when is_binary(repo_root) and is_binary(worktree_path) do
+    with {:ok, lstat_identity} <- worktree_lstat_identity(worktree_path),
+         {:ok, registration} when is_map(registration) <-
+           Git.worktree_registration(repo_root, worktree_path) do
+      {:ok,
+       %{
+         lstat_identity: lstat_identity,
+         worktree_registration: registration
+       }}
+    else
+      {:ok, nil} -> {:error, :worktree_not_registered}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def capture_worktree_removal_identity(_repo_root, _worktree_path),
+    do: {:error, :invalid_worktree_path}
 
   @doc false
   def context_task_id(context) when is_map(context) do
@@ -956,7 +1352,7 @@ defmodule Arbor.Actions.Coding.Workspace do
   # - pre-existing branch, newly added path -> :owned (branch reuse is fine)
   # - new branch + new path -> :owned
   # `reset?` is independent: reused worktrees / attached branches start clean.
-  defp ensure_worktree(repo_root, branch_name, worktree_path, base_commit) do
+  defp ensure_worktree(repo_root, branch_name, worktree_path, base_commit, require_reused?) do
     cond do
       File.dir?(worktree_path) ->
         with {:ok, path} <- ensure_existing_worktree_branch(worktree_path, branch_name) do
@@ -967,14 +1363,22 @@ defmodule Arbor.Actions.Coding.Workspace do
         {:ok, existing_path, :reused, true}
 
       branch_exists?(repo_root, branch_name) ->
-        with {:ok, path} <- add_existing_branch_worktree(repo_root, branch_name, worktree_path) do
-          {:ok, path, :owned, true}
+        if require_reused? do
+          {:error, :reused_worktree_vanished}
+        else
+          with {:ok, path} <- add_existing_branch_worktree(repo_root, branch_name, worktree_path) do
+            {:ok, path, :owned, true}
+          end
         end
 
       true ->
-        with {:ok, path} <-
-               add_new_branch_worktree(repo_root, branch_name, worktree_path, base_commit) do
-          {:ok, path, :owned, false}
+        if require_reused? do
+          {:error, :reused_worktree_vanished}
+        else
+          with {:ok, path} <-
+                 add_new_branch_worktree(repo_root, branch_name, worktree_path, base_commit) do
+            {:ok, path, :owned, false}
+          end
         end
     end
   end
@@ -997,28 +1401,10 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   defp worktree_for_branch(repo_root, branch_name) do
-    with {:ok, output} <- git(repo_root, ["worktree", "list", "--porcelain"]) do
-      output
-      |> String.split("\n\n", trim: true)
-      |> Enum.find_value(fn entry ->
-        lines = String.split(entry, "\n", trim: true)
-        path = line_value(lines, "worktree ")
-        branch = line_value(lines, "branch refs/heads/")
-
-        if branch == branch_name, do: path
-      end)
-    else
-      _ -> nil
+    case Git.worktree_for_branch(repo_root, branch_name) do
+      {:ok, path} -> path
+      {:error, _reason} -> nil
     end
-  end
-
-  defp line_value(lines, prefix) do
-    lines
-    |> Enum.find_value(fn line ->
-      if String.starts_with?(line, prefix) do
-        String.replace_prefix(line, prefix, "")
-      end
-    end)
   end
 
   defp branch_exists?(repo_root, branch_name) do
@@ -1052,19 +1438,46 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   # After ensure_worktree, apply reset/clean. If this invocation owns the path
   # and finalization fails, remove path + git registration before returning.
-  defp finalize_created_worktree(repo_root, path, ownership, base_commit, reset?) do
+  defp finalize_created_worktree(repo_root, path, ownership, base_commit, reset?, owned_identity) do
     case maybe_reset_reused_worktree(path, base_commit, reset?) do
       :ok ->
         :ok
 
-      {:error, _reason} = err ->
-        if ownership == :owned do
-          remove_owned_worktree(repo_root, path)
-        end
+      {:error, reset_reason} = err ->
+        if ownership == :owned and is_map(owned_identity) do
+          case remove_owned_worktree(repo_root, path, owned_identity) do
+            :ok ->
+              err
 
-        err
+            {:error, cleanup_reason} ->
+              {:error, {:worktree_finalize_cleanup_failed, reset_reason, cleanup_reason}}
+          end
+        else
+          if ownership == :owned do
+            {:error, {:worktree_finalize_identity_unavailable, reset_reason}}
+          else
+            err
+          end
+        end
     end
   end
+
+  defp capture_owned_removal_identity(_repo_root, _path, _branch_name, :reused),
+    do: {:ok, nil}
+
+  defp capture_owned_removal_identity(repo_root, path, branch_name, :owned) do
+    with {:ok, removal_identity} <- capture_worktree_removal_identity(repo_root, path),
+         %{branch: ^branch_name} <- removal_identity.worktree_registration do
+      {:ok, removal_identity}
+    else
+      %{branch: _other} -> {:error, :worktree_registration_mismatch}
+      %{detached: true} -> {:error, :worktree_registration_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp capture_owned_removal_identity(_repo_root, _path, _branch_name, _ownership),
+    do: {:error, :invalid_worktree_ownership}
 
   defp maybe_reset_reused_worktree(_worktree_path, _base_commit, false), do: :ok
 
@@ -1078,29 +1491,17 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   # Destructive cleanup for owned worktrees created by this invocation only.
-  defp remove_owned_worktree(repo_root, worktree_path)
-       when is_binary(repo_root) and is_binary(worktree_path) do
-    if File.dir?(worktree_path) do
-      case System.cmd(
-             "git",
-             ["-C", repo_root, "worktree", "remove", "--force", worktree_path],
-             stderr_to_stdout: true
-           ) do
-        {_output, 0} ->
-          :ok
-
-        {_output, _code} ->
-          File.rm_rf(worktree_path)
-          _ = System.cmd("git", ["-C", repo_root, "worktree", "prune"], stderr_to_stdout: true)
-          :ok
-      end
-    else
-      :ok
-    end
+  # The caller must provide the identity captured before fallible post-create
+  # work; this helper never rebinds authority to the current path.
+  @doc false
+  @spec remove_owned_worktree(String.t(), String.t(), map()) :: :ok | {:error, term()}
+  def remove_owned_worktree(repo_root, worktree_path, identity)
+      when is_binary(repo_root) and is_binary(worktree_path) and is_map(identity) do
+    Git.remove_worktree(repo_root, worktree_path, identity)
   rescue
-    _ -> :ok
+    error -> {:error, {:cleanup_raised, Exception.message(error)}}
   catch
-    :exit, _ -> :ok
+    kind, reason -> {:error, {:cleanup_thrown, kind, reason}}
   end
 
   defp auth_context_principal_id(context) when is_map(context) do
@@ -1230,6 +1631,7 @@ defmodule Arbor.Actions.Coding.Workspace do
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(%{repo_path: repo_path} = params, context) do
       Actions.emit_started(__MODULE__, %{repo_path: repo_path})
+      {task_id, principal_id} = resume_identity(context)
 
       with {:ok, repo_root} <- Workspace.resolve_repo_root(repo_path),
            {:ok, branch_name} <- Workspace.resolve_branch_name(params),
@@ -1240,8 +1642,8 @@ defmodule Arbor.Actions.Coding.Workspace do
                base_ref: get_param(params, :base_ref),
                worktree_base_dir: get_param(params, :worktree_base_dir),
                task: get_param(params, :task),
-               task_id: Workspace.context_task_id(context),
-               principal_id: Workspace.context_principal_id(context)
+               task_id: task_id,
+               principal_id: principal_id
              }) do
         Actions.emit_completed(__MODULE__, %{
           workspace_id: lease.workspace_id,
@@ -1257,6 +1659,19 @@ defmodule Arbor.Actions.Coding.Workspace do
     end
 
     def run(_params, _context), do: {:error, "repo_path is required"}
+
+    defp resume_identity(context) do
+      task_id = Workspace.context_task_id(context)
+      principal_id = Workspace.context_principal_id(context)
+
+      if nonblank_id?(task_id) and nonblank_id?(principal_id) do
+        {task_id, principal_id}
+      else
+        {nil, nil}
+      end
+    end
+
+    defp nonblank_id?(id), do: is_binary(id) and String.trim(id) != ""
 
     defp get_param(map, key) when is_map(map) do
       cond do

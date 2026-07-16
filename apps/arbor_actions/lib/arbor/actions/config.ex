@@ -48,6 +48,89 @@ defmodule Arbor.Actions.Config do
   @spec workspace_retention_max_ttl_ms() :: pos_integer()
   def workspace_retention_max_ttl_ms, do: @workspace_retention_max_ms
 
+  @doc """
+  Absolute directory for the node-restart durable retained-workspace journal.
+
+  Defaults to `$ARBOR_HOME/workspace_retention` (or `~/.arbor/workspace_retention`
+  when `ARBOR_HOME` is unset) — never the repository CWD. Operators may override
+  via `Application.put_env(:arbor_actions, :workspace_retention_journal_path, path)`.
+  Configured paths and `ARBOR_HOME` must be absolute; relative values raise
+  rather than being silently resolved against the process working directory.
+  Tests inject a private temp path through the durable store's `:path` start option
+  and must not share the production home journal.
+  """
+  @spec workspace_retention_journal_path() :: String.t()
+  def workspace_retention_journal_path do
+    case Application.fetch_env(:arbor_actions, :workspace_retention_journal_path) do
+      {:ok, path} ->
+        require_absolute_retention_path!(path, :workspace_retention_journal_path)
+
+      :error ->
+        arbor_home =
+          case System.get_env("ARBOR_HOME") do
+            home when is_binary(home) and home != "" ->
+              require_absolute_retention_path!(home, :arbor_home)
+
+            _ ->
+              Path.expand("~/.arbor")
+          end
+
+        Path.join(arbor_home, "workspace_retention")
+    end
+  end
+
+  defp require_absolute_retention_path!(path, source)
+       when is_binary(path) and path != "" do
+    if Path.type(path) == :absolute do
+      Path.expand(path)
+    else
+      raise ArgumentError,
+            "#{source} must be an absolute path; relative paths must not depend on CWD"
+    end
+  end
+
+  defp require_absolute_retention_path!(_path, source) do
+    raise ArgumentError, "#{source} must be a non-empty absolute path"
+  end
+
+  @doc """
+  Whether the application-owned retained-workspace durable journal is enabled.
+
+  Production/default is **on** (node-restart durability). `config/test.exs`
+  explicitly disables it so the application supervisor never opens
+  `~/.arbor/workspace_retention` or hydrates production evidence under
+  `MIX_ENV=test`. Focused restart tests inject private temp-backed stores.
+  """
+  @spec workspace_retention_journal_enabled?() :: boolean()
+  def workspace_retention_journal_enabled? do
+    case Application.get_env(:arbor_actions, :workspace_retention_journal_enabled, true) do
+      false -> false
+      :disabled -> false
+      "false" -> false
+      "0" -> false
+      0 -> false
+      _ -> true
+    end
+  end
+
+  @doc """
+  Journal option for the application-owned `WorkspaceLeaseRegistry` child.
+
+  When enabled, binds the production `WorkspaceRetentionDurableStore` process
+  name. When disabled (tests), returns `:disabled` so no durable hydrate/allocate
+  path touches the home journal.
+  """
+  @spec application_retention_journal() ::
+          :disabled | {module(), module()}
+  def application_retention_journal do
+    if workspace_retention_journal_enabled?() do
+      store = Arbor.Actions.Coding.WorkspaceRetentionDurableStore
+      {store, store}
+    else
+      :disabled
+    end
+  end
+
   @spec get(map(), atom(), any()) :: any()
   def get(map, key, default \\ nil)
 

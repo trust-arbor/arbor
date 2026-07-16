@@ -75,7 +75,10 @@ config :arbor_orchestrator, preprocessor_enabled: false
 # :audit_only logs violations without blocking. Use :strict to block.
 config :arbor_actions,
   default_taint_policy: :audit_only,
-  coding_default_acp_agent: "codex"
+  coding_default_acp_agent: "codex",
+  # Production default: node-restart durable retained-workspace journal is on.
+  # config/test.exs must disable this so MIX_ENV=test never opens ~/.arbor.
+  workspace_retention_journal_enabled: true
 
 # Channel senders for arbor_actions (runtime resolution, no compile-time dep)
 config :arbor_actions, :channel_senders, %{

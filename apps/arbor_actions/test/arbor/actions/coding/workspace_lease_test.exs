@@ -4,9 +4,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
   alias Arbor.Actions
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Git
   alias Arbor.Contracts.Security.AuthContext
 
   @moduletag :fast
+  @owner_operation_timeout 10_000
+  @owner_hold_timeout 30_000
 
   describe "discovery and canonical URIs" do
     test "workspace lease actions are discoverable under the coding category" do
@@ -186,6 +189,158 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       assert is_binary(view.fingerprint)
     end
 
+    test "security regression: detached cleanup is idempotent after path and registration absence",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      worktree_path = Path.join(tmp_dir, "detached-worktree")
+      commit = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, ^worktree_path} =
+               Workspace.create_detached_worktree(repo, worktree_path, commit)
+
+      git!(repo, ["worktree", "remove", "--force", worktree_path])
+      assert {:error, :enoent} = File.lstat(worktree_path)
+      refute worktree_registered?(repo, worktree_path)
+
+      assert :ok = Workspace.remove_detached_worktree(repo, worktree_path)
+    end
+
+    test "security regression: newline worktree path cannot hide a surviving registration",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      worktree_path = Path.join(tmp_dir, "detached\nworktree")
+      commit = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, %{path: ^worktree_path}} =
+               Workspace.create_detached_worktree_with_identity(repo, worktree_path, commit)
+
+      File.rm_rf!(worktree_path)
+
+      try do
+        assert {:ok, %{detached: true}} = Git.worktree_registration(repo, worktree_path)
+        assert {:error, :enoent} = File.lstat(worktree_path)
+
+        assert {:error, :detached_snapshot_cleanup_identity_required} =
+                 Workspace.remove_detached_worktree(repo, worktree_path)
+      after
+        _ = System.cmd("git", ["-C", repo, "worktree", "prune", "--expire", "now"])
+      end
+    end
+
+    test "security regression: failed detached finalization returns its cleanup identity", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      worktree_path = Path.join(tmp_dir, "detached-worktree")
+      preserved_path = Path.join(tmp_dir, "detached-worktree-preserved")
+      replacement_marker = Path.join(worktree_path, "replacement-marker")
+      commit = git!(repo, ["rev-parse", "HEAD"])
+      hook_key = {Workspace, :test_after_detached_snapshot_identity}
+
+      Process.put(hook_key, fn ^worktree_path, _identity ->
+        File.rename!(worktree_path, preserved_path)
+        File.mkdir!(worktree_path)
+        File.write!(replacement_marker, "replacement survives\n")
+      end)
+
+      try do
+        assert {:error,
+                {:detached_snapshot_cleanup_retained, _reason, _cleanup_reason, removal_identity}} =
+                 Workspace.create_detached_worktree_with_identity(
+                   repo,
+                   worktree_path,
+                   commit
+                 )
+
+        assert is_map(removal_identity)
+        assert File.read!(replacement_marker) == "replacement survives\n"
+
+        File.rm_rf!(worktree_path)
+        File.rename!(preserved_path, worktree_path)
+        assert :ok = Workspace.remove_detached_worktree(repo, worktree_path, removal_identity)
+      after
+        Process.delete(hook_key)
+        File.rm_rf(worktree_path)
+        File.rm_rf(preserved_path)
+        _ = System.cmd("git", ["-C", repo, "worktree", "prune", "--expire", "now"])
+      end
+    end
+
+    test "security regression: partial failed add recovers and retains its cleanup identity", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      worktree_path = Path.join(tmp_dir, "partial-detached-worktree")
+      preserved_path = Path.join(tmp_dir, "partial-detached-worktree-preserved")
+      commit = git!(repo, ["rev-parse", "HEAD"])
+      add_hook = {Workspace, :test_force_detached_add_failure}
+      identity_hook = {Workspace, :test_after_detached_snapshot_identity}
+
+      Process.put(add_hook, true)
+
+      Process.put(identity_hook, fn ^worktree_path, _identity ->
+        File.rename!(worktree_path, preserved_path)
+        File.mkdir!(worktree_path)
+      end)
+
+      try do
+        assert {:error,
+                {:detached_snapshot_cleanup_retained, :detached_snapshot_create_failed,
+                 _cleanup_reason, removal_identity}} =
+                 Workspace.create_detached_worktree_with_identity(
+                   repo,
+                   worktree_path,
+                   commit
+                 )
+
+        File.rmdir!(worktree_path)
+        File.rename!(preserved_path, worktree_path)
+        assert :ok = Workspace.remove_detached_worktree(repo, worktree_path, removal_identity)
+      after
+        Process.delete(add_hook)
+        Process.delete(identity_hook)
+        File.rm_rf(worktree_path)
+        File.rm_rf(preserved_path)
+        _ = System.cmd("git", ["-C", repo, "worktree", "prune", "--expire", "now"])
+      end
+    end
+
+    test "security regression: identity capture exhaustion retains unidentified snapshot", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      worktree_path = Path.join(tmp_dir, "unidentified-detached-worktree")
+      commit = git!(repo, ["rev-parse", "HEAD"])
+      hook_key = {Workspace, :test_force_detached_identity_capture_failure}
+      Process.put(hook_key, true)
+
+      try do
+        assert {:error,
+                {:detached_snapshot_cleanup_identity_unavailable,
+                 :detached_snapshot_create_failed, _reason}} =
+                 Workspace.create_detached_worktree_with_identity(
+                   repo,
+                   worktree_path,
+                   commit
+                 )
+
+        assert File.dir?(worktree_path)
+
+        assert {:error, :detached_snapshot_cleanup_identity_required} =
+                 Workspace.remove_detached_worktree(repo, worktree_path)
+      after
+        Process.delete(hook_key)
+
+        case Workspace.capture_worktree_removal_identity(repo, worktree_path) do
+          {:ok, identity} ->
+            _ = Workspace.remove_detached_worktree(repo, worktree_path, identity)
+
+          {:error, _reason} ->
+            _ = System.cmd("git", ["-C", repo, "worktree", "remove", "--force", worktree_path])
+        end
+      end
+    end
+
     test "retain disarms cleanup, preserves worktree, and is idempotent", %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       branch = "test/workspace-retain"
@@ -276,6 +431,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       worktree_path = expected_worktree_path(worktree_base, branch)
       git!(repo, ["branch", branch])
       git!(repo, ["worktree", "add", worktree_path, branch])
+      canonical_worktree_path = git!(worktree_path, ["rev-parse", "--show-toplevel"])
       # Commit a tracked marker so acquire's reset/clean does not erase evidence
       # that the path itself must survive an explicit remove of a reused lease.
       File.write!(Path.join(worktree_path, "preexisting.txt"), "keep\n")
@@ -293,7 +449,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                )
 
       assert lease.ownership == "reused"
-      assert lease.worktree_path == worktree_path
+      assert lease.worktree_path == canonical_worktree_path
 
       assert {:ok, removed} =
                Workspace.Release.run(
@@ -302,10 +458,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                )
 
       assert removed.status == "removed"
-      assert File.dir?(worktree_path)
-      assert worktree_registered?(repo, worktree_path)
-      assert git!(worktree_path, ["rev-parse", "--is-inside-work-tree"]) == "true"
-      assert git!(worktree_path, ["branch", "--show-current"]) == branch
+      assert File.dir?(canonical_worktree_path)
+      assert worktree_registered?(repo, canonical_worktree_path)
+      assert git!(canonical_worktree_path, ["rev-parse", "--is-inside-work-tree"]) == "true"
+      assert git!(canonical_worktree_path, ["branch", "--show-current"]) == branch
     end
 
     test "inspect and release are scoped to the lease owner", %{tmp_dir: tmp_dir} do
@@ -330,11 +486,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           receive do
             :hold -> :ok
           after
-            5_000 -> :ok
+            @owner_hold_timeout -> :ok
           end
         end)
 
-      assert_receive {:leased, lease}, 2_000
+      assert_receive {:leased, lease}, @owner_operation_timeout
 
       # Different process without matching task+principal cannot inspect or release.
       assert {:error, :not_authorized} =
@@ -367,11 +523,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           receive do
             :hold -> :ok
           after
-            5_000 -> :ok
+            @owner_hold_timeout -> :ok
           end
         end)
 
-      assert_receive {:task_leased, task_lease}, 2_000
+      assert_receive {:task_leased, task_lease}, @owner_operation_timeout
 
       assert {:ok, inspected} =
                Workspace.Inspect.run(%{workspace_id: task_lease.workspace_id}, %{
@@ -396,6 +552,58 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       # Keep owners alive until assertions complete.
       send(owner, :hold)
       send(resume_owner, :hold)
+    end
+
+    test "principal-only action context keeps lease authority process-local", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      principal_id = "agent_owner_only_#{System.unique_integer([:positive])}"
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/workspace-principal-only-context",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{agent_id: principal_id}
+               )
+
+      assert {:ok, inspected} =
+               Workspace.Inspect.run(
+                 %{workspace_id: lease.workspace_id},
+                 %{agent_id: principal_id}
+               )
+
+      assert inspected.workspace_id == lease.workspace_id
+
+      cross_process_result =
+        Task.async(fn ->
+          Workspace.Inspect.run(
+            %{workspace_id: lease.workspace_id},
+            %{agent_id: principal_id}
+          )
+        end)
+        |> Task.await()
+
+      assert {:error, :not_authorized} = cross_process_result
+
+      assert {:ok, removed} =
+               Workspace.Release.run(
+                 %{workspace_id: lease.workspace_id, mode: "remove"},
+                 %{agent_id: principal_id}
+               )
+
+      assert removed.status == "removed"
+
+      assert {:error, :incomplete_task_principal} =
+               WorkspaceLeaseRegistry.acquire(%{
+                 repo_path: repo,
+                 branch: "test/workspace-direct-principal-only",
+                 worktree_base_dir: Path.join(tmp_dir, "direct-worktrees"),
+                 principal_id: principal_id
+               })
     end
 
     test "security regression: task_id alone without principal does not authorize resume", %{
@@ -423,11 +631,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           receive do
             :hold -> :ok
           after
-            5_000 -> :ok
+            @owner_hold_timeout -> :ok
           end
         end)
 
-      assert_receive {:leased, lease}, 2_000
+      assert_receive {:leased, lease}, @owner_operation_timeout
 
       # Matching task_id with missing principal must be denied.
       assert {:error, :not_authorized} =
@@ -484,11 +692,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           receive do
             :hold -> :ok
           after
-            5_000 -> :ok
+            @owner_hold_timeout -> :ok
           end
         end)
 
-      assert_receive {:leased, lease}, 2_000
+      assert_receive {:leased, lease}, @owner_operation_timeout
 
       # Same AuthContext principal + task (production ActionsExecutor shape).
       resume_context = %{auth_context: AuthContext.new(principal_id), task_id: task_id}
@@ -560,7 +768,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:leased, lease}, 2_000
+      assert_receive {:leased, lease}, @owner_operation_timeout
       assert File.dir?(lease.worktree_path)
       assert File.exists?(Path.join(lease.worktree_path, "dirty.txt"))
       assert lease.ownership == "owned"
@@ -658,7 +866,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:leased, lease}, 2_000
+      assert_receive {:leased, lease}, @owner_operation_timeout
       assert Workspace.inspect_worktree(lease.worktree_path, lease.base_commit).dirty
       Process.exit(owner, :kill)
 
@@ -687,17 +895,18 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                })
     end
 
-    test "security regression: reactivated identity-invalid quarantine cannot force-remove and survives another owner death",
+    test "security regression: disabled journal keeps identity-invalid quarantine across reactivation and owner death",
          %{
            tmp_dir: tmp_dir
          } do
       fake_repo = Path.join(tmp_dir, "fake-repo")
       fake_worktree = Path.join(tmp_dir, "fake-worktree")
-      File.mkdir_p!(fake_repo)
-      File.mkdir_p!(fake_worktree)
+      branch = "test/workspace-owner-death-quarantine"
+      create_git_repo(fake_repo)
+      base_commit = git!(fake_repo, ["rev-parse", "HEAD"])
+      git!(fake_repo, ["worktree", "add", "-b", branch, fake_worktree])
       File.write!(Path.join(fake_worktree, "partial.txt"), "recoverable\n")
 
-      branch = "test/workspace-owner-death-quarantine"
       workspace_id = "ws_quarantine_#{System.unique_integer([:positive])}"
       task_id = "task-quarantine-#{System.unique_integer([:positive])}"
       principal_id = "agent-quarantine-#{System.unique_integer([:positive])}"
@@ -708,12 +917,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
         {WorkspaceLeaseRegistry,
          name: server,
          retention_ttl_ms: 50,
+         retention_journal: :disabled,
          owner_death_retry_base_ms: 100,
          linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
       )
 
       create_worktree = fn _repo, _branch, _params ->
-        {:ok, fake_worktree, :owned, String.duplicate("a", 40)}
+        {:ok, fake_worktree, :owned, base_commit}
       end
 
       owner =
@@ -736,7 +946,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:leased, {:ok, lease}}, 2_000
+      assert_receive {:leased, {:ok, lease}}, @owner_operation_timeout
+
+      fresh = Map.fetch!(:sys.get_state(server).leases, workspace_id)
+      refute Map.has_key?(fresh, :retention_marker_active)
+      refute Map.has_key?(fresh, :retention_lstat_identity)
+
+      unregister_worktree_preserving_path(fake_repo, fake_worktree)
       Process.exit(owner, :kill)
 
       assert_eventually(fn ->
@@ -752,9 +968,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       assert quarantined.owner_death_policy == :retention_identity_unavailable
       assert quarantined.task_id == task_id
       assert quarantined.principal_id == principal_id
-      assert quarantined.repo_path == Path.expand(fake_repo)
+      assert quarantined.repo_path == Workspace.canonical_path_or_expanded(fake_repo)
       assert quarantined.branch == branch
-      assert Path.expand(quarantined.worktree_path) == Path.expand(fake_worktree)
+      assert quarantined.worktree_path == lease.worktree_path
       refute Process.alive?(quarantined.owner_pid)
 
       assert {:error, :workspace_in_use} =
@@ -791,7 +1007,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:reactivated, {:ok, reactivated}}, 2_000
+      assert_receive {:reactivated, {:ok, reactivated}}, @owner_operation_timeout
 
       state = :sys.get_state(server)
       active = Map.fetch!(state.leases, workspace_id)
@@ -835,10 +1051,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
          } do
       fake_repo = Path.join(tmp_dir, "retry-fake-repo")
       fake_worktree = Path.join(tmp_dir, "retry-fake-worktree")
-      File.mkdir_p!(fake_repo)
-      File.mkdir_p!(fake_worktree)
-
       branch = "test/workspace-owner-death-retry"
+      create_git_repo(fake_repo)
+      base_commit = git!(fake_repo, ["rev-parse", "HEAD"])
+      git!(fake_repo, ["worktree", "add", "-b", branch, fake_worktree])
+
       workspace_id = "ws_retry_#{System.unique_integer([:positive])}"
       task_id = "task-retry-#{System.unique_integer([:positive])}"
       principal_id = "agent-retry-#{System.unique_integer([:positive])}"
@@ -855,7 +1072,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       )
 
       create_worktree = fn _repo, _branch, _params ->
-        {:ok, fake_worktree, :owned, String.duplicate("a", 40)}
+        {:ok, fake_worktree, :owned, base_commit}
       end
 
       owner =
@@ -878,7 +1095,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:leased, {:ok, _lease}}, 2_000
+      assert_receive {:leased, {:ok, _lease}}, @owner_operation_timeout
+      unregister_worktree_preserving_path(fake_repo, fake_worktree)
       Process.exit(owner, :kill)
 
       assert_eventually(fn ->
@@ -889,8 +1107,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       end)
 
       {:ok, _removed} = File.rm_rf(fake_worktree)
-      create_git_repo(fake_repo)
-      git!(fake_repo, ["worktree", "add", "-b", branch, fake_worktree])
+      git!(fake_repo, ["worktree", "add", fake_worktree, branch])
 
       assert_eventually(fn ->
         state = :sys.get_state(server)
@@ -926,10 +1143,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       fake_repo = Path.join(tmp_dir, "pinned-fake-repo")
       fake_worktree = Path.join(tmp_dir, "pinned-fake-worktree")
       original_copy = fake_worktree <> "-original"
-      create_git_repo(fake_repo)
-      File.mkdir_p!(fake_worktree)
-
       branch = "test/workspace-owner-death-pinned"
+      create_git_repo(fake_repo)
+      base_commit = git!(fake_repo, ["rev-parse", "HEAD"])
+      git!(fake_repo, ["worktree", "add", "-b", branch, fake_worktree])
+
       workspace_id = "ws_pinned_#{System.unique_integer([:positive])}"
       task_id = "task-pinned-#{System.unique_integer([:positive])}"
       principal_id = "agent-pinned-#{System.unique_integer([:positive])}"
@@ -944,7 +1162,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       )
 
       create_worktree = fn _repo, _branch, _params ->
-        {:ok, fake_worktree, :owned, String.duplicate("a", 40)}
+        {:ok, fake_worktree, :owned, base_commit}
       end
 
       owner =
@@ -967,7 +1185,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:leased, {:ok, _lease}}, 2_000
+      assert_receive {:leased, {:ok, _lease}}, @owner_operation_timeout
+      unregister_worktree_preserving_path(fake_repo, fake_worktree)
       Process.exit(owner, :kill)
 
       assert_eventually(fn ->
@@ -977,7 +1196,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       end)
 
       {:ok, _removed} = File.rm_rf(fake_worktree)
-      git!(fake_repo, ["worktree", "add", "-b", branch, fake_worktree])
+      git!(fake_repo, ["worktree", "add", fake_worktree, branch])
 
       recovery_owner =
         spawn(fn ->
@@ -999,7 +1218,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:reactivated, {:ok, _reactivated}}, 2_000
+      assert_receive {:reactivated, {:ok, _reactivated}}, @owner_operation_timeout
 
       active = Map.fetch!(:sys.get_state(server).leases, workspace_id)
       assert is_map(active.owner_death_deletion_identity)
@@ -1028,11 +1247,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
          } do
       fake_repo = Path.join(tmp_dir, "dormant-fake-repo")
       fake_worktree = Path.join(tmp_dir, "dormant-fake-worktree")
-      File.mkdir_p!(fake_repo)
-      File.mkdir_p!(fake_worktree)
+      branch = "test/workspace-owner-death-dormant"
+      create_git_repo(fake_repo)
+      base_commit = git!(fake_repo, ["rev-parse", "HEAD"])
+      git!(fake_repo, ["worktree", "add", "-b", branch, fake_worktree])
       File.write!(Path.join(fake_worktree, "preserve.txt"), "do not delete\n")
 
-      branch = "test/workspace-owner-death-dormant"
       workspace_id = "ws_dormant_#{System.unique_integer([:positive])}"
       task_id = "task-dormant-#{System.unique_integer([:positive])}"
       principal_id = "agent-dormant-#{System.unique_integer([:positive])}"
@@ -1048,7 +1268,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       )
 
       create_worktree = fn _repo, _branch, _params ->
-        {:ok, fake_worktree, :owned, String.duplicate("a", 40)}
+        {:ok, fake_worktree, :owned, base_commit}
       end
 
       owner =
@@ -1071,7 +1291,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:leased, {:ok, _lease}}, 2_000
+      assert_receive {:leased, {:ok, _lease}}, @owner_operation_timeout
+      unregister_worktree_preserving_path(fake_repo, fake_worktree)
       Process.exit(owner, :kill)
 
       assert_eventually(fn ->
@@ -1146,7 +1367,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:leased, lease, head}, 2_000
+      assert_receive {:leased, lease, head}, @owner_operation_timeout
       assert head != lease.base_commit
       assert File.dir?(lease.worktree_path)
 
@@ -1225,7 +1446,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:leased, lease}, 2_000
+      assert_receive {:leased, lease}, @owner_operation_timeout
       assert File.dir?(lease.worktree_path)
       assert lease.ownership == "owned"
       assert git!(lease.worktree_path, ["rev-parse", "HEAD"]) == lease.base_commit
@@ -1275,6 +1496,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       worktree_path = expected_worktree_path(worktree_base, branch)
       git!(repo, ["branch", branch])
       git!(repo, ["worktree", "add", worktree_path, branch])
+      canonical_worktree_path = git!(worktree_path, ["rev-parse", "--show-toplevel"])
       File.write!(Path.join(worktree_path, "preexisting.txt"), "keep\n")
       git!(worktree_path, ["add", "preexisting.txt"])
       git!(worktree_path, ["commit", "-m", "preexisting marker"])
@@ -1299,22 +1521,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           receive do
             :never -> :ok
           after
-            5_000 -> :ok
+            @owner_hold_timeout -> :ok
           end
         end)
 
-      assert_receive {:leased, lease}, 2_000
+      assert_receive {:leased, lease}, @owner_operation_timeout
       assert lease.ownership == "reused"
-      assert lease.worktree_path == worktree_path
+      assert lease.worktree_path == canonical_worktree_path
 
       Process.exit(owner, :kill)
       Process.sleep(150)
 
       # Reused path must survive owner death even with dirty uncommitted files.
-      assert File.dir?(worktree_path)
-      assert worktree_registered?(repo, worktree_path)
-      assert git!(worktree_path, ["rev-parse", "--is-inside-work-tree"]) == "true"
-      assert git!(worktree_path, ["branch", "--show-current"]) == branch
+      assert File.dir?(canonical_worktree_path)
+      assert worktree_registered?(repo, canonical_worktree_path)
+      assert git!(canonical_worktree_path, ["rev-parse", "--is-inside-work-tree"]) == "true"
+      assert git!(canonical_worktree_path, ["branch", "--show-current"]) == branch
     end
   end
 
@@ -1489,6 +1711,33 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
       assert {:ok, _} =
                WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, %{server: server})
+    end
+
+    test "security regression: Workspace cleanup refuses a replacement inode", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      repo_root = git!(repo, ["rev-parse", "--show-toplevel"])
+      branch = "test/workspace-cleanup-replacement"
+      worktree_path = Path.join(tmp_dir, Workspace.worktree_dir_name(branch))
+      base_commit = git!(repo_root, ["rev-parse", "HEAD"])
+
+      assert {:ok, ^worktree_path, :owned, ^base_commit} =
+               Workspace.create_worktree(repo_root, branch, %{
+                 worktree_base_dir: tmp_dir,
+                 base_ref: base_commit
+               })
+
+      assert {:ok, identity} = Workspace.worktree_lstat_identity(worktree_path)
+      File.rm_rf!(worktree_path)
+      File.mkdir_p!(worktree_path)
+      File.write!(Path.join(worktree_path, "survivor.txt"), "must-live\n")
+
+      assert {:error, _reason} =
+               Workspace.remove_owned_worktree(repo_root, worktree_path, identity)
+
+      assert File.read!(Path.join(worktree_path, "survivor.txt")) == "must-live\n"
+      assert worktree_registered?(repo_root, worktree_path)
     end
 
     test "security regression: invalid ownership never deletes a pre-existing worktree", %{
@@ -2039,11 +2288,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           receive do
             :hold -> :ok
           after
-            5_000 -> :ok
+            @owner_hold_timeout -> :ok
           end
         end)
 
-      assert_receive {:leased, lease}, 2_000
+      assert_receive {:leased, lease}, @owner_operation_timeout
 
       assert {:error, :not_authorized} =
                Workspace.CommittedChange.run(%{workspace_id: lease.workspace_id}, %{})
@@ -2114,6 +2363,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
   defp expected_worktree_path(base_dir, branch_name) do
     Path.join(base_dir, Workspace.worktree_dir_name(branch_name))
+  end
+
+  defp unregister_worktree_preserving_path(repo_root, worktree_path) do
+    parked_path = worktree_path <> "-unregistered"
+    File.rename!(worktree_path, parked_path)
+    git!(repo_root, ["worktree", "prune", "--expire", "now"])
+    File.rename!(parked_path, worktree_path)
+    assert {:ok, nil} = Git.worktree_registration(repo_root, worktree_path)
   end
 
   defp worktree_registered?(repo_root, worktree_path) do

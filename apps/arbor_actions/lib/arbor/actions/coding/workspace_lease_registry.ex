@@ -40,8 +40,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   both the invoking process and the parent workspace owner. Normal release,
   validation-process death, workspace-owner death, and workspace removal all
   clean those resources. Dependency trees are materialized through the public
-  `Arbor.Shell` Linux baseline lease API; the opaque lease stays private to the
-  registry's validation_resource record and is never projected in public views.
+  `Arbor.Shell` Linux baseline lease API. A separately supervised per-resource
+  owner holds every Actions cleanup identity and acquires the process-bound
+  opaque Shell lease itself. It monitors this registry and cleans the complete
+  child resource if the registry restarts; neither the opaque lease nor the
+  owner PID is projected in public views.
 
   ## Review snapshots
 
@@ -57,9 +60,57 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   All client-facing maps are JSON-clean: no PIDs, monitor refs, functions, or
   rich structs.
 
-  Retained records are process state and are intentionally not deletion
-  authority across a registry restart. A restarted registry may leak retained
-  worktrees; durable restart markers and reconciliation are a follow-up.
+  ## Restart durability
+
+  With a ready retention journal, every newly-created owned worktree writes a
+  versioned JSON-clean lifecycle `"active"` marker through the public
+  `Arbor.Persistence` facade before the live lease is exposed. Owned retained
+  worktrees rewrite that same marker before live lease authority is dropped.
+  An explicitly disabled journal is the rollback/runtime-only mode: fresh
+  owned leases skip initial durable identity capture and use the legacy
+  release-time identity capture and owner-death quarantine behavior.
+  Markers are evidence only: reactivation and TTL cleanup revalidate canonical
+  worktree path, lstat identity, registered worktree path, branch, and
+  nonblank exact `task_id` + `principal_id` with the same identity checks as
+  process-local retention. Git HEAD may be retained as evidence but is **not**
+  part of authorization/recovery/cleanup identity — a resumed worker may commit.
+
+  Crash consistency: reactivation **never** deletes the durable marker. Before
+  converting retained state to a live lease, the registry atomically refreshes
+  the same workspace-keyed marker as lifecycle `"active"` bound to the current
+  BEAM runtime id with a fresh bounded expiry; if that persistence fails,
+  retained state is left unchanged and reactivation is denied. Durable evidence
+  remains throughout active ownership. The marker is deleted only after
+  explicit/TTL cleanup has positively proved both path and Git registration
+  absent. Marker/workspace keys stay stable across reactivation and later
+  retain/remove transitions.
+
+  Lifecycle / runtime id:
+  * `"retained"` markers hydrate with TTL cleanup timers.
+  * `"active"` markers for the **current** BEAM runtime id hydrate as
+    orphaned-active (no TTL) so a registry-only restart cannot arm deletion
+    while a live owner may still hold the worktree; exact task+principal
+    reacquire rebinds them. Safety deliberately wins over liveness here: there
+    is no TTL because the old owner process may still be alive in this BEAM.
+    Without exact reactivation or release, operator/manual recovery is required.
+    If both the canonical path and its Git registration are positively absent,
+    hydration instead settles the completed removal by deleting the marker.
+  * `"active"` markers from a **prior** BEAM incarnation may become retained
+    because that incarnation is gone. Conversion persists one fresh bounded
+    retention TTL; later retained restarts consume its remaining time.
+  * Operational paths always use the canonical identity-checked
+    `worktree_path`; `display_worktree_path` is never used for cleanup or
+    identity.
+
+  Retained worktree cleanup never falls back to raw `File.rm_rf` and never
+  targets the primary checkout (`repo_path == worktree_path`). Automatic cleanup pre-reserves a
+  durable attempt count before every delete attempt; reservation failure
+  poisons admission and keeps dormant evidence without performing the attempt.
+
+  Production starts a node-restart file backend
+  (`WorkspaceRetentionDurableStore`). Tests inject a named backend via
+  `:retention_journal` (`{store_name, backend}` or `:disabled`) and may inject
+  `:retention_runtime_id` for hermetic incarnation tests.
   """
 
   use GenServer
@@ -67,9 +118,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   require Logger
 
   alias Arbor.Actions.Config
+  alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: RetentionJournal
   alias Arbor.Actions.Git
   alias Arbor.Common.SafePath
+  alias Arbor.Persistence
 
   @type ownership :: :owned | :reused
   @type release_mode :: :retain | :remove
@@ -81,8 +135,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   @max_owner_death_retry_limit 10
   @default_owner_death_retry_base_ms 1_000
   @max_owner_death_retry_base_ms 60_000
+  # Automatic retained cleanup / marker-delete retries before dormant evidence.
+  @default_retained_cleanup_retry_limit 8
+  @validation_owner_cleanup_retry_initial_ms 50
+  @validation_owner_cleanup_retry_max_ms 2_000
+  @default_validation_owner_cleanup_retry_limit 8
+  @max_validation_owner_cleanup_retry_limit 32
 
   @type lease :: %{
+          optional(:retention_marker_active) => boolean(),
+          optional(:retention_repo_path) => String.t(),
+          optional(:retention_worktree_path) => String.t(),
+          optional(:retention_lstat_identity) => map(),
+          optional(:retention_worktree_registration) => map(),
           workspace_id: String.t(),
           owner_pid: pid(),
           owner_ref: reference(),
@@ -108,6 +173,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           branch: String.t(),
           base_commit: String.t(),
           ownership: :owned,
+          # Hot lifecycle: :retained | :active_orphaned (same-BEAM active marker).
+          lifecycle: :retained | :active_orphaned,
+          runtime_id: String.t(),
           target: tuple(),
           lstat_identity: map(),
           worktree_registration: map(),
@@ -116,7 +184,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           expires_at: DateTime.t(),
           expires_at_ms: integer(),
           retry_count: non_neg_integer(),
-          cleanup_failure: term() | nil
+          cleanup_failure: term() | nil,
+          dormant: boolean()
         }
 
   @type validation_resource :: %{
@@ -127,8 +196,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           repo_path: String.t(),
           candidate_path: String.t(),
           candidate_commit: String.t() | nil,
+          candidate_cleanup_identity: map() | nil,
           base_commit: String.t(),
           root_path: String.t(),
+          root_cleanup_identity: map() | nil,
           # Private staging parent (0700). Exact stage_path child is created
           # exclusively by SecurityRegression.Shell.stage_sources/2.
           stage_parent_path: String.t(),
@@ -146,14 +217,23 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           base_build_path: String.t(),
           base_deps_path: String.t() | nil,
           base_worktree_path: String.t(),
+          base_cleanup_identity: map() | nil,
           base_runner_path: String.t(),
           base_result_path: String.t(),
-          # Opaque Shell dependency-baseline lease. Process-private only —
-          # never projected through validation_resource_view/1.
-          dependency_lease: term() | nil,
+          resource_owner_pid: pid() | nil,
+          resource_owner_ref: reference() | nil,
+          resource_owner_cleanup_retry_ms: pos_integer(),
+          resource_owner_cleanup_retry_count: non_neg_integer(),
+          resource_owner_cleanup_dormant: boolean(),
+          # Internal presence marker only. The opaque Shell lease remains in
+          # resource_owner_pid and is never copied into registry/public state.
+          dependency_lease: :resource_owner | :owner_lost | nil,
+          dependency_root_path: String.t() | nil,
           dependency_receipt: map() | nil,
           dependency_verified_copy: boolean() | nil,
-          snapshot_created: boolean()
+          snapshot_created: boolean(),
+          setup_status: :active | :setup_failed,
+          cleanup_failures_remaining: non_neg_integer()
         }
 
   @registry_name __MODULE__
@@ -356,6 +436,20 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  defp creation_blocker_view(blocker) do
+    %{
+      workspace_id: blocker.workspace_id,
+      repo_path: blocker.repo_path,
+      worktree_path: blocker.worktree_path,
+      branch: blocker.branch,
+      ownership: "pending",
+      lifecycle: "creating",
+      active: false,
+      dormant: true,
+      status: "creating_blocked"
+    }
+  end
+
   @doc false
   @spec review_snapshot_view(map()) :: map()
   def review_snapshot_view(snapshot) when is_map(snapshot) do
@@ -378,27 +472,73 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   @impl true
   def init(opts) do
-    {:ok,
-     %{
-       leases: %{},
-       by_ref: %{},
-       retained_by_id: %{},
-       retained_by_target: %{},
-       retention_ttl_ms: Config.workspace_retention_ttl_ms(server_opts(opts)),
-       retained_cleanup:
-         Keyword.get(server_opts(opts), :retained_cleanup, &remove_owned_worktree/2),
-       owner_death_retry_limit: owner_death_retry_limit(server_opts(opts)),
-       owner_death_retry_base_ms: owner_death_retry_base_ms(server_opts(opts)),
-       validation_resources: %{},
-       validation_by_ref: %{},
-       validation_by_workspace: %{},
-       review_attestations: %{},
-       attestation_by_workspace: %{},
-       attestation_states: %{},
-       review_snapshots: %{},
-       review_snapshots_by_workspace: %{},
-       linux_dependency_baseline_materializer: dependency_baseline_materializer_from_opts(opts)
-     }}
+    server_opts = server_opts(opts)
+
+    state = %{
+      leases: %{},
+      by_ref: %{},
+      retained_by_id: %{},
+      retained_by_target: %{},
+      retention_blockers: %{},
+      retention_blockers_by_target: %{},
+      retention_ttl_ms: Config.workspace_retention_ttl_ms(server_opts),
+      retained_cleanup:
+        Keyword.get(server_opts, :retained_cleanup, &remove_owned_retained_worktree/1),
+      retained_cleanup_retry_limit: retained_cleanup_retry_limit(server_opts),
+      owner_death_retry_limit: owner_death_retry_limit(server_opts),
+      owner_death_retry_base_ms: owner_death_retry_base_ms(server_opts),
+      validation_resources: %{},
+      validation_by_ref: %{},
+      validation_by_resource_owner_ref: %{},
+      validation_by_workspace: %{},
+      validation_owner_cleanup_retry_limit: validation_owner_cleanup_retry_limit(server_opts),
+      validation_resource_supervisor:
+        Keyword.get(
+          server_opts,
+          :validation_resource_supervisor,
+          ValidationResourceOwner.supervisor_name()
+        ),
+      review_attestations: %{},
+      attestation_by_workspace: %{},
+      attestation_states: %{},
+      review_snapshots: %{},
+      review_snapshots_by_workspace: %{},
+      linux_dependency_baseline_materializer: dependency_baseline_materializer_from_opts(opts),
+      retention_journal: journal_config_from_opts(opts),
+      # Stable across registry restarts in this BEAM; new after BEAM restart
+      # (unless tests inject :retention_runtime_id).
+      retention_runtime_id: resolve_retention_runtime_id(server_opts)
+    }
+
+    {:ok, hydrate_retained_from_journal(state)}
+  end
+
+  defp resolve_retention_runtime_id(opts) when is_list(opts) do
+    case Keyword.get(opts, :retention_runtime_id) do
+      id when is_binary(id) and id != "" ->
+        id
+
+      _ ->
+        beam_retention_runtime_id()
+    end
+  end
+
+  defp resolve_retention_runtime_id(_), do: beam_retention_runtime_id()
+
+  # Process dictionary / persistent_term: survives registry GenServer restarts
+  # inside one BEAM incarnation; new OS/BEAM process starts empty.
+  defp beam_retention_runtime_id do
+    key = {__MODULE__, :retention_runtime_id}
+
+    case :persistent_term.get(key, :undefined) do
+      id when is_binary(id) and id != "" ->
+        id
+
+      :undefined ->
+        id = "rt_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+        :persistent_term.put(key, id)
+        id
+    end
   end
 
   defp server_opts(opts) when is_list(opts), do: opts
@@ -424,6 +564,30 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  defp retained_cleanup_retry_limit(opts) do
+    max = RetentionJournal.max_cleanup_retries()
+
+    case Keyword.get(opts, :retained_cleanup_retry_limit) do
+      limit when is_integer(limit) and limit >= 0 and limit <= max ->
+        limit
+
+      _ ->
+        @default_retained_cleanup_retry_limit
+    end
+  end
+
+  defp validation_owner_cleanup_retry_limit(opts) do
+    case Keyword.get(opts, :validation_owner_cleanup_retry_limit) do
+      limit
+      when is_integer(limit) and limit >= 0 and
+             limit <= @max_validation_owner_cleanup_retry_limit ->
+        limit
+
+      _other ->
+        @default_validation_owner_cleanup_retry_limit
+    end
+  end
+
   defp dependency_baseline_materializer_from_opts(opts) when is_list(opts) do
     case Keyword.get(server_opts(opts), :linux_dependency_baseline_materializer) do
       mod when is_atom(mod) and not is_nil(mod) -> mod
@@ -440,7 +604,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:ok, prepared} ->
         case quarantined_acquire(state, prepared) do
           {:ok, lease} ->
-            reactivate_quarantined(lease, prepared, state)
+            case ensure_journal_admits_allocation(state, prepared, :existing_marker) do
+              :ok -> reactivate_quarantined(lease, prepared, state)
+              {:error, reason} -> {:reply, {:error, reason}, state}
+            end
 
           {:error, reason} ->
             {:reply, {:error, reason}, state}
@@ -461,6 +628,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:ok, lease} ->
         {:reply, {:ok, public_view(lease)}, state}
 
+      {:error, :not_found} ->
+        case Map.get(state.retention_blockers, workspace_id) do
+          blocker when is_map(blocker) ->
+            if principal_task_match?(blocker, caller) do
+              {:reply, {:ok, creation_blocker_view(blocker)}, state}
+            else
+              {:reply, {:error, :not_authorized}, state}
+            end
+
+          _ ->
+            {:reply, {:error, :not_found}, state}
+        end
+
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
@@ -471,7 +651,30 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     case Map.fetch(state.leases, workspace_id) do
       :error ->
-        {:reply, {:ok, already_released_view(workspace_id)}, state}
+        case Map.fetch(state.retention_blockers, workspace_id) do
+          {:ok, blocker} ->
+            if principal_task_match?(blocker, caller) do
+              {:reply, {:error, :retention_creation_blocked}, state}
+            else
+              {:reply, {:error, :not_authorized}, state}
+            end
+
+          :error ->
+            case Map.fetch(state.retained_by_id, workspace_id) do
+              {:ok, %{lifecycle: :active_orphaned} = retained} ->
+                if principal_task_match?(retained, caller) do
+                  case release_orphaned_retained(state, retained, mode) do
+                    {:ok, result, state} -> {:reply, {:ok, result}, state}
+                    {:error, reason, state} -> {:reply, {:error, reason}, state}
+                  end
+                else
+                  {:reply, {:error, :not_authorized}, state}
+                end
+
+              _ ->
+                {:reply, {:ok, already_released_view(workspace_id)}, state}
+            end
+        end
 
       {:ok, lease} ->
         if authorized?(lease, caller) do
@@ -756,6 +959,137 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Map.fetch(Map.get(state, :validation_by_resource_owner_ref, %{}), ref) do
+      {:ok, resource_id} ->
+        {:noreply, handle_validation_resource_owner_down(state, resource_id, ref)}
+
+      :error ->
+        handle_validation_or_workspace_owner_down(ref, state)
+    end
+  end
+
+  @impl true
+  def handle_info({:validation_resource_owner_cleanup_retry, resource_id}, state)
+      when is_binary(resource_id) do
+    {:noreply, retry_validation_resource_owner_cleanup(state, resource_id)}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  # -- Internals ------------------------------------------------------
+
+  defp handle_validation_resource_owner_down(state, resource_id, ref) do
+    state =
+      Map.put(
+        state,
+        :validation_by_resource_owner_ref,
+        state
+        |> Map.get(:validation_by_resource_owner_ref, %{})
+        |> Map.delete(ref)
+      )
+
+    case Map.get(state.validation_resources, resource_id) do
+      nil ->
+        state
+
+      resource ->
+        dependency_lease =
+          if is_nil(Map.get(resource, :dependency_lease)), do: nil, else: :owner_lost
+
+        resource = %{
+          resource
+          | resource_owner_pid: nil,
+            resource_owner_ref: nil,
+            dependency_lease: dependency_lease,
+            resource_owner_cleanup_retry_count: 0,
+            resource_owner_cleanup_dormant: false
+        }
+
+        state = %{
+          state
+          | validation_resources:
+              Map.put(state.validation_resources, resource.resource_id, resource)
+        }
+
+        retry_validation_resource_owner_cleanup(state, resource_id)
+    end
+  end
+
+  defp retry_validation_resource_owner_cleanup(state, resource_id) do
+    case Map.get(state.validation_resources, resource_id) do
+      %{resource_owner_pid: nil} = resource ->
+        case do_release_validation_resource(state, resource) do
+          {{:ok, _result}, next_state} ->
+            next_state
+
+          {{:error, _reason}, next_state} ->
+            schedule_validation_resource_owner_cleanup(next_state, resource_id)
+        end
+
+      _other ->
+        state
+    end
+  end
+
+  defp schedule_validation_resource_owner_cleanup(state, resource_id) do
+    case Map.get(state.validation_resources, resource_id) do
+      nil ->
+        state
+
+      resource ->
+        count = Map.get(resource, :resource_owner_cleanup_retry_count, 0)
+
+        limit =
+          Map.get(
+            state,
+            :validation_owner_cleanup_retry_limit,
+            @default_validation_owner_cleanup_retry_limit
+          )
+
+        if count >= limit do
+          updated = %{
+            resource
+            | resource_owner_cleanup_dormant: true
+          }
+
+          %{
+            state
+            | validation_resources:
+                Map.put(state.validation_resources, resource.resource_id, updated)
+          }
+        else
+          delay =
+            Map.get(
+              resource,
+              :resource_owner_cleanup_retry_ms,
+              @validation_owner_cleanup_retry_initial_ms
+            )
+
+          _ =
+            Process.send_after(
+              self(),
+              {:validation_resource_owner_cleanup_retry, resource.resource_id},
+              delay
+            )
+
+          updated = %{
+            resource
+            | resource_owner_cleanup_retry_ms:
+                min(delay * 2, @validation_owner_cleanup_retry_max_ms),
+              resource_owner_cleanup_retry_count: count + 1,
+              resource_owner_cleanup_dormant: false
+          }
+
+          %{
+            state
+            | validation_resources:
+                Map.put(state.validation_resources, resource.resource_id, updated)
+          }
+        end
+    end
+  end
+
+  defp handle_validation_or_workspace_owner_down(ref, state) do
     case Map.fetch(state.validation_by_ref, ref) do
       {:ok, resource_id} ->
         case Map.get(state.validation_resources, resource_id) do
@@ -776,10 +1110,6 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         handle_workspace_owner_down(ref, state)
     end
   end
-
-  def handle_info(_msg, state), do: {:noreply, state}
-
-  # -- Internals ------------------------------------------------------
 
   defp call(message, opts) do
     server = Keyword.get(opts, :server, @registry_name)
@@ -846,8 +1176,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     owner_ref = Process.monitor(owner_pid)
     materializer = state.linux_dependency_baseline_materializer
 
-    case create_validation_root(lease.workspace_id) do
-      {:ok, resource_id, root_path} ->
+    case create_validation_root(state, lease, candidate_commit, materializer) do
+      {:ok, resource_id, root_path, root_cleanup_identity, resource_owner_pid} ->
         resource =
           new_validation_resource(
             lease,
@@ -855,6 +1185,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             owner_ref,
             resource_id,
             root_path,
+            root_cleanup_identity,
+            resource_owner_pid,
             candidate_commit,
             cleanup_failures
           )
@@ -862,34 +1194,44 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         case setup_validation_resource(
                resource,
                force_dependency_snapshot_failure,
-               setup_opts,
-               materializer
+               setup_opts
              ) do
           {:ok, resource} ->
             {:ok, resource, put_validation_resource(state, resource)}
 
-          {:error, {:cleanup_required, reason, dep_lease}} ->
+          {:error, {:cleanup_required, reason}, failed_resource} ->
             handle_dependency_cleanup_required(
               state,
-              resource,
-              materializer,
-              dep_lease,
+              failed_resource,
               reason,
               force_partial_cleanup_failure_once
             )
 
-          {:error, reason} ->
+          {:error, reason, failed_resource} ->
             case rollback_partial_validation_resource(
-                   resource,
+                   failed_resource,
                    force_partial_cleanup_failure_once
                  ) do
               :ok ->
-                Process.demonitor(owner_ref, [:flush])
-                {:error, reason}
+                case stop_validation_resource_owner(failed_resource) do
+                  :ok ->
+                    Process.demonitor(owner_ref, [:flush])
+                    {:error, reason}
+
+                  {:error, _stop_reason} ->
+                    resource = %{
+                      failed_resource
+                      | setup_status: :setup_failed,
+                        cleanup_failures_remaining: 0
+                    }
+
+                    {:error, :validation_resource_setup_failed_cleanup_retained,
+                     put_validation_resource(state, resource)}
+                end
 
               {:error, _cleanup_reason} ->
                 resource = %{
-                  resource
+                  failed_resource
                   | setup_status: :setup_failed,
                     cleanup_failures_remaining: 0
                 }
@@ -898,6 +1240,27 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                  put_validation_resource(state, resource)}
             end
         end
+
+      {:error,
+       {:validation_root_cleanup_retained, resource_id, root_path, root_cleanup_identity,
+        resource_owner_pid}} ->
+        resource =
+          new_validation_resource(
+            lease,
+            owner_pid,
+            owner_ref,
+            resource_id,
+            root_path,
+            root_cleanup_identity,
+            resource_owner_pid,
+            candidate_commit,
+            0
+          )
+
+        resource = %{resource | setup_status: :setup_failed}
+
+        {:error, :validation_resource_setup_failed_cleanup_retained,
+         put_validation_resource(state, resource)}
 
       {:error, reason} ->
         Process.demonitor(owner_ref, [:flush])
@@ -908,14 +1271,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp handle_dependency_cleanup_required(
          state,
          resource,
-         materializer,
-         dep_lease,
          reason,
          force_partial_cleanup_failure_once
        ) do
-    # Registry owns the lease: attempt Shell release immediately so failures
-    # never leave an untracked Shell root. Release only from this process.
-    case release_dependency_baseline_lease(materializer, dep_lease) do
+    case ValidationResourceOwner.release_dependency(resource.resource_owner_pid) do
       :ok ->
         resource = %{resource | dependency_lease: nil}
 
@@ -924,8 +1283,21 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                force_partial_cleanup_failure_once
              ) do
           :ok ->
-            Process.demonitor(resource.owner_ref, [:flush])
-            {:error, reason}
+            case stop_validation_resource_owner(resource) do
+              :ok ->
+                Process.demonitor(resource.owner_ref, [:flush])
+                {:error, reason}
+
+              {:error, _stop_reason} ->
+                retained = %{
+                  resource
+                  | setup_status: :setup_failed,
+                    cleanup_failures_remaining: 0
+                }
+
+                {:error, :validation_resource_setup_failed_cleanup_retained,
+                 put_validation_resource(state, retained)}
+            end
 
           {:error, _cleanup_reason} ->
             resource = %{
@@ -944,7 +1316,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           resource
           | setup_status: :setup_failed,
             cleanup_failures_remaining: 0,
-            dependency_lease: dep_lease
+            dependency_lease: :resource_owner
         }
 
         {:error, :validation_resource_setup_failed_cleanup_retained,
@@ -958,9 +1330,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          owner_ref,
          resource_id,
          root_path,
+         root_cleanup_identity,
+         resource_owner_pid,
          candidate_commit,
          cleanup_failures
        ) do
+    resource_owner_ref = Process.monitor(resource_owner_pid)
     candidate_runtime = Path.join(root_path, "candidate-runtime")
     base_runtime = Path.join(root_path, "base-runtime")
     stage_parent = Path.join(root_path, "staging")
@@ -977,8 +1352,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           else: lease.worktree_path
         ),
       candidate_commit: candidate_commit,
+      candidate_cleanup_identity: nil,
       base_commit: lease.base_commit,
       root_path: root_path,
+      root_cleanup_identity: root_cleanup_identity,
+      resource_owner_pid: resource_owner_pid,
+      resource_owner_ref: resource_owner_ref,
+      resource_owner_cleanup_retry_ms: @validation_owner_cleanup_retry_initial_ms,
+      resource_owner_cleanup_retry_count: 0,
+      resource_owner_cleanup_dormant: false,
       # Parent is private/owned; exact stage_path child is created exclusively by
       # SecurityRegression.Shell.stage_sources/2 (must not pre-exist).
       stage_parent_path: stage_parent,
@@ -997,6 +1379,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       base_build_path: Path.join(base_runtime, "build"),
       base_deps_path: nil,
       base_worktree_path: Path.join(root_path, "base"),
+      base_cleanup_identity: nil,
       base_runner_path: Path.join(base_runtime, "runner.exs"),
       base_result_path: Path.join(base_runtime, "result.etf"),
       # Candidate-leg aliases for existing callers.
@@ -1004,6 +1387,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       tmp_path: Path.join(candidate_runtime, "tmp"),
       runner_path: Path.join(candidate_runtime, "runner.exs"),
       dependency_lease: nil,
+      dependency_root_path: nil,
       dependency_receipt: nil,
       dependency_verified_copy: nil,
       snapshot_created: false,
@@ -1021,8 +1405,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp setup_validation_resource(
          resource,
          force_dependency_snapshot_failure,
-         setup_opts,
-         materializer
+         setup_opts
        ) do
     # Ordering is load-bearing: Actions-owned private dirs and any detached
     # candidate worktree are created and forced private *before* the Shell
@@ -1030,35 +1413,64 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     with :ok <- check_deadline(setup_opts),
          :ok <- create_private_validation_directories(resource),
          :ok <- check_deadline(setup_opts),
-         {:ok, _candidate_path} <- create_candidate_snapshot_from_resource(resource),
-         :ok <- check_deadline(setup_opts),
+         {:ok, resource} <- create_candidate_snapshot_from_resource(resource) do
+      continue_validation_resource_setup(
+        resource,
+        force_dependency_snapshot_failure,
+        setup_opts
+      )
+    else
+      {:error, reason, failed_resource} -> {:error, reason, failed_resource}
+      {:error, reason} -> {:error, reason, resource}
+    end
+  end
+
+  defp continue_validation_resource_setup(
+         resource,
+         force_dependency_snapshot_failure,
+         setup_opts
+       ) do
+    with :ok <- check_deadline(setup_opts),
          :ok <- force_private_top_boundaries(resource),
          :ok <- maybe_force_dependency_snapshot_failure(force_dependency_snapshot_failure),
          :ok <- check_deadline(setup_opts),
          {:ok, remaining_ms} <- remaining_shell_deadline_ms(setup_opts) do
-      case acquire_dependency_baseline_lease(materializer, remaining_ms) do
-        {:ok, dep_lease, view} ->
-          case admit_dependency_baseline_view(view) do
+      case ValidationResourceOwner.acquire_dependency(
+             resource.resource_owner_pid,
+             remaining_ms
+           ) do
+        {:ok, view, cleanup_locator} ->
+          resource = merge_dependency_cleanup_locator(resource, cleanup_locator)
+
+          case admit_dependency_baseline_view(view, resource.dependency_root_path) do
             {:ok, admitted} ->
               # Pure merge only — no further fallible setup after acquire.
-              {:ok, merge_dependency_baseline(resource, dep_lease, admitted)}
+              {:ok, merge_dependency_baseline(resource, admitted)}
 
             {:error, reason} ->
-              case release_dependency_baseline_lease(materializer, dep_lease) do
+              case ValidationResourceOwner.release_dependency(resource.resource_owner_pid) do
                 :ok ->
-                  {:error, reason}
+                  {:error, reason, resource}
 
                 {:error, _} ->
-                  {:error, {:cleanup_required, reason, dep_lease}}
+                  failed = %{resource | dependency_lease: :resource_owner}
+                  {:error, {:cleanup_required, reason}, failed}
               end
           end
 
-        {:error, {:cleanup_required, reason, dep_lease}} ->
-          {:error, {:cleanup_required, reason, dep_lease}}
+        {:error, {:cleanup_required, reason, cleanup_locator}} ->
+          failed =
+            resource
+            |> merge_dependency_cleanup_locator(cleanup_locator)
+            |> Map.put(:dependency_lease, :resource_owner)
+
+          {:error, {:cleanup_required, reason}, failed}
 
         {:error, reason} ->
-          {:error, reason}
+          {:error, reason, resource}
       end
+    else
+      {:error, reason} -> {:error, reason, resource}
     end
   end
 
@@ -1154,16 +1566,18 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     do: cleanup_actions_owned_validation_files(resource)
 
   defp create_candidate_snapshot_from_resource(%{candidate_commit: nil} = resource),
-    do: {:ok, resource.candidate_path}
+    do: {:ok, resource}
 
   defp create_candidate_snapshot_from_resource(resource) do
-    case Workspace.create_detached_worktree(
-           resource.repo_path,
-           resource.candidate_path,
+    case ValidationResourceOwner.create_candidate(
+           resource.resource_owner_pid,
            resource.candidate_commit
          ) do
-      {:ok, candidate_path} when candidate_path == resource.candidate_path ->
-        {:ok, candidate_path}
+      {:ok, removal_identity} when is_map(removal_identity) ->
+        {:ok, %{resource | candidate_cleanup_identity: removal_identity}}
+
+      {:error, reason, removal_identity} when is_map(removal_identity) ->
+        {:error, reason, %{resource | candidate_cleanup_identity: removal_identity}}
 
       {:error, reason} ->
         {:error, reason}
@@ -1205,56 +1619,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp remaining_shell_deadline_ms(_), do: {:ok, @default_dependency_lease_deadline_ms}
 
-  defp acquire_dependency_baseline_lease(materializer, remaining_ms)
-       when is_atom(materializer) and is_integer(remaining_ms) and remaining_ms > 0 do
-    try do
-      case materializer.acquire_linux_dependency_baseline_lease(remaining_ms) do
-        # Ownership transfers on any non-nil lease. View shape is admitted only
-        # after transfer so a malformed/non-map view cannot drop a live lease.
-        {:ok, lease, view} when not is_nil(lease) ->
-          {:ok, lease, view}
-
-        {:error, {:cleanup_required, reason, lease}} when not is_nil(lease) ->
-          {:error, {:cleanup_required, reason, lease}}
-
-        {:error, reason} ->
-          {:error, reason}
-
-        _other ->
-          {:error, :dependency_baseline_acquire_failed}
-      end
-    rescue
-      _ -> {:error, :dependency_baseline_acquire_failed}
-    catch
-      :exit, _ -> {:error, :dependency_baseline_acquire_failed}
-      :throw, _ -> {:error, :dependency_baseline_acquire_failed}
-    end
-  end
-
-  defp acquire_dependency_baseline_lease(_materializer, _remaining_ms),
-    do: {:error, :invalid_deadline}
-
-  defp release_dependency_baseline_lease(_materializer, nil), do: :ok
-
-  defp release_dependency_baseline_lease(materializer, lease) when is_atom(materializer) do
-    try do
-      case materializer.release_linux_dependency_baseline_lease(lease) do
-        :ok -> :ok
-        {:error, reason} -> {:error, reason}
-        _other -> {:error, :dependency_baseline_release_failed}
-      end
-    rescue
-      _ -> {:error, :dependency_baseline_release_failed}
-    catch
-      :exit, _ -> {:error, :dependency_baseline_release_failed}
-      :throw, _ -> {:error, :dependency_baseline_release_failed}
-    end
-  end
-
-  defp release_dependency_baseline_lease(_materializer, _lease),
-    do: {:error, :dependency_baseline_release_failed}
-
-  defp admit_dependency_baseline_view(view) when is_map(view) do
+  defp admit_dependency_baseline_view(view, cleanup_root_path) when is_map(view) do
     candidate = Map.get(view, "candidate_path") || Map.get(view, :candidate_path)
     base = Map.get(view, "base_path") || Map.get(view, :base_path)
     receipt = Map.get(view, "receipt") || Map.get(view, :receipt)
@@ -1265,6 +1630,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          true <- Path.type(candidate) == :absolute,
          true <- Path.type(base) == :absolute,
          true <- candidate != base,
+         true <- Path.dirname(candidate) == cleanup_root_path,
+         true <- Path.dirname(base) == cleanup_root_path,
          true <- verified === true,
          :ok <- validate_json_clean_receipt(receipt) do
       {:ok,
@@ -1279,7 +1646,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp admit_dependency_baseline_view(_view), do: {:error, :invalid_dependency_baseline_view}
+  defp admit_dependency_baseline_view(_view, _cleanup_root_path),
+    do: {:error, :invalid_dependency_baseline_view}
+
+  defp merge_dependency_cleanup_locator(resource, %{root_path: root_path}) do
+    %{resource | dependency_root_path: root_path}
+  end
 
   defp validate_json_clean_receipt(receipt) when is_map(receipt) do
     # Closed-enough JSON-clean contract: encodeable, bounded, no rich terms.
@@ -1321,10 +1693,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp json_clean_term?(_), do: false
 
-  defp merge_dependency_baseline(resource, dep_lease, admitted) do
+  defp merge_dependency_baseline(resource, admitted) do
     %{
       resource
-      | dependency_lease: dep_lease,
+      | dependency_lease: :resource_owner,
         candidate_deps_path: admitted.candidate_deps_path,
         base_deps_path: admitted.base_deps_path,
         dependency_receipt: admitted.dependency_receipt,
@@ -1378,13 +1750,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp perform_validation_snapshot_create(state, resource) do
-    case Workspace.create_detached_worktree(
-           resource.repo_path,
-           resource.base_worktree_path,
+    case ValidationResourceOwner.create_base(
+           resource.resource_owner_pid,
            resource.base_commit
          ) do
-      {:ok, _path} ->
-        resource = %{resource | snapshot_created: true}
+      {:ok, removal_identity} when is_map(removal_identity) ->
+        resource = %{
+          resource
+          | snapshot_created: true,
+            base_cleanup_identity: removal_identity
+        }
 
         state = %{
           state
@@ -1393,6 +1768,17 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         }
 
         {:reply, {:ok, validation_resource_view(resource)}, state}
+
+      {:error, reason, removal_identity} when is_map(removal_identity) ->
+        resource = %{resource | base_cleanup_identity: removal_identity}
+
+        state = %{
+          state
+          | validation_resources:
+              Map.put(state.validation_resources, resource.resource_id, resource)
+        }
+
+        {:reply, {:error, reason}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -1491,37 +1877,77 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     {:error, state}
   end
 
-  defp attempt_validation_resource_cleanup(state, resource) do
-    materializer = state.linux_dependency_baseline_materializer
+  defp attempt_validation_resource_cleanup(
+         state,
+         %{resource_owner_pid: nil} = resource
+       ) do
+    with :ok <- cleanup_actions_owned_validation_files(resource),
+         :ok <- prove_lost_owner_dependency_absent(resource) do
+      cleared = %{resource | dependency_lease: nil}
 
+      state = %{
+        state
+        | validation_resources: Map.put(state.validation_resources, resource.resource_id, cleared)
+      }
+
+      {:ok, state}
+    else
+      {:error, _reason} -> {:error, state}
+    end
+  end
+
+  defp attempt_validation_resource_cleanup(state, resource) do
     # Phase 1: Actions-owned root + detached worktrees.
-    # Phase 2: Shell dependency-baseline lease release (idempotent after success).
+    # Phase 2: resource-owner Shell lease release (idempotent after success).
     case cleanup_actions_owned_validation_files(resource) do
       :ok ->
-        case release_dependency_baseline_lease(
-               materializer,
-               Map.get(resource, :dependency_lease)
-             ) do
+        case ValidationResourceOwner.release_dependency(resource.resource_owner_pid) do
           :ok ->
-            # Drop the opaque lease from the retained record only after proven release.
             cleared = %{resource | dependency_lease: nil}
 
-            state = %{
-              state
-              | validation_resources:
-                  Map.put(state.validation_resources, resource.resource_id, cleared)
-            }
+            case stop_validation_resource_owner(cleared) do
+              :ok ->
+                state = %{
+                  state
+                  | validation_resources:
+                      Map.put(state.validation_resources, resource.resource_id, cleared)
+                }
 
-            {:ok, state}
+                {:ok, state}
+
+              {:error, _reason} ->
+                state = %{
+                  state
+                  | validation_resources:
+                      Map.put(state.validation_resources, resource.resource_id, cleared)
+                }
+
+                {:error, state}
+            end
 
           {:error, _reason} ->
-            # Actions root is gone but Shell lease remains — retain for retry.
+            # Actions root is gone but the owner may still hold its Shell lease.
             {:error, state}
         end
 
       {:error, _reason} ->
         # Keep resource + lease for explicit retry.
         {:error, state}
+    end
+  end
+
+  defp prove_lost_owner_dependency_absent(%{dependency_lease: nil}), do: :ok
+
+  defp prove_lost_owner_dependency_absent(resource) do
+    case Map.get(resource, :dependency_root_path) do
+      path when is_binary(path) ->
+        case File.lstat(path) do
+          {:error, :enoent} -> :ok
+          _other -> {:error, :dependency_baseline_cleanup_pending}
+        end
+
+      _other ->
+        {:error, :dependency_baseline_cleanup_unproven}
     end
   end
 
@@ -1539,34 +1965,60 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     :exit, _reason -> {:error, :resource_cleanup_failed}
   end
 
+  defp stop_validation_resource_owner(resource) do
+    case ValidationResourceOwner.stop(Map.get(resource, :resource_owner_pid)) do
+      :ok ->
+        case Map.get(resource, :resource_owner_ref) do
+          ref when is_reference(ref) -> Process.demonitor(ref, [:flush])
+          _other -> :ok
+        end
+
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp cleanup_candidate_detached_worktree(resource) do
     if is_binary(Map.get(resource, :candidate_commit)) do
-      Workspace.remove_detached_worktree(resource.repo_path, resource.candidate_path)
+      Workspace.remove_detached_worktree(
+        resource.repo_path,
+        resource.candidate_path,
+        Map.get(resource, :candidate_cleanup_identity)
+      )
     else
       :ok
     end
   end
 
   defp cleanup_base_detached_worktree(resource) do
-    Workspace.remove_detached_worktree(resource.repo_path, resource.base_worktree_path)
+    Workspace.remove_detached_worktree(
+      resource.repo_path,
+      resource.base_worktree_path,
+      Map.get(resource, :base_cleanup_identity)
+    )
   end
 
   defp cleanup_validation_root(resource) do
     root = resource.root_path
+    identity = Map.get(resource, :root_cleanup_identity)
 
-    if is_binary(root) do
-      case File.rm_rf(root) do
-        {:ok, _paths} ->
-          case File.lstat(root) do
-            {:error, :enoent} -> :ok
-            _other -> {:error, :resource_root_still_exists}
-          end
+    cond do
+      is_binary(root) and is_map(identity) and Map.get(identity, :path) == root ->
+        case Arbor.Shell.remove_owned_tree(identity) do
+          :ok -> :ok
+          {:error, _reason} -> {:error, :validation_root_cleanup_failed}
+        end
 
-        {:error, reason, _path} ->
-          {:error, reason}
-      end
-    else
-      {:error, :invalid_resource_root}
+      is_binary(root) ->
+        case File.lstat(root) do
+          {:error, :enoent} -> :ok
+          _other -> {:error, :validation_root_cleanup_identity_required}
+        end
+
+      true ->
+        {:error, :invalid_resource_root}
     end
   end
 
@@ -1576,14 +2028,31 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       |> Map.get(resource.workspace_id, MapSet.new())
       |> MapSet.put(resource.resource_id)
 
-    %{
-      state
-      | validation_resources: Map.put(state.validation_resources, resource.resource_id, resource),
-        validation_by_ref:
-          Map.put(state.validation_by_ref, resource.owner_ref, resource.resource_id),
-        validation_by_workspace:
-          Map.put(state.validation_by_workspace, resource.workspace_id, workspace_resources)
-    }
+    validation_by_resource_owner_ref =
+      case Map.get(resource, :resource_owner_ref) do
+        ref when is_reference(ref) ->
+          state
+          |> Map.get(:validation_by_resource_owner_ref, %{})
+          |> Map.put(ref, resource.resource_id)
+
+        _other ->
+          Map.get(state, :validation_by_resource_owner_ref, %{})
+      end
+
+    state
+    |> Map.put(
+      :validation_resources,
+      Map.put(state.validation_resources, resource.resource_id, resource)
+    )
+    |> Map.put(
+      :validation_by_ref,
+      Map.put(state.validation_by_ref, resource.owner_ref, resource.resource_id)
+    )
+    |> Map.put(:validation_by_resource_owner_ref, validation_by_resource_owner_ref)
+    |> Map.put(
+      :validation_by_workspace,
+      Map.put(state.validation_by_workspace, resource.workspace_id, workspace_resources)
+    )
   end
 
   defp drop_validation_resource(state, resource) do
@@ -1599,12 +2068,25 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         Map.put(state.validation_by_workspace, resource.workspace_id, workspace_resources)
       end
 
-    %{
-      state
-      | validation_resources: Map.delete(state.validation_resources, resource.resource_id),
-        validation_by_ref: Map.delete(state.validation_by_ref, resource.owner_ref),
-        validation_by_workspace: validation_by_workspace
-    }
+    validation_by_resource_owner_ref =
+      case Map.get(resource, :resource_owner_ref) do
+        ref when is_reference(ref) ->
+          state
+          |> Map.get(:validation_by_resource_owner_ref, %{})
+          |> Map.delete(ref)
+
+        _other ->
+          Map.get(state, :validation_by_resource_owner_ref, %{})
+      end
+
+    state
+    |> Map.put(
+      :validation_resources,
+      Map.delete(state.validation_resources, resource.resource_id)
+    )
+    |> Map.put(:validation_by_ref, Map.delete(state.validation_by_ref, resource.owner_ref))
+    |> Map.put(:validation_by_resource_owner_ref, validation_by_resource_owner_ref)
+    |> Map.put(:validation_by_workspace, validation_by_workspace)
   end
 
   defp validation_resource_view(resource) do
@@ -1650,18 +2132,27 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       baseline_verified_copy: Map.get(resource, :dependency_verified_copy),
       snapshot_created: resource.snapshot_created,
       setup_status: Atom.to_string(resource.setup_status),
+      cleanup_status: validation_resource_cleanup_status(resource),
       active: true
     }
   end
 
-  defp create_validation_root(workspace_id, attempts \\ 4)
+  defp validation_resource_cleanup_status(resource) do
+    cond do
+      Map.get(resource, :resource_owner_cleanup_dormant, false) -> "dormant"
+      is_nil(Map.get(resource, :resource_owner_pid)) -> "retrying"
+      true -> "owned"
+    end
+  end
 
-  defp create_validation_root(_workspace_id, 0),
+  defp create_validation_root(state, lease, candidate_commit, materializer, attempts \\ 4)
+
+  defp create_validation_root(_state, _lease, _candidate_commit, _materializer, 0),
     do: {:error, :validation_resource_collision}
 
-  defp create_validation_root(workspace_id, attempts) do
+  defp create_validation_root(state, lease, candidate_commit, materializer, attempts) do
     token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
-    workspace_hash = sha256(workspace_id) |> binary_part(0, 12)
+    workspace_hash = sha256(lease.workspace_id) |> binary_part(0, 12)
     resource_id = "validation_" <> token
 
     with {:ok, tmp_root} <- SafePath.resolve_real(System.tmp_dir!()) do
@@ -1671,19 +2162,41 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           "arbor-validation-#{workspace_hash}-#{token}"
         )
 
-      case File.mkdir(root_path) do
-        :ok ->
-          case File.chmod(root_path, 0o700) do
-            :ok ->
-              {:ok, resource_id, root_path}
+      candidate_path =
+        if is_binary(candidate_commit),
+          do: Path.join(root_path, "candidate"),
+          else: lease.worktree_path
 
-            {:error, _reason} ->
-              _ = File.rm_rf(root_path)
-              {:error, :validation_resource_create_failed}
-          end
+      owner_opts = [
+        registry_pid: self(),
+        repo_path: lease.repo_path,
+        root_path: root_path,
+        candidate_path: candidate_path,
+        candidate_commit: candidate_commit,
+        base_path: Path.join(root_path, "base"),
+        materializer: materializer,
+        cleanup_retry_limit:
+          Map.get(
+            state,
+            :validation_owner_cleanup_retry_limit,
+            @default_validation_owner_cleanup_retry_limit
+          )
+      ]
 
-        {:error, :eexist} ->
-          create_validation_root(workspace_id, attempts - 1)
+      case ValidationResourceOwner.start(
+             state.validation_resource_supervisor,
+             owner_opts
+           ) do
+        {:ok, resource_owner_pid, root_cleanup_identity} ->
+          {:ok, resource_id, root_path, root_cleanup_identity, resource_owner_pid}
+
+        {:error, :root_exists} ->
+          create_validation_root(state, lease, candidate_commit, materializer, attempts - 1)
+
+        {:error, {:cleanup_retained, resource_owner_pid, root_cleanup_identity}} ->
+          {:error,
+           {:validation_root_cleanup_retained, resource_id, root_path, root_cleanup_identity,
+            resource_owner_pid}}
 
         {:error, _reason} ->
           {:error, :validation_resource_create_failed}
@@ -2293,6 +2806,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     with true <- is_pid(owner_pid) || {:error, :invalid_owner_pid},
          :ok <- require_binary(attrs.repo_path, :repo_path),
          :ok <- require_binary(attrs.branch, :branch),
+         :ok <- validate_task_principal_pair(attrs.task_id, attrs.principal_id),
          {:ok, repo_path} <- canonical_repo_path(attrs.repo_path, attrs.create_worktree),
          {:ok, branch} <- validate_branch(attrs.branch),
          {:ok, workspace_id} <- resolve_workspace_id(attrs.workspace_id),
@@ -2321,22 +2835,197 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          :ok <- ensure_target_free(state, prepared.repo_path, prepared.branch) do
       case retained_acquire(state, prepared) do
         :none ->
-          if Map.has_key?(state.retained_by_id, prepared.workspace_id) do
-            {:reply, {:error, :workspace_id_collision}, state}
+          capacity_mode = fresh_acquire_capacity_mode(prepared)
+
+          with :ok <- ensure_journal_admits_allocation(state, prepared, capacity_mode) do
+            if Map.has_key?(state.retained_by_id, prepared.workspace_id) do
+              {:reply, {:error, :workspace_id_collision}, state}
+            else
+              case capacity_mode do
+                :new_marker ->
+                  case reserve_creating_intent(state, prepared) do
+                    {:ok, intent, state} ->
+                      perform_acquire(prepared, state, intent, capacity_mode)
+
+                    {:error, reason, state} ->
+                      {:reply, {:error, reason}, state}
+                  end
+
+                :no_new_marker ->
+                  perform_acquire(prepared, state, nil, capacity_mode)
+              end
+            end
           else
-            perform_acquire(prepared, state)
+            {:error, reason} -> {:reply, {:error, reason}, state}
           end
 
         {:error, reason} ->
           {:reply, {:error, reason}, state}
 
         {:ok, retained} ->
-          reactivate_retained(retained, prepared, state)
+          case ensure_journal_admits_allocation(state, prepared, :existing_marker) do
+            :ok -> reactivate_retained(retained, prepared, state)
+            {:error, reason} -> {:reply, {:error, reason}, state}
+          end
       end
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
+
+  # Poisoned/unreadable durable evidence must not be silently overlapped by a
+  # fresh checkout. Recheck the backend on every allocation so a store that
+  # becomes unavailable or poisoned after registry startup still fails closed.
+  # Explicit `:disabled` journals (tests) remain open.
+  defp ensure_journal_admits_allocation(
+         %{retention_journal: %{status: :poisoned}},
+         _prepared,
+         _capacity_mode
+       ) do
+    {:error, :retention_journal_unavailable}
+  end
+
+  defp ensure_journal_admits_allocation(
+         %{retention_journal: %{status: :ready} = journal} = state,
+         prepared,
+         capacity_mode
+       ) do
+    with {:ok, records} <- load_durable_retained_records(journal),
+         :ok <- require_available_creation_target(records, prepared),
+         :ok <- require_matching_durable_hot_ids(state, records),
+         :ok <- require_marker_capacity(records, capacity_mode) do
+      :ok
+    else
+      {:error, :retention_record_limit_exceeded} = error -> error
+      {:error, :retention_creation_blocked} = error -> error
+      {:error, _reason} -> {:error, :retention_journal_unavailable}
+    end
+  end
+
+  defp ensure_journal_admits_allocation(
+         %{retention_journal: %{status: :disabled}},
+         _prepared,
+         _capacity_mode
+       ),
+       do: :ok
+
+  defp ensure_journal_admits_allocation(_state, _prepared, _capacity_mode),
+    do: {:error, :retention_journal_unavailable}
+
+  defp require_matching_durable_hot_ids(state, records) do
+    durable_ids = records |> Enum.map(& &1.workspace_id) |> MapSet.new()
+
+    retained_ids = state.retained_by_id |> Map.keys() |> MapSet.new()
+
+    active_ids =
+      state.leases
+      |> Enum.reduce(MapSet.new(), fn {_id, lease}, acc ->
+        if lease.ownership == :owned and Map.get(lease, :retention_marker_active) == true do
+          MapSet.put(acc, lease.workspace_id)
+        else
+          acc
+        end
+      end)
+
+    blocker_ids = state.retention_blockers |> Map.keys() |> MapSet.new()
+
+    if durable_ids == MapSet.union(MapSet.union(retained_ids, active_ids), blocker_ids) do
+      :ok
+    else
+      {:error, :retention_inventory_hot_state_mismatch}
+    end
+  end
+
+  defp require_available_creation_target(records, prepared) do
+    prepared_target = target_key(prepared.repo_path, prepared.branch, prepared.candidate_path)
+
+    blocker =
+      Enum.find(records, fn record ->
+        RetentionJournal.creating_record?(record) and
+          (record.workspace_id == prepared.workspace_id or
+             target_key(record.repo_path, record.branch, record.worktree_path) == prepared_target)
+      end)
+
+    if blocker, do: {:error, :retention_creation_blocked}, else: :ok
+  end
+
+  defp require_marker_capacity(records, :new_marker) do
+    if length(records) < RetentionJournal.max_records() do
+      :ok
+    else
+      {:error, :retention_record_limit_exceeded}
+    end
+  end
+
+  defp require_marker_capacity(_records, :no_new_marker), do: :ok
+  defp require_marker_capacity(_records, :existing_marker), do: :ok
+
+  defp fresh_acquire_capacity_mode(%{create_worktree: fun}) when is_function(fun, 3),
+    do: :new_marker
+
+  defp fresh_acquire_capacity_mode(prepared) do
+    case Workspace.preflight_worktree_ownership(
+           prepared.repo_path,
+           prepared.branch,
+           prepared.create_params
+         ) do
+      :reused -> :no_new_marker
+      _ -> :new_marker
+    end
+  end
+
+  defp reserve_creating_intent(%{retention_journal: %{status: :disabled}} = state, _prepared),
+    do: {:ok, nil, state}
+
+  defp reserve_creating_intent(%{retention_journal: %{status: :ready}} = state, prepared) do
+    intent = initial_creating_marker(state, prepared)
+
+    case persist_retained_marker(state, intent) do
+      :ok -> {:ok, intent, state}
+      {:error, reason} -> {:error, {:retention_journal_write_failed, reason}, state}
+    end
+  end
+
+  defp reserve_creating_intent(state, _prepared),
+    do: {:error, :retention_journal_unavailable, state}
+
+  defp initial_creating_marker(state, prepared) do
+    ttl_ms = min(state.retention_ttl_ms, Config.workspace_retention_max_ttl_ms())
+
+    %{
+      workspace_id: prepared.workspace_id,
+      task_id: prepared.task_id,
+      principal_id: prepared.principal_id,
+      repo_path: prepared.repo_path,
+      worktree_path: prepared.candidate_path,
+      display_worktree_path: prepared.candidate_path,
+      branch: prepared.branch,
+      base_commit: nil,
+      ownership: :pending,
+      lifecycle: :creating,
+      runtime_id: state.retention_runtime_id,
+      target: target_key(prepared.repo_path, prepared.branch, prepared.candidate_path),
+      lstat_identity: nil,
+      worktree_registration: nil,
+      expires_at: DateTime.add(DateTime.utc_now(), ttl_ms, :millisecond),
+      retry_count: 0,
+      durable_lifecycle: "creating",
+      dormant: true,
+      cleanup_failure: nil
+    }
+  end
+
+  defp reserved_creating_intent?(records, prepared, intent) when is_map(intent) do
+    Enum.any?(records, fn record ->
+      RetentionJournal.creating_record?(record) and
+        record.workspace_id == intent.workspace_id and
+        record.repo_path == prepared.repo_path and
+        record.worktree_path == prepared.candidate_path and
+        record.branch == prepared.branch
+    end)
+  end
+
+  defp reserved_creating_intent?(_records, _prepared, _intent), do: false
 
   defp quarantined_acquire(state, prepared) do
     quarantine =
@@ -2433,10 +3122,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp canonical_path_or_expanded(path) do
-    case SafePath.resolve_real(path) do
-      {:ok, canonical} -> canonical
-      {:error, _} -> Path.expand(path)
-    end
+    Workspace.canonical_path_or_expanded(path)
   end
 
   defp canonical_repo_path(path, create_worktree) do
@@ -2469,8 +3155,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp put_optional(map, _key, ""), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)
 
-  defp resolve_workspace_id(id) when is_binary(id) and id != "", do: {:ok, id}
-  defp resolve_workspace_id(_), do: {:ok, generate_workspace_id()}
+  defp resolve_workspace_id(id) when is_binary(id) and id != "" do
+    with {:ok, _key} <- RetentionJournal.record_key(id), do: {:ok, id}
+  end
+
+  defp resolve_workspace_id(id) when id in [nil, ""], do: {:ok, generate_workspace_id()}
+  defp resolve_workspace_id(_), do: {:error, :invalid_workspace_id}
 
   defp ensure_workspace_id_free(state, workspace_id) do
     if Map.has_key?(state.leases, workspace_id) do
@@ -2529,16 +3219,116 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       principal_task_match?(retained, prepared)
   end
 
-  defp perform_acquire(prepared, state) do
+  defp perform_acquire(prepared, state, intent, capacity_mode) do
     # Monitor before any git side effect so a mid-create owner death queues DOWN.
     owner_ref = Process.monitor(prepared.owner_pid)
 
-    case run_create_worktree(prepared) do
+    case run_create_worktree(prepared, capacity_mode == :no_new_marker) do
       {:ok, worktree_path, ownership, base_commit} ->
-        with {:ok, ownership_atom} <- normalize_ownership(ownership),
-             :ok <- require_binary(worktree_path, :worktree_path),
-             {:ok, canonical_worktree_path} <- canonical_existing_path(worktree_path),
-             :ok <- require_binary(base_commit, :base_commit) do
+        case prepare_created_lease(prepared, owner_ref, worktree_path, ownership, base_commit) do
+          {:ok, lease, created_identity} ->
+            if Map.has_key?(state.leases, lease.workspace_id) do
+              Process.demonitor(owner_ref, [:flush])
+
+              handle_post_create_failure(
+                state,
+                intent,
+                prepared.repo_path,
+                lease.worktree_path,
+                lease.ownership,
+                created_identity,
+                :workspace_id_collision
+              )
+            else
+              case ensure_target_free(state, lease.repo_path, lease.branch) do
+                :ok ->
+                  case ensure_created_ownership_admitted(state, prepared, lease.ownership, intent) do
+                    :ok ->
+                      case finalize_created_lease(state, lease, intent) do
+                        {:ok, finalized, state} ->
+                          state = state |> put_lease(finalized) |> put_ref(finalized)
+                          {:reply, {:ok, public_view(finalized)}, state}
+
+                        {:error, reason, state, :cleanup_confirmed} ->
+                          Process.demonitor(owner_ref, [:flush])
+                          {:reply, {:error, reason}, state}
+
+                        {:error, reason, state, :evidence_preserved} ->
+                          {:reply, {:error, reason}, state}
+                      end
+
+                    {:error, reason} ->
+                      Process.demonitor(owner_ref, [:flush])
+
+                      handle_post_create_failure(
+                        state,
+                        intent,
+                        lease.repo_path,
+                        lease.worktree_path,
+                        lease.ownership,
+                        created_identity,
+                        reason
+                      )
+                  end
+
+                {:error, reason} ->
+                  Process.demonitor(owner_ref, [:flush])
+
+                  handle_post_create_failure(
+                    state,
+                    intent,
+                    lease.repo_path,
+                    lease.worktree_path,
+                    lease.ownership,
+                    created_identity,
+                    reason
+                  )
+              end
+            end
+
+          {:error, reason, ownership_atom, canonical_path, created_identity} ->
+            Process.demonitor(owner_ref, [:flush])
+
+            handle_post_create_failure(
+              state,
+              intent,
+              prepared.repo_path,
+              canonical_path || worktree_path,
+              ownership_atom,
+              created_identity,
+              reason
+            )
+        end
+
+      {:error, reason} ->
+        Process.demonitor(owner_ref, [:flush])
+
+        case settle_create_intent_after_failure(state, intent) do
+          {:ok, state} ->
+            {:reply, {:error, reason}, state}
+
+          {:blocked, _blocker_reason, state} ->
+            {:reply, {:error, reason}, state}
+
+          {:error, delete_reason, state} ->
+            {:reply, {:error, {:retention_journal_delete_failed, delete_reason}}, state}
+        end
+    end
+  end
+
+  defp prepare_created_lease(prepared, owner_ref, worktree_path, ownership, base_commit) do
+    with {:ok, ownership_atom} <- normalize_ownership(ownership),
+         :ok <- require_binary(worktree_path, :worktree_path),
+         {:ok, canonical_worktree_path} <- canonical_existing_path(worktree_path),
+         {:ok, created_identity} <-
+           capture_created_identity(
+             prepared.repo_path,
+             canonical_worktree_path,
+             prepared.branch,
+             ownership_atom
+           ) do
+      case require_binary(base_commit, :base_commit) do
+        :ok ->
           lease = %{
             workspace_id: prepared.workspace_id,
             owner_pid: prepared.owner_pid,
@@ -2546,7 +3336,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             task_id: prepared.task_id,
             principal_id: prepared.principal_id,
             repo_path: prepared.repo_path,
-            worktree_path: worktree_path,
+            worktree_path: canonical_worktree_path,
             branch: prepared.branch,
             base_commit: base_commit,
             ownership: ownership_atom,
@@ -2554,95 +3344,489 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             cleanup_armed: true
           }
 
-          # Re-check after create (defensive with single GenServer).
-          if Map.has_key?(state.leases, lease.workspace_id) do
-            Process.demonitor(owner_ref, [:flush])
-            cleanup_failed_create(prepared.repo_path, canonical_worktree_path, ownership_atom)
-            {:reply, {:error, :workspace_id_collision}, state}
-          else
-            case ensure_target_free(state, lease.repo_path, lease.branch) do
-              :ok ->
-                state =
-                  state
-                  |> put_lease(lease)
-                  |> put_ref(lease)
+          {:ok, bind_created_identity(lease, created_identity), created_identity}
 
-                # If the owner already died, DOWN is queued and will move an
-                # owned worktree into bounded retention.
-                {:reply, {:ok, public_view(lease)}, state}
+        {:error, reason} ->
+          {:error, reason, ownership_atom, canonical_worktree_path, created_identity}
+      end
+    else
+      {:error, reason} ->
+        ownership_atom = normalize_ownership_for_cleanup(ownership)
+        {:error, reason, ownership_atom, normalize_created_path(worktree_path), nil}
+    end
+  end
 
-              {:error, reason} ->
-                Process.demonitor(owner_ref, [:flush])
-                cleanup_failed_create(prepared.repo_path, canonical_worktree_path, ownership_atom)
-                {:reply, {:error, reason}, state}
-            end
-          end
+  defp normalize_ownership_for_cleanup(ownership) do
+    case normalize_ownership(ownership) do
+      {:ok, normalized} -> normalized
+      _ -> ownership
+    end
+  end
+
+  defp normalize_created_path(path) when is_binary(path), do: path
+  defp normalize_created_path(_path), do: nil
+
+  defp handle_post_create_failure(
+         state,
+         intent,
+         repo_path,
+         worktree_path,
+         ownership,
+         identity,
+         reason
+       ) do
+    cleanup_result = cleanup_failed_create(repo_path, worktree_path, ownership, identity)
+
+    case {normalize_ownership_for_cleanup(ownership), identity, cleanup_result} do
+      {:owned, nil, _} ->
+        if is_nil(intent) do
+          {:reply, {:error, reason}, state}
         else
-          {:error, reason} ->
-            Process.demonitor(owner_ref, [:flush])
-            cleanup_failed_create(prepared.repo_path, worktree_path, ownership)
+          blocker =
+            creation_blocker_from_intent(
+              intent,
+              %{repo_path: repo_path, worktree_path: worktree_path, branch: intent.branch},
+              reason
+            )
+
+          state =
+            state
+            |> degrade_retention_journal({:create_identity_unavailable, reason})
+            |> put_creation_blocker(blocker)
+
+          {:reply, {:error, reason}, state}
+        end
+
+      {:owned, _identity, _cleanup_result} when not is_nil(intent) ->
+        case confirm_failed_create_removed(repo_path, worktree_path, cleanup_result) do
+          :ok ->
+            case settle_create_intent_after_failure(state, intent) do
+              {:ok, state} ->
+                {:reply, {:error, reason}, state}
+
+              {:blocked, _blocker_reason, state} ->
+                {:reply, {:error, reason}, state}
+
+              {:error, delete_reason, state} ->
+                {:reply, {:error, {:retention_journal_delete_failed, delete_reason}}, state}
+            end
+
+          {:error, cleanup_reason} ->
+            blocker =
+              creation_blocker_from_intent(
+                intent,
+                %{repo_path: repo_path, worktree_path: worktree_path},
+                {reason, cleanup_reason}
+              )
+
+            state =
+              state
+              |> degrade_retention_journal({:create_cleanup_unconfirmed, cleanup_reason})
+              |> put_creation_blocker(blocker)
+
             {:reply, {:error, reason}, state}
         end
 
+      {:reused, _identity, _cleanup_result} ->
+        # A successful reused result did not create an owned worktree. Its
+        # reserved intent may therefore be removed without create-cleanup
+        # absence proof. Any deletion failure still preserves the blocker.
+        case settle_create_intent_after_success(state, intent) do
+          {:ok, state} ->
+            {:reply, {:error, reason}, state}
+
+          {:error, delete_reason, state} ->
+            {:reply, {:error, {:retention_journal_delete_failed, delete_reason}}, state}
+        end
+
+      _ ->
+        if is_nil(intent) do
+          {:reply, {:error, reason}, state}
+        else
+          blocker =
+            creation_blocker_from_intent(
+              intent,
+              %{repo_path: repo_path, worktree_path: worktree_path},
+              reason
+            )
+
+          {:reply, {:error, reason},
+           put_creation_blocker(degrade_retention_journal(state, reason), blocker)}
+        end
+    end
+  end
+
+  defp ensure_created_ownership_admitted(_state, _prepared, :reused, _intent), do: :ok
+
+  defp ensure_created_ownership_admitted(
+         %{retention_journal: %{status: :disabled}},
+         _prepared,
+         :owned,
+         _intent
+       ),
+       do: :ok
+
+  defp ensure_created_ownership_admitted(state, prepared, :owned, intent) do
+    with %{retention_journal: %{status: :ready} = journal} <- state,
+         {:ok, records} <- load_durable_retained_records(journal),
+         true <- reserved_creating_intent?(records, prepared, intent) do
+      :ok
+    else
+      _ -> {:error, :retention_creation_intent_missing}
+    end
+  end
+
+  defp finalize_created_lease(state, %{ownership: :reused} = lease, nil),
+    do: {:ok, lease, state}
+
+  defp finalize_created_lease(state, %{ownership: :reused} = lease, intent) do
+    case settle_create_intent_after_success(state, intent) do
+      {:ok, state} -> {:ok, lease, state}
+      {:error, reason, state} -> {:error, reason, state, :evidence_preserved}
+    end
+  end
+
+  defp finalize_created_lease(
+         %{retention_journal: %{status: :disabled}} = state,
+         %{ownership: :owned} = lease,
+         nil
+       ),
+       do: {:ok, lease, state}
+
+  defp finalize_created_lease(state, %{ownership: :owned} = lease, intent) do
+    with {:ok, identity} <- capture_retention_identity(lease) do
+      active_marker = initial_active_marker(state, lease, identity)
+      lease = bind_retention_identity(lease, state, active_marker)
+
+      case persist_retained_marker(state, active_marker) do
+        :ok ->
+          {:ok, lease, state}
+
+        {:error, reason} ->
+          preserve_or_cleanup_initial_marker_failure(state, lease, active_marker, intent, reason)
+      end
+    else
       {:error, reason} ->
-        Process.demonitor(owner_ref, [:flush])
-        {:reply, {:error, reason}, state}
+        cleanup_result =
+          cleanup_failed_create(
+            lease.repo_path,
+            lease.worktree_path,
+            :owned,
+            Map.get(lease, :created_removal_identity)
+          )
+
+        case confirm_failed_create_removed(lease.repo_path, lease.worktree_path, cleanup_result) do
+          :ok ->
+            case settle_create_intent_after_failure(state, intent) do
+              {:ok, state} ->
+                {:error, :retention_identity_unavailable, state, :cleanup_confirmed}
+
+              {:blocked, _blocker_reason, state} ->
+                {:error, :retention_identity_unavailable, state, :evidence_preserved}
+
+              {:error, delete_reason, state} ->
+                {:error, {:retention_journal_delete_failed, delete_reason}, state,
+                 :evidence_preserved}
+            end
+
+          {:error, cleanup_reason} ->
+            # No durable identity exists, so preservation is the only safe
+            # fallback when the closed Git cleanup cannot prove absence.
+            blocker = creation_blocker_from_intent(intent, lease, {reason, cleanup_reason})
+            state = put_creation_blocker(state, blocker)
+            state = degrade_retention_journal(state, {:initial_identity_capture_failed, reason})
+
+            {:error, :retention_identity_unavailable, state, :evidence_preserved}
+        end
+    end
+  end
+
+  defp confirm_failed_create_removed(repo_path, worktree_path, _cleanup_result) do
+    with {:error, :enoent} <- File.lstat(worktree_path),
+         {:ok, :absent} <- worktree_path_registration_presence(repo_path, worktree_path) do
+      :ok
+    else
+      _ -> {:error, :failed_create_cleanup_unconfirmed}
+    end
+  end
+
+  defp initial_active_marker(state, lease, identity) do
+    ttl_ms = state.retention_ttl_ms
+    expires_at = DateTime.add(DateTime.utc_now(), ttl_ms, :millisecond)
+
+    %{
+      workspace_id: lease.workspace_id,
+      owner_pid: lease.owner_pid,
+      task_id: lease.task_id,
+      principal_id: lease.principal_id,
+      repo_path: identity.repo_path,
+      worktree_path: identity.worktree_path,
+      display_worktree_path: lease.worktree_path,
+      branch: lease.branch,
+      base_commit: lease.base_commit,
+      ownership: :owned,
+      lifecycle: :retained,
+      runtime_id: state.retention_runtime_id,
+      durable_lifecycle: "active",
+      target: target_key(identity.repo_path, lease.branch, identity.worktree_path),
+      lstat_identity: identity.lstat_identity,
+      worktree_registration: identity.worktree_registration,
+      expiry_generation: make_ref(),
+      expiry_ref: nil,
+      expires_at: expires_at,
+      expires_at_ms: System.monotonic_time(:millisecond) + ttl_ms,
+      retry_count: 0,
+      cleanup_failure: nil,
+      dormant: false
+    }
+  end
+
+  defp settle_create_intent_after_success(state, nil), do: {:ok, state}
+
+  defp settle_create_intent_after_success(state, intent) do
+    case delete_retained_marker(state, intent) do
+      :ok ->
+        {:ok, drop_creation_blocker(state, intent)}
+
+      {:error, reason} ->
+        blocker = creation_blocker_from_intent(intent, intent, {:intent_delete_failed, reason})
+
+        state =
+          put_creation_blocker(
+            degrade_retention_journal(state, {:intent_delete_failed, reason}),
+            blocker
+          )
+
+        {:error, reason, state}
+    end
+  end
+
+  defp settle_create_intent_after_failure(state, nil), do: {:ok, state}
+
+  defp settle_create_intent_after_failure(state, intent) do
+    case creation_marker_absent?(intent) do
+      :ok ->
+        case delete_retained_marker(state, intent) do
+          :ok ->
+            {:ok, drop_creation_blocker(state, intent)}
+
+          {:error, reason} ->
+            blocker =
+              creation_blocker_from_intent(intent, intent, {:intent_delete_failed, reason})
+
+            state =
+              state
+              |> degrade_retention_journal({:intent_delete_failed, reason})
+              |> put_creation_blocker(blocker)
+
+            {:error, reason, state}
+        end
+
+      {:error, reason} ->
+        blocker =
+          creation_blocker_from_intent(intent, intent, {:create_cleanup_unconfirmed, reason})
+
+        state =
+          state
+          |> degrade_retention_journal({:create_cleanup_unconfirmed, reason})
+          |> put_creation_blocker(blocker)
+
+        {:blocked, reason, state}
+    end
+  end
+
+  defp creation_blocker_from_intent(nil, _fallback, reason),
+    do: %{workspace_id: "unknown", repo_path: "", worktree_path: "", branch: "", reason: reason}
+
+  defp creation_blocker_from_intent(intent, fallback, reason) do
+    blocker = %{
+      workspace_id: intent.workspace_id,
+      task_id: intent.task_id,
+      principal_id: intent.principal_id,
+      repo_path: intent.repo_path || Map.get(fallback, :repo_path),
+      worktree_path: intent.worktree_path || Map.get(fallback, :worktree_path),
+      branch: intent.branch || Map.get(fallback, :branch),
+      ownership: :pending,
+      lifecycle: :creating,
+      active: false,
+      dormant: true,
+      target: target_key(intent.repo_path, intent.branch, intent.worktree_path),
+      cleanup_failure: reason
+    }
+
+    blocker
+  end
+
+  defp put_creation_blocker(state, blocker) do
+    %{
+      state
+      | retention_blockers: Map.put(state.retention_blockers, blocker.workspace_id, blocker),
+        retention_blockers_by_target:
+          Map.put(state.retention_blockers_by_target, blocker.target, blocker)
+    }
+  end
+
+  defp drop_creation_blocker(state, blocker) do
+    workspace_id = Map.get(blocker, :workspace_id)
+    target = Map.get(blocker, :target)
+
+    %{
+      state
+      | retention_blockers: Map.delete(state.retention_blockers, workspace_id),
+        retention_blockers_by_target: Map.delete(state.retention_blockers_by_target, target)
+    }
+  end
+
+  defp bind_retention_identity(lease, state, marker) do
+    Map.merge(lease, %{
+      retention_marker_active: true,
+      retention_runtime_id: state.retention_runtime_id,
+      retention_repo_path: marker.repo_path,
+      retention_worktree_path: marker.worktree_path,
+      retention_lstat_identity: marker.lstat_identity,
+      retention_worktree_registration: marker.worktree_registration,
+      retention_expires_at: marker.expires_at,
+      retention_expires_at_ms: marker.expires_at_ms,
+      owner_death_deletion_identity: %{
+        worktree_path: marker.worktree_path,
+        lstat_identity: marker.lstat_identity,
+        worktree_registration: Map.take(marker.worktree_registration, [:path, :branch])
+      }
+    })
+  end
+
+  defp preserve_or_cleanup_initial_marker_failure(state, lease, marker, intent, reason) do
+    failure = {:retention_journal_write_failed, reason}
+
+    cleanup_result = remove_owned_retained_worktree(marker)
+
+    case confirm_failed_create_removed(marker.repo_path, marker.worktree_path, cleanup_result) do
+      :ok ->
+        case settle_create_intent_after_failure(state, intent) do
+          {:ok, state} ->
+            {:error, failure, state, :cleanup_confirmed}
+
+          {:blocked, _reason, state} ->
+            {:error, failure, state, :evidence_preserved}
+
+          {:error, delete_reason, state} ->
+            {:error, {:retention_journal_delete_failed, delete_reason}, state,
+             :evidence_preserved}
+        end
+
+      {:error, cleanup_reason} ->
+        Logger.warning(
+          "initial active marker write failed and exact cleanup was unconfirmed; preserving evidence",
+          workspace_id: lease.workspace_id,
+          detail: inspect({reason, cleanup_reason})
+        )
+
+        blocker =
+          creation_blocker_from_intent(
+            intent,
+            lease,
+            {:initial_marker_write_failed, reason, cleanup_reason}
+          )
+
+        state =
+          state
+          |> degrade_retention_journal({:initial_marker_write_failed, reason})
+          |> put_creation_blocker(blocker)
+
+        {:error, failure, state, :evidence_preserved}
     end
   end
 
   defp reactivate_retained(retained, prepared, state) do
+    # Stable workspace_id preserves the durable marker key across reactivation.
+    workspace_id = retained.workspace_id
+
     with :ok <- validate_retained_identity(retained, prepared),
-         {:ok, workspace_id} <- fresh_workspace_id(state, prepared, retained) do
+         :ok <- ensure_reactivated_id_usable(state, prepared, workspace_id),
+         {:ok, refreshed_retained} <- refresh_marker_before_reactivation(state, retained) do
       owner_ref = Process.monitor(prepared.owner_pid)
-      cancel_expiry(retained.expiry_ref)
+      cancel_expiry(refreshed_retained.expiry_ref)
 
       lease = %{
         workspace_id: workspace_id,
         owner_pid: prepared.owner_pid,
         owner_ref: owner_ref,
-        task_id: prepared.task_id || retained.task_id,
-        principal_id: prepared.principal_id || retained.principal_id,
-        repo_path: retained.repo_path,
-        worktree_path: Map.get(retained, :display_worktree_path, retained.worktree_path),
-        branch: retained.branch,
-        base_commit: retained.base_commit,
+        task_id: prepared.task_id || refreshed_retained.task_id,
+        principal_id: prepared.principal_id || refreshed_retained.principal_id,
+        repo_path: refreshed_retained.repo_path,
+        # Display path is never operational — only the identity-checked path.
+        worktree_path: refreshed_retained.worktree_path,
+        branch: refreshed_retained.branch,
+        base_commit: refreshed_retained.base_commit,
         ownership: :owned,
         active: true,
-        cleanup_armed: true
+        cleanup_armed: true,
+        retention_marker_active: true,
+        retention_runtime_id: state.retention_runtime_id,
+        retention_repo_path: refreshed_retained.repo_path,
+        # Identity needed for identity-bound remove while durable marker remains.
+        retention_lstat_identity: refreshed_retained.lstat_identity,
+        retention_worktree_registration: refreshed_retained.worktree_registration,
+        retention_worktree_path: refreshed_retained.worktree_path,
+        retention_expires_at: refreshed_retained.expires_at,
+        retention_expires_at_ms: refreshed_retained.expires_at_ms
       }
 
-      state = drop_retained(state, retained)
+      # Durable marker remains for the entire active ownership window. Never
+      # delete it here — only explicit/TTL cleanup after proven absence may.
+      state = drop_retained(state, refreshed_retained)
       state = state |> put_lease(lease) |> put_ref(lease)
+
       {:reply, {:ok, public_view(lease)}, state}
     else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason} ->
+        # Persistence or identity failure: leave retained state untouched.
+        {:reply, {:error, reason}, state}
     end
   end
 
-  defp fresh_workspace_id(
-         state,
-         %{workspace_id_explicit: true, workspace_id: workspace_id},
-         retained
-       ) do
+  defp ensure_reactivated_id_usable(state, prepared, workspace_id) do
     cond do
-      workspace_id == retained.workspace_id ->
-        {:ok, workspace_id}
+      prepared.workspace_id_explicit and prepared.workspace_id != workspace_id ->
+        {:error, :workspace_id_collision}
 
-      Map.has_key?(state.leases, workspace_id) or Map.has_key?(state.retained_by_id, workspace_id) ->
+      Map.has_key?(state.leases, workspace_id) ->
         {:error, :workspace_id_collision}
 
       true ->
-        {:ok, workspace_id}
+        :ok
     end
   end
 
-  defp fresh_workspace_id(state, _prepared, _retained) do
-    workspace_id = generate_workspace_id()
+  # Atomically refresh the durable marker as lifecycle "active" for this BEAM
+  # runtime id before converting retained/orphaned → live. Same workspace key;
+  # failure denies reactivation.
+  defp refresh_marker_before_reactivation(state, retained) do
+    ttl_ms = state.retention_ttl_ms
+    now_ms = System.monotonic_time(:millisecond)
+    expires_at = DateTime.add(DateTime.utc_now(), ttl_ms, :millisecond)
+    expires_at_ms = now_ms + ttl_ms
 
-    if Map.has_key?(state.leases, workspace_id) or
-         Map.has_key?(state.retained_by_id, workspace_id),
-       do: fresh_workspace_id(state, %{workspace_id_explicit: false}, nil),
-       else: {:ok, workspace_id}
+    refreshed =
+      Map.merge(retained, %{
+        expires_at: expires_at,
+        expires_at_ms: expires_at_ms,
+        retry_count: 0,
+        cleanup_failure: nil,
+        dormant: false,
+        lifecycle: :retained,
+        runtime_id: state.retention_runtime_id,
+        # Persist lifecycle "active" while converting; hot retained entry is dropped.
+        durable_lifecycle: "active"
+      })
+
+    case persist_retained_marker(state, refreshed) do
+      :ok ->
+        {:ok, Map.put(refreshed, :durable_lifecycle, nil)}
+
+      {:error, reason} ->
+        {:error, {:retention_journal_write_failed, reason}}
+    end
   end
 
   defp validate_retained_identity(retained, prepared) do
@@ -2651,10 +3835,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
              retained.target,
          {:ok, current_path} <- canonical_existing_path(prepared.candidate_path),
          true <- current_path == retained.worktree_path,
+         true <- retained.worktree_path != retained.repo_path,
          {:ok, current_lstat} <- File.lstat(retained.worktree_path),
          true <- lstat_identity(current_lstat) == retained.lstat_identity,
          {:ok, registration} <- worktree_registration(retained.repo_path, retained.worktree_path),
-         true <- registration == retained.worktree_registration,
+         # HEAD is mutable workspace content, not ownership identity.
+         true <- registration_matches?(registration, retained.worktree_registration),
          {:ok, current_branch} <- current_branch(retained.repo_path, retained.worktree_path),
          true <- current_branch == retained.branch do
       :ok
@@ -2667,14 +3853,21 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp cancel_expiry(ref) when is_reference(ref), do: Process.cancel_timer(ref)
   defp cancel_expiry(_), do: :ok
 
-  defp run_create_worktree(prepared) do
+  defp run_create_worktree(prepared, require_reused?) do
+    create_params =
+      if require_reused? do
+        Map.put(prepared.create_params, :require_reused, true)
+      else
+        prepared.create_params
+      end
+
     try do
       case prepared.create_worktree do
         fun when is_function(fun, 3) ->
-          fun.(prepared.repo_path, prepared.branch, prepared.create_params)
+          fun.(prepared.repo_path, prepared.branch, create_params)
 
         _ ->
-          Workspace.create_worktree(prepared.repo_path, prepared.branch, prepared.create_params)
+          Workspace.create_worktree(prepared.repo_path, prepared.branch, create_params)
       end
     rescue
       error ->
@@ -2687,12 +3880,40 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   # Post-create registration/finalization failed. Delete only when the callback
   # supplied a valid owned marker; unknown ownership is never deletion authority.
-  defp cleanup_failed_create(repo_path, worktree_path, ownership) do
+  defp cleanup_failed_create(repo_path, worktree_path, ownership, identity) do
     case normalize_ownership(ownership) do
-      {:ok, :owned} -> remove_owned_worktree(repo_path, worktree_path)
-      _ -> :ok
+      {:ok, :owned} when is_map(identity) ->
+        remove_owned_worktree(repo_path, worktree_path, identity)
+
+      {:ok, :owned} ->
+        {:error, :owned_worktree_identity_unavailable}
+
+      _ ->
+        :ok
     end
   end
+
+  defp capture_created_identity(_repo_path, _path, _branch, :reused), do: {:ok, nil}
+
+  defp capture_created_identity(repo_path, path, branch, :owned) do
+    with {:ok, identity} <- Workspace.capture_worktree_removal_identity(repo_path, path),
+         %{branch: ^branch} <- identity.worktree_registration do
+      {:ok, identity}
+    else
+      %{branch: _other} -> {:error, :worktree_registration_mismatch}
+      %{detached: true} -> {:error, :worktree_registration_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp capture_created_identity(_repo_path, _path, _branch, _ownership),
+    do: {:error, :owned_worktree_identity_unavailable}
+
+  defp bind_created_identity(lease, identity) when is_map(identity) do
+    Map.put(lease, :created_removal_identity, identity)
+  end
+
+  defp bind_created_identity(lease, _identity), do: lease
 
   defp put_lease(state, lease) do
     %{state | leases: Map.put(state.leases, lease.workspace_id, lease)}
@@ -2732,8 +3953,131 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp non_empty_id?(id), do: is_binary(id) and id != ""
 
+  defp validate_task_principal_pair(nil, nil), do: :ok
+
+  defp validate_task_principal_pair(task_id, principal_id)
+       when is_binary(task_id) and is_binary(principal_id),
+       do: :ok
+
+  defp validate_task_principal_pair(_task_id, _principal_id),
+    do: {:error, :incomplete_task_principal}
+
   defp owner_death_quarantined?(lease) do
     Map.get(lease, :owner_death_deletion_disabled) == true
+  end
+
+  defp release_orphaned_retained(state, retained, :retain) do
+    ttl_ms = state.retention_ttl_ms
+    now_ms = System.monotonic_time(:millisecond)
+    expires_at = DateTime.add(DateTime.utc_now(), ttl_ms, :millisecond)
+
+    refreshed =
+      Map.merge(retained, %{
+        lifecycle: :retained,
+        runtime_id: state.retention_runtime_id,
+        durable_lifecycle: "retained",
+        expiry_generation: make_ref(),
+        expiry_ref: nil,
+        expires_at: expires_at,
+        expires_at_ms: now_ms + ttl_ms,
+        retry_count: 0,
+        cleanup_failure: nil,
+        dormant: false
+      })
+
+    case persist_retained_marker(state, refreshed) do
+      :ok ->
+        expiry_ref =
+          Process.send_after(
+            self(),
+            {:retained_expire, refreshed.target, refreshed.expiry_generation},
+            ttl_ms
+          )
+
+        retained =
+          refreshed
+          |> Map.put(:expiry_ref, expiry_ref)
+          |> Map.put(:durable_lifecycle, nil)
+
+        state = put_retained(state, retained)
+
+        result =
+          retained
+          |> Map.put(:active, false)
+          |> public_view()
+          |> Map.put(:active, false)
+          |> Map.put(:status, "retained")
+          |> Map.put(:expires_at, DateTime.to_iso8601(expires_at))
+
+        {:ok, result, state}
+
+      {:error, reason} ->
+        {:error, {:retention_journal_write_failed, reason}, state}
+    end
+  end
+
+  defp release_orphaned_retained(state, retained, :remove) do
+    # Convert the active marker durably before allowing the cleanup machinery
+    # to mutate hot state or reserve a destructive attempt.
+    retained_for_remove =
+      Map.merge(retained, %{
+        lifecycle: :retained,
+        runtime_id: state.retention_runtime_id,
+        durable_lifecycle: "retained"
+      })
+
+    case persist_retained_marker(state, retained_for_remove) do
+      :ok ->
+        state = put_retained(state, Map.put(retained_for_remove, :durable_lifecycle, nil))
+
+        case remove_retained_now(state, retained_for_remove) do
+          {:ok, state} ->
+            result =
+              retained
+              |> Map.put(:active, false)
+              |> public_view()
+              |> Map.put(:active, false)
+              |> Map.put(:status, "removed")
+
+            {:ok, result, state}
+
+          {:error, reason, state} ->
+            {:error, reason, state}
+        end
+
+      {:error, reason} ->
+        {:error, {:retention_journal_write_failed, reason}, state}
+    end
+  end
+
+  defp remove_retained_now(state, retained) do
+    case reserve_cleanup_attempt(state, retained) do
+      {:ok, reserved, state2} ->
+        case settle_or_cleanup_retained(state2, reserved) do
+          :ok ->
+            case delete_retained_marker(state2, reserved) do
+              :ok ->
+                {:ok, drop_retained(state2, reserved)}
+
+              {:error, reason} ->
+                # The path is gone and registration is absent, but preserve
+                # the marker as evidence until bounded deletion retries settle.
+                {:ok,
+                 schedule_retry_after_failed_attempt(
+                   state2,
+                   reserved,
+                   {:marker_delete_failed, reason}
+                 )}
+            end
+
+          {:error, reason} ->
+            state = schedule_retry_after_failed_attempt(state2, reserved, reason)
+            {:error, reason, state}
+        end
+
+      {:error, reason, state} ->
+        {:error, reason, state}
+    end
   end
 
   defp do_release(state, lease, :retain) when lease.ownership == :reused do
@@ -2751,7 +4095,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp do_release(state, lease, :retain) when lease.ownership == :owned do
-    case capture_retention_identity(lease) do
+    case active_lease_retention_identity(state, lease) do
       {:ok, identity} ->
         now_ms = System.monotonic_time(:millisecond)
         ttl_ms = state.retention_ttl_ms
@@ -2765,12 +4109,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           owner_pid: lease.owner_pid,
           task_id: lease.task_id,
           principal_id: lease.principal_id,
-          repo_path: lease.repo_path,
+          repo_path: identity.repo_path,
           worktree_path: identity.worktree_path,
           display_worktree_path: lease.worktree_path,
           branch: lease.branch,
           base_commit: lease.base_commit,
           ownership: :owned,
+          lifecycle: :retained,
+          runtime_id: state.retention_runtime_id,
+          durable_lifecycle: "retained",
           target: target,
           lstat_identity: identity.lstat_identity,
           worktree_registration: identity.worktree_registration,
@@ -2779,22 +4126,39 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           expires_at: expires_at,
           expires_at_ms: expires_at_ms,
           retry_count: 0,
-          cleanup_failure: nil
+          cleanup_failure: nil,
+          dormant: false
         }
 
-        expiry_ref = Process.send_after(self(), {:retained_expire, target, generation}, ttl_ms)
-        retained = %{retained | expiry_ref: expiry_ref}
-        state = drop_lease(state, lease) |> put_retained(retained)
-        Process.demonitor(lease.owner_ref, [:flush])
+        # Persist durable evidence before dropping live authority so a crash
+        # cannot turn a retained workspace into an untracked leak.
+        case persist_retained_marker(state, retained) do
+          :ok ->
+            expiry_ref =
+              Process.send_after(self(), {:retained_expire, target, generation}, ttl_ms)
 
-        result =
-          lease
-          |> public_view()
-          |> Map.put(:active, false)
-          |> Map.put(:status, "retained")
-          |> Map.put(:expires_at, DateTime.to_iso8601(expires_at))
+            retained = %{retained | expiry_ref: expiry_ref, durable_lifecycle: nil}
+            state = drop_lease(state, lease) |> put_retained(retained)
+            Process.demonitor(lease.owner_ref, [:flush])
 
-        {:ok, result, state}
+            result =
+              lease
+              |> public_view()
+              |> Map.put(:active, false)
+              |> Map.put(:status, "retained")
+              |> Map.put(:expires_at, DateTime.to_iso8601(expires_at))
+
+            {:ok, result, state}
+
+          {:error, reason} ->
+            Logger.warning(
+              "workspace retain durable write failed; keeping live lease",
+              workspace_id: lease.workspace_id,
+              detail: inspect(reason)
+            )
+
+            {:error, {:retention_journal_write_failed, reason}, state}
+        end
 
       {:error, reason} ->
         # Public release surface keeps the stable atom; owner-death logging uses the detail.
@@ -2830,20 +4194,106 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp do_release(state, lease, :remove), do: do_release_after_identity_capture(state, lease)
 
   defp do_release_after_identity_capture(state, lease) do
-    state = drop_lease(state, lease)
-    Process.demonitor(lease.owner_ref, [:flush])
-
     if lease.ownership == :owned do
-      remove_owned_worktree(lease.repo_path, lease.worktree_path)
+      case remove_active_owned_lease(state, lease) do
+        {:ok, state} ->
+          Process.demonitor(lease.owner_ref, [:flush])
+
+          result =
+            lease
+            |> public_view()
+            |> Map.put(:active, false)
+            |> Map.put(:status, "removed")
+
+          {:ok, result, state}
+
+        {:error, reason, state} ->
+          {:error, reason, state}
+      end
+    else
+      state = drop_lease(state, lease)
+      Process.demonitor(lease.owner_ref, [:flush])
+
+      result =
+        lease
+        |> public_view()
+        |> Map.put(:active, false)
+        |> Map.put(:status, "removed")
+
+      {:ok, result, state}
     end
+  end
 
-    result =
-      lease
-      |> public_view()
-      |> Map.put(:active, false)
-      |> Map.put(:status, "removed")
+  # Owned remove: revalidate expected identity, destroy only when it still
+  # matches, prove path+Git absence, then delete the durable marker. Marker
+  # delete failure schedules bounded retries; dormancy only after the limit.
+  defp remove_active_owned_lease(state, lease) do
+    with {:ok, retained_like} <- retained_view_from_active_lease(state, lease) do
+      case remove_owned_retained_worktree(retained_like) do
+        :ok ->
+          case verify_retained_removed(retained_like) do
+            :ok ->
+              state = drop_lease(state, lease)
 
-    {:ok, result, state}
+              case delete_retained_marker(state, retained_like) do
+                :ok ->
+                  {:ok, state}
+
+                {:error, reason} ->
+                  # Path is gone but marker remains — schedule bounded marker
+                  # deletion retries rather than immediately going dormant.
+                  state =
+                    schedule_retained_retry(
+                      state,
+                      retained_like,
+                      {:marker_delete_failed, reason}
+                    )
+
+                  {:ok, state}
+              end
+
+            {:error, reason} ->
+              {:error, {:cleanup_unconfirmed, reason}, state}
+          end
+
+        {:error, reason} ->
+          {:error, reason, state}
+      end
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp retained_view_from_active_lease(state, lease) do
+    with {:ok, identity} <- active_lease_retention_identity(state, lease) do
+      {:ok,
+       %{
+         workspace_id: lease.workspace_id,
+         owner_pid: lease.owner_pid,
+         task_id: lease.task_id,
+         principal_id: lease.principal_id,
+         repo_path: identity.repo_path,
+         worktree_path: identity.worktree_path,
+         display_worktree_path: lease.worktree_path,
+         branch: lease.branch,
+         base_commit: lease.base_commit,
+         ownership: :owned,
+         lifecycle: :retained,
+         runtime_id: Map.get(lease, :retention_runtime_id, state.retention_runtime_id),
+         durable_lifecycle: "active",
+         target: target_key(identity.repo_path, lease.branch, identity.worktree_path),
+         lstat_identity: identity.lstat_identity,
+         worktree_registration: identity.worktree_registration,
+         expiry_generation: make_ref(),
+         expiry_ref: nil,
+         expires_at: Map.get(lease, :retention_expires_at, DateTime.utc_now()),
+         expires_at_ms:
+           Map.get(lease, :retention_expires_at_ms, System.monotonic_time(:millisecond)),
+         retry_count: 0,
+         cleanup_failure: nil,
+         dormant: false
+       }}
+    end
   end
 
   defp drop_lease(state, lease) do
@@ -2888,23 +4338,79 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp capture_retention_identity(lease) do
-    with {:ok, canonical_worktree_path} <- canonical_existing_path(lease.worktree_path),
+    with {:ok, canonical_repo} <- canonical_existing_path(lease.repo_path),
+         {:ok, canonical_worktree_path} <- canonical_existing_path(lease.worktree_path),
+         :ok <- reject_primary_checkout_paths(canonical_repo, canonical_worktree_path),
          {:ok, lstat} <- File.lstat(canonical_worktree_path),
-         {:ok, registration} <- worktree_registration(lease.repo_path, canonical_worktree_path),
+         {:ok, registration} <- worktree_registration(canonical_repo, canonical_worktree_path),
+         true <- registration.path == canonical_worktree_path,
          true <- registration.branch == lease.branch,
-         {:ok, current_branch} <- current_branch(lease.repo_path, canonical_worktree_path),
+         {:ok, current_branch} <- current_branch(canonical_repo, canonical_worktree_path),
          true <- current_branch == lease.branch do
       {:ok,
        %{
+         repo_path: canonical_repo,
          worktree_path: canonical_worktree_path,
          lstat_identity: lstat_identity(lstat),
          worktree_registration: registration
        }}
     else
       {:error, reason} -> {:error, reason}
+      false -> {:error, :retained_identity_mismatch}
       other -> {:error, {:unexpected_identity, other}}
     end
   end
+
+  defp active_lease_retention_identity(
+         %{retention_journal: %{status: :disabled}},
+         lease
+       ),
+       do: capture_retention_identity(lease)
+
+  defp active_lease_retention_identity(_state, lease),
+    do: retention_identity_from_active_lease(lease)
+
+  defp retention_identity_from_active_lease(lease) do
+    repo_path = Map.get(lease, :retention_repo_path)
+    worktree_path = Map.get(lease, :retention_worktree_path)
+    lstat = Map.get(lease, :retention_lstat_identity)
+    registration = Map.get(lease, :retention_worktree_registration)
+
+    retained_identity = %{
+      repo_path: repo_path,
+      worktree_path: worktree_path,
+      lstat_identity: lstat,
+      worktree_registration: registration
+    }
+
+    with true <- is_binary(repo_path) and is_binary(worktree_path),
+         true <- is_map(lstat) and is_map(registration),
+         true <- repo_path != worktree_path,
+         :ok <- revalidate_destruction_identity(retained_identity),
+         {:ok, current_branch} <- current_branch(repo_path, worktree_path),
+         true <- current_branch == lease.branch do
+      {:ok,
+       %{
+         repo_path: repo_path,
+         worktree_path: worktree_path,
+         lstat_identity: lstat,
+         worktree_registration: registration
+       }}
+    else
+      _ -> {:error, :retention_identity_unavailable}
+    end
+  end
+
+  defp reject_primary_checkout_paths(repo_path, worktree_path)
+       when is_binary(repo_path) and is_binary(worktree_path) do
+    if repo_path == worktree_path do
+      {:error, :primary_checkout_not_retainable}
+    else
+      :ok
+    end
+  end
+
+  defp reject_primary_checkout_paths(_, _), do: {:error, :primary_checkout_not_retainable}
 
   # HEAD is intentionally excluded: an authorized resumed worker may commit
   # between reactivation and release, while the directory inode, canonical
@@ -2924,6 +4430,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     case Map.get(state.retained_by_target, target) do
       %{} = retained when retained.expiry_generation == generation ->
         cond do
+          Map.get(retained, :dormant) == true ->
+            # Exhausted automatic retries — no recurring timer.
+            state
+
+          Map.get(retained, :lifecycle) == :active_orphaned ->
+            # Same-BEAM active marker: never arm TTL deletion.
+            state
+
           System.monotonic_time(:millisecond) < retained.expires_at_ms ->
             reschedule_retained_expiry(state, retained)
 
@@ -2931,17 +4445,47 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             state
 
           true ->
-            case cleanup_retained_worktree(state, retained) do
-              :ok ->
-                drop_retained(state, retained)
+            # Pre-reserve durable attempt count before any destructive work.
+            case reserve_cleanup_attempt(state, retained) do
+              {:ok, reserved, state2} ->
+                case settle_or_cleanup_retained(state2, reserved) do
+                  :ok ->
+                    # Marker removal only after proven path + Git registration absence.
+                    case delete_retained_marker(state2, reserved) do
+                      :ok ->
+                        drop_retained(state2, reserved)
 
-              {:error, reason} ->
-                schedule_retained_retry(state, retained, reason)
+                      {:error, reason} ->
+                        schedule_retry_after_failed_attempt(
+                          state2,
+                          reserved,
+                          {:marker_delete_failed, reason}
+                        )
+                    end
+
+                  {:error, reason} ->
+                    schedule_retry_after_failed_attempt(state2, reserved, reason)
+                end
+
+              {:error, _why, state2} ->
+                state2
             end
         end
 
       _ ->
         state
+    end
+  end
+
+  # Positive absence (path + registration already gone) settles the durable
+  # marker without granting deletion authority for a still-present path.
+  defp settle_or_cleanup_retained(state, retained) do
+    case verify_retained_removed(retained) do
+      :ok ->
+        :ok
+
+      {:error, _} ->
+        cleanup_retained_worktree(state, retained)
     end
   end
 
@@ -2954,6 +4498,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp cleanup_retained_worktree(state, retained) do
     case validate_retained_stored_identity(retained) do
       :ok ->
+        # Pass the full retained identity into the cleanup boundary so the
+        # default path can revalidate immediately before every destructive
+        # fallback (never unconditional rm_rf after identity change).
         case invoke_retained_cleanup(state.retained_cleanup, retained) do
           :ok ->
             case verify_retained_removed(retained) do
@@ -2978,7 +4525,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          {:ok, current_lstat} <- File.lstat(retained.worktree_path),
          true <- lstat_identity(current_lstat) == retained.lstat_identity,
          {:ok, registration} <- worktree_registration(retained.repo_path, retained.worktree_path),
-         true <- registration == retained.worktree_registration,
+         # HEAD is evidence only; ownership identity is path + branch + lstat.
+         true <- registration_matches?(registration, retained.worktree_registration),
          {:ok, current_branch} <- current_branch(retained.repo_path, retained.worktree_path),
          true <- current_branch == retained.branch do
       :ok
@@ -2987,8 +4535,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp invoke_retained_cleanup(cleanup, retained) when is_function(cleanup, 2) do
-    case cleanup.(retained.repo_path, retained.worktree_path) do
+  defp invoke_retained_cleanup(cleanup, retained) when is_function(cleanup, 1) do
+    case cleanup.(retained) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
       _ -> {:error, :retained_cleanup_failed}
@@ -3003,29 +4551,143 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp verify_retained_removed(retained) do
     with {:error, :enoent} <- File.lstat(retained.worktree_path),
-         {:ok, nil} <- worktree_registration_status(retained.repo_path, retained.worktree_path) do
+         {:ok, :absent} <-
+           worktree_path_registration_presence(retained.repo_path, retained.worktree_path) do
       :ok
     else
       _ -> {:error, :retained_cleanup_unconfirmed}
     end
   end
 
-  defp schedule_retained_retry(state, %{retry_count: retry_count} = retained, reason) do
-    generation = make_ref()
-    delay = min(1_000 * Integer.pow(2, min(retry_count, 5)), 60_000)
+  # Pre-reserve one durable cleanup/delete attempt. Failed reservation performs
+  # no attempt, poisons admission, stops recurring cleanup, and keeps dormant
+  # evidence so a restart cannot regain free retries.
+  defp reserve_cleanup_attempt(state, retained) do
+    limit = Map.get(state, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
+    retry_count = Map.get(retained, :retry_count, 0)
 
-    expiry_ref =
-      Process.send_after(self(), {:retained_expire, retained.target, generation}, delay)
+    cond do
+      Map.get(retained, :dormant) == true ->
+        {:error, :already_dormant, state}
 
-    retained = %{
-      retained
-      | expiry_generation: generation,
-        expiry_ref: expiry_ref,
-        retry_count: retry_count + 1,
-        cleanup_failure: reason
-    }
+      Map.get(retained, :lifecycle) == :active_orphaned ->
+        {:error, :orphaned_active_not_cleaned, state}
 
-    put_retained(state, retained)
+      retry_count >= limit ->
+        dormant =
+          %{
+            retained
+            | dormant: true,
+              expiry_ref: nil,
+              cleanup_failure: :cleanup_retries_exhausted
+          }
+
+        cancel_expiry(Map.get(retained, :expiry_ref))
+        _ = persist_retained_marker(state, dormant)
+
+        Logger.warning(
+          "workspace retained cleanup retries exhausted; dormant evidence kept",
+          workspace_id: retained.workspace_id
+        )
+
+        {:error, :retries_exhausted, put_retained(state, dormant)}
+
+      true ->
+        reserved = %{
+          retained
+          | retry_count: retry_count + 1,
+            dormant: false,
+            durable_lifecycle: "retained"
+        }
+
+        case persist_retained_marker(state, reserved) do
+          :ok ->
+            cancel_expiry(Map.get(retained, :expiry_ref))
+            reserved = %{reserved | expiry_ref: nil, durable_lifecycle: nil}
+            {:ok, reserved, put_retained(state, reserved)}
+
+          {:error, reason} ->
+            cancel_expiry(Map.get(retained, :expiry_ref))
+
+            dormant = %{
+              retained
+              | dormant: true,
+                expiry_ref: nil,
+                cleanup_failure: {:retry_reservation_failed, reason}
+            }
+
+            Logger.warning(
+              "workspace retained cleanup reservation failed; no attempt; journal poisoned",
+              workspace_id: retained.workspace_id,
+              detail: inspect(reason)
+            )
+
+            # Keep dormant evidence in hot state; only degrade admission.
+            # (hydrate-time poison clears partial inventory; this path must not.)
+            state =
+              state
+              |> put_retained(dormant)
+              |> degrade_retention_journal({:retry_reservation_failed, reason})
+
+            {:error, :reservation_failed, state}
+        end
+    end
+  end
+
+  # After a reserved attempt fails, reschedule without incrementing again.
+  # Restart still sees the pre-reserved retry_count.
+  defp schedule_retry_after_failed_attempt(state, retained, reason) do
+    limit = Map.get(state, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
+    retry_count = Map.get(retained, :retry_count, 0)
+
+    if retry_count >= limit do
+      cancel_expiry(Map.get(retained, :expiry_ref))
+
+      dormant = %{
+        retained
+        | expiry_ref: nil,
+          dormant: true,
+          cleanup_failure: {:cleanup_retries_exhausted, reason},
+          durable_lifecycle: "retained"
+      }
+
+      _ = persist_retained_marker(state, dormant)
+      put_retained(state, %{dormant | durable_lifecycle: nil})
+    else
+      generation = make_ref()
+      # retry_count is pre-reserved before the attempt. Preserve the original
+      # backoff sequence: the first failed attempt waits one base interval,
+      # then subsequent reserved attempts double from there.
+      exponent = retry_count |> Kernel.-(1) |> max(0) |> min(5)
+      delay = min(1_000 * Integer.pow(2, exponent), 60_000)
+
+      expiry_ref =
+        Process.send_after(self(), {:retained_expire, retained.target, generation}, delay)
+
+      next = %{
+        retained
+        | expiry_generation: generation,
+          expiry_ref: expiry_ref,
+          cleanup_failure: reason,
+          dormant: false,
+          durable_lifecycle: "retained"
+      }
+
+      _ = persist_retained_marker(state, next)
+      put_retained(state, %{next | durable_lifecycle: nil})
+    end
+  end
+
+  # Compatibility path used by active-lease marker-delete failure after path
+  # remove: pre-reserve then schedule.
+  defp schedule_retained_retry(state, retained, reason) do
+    case reserve_cleanup_attempt(state, retained) do
+      {:ok, reserved, state2} ->
+        schedule_retry_after_failed_attempt(state2, reserved, reason)
+
+      {:error, _why, state2} ->
+        state2
+    end
   end
 
   defp reschedule_retained_expiry(state, retained) do
@@ -3038,8 +4700,643 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     put_retained(state, %{retained | expiry_generation: generation, expiry_ref: expiry_ref})
   end
 
-  defp target_key(repo_path, branch, worktree_path),
-    do: {:workspace_target, repo_path, branch, worktree_path}
+  # -- Retention journal (Persistence facade) -------------------------
+
+  defp journal_config_from_opts(opts) do
+    journal =
+      case Keyword.fetch(server_opts(opts), :retention_journal) do
+        {:ok, configured} -> configured
+        :error -> Config.application_retention_journal()
+      end
+
+    case journal do
+      :disabled ->
+        %{status: :disabled}
+
+      {store_name, backend}
+      when is_atom(store_name) and is_atom(backend) and not is_nil(backend) ->
+        %{status: :ready, store_name: store_name, backend: backend}
+
+      %{store_name: store_name, backend: backend}
+      when is_atom(store_name) and is_atom(backend) and not is_nil(backend) ->
+        %{status: :ready, store_name: store_name, backend: backend}
+
+      _ ->
+        %{status: :poisoned, reason: :invalid_retention_journal_configuration}
+    end
+  end
+
+  defp hydrate_retained_from_journal(%{retention_journal: %{status: :disabled}} = state),
+    do: state
+
+  defp hydrate_retained_from_journal(%{retention_journal: %{status: :poisoned}} = state),
+    do: state
+
+  # All-or-nothing: fully validate/materialize the durable inventory (including
+  # duplicate-target rejection and far-future expiry rewrites) before any timer
+  # is scheduled or hot retained entry is installed. A single bad/duplicate
+  # record poisons the journal and leaves no partial hot state.
+  defp hydrate_retained_from_journal(%{retention_journal: journal} = state) do
+    case load_durable_retained_records(journal) do
+      {:ok, records} ->
+        case materialize_all_retained(records, state) do
+          {:ok, retained_list, state_after} ->
+            install_retained_list(state_after, retained_list)
+
+          {:error, reason} ->
+            Logger.warning(
+              "workspace retention journal hydrate failed closed; no hot retained state",
+              detail: inspect(reason)
+            )
+
+            poison_retention_journal(state, reason)
+        end
+
+      {:error, reason} ->
+        Logger.warning(
+          "workspace retention journal load failed; starting poisoned without hot restore",
+          detail: inspect(reason)
+        )
+
+        poison_retention_journal(state, reason)
+    end
+  end
+
+  defp poison_retention_journal(%{retention_journal: journal} = state, reason) do
+    %{
+      state
+      | retained_by_id: %{},
+        retained_by_target: %{},
+        retention_blockers: %{},
+        retention_blockers_by_target: %{},
+        retention_journal:
+          journal
+          |> Map.put(:status, :poisoned)
+          |> Map.put(:reason, reason)
+    }
+  end
+
+  # Degrade admission without wiping already-materialized dormant evidence.
+  defp degrade_retention_journal(%{retention_journal: journal} = state, reason) do
+    %{
+      state
+      | retention_journal:
+          journal
+          |> Map.put(:status, :poisoned)
+          |> Map.put(:reason, reason)
+    }
+  end
+
+  defp materialize_all_retained(records, state) when is_list(records) do
+    records
+    |> Enum.reduce_while({:ok, [], MapSet.new(), MapSet.new(), state}, fn record,
+                                                                          {:ok, acc, ids, targets,
+                                                                           st} ->
+      case RetentionJournal.restore_decision(record) do
+        :restore ->
+          case materialize_durable_record(record, st) do
+            {:ok, :settled, st2} ->
+              {:cont, {:ok, acc, ids, targets, st2}}
+
+            {:ok, materialized, st2} ->
+              cond do
+                MapSet.member?(ids, materialized.workspace_id) ->
+                  {:halt, {:error, {:duplicate_workspace_id, materialized.workspace_id}}}
+
+                MapSet.member?(targets, materialized.target) ->
+                  {:halt, {:error, {:duplicate_workspace_target, materialized.target}}}
+
+                true ->
+                  {:cont,
+                   {:ok, [materialized | acc], MapSet.put(ids, materialized.workspace_id),
+                    MapSet.put(targets, materialized.target), st2}}
+              end
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+
+        {:reject, reason} ->
+          {:halt, {:error, {:restore_rejected, Map.get(record, :workspace_id), reason}}}
+      end
+    end)
+    |> case do
+      {:ok, list, _ids, _targets, st} -> {:ok, Enum.reverse(list), st}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp materialize_durable_record(record, state) do
+    if RetentionJournal.creating_record?(record) do
+      materialize_creation_blocker(record, state)
+    else
+      case settle_absent_same_runtime_active_marker(record, state) do
+        {:ok, :settled, state2} ->
+          {:ok, :settled, state2}
+
+        {:ok, :keep, state2} ->
+          case materialize_retained_from_durable(record, state2) do
+            {:ok, retained, state3} ->
+              {:ok, retained, state3}
+
+            {:error, reason} ->
+              {:error, {:materialize_failed, Map.get(record, :workspace_id), reason}}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp materialize_creation_blocker(record, state) do
+    blocker = %{
+      workspace_id: record.workspace_id,
+      task_id: record.task_id,
+      principal_id: record.principal_id,
+      repo_path: canonical_path_or_expanded(record.repo_path),
+      worktree_path: canonical_path_or_expanded(record.worktree_path),
+      branch: record.branch,
+      base_commit: nil,
+      ownership: :pending,
+      lifecycle: :creating,
+      runtime_id: record.runtime_id,
+      lstat_identity: nil,
+      worktree_registration: nil,
+      target: target_key(record.repo_path, record.branch, record.worktree_path),
+      expires_at: record.expires_at,
+      retry_count: record.retry_count,
+      dormant: true,
+      cleanup_failure: :creating_intent_unresolved
+    }
+
+    case creation_marker_absent?(blocker) do
+      :ok ->
+        case delete_retained_marker(state, record) do
+          :ok ->
+            {:ok, :settled, state}
+
+          {:error, reason} ->
+            {:ok, %{blocker | cleanup_failure: {:intent_delete_failed, reason}}, state}
+        end
+
+      {:error, reason} ->
+        {:ok, %{blocker | cleanup_failure: reason}, state}
+    end
+  end
+
+  defp creation_marker_absent?(blocker) do
+    with {:error, :enoent} <- File.lstat(blocker.worktree_path),
+         {:ok, :absent} <-
+           worktree_path_registration_presence(blocker.repo_path, blocker.worktree_path) do
+      :ok
+    else
+      {:ok, :present} -> {:error, :creation_path_or_registration_present}
+      {:error, reason} -> {:error, {:creation_absence_uncertain, reason}}
+      {:ok, _stat} -> {:error, :creation_path_present}
+    end
+  end
+
+  defp settle_absent_same_runtime_active_marker(
+         %{lifecycle: "active", runtime_id: runtime_id} = record,
+         %{retention_runtime_id: runtime_id} = state
+       ) do
+    repo_path = canonical_path_or_expanded(record.repo_path)
+    worktree_path = canonical_path_or_expanded(record.worktree_path)
+
+    case File.lstat(worktree_path) do
+      {:error, :enoent} ->
+        case worktree_path_registration_presence(repo_path, worktree_path) do
+          {:ok, :absent} ->
+            case delete_retained_marker(state, %{workspace_id: record.workspace_id}) do
+              :ok ->
+                {:ok, :settled, state}
+
+              {:error, reason} ->
+                {:error, {:stale_active_marker_delete_failed, record.workspace_id, reason}}
+            end
+
+          _present_or_uncertain ->
+            {:ok, :keep, state}
+        end
+
+      _present_or_uncertain ->
+        {:ok, :keep, state}
+    end
+  end
+
+  defp settle_absent_same_runtime_active_marker(_record, state),
+    do: {:ok, :keep, state}
+
+  # Install hot retained entries and schedule expiry timers only after the full
+  # inventory has been validated. No orphan timers on partial failure.
+  # Same-BEAM active markers and dormant evidence get no TTL timers.
+  defp install_retained_list(state, retained_list) when is_list(retained_list) do
+    Enum.reduce(retained_list, state, fn retained, acc ->
+      cond do
+        Map.get(retained, :lifecycle) == :creating ->
+          put_creation_blocker(acc, retained)
+
+        Map.get(retained, :dormant) == true ->
+          put_retained(acc, retained)
+
+        Map.get(retained, :lifecycle) == :active_orphaned ->
+          put_retained(acc, %{retained | expiry_ref: nil})
+
+        true ->
+          now_ms = System.monotonic_time(:millisecond)
+          remaining = max(retained.expires_at_ms - now_ms, 1)
+          generation = make_ref()
+
+          expiry_ref =
+            Process.send_after(self(), {:retained_expire, retained.target, generation}, remaining)
+
+          put_retained(acc, %{
+            retained
+            | expiry_generation: generation,
+              expiry_ref: expiry_ref
+          })
+      end
+    end)
+  end
+
+  defp load_durable_retained_records(%{status: status} = journal)
+       when status in [:ready, :poisoned] do
+    store_name = journal.store_name
+    backend = journal.backend
+
+    try do
+      with {:ok, keys} when is_list(keys) <- Persistence.list(store_name, backend),
+           {:ok, values} <- fetch_durable_values(store_name, backend, keys),
+           {:ok, records} <- RetentionJournal.decode_inventory(keys, values) do
+        {:ok, records}
+      else
+        {:error, reason} -> {:error, reason}
+        {:ok, _non_list} -> {:error, :invalid_key_list}
+        other -> {:error, other}
+      end
+    catch
+      kind, reason ->
+        {:error, {:retention_journal_unavailable, kind, reason}}
+    end
+  end
+
+  defp load_durable_retained_records(_), do: {:ok, []}
+
+  defp fetch_durable_values(store_name, backend, keys) do
+    Enum.reduce_while(keys, {:ok, %{}}, fn key, {:ok, acc} ->
+      if RetentionJournal.retained_key?(key) do
+        try do
+          case Persistence.get(store_name, backend, key) do
+            {:ok, value} ->
+              {:cont, {:ok, Map.put(acc, key, value)}}
+
+            {:error, :not_found} ->
+              {:halt, {:error, {:missing_retention_value, key}}}
+
+            {:error, reason} ->
+              {:halt, {:error, {:retention_journal_get_failed, key, reason}}}
+          end
+        catch
+          kind, reason ->
+            {:halt, {:error, {:retention_journal_unavailable, kind, reason}}}
+        end
+      else
+        {:cont, {:ok, acc}}
+      end
+    end)
+  end
+
+  # Build a retained map without scheduling timers. Far-future expiry is clamped
+  # to the operator/global ceiling and **persisted** before the record is admitted
+  # so a later restart cannot regain the original unbounded expiry.
+  # Active markers for the current runtime become orphaned-active (no TTL);
+  # prior-incarnation active markers become retained (TTL eligible).
+  defp materialize_retained_from_durable(record, state) do
+    with {:ok, expires_at, _} <- DateTime.from_iso8601(record.expires_at),
+         {:ok, lstat} <- hydrate_lstat_identity(record.lstat_identity),
+         {:ok, hydrated_registration} <-
+           hydrate_worktree_registration(record.worktree_registration),
+         # Canonicalize before any identity/target work. Display is never operational.
+         repo_path = canonical_path_or_expanded(record.repo_path),
+         worktree_path = canonical_path_or_expanded(record.worktree_path),
+         true <- worktree_path != repo_path,
+         true <-
+           hydrated_registration.path == worktree_path or
+             registration_path_matches?(hydrated_registration, worktree_path),
+         paths_changed? =
+           record.repo_path != repo_path or record.worktree_path != worktree_path or
+             hydrated_registration.path != worktree_path,
+         registration = %{hydrated_registration | path: worktree_path},
+         {:ok, hot_lifecycle, durable_lifecycle, convert?} <-
+           hydrate_lifecycle(record, state.retention_runtime_id),
+         {:ok, remaining_ms, bounded_expires_at, clamped?} <-
+           bound_hydration_expiry(expires_at, state, convert?),
+         {:ok, state2} <-
+           maybe_persist_hydration_rewrite(
+             state,
+             record,
+             bounded_expires_at,
+             clamped? or convert? or paths_changed?,
+             durable_lifecycle,
+             lstat,
+             registration,
+             repo_path,
+             worktree_path
+           ) do
+      now_ms = System.monotonic_time(:millisecond)
+      expires_at_ms = now_ms + remaining_ms
+      target = target_key(repo_path, record.branch, worktree_path)
+
+      retry_count = Map.get(record, :retry_count, 0)
+
+      limit =
+        Map.get(state2, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
+
+      dormant? = retry_count >= limit and hot_lifecycle == :retained
+
+      retained = %{
+        workspace_id: record.workspace_id,
+        # PIDs are never durable; restart reactivation requires task+principal.
+        owner_pid: nil,
+        task_id: record.task_id,
+        principal_id: record.principal_id,
+        repo_path: repo_path,
+        worktree_path: worktree_path,
+        display_worktree_path: record.display_worktree_path,
+        branch: record.branch,
+        base_commit: record.base_commit,
+        ownership: :owned,
+        lifecycle: hot_lifecycle,
+        runtime_id: state2.retention_runtime_id,
+        durable_lifecycle: nil,
+        target: target,
+        lstat_identity: lstat,
+        worktree_registration: registration,
+        expiry_generation: make_ref(),
+        expiry_ref: nil,
+        expires_at: bounded_expires_at,
+        expires_at_ms: expires_at_ms,
+        retry_count: retry_count,
+        cleanup_failure: if(dormant?, do: :cleanup_retries_exhausted, else: nil),
+        dormant: dormant?
+      }
+
+      {:ok, retained, state2}
+    else
+      false -> {:error, :primary_checkout_not_retainable}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_durable_expires_at}
+    end
+  end
+
+  defp registration_path_matches?(%{path: path}, worktree_path) when is_binary(path) do
+    canonical_path_or_expanded(path) == worktree_path
+  end
+
+  defp registration_path_matches?(_, _), do: false
+
+  # Decide hot lifecycle from durable marker + current BEAM runtime id.
+  # Returns {hot_lifecycle, durable_lifecycle_to_persist, must_rewrite?}.
+  defp hydrate_lifecycle(record, current_runtime_id) do
+    case Map.get(record, :lifecycle) do
+      "active" when record.runtime_id == current_runtime_id ->
+        {:ok, :active_orphaned, "active", false}
+
+      "active" ->
+        # Prior BEAM incarnation: may become retained with TTL.
+        {:ok, :retained, "retained", true}
+
+      "retained" ->
+        {:ok, :retained, "retained", false}
+
+      other ->
+        {:error, {:invalid_lifecycle, other}}
+    end
+  end
+
+  defp maybe_persist_hydration_rewrite(
+         state,
+         record,
+         bounded_expires_at,
+         false,
+         _durable_lifecycle,
+         _lstat,
+         _registration,
+         _repo_path,
+         _worktree_path
+       ) do
+    # No clamp, lifecycle conversion, or path normalization — leave durable bytes untouched.
+    _ = record
+    _ = bounded_expires_at
+    {:ok, state}
+  end
+
+  defp maybe_persist_hydration_rewrite(
+         state,
+         record,
+         bounded_expires_at,
+         true,
+         durable_lifecycle,
+         lstat,
+         registration,
+         repo_path,
+         worktree_path
+       ) do
+    retained_for_persist = %{
+      workspace_id: record.workspace_id,
+      task_id: record.task_id,
+      principal_id: record.principal_id,
+      repo_path: repo_path,
+      worktree_path: worktree_path,
+      display_worktree_path: record.display_worktree_path,
+      branch: record.branch,
+      base_commit: record.base_commit,
+      ownership: :owned,
+      lifecycle: :retained,
+      runtime_id: state.retention_runtime_id,
+      durable_lifecycle: durable_lifecycle,
+      lstat_identity: lstat,
+      worktree_registration: registration,
+      expires_at: bounded_expires_at,
+      retry_count: Map.get(record, :retry_count, 0)
+    }
+
+    case persist_retained_marker(state, retained_for_persist) do
+      :ok ->
+        {:ok, state}
+
+      {:error, reason} ->
+        {:error, {:hydration_rewrite_persist_failed, reason}}
+    end
+  end
+
+  # No durable input may schedule an unbounded timer. Clamp remaining lifetime
+  # to the registry operator TTL and the global configured maximum. Returns
+  # `{remaining_ms, bounded_expires_at, clamped?}`.
+  defp bound_hydration_expiry(_expires_at, state, true) do
+    now = DateTime.utc_now()
+    ceiling = min(state.retention_ttl_ms, Config.workspace_retention_max_ttl_ms())
+    bounded = DateTime.add(now, ceiling, :millisecond)
+    {:ok, ceiling, bounded, true}
+  end
+
+  defp bound_hydration_expiry(%DateTime{} = expires_at, state, false) do
+    now = DateTime.utc_now()
+    raw_remaining = DateTime.diff(expires_at, now, :millisecond)
+    configured_ttl = state.retention_ttl_ms
+    global_max = Config.workspace_retention_max_ttl_ms()
+    ceiling = min(configured_ttl, global_max)
+
+    cond do
+      # Far-future durable expiry is not authority to schedule an unbounded timer.
+      raw_remaining > ceiling ->
+        bounded = DateTime.add(now, ceiling, :millisecond)
+        {:ok, ceiling, bounded, true}
+
+      raw_remaining < 0 ->
+        {:ok, 0, expires_at, false}
+
+      true ->
+        {:ok, raw_remaining, expires_at, false}
+    end
+  end
+
+  defp bound_hydration_expiry(_, _, _), do: {:error, :invalid_durable_expires_at}
+
+  defp hydrate_lstat_identity(%{type: type} = identity) when is_map(identity) do
+    type_atom =
+      case type do
+        t when is_atom(t) ->
+          t
+
+        "directory" ->
+          :directory
+
+        "regular" ->
+          :regular
+
+        "symlink" ->
+          :symlink
+
+        "device" ->
+          :device
+
+        "other" ->
+          :other
+
+        _ ->
+          nil
+      end
+
+    if is_atom(type_atom) and not is_nil(type_atom) and
+         is_integer(Map.get(identity, :major_device)) and
+         is_integer(Map.get(identity, :minor_device)) and
+         is_integer(Map.get(identity, :inode)) do
+      {:ok,
+       %{
+         type: type_atom,
+         major_device: identity.major_device,
+         minor_device: identity.minor_device,
+         inode: identity.inode
+       }}
+    else
+      {:error, :invalid_lstat_identity}
+    end
+  end
+
+  defp hydrate_lstat_identity(_), do: {:error, :invalid_lstat_identity}
+
+  defp hydrate_worktree_registration(%{path: path, head: head, branch: branch})
+       when is_binary(path) and is_binary(head) and is_binary(branch) do
+    {:ok, %{path: path, head: head, branch: branch}}
+  end
+
+  defp hydrate_worktree_registration(_), do: {:error, :invalid_worktree_registration}
+
+  defp persist_retained_marker(%{retention_journal: %{status: :disabled}}, _retained), do: :ok
+
+  defp persist_retained_marker(%{retention_journal: %{status: :poisoned}}, _retained) do
+    {:error, :retention_journal_poisoned}
+  end
+
+  defp persist_retained_marker(%{retention_journal: journal} = state, retained)
+       when journal.status == :ready do
+    try do
+      lifecycle =
+        Map.get(retained, :durable_lifecycle) ||
+          case Map.get(retained, :lifecycle, :retained) do
+            :active_orphaned -> "active"
+            :retained -> "retained"
+            "active" -> "active"
+            "retained" -> "retained"
+            _ -> "retained"
+          end
+
+      runtime_id =
+        Map.get(retained, :runtime_id) || Map.get(state, :retention_runtime_id) ||
+          beam_retention_runtime_id()
+
+      with {:ok, key} <- RetentionJournal.record_key(retained.workspace_id),
+           {:ok, payload} <-
+             RetentionJournal.encode_record(%{
+               workspace_id: retained.workspace_id,
+               task_id: retained.task_id,
+               principal_id: retained.principal_id,
+               repo_path: retained.repo_path,
+               worktree_path: retained.worktree_path,
+               display_worktree_path:
+                 Map.get(retained, :display_worktree_path, retained.worktree_path),
+               branch: retained.branch,
+               base_commit: retained.base_commit,
+               ownership: Map.get(retained, :ownership, :owned),
+               lifecycle: lifecycle,
+               runtime_id: runtime_id,
+               lstat_identity: retained.lstat_identity,
+               worktree_registration: retained.worktree_registration,
+               expires_at: retained.expires_at,
+               retry_count: Map.get(retained, :retry_count, 0)
+             }),
+           :ok <- Persistence.put(journal.store_name, journal.backend, key, payload) do
+        :ok
+      else
+        {:error, reason} -> {:error, reason}
+        other -> {:error, other}
+      end
+    catch
+      kind, reason ->
+        {:error, {:retention_journal_unavailable, kind, reason}}
+    end
+  end
+
+  defp persist_retained_marker(_state, _retained), do: {:error, :retention_journal_unavailable}
+
+  defp delete_retained_marker(%{retention_journal: %{status: :disabled}}, _retained), do: :ok
+
+  defp delete_retained_marker(%{retention_journal: journal}, retained)
+       when journal.status in [:ready, :poisoned] do
+    try do
+      with {:ok, key} <- RetentionJournal.record_key(retained.workspace_id),
+           :ok <- Persistence.delete(journal.store_name, journal.backend, key) do
+        :ok
+      else
+        {:error, reason} -> {:error, reason}
+        other -> {:error, other}
+      end
+    catch
+      kind, reason ->
+        {:error, {:retention_journal_unavailable, kind, reason}}
+    end
+  end
+
+  defp delete_retained_marker(_state, _retained), do: {:error, :retention_journal_unavailable}
+
+  # Canonicalize path components so /var vs /private/var aliases cannot form
+  # distinct ownership targets for the same worktree.
+  defp target_key(repo_path, branch, worktree_path) do
+    {:workspace_target, canonical_path_or_expanded(repo_path), branch,
+     canonical_path_or_expanded(worktree_path)}
+  end
 
   defp lstat_identity(%File.Stat{} = stat) do
     Map.take(Map.from_struct(stat), [:type, :major_device, :minor_device, :inode])
@@ -3047,47 +5344,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp worktree_registration(repo_path, worktree_path) do
     case worktree_registration_status(repo_path, worktree_path) do
-      {:ok, registration} when is_map(registration) -> {:ok, registration}
+      {:ok, %{branch: branch} = registration} when is_binary(branch) -> {:ok, registration}
+      {:ok, %{detached: true}} -> {:error, :worktree_detached}
       {:ok, nil} -> {:error, :worktree_not_registered}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp worktree_registration_status(repo_path, worktree_path) do
-    with {:ok, output} <- git_output(repo_path, ["worktree", "list", "--porcelain"]) do
-      registration =
-        output
-        |> String.split("\n\n", trim: true)
-        |> Enum.map(&parse_worktree_registration/1)
-        |> Enum.find(fn
-          {:ok, %{path: path}} -> path == worktree_path
-          _ -> false
-        end)
+  defp worktree_registration_status(repo_path, worktree_path),
+    do: Git.worktree_registration(repo_path, worktree_path)
 
-      case registration do
-        {:ok, value} -> {:ok, value}
-        nil -> {:ok, nil}
-      end
+  defp worktree_path_registration_presence(repo_path, worktree_path) do
+    case worktree_registration_status(repo_path, worktree_path) do
+      {:ok, nil} -> {:ok, :absent}
+      {:ok, registration} when is_map(registration) -> {:ok, :present}
+      {:error, reason} -> {:error, reason}
     end
-  end
-
-  defp parse_worktree_registration(entry) do
-    lines = String.split(entry, "\n", trim: true)
-    path = line_value(lines, "worktree ")
-    head = line_value(lines, "HEAD ")
-    branch = line_value(lines, "branch refs/heads/")
-
-    if is_binary(path) and is_binary(head) and is_binary(branch) do
-      {:ok, %{path: canonical_path_or_expanded(path), head: head, branch: branch}}
-    else
-      :error
-    end
-  end
-
-  defp line_value(lines, prefix) do
-    Enum.find_value(lines, fn line ->
-      if String.starts_with?(line, prefix), do: String.replace_prefix(line, prefix, "")
-    end)
   end
 
   defp current_branch(repo_path, worktree_path) do
@@ -3141,7 +5413,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp normalize_mode(other),
     do: {:error, "release mode must be \"retain\" or \"remove\", got: #{inspect(other)}"}
 
-  defp normalize_id(id) when is_binary(id) and id != "", do: id
+  defp normalize_id(id) when is_binary(id) do
+    if String.trim(id) == "", do: nil, else: id
+  end
+
   defp normalize_id(_), do: nil
 
   defp normalize_cleanup_failures(count, _force_once)
@@ -3154,32 +5429,144 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp require_binary(value, _field) when is_binary(value) and value != "", do: :ok
   defp require_binary(_value, field), do: {:error, {:invalid, field}}
 
-  # Destructive: explicit remove-of-owned and failed-create cleanup only.
-  defp remove_owned_worktree(repo_root, worktree_path)
-       when is_binary(repo_root) and is_binary(worktree_path) do
-    if File.dir?(worktree_path) do
-      result =
-        Git.with_storage_authority(repo_root, worktree_path, fn ->
-          Git.execute(repo_root, ["worktree", "remove", "--force", worktree_path])
-        end)
+  # Destructive: identity-bound remove for retained TTL / explicit cleanup.
+  # Revalidates expected filesystem + Git identity. Uses `git worktree remove`
+  # only — never File.rm_rf. On failure, retain the path as evidence.
+  @doc false
+  @spec remove_owned_retained_worktree(map()) :: :ok | {:error, term()}
+  def remove_owned_retained_worktree(retained) when is_map(retained) do
+    repo_root = retained.repo_path
+    worktree_path = retained.worktree_path
 
-      case result do
-        {:ok, %{exit_code: 0}} ->
-          :ok
+    with :ok <- require_binary(repo_root, :repo_path),
+         :ok <- require_binary(worktree_path, :worktree_path),
+         true <- worktree_path != repo_root,
+         :ok <- revalidate_destruction_identity(retained) do
+      if match?({:ok, %File.Stat{}}, File.lstat(worktree_path)) do
+        removal_identity = %{
+          lstat_identity: normalize_lstat_for_compare(retained.lstat_identity),
+          worktree_registration: retained.worktree_registration
+        }
 
-        _ ->
-          # Force-remove even if git worktree metadata is stale (dirty cancel).
-          File.rm_rf(worktree_path)
-          _ = Git.execute(repo_root, ["worktree", "prune"])
+        case Git.remove_worktree(repo_root, worktree_path, removal_identity) do
+          :ok ->
+            :ok
 
-          :ok
+          {:error, reason} ->
+            # No raw File.rm_rf fallback — retain evidence for operator recovery.
+            {:error, {:worktree_remove_failed, reason}}
+        end
+      else
+        # Path already absent — treat as success for settle/verify to confirm.
+        :ok
       end
     else
-      :ok
+      false ->
+        {:error, :primary_checkout_not_retainable}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   rescue
-    _ -> :ok
+    error -> {:error, {:cleanup_raised, Exception.message(error)}}
   catch
-    :exit, _ -> :ok
+    kind, reason -> {:error, {:cleanup_thrown, kind, reason}}
   end
+
+  def remove_owned_retained_worktree(_), do: {:error, :invalid_retained_cleanup}
+
+  # Failed-create cleanup: identity-checked git worktree remove only. Never
+  # File.rm_rf — leave evidence on failure so primary/non-owned paths cannot
+  # be swept by a fallback.
+  defp remove_owned_worktree(repo_root, worktree_path, identity)
+       when is_binary(repo_root) and is_binary(worktree_path) and is_map(identity) do
+    cond do
+      worktree_path == repo_root ->
+        {:error, :primary_checkout_not_retainable}
+
+      true ->
+        case Git.remove_worktree(repo_root, worktree_path, identity) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "owned worktree create-failure cleanup could not remove via git; retaining evidence",
+              worktree_path: worktree_path,
+              detail: inspect(reason)
+            )
+
+            {:error, {:worktree_remove_failed, reason}}
+        end
+    end
+  rescue
+    error -> {:error, {:cleanup_raised, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:cleanup_thrown, kind, reason}}
+  end
+
+  defp remove_owned_worktree(_repo_root, _worktree_path, _identity),
+    do: {:error, :owned_worktree_identity_unavailable}
+
+  defp revalidate_destruction_identity(retained) when is_map(retained) do
+    expected_lstat = Map.get(retained, :lstat_identity)
+    expected_reg = Map.get(retained, :worktree_registration)
+    path = Map.get(retained, :worktree_path)
+    repo = Map.get(retained, :repo_path)
+
+    cond do
+      not is_map(expected_lstat) or not is_map(expected_reg) ->
+        {:error, :missing_expected_identity}
+
+      not is_binary(path) or not is_binary(repo) ->
+        {:error, :invalid_cleanup_paths}
+
+      path == repo ->
+        {:error, :primary_checkout_not_retainable}
+
+      true ->
+        with {:ok, current_path} <- canonical_existing_path(path),
+             true <- current_path == path,
+             {:ok, current_repo} <- canonical_existing_path(repo),
+             true <- current_path != current_repo,
+             {:ok, current_lstat} <- File.lstat(path),
+             true <- lstat_identity(current_lstat) == normalize_lstat_for_compare(expected_lstat),
+             {:ok, registration} <- worktree_registration(repo, path),
+             true <- registration_matches?(registration, expected_reg) do
+          :ok
+        else
+          _ -> {:error, :retained_identity_mismatch}
+        end
+    end
+  end
+
+  defp revalidate_destruction_identity(_), do: {:error, :invalid_retained_cleanup}
+
+  defp normalize_lstat_for_compare(%{type: type} = identity) when is_atom(type), do: identity
+
+  defp normalize_lstat_for_compare(%{type: type} = identity) when is_binary(type) do
+    type_atom =
+      case type do
+        "directory" -> :directory
+        "regular" -> :regular
+        "symlink" -> :symlink
+        "device" -> :device
+        "other" -> :other
+        _ -> type
+      end
+
+    %{identity | type: type_atom}
+  end
+
+  defp normalize_lstat_for_compare(other), do: other
+
+  # Ownership identity is registered path + branch only. Git HEAD is mutable
+  # workspace content (a resumed worker may commit) and must not gate
+  # reactivation, cleanup, or destruction.
+  defp registration_matches?(current, expected) when is_map(current) and is_map(expected) do
+    Map.get(current, :path) == Map.get(expected, :path) and
+      Map.get(current, :branch) == Map.get(expected, :branch)
+  end
+
+  defp registration_matches?(_, _), do: false
 end

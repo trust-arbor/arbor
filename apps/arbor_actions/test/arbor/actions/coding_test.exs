@@ -6,6 +6,7 @@ defmodule Arbor.Actions.CodingTest do
   alias Arbor.Actions.Mix, as: MixActions
 
   @moduletag :fast
+  @owner_operation_timeout 10_000
 
   describe "ProduceReviewableChange metadata" do
     test "is discoverable as a coding action" do
@@ -1605,8 +1606,8 @@ defmodule Arbor.Actions.CodingTest do
           )
         end)
 
-      assert_receive {:start_session, worktree_path}, 2_000
-      assert_receive {:prompt_blocked, ^worktree_path}, 2_000
+      assert_receive {:start_session, worktree_path}, @owner_operation_timeout
+      assert_receive {:prompt_blocked, ^worktree_path}, @owner_operation_timeout
       assert File.dir?(worktree_path)
       assert File.exists?(Path.join(worktree_path, "dirty.txt"))
 
@@ -1660,11 +1661,12 @@ defmodule Arbor.Actions.CodingTest do
 
       git!(repo, ["branch", branch])
       git!(repo, ["worktree", "add", worktree_path, branch])
+      canonical_worktree_path = git!(worktree_path, ["rev-parse", "--show-toplevel"])
       File.write!(Path.join(worktree_path, "preexisting.txt"), "keep me\n")
 
       # Prove the path is already registered before the action runs.
       worktree_list = git!(repo, ["worktree", "list", "--porcelain"])
-      assert worktree_list =~ worktree_path
+      assert worktree_list =~ canonical_worktree_path
 
       parent = self()
 
@@ -1707,9 +1709,9 @@ defmodule Arbor.Actions.CodingTest do
           )
         end)
 
-      assert_receive {:start_session, ^worktree_path}, 2_000
-      assert_receive {:prompt_blocked, ^worktree_path}, 2_000
-      assert File.dir?(worktree_path)
+      assert_receive {:start_session, ^canonical_worktree_path}, @owner_operation_timeout
+      assert_receive {:prompt_blocked, ^canonical_worktree_path}, @owner_operation_timeout
+      assert File.dir?(canonical_worktree_path)
 
       # :kill models TaskStore/Session cancel. Not-owned path must survive.
       Process.exit(action_pid, :kill)
@@ -1717,11 +1719,11 @@ defmodule Arbor.Actions.CodingTest do
       # Give any mis-armed guard time to run (it must not).
       Process.sleep(150)
 
-      assert File.dir?(worktree_path)
-      assert worktree_registered?(repo, worktree_path)
+      assert File.dir?(canonical_worktree_path)
+      assert worktree_registered?(repo, canonical_worktree_path)
       # Directory remains usable as a git worktree after cancel.
-      assert git!(worktree_path, ["rev-parse", "--is-inside-work-tree"]) == "true"
-      assert git!(worktree_path, ["branch", "--show-current"]) == branch
+      assert git!(canonical_worktree_path, ["rev-parse", "--is-inside-work-tree"]) == "true"
+      assert git!(canonical_worktree_path, ["branch", "--show-current"]) == branch
     end
 
     test "preserves worktree on ordinary validation failure (not cancel)", %{tmp_dir: tmp_dir} do

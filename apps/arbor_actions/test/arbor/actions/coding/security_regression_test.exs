@@ -2,9 +2,11 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   use Arbor.Actions.ActionCase, async: false
 
   alias Arbor.Actions.Coding.SecurityRegression.Validate
+  alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Council
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Git
   alias Arbor.Common.SafePath
 
   @moduletag :slow
@@ -303,7 +305,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
     state = :sys.get_state(WorkspaceLeaseRegistry)
     private = Map.fetch!(state.validation_resources, resource.resource_id)
-    lease_root = private.dependency_lease.root_path
+    lease_root = dependency_lease_root(private)
     assert is_binary(lease_root)
     assert File.dir?(lease_root)
 
@@ -377,7 +379,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
     state = :sys.get_state(WorkspaceLeaseRegistry)
     private = Map.fetch!(state.validation_resources, resource.resource_id)
-    lease_root = private.dependency_lease.root_path
+    lease_root = dependency_lease_root(private)
     original_base_worktree_path = private.base_worktree_path
     assert is_binary(lease_root)
     assert File.dir?(lease_root)
@@ -411,7 +413,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
       state = :sys.get_state(WorkspaceLeaseRegistry)
       private = Map.fetch!(state.validation_resources, resource.resource_id)
       assert private.dependency_lease != nil
-      assert private.dependency_lease.root_path == lease_root
+      assert dependency_lease_root(private) == lease_root
 
       assert {:ok, [retained]} =
                WorkspaceLeaseRegistry.validation_resources(
@@ -441,6 +443,567 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
     refute File.exists?(resource.root_path)
     refute File.exists?(lease_root)
+  end
+
+  test "security regression: validation cleanup does not rebind deletion to a replacement worktree",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/replacement_cleanup_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.ReplacementCleanupTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    %{review_attestation_id: attestation_id} = attested_params(fixture, [test_path])
+
+    assert {:ok, %{resource: resource}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(
+               attestation_id,
+               fixture.context
+             )
+
+    private =
+      WorkspaceLeaseRegistry
+      |> :sys.get_state()
+      |> Map.fetch!(:validation_resources)
+      |> Map.fetch!(resource.resource_id)
+
+    original_identity = private.candidate_cleanup_identity
+    preserved_original = Path.join(tmp_dir, "preserved-original-candidate")
+    marker = Path.join(resource.candidate_path, "replacement-marker")
+
+    assert is_map(original_identity)
+    File.rename!(resource.candidate_path, preserved_original)
+    git!(fixture.repo, ["worktree", "prune", "--expire", "now"])
+    assert {:ok, nil} = Git.worktree_registration(fixture.repo, resource.candidate_path)
+
+    git!(fixture.repo, [
+      "worktree",
+      "add",
+      "--detach",
+      resource.candidate_path,
+      resource.candidate_commit
+    ])
+
+    File.write!(marker, "replacement survives\n")
+
+    {:ok, replacement_identity} =
+      Workspace.capture_worktree_removal_identity(fixture.repo, resource.candidate_path)
+
+    refute replacement_identity.lstat_identity == original_identity.lstat_identity
+
+    try do
+      assert {:error, :validation_resource_cleanup_failed} =
+               WorkspaceLeaseRegistry.release_validation_resource(
+                 resource.resource_id,
+                 fixture.context
+               )
+
+      assert File.read!(marker) == "replacement survives\n"
+      assert File.dir?(resource.root_path)
+
+      retained =
+        WorkspaceLeaseRegistry
+        |> :sys.get_state()
+        |> Map.fetch!(:validation_resources)
+        |> Map.fetch!(resource.resource_id)
+
+      assert retained.candidate_cleanup_identity == original_identity
+      assert retained.dependency_lease != nil
+    after
+      _ =
+        System.cmd(
+          "git",
+          ["-C", fixture.repo, "worktree", "remove", "--force", resource.candidate_path],
+          stderr_to_stdout: true
+        )
+
+      File.rm_rf!(preserved_original)
+    end
+
+    assert {:ok, _material} =
+             WorkspaceLeaseRegistry.finalize_review_attestation(
+               attestation_id,
+               fixture.context
+             )
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+  end
+
+  test "security regression: owner death after failed baseline admission retains cleanup locator",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+
+    for {mode, release_failures} <- [cleanup_required: 1, non_map_view: 2] do
+      Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+      Arbor.Actions.TestLinuxBaselineMaterializer.force_acquire(mode)
+      Arbor.Actions.TestLinuxBaselineMaterializer.force_release_failures(release_failures)
+
+      assert {:error, :validation_resource_setup_failed_cleanup_retained} =
+               WorkspaceLeaseRegistry.acquire_validation_resource(
+                 fixture.lease.workspace_id,
+                 fixture.context
+               )
+
+      assert {:ok, [retained]} =
+               WorkspaceLeaseRegistry.validation_resources(
+                 fixture.lease.workspace_id,
+                 fixture.context
+               )
+
+      private =
+        WorkspaceLeaseRegistry
+        |> :sys.get_state()
+        |> Map.fetch!(:validation_resources)
+        |> Map.fetch!(retained.resource_id)
+
+      assert is_binary(private.dependency_root_path)
+      assert File.dir?(private.dependency_root_path)
+
+      owner = private.resource_owner_pid
+      owner_ref = Process.monitor(owner)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}, 5_000
+
+      assert_eventually(fn ->
+        WorkspaceLeaseRegistry.validation_resources(
+          fixture.lease.workspace_id,
+          fixture.context
+        ) == {:ok, []} and not File.exists?(private.root_path) and
+          not File.exists?(private.dependency_root_path)
+      end)
+
+      assert File.dir?(fixture.lease.worktree_path)
+    end
+  end
+
+  test "security regression: validation cleanup does not delete a replacement root", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    private =
+      WorkspaceLeaseRegistry
+      |> :sys.get_state()
+      |> Map.fetch!(:validation_resources)
+      |> Map.fetch!(resource.resource_id)
+
+    assert private.root_cleanup_identity.path == resource.root_path
+    preserved_original = Path.join(tmp_dir, "preserved-validation-root")
+    File.rename!(resource.root_path, preserved_original)
+    File.mkdir!(resource.root_path)
+    replacement_marker = Path.join(resource.root_path, "replacement-marker")
+    File.write!(replacement_marker, "replacement survives\n")
+
+    try do
+      assert {:error, :validation_resource_cleanup_failed} =
+               WorkspaceLeaseRegistry.release_validation_resource(
+                 resource.resource_id,
+                 fixture.context
+               )
+
+      assert File.read!(replacement_marker) == "replacement survives\n"
+
+      retained =
+        WorkspaceLeaseRegistry
+        |> :sys.get_state()
+        |> Map.fetch!(:validation_resources)
+        |> Map.fetch!(resource.resource_id)
+
+      assert retained.root_cleanup_identity == private.root_cleanup_identity
+      assert retained.dependency_lease != nil
+    after
+      File.rm_rf!(resource.root_path)
+      File.rename!(preserved_original, resource.root_path)
+    end
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+  end
+
+  test "security regression: registry crash cannot orphan validation resources", %{
+    tmp_dir: tmp_dir
+  } do
+    suffix = System.unique_integer([:positive, :monotonic])
+    supervisor = :"validation_resource_supervisor_#{suffix}"
+    server = :"workspace_registry_crash_#{suffix}"
+
+    start_supervised!(%{
+      id: supervisor,
+      start: {DynamicSupervisor, :start_link, [[name: supervisor, strategy: :one_for_one]]},
+      type: :supervisor
+    })
+
+    registry_pid =
+      start_supervised!(%{
+        id: server,
+        start:
+          {WorkspaceLeaseRegistry, :start_link,
+           [
+             [
+               name: server,
+               retention_journal: :disabled,
+               validation_resource_supervisor: supervisor,
+               linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
+             ]
+           ]},
+        restart: :permanent
+      })
+
+    repo = create_base_project(Path.join(tmp_dir, "registry-crash-repo"), valid_module())
+    task_id = "task_registry_crash_#{suffix}"
+    principal_id = "agent_registry_crash_#{suffix}"
+    context = %{server: server, task_id: task_id, agent_id: principal_id}
+
+    assert {:ok, lease} =
+             WorkspaceLeaseRegistry.acquire(
+               %{
+                 repo_path: repo,
+                 branch: "test/registry-crash-#{suffix}",
+                 worktree_base_dir: Path.join(tmp_dir, "registry-crash-worktrees"),
+                 task_id: task_id,
+                 principal_id: principal_id
+               },
+               server: server
+             )
+
+    {:ok, parent_cleanup_identity} =
+      Workspace.capture_worktree_removal_identity(repo, lease.worktree_path)
+
+    on_exit(fn ->
+      _ = Workspace.remove_owned_worktree(repo, lease.worktree_path, parent_cleanup_identity)
+    end)
+
+    test_path = "test/registry_crash_test.exs"
+    File.mkdir_p!(Path.join(lease.worktree_path, "test"))
+    File.write!(Path.join(lease.worktree_path, test_path), "ExUnit.start()\n")
+    git!(lease.worktree_path, ["add", test_path])
+    git!(lease.worktree_path, ["commit", "-m", "validation candidate"])
+
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        lease.worktree_path,
+        lease.workspace_id,
+        lease.base_commit,
+        [test_path]
+      )
+
+    assert {:ok, %{review_attestation_id: attestation_id}} =
+             WorkspaceLeaseRegistry.issue_review_attestation(
+               lease.workspace_id,
+               material,
+               String.duplicate("a", 64),
+               context
+             )
+
+    assert {:ok, %{resource: resource}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(attestation_id, context)
+
+    assert {:ok, snapshot} =
+             WorkspaceLeaseRegistry.create_validation_snapshot(resource.resource_id, context)
+
+    private =
+      server
+      |> :sys.get_state()
+      |> Map.fetch!(:validation_resources)
+      |> Map.fetch!(resource.resource_id)
+
+    dependency_root = dependency_lease_root(private)
+    resource_owner = private.resource_owner_pid
+    assert File.dir?(resource.root_path)
+    assert File.dir?(resource.candidate_path)
+    assert File.dir?(snapshot.base_worktree_path)
+    assert File.dir?(dependency_root)
+
+    assert {:error, :foreign_caller} =
+             Arbor.Actions.Coding.ValidationResourceOwner.cleanup_actions(resource_owner)
+
+    assert File.dir?(resource.root_path)
+
+    registry_ref = Process.monitor(registry_pid)
+    Process.exit(registry_pid, :kill)
+    assert_receive {:DOWN, ^registry_ref, :process, ^registry_pid, :killed}, 5_000
+
+    assert_eventually(fn ->
+      not Process.alive?(resource_owner) and
+        not File.exists?(resource.root_path) and
+        not File.exists?(resource.candidate_path) and
+        not File.exists?(snapshot.base_worktree_path) and
+        not File.exists?(dependency_root) and
+        Git.worktree_registration(repo, resource.candidate_path) == {:ok, nil} and
+        Git.worktree_registration(repo, snapshot.base_worktree_path) == {:ok, nil}
+    end)
+
+    assert File.dir?(lease.worktree_path)
+  end
+
+  test "security regression: killed validation owner converges through the registry", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    assert {:ok, snapshot} =
+             WorkspaceLeaseRegistry.create_validation_snapshot(
+               resource.resource_id,
+               fixture.context
+             )
+
+    private =
+      WorkspaceLeaseRegistry
+      |> :sys.get_state()
+      |> Map.fetch!(:validation_resources)
+      |> Map.fetch!(resource.resource_id)
+
+    dependency_root = dependency_lease_root(private)
+    owner = private.resource_owner_pid
+    owner_ref = Process.monitor(owner)
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}, 5_000
+
+    assert_eventually(fn ->
+      WorkspaceLeaseRegistry.validation_resources(
+        fixture.lease.workspace_id,
+        fixture.context
+      ) == {:ok, []} and
+        not File.exists?(resource.root_path) and
+        not File.exists?(snapshot.base_worktree_path) and
+        not File.exists?(dependency_root) and
+        Git.worktree_registration(fixture.repo, snapshot.base_worktree_path) == {:ok, nil}
+    end)
+
+    assert File.dir?(fixture.lease.worktree_path)
+  end
+
+  test "security regression: supervised validation-owner shutdown finishes inside its cleanup window",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    assert {:ok, snapshot} =
+             WorkspaceLeaseRegistry.create_validation_snapshot(
+               resource.resource_id,
+               fixture.context
+             )
+
+    private =
+      WorkspaceLeaseRegistry
+      |> :sys.get_state()
+      |> Map.fetch!(:validation_resources)
+      |> Map.fetch!(resource.resource_id)
+
+    dependency_root = dependency_lease_root(private)
+    owner = private.resource_owner_pid
+    started_at = System.monotonic_time(:millisecond)
+
+    assert :ok =
+             DynamicSupervisor.terminate_child(
+               Arbor.Actions.Coding.ValidationResourceOwner.supervisor_name(),
+               owner
+             )
+
+    assert System.monotonic_time(:millisecond) - started_at < 30_000
+
+    assert_eventually(fn ->
+      WorkspaceLeaseRegistry.validation_resources(
+        fixture.lease.workspace_id,
+        fixture.context
+      ) == {:ok, []} and
+        not File.exists?(resource.root_path) and
+        not File.exists?(snapshot.base_worktree_path) and
+        not File.exists?(dependency_root)
+    end)
+
+    assert File.dir?(fixture.lease.worktree_path)
+  end
+
+  test "security regression: registry-loss cleanup enters dormant state after bounded failures",
+       %{
+         tmp_dir: tmp_dir
+       } do
+    suffix = System.unique_integer([:positive, :monotonic])
+    supervisor = :"validation_dormant_owner_supervisor_#{suffix}"
+
+    start_supervised!(%{
+      id: supervisor,
+      start: {DynamicSupervisor, :start_link, [[name: supervisor, strategy: :one_for_one]]},
+      type: :supervisor
+    })
+
+    repo = create_base_project(Path.join(tmp_dir, "dormant-owner-repo"), valid_module())
+    root_path = Path.join(tmp_dir, "dormant-owner-root")
+    parent = self()
+
+    registry_pid =
+      spawn(fn ->
+        opts = [
+          registry_pid: self(),
+          repo_path: repo,
+          root_path: root_path,
+          candidate_path: repo,
+          candidate_commit: nil,
+          base_path: Path.join(root_path, "base"),
+          materializer: Arbor.Actions.TestLinuxBaselineMaterializer,
+          cleanup_retry_limit: 1
+        ]
+
+        send(parent, {:owner_started, ValidationResourceOwner.start(supervisor, opts)})
+        receive do: (:stop -> :ok)
+      end)
+
+    assert_receive {:owner_started, {:ok, owner, _identity}}, 5_000
+    assert :sys.get_state(owner).supervisor_pid == Process.whereis(supervisor)
+
+    preserved_root = root_path <> "-preserved"
+    File.rename!(root_path, preserved_root)
+    File.mkdir!(root_path)
+    replacement_marker = Path.join(root_path, "replacement.txt")
+    File.write!(replacement_marker, "replacement")
+
+    Process.exit(registry_pid, :kill)
+
+    assert_eventually(fn ->
+      Process.alive?(owner) and
+        case :sys.get_state(owner) do
+          %{cleanup_dormant: true, cleanup_timer: nil, cleanup_retry_count: 1} -> true
+          _other -> false
+        end
+    end)
+
+    assert File.read!(replacement_marker) == "replacement"
+
+    File.rm_rf!(root_path)
+    File.rename!(preserved_root, root_path)
+
+    assert :ok = DynamicSupervisor.terminate_child(supervisor, owner)
+    refute Process.alive?(owner)
+    refute File.exists?(root_path)
+  end
+
+  test "security regression: dead-owner cleanup becomes discoverable dormant evidence", %{
+    tmp_dir: tmp_dir
+  } do
+    suffix = System.unique_integer([:positive, :monotonic])
+    supervisor = :"validation_dormant_registry_supervisor_#{suffix}"
+    server = :"workspace_dormant_registry_#{suffix}"
+
+    start_supervised!(%{
+      id: supervisor,
+      start: {DynamicSupervisor, :start_link, [[name: supervisor, strategy: :one_for_one]]},
+      type: :supervisor
+    })
+
+    _registry_pid =
+      start_supervised!(%{
+        id: server,
+        start:
+          {WorkspaceLeaseRegistry, :start_link,
+           [
+             [
+               name: server,
+               retention_journal: :disabled,
+               validation_resource_supervisor: supervisor,
+               validation_owner_cleanup_retry_limit: 1,
+               linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
+             ]
+           ]},
+        restart: :permanent
+      })
+
+    repo = create_base_project(Path.join(tmp_dir, "dormant-registry-repo"), valid_module())
+    task_id = "task_dormant_registry_#{suffix}"
+    principal_id = "agent_dormant_registry_#{suffix}"
+    context = %{server: server, task_id: task_id, agent_id: principal_id}
+
+    assert {:ok, lease} =
+             WorkspaceLeaseRegistry.acquire(
+               %{
+                 repo_path: repo,
+                 branch: "test/dormant-registry-#{suffix}",
+                 worktree_base_dir: Path.join(tmp_dir, "dormant-registry-worktrees"),
+                 task_id: task_id,
+                 principal_id: principal_id
+               },
+               server: server
+             )
+
+    on_exit(fn ->
+      _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, context)
+    end)
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(lease.workspace_id, context)
+
+    private =
+      server
+      |> :sys.get_state()
+      |> Map.fetch!(:validation_resources)
+      |> Map.fetch!(resource.resource_id)
+
+    preserved_root = resource.root_path <> "-preserved"
+    File.rename!(resource.root_path, preserved_root)
+    File.mkdir!(resource.root_path)
+    replacement_marker = Path.join(resource.root_path, "replacement.txt")
+    File.write!(replacement_marker, "replacement")
+
+    owner = private.resource_owner_pid
+    Process.exit(owner, :kill)
+
+    assert_eventually(fn ->
+      case WorkspaceLeaseRegistry.validation_resources(lease.workspace_id, context) do
+        {:ok, [%{resource_id: id, cleanup_status: "dormant"}]} ->
+          id == resource.resource_id and not File.exists?(private.dependency_root_path)
+
+        _other ->
+          false
+      end
+    end)
+
+    state = :sys.get_state(server)
+    dormant = Map.fetch!(state.validation_resources, resource.resource_id)
+    assert dormant.resource_owner_cleanup_retry_count == 1
+    assert dormant.resource_owner_cleanup_dormant
+    assert File.read!(replacement_marker) == "replacement"
+
+    Process.sleep(150)
+    stable = :sys.get_state(server).validation_resources[resource.resource_id]
+    assert stable.resource_owner_cleanup_retry_count == 1
+    assert stable.resource_owner_cleanup_dormant
+
+    File.rm_rf!(resource.root_path)
+    File.rename!(preserved_root, resource.root_path)
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(resource.resource_id, context)
+
+    refute File.exists?(resource.root_path)
+    assert File.dir?(lease.worktree_path)
   end
 
   test "validator accepts neither workspace_id nor test_paths and failed claim spawns no candidate code",
@@ -874,9 +1437,10 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
              WorkspaceLeaseRegistry.finalize_review_attestation(id, fixture.context)
   end
 
-  test "partial setup plus rollback failure retains the candidate root for retry", %{
-    tmp_dir: tmp_dir
-  } do
+  test "security regression: partial setup failure retains its candidate cleanup identity for retry",
+       %{
+         tmp_dir: tmp_dir
+       } do
     fixture = leased_project(tmp_dir, valid_module())
     test_path = "test/partial_cleanup_test.exs"
 
@@ -906,6 +1470,14 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     assert resource.setup_status == "setup_failed"
     assert File.dir?(resource.root_path)
     assert File.dir?(resource.candidate_path)
+
+    private =
+      WorkspaceLeaseRegistry
+      |> :sys.get_state()
+      |> Map.fetch!(:validation_resources)
+      |> Map.fetch!(resource.resource_id)
+
+    assert is_map(private.candidate_cleanup_identity)
 
     assert {:ok, _material} =
              WorkspaceLeaseRegistry.finalize_review_attestation(id, fixture.context)
@@ -1496,6 +2068,11 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
       _ ->
         false
     end
+  end
+
+  defp dependency_lease_root(resource) do
+    owner_state = :sys.get_state(resource.resource_owner_pid)
+    owner_state.dependency_lease.root_path
   end
 
   defp assert_eventually(fun, attempts \\ 100)

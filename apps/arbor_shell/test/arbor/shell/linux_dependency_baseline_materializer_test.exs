@@ -753,6 +753,56 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializerTest do
       assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 5_000
     end
 
+    test "security regression: owner-death cleanup becomes dormant after bounded retries", %{
+      fixture_root: root
+    } do
+      {_source, plan, _} = build_source_and_plan(root)
+      FakeAuthority.set_plan(plan)
+      parent = self()
+
+      {:ok, owner} =
+        Task.start(fn ->
+          assert {:ok, lease, view} =
+                   Materializer.acquire(30_000,
+                     authority: FakeAuthority,
+                     __test_cleanup_failures: 2,
+                     __test_cleanup_retry_limit: 1
+                   )
+
+          send(parent, {:dormant_lease, lease, view})
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive {:dormant_lease, lease, view}, 10_000
+      root_path = Path.dirname(view["candidate_path"])
+      worker = lease.worker
+      assert File.dir?(root_path)
+
+      owner_ref = Process.monitor(owner)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}
+
+      assert eventually?(fn ->
+               state = :sys.get_state(worker)
+
+               state.status == :cleanup_dormant and state.cleanup_retry_count == 1 and
+                 state.cleanup_timer == nil and state.cleanup_dormant
+             end)
+
+      dormant_state = :sys.get_state(worker)
+      Process.sleep(250)
+      assert :sys.get_state(worker) == dormant_state
+      assert File.dir?(root_path)
+
+      worker_ref = Process.monitor(worker)
+
+      assert :ok =
+               DynamicSupervisor.terminate_child(Materializer.supervisor_name(), worker)
+
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, _}, 5_000
+      refute File.exists?(root_path)
+    end
+
     test "destination exact-tree verification rejects extra undeclared names", %{
       fixture_root: root
     } do
@@ -898,6 +948,45 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializerTest do
 
       ensure_materializer_supervisor!()
       assert is_pid(Process.whereis(Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor))
+    end
+
+    test "security regression: supervisor shutdown does not repeat bounded cleanup in terminate",
+         %{
+           fixture_root: root
+         } do
+      {_source, plan, _} = build_source_and_plan(root)
+      FakeAuthority.set_plan(plan)
+
+      assert {:ok, lease, view} =
+               Materializer.acquire(30_000,
+                 authority: FakeAuthority,
+                 __test_cleanup_failures: 20
+               )
+
+      root_path = Path.dirname(view["candidate_path"])
+      worker_ref = Process.monitor(lease.worker)
+
+      materializer_sup =
+        Process.whereis(Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor)
+
+      sup_ref = Process.monitor(materializer_sup)
+      assert File.dir?(root_path)
+
+      assert :ok =
+               Supervisor.terminate_child(
+                 Arbor.Shell.Supervisor,
+                 Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor
+               )
+
+      assert_receive {:DOWN, ^sup_ref, :process, ^materializer_sup, _}, 5_000
+      assert_receive {:DOWN, ^worker_ref, :process, _, _}, 5_000
+
+      # Exactly twenty bounded attempts were forced to fail. A second cleanup
+      # from terminate/2 would be attempt twenty-one and remove this root.
+      assert File.dir?(root_path)
+      File.rm_rf!(root_path)
+
+      ensure_materializer_supervisor!()
     end
   end
 

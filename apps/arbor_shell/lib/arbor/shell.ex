@@ -466,6 +466,17 @@ defmodule Arbor.Shell do
   def acquire_linux_dependency_baseline_lease(_deadline_ms),
     do: {:error, :invalid_deadline}
 
+  @doc false
+  @spec acquire_linux_dependency_baseline_lease_with_cleanup_locator(pos_integer()) ::
+          {:ok, term(), map(), map()} | {:error, term()}
+  def acquire_linux_dependency_baseline_lease_with_cleanup_locator(deadline_ms)
+      when is_integer(deadline_ms) and deadline_ms > 0 do
+    Arbor.Shell.LinuxDependencyBaselineMaterializer.acquire_with_cleanup_locator(deadline_ms)
+  end
+
+  def acquire_linux_dependency_baseline_lease_with_cleanup_locator(_deadline_ms),
+    do: {:error, :invalid_deadline}
+
   @doc """
   Release a Linux dependency-baseline materialization lease.
 
@@ -478,6 +489,38 @@ defmodule Arbor.Shell do
   def release_linux_dependency_baseline_lease(lease) do
     Arbor.Shell.LinuxDependencyBaselineMaterializer.release(lease)
   end
+
+  @doc false
+  @spec release_linux_dependency_baseline_lease(term(), pos_integer()) ::
+          :ok | {:error, term()}
+  def release_linux_dependency_baseline_lease(lease, timeout_ms)
+      when is_integer(timeout_ms) and timeout_ms > 0 do
+    Arbor.Shell.LinuxDependencyBaselineMaterializer.release(lease, timeout_ms)
+  end
+
+  def release_linux_dependency_baseline_lease(_lease, _timeout_ms),
+    do: {:error, :invalid_deadline}
+
+  @doc false
+  @spec create_private_owned_tree(String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def create_private_owned_tree(path) do
+    Arbor.Shell.OwnedTree.create_private(path)
+  end
+
+  @doc false
+  @spec remove_owned_tree(map()) :: :ok | {:error, term()}
+  def remove_owned_tree(identity) do
+    Arbor.Shell.OwnedTree.remove(identity)
+  end
+
+  @doc false
+  @spec remove_owned_tree(map(), keyword()) :: :ok | {:error, term()}
+  def remove_owned_tree(identity, opts) when is_list(opts) do
+    Arbor.Shell.OwnedTree.remove(identity, opts)
+  end
+
+  def remove_owned_tree(_identity, _opts), do: {:error, :invalid_owned_tree_cleanup}
 
   @doc """
   Redacted public status of the Apple Container control-plane authority owner.

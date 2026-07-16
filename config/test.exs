@@ -191,6 +191,11 @@ config :arbor_persistence,
 # P0-1: Keep permissive taint in tests — existing tests don't set taint context
 config :arbor_actions, default_taint_policy: :permissive
 
+# Never open the production ~/.arbor/workspace_retention journal under tests.
+# The application-owned WorkspaceLeaseRegistry starts with retention_journal:
+# :disabled; restart durability suites inject private temp-backed stores only.
+config :arbor_actions, workspace_retention_journal_enabled: false
+
 # Use hash-based test embeddings when no real providers are available
 config :arbor_ai, embedding_test_fallback: true
 
