@@ -733,6 +733,119 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     assert tampered["status"] == "failed"
   end
 
+  test "known optional artifact evidence does not change provenance authority or parity" do
+    cases = [
+      {"workspace_release",
+       fn artifacts, _root ->
+         Map.put(artifacts, "workspace_release", %{
+           "workspace_release_status" => "retained",
+           "workspace_expires_at" => "2026-07-17T12:00:00Z"
+         })
+       end},
+      {"workspace_release and acp_transcript",
+       fn artifacts, root ->
+         artifacts
+         |> Map.put("workspace_release", %{"workspace_release_status" => "removed"})
+         |> Map.put("acp_transcript", valid_transcript_descriptor(root))
+       end}
+    ]
+
+    for {label, transform} <- cases do
+      report = run_production_artifact_case(transform)
+      verification = row(report, "pipeline")["artifact_hash_verification"]
+
+      assert verification["graph_hash_verified"] == true, label
+      assert verification["status"] == "passed", label
+      assert report["summary"]["equivalent_pairs"] == 1, label
+      assert hd(report["pairs"])["comparison"]["status"] == "equivalent", label
+    end
+  end
+
+  test "security regression: optional artifact evidence remains closed and bounded" do
+    transcript_mutation = fn mutation ->
+      fn artifacts, root ->
+        descriptor = root |> valid_transcript_descriptor() |> mutation.()
+        Map.put(artifacts, "acp_transcript", descriptor)
+      end
+    end
+
+    cases = [
+      {"unknown top-level artifact",
+       fn artifacts, _root -> Map.put(artifacts, "unexpected_evidence", %{}) end},
+      {"workspace_release unknown field",
+       fn artifacts, _root ->
+         Map.put(artifacts, "workspace_release", %{
+           "workspace_release_status" => "retained",
+           "workspace_id" => "inline-authority"
+         })
+       end},
+      {"workspace_release oversized scalar",
+       fn artifacts, _root ->
+         Map.put(artifacts, "workspace_release", %{
+           "workspace_release_status" => String.duplicate("x", 257)
+         })
+       end},
+      {"inline transcript turns",
+       transcript_mutation.(fn descriptor -> Map.put(descriptor, "turns", []) end)},
+      {"inline transcript stream",
+       transcript_mutation.(fn descriptor -> Map.put(descriptor, "stream", %{}) end)},
+      {"non-canonical transcript path",
+       transcript_mutation.(fn descriptor ->
+         Map.put(descriptor, "path", Path.join(descriptor["path"], "../transcript.json"))
+       end)},
+      {"uppercase transcript digest",
+       transcript_mutation.(fn descriptor ->
+         Map.update!(descriptor, "sha256", &String.upcase/1)
+       end)},
+      {"oversized transcript",
+       transcript_mutation.(fn descriptor -> Map.put(descriptor, "byte_size", 512_001) end)},
+      {"inconsistent transcript counts",
+       transcript_mutation.(fn descriptor -> Map.put(descriptor, "turns_seen", 4) end)},
+      {"inconsistent transcript truncation",
+       transcript_mutation.(fn descriptor -> Map.put(descriptor, "turns_truncated", false) end)},
+      {"invalid transcript aggregate flag",
+       transcript_mutation.(fn descriptor ->
+         Map.put(descriptor, "aggregate_truncated", "false")
+       end)},
+      {"invalid transcript schema",
+       transcript_mutation.(fn descriptor -> Map.put(descriptor, "schema_version", 2) end)},
+      {"blank transcript task id",
+       transcript_mutation.(fn descriptor -> Map.put(descriptor, "task_id", " ") end)}
+    ]
+
+    for {label, transform} <- cases do
+      verification =
+        transform
+        |> run_production_artifact_case()
+        |> row("pipeline")
+        |> Map.fetch!("artifact_hash_verification")
+
+      assert verification["graph_hash_verified"] == false, label
+      assert verification["status"] == "failed", label
+    end
+  end
+
+  test "security regression: required provenance cannot be omitted or overridden" do
+    cases = [
+      {"missing graph hash", fn artifacts, _root -> Map.delete(artifacts, "graph_hash") end},
+      {"duplicate graph hash",
+       fn artifacts, _root -> Map.put(artifacts, :graph_hash, String.duplicate("0", 64)) end},
+      {"mismatched graph hash",
+       fn artifacts, _root -> Map.put(artifacts, "graph_hash", String.duplicate("0", 64)) end}
+    ]
+
+    for {label, transform} <- cases do
+      verification =
+        transform
+        |> run_production_artifact_case()
+        |> row("pipeline")
+        |> Map.fetch!("artifact_hash_verification")
+
+      assert verification["graph_hash_verified"] == false, label
+      assert verification["status"] == "failed", label
+    end
+  end
+
   test "provenance artifact swaps are rejected immediately before reads" do
     scenario = production_scenario!()
     install_leased_executors()
@@ -1239,6 +1352,9 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
       :lease_marker_tamper ->
         leased_result(executor, principal_id, task, context, :lease_marker_tamper)
 
+      {:artifact_transform, transform} when is_function(transform, 2) ->
+        leased_result(executor, principal_id, task, context, {:artifact_transform, transform})
+
       :missing_worktree ->
         production_result(executor, principal_id, task, context, nil, %{}, nil)
 
@@ -1724,13 +1840,57 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
 
     File.write!(manifest_path, Jason.encode!(manifest, pretty: true))
 
-    {%{
-       "coding_pipeline_path" => dot_path,
-       "coding_plan_path" => plan_path,
-       "compile_manifest_path" => manifest_path,
-       "compiler_version" => compilation["compiler_version"],
-       "graph_hash" => compilation["graph_hash"]
-     }, root}
+    artifacts = %{
+      "coding_pipeline_path" => dot_path,
+      "coding_plan_path" => plan_path,
+      "compile_manifest_path" => manifest_path,
+      "compiler_version" => compilation["compiler_version"],
+      "graph_hash" => compilation["graph_hash"]
+    }
+
+    artifacts =
+      case mode do
+        {:artifact_transform, transform} when is_function(transform, 2) ->
+          transform.(artifacts, root)
+
+        _other ->
+          artifacts
+      end
+
+    {artifacts, root}
+  end
+
+  defp run_production_artifact_case(transform) do
+    scenario = production_scenario!()
+    install_leased_executors()
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_test_mode,
+      {:artifact_transform, transform}
+    )
+
+    assert {:ok, report} = run_production_scenario(scenario)
+    report
+  end
+
+  defp valid_transcript_descriptor(root) do
+    path = Path.join(root, "acp-transcript.json")
+    content = Jason.encode!(%{"schema_version" => 1})
+    File.write!(path, content)
+
+    %{
+      "path" => path,
+      "sha256" => sha256(content),
+      "byte_size" => byte_size(content),
+      "turns_retained" => 2,
+      "turns_seen" => 3,
+      "turns_omitted" => 1,
+      "turns_truncated" => true,
+      "aggregate_truncated" => false,
+      "schema_version" => 1,
+      "task_id" => "coding-benchmark-pipeline-transcript"
+    }
   end
 
   defp production_plan!(task) do

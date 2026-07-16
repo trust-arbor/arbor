@@ -15,6 +15,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   alias Arbor.Commands.CodingBenchmark.{Adapter, Git, LegacyAdapter, PipelineAdapter, Runtime}
   alias Arbor.Commands.CodingParity
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Coding.{TranscriptDescriptor, WorkspaceReleaseDescriptor}
   alias Arbor.Orchestrator
 
   @manifest_schema "arbor.coding_benchmark.manifest.v1"
@@ -27,6 +28,15 @@ defmodule Arbor.Commands.CodingBenchmark do
     {"coding_pipeline_path", :coding_pipeline_path},
     {"compile_manifest_path", :compile_manifest_path}
   ]
+  @pipeline_provenance_keys ~w(
+    coding_plan_path coding_pipeline_path compile_manifest_path compiler_version graph_hash
+  )
+  @required_pipeline_artifact_keys MapSet.new(@pipeline_provenance_keys)
+  @optional_pipeline_artifact_keys MapSet.new(~w(workspace_release acp_transcript))
+  @allowed_pipeline_artifact_keys MapSet.union(
+                                    @required_pipeline_artifact_keys,
+                                    @optional_pipeline_artifact_keys
+                                  )
   @artifact_filenames %{
     "coding_pipeline_path" => "coding-pipeline.dot",
     "coding_plan_path" => "coding-plan.json",
@@ -1884,7 +1894,8 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp production_provenance_verified(result, trusted_root) do
     with {:ok, artifacts} <- result_artifacts(result),
-         {:ok, paths} <- exact_provenance_paths(artifacts, trusted_root),
+         {:ok, provenance} <- validated_provenance_artifacts(artifacts),
+         {:ok, paths} <- exact_provenance_paths(provenance, trusted_root),
          {:ok, dot} <-
            read_trusted_artifact(paths["coding_pipeline_path"], trusted_root, @max_dot_bytes),
          {:ok, plan_json} <-
@@ -1903,11 +1914,11 @@ defmodule Arbor.Commands.CodingBenchmark do
          {:ok, manifest} <- decode_json_object(manifest_json),
          {:ok, identity} <- Orchestrator.verify_coding_provenance(plan_map, dot, manifest),
          true <-
-           fetch_value(artifacts, "graph_hash", :graph_hash, nil) == identity["graph_hash"],
+           fetch_value(provenance, "graph_hash", :graph_hash, nil) == identity["graph_hash"],
          true <-
-           fetch_value(artifacts, "compiler_version", :compiler_version, nil) ==
+           fetch_value(provenance, "compiler_version", :compiler_version, nil) ==
              identity["compiler_version"],
-         {:ok, ^paths} <- exact_provenance_paths(artifacts, trusted_root) do
+         {:ok, ^paths} <- exact_provenance_paths(provenance, trusted_root) do
       true
     else
       _other -> false
@@ -1917,6 +1928,43 @@ defmodule Arbor.Commands.CodingBenchmark do
   catch
     _kind, _reason -> false
   end
+
+  defp validated_provenance_artifacts(artifacts) do
+    with {:ok, keys} <- artifact_descriptor_keys(artifacts),
+         true <- MapSet.subset?(@required_pipeline_artifact_keys, keys),
+         true <- MapSet.subset?(keys, @allowed_pipeline_artifact_keys),
+         :ok <- validate_optional_artifact_descriptors(artifacts) do
+      provenance =
+        Map.new(@pipeline_provenance_keys, fn key ->
+          {:ok, value} = artifact_descriptor_value(artifacts, key)
+          {key, value}
+        end)
+
+      {:ok, provenance}
+    else
+      _other -> {:error, :invalid_artifact_descriptors}
+    end
+  end
+
+  defp validate_optional_artifact_descriptors(artifacts) do
+    Enum.reduce_while(@optional_pipeline_artifact_keys, :ok, fn key, :ok ->
+      case artifact_descriptor_value(artifacts, key) do
+        :error ->
+          {:cont, :ok}
+
+        {:ok, descriptor} ->
+          if valid_optional_artifact_descriptor?(key, descriptor),
+            do: {:cont, :ok},
+            else: {:halt, {:error, :invalid_optional_artifact_descriptor}}
+      end
+    end)
+  end
+
+  defp valid_optional_artifact_descriptor?("workspace_release", descriptor),
+    do: WorkspaceReleaseDescriptor.valid?(descriptor)
+
+  defp valid_optional_artifact_descriptor?("acp_transcript", descriptor),
+    do: TranscriptDescriptor.valid?(descriptor)
 
   defp exact_provenance_paths(artifacts, trusted_root) do
     with {:ok, %{type: :directory}} <- File.lstat(trusted_root),
@@ -1943,30 +1991,40 @@ defmodule Arbor.Commands.CodingBenchmark do
   end
 
   defp exact_artifact_descriptor_keys(artifacts) do
-    allowed = MapSet.new(~w(
-      coding_plan_path coding_pipeline_path compile_manifest_path compiler_version graph_hash
-    ))
+    allowed = @required_pipeline_artifact_keys
 
-    keys =
-      Enum.reduce_while(artifacts, {:ok, MapSet.new()}, fn {key, _value}, {:ok, acc} ->
-        name = if is_atom(key), do: Atom.to_string(key), else: key
-
-        cond do
-          not is_binary(name) -> {:halt, {:error, :invalid_artifact_descriptor_key}}
-          MapSet.member?(acc, name) -> {:halt, {:error, :duplicate_artifact_descriptor_key}}
-          true -> {:cont, {:ok, MapSet.put(acc, name)}}
-        end
-      end)
-
-    case keys do
+    case artifact_descriptor_keys(artifacts) do
       {:ok, ^allowed} -> :ok
       _other -> {:error, :invalid_artifact_descriptor_keys}
+    end
+  end
+
+  defp artifact_descriptor_keys(artifacts) do
+    Enum.reduce_while(artifacts, {:ok, MapSet.new()}, fn {key, _value}, {:ok, acc} ->
+      name = if is_atom(key), do: Atom.to_string(key), else: key
+
+      cond do
+        not is_binary(name) -> {:halt, {:error, :invalid_artifact_descriptor_key}}
+        MapSet.member?(acc, name) -> {:halt, {:error, :duplicate_artifact_descriptor_key}}
+        true -> {:cont, {:ok, MapSet.put(acc, name)}}
+      end
+    end)
+  end
+
+  defp artifact_descriptor_value(artifacts, key) do
+    case Map.fetch(artifacts, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> Map.fetch(artifacts, artifact_atom_key(key))
     end
   end
 
   defp artifact_atom_key("coding_plan_path"), do: :coding_plan_path
   defp artifact_atom_key("coding_pipeline_path"), do: :coding_pipeline_path
   defp artifact_atom_key("compile_manifest_path"), do: :compile_manifest_path
+  defp artifact_atom_key("compiler_version"), do: :compiler_version
+  defp artifact_atom_key("graph_hash"), do: :graph_hash
+  defp artifact_atom_key("workspace_release"), do: :workspace_release
+  defp artifact_atom_key("acp_transcript"), do: :acp_transcript
 
   defp read_trusted_artifact(path, trusted_root, max_bytes) do
     with {:ok, expected} <- trusted_artifact_identity(path, trusted_root),
