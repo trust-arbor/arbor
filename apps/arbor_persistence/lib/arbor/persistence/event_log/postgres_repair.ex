@@ -18,7 +18,10 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
   @position_rows "arbor_event_log_position_repair_rows"
   @identity_batches "arbor_event_log_identity_repair_batches"
   @identity_rows "arbor_event_log_identity_repair_rows"
+  @position_disposition "operator_reviewed_backup_bound_position_repair_v1"
+  @position_algorithm "row_number_global_position_created_at_id_v1"
   @identity_provenance "legacy_trusted_cutover_snapshot_v1"
+  @identity_disposition "synthetic_operation_ids_anchor_operator_reviewed_cutover_snapshot_not_original_append_boundaries_v1"
   @default_batch_size 1_000
   @max_batch_size 10_000
 
@@ -52,18 +55,25 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
   Deterministically rewrites all global positions under an exclusive lock.
 
   `expected_count` and `expected_old_max` must be copied from a preceding audit.
-  The retained rollback table is deliberately single-use: any existing mapping
-  is treated as a conflict until a human reviews and removes it separately.
+  `source_backup_digest` binds the retained mapping to the reviewed source
+  backup. The retained rollback table is deliberately single-use: any existing
+  mapping is treated as a conflict until a human reviews and removes it separately.
   """
-  @spec apply_positions(module(), non_neg_integer(), non_neg_integer()) ::
+  @spec apply_positions(module(), non_neg_integer(), non_neg_integer(), String.t()) ::
           {:ok, map()} | {:error, term()}
-  def apply_positions(repo \\ Repo, expected_count, expected_old_max)
+  def apply_positions(expected_count, expected_old_max, source_backup_digest)
+      when is_integer(expected_count) and is_integer(expected_old_max) and
+             is_binary(source_backup_digest) do
+    apply_positions(Repo, expected_count, expected_old_max, source_backup_digest)
+  end
 
-  def apply_positions(repo, expected_count, expected_old_max)
+  def apply_positions(repo, expected_count, expected_old_max, source_backup_digest)
       when is_integer(expected_count) and expected_count >= 0 and is_integer(expected_old_max) and
-             expected_old_max >= 0 do
+             expected_old_max >= 0 and is_binary(source_backup_digest) do
     with :ok <- postgres_repo(repo),
          :ok <- validate_position_expectations(expected_count, expected_old_max),
+         :ok <- validate_source_backup_digest(source_backup_digest),
+         :ok <- ensure_sha256_support(repo),
          :ok <- reject_active_or_waiting_writers(repo) do
       transaction(repo, fn ->
         lock_events!(repo)
@@ -74,23 +84,31 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
         assert_no_position_provenance!(repo)
 
         batch_id = "position_" <> Ecto.UUID.generate()
-        insert_position_batch!(repo, batch_id, audit)
+        insert_position_batch!(repo, batch_id, audit, source_backup_digest)
         stage_positions!(repo, batch_id)
         assert_position_stage_complete!(repo, batch_id, expected_count)
         update_positions!(repo, batch_id)
+        verify_position_source_rows!(repo, batch_id)
         reset_legacy_sequence!(repo, expected_count)
         verify_dense_positions!(repo, expected_count)
         verify_stream_monotonicity!(repo)
         mark_position_batch!(repo, batch_id, "applied")
 
-        %{batch_id: batch_id, audit: audit, event_count: expected_count}
+        %{
+          batch_id: batch_id,
+          audit: audit,
+          event_count: expected_count,
+          source_backup_digest: source_backup_digest,
+          disposition: @position_disposition,
+          algorithm: @position_algorithm
+        }
       end)
     end
   rescue
     error -> {:error, {:database_error, Exception.message(error)}}
   end
 
-  def apply_positions(_repo, _expected_count, _expected_old_max),
+  def apply_positions(_repo, _expected_count, _expected_old_max, _source_backup_digest),
     do: {:error, :invalid_position_expectations}
 
   @doc "Restores the exact retained old positions for an applied repair batch."
@@ -101,13 +119,16 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       when is_binary(batch_id) and is_binary(confirmation) do
     with :ok <- postgres_repo(repo),
          :ok <- exact_confirmation(batch_id, confirmation),
+         :ok <- ensure_sha256_support(repo),
          :ok <- reject_active_or_waiting_writers(repo) do
       transaction(repo, fn ->
         lock_events!(repo)
         create_position_tables!(repo)
         batch = fetch_applied_position_batch!(repo, batch_id)
         assert_position_stage_complete!(repo, batch_id, batch.event_count)
+        assert_rollback_index_allows_duplicates!(repo)
         assert_current_positions_match_stage!(repo, batch_id, :proposed)
+        verify_position_source_rows!(repo, batch_id)
         restore_old_positions!(repo, batch_id)
         reset_legacy_sequence!(repo, batch.old_maximum)
         assert_current_positions_match_stage!(repo, batch_id, :old)
@@ -131,7 +152,8 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
   Stages canonical legacy fingerprints in bounded keyset batches.
 
   The supplied digest identifies the reviewed source backup. Its presence is
-  provenance only: it anchors the trusted cutover snapshot and does not prove
+  provenance only: synthetic operation IDs anchor the operator-reviewed cutover
+  snapshot, do not reconstruct original append boundaries, and do not prove
   integrity of pre-cutover event data.
   """
   @spec stage_identity(module(), String.t(), String.t(), pos_integer()) ::
@@ -153,6 +175,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
     with :ok <- postgres_repo(repo),
          :ok <- validate_batch_id(batch_id),
          :ok <- validate_source_backup_digest(source_backup_digest),
+         :ok <- ensure_sha256_support(repo),
          :ok <- validate_batch_size(batch_size) do
       create_identity_tables(repo)
       ensure_identity_schema!(repo)
@@ -173,7 +196,8 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
           expected_event_count: expected_event_count,
           staged_count: staged_count,
           source_backup_digest: source_backup_digest,
-          provenance: @identity_provenance
+          provenance: @identity_provenance,
+          disposition: @identity_disposition
         }
       end)
     end
@@ -199,6 +223,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
     with :ok <- postgres_repo(repo),
          :ok <- validate_batch_id(batch_id),
          :ok <- validate_batch_size(batch_size),
+         :ok <- ensure_sha256_support(repo),
          :ok <- reject_active_or_waiting_writers(repo) do
       transaction(repo, fn ->
         lock_events!(repo)
@@ -223,7 +248,9 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
         validate_fingerprint_constraint!(repo)
         mark_identity_batch!(repo, batch_id, "applied")
 
-        Map.put(batch, :provenance, @identity_provenance)
+        batch
+        |> Map.put(:provenance, @identity_provenance)
+        |> Map.put(:disposition, @identity_disposition)
       end)
     end
   rescue
@@ -241,6 +268,13 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
   end
 
   defp postgres_repo(_repo), do: {:error, :postgres_required}
+
+  defp ensure_sha256_support(repo) do
+    query!(repo, "SELECT encode(sha256(''::bytea), 'hex')")
+    :ok
+  rescue
+    _error -> {:error, :postgres_builtin_sha256_required}
+  end
 
   defp validate_position_expectations(count, maximum)
        when count <= @max_position and maximum <= @max_position,
@@ -413,6 +447,9 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       batch_id text PRIMARY KEY,
       event_count bigint NOT NULL,
       old_maximum bigint NOT NULL,
+      source_backup_digest text NOT NULL,
+      disposition_marker text NOT NULL,
+      position_algorithm text NOT NULL,
       status text NOT NULL,
       created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
       applied_at timestamptz
@@ -425,8 +462,21 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       batch_id text NOT NULL REFERENCES #{table(repo, @position_batches)}(batch_id),
       old_global_position bigint NOT NULL,
       proposed_global_position bigint NOT NULL,
+      source_row_sha256 text NOT NULL,
       created_at timestamptz NOT NULL DEFAULT clock_timestamp()
     )
+    """)
+
+    query!(repo, """
+    ALTER TABLE #{table(repo, @position_batches)}
+    ADD COLUMN IF NOT EXISTS source_backup_digest text,
+    ADD COLUMN IF NOT EXISTS disposition_marker text,
+    ADD COLUMN IF NOT EXISTS position_algorithm text
+    """)
+
+    query!(repo, """
+    ALTER TABLE #{table(repo, @position_rows)}
+    ADD COLUMN IF NOT EXISTS source_row_sha256 text
     """)
   end
 
@@ -436,14 +486,23 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       else: raise("position rollback provenance already exists; refusing conflicting repair")
   end
 
-  defp insert_position_batch!(repo, batch_id, audit) do
+  defp insert_position_batch!(repo, batch_id, audit, source_backup_digest) do
     query!(
       repo,
       """
-      INSERT INTO #{table(repo, @position_batches)} (batch_id, event_count, old_maximum, status)
-      VALUES ($1, $2, $3, 'staged')
+      INSERT INTO #{table(repo, @position_batches)} (
+        batch_id, event_count, old_maximum, source_backup_digest,
+        disposition_marker, position_algorithm, status
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'staged')
       """,
-      [batch_id, audit.event_count, audit.max_global_position || 0]
+      [
+        batch_id,
+        audit.event_count,
+        audit.max_global_position || 0,
+        source_backup_digest,
+        @position_disposition,
+        @position_algorithm
+      ]
     )
   end
 
@@ -452,13 +511,15 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       repo,
       """
       INSERT INTO #{table(repo, @position_rows)} (
-        event_id, batch_id, old_global_position, proposed_global_position
+        event_id, batch_id, old_global_position, proposed_global_position, source_row_sha256
       )
       SELECT id,
              $1,
              global_position,
-             ROW_NUMBER() OVER (ORDER BY global_position, created_at, id)
+             ROW_NUMBER() OVER (ORDER BY global_position, created_at, id),
+             #{position_source_checksum_sql("event")}
       FROM #{table(repo, "events")}
+      AS event
       ORDER BY global_position, created_at, id
       """,
       [batch_id]
@@ -497,6 +558,25 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
     if count == expected,
       do: :ok,
       else: raise("position repair updated an unexpected number of events")
+  end
+
+  defp verify_position_source_rows!(repo, batch_id) do
+    [[mismatches]] =
+      query!(
+        repo,
+        """
+        SELECT COUNT(*)
+        FROM #{table(repo, @position_rows)} staged
+        JOIN #{table(repo, "events")} event ON event.id = staged.event_id
+        WHERE staged.batch_id = $1
+          AND staged.source_row_sha256 IS DISTINCT FROM #{position_source_checksum_sql("event")}
+        """,
+        [batch_id]
+      )
+
+    if mismatches == 0,
+      do: :ok,
+      else: raise("position repair source-row checksum mismatch")
   end
 
   defp verify_dense_positions!(repo, expected_count) do
@@ -573,6 +653,36 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
     end
   end
 
+  defp assert_rollback_index_allows_duplicates!(repo) do
+    [[index_count]] =
+      query!(
+        repo,
+        """
+        SELECT COUNT(*)
+        FROM pg_index index_definition
+        JOIN pg_attribute attribute
+          ON attribute.attrelid = index_definition.indrelid
+         AND attribute.attnum = ANY (index_definition.indkey)
+        WHERE index_definition.indrelid = to_regclass($1)
+          AND index_definition.indisunique
+          AND index_definition.indpred IS NULL
+          AND index_definition.indnkeyatts = 1
+          AND attribute.attname = 'global_position'
+        """,
+        [regclass_name(repo, "events")]
+      )
+
+    if index_count == 0 do
+      :ok
+    else
+      raise(
+        "exact rollback is unavailable while a unique global_position index exists; " <>
+          "rollback after protocol migration requires restoring the database snapshot " <>
+          "or an explicitly reviewed index downgrade"
+      )
+    end
+  end
+
   defp assert_current_positions_match_stage!(repo, batch_id, column) do
     staged_column =
       if column == :proposed, do: "proposed_global_position", else: "old_global_position"
@@ -637,8 +747,14 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       batch_id text NOT NULL REFERENCES #{table(repo, @identity_batches)}(batch_id),
       operation_id text NOT NULL,
       operation_fingerprint text NOT NULL,
+      source_row_sha256 text NOT NULL,
       created_at timestamptz NOT NULL DEFAULT clock_timestamp()
     )
+    """)
+
+    query!(repo, """
+    ALTER TABLE #{table(repo, @identity_rows)}
+    ADD COLUMN IF NOT EXISTS source_row_sha256 text
     """)
   end
 
@@ -699,9 +815,12 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       query!(
         repo,
         """
-        SELECT id, stream_id, event_number, global_position, type, data, metadata,
-               agent_id, causation_id, correlation_id, event_timestamp
+        SELECT event.id, event.stream_id, event.event_number, event.global_position,
+               event.type, event.data, event.metadata, event.agent_id,
+               event.causation_id, event.correlation_id, event.event_timestamp,
+               #{identity_source_checksum_sql("event")}
         FROM #{table(repo, "events")}
+        AS event
         WHERE operation_id IS NULL
           AND operation_fingerprint IS NULL
           AND ($1::text IS NULL OR id > $1)
@@ -742,7 +861,8 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
            agent_id,
            causation_id,
            correlation_id,
-           timestamp
+           timestamp,
+           source_row_sha256
          ],
          _digest
        ) do
@@ -765,23 +885,30 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
         raise("cannot fingerprint legacy event #{inspect(id)}")
 
     operation_id = deterministic_identity_operation_id(id, fingerprint)
-    {id, operation_id, fingerprint}
+    {id, operation_id, fingerprint, source_row_sha256}
   end
 
   defp insert_identity_rows!(repo, batch_id, rows) do
     ids = Enum.map(rows, &elem(&1, 0))
     operation_ids = Enum.map(rows, &elem(&1, 1))
     fingerprints = Enum.map(rows, &elem(&1, 2))
+    source_row_sha256s = Enum.map(rows, &elem(&1, 3))
 
     query!(
       repo,
       """
       INSERT INTO #{table(repo, @identity_rows)} (
-        event_id, batch_id, operation_id, operation_fingerprint
+        event_id, batch_id, operation_id, operation_fingerprint, source_row_sha256
       )
-      SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[])
+      SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
       """,
-      [ids, List.duplicate(batch_id, length(ids)), operation_ids, fingerprints]
+      [
+        ids,
+        List.duplicate(batch_id, length(ids)),
+        operation_ids,
+        fingerprints,
+        source_row_sha256s
+      ]
     )
   end
 
@@ -901,10 +1028,11 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
       repo,
       """
       SELECT staged.event_id, staged.operation_id, staged.operation_fingerprint,
+             staged.source_row_sha256,
              event.stream_id, event.event_number, event.global_position, event.type,
              event.data, event.metadata, event.agent_id, event.causation_id,
              event.correlation_id, event.event_timestamp, event.operation_id,
-             event.operation_fingerprint
+             event.operation_fingerprint, #{identity_source_checksum_sql("event")}
       FROM #{table(repo, @identity_rows)} staged
       JOIN #{table(repo, "events")} event ON event.id = staged.event_id
       WHERE staged.batch_id = $1 AND ($2::text IS NULL OR staged.event_id > $2)
@@ -920,6 +1048,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
            id,
            staged_operation_id,
            staged_fingerprint,
+           staged_source_row_sha256,
            stream_id,
            event_number,
            global_position,
@@ -931,7 +1060,8 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
            correlation_id,
            timestamp,
            operation_id,
-           operation_fingerprint
+           operation_fingerprint,
+           current_source_row_sha256
          ],
          phase
        ) do
@@ -953,6 +1083,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
 
     valid? =
       current_fingerprint == staged_fingerprint and
+        current_source_row_sha256 == staged_source_row_sha256 and
         case phase do
           :staged ->
             is_nil(operation_id) and is_nil(operation_fingerprint)
@@ -1015,6 +1146,16 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
   defp utc_datetime!(%DateTime{} = datetime), do: DateTime.shift_zone!(datetime, "Etc/UTC")
   defp utc_datetime!(%NaiveDateTime{} = datetime), do: DateTime.from_naive!(datetime, "Etc/UTC")
   defp utc_datetime!(other), do: raise("invalid persisted event timestamp: #{inspect(other)}")
+
+  # jsonb text is canonicalized by PostgreSQL. These checksums cover all current
+  # persisted event columns without materializing the log in the BEAM process.
+  defp position_source_checksum_sql(event_alias) do
+    "encode(sha256(convert_to((to_jsonb(#{event_alias}) - 'global_position')::text, 'UTF8')), 'hex')"
+  end
+
+  defp identity_source_checksum_sql(event_alias) do
+    "encode(sha256(convert_to((to_jsonb(#{event_alias}) - 'operation_id' - 'operation_fingerprint')::text, 'UTF8')), 'hex')"
+  end
 
   defp table(repo, name) do
     prefix = repo.config() |> Keyword.get(:prefix)

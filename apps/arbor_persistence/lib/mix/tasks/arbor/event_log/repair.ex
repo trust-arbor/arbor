@@ -5,15 +5,21 @@ defmodule Mix.Tasks.Arbor.EventLog.Repair do
   full Arbor umbrella.
 
       ./bin/mix arbor.event_log.repair
-      ARBOR_DB=postgres ARBOR_DB_NAME=arbor_clone ./bin/mix arbor.event_log.repair --apply-positions --expected-count 3550132 --expected-old-max 2874929
+      ARBOR_DB=postgres ARBOR_DB_NAME=arbor_clone ./bin/mix arbor.event_log.repair --apply-positions --expected-count 3550132 --expected-old-max 2874929 --source-backup-digest SHA256
 
   Modes are mutually exclusive. Audit is the default. Position repair requires
   the exact count and old maximum from an audit. Identity remediation is split
   into staging and application so the reviewed source-backup digest and staged
   snapshot are durable before an exclusive-lock update occurs.
 
-  Identity provenance anchors a trusted cutover snapshot; it does not prove
-  integrity of events that predate that snapshot.
+  PostgreSQL built-in `sha256(bytea)` support is required for retained source-row
+  checksums.
+
+  Identity provenance anchors a trusted cutover snapshot; synthetic operation
+  IDs do not reconstruct original append boundaries or prove integrity of events
+  that predate that snapshot. Position rollback is unavailable after a unique
+  `global_position` index is installed unless an operator restores a database
+  snapshot or performs an explicitly reviewed index downgrade.
   """
 
   use Mix.Task
@@ -75,7 +81,8 @@ defmodule Mix.Tasks.Arbor.EventLog.Repair do
   defp apply_positions(opts) do
     count = required_integer!(opts, :expected_count)
     old_maximum = required_integer!(opts, :expected_old_max)
-    print_result(PostgresRepair.apply_positions(Repo, count, old_maximum))
+    digest = required_string!(opts, :source_backup_digest)
+    print_result(PostgresRepair.apply_positions(Repo, count, old_maximum, digest))
   end
 
   defp rollback(opts) do
@@ -138,7 +145,7 @@ defmodule Mix.Tasks.Arbor.EventLog.Repair do
 
     Usage:
       ./bin/mix arbor.event_log.repair
-      ./bin/mix arbor.event_log.repair --apply-positions --expected-count COUNT --expected-old-max MAX
+      ./bin/mix arbor.event_log.repair --apply-positions --expected-count COUNT --expected-old-max MAX --source-backup-digest SHA256
       ./bin/mix arbor.event_log.repair --rollback-batch BATCH --confirm-rollback BATCH
       ./bin/mix arbor.event_log.repair --stage-identities --batch-id BATCH --source-backup-digest SHA256 [--batch-size N]
       ./bin/mix arbor.event_log.repair --apply-identities --batch-id BATCH [--batch-size N]

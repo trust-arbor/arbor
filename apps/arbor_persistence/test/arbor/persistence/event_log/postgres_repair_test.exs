@@ -6,6 +6,8 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
   @moduletag :database
   @moduletag :integration
 
+  @position_digest "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
   defmodule RepairRepo do
     use Ecto.Repo,
       otp_app: :arbor_persistence,
@@ -76,7 +78,9 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
     assert {:ok, audit} = PostgresRepair.audit(RepairRepo)
     assert audit.stream_global_position_regressions_or_ties == 1
 
-    assert {:error, {:database_error, message}} = PostgresRepair.apply_positions(RepairRepo, 2, 4)
+    assert {:error, {:database_error, message}} =
+             PostgresRepair.apply_positions(RepairRepo, 2, 4, @position_digest)
+
     assert message =~ "malformed EventLog history"
 
     assert %{rows: [[0]]} =
@@ -89,17 +93,42 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
     insert_event!("evt-a", "stream-a", 1, 1, "2026-07-01 00:00:01")
     insert_event!("evt-z-2", "stream-z", 2, 3, "2026-07-01 00:00:03")
 
-    assert {:ok, %{batch_id: batch_id}} = PostgresRepair.apply_positions(RepairRepo, 4, 3)
+    assert {:ok, %{batch_id: batch_id}} =
+             PostgresRepair.apply_positions(RepairRepo, 4, 3, @position_digest)
 
     assert %{rows: [["evt-a", 1], ["evt-b", 2], ["evt-z", 3], ["evt-z-2", 4]]} =
              RepairRepo.query!("SELECT id, global_position FROM events ORDER BY global_position")
 
-    assert %{rows: [["evt-a", 1, 1], ["evt-b", 1, 2], ["evt-z", 2, 3], ["evt-z-2", 3, 4]]} =
+    assert %{
+             rows: [
+               [
+                 @position_digest,
+                 "operator_reviewed_backup_bound_position_repair_v1",
+                 "row_number_global_position_created_at_id_v1"
+               ]
+             ]
+           } =
              RepairRepo.query!(
-               "SELECT event_id, old_global_position, proposed_global_position " <>
+               "SELECT source_backup_digest, disposition_marker, position_algorithm " <>
+                 "FROM arbor_event_log_position_repair_batches WHERE batch_id = $1",
+               [batch_id]
+             )
+
+    assert %{
+             rows: [
+               ["evt-a", 1, 1, source_row_sha256],
+               ["evt-b", 1, 2, _],
+               ["evt-z", 2, 3, _],
+               ["evt-z-2", 3, 4, _]
+             ]
+           } =
+             RepairRepo.query!(
+               "SELECT event_id, old_global_position, proposed_global_position, source_row_sha256 " <>
                  "FROM arbor_event_log_position_repair_rows WHERE batch_id = $1 ORDER BY proposed_global_position",
                [batch_id]
              )
+
+    assert String.match?(source_row_sha256, ~r/^[0-9a-f]{64}$/)
 
     assert {:ok, audit} = PostgresRepair.audit(RepairRepo)
     assert audit.event_count == audit.distinct_global_positions
@@ -112,14 +141,34 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
     insert_event!("evt-b", "stream-b", 1, 1, "2026-07-01 00:00:01")
 
     assert {:error, {:database_error, message}} =
-             PostgresRepair.apply_positions(RepairRepo, 2, 999)
+             PostgresRepair.apply_positions(RepairRepo, 2, 999, @position_digest)
 
     assert message =~ "confirmation mismatch"
 
-    assert {:ok, %{batch_id: batch_id}} = PostgresRepair.apply_positions(RepairRepo, 2, 1)
+    assert {:ok, %{batch_id: batch_id}} =
+             PostgresRepair.apply_positions(RepairRepo, 2, 1, @position_digest)
 
     assert {:error, :rollback_confirmation_mismatch} =
              PostgresRepair.rollback_positions(RepairRepo, batch_id, "wrong-batch")
+
+    RepairRepo.query!(
+      "CREATE UNIQUE INDEX events_global_position_rollback_test_index ON events (global_position)"
+    )
+
+    assert {:error, {:database_error, index_message}} =
+             PostgresRepair.rollback_positions(RepairRepo, batch_id, batch_id)
+
+    assert index_message =~ "unique global_position index"
+    assert index_message =~ "database snapshot"
+    RepairRepo.query!("DROP INDEX events_global_position_rollback_test_index")
+
+    RepairRepo.query!("UPDATE events SET data = '{\"tampered\":true}'::jsonb WHERE id = 'evt-a'")
+
+    assert {:error, {:database_error, checksum_message}} =
+             PostgresRepair.rollback_positions(RepairRepo, batch_id, batch_id)
+
+    assert checksum_message =~ "source-row checksum mismatch"
+    RepairRepo.query!("UPDATE events SET data = '{\"value\":1}'::jsonb WHERE id = 'evt-a'")
 
     assert {:ok, %{batch_id: ^batch_id}} =
              PostgresRepair.rollback_positions(RepairRepo, batch_id, batch_id)
@@ -142,6 +191,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
     assert {:ok, staged} = PostgresRepair.stage_identity(RepairRepo, "identity-tamper", digest, 1)
     assert staged.staged_count == 1
     assert staged.provenance == "legacy_trusted_cutover_snapshot_v1"
+    assert staged.disposition =~ "not_original_append_boundaries"
 
     assert %{rows: [[operation_id, fingerprint]]} =
              RepairRepo.query!(
@@ -206,6 +256,47 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
     assert String.match?(fingerprint, ~r/^[0-9a-f]{64}$/)
   end
 
+  test "identity remediation rejects global position tampering after staging" do
+    insert_event!("evt-a", "stream-a", 1, 1, "2026-07-01 00:00:00")
+
+    RepairRepo.query!("""
+    ALTER TABLE events
+    ADD CONSTRAINT events_operation_fingerprint_present
+    CHECK (operation_fingerprint IS NOT NULL) NOT VALID
+    """)
+
+    assert {:ok, %{staged_count: 1}} =
+             PostgresRepair.stage_identity(
+               RepairRepo,
+               "identity-global-position-tamper",
+               String.duplicate("c", 64),
+               1
+             )
+
+    RepairRepo.query!("ALTER TABLE events DROP CONSTRAINT events_operation_fingerprint_present")
+    RepairRepo.query!("UPDATE events SET global_position = 2 WHERE id = 'evt-a'")
+
+    RepairRepo.query!("""
+    ALTER TABLE events
+    ADD CONSTRAINT events_operation_fingerprint_present
+    CHECK (operation_fingerprint IS NOT NULL) NOT VALID
+    """)
+
+    assert {:error, {:database_error, message}} =
+             PostgresRepair.apply_staged_identity(
+               RepairRepo,
+               "identity-global-position-tamper",
+               1
+             )
+
+    assert message =~ "identity staging mismatch"
+
+    assert %{rows: [[nil, nil]]} =
+             RepairRepo.query!(
+               "SELECT operation_id, operation_fingerprint FROM events WHERE id = 'evt-a'"
+             )
+  end
+
   defp insert_event!(id, stream_id, event_number, global_position, created_at) do
     created_at = NaiveDateTime.from_iso8601!(created_at)
 
@@ -237,6 +328,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
       causation_id text,
       correlation_id text,
       event_timestamp timestamp(6) without time zone,
+      committed_at timestamp(6) without time zone NOT NULL DEFAULT clock_timestamp(),
       operation_id text,
       operation_fingerprint text,
       created_at timestamp(6) without time zone NOT NULL
