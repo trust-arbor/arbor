@@ -1217,5 +1217,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepair do
   end
 
   defp query!(repo, sql, params \\ []), do: query_result!(repo, sql, params).rows
-  defp query_result!(repo, sql, params), do: repo.query!(sql, params, timeout: :infinity)
+
+  defp query_result!(repo, sql, params),
+    do: repo.query!(sql, params, timeout: :infinity, prepare: :unnamed)
 end
