@@ -36,6 +36,8 @@ defmodule Arbor.Orchestrator.Conformance53Test do
   end
 
   test "5.3 resume_from checkpoint continues execution from persisted position" do
+    alias Arbor.Orchestrator.Test.CheckpointResumeHelper
+
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
@@ -52,12 +54,17 @@ defmodule Arbor.Orchestrator.Conformance53Test do
         "arbor_orchestrator_5_3_resume_#{System.unique_integer([:positive])}"
       )
 
+    # Stable run_id + process-loss recovery; keep settled current_effect intact.
+    run_id = CheckpointResumeHelper.unique_run_id("c53_resume")
+    CheckpointResumeHelper.schedule_journal_cleanup(run_id)
+
     # Resume requires identity for checkpoint HMAC integrity (post-2026-06-03
     # Option D migration). Same key on write + read so HMAC verifies.
     identity_key = :crypto.strong_rand_bytes(32)
 
     assert {:error, :max_steps_exceeded} =
              Arbor.Orchestrator.run(dot,
+               run_id: run_id,
                logs_root: logs_root,
                max_steps: 2,
                identity_private_key: identity_key
@@ -66,10 +73,14 @@ defmodule Arbor.Orchestrator.Conformance53Test do
     checkpoint_path = Path.join(logs_root, "checkpoint.json")
     assert File.exists?(checkpoint_path)
 
+    CheckpointResumeHelper.reopen_as_recovering!(run_id)
+
     assert {:ok, resumed} =
              Arbor.Orchestrator.run(dot,
+               run_id: run_id,
                logs_root: logs_root,
                resume_from: checkpoint_path,
+               recovery: true,
                identity_private_key: identity_key
              )
 

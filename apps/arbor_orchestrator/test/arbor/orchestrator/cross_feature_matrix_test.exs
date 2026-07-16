@@ -286,6 +286,8 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
   end
 
   test "matrix: checkpoint resume reaches same terminal node" do
+    alias Arbor.Orchestrator.Test.CheckpointResumeHelper
+
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
@@ -302,21 +304,29 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
         "arbor_orchestrator_matrix_resume_#{System.unique_integer([:positive])}"
       )
 
-    # Resume requires an identity (checkpoint HMAC derived from
-    # :identity_private_key); legacy unsigned-checkpoint fail-open is closed.
+    # Stable run_id + process-loss recovery; keep settled current_effect intact.
+    run_id = CheckpointResumeHelper.unique_run_id("matrix_resume")
+    CheckpointResumeHelper.schedule_journal_cleanup(run_id)
+
+    # Resume requires identity (checkpoint HMAC from :identity_private_key).
     key = "test-resume-identity-key-32-bytes!!"
 
     assert {:error, :max_steps_exceeded} =
              Arbor.Orchestrator.run(dot,
+               run_id: run_id,
                logs_root: logs_root,
                max_steps: 2,
                identity_private_key: key
              )
 
+    CheckpointResumeHelper.reopen_as_recovering!(run_id)
+
     assert {:ok, resumed} =
              Arbor.Orchestrator.run(dot,
+               run_id: run_id,
                logs_root: logs_root,
                resume: true,
+               recovery: true,
                identity_private_key: key
              )
 

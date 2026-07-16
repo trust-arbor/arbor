@@ -99,6 +99,8 @@ defmodule Arbor.Orchestrator.Conformance117Test do
   end
 
   test "11.7 resume restores checkpointed state and continues from the checkpoint position" do
+    alias Arbor.Orchestrator.Test.CheckpointResumeHelper
+
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
@@ -115,21 +117,29 @@ defmodule Arbor.Orchestrator.Conformance117Test do
         "arbor_orchestrator_11_7_resume_#{System.unique_integer([:positive])}"
       )
 
-    # Resume requires an identity (engine derives the checkpoint HMAC from
-    # :identity_private_key); legacy unsigned-checkpoint fail-open is closed.
+    # Stable run_id + process-loss recovery; keep settled current_effect intact.
+    run_id = CheckpointResumeHelper.unique_run_id("c117_resume")
+    CheckpointResumeHelper.schedule_journal_cleanup(run_id)
+
+    # Resume requires identity (checkpoint HMAC from :identity_private_key).
     key = "test-resume-identity-key-32-bytes!!"
 
     assert {:error, :max_steps_exceeded} =
              Arbor.Orchestrator.run(dot,
+               run_id: run_id,
                logs_root: logs_root,
                max_steps: 2,
                identity_private_key: key
              )
 
+    CheckpointResumeHelper.reopen_as_recovering!(run_id)
+
     assert {:ok, resumed} =
              Arbor.Orchestrator.run(dot,
+               run_id: run_id,
                logs_root: logs_root,
                resume: true,
+               recovery: true,
                identity_private_key: key
              )
 

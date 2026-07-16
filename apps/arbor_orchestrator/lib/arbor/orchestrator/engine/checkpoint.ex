@@ -70,6 +70,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   require Logger
 
   alias Arbor.Contracts.Persistence.Record, as: PersistenceRecord
+  alias Arbor.Contracts.Security.Taint
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @default_store_name :arbor_orchestrator_checkpoints
@@ -78,6 +79,15 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   @checkpoint_filename "checkpoint.json"
   @max_reason_bytes 256
   @max_reason_depth 4
+
+  # Closed vocabularies for Outcome.output_taint reconstruction. Never
+  # String.to_atom/1 untrusted checkpoint input — only these allowlists.
+  @output_taint_levels [:trusted, :derived, :untrusted, :hostile]
+  @output_taint_level_by_string Map.new(@output_taint_levels, &{Atom.to_string(&1), &1})
+  @taint_sensitivities [:public, :internal, :confidential, :restricted]
+  @taint_sensitivity_by_string Map.new(@taint_sensitivities, &{Atom.to_string(&1), &1})
+  @taint_confidences [:unverified, :plausible, :corroborated, :verified]
+  @taint_confidence_by_string Map.new(@taint_confidences, &{Atom.to_string(&1), &1})
 
   @durability_rank %{
     volatile: 0,
@@ -590,6 +600,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           # context_taint) and NOT reconstructed on deserialize. Drop it so the
           # checkpoint JSON/HMAC doesn't choke on tuples.
           |> Map.put(:taint_reductions, [])
+          # Persist output_taint in a closed form so digest-bearing Outcomes
+          # round-trip exactly (bare level atom or full %Taint{}).
+          |> Map.update(:output_taint, nil, &serialize_output_taint/1)
 
         {node_id, sanitized}
       end)
@@ -1109,7 +1122,11 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
            suggested_next_ids: Map.get(outcome_map, "suggested_next_ids", []),
            context_updates: Map.get(outcome_map, "context_updates", %{}),
            notes: Map.get(outcome_map, "notes"),
-           failure_reason: Map.get(outcome_map, "failure_reason")
+           failure_reason: Map.get(outcome_map, "failure_reason"),
+           # Digest-bearing field: must round-trip exactly for effect recovery.
+           # Transient reductions stay empty (engine applied them live).
+           output_taint: parse_output_taint(Map.get(outcome_map, "output_taint")),
+           taint_reductions: []
          }}
       end)
       |> Map.new()
@@ -1132,6 +1149,125 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
        pending_intents: deserialize_intents(Map.get(decoded, "pending_intents", %{})),
        execution_digests: deserialize_digests(Map.get(decoded, "execution_digests", %{}))
      }}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Outcome.output_taint — closed serialize / fail-closed deserialize
+  # ---------------------------------------------------------------------------
+
+  # Bare level atoms stay atoms (JSON encodes as strings). Full %Taint{} uses
+  # the same persistable map as context_taint for a single closed form.
+  defp serialize_output_taint(nil), do: nil
+
+  defp serialize_output_taint(level) when level in @output_taint_levels, do: level
+
+  defp serialize_output_taint(%Taint{} = taint) do
+    Arbor.Signals.Taint.to_persistable(taint)
+  end
+
+  # Unknown runtime values must not enter durable checkpoints as open atoms.
+  defp serialize_output_taint(_unknown), do: :hostile
+
+  # Missing / explicit null → nil (legacy unlabeled outcomes; digests of nil
+  # receipts still match). Never default to :trusted.
+  defp parse_output_taint(nil), do: nil
+
+  defp parse_output_taint(level) when level in @output_taint_levels, do: level
+
+  defp parse_output_taint(level) when is_binary(level) do
+    Map.get(@output_taint_level_by_string, level, :hostile)
+  end
+
+  defp parse_output_taint(%Taint{} = taint), do: taint
+
+  defp parse_output_taint(map) when is_map(map) do
+    # normalize_keys already stringifies outer keys; still accept atom keys
+    # for nested maps that may arrive from in-process store values.
+    string_map = stringify_map_keys(map)
+
+    cond do
+      # Signals.Taint.to_persistable / from_persistable form (serialize path)
+      Map.has_key?(string_map, "taint_level") ->
+        Arbor.Signals.Taint.from_persistable(string_map)
+
+      # Jason.Encoder shape for %Taint{} (level/sensitivity/...) if a nested
+      # struct was encoded without going through to_persistable.
+      Map.has_key?(string_map, "level") or Map.has_key?(string_map, "sensitivity") or
+          Map.has_key?(string_map, "sanitizations") ->
+        parse_output_taint_jason_struct(string_map)
+
+      true ->
+        # Malformed map — restrictive bare level so digests cannot match an
+        # untampered receipt that used a real taint value or nil.
+        :hostile
+    end
+  end
+
+  defp parse_output_taint(_unknown), do: :hostile
+
+  defp parse_output_taint_jason_struct(map) when is_map(map) do
+    %Taint{
+      level:
+        parse_closed_atom(
+          Map.get(map, "level"),
+          @output_taint_level_by_string,
+          @output_taint_levels,
+          :hostile
+        ),
+      sensitivity:
+        parse_closed_atom(
+          Map.get(map, "sensitivity"),
+          @taint_sensitivity_by_string,
+          @taint_sensitivities,
+          :restricted
+        ),
+      sanitizations: parse_non_neg_integer(Map.get(map, "sanitizations"), 0),
+      confidence:
+        parse_closed_atom(
+          Map.get(map, "confidence"),
+          @taint_confidence_by_string,
+          @taint_confidences,
+          :unverified
+        ),
+      source: parse_optional_binary(Map.get(map, "source")),
+      chain: parse_string_list(Map.get(map, "chain"))
+    }
+  end
+
+  defp parse_closed_atom(nil, _by_string, _allowed, fallback), do: fallback
+
+  defp parse_closed_atom(value, _by_string, allowed, fallback)
+       when is_atom(value) and is_list(allowed) do
+    if value in allowed, do: value, else: fallback
+  end
+
+  defp parse_closed_atom(value, by_string, _allowed, fallback) when is_binary(value) do
+    Map.get(by_string, value, fallback)
+  end
+
+  defp parse_closed_atom(_value, _by_string, _allowed, fallback), do: fallback
+
+  defp parse_non_neg_integer(value, _default) when is_integer(value) and value >= 0, do: value
+  defp parse_non_neg_integer(_value, default), do: default
+
+  defp parse_optional_binary(nil), do: nil
+  defp parse_optional_binary(value) when is_binary(value), do: value
+  defp parse_optional_binary(_), do: nil
+
+  defp parse_string_list(list) when is_list(list) do
+    Enum.map(list, fn
+      s when is_binary(s) -> s
+      other -> to_string(other)
+    end)
+  end
+
+  defp parse_string_list(_), do: []
+
+  defp stringify_map_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), v}
+      {k, v} -> {k, v}
+    end)
   end
 
   # Deserialize pending_intents — atomize known keys within each intent map

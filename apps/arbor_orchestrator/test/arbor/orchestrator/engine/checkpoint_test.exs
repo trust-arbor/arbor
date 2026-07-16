@@ -4,9 +4,46 @@ defmodule Arbor.Orchestrator.Engine.CheckpointTest do
 
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Orchestrator.Engine.Checkpoint
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Context, EffectOwner, Outcome}
 
   @secret "test_hmac_secret_key_32bytes!!"
+
+  defmodule DigestMemoryStore do
+    @moduledoc false
+    use GenServer
+
+    def durability_class(opts), do: GenServer.call(Keyword.fetch!(opts, :name), :class)
+
+    def start_link(opts),
+      do: GenServer.start_link(__MODULE__, %{}, name: Keyword.fetch!(opts, :name))
+
+    def put(key, value, opts), do: GenServer.call(Keyword.fetch!(opts, :name), {:put, key, value})
+    def get(key, opts), do: GenServer.call(Keyword.fetch!(opts, :name), {:get, key})
+    def delete(key, opts), do: GenServer.call(Keyword.fetch!(opts, :name), {:delete, key})
+    def list(opts), do: GenServer.call(Keyword.fetch!(opts, :name), :list)
+
+    @impl true
+    def init(_), do: {:ok, %{data: %{}}}
+
+    @impl true
+    def handle_call(:class, _from, state), do: {:reply, :process_lifetime, state}
+    def handle_call(:list, _from, state), do: {:reply, {:ok, Map.keys(state.data)}, state}
+
+    def handle_call({:put, key, value}, _from, state) do
+      {:reply, :ok, %{state | data: Map.put(state.data, key, value)}}
+    end
+
+    def handle_call({:get, key}, _from, state) do
+      case Map.fetch(state.data, key) do
+        {:ok, value} -> {:reply, {:ok, value}, state}
+        :error -> {:reply, {:error, :not_found}, state}
+      end
+    end
+
+    def handle_call({:delete, key}, _from, state) do
+      {:reply, :ok, %{state | data: Map.delete(state.data, key)}}
+    end
+  end
 
   setup do
     tmp = Path.join(System.tmp_dir!(), "checkpoint_test_#{:rand.uniform(100_000)}")
@@ -91,6 +128,191 @@ defmodule Arbor.Orchestrator.Engine.CheckpointTest do
 
       assert %Outcome{status: :fail, failure_reason: "invalid persisted status"} =
                loaded.node_outcomes["untrusted_status"]
+    end
+  end
+
+  describe "Outcome.output_taint digest round-trip (effect recovery)" do
+    test "atom output_taint preserves EffectOwner.outcome_result_digest/1 via file", %{tmp: tmp} do
+      # Simulated LLM outcomes use bare :derived — this is the production bug
+      # that broke settled-effect recovery after max_steps interruption.
+      original = %Outcome{
+        status: :success,
+        notes: "Stage completed: a",
+        output_taint: :derived,
+        context_updates: %{"last_stage" => "a"},
+        taint_reductions: []
+      }
+
+      original_digest = EffectOwner.outcome_result_digest(original)
+
+      cp =
+        Checkpoint.from_state(
+          "a",
+          ["start", "a"],
+          %{},
+          Context.new(%{}),
+          %{"a" => original},
+          run_id: "run_atom_taint_digest",
+          graph_hash: "g_atom"
+        )
+
+      assert :ok = Checkpoint.write(cp, tmp, hmac_secret: @secret)
+
+      assert {:ok, loaded} =
+               Checkpoint.load(Path.join(tmp, "checkpoint.json"),
+                 hmac_secret: @secret,
+                 run_id: "run_atom_taint_digest"
+               )
+
+      loaded_outcome = loaded.node_outcomes["a"]
+      assert loaded_outcome.output_taint == :derived
+      assert loaded_outcome.taint_reductions == []
+      assert EffectOwner.outcome_result_digest(loaded_outcome) == original_digest
+    end
+
+    test "full %Taint{} output_taint preserves digest via file", %{tmp: tmp} do
+      original = %Outcome{
+        status: :success,
+        notes: "reduced",
+        output_taint: %Taint{
+          level: :derived,
+          sensitivity: :internal,
+          sanitizations: 0b101,
+          confidence: :plausible,
+          source: "llm",
+          chain: ["ingress", "llm"]
+        },
+        taint_reductions: []
+      }
+
+      original_digest = EffectOwner.outcome_result_digest(original)
+
+      cp =
+        Checkpoint.from_state(
+          "n",
+          ["start", "n"],
+          %{},
+          Context.new(%{}),
+          %{"n" => original},
+          run_id: "run_struct_taint_digest",
+          graph_hash: "g_struct"
+        )
+
+      assert :ok = Checkpoint.write(cp, tmp, hmac_secret: @secret)
+
+      assert {:ok, loaded} =
+               Checkpoint.load(Path.join(tmp, "checkpoint.json"),
+                 hmac_secret: @secret,
+                 run_id: "run_struct_taint_digest"
+               )
+
+      loaded_outcome = loaded.node_outcomes["n"]
+      assert %Taint{} = loaded_outcome.output_taint
+      assert loaded_outcome.output_taint.level == :derived
+      assert loaded_outcome.output_taint.sanitizations == 0b101
+      assert loaded_outcome.output_taint.source == "llm"
+      assert loaded_outcome.output_taint.chain == ["ingress", "llm"]
+      assert EffectOwner.outcome_result_digest(loaded_outcome) == original_digest
+    end
+
+    test "security regression: unknown output_taint string fails closed (not nil/trusted)", %{
+      tmp: tmp
+    } do
+      cp =
+        Checkpoint.from_state(
+          "n",
+          ["start"],
+          %{},
+          Context.new(%{}),
+          %{"n" => %Outcome{status: :success, output_taint: :derived}},
+          run_id: "run_bad_taint"
+        )
+
+      assert :ok = Checkpoint.write(cp, tmp)
+      path = Path.join(tmp, "checkpoint.json")
+      {:ok, raw} = File.read(path)
+      {:ok, decoded} = Jason.decode(raw)
+
+      tampered =
+        put_in(decoded, ["node_outcomes", "n", "output_taint"], "not_a_real_level")
+
+      File.write!(path, Jason.encode!(tampered))
+
+      assert {:ok, loaded} = Checkpoint.load(path)
+      # Restrictive reconstruction — never nil (unlabeled) or :trusted (open).
+      assert loaded.node_outcomes["n"].output_taint == :hostile
+      refute loaded.node_outcomes["n"].output_taint in [nil, :trusted]
+    end
+
+    test "security regression: malformed output_taint map fails closed", %{tmp: tmp} do
+      cp =
+        Checkpoint.from_state(
+          "n",
+          ["start"],
+          %{},
+          Context.new(%{}),
+          %{"n" => %Outcome{status: :success, output_taint: :untrusted}},
+          run_id: "run_bad_taint_map"
+        )
+
+      assert :ok = Checkpoint.write(cp, tmp)
+      path = Path.join(tmp, "checkpoint.json")
+      {:ok, raw} = File.read(path)
+      {:ok, decoded} = Jason.decode(raw)
+
+      tampered =
+        put_in(decoded, ["node_outcomes", "n", "output_taint"], %{"weird" => true})
+
+      File.write!(path, Jason.encode!(tampered))
+
+      assert {:ok, loaded} = Checkpoint.load(path)
+      assert loaded.node_outcomes["n"].output_taint == :hostile
+    end
+
+    test "atom output_taint digest survives configured store-backed load", %{tmp: tmp} do
+      store_name = :"ckpt_digest_store_#{System.unique_integer([:positive])}"
+      start_supervised!({DigestMemoryStore, name: store_name})
+
+      original = %Outcome{
+        status: :success,
+        notes: "store path",
+        output_taint: :derived,
+        taint_reductions: []
+      }
+
+      original_digest = EffectOwner.outcome_result_digest(original)
+      run_id = "run_store_taint_digest"
+
+      cp =
+        Checkpoint.from_state(
+          "a",
+          ["start", "a"],
+          %{},
+          Context.new(%{}),
+          %{"a" => original},
+          run_id: run_id,
+          graph_hash: "g_store"
+        )
+
+      assert {:ok, _receipt} =
+               Checkpoint.persist(cp, tmp,
+                 hmac_secret: @secret,
+                 store: DigestMemoryStore,
+                 store_name: store_name
+               )
+
+      # Drop file so load must use the configured store.
+      File.rm!(Path.join(tmp, "checkpoint.json"))
+
+      assert {:ok, loaded} =
+               Checkpoint.load(Path.join(tmp, "checkpoint.json"),
+                 run_id: run_id,
+                 hmac_secret: @secret,
+                 store: DigestMemoryStore,
+                 store_name: store_name
+               )
+
+      assert EffectOwner.outcome_result_digest(loaded.node_outcomes["a"]) == original_digest
     end
   end
 

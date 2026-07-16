@@ -296,6 +296,9 @@ defmodule Arbor.Orchestrator.EngineTest do
   end
 
   test "resume continues from saved checkpoint" do
+    alias Arbor.Orchestrator.Test.CheckpointResumeHelper
+    alias Arbor.Orchestrator.PipelineStatus
+
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
@@ -312,13 +315,18 @@ defmodule Arbor.Orchestrator.EngineTest do
         "arbor_orchestrator_resume_#{System.unique_integer([:positive])}"
       )
 
-    # Resume now requires an identity (the engine derives the checkpoint HMAC
-    # from :identity_private_key) — the legacy unsigned-checkpoint fail-open is
-    # closed. Sign on the initial run, verify on resume, with the same key.
+    # Stable run_id: max_steps_exceeded is a terminal failure. Process-loss
+    # recovery reopens only lifecycle terminal fields, claims the same journal
+    # record, and resumes without mutating current_effect / effect_generation.
+    run_id = CheckpointResumeHelper.unique_run_id("engine_resume")
+    CheckpointResumeHelper.schedule_journal_cleanup(run_id)
+
+    # Resume requires identity (checkpoint HMAC from :identity_private_key).
     key = "test-resume-identity-key-32-bytes!!"
 
     assert {:error, :max_steps_exceeded} =
              Arbor.Orchestrator.run(dot,
+               run_id: run_id,
                logs_root: logs_root,
                max_steps: 2,
                identity_private_key: key
@@ -326,10 +334,23 @@ defmodule Arbor.Orchestrator.EngineTest do
 
     assert File.exists?(Path.join(logs_root, "checkpoint.json"))
 
+    pre = PipelineStatus.get_record(run_id)
+    assert pre.current_effect["status"] == "settled"
+    assert pre.current_effect["node_id"] == "a"
+    effect_generation = pre.effect_generation
+    effect_exec = pre.current_effect["execution_id"]
+
+    reopened = CheckpointResumeHelper.reopen_as_recovering!(run_id)
+    # Authoritative effect evidence must survive reopen.
+    assert reopened.current_effect["execution_id"] == effect_exec
+    assert reopened.effect_generation == effect_generation
+
     assert {:ok, resumed} =
              Arbor.Orchestrator.run(dot,
+               run_id: run_id,
                logs_root: logs_root,
                resume: true,
+               recovery: true,
                identity_private_key: key
              )
 
@@ -337,6 +358,70 @@ defmodule Arbor.Orchestrator.EngineTest do
     assert "a" in resumed.completed_nodes
     assert "b" in resumed.completed_nodes
     assert "exit" in resumed.completed_nodes
+  end
+
+  test "security regression: settled-effect recovery after max_steps preserves receipt digest" do
+    # End-to-end: real Engine partial run produces a settled current_effect;
+    # reopen lifecycle only (no effect rewrite); resume must complete. Fails on
+    # main when Checkpoint dropped Outcome.output_taint and digests mismatched.
+    alias Arbor.Orchestrator.Test.CheckpointResumeHelper
+    alias Arbor.Orchestrator.PipelineStatus
+
+    dot = """
+    digraph Flow {
+      start [shape=Mdiamond]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
+      exit [shape=Msquare]
+      start -> a -> b -> exit
+    }
+    """
+
+    logs_root =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor_orchestrator_digest_recovery_#{System.unique_integer([:positive])}"
+      )
+
+    run_id = CheckpointResumeHelper.unique_run_id("digest_recovery")
+    CheckpointResumeHelper.schedule_journal_cleanup(run_id)
+    key = :crypto.strong_rand_bytes(32)
+
+    assert {:error, :max_steps_exceeded} =
+             Arbor.Orchestrator.run(dot,
+               run_id: run_id,
+               logs_root: logs_root,
+               max_steps: 2,
+               identity_private_key: key
+             )
+
+    rec = PipelineStatus.get_record(run_id)
+    assert rec.status == :failed
+    assert rec.completed_nodes == ["start", "a"]
+    assert is_map(rec.current_effect)
+    assert rec.current_effect["status"] == "settled"
+    assert rec.current_effect["node_id"] == "a"
+    assert is_binary(rec.current_effect["result_digest"])
+    preserved_effect = rec.current_effect
+    preserved_generation = rec.effect_generation
+
+    reopened = CheckpointResumeHelper.reopen_as_recovering!(run_id)
+    assert reopened.current_effect == preserved_effect
+    assert reopened.effect_generation == preserved_generation
+
+    assert {:ok, resumed} =
+             Arbor.Orchestrator.run(dot,
+               run_id: run_id,
+               logs_root: logs_root,
+               resume: true,
+               recovery: true,
+               identity_private_key: key
+             )
+
+    assert "b" in resumed.completed_nodes
+    assert "exit" in resumed.completed_nodes
+    final = PipelineStatus.get_record(run_id)
+    assert final.status == :completed
   end
 
   test "wait.human routes by interviewer choice" do
