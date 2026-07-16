@@ -2,6 +2,7 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Persistence.EventLog.PostgresRepair
+  alias Mix.Tasks.Arbor.EventLog.Repair, as: RepairTask
 
   @moduletag :database
   @moduletag :integration
@@ -9,6 +10,12 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
   @position_digest "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
   defmodule RepairRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.Postgres
+  end
+
+  defmodule TaskBoundaryRepo do
     use Ecto.Repo,
       otp_app: :arbor_persistence,
       adapter: Ecto.Adapters.Postgres
@@ -69,6 +76,33 @@ defmodule Arbor.Persistence.EventLog.PostgresRepairTest do
     assert audit.same_stream_position_collision_groups == 0
     assert audit.stream_sequence_problem_groups == 0
     assert audit.stream_global_position_regressions_or_ties == 0
+  end
+
+  test "repair task starts narrow database dependencies before the configured repo", %{
+    schema: schema
+  } do
+    assert is_nil(Process.whereis(TaskBoundaryRepo))
+
+    Application.put_env(
+      :arbor_persistence,
+      TaskBoundaryRepo,
+      Keyword.merge(postgres_opts(),
+        pool_size: 2,
+        after_connect: fn connection ->
+          Postgrex.query!(connection, "SET search_path TO #{quote_identifier(schema)}", [])
+        end
+      )
+    )
+
+    on_exit(fn ->
+      if pid = Process.whereis(TaskBoundaryRepo), do: Process.exit(pid, :normal)
+      Application.delete_env(:arbor_persistence, TaskBoundaryRepo)
+    end)
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn -> assert :ok = RepairTask.run([], TaskBoundaryRepo) end)
+
+    assert output =~ "event_count: 0"
   end
 
   test "position repair refuses malformed stream history" do

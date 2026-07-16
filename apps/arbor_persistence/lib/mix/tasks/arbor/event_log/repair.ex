@@ -41,7 +41,10 @@ defmodule Mix.Tasks.Arbor.EventLog.Repair do
   ]
 
   @impl Mix.Task
-  def run(args) do
+  def run(args), do: run(args, Repo)
+
+  @doc false
+  def run(args, repo) when is_atom(repo) do
     {opts, positional, invalid} = OptionParser.parse(args, switches: @switches)
 
     unless positional == [] and invalid == [] do
@@ -49,14 +52,15 @@ defmodule Mix.Tasks.Arbor.EventLog.Repair do
     end
 
     Mix.Task.run("app.config")
-    start_repo!()
+    start_database_apps!()
+    start_repo!(repo)
 
     case mode(opts) do
-      :audit -> print_result(PostgresRepair.audit(Repo))
-      :apply_positions -> apply_positions(opts)
-      :rollback -> rollback(opts)
-      :stage_identities -> stage_identities(opts)
-      :apply_identities -> apply_identities(opts)
+      :audit -> print_result(PostgresRepair.audit(repo))
+      :apply_positions -> apply_positions(repo, opts)
+      :rollback -> rollback(repo, opts)
+      :stage_identities -> stage_identities(repo, opts)
+      :apply_identities -> apply_identities(repo, opts)
       :invalid -> usage_error("select at most one explicit repair mode")
     end
   end
@@ -78,38 +82,50 @@ defmodule Mix.Tasks.Arbor.EventLog.Repair do
     end
   end
 
-  defp apply_positions(opts) do
+  defp apply_positions(repo, opts) do
     count = required_integer!(opts, :expected_count)
     old_maximum = required_integer!(opts, :expected_old_max)
     digest = required_string!(opts, :source_backup_digest)
-    print_result(PostgresRepair.apply_positions(Repo, count, old_maximum, digest))
+    print_result(PostgresRepair.apply_positions(repo, count, old_maximum, digest))
   end
 
-  defp rollback(opts) do
+  defp rollback(repo, opts) do
     batch_id = Keyword.fetch!(opts, :rollback_batch)
     confirmation = required_string!(opts, :confirm_rollback)
-    print_result(PostgresRepair.rollback_positions(Repo, batch_id, confirmation))
+    print_result(PostgresRepair.rollback_positions(repo, batch_id, confirmation))
   end
 
-  defp stage_identities(opts) do
+  defp stage_identities(repo, opts) do
     batch_id = required_string!(opts, :batch_id)
     digest = required_string!(opts, :source_backup_digest)
     batch_size = Keyword.get(opts, :batch_size, 1_000)
-    print_result(PostgresRepair.stage_identity(Repo, batch_id, digest, batch_size))
+    print_result(PostgresRepair.stage_identity(repo, batch_id, digest, batch_size))
   end
 
-  defp apply_identities(opts) do
+  defp apply_identities(repo, opts) do
     batch_id = required_string!(opts, :batch_id)
     batch_size = Keyword.get(opts, :batch_size, 1_000)
-    print_result(PostgresRepair.apply_staged_identity(Repo, batch_id, batch_size))
+    print_result(PostgresRepair.apply_staged_identity(repo, batch_id, batch_size))
   end
 
-  defp start_repo! do
-    case Repo.start_link() do
+  defp start_repo!(repo) do
+    case repo.start_link() do
       {:ok, _pid} -> :ok
       {:error, {:already_started, _pid}} -> :ok
-      {:error, reason} -> Mix.raise("could not start Arbor.Persistence.Repo: #{inspect(reason)}")
+      {:error, reason} -> Mix.raise("could not start #{inspect(repo)}: #{inspect(reason)}")
     end
+  end
+
+  defp start_database_apps! do
+    Enum.each([:ecto_sql, :postgrex], fn app ->
+      case Application.ensure_all_started(app) do
+        {:ok, _started} ->
+          :ok
+
+        {:error, reason} ->
+          Mix.raise("could not start required database application #{app}: #{inspect(reason)}")
+      end
+    end)
   end
 
   defp required_integer!(opts, key) do
