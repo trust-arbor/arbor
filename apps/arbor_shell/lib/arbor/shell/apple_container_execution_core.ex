@@ -6,6 +6,10 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   `AppleContainerProber` admitted receipt into a validated
   `AppleContainerPlanCore` plan and bounded execution settings.
 
+  The Actions envelope retains file-level authority for the reviewed Mix
+  wrapper. After `tool_name` is proven equal to that exact file path, this
+  core derives its canonical parent directory for PlanCore's read-only bind.
+
   Performs no IO, process execution, filesystem access, environment reads,
   Application config reads, or GenServer calls. Used by the internal
   `AppleContainerExecutor` that backs `Arbor.Shell.execute_spawn_capable/3`.
@@ -102,7 +106,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   @allowed_revisions MapSet.new(["candidate", "base"])
   @allowed_revision_atoms MapSet.new([:candidate, :base])
 
-  @plan_projection_keys [:worktree, :home, :tmp, :build, :deps, :mix_wrapper]
+  @plan_directory_projection_keys [:worktree, :home, :tmp, :build, :deps]
 
   @entry_logical_keys [:path, :mode, :purpose]
   @allowed_entry_keys MapSet.new(
@@ -146,6 +150,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
              authority,
              unit_name,
              prepared.projections,
+             prepared.mix_wrapper_dir,
              prepared.mix_env,
              prepared.command_args
            ),
@@ -224,12 +229,14 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     with {:ok, settings} <- validate_opts(opts),
          {:ok, projections} <- parse_filesystem_projections(settings.filesystem_projections),
          :ok <- match_tool_and_cwd(tool_name, settings.cwd, projections),
+         {:ok, mix_wrapper_dir} <- derive_mix_wrapper_dir(projections),
          {:ok, command_args} <- validate_mix_argv(args),
          {:ok, mix_env} <- select_mix_env(settings.env, command_args) do
       {:ok,
        %{
          command_args: command_args,
          mix_env: mix_env,
+         mix_wrapper_dir: mix_wrapper_dir,
          projections: projections,
          timeout: settings.timeout,
          max_output_bytes: settings.max_output_bytes
@@ -815,6 +822,50 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
+  # Apple Container 1.1.0 virtiofs bind sources must be directories. Keep the
+  # Actions authority at the exact wrapper file, then derive the only directory
+  # PlanCore may mount. Requiring the fixed basename preserves the fixed guest
+  # entrypoint without exposing either source-parent or guest-target control.
+  defp derive_mix_wrapper_dir(projections) do
+    wrapper_path = Map.fetch!(projections, :mix_wrapper).path
+    wrapper_dir = Path.dirname(wrapper_path)
+
+    with :ok <- validate_mix_wrapper_mount_source(wrapper_path, wrapper_dir),
+         :ok <- reject_mix_wrapper_dir_overlap(wrapper_dir, projections) do
+      {:ok, wrapper_dir}
+    end
+  end
+
+  defp validate_mix_wrapper_mount_source(wrapper_path, wrapper_dir) do
+    case validate_absolute_canonical_path(wrapper_dir) do
+      {:ok, ^wrapper_dir} ->
+        if wrapper_dir != "/" and Path.join(wrapper_dir, "mix") == wrapper_path do
+          :ok
+        else
+          {:error, :invalid_mix_wrapper_mount_source}
+        end
+
+      {:error, _reason} ->
+        {:error, :invalid_mix_wrapper_mount_source}
+    end
+  end
+
+  defp reject_mix_wrapper_dir_overlap(wrapper_dir, projections) do
+    Enum.reduce_while(@projection_purposes, :ok, fn
+      :mix_wrapper, :ok ->
+        {:cont, :ok}
+
+      purpose, :ok ->
+        projection_path = Map.fetch!(projections, purpose).path
+
+        if segment_path_overlap?(wrapper_dir, projection_path) do
+          {:halt, {:error, {:overlapping_projection_paths, :mix_wrapper_dir, purpose}}}
+        else
+          {:cont, :ok}
+        end
+    end)
+  end
+
   # ── Mix argv ───────────────────────────────────────────────────────────
 
   defp validate_mix_argv(args) when is_list(args) do
@@ -1327,11 +1378,20 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   # ── Plan request assembly ──────────────────────────────────────────────
 
-  defp build_plan_request(authority, unit_name, projections, mix_env, command_args) do
+  defp build_plan_request(
+         authority,
+         unit_name,
+         projections,
+         mix_wrapper_dir,
+         mix_env,
+         command_args
+       ) do
     plan_projections =
-      Map.new(@plan_projection_keys, fn key ->
+      @plan_directory_projection_keys
+      |> Map.new(fn key ->
         {key, Map.fetch!(projections, key).path}
       end)
+      |> Map.put(:mix_wrapper_dir, mix_wrapper_dir)
 
     host_runtime_roots = %{
       erlang: Map.fetch!(projections, :runtime_erlang).path,

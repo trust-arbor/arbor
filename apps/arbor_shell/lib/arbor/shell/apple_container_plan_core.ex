@@ -20,6 +20,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   Plans are data only. The imperative `AppleContainerExecutor` (via
   `Arbor.Shell.execute_spawn_capable/3`) interprets admitted plans after pure
   preflight and admission.
+
+  Every bind source in `:projections` is a host directory. In particular,
+  `:mix_wrapper_dir` is the canonical parent of the separately reviewed Mix
+  wrapper file. It is mounted read-only at fixed guest `/arbor/bin`, while the
+  fixed entrypoint remains `/arbor/bin/mix`.
   """
 
   @runtime_executable "/usr/local/bin/container"
@@ -36,6 +41,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @memory "2G"
 
   @guest_workdir "/workspace"
+  @guest_mix_wrapper_dir "/arbor/bin"
   @guest_mix_wrapper "/arbor/bin/mix"
   @guest_erlang_root "/usr/local/lib/erlang"
   @guest_elixir_root "/usr/local"
@@ -55,7 +61,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     {:tmp, "/arbor/tmp", :read_write},
     {:build, "/arbor/build", :read_write},
     {:deps, "/arbor/deps", :read_write},
-    {:mix_wrapper, "/arbor/bin/mix", :read_only}
+    {:mix_wrapper_dir, @guest_mix_wrapper_dir, :read_only}
   ]
 
   @projection_keys Enum.map(@projection_specs, &elem(&1, 0))
@@ -110,17 +116,18 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   @type mix_env :: String.t()
   @type host_path :: String.t()
+  @type host_directory_path :: String.t()
   # Local execution alias strings — never externally routable provisioning refs.
   @type workload_execution_alias :: String.t()
   @type init_execution_alias :: String.t()
 
   @type projections :: %{
-          worktree: host_path(),
-          home: host_path(),
-          tmp: host_path(),
-          build: host_path(),
-          deps: host_path(),
-          mix_wrapper: host_path()
+          worktree: host_directory_path(),
+          home: host_directory_path(),
+          tmp: host_directory_path(),
+          build: host_directory_path(),
+          deps: host_directory_path(),
+          mix_wrapper_dir: host_directory_path()
         }
 
   @type host_runtime_roots :: %{
@@ -130,7 +137,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   @type mount_plan :: %{
           purpose: atom(),
-          host_path: host_path(),
+          host_path: host_directory_path(),
           guest_path: String.t(),
           mode: :read_only | :read_write,
           mount_spec: String.t()

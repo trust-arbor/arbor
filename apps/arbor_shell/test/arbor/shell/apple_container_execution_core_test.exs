@@ -19,6 +19,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
   @kernel "/usr/local/share/container/kernels/default.kernel"
   @unit "arbor-val-unit01"
   @mix_wrapper "/private/tmp/arbor-val/bin/mix"
+  @mix_wrapper_dir "/private/tmp/arbor-val/bin"
   @worktree "/private/tmp/arbor-val/worktree"
 
   @valid_admission %{
@@ -301,7 +302,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
                  Core.new(valid_request(%{opts: valid_opts(filesystem_projections: projections)}))
 
         assert spec.plan.projections.worktree == @worktree
-        assert spec.plan.projections.mix_wrapper == @mix_wrapper
+        assert spec.plan.projections.mix_wrapper_dir == @mix_wrapper_dir
+        refute Map.has_key?(spec.plan.projections, :mix_wrapper)
         refute Map.has_key?(spec.plan.projections, :runtime)
       end
     end
@@ -385,6 +387,41 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
 
   describe "projection validation" do
     @tag :security_regression
+    test "security regression: file wrapper authority becomes an exact read-only directory bind" do
+      projections = base_projections()
+      wrapper_entry = Enum.find(projections.read_only, &(&1["purpose"] == "mix_wrapper"))
+
+      request =
+        valid_request(%{opts: valid_opts(filesystem_projections: projections)})
+
+      # Actions and tool authority remain the exact reviewed wrapper file.
+      assert wrapper_entry["path"] == @mix_wrapper
+      assert request.tool_name == wrapper_entry["path"]
+
+      assert {:ok, spec} = Core.new(request)
+      assert spec.plan.projections.mix_wrapper_dir == @mix_wrapper_dir
+      refute Map.has_key?(spec.plan.projections, :mix_wrapper)
+
+      wrapper_mount = Enum.find(spec.plan.mounts, &(&1.purpose == :mix_wrapper_dir))
+
+      assert wrapper_mount == %{
+               purpose: :mix_wrapper_dir,
+               host_path: @mix_wrapper_dir,
+               guest_path: "/arbor/bin",
+               mode: :read_only,
+               mount_spec:
+                 "type=bind,source=/private/tmp/arbor-val/bin,target=/arbor/bin,readonly"
+             }
+
+      assert wrapper_mount.mount_spec in spec.plan.argv.create
+      refute @mix_wrapper in spec.plan.argv.create
+
+      # The derived directory is mount data only, never alternate tool authority.
+      assert {:error, :tool_name_mix_wrapper_mismatch} =
+               Core.new(%{request | tool_name: @mix_wrapper_dir})
+    end
+
+    @tag :security_regression
     test "security regression: admits Actions envelope and rejects flat/runtime-parent shape" do
       assert {:ok, spec} =
                Core.new(
@@ -396,7 +433,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       assert spec.plan.projections.tmp == "/private/tmp/arbor-val/tmp"
       assert spec.plan.projections.build == "/private/tmp/arbor-val/build"
       assert spec.plan.projections.deps == "/private/tmp/arbor-val/deps"
-      assert spec.plan.projections.mix_wrapper == @mix_wrapper
+      assert spec.plan.projections.mix_wrapper_dir == @mix_wrapper_dir
+      refute Map.has_key?(spec.plan.projections, :mix_wrapper)
       refute Map.has_key?(spec.plan.projections, :runtime)
 
       # Legacy flat purpose map (including retired runtime parent) is not an envelope.
@@ -520,6 +558,50 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
 
       assert {:error, :cwd_worktree_mismatch} =
                Core.new(valid_request(%{opts: valid_opts(cwd: "/private/tmp/other")}))
+    end
+
+    test "rejects malformed or root wrapper parents with a bounded reason" do
+      for wrapper_path <- ["/mix", "/private/tmp/arbor-val/bin/not-mix"] do
+        projections =
+          put_group_entry(
+            base_projections(),
+            :read_only,
+            :mix_wrapper,
+            actions_entry(wrapper_path, :read_only, :mix_wrapper)
+          )
+
+        opts = valid_opts(filesystem_projections: projections)
+
+        assert {:error, :invalid_mix_wrapper_mount_source} =
+                 Core.validate_request(wrapper_path, ["compile"], opts)
+
+        assert {:error, :invalid_mix_wrapper_mount_source} =
+                 Core.new(valid_request(%{tool_name: wrapper_path, opts: opts}))
+      end
+    end
+
+    @tag :security_regression
+    test "rejects overlap introduced only by the derived wrapper directory" do
+      wrapper_path = "/private/tmp/arbor-val/shared-bin/mix"
+      nested_worktree = "/private/tmp/arbor-val/shared-bin/worktree"
+
+      projections =
+        base_projections()
+        |> put_group_entry(
+          :read_only,
+          :mix_wrapper,
+          actions_entry(wrapper_path, :read_only, :mix_wrapper)
+        )
+        |> put_group_entry(
+          :read_write,
+          :worktree,
+          actions_entry(nested_worktree, :read_write, :worktree)
+        )
+
+      opts = valid_opts(cwd: nested_worktree, filesystem_projections: projections)
+
+      assert {:error, {:overlapping_projection_paths, :mix_wrapper_dir, :worktree}} =
+               Core.validate_request(wrapper_path, ["compile"], opts)
     end
 
     test "rejects duplicate envelope and entry key aliases" do

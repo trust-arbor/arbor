@@ -30,7 +30,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     tmp: "/private/tmp/arbor-val/tmp",
     build: "/private/tmp/arbor-val/build",
     deps: "/private/tmp/arbor-val/deps",
-    mix_wrapper: "/private/tmp/arbor-val/bin/mix"
+    mix_wrapper_dir: "/private/tmp/arbor-val/bin"
   }
 
   @host_runtime_roots %{
@@ -125,7 +125,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  "--mount",
                  "type=bind,source=/private/tmp/arbor-val/deps,target=/arbor/deps",
                  "--mount",
-                 "type=bind,source=/private/tmp/arbor-val/bin/mix,target=/arbor/bin/mix,readonly",
+                 "type=bind,source=/private/tmp/arbor-val/bin,target=/arbor/bin,readonly",
                  "--workdir",
                  "/workspace",
                  "--env",
@@ -202,7 +202,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                "/arbor/tmp",
                "/arbor/build",
                "/arbor/deps",
-               "/arbor/bin/mix"
+               "/arbor/bin"
              ]
 
       assert Enum.map(plan.mounts, & &1.mode) == [
@@ -257,7 +257,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
           "tmp" => @projections.tmp,
           "build" => @projections.build,
           "deps" => @projections.deps,
-          "mix_wrapper" => @projections.mix_wrapper
+          "mix_wrapper_dir" => @projections.mix_wrapper_dir
         },
         "host_runtime_roots" => %{
           "erlang" => @host_runtime_roots_valid.erlang,
@@ -362,11 +362,11 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
            :projections,
            Map.put(@projections, :worktree, "/private/tmp/" <> @invalid_utf8)
          )},
-        {:projection_mix_wrapper,
+        {:projection_mix_wrapper_dir,
          Map.put(
            @valid_request,
            :projections,
-           Map.put(@projections, :mix_wrapper, "/private/tmp/mix" <> @invalid_utf8)
+           Map.put(@projections, :mix_wrapper_dir, "/private/tmp/mix" <> @invalid_utf8)
          )},
         {:host_runtime_erlang,
          Map.put(
@@ -649,7 +649,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                :tmp,
                :build,
                :deps,
-               :mix_wrapper
+               :mix_wrapper_dir
              ]
 
       # Sibling outside projections is accepted.
@@ -704,7 +704,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
         {{:build, "/tmp//double"}, :non_canonical_path},
         {{:deps, "/tmp/deps/"}, :trailing_slash},
         {{:home, "/tmp/ho\0me"}, :nul_byte},
-        {{:mix_wrapper, "/tmp/mix\nwrapper"}, :control_char},
+        {{:mix_wrapper_dir, "/tmp/mix\nwrapper"}, :control_char},
         {{:worktree, "/tmp/work tree"}, :whitespace_in_path}
       ]
 
@@ -764,18 +764,18 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
     @tag :security_regression
     test "rejects segment-aware ancestor/descendant projection overlaps in both orders" do
-      # Read/write worktree must never contain the read-only mix_wrapper source.
+      # Read/write worktree must never contain the read-only wrapper directory source.
       nested_wrapper =
         Map.put(
           @projections,
-          :mix_wrapper,
-          @projections.worktree <> "/bin/mix"
+          :mix_wrapper_dir,
+          @projections.worktree <> "/bin"
         )
 
       assert {:error, {:overlapping_projection_paths, a, b}} =
                AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested_wrapper))
 
-      assert MapSet.new([a, b]) == MapSet.new([:worktree, :mix_wrapper])
+      assert MapSet.new([a, b]) == MapSet.new([:worktree, :mix_wrapper_dir])
 
       # Reverse order of nesting: worktree under home (both read/write — must not nest).
       nested_worktree =
@@ -811,7 +811,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert MapSet.new([g, h]) == MapSet.new([:tmp, :build])
 
       # Every actual mount source pair remains subject to overlap rejection.
-      mount_purposes = [:worktree, :home, :tmp, :build, :deps, :mix_wrapper]
+      mount_purposes = [:worktree, :home, :tmp, :build, :deps, :mix_wrapper_dir]
 
       for parent <- mount_purposes, child <- mount_purposes, parent != child do
         nested =
@@ -897,18 +897,35 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     end
 
     @tag :security_regression
-    test "allows sibling path-prefix non-overlap (not raw String.starts_with?)" do
-      # /.../work and /.../worktree share a string prefix but not a path segment ancestor.
-      sibling =
+    test "table: allows sibling path-prefix near misses (not raw String.starts_with?)" do
+      cases = [
+        {:worktree, "/private/tmp/arbor-val/work", :home, "/private/tmp/arbor-val/worktree"},
+        {:mix_wrapper_dir, "/private/tmp/arbor-val/bin", :worktree,
+         "/private/tmp/arbor-val/binary-worktree"}
+      ]
+
+      for {key_a, path_a, key_b, path_b} <- cases do
+        sibling =
+          @projections
+          |> Map.put(key_a, path_a)
+          |> Map.put(key_b, path_b)
+
+        assert {:ok, plan} =
+                 AppleContainerPlanCore.new(Map.put(@valid_request, :projections, sibling))
+
+        assert Map.fetch!(plan.projections, key_a) == path_a
+        assert Map.fetch!(plan.projections, key_b) == path_b
+      end
+    end
+
+    test "rejects the retired file-shaped wrapper projection key" do
+      file_shaped =
         @projections
-        |> Map.put(:worktree, "/private/tmp/arbor-val/work")
-        |> Map.put(:home, "/private/tmp/arbor-val/worktree")
+        |> Map.delete(:mix_wrapper_dir)
+        |> Map.put(:mix_wrapper, "/private/tmp/arbor-val/bin/mix")
 
-      assert {:ok, plan} =
-               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, sibling))
-
-      assert plan.projections.worktree == "/private/tmp/arbor-val/work"
-      assert plan.projections.home == "/private/tmp/arbor-val/worktree"
+      assert {:error, :unsupported_projection_keys} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, file_shaped))
     end
 
     test "rejects caller-controlled guest targets / mount mode weakening keys" do
@@ -1106,6 +1123,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
       ep_idx = Enum.find_index(create, &(&1 == "--entrypoint"))
       assert is_integer(ep_idx)
+      assert Enum.count(create, &(&1 == "--entrypoint")) == 1
       assert Enum.at(create, ep_idx + 1) == "/arbor/bin/mix"
 
       image_index = Enum.find_index(create, &(&1 == @image))
@@ -1162,7 +1180,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                {:tmp, "/arbor/tmp", :read_write},
                {:build, "/arbor/build", :read_write},
                {:deps, "/arbor/deps", :read_write},
-               {:mix_wrapper, "/arbor/bin/mix", :read_only}
+               {:mix_wrapper_dir, "/arbor/bin", :read_only}
              ]
 
       assert AppleContainerPlanCore.guest_runtime_roots() == %{
