@@ -313,7 +313,14 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "arbor://action/git/**" in resources
       assert "arbor://action/mix/**" in resources
       assert "arbor://action/council/review" in resources
+      assert "arbor://action/consensus/decide_review" in resources
       assert "arbor://consensus/decide" in resources
+
+      assert Enum.any?(data["required_capabilities"], fn capability ->
+               capability["resource"] == "arbor://action/consensus/decide_review" and
+                 capability["description"] ==
+                   "Run the pinned nested council's deterministic review reducer"
+             end)
 
       assert Enum.any?(data["required_capabilities"], fn capability ->
                capability["resource"] == "arbor://consensus/decide" and
@@ -343,6 +350,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert preset["rules"]["arbor://action/mix"] == "auto"
       assert preset["rules"]["arbor://shell/exec"] == "ask"
       assert preset["rules"]["arbor://action/council/review"] == "auto"
+      assert preset["rules"]["arbor://action/consensus/decide_review"] == "auto"
       assert preset["rules"]["arbor://consensus/decide"] == "auto"
 
       assert preset["rules"]

@@ -159,6 +159,21 @@ another one. It doubles as user documentation — anyone standing up agents need
   This subtree includes native execution tools, so do not grant it to read-only agents;
   grant exact child URIs instead when the provider exposes stable canonical names.
 
+## 10. Nested reviewed graphs need exact child-action authority
+
+- **What:** a capability for the outer composite action does not authorize actions in
+  a nested reviewed DOT graph. Domain authority such as
+  `arbor://consensus/decide` also does not satisfy the action executor's canonical
+  gate for `consensus_decide_review`, which is
+  `arbor://action/consensus/decide_review`.
+- **Symptom:** every council reviewer completes, but the parent review action returns
+  `:no_decision_in_result`. The nested `decide/status.json` shows
+  `Capability check failed: arbor://action/consensus/decide_review (:unauthorized)`.
+- **Action:** keep the child action pinned in the reviewed execution manifest and
+  grant its exact canonical action URI to the agent template that is authorized to
+  run that graph. Set the matching trust rule deliberately; do not broaden to
+  `arbor://action/consensus/**` or disable nested authorization.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -173,3 +188,5 @@ another one. It doubles as user documentation — anyone standing up agents need
 7. To watch `security.*` signals, subscribe with a `principal_id:` and **tolerate refusal**.
 8. For native ACP workers, grant exact callback URIs or `arbor://acp/tool/**`; the base
    capability alone only names the namespace.
+9. For nested reviewed graphs, grant every pinned child action's exact canonical URI;
+   outer-action and domain capabilities do not substitute for action authority.

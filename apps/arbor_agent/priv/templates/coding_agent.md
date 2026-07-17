@@ -80,6 +80,8 @@ required_capabilities:
   resource: "arbor://action/mix/**"
 - description: "Submit committed changes for council review"
   resource: "arbor://action/council/review"
+- description: "Run the pinned nested council's deterministic review reducer"
+  resource: "arbor://action/consensus/decide_review"
 - description: "Deterministically tally the binding council's review decision"
   resource: "arbor://consensus/decide"
 - description: "Notify the active session about completion or blockers"
@@ -105,6 +107,7 @@ trust_preset:
     "arbor://action/mix": auto
     "arbor://shell/exec": ask
     "arbor://action/council/review": auto
+    "arbor://action/consensus/decide_review": auto
     "arbor://consensus/decide": auto
     "arbor://comms/notify/session": auto
 values:

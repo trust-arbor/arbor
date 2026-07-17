@@ -187,7 +187,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
         "arbor://acp/tool/execute",
         "arbor://action/mix/compile",
         "arbor://action/git/pr",
-        "arbor://action/council/review"
+        "arbor://action/council/review",
+        "arbor://action/consensus/decide_review"
       ]
 
       for resource_uri <- auto_uris do
@@ -214,6 +215,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       uris = Enum.map(caps, & &1.resource_uri)
       assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/coding/reviewed_commit"))
       assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/git"))
+      assert "arbor://action/consensus/decide_review" in uris
     end
 
     test "template repo file grants mint concrete FileGuard scopes" do
