@@ -226,6 +226,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              binding["name"] == "consensus_decide_review"
            end)
 
+    assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
+             binding["name"] == "coding_reviewed_commit" and
+               not Map.has_key?(binding, "execution_dependencies")
+           end)
+
+    assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
+             binding["name"] == "git_commit" and
+               binding["module"] == Atom.to_string(Arbor.Actions.Git.Commit) and
+               not Map.has_key?(binding, "execution_dependencies")
+           end)
+
     for action_name <- ~w(coding_review_tree_read coding_review_tree_search) do
       assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
                binding["name"] == action_name
@@ -254,6 +265,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     catalog = %{"actions" => actions, "digest" => canonical_digest(actions)}
 
     assert {:error, {:referenced_action_missing, "consensus_decide_review"}} =
+             compile_with_catalog(plan!(), ctx, ctx.template_source, catalog)
+  end
+
+  test "transitive nested git_commit binding is required from the injected catalog", ctx do
+    actions = Enum.reject(ctx.action_catalog["actions"], &(&1["name"] == "git_commit"))
+    catalog = %{"actions" => actions, "digest" => canonical_digest(actions)}
+
+    assert {:error, {:referenced_action_missing, "git_commit"}} =
              compile_with_catalog(plan!(), ctx, ctx.template_source, catalog)
   end
 

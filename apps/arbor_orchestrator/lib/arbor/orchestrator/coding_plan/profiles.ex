@@ -144,7 +144,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                              council_review_change
                            ])
 
-  @required_nested_actions ["consensus_decide_review"]
+  @required_nested_actions Enum.sort(["consensus_decide_review", "git_commit"])
 
   @binding_council_review %{
     "action" => "council_review_change",

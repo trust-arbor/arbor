@@ -8,6 +8,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
   alias Arbor.Actions.TestFixtures.{
     AlphaAction,
     AlphaSchemaChangedAction,
+    DepRootAction,
+    InvalidExecutionDependenciesAction,
     InvalidSchemaAction,
     InvalidUtf8DescriptionAction,
     InvalidUtf8NameAction,
@@ -72,11 +74,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
                    egress_declared
                    egress_destination_resolver
                    egress_tier_resolver
+                   execution_dependencies
                    module
                    name
                    parameters_schema
                    resource_uri
                  )
+
+               assert action["execution_dependencies"] == []
              end)
 
       assert {:ok, zebra} = ActionCatalog.fetch(snapshot, "zebra_action")
@@ -136,6 +141,34 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
       assert {:ok, changed} = ActionCatalog.snapshot(modules: [AlphaSchemaChangedAction])
 
       refute original["digest"] == changed["digest"]
+    end
+
+    test "binds execution_dependencies as catalog-only digest metadata" do
+      assert {:ok, without_deps} = ActionCatalog.snapshot(modules: [AlphaAction])
+      assert {:ok, with_deps} = ActionCatalog.snapshot(modules: [DepRootAction])
+
+      assert {:ok, alpha} = ActionCatalog.fetch(without_deps, "alpha_action")
+      assert alpha["execution_dependencies"] == []
+
+      assert {:ok, root} = ActionCatalog.fetch(with_deps, "dep_root_action")
+      assert root["execution_dependencies"] == ["dep_leaf_action", "dep_mid_action"]
+      refute without_deps["digest"] == with_deps["digest"]
+
+      assert {:ok, reviewed} =
+               ActionCatalog.snapshot(modules: [Arbor.Actions.Coding.ReviewedCommit])
+
+      assert {:ok, reviewed_commit} =
+               ActionCatalog.fetch(reviewed, "coding_reviewed_commit")
+
+      assert reviewed_commit["execution_dependencies"] == ["git_commit"]
+    end
+
+    test "invalid execution dependency declarations fail closed" do
+      assert {:error, {:action_uninspectable, module_name, message}} =
+               ActionCatalog.snapshot(modules: [InvalidExecutionDependenciesAction])
+
+      assert module_name == Atom.to_string(InvalidExecutionDependenciesAction)
+      assert message =~ "invalid_execution_dependencies"
     end
 
     test "rejects distinct modules that publish the same action name" do

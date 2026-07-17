@@ -89,6 +89,12 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
   def effect_class, do: :local_write
 
+  @doc """
+  Nested actions this composite may invoke under its own authorization path.
+  """
+  @spec execution_dependencies() :: [module()]
+  def execution_dependencies, do: [Git.Commit]
+
   @impl true
   @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
   def run(%{path: path, message: message} = params, context) do

@@ -69,6 +69,11 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     assert Arbor.Actions.pipeline_internal_action?(ReviewedCommit)
   end
 
+  test "declares git_commit as a nested execution dependency" do
+    assert ReviewedCommit.execution_dependencies() == [Arbor.Actions.Git.Commit]
+    assert {:ok, ["git_commit"]} = Arbor.Actions.execution_dependencies(ReviewedCommit)
+  end
+
   test "canonical URI is coding reviewed_commit" do
     assert Arbor.Actions.canonical_uri_for(ReviewedCommit, %{}) ==
              "arbor://action/coding/reviewed_commit"

@@ -4,10 +4,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
 
   The manifest identifies the exact loaded action and handler code referenced
   by a compiled graph, including wrapper handlers and every dynamically selected
-  delegate module. It also binds the complete compiled graph structure, not only
-  the source bytes from which that graph was parsed. Capability and egress
-  projections are derived from those bindings for audit; neither projection
-  grants execution authority.
+  delegate module. Action bindings include the transitive closure of direct graph
+  actions plus catalog-declared nested action dependencies; catalog-only
+  dependency metadata is stripped from final manifest entries so v2/v3 shapes and
+  runtime action-binding comparison stay backward-compatible. It also binds the
+  complete compiled graph structure, not only the source bytes from which that
+  graph was parsed. Capability and egress projections are derived from those
+  bindings for audit; neither projection grants execution authority.
   """
 
   alias Arbor.Orchestrator.Graph
@@ -435,21 +438,84 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   end
 
   defp referenced_actions(graph, catalog) do
-    with {:ok, action_names} <- direct_action_names(graph) do
-      action_names
-      |> Enum.uniq()
-      |> Enum.sort()
-      |> Enum.reduce_while({:ok, []}, fn action_name, {:ok, bindings} ->
-        case fetch_catalog_action(catalog, action_name) do
-          {:ok, binding} -> {:cont, {:ok, [binding | bindings]}}
-          :error -> {:halt, {:error, {:referenced_action_missing, action_name}}}
-        end
-      end)
-      |> case do
-        {:ok, bindings} -> {:ok, Enum.sort_by(bindings, & &1["name"])}
-        {:error, _reason} = error -> error
+    with {:ok, action_names} <- direct_action_names(graph),
+         seed_names = action_names |> Enum.uniq() |> Enum.sort(),
+         {:ok, bindings} <-
+           expand_action_dependencies(seed_names, catalog, MapSet.new(), []) do
+      {:ok,
+       bindings
+       |> Enum.map(&strip_catalog_only_action_metadata/1)
+       |> Enum.sort_by(& &1["name"])}
+    end
+  end
+
+  # Expand direct graph actions through catalog-only execution_dependencies.
+  # The seed worklist is sorted so missing-action failures and traversal order
+  # do not depend on Graph node map enumeration. Previously-seen names are
+  # skipped so cycles and shared diamond edges terminate safely without
+  # unbounded recursion.
+  defp expand_action_dependencies([], _catalog, _seen, bindings) do
+    {:ok, bindings}
+  end
+
+  defp expand_action_dependencies([action_name | rest], catalog, seen, bindings)
+       when is_binary(action_name) do
+    if MapSet.member?(seen, action_name) do
+      expand_action_dependencies(rest, catalog, seen, bindings)
+    else
+      case fetch_catalog_action(catalog, action_name) do
+        {:ok, binding} ->
+          with {:ok, dependency_names} <- catalog_execution_dependencies(binding) do
+            expand_action_dependencies(
+              rest ++ dependency_names,
+              catalog,
+              MapSet.put(seen, action_name),
+              [binding | bindings]
+            )
+          end
+
+        :error ->
+          {:error, {:referenced_action_missing, action_name}}
       end
     end
+  end
+
+  defp expand_action_dependencies([action_name | _rest], _catalog, _seen, _bindings) do
+    {:error, {:invalid_referenced_action, action_name}}
+  end
+
+  defp catalog_execution_dependencies(%{"name" => name} = binding) when is_binary(name) do
+    case Map.fetch(binding, "execution_dependencies") do
+      :error ->
+        {:ok, []}
+
+      {:ok, dependencies} when is_list(dependencies) ->
+        if valid_catalog_execution_dependencies?(dependencies) do
+          {:ok, dependencies}
+        else
+          {:error, {:invalid_action_execution_dependencies, name}}
+        end
+
+      {:ok, _other} ->
+        {:error, {:invalid_action_execution_dependencies, name}}
+    end
+  end
+
+  defp catalog_execution_dependencies(_binding),
+    do: {:error, :invalid_action_binding}
+
+  defp valid_catalog_execution_dependencies?(dependencies) do
+    Enum.all?(dependencies, fn
+      name when is_binary(name) ->
+        String.valid?(name) and String.trim(name) != ""
+
+      _other ->
+        false
+    end) and dependencies == Enum.sort(Enum.uniq(dependencies))
+  end
+
+  defp strip_catalog_only_action_metadata(binding) when is_map(binding) do
+    Map.delete(binding, "execution_dependencies")
   end
 
   defp direct_action_names(%Graph{} = graph) do

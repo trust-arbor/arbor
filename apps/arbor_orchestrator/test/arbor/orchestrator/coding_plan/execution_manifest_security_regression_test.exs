@@ -5,11 +5,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     BindingOriginalAction,
     BindingReplacementAction,
     BindingSchemaChangedAction,
+    DepCycleAAction,
+    DepCycleBAction,
+    DepLeafAction,
+    DepMidAction,
+    DepRootAction,
     UnrelatedBindingAction
   }
 
   alias Arbor.Actions.Consensus.DecideReview
   alias Arbor.Actions.Coding.ReviewTree.{Read, Search}
+  alias Arbor.Actions.Coding.ReviewedCommit
+  alias Arbor.Actions.Git.Commit
 
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
   alias Arbor.Orchestrator.Dot.Parser
@@ -113,7 +120,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     assert nested_graph["execution_manifest"]["version"] == 2
     refute Map.has_key?(nested_graph["execution_manifest"], "nested_graphs")
 
-    assert Enum.any?(manifest["actions"], &(&1 == consensus))
+    consensus_binding = Map.delete(consensus, "execution_dependencies")
+
+    assert Enum.any?(manifest["actions"], &(&1 == consensus_binding))
     assert Enum.any?(manifest["actions"], &(&1["name"] == "coding_review_tree_read"))
     assert Enum.any?(manifest["actions"], &(&1["name"] == "coding_review_tree_search"))
     assert consensus["resource_uri"] in manifest["capability_uris"]
@@ -168,6 +177,129 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
                  sha256(dot)
                )
     end
+  end
+
+  test "transitive execution_dependencies are bound and stripped from final actions" do
+    dot = """
+    digraph TransitiveDeps {
+      start [shape=Mdiamond]
+      root [type="exec", target="action", action="dep_root_action"]
+      done [shape=Msquare]
+      start -> root -> done
+    }
+    """
+
+    catalog = catalog!([DepRootAction, DepMidAction, DepLeafAction, UnrelatedBindingAction])
+    {:ok, root_spec} = ActionCatalog.fetch(catalog, "dep_root_action")
+    assert root_spec["execution_dependencies"] == ["dep_leaf_action", "dep_mid_action"]
+
+    assert {:ok, {manifest, digest}} =
+             ExecutionManifest.build(compiled_graph!(dot), catalog, sha256(dot))
+
+    names = Enum.map(manifest["actions"], & &1["name"])
+    assert names == ["dep_leaf_action", "dep_mid_action", "dep_root_action"]
+    refute "unrelated_binding_action" in names
+
+    assert Enum.all?(manifest["actions"], fn binding ->
+             not Map.has_key?(binding, "execution_dependencies")
+           end)
+
+    assert :ok = ExecutionManifest.validate(manifest, digest, sha256(dot))
+  end
+
+  test "dependency graph revisits and cycles terminate without unbounded recursion" do
+    dot = """
+    digraph CyclicDeps {
+      start [shape=Mdiamond]
+      cycle [type="exec", target="action", action="dep_cycle_a_action"]
+      done [shape=Msquare]
+      start -> cycle -> done
+    }
+    """
+
+    catalog = catalog!([DepCycleAAction, DepCycleBAction])
+
+    assert {:ok, {manifest, _digest}} =
+             ExecutionManifest.build(compiled_graph!(dot), catalog, sha256(dot))
+
+    names = Enum.map(manifest["actions"], & &1["name"])
+    assert names == ["dep_cycle_a_action", "dep_cycle_b_action"]
+  end
+
+  test "missing transitive dependency fails closed with referenced_action_missing" do
+    dot = """
+    digraph MissingDep {
+      start [shape=Mdiamond]
+      root [type="exec", target="action", action="dep_root_action"]
+      done [shape=Msquare]
+      start -> root -> done
+    }
+    """
+
+    catalog = catalog!([DepRootAction, DepMidAction])
+
+    assert {:error, {:referenced_action_missing, "dep_leaf_action"}} =
+             ExecutionManifest.build(compiled_graph!(dot), catalog, sha256(dot))
+  end
+
+  test "direct action worklist is sorted so missing-action errors are deterministic" do
+    # Node ids are reverse-alpha relative to the missing action names so map
+    # enumeration order would otherwise prefer "zebra_missing_action" first.
+    dot = """
+    digraph SortedMissingSeeds {
+      start [shape=Mdiamond]
+      z_node [type="exec", target="action", action="zebra_missing_action"]
+      a_node [type="exec", target="action", action="alpha_missing_action"]
+      done [shape=Msquare]
+      start -> z_node -> a_node -> done
+    }
+    """
+
+    catalog = catalog!([BindingOriginalAction])
+
+    assert {:error, {:referenced_action_missing, "alpha_missing_action"}} =
+             ExecutionManifest.build(compiled_graph!(dot), catalog, sha256(dot))
+  end
+
+  test "malformed catalog execution_dependencies fail closed" do
+    catalog = catalog!([BindingOriginalAction])
+
+    [action] = catalog["actions"]
+
+    poisoned =
+      Map.put(catalog, "actions", [
+        Map.put(action, "execution_dependencies", ["unsorted_b", "unsorted_a"])
+      ])
+
+    assert {:error, {:invalid_action_execution_dependencies, "binding_action"}} =
+             ExecutionManifest.build(compiled_graph!(), poisoned, sha256(@dot))
+  end
+
+  test "ReviewedCommit transitive binding pins git_commit without catalog-only metadata" do
+    dot = """
+    digraph ReviewedCommitBinding {
+      start [shape=Mdiamond]
+      commit [type="exec", target="action", action="coding_reviewed_commit"]
+      done [shape=Msquare]
+      start -> commit -> done
+    }
+    """
+
+    catalog = catalog!([ReviewedCommit, Commit])
+
+    assert {:ok, reviewed} = ActionCatalog.fetch(catalog, "coding_reviewed_commit")
+    assert reviewed["execution_dependencies"] == ["git_commit"]
+
+    assert {:ok, {manifest, _digest}} =
+             ExecutionManifest.build(compiled_graph!(dot), catalog, sha256(dot))
+
+    names = Enum.map(manifest["actions"], & &1["name"])
+    assert "coding_reviewed_commit" in names
+    assert "git_commit" in names
+
+    assert Enum.all?(manifest["actions"], fn binding ->
+             not Map.has_key?(binding, "execution_dependencies")
+           end)
   end
 
   test "nested graph declarations fail closed when malformed or unknown" do

@@ -19,10 +19,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
 
   Registry entries contain aliases and runtime module references. A snapshot
   deduplicates those aliases by module, calls each action's `to_tool/0`, and
-  combines its schema with `Arbor.Actions.runtime_descriptor/1`. Module names
-  and loaded BEAM digests are retained as JSON strings so compilation can bind
-  exact executable code without retaining atoms, functions, PIDs, or other
-  runtime references.
+  combines its schema with `Arbor.Actions.runtime_descriptor/1` plus catalog-only
+  `execution_dependencies` metadata from `Arbor.Actions.execution_dependencies/1`.
+  Module names and loaded BEAM digests are retained as JSON strings so compilation
+  can bind exact executable code without retaining atoms, functions, PIDs, or
+  other runtime references. The catalog digest binds dependency metadata; final
+  execution manifests strip it after transitive closure expansion.
   """
 
   alias Arbor.Common.ActionRegistry
@@ -261,8 +263,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
     try do
       with {:ok, spec} <- module |> apply(:to_tool, []) |> normalize_action_spec(module_name),
            {:ok, descriptor} <- Arbor.Actions.runtime_descriptor(module),
-           :ok <- require_descriptor_name(descriptor, spec, module_name) do
-        {:ok, Map.merge(spec, descriptor)}
+           :ok <- require_descriptor_name(descriptor, spec, module_name),
+           {:ok, execution_dependencies} <- Arbor.Actions.execution_dependencies(module) do
+        {:ok,
+         spec
+         |> Map.merge(descriptor)
+         |> Map.put("execution_dependencies", execution_dependencies)}
       else
         {:error, reason} when is_atom(reason) ->
           {:error, {:action_uninspectable, module_name, bounded_message(Atom.to_string(reason))}}

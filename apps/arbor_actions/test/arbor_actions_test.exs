@@ -69,6 +69,118 @@ defmodule Arbor.ActionsTest do
     end
   end
 
+  describe "execution_dependencies/1" do
+    test "absent declarations normalize to an empty sorted list" do
+      assert {:ok, []} = Actions.execution_dependencies(Arbor.Actions.File.Read)
+      assert {:ok, []} = Actions.execution_dependencies(Arbor.Actions.Git.Commit)
+    end
+
+    test "ReviewedCommit declares git_commit deterministically" do
+      assert {:ok, ["git_commit"]} =
+               Actions.execution_dependencies(Arbor.Actions.Coding.ReviewedCommit)
+
+      assert Arbor.Actions.Coding.ReviewedCommit.execution_dependencies() == [
+               Arbor.Actions.Git.Commit
+             ]
+    end
+
+    test "invalid dependency declarations fail closed" do
+      defmodule InvalidDependenciesShape do
+        def to_tool do
+          %{name: "invalid_dependencies_shape", description: "x", parameters_schema: %{}}
+        end
+
+        def execution_dependencies, do: :not_a_list
+      end
+
+      defmodule InvalidDependenciesEntry do
+        def to_tool do
+          %{name: "invalid_dependencies_entry", description: "x", parameters_schema: %{}}
+        end
+
+        def execution_dependencies, do: ["git_commit"]
+      end
+
+      assert {:error, :invalid_execution_dependencies} =
+               Actions.execution_dependencies(InvalidDependenciesShape)
+
+      assert {:error, :invalid_execution_dependencies} =
+               Actions.execution_dependencies(InvalidDependenciesEntry)
+    end
+
+    test "ensure_loads declared dependency modules before reading their action names" do
+      leaf_source = """
+      defmodule Arbor.Actions.TestFixtures.EnsureLoadDepLeaf do
+        def to_tool do
+          %{name: "ensure_load_dep_leaf", description: "x", parameters_schema: %{}}
+        end
+      end
+      """
+
+      root_source = """
+      defmodule Arbor.Actions.TestFixtures.EnsureLoadDepRoot do
+        def to_tool do
+          %{name: "ensure_load_dep_root", description: "x", parameters_schema: %{}}
+        end
+
+        def execution_dependencies, do: [Arbor.Actions.TestFixtures.EnsureLoadDepLeaf]
+      end
+      """
+
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "arbor-ensure-load-deps-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+
+      [{leaf, leaf_beam}] = Code.compile_string(leaf_source)
+      [{root, _root_beam}] = Code.compile_string(root_source)
+
+      on_exit(fn ->
+        _ = :code.del_path(String.to_charlist(tmp))
+
+        for module <- [root, leaf] do
+          _ = :code.purge(module)
+          _ = :code.delete(module)
+          _ = :code.purge(module)
+        end
+
+        File.rm_rf(tmp)
+      end)
+
+      leaf_beam_path =
+        Path.join(tmp, "Elixir.Arbor.Actions.TestFixtures.EnsureLoadDepLeaf.beam")
+
+      File.write!(leaf_beam_path, leaf_beam)
+      true = :code.add_patha(String.to_charlist(tmp))
+
+      # delete/1 demotes current→old; purge/1 removes old. Two-step unload so
+      # the next ensure_loaded must re-read the on-disk BEAM.
+      _ = :code.purge(leaf)
+      true = :code.delete(leaf)
+      _ = :code.purge(leaf)
+      refute :code.is_loaded(leaf)
+
+      assert {:ok, ["ensure_load_dep_leaf"]} = Actions.execution_dependencies(root)
+      assert {:file, _path} = :code.is_loaded(leaf)
+    end
+
+    test "unavailable declared dependency modules fail closed" do
+      defmodule UnavailableDepRoot do
+        def to_tool do
+          %{name: "unavailable_dep_root", description: "x", parameters_schema: %{}}
+        end
+
+        def execution_dependencies, do: [Arbor.Actions.TestFixtures.DefinitelyMissingDependency]
+      end
+
+      assert {:error, :invalid_execution_dependencies} =
+               Actions.execution_dependencies(UnavailableDepRoot)
+    end
+  end
+
   describe "reviewed_pipeline/1" do
     test "returns the packaged code-review council artifact through the public facade" do
       assert {:ok, pipeline} = Actions.reviewed_pipeline("code_review_council")

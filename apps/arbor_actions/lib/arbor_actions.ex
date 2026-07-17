@@ -933,6 +933,67 @@ defmodule Arbor.Actions do
 
   def runtime_descriptor(_action_module), do: {:error, :invalid_action_module}
 
+  @doc """
+  Return deterministic nested action names this module may invoke internally.
+
+  Composite actions optionally declare `execution_dependencies/0` returning a
+  list of action modules (preferred so refactors stay compiler-visible). The
+  facade normalizes declarations to sorted, unique, JSON-clean Jido action
+  names. Missing declarations normalize to `[]`. Invalid shapes, non-module
+  entries, or modules without a resolvable action name fail closed.
+  """
+  @spec execution_dependencies(module()) :: {:ok, [String.t()]} | {:error, atom()}
+  def execution_dependencies(action_module) when is_atom(action_module) do
+    with {:module, ^action_module} <- Code.ensure_loaded(action_module) do
+      if function_exported?(action_module, :execution_dependencies, 0) do
+        normalize_execution_dependencies(action_module.execution_dependencies())
+      else
+        {:ok, []}
+      end
+    else
+      _other -> {:error, :action_module_unavailable}
+    end
+  rescue
+    _exception -> {:error, :invalid_execution_dependencies}
+  catch
+    _kind, _reason -> {:error, :invalid_execution_dependencies}
+  end
+
+  def execution_dependencies(_action_module), do: {:error, :invalid_action_module}
+
+  defp normalize_execution_dependencies(dependencies) when is_list(dependencies) do
+    dependencies
+    |> Enum.reduce_while({:ok, []}, fn
+      module, {:ok, names} when is_atom(module) ->
+        # Catalog inspection may visit a composite before a declared dependency
+        # has been loaded; ensure_loaded then resolve the Jido name. Unavailable
+        # modules and modules without a resolvable name fail closed.
+        case dependency_action_name(module) do
+          {:ok, name} -> {:cont, {:ok, [name | names]}}
+          {:error, _reason} -> {:halt, {:error, :invalid_execution_dependencies}}
+        end
+
+      _other, _acc ->
+        {:halt, {:error, :invalid_execution_dependencies}}
+    end)
+    |> case do
+      {:ok, names} -> {:ok, names |> Enum.uniq() |> Enum.sort()}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp normalize_execution_dependencies(_dependencies),
+    do: {:error, :invalid_execution_dependencies}
+
+  defp dependency_action_name(module) when is_atom(module) do
+    with {:module, ^module} <- Code.ensure_loaded(module),
+         {:ok, name} <- runtime_action_name(module) do
+      {:ok, name}
+    else
+      _other -> {:error, :invalid_execution_dependencies}
+    end
+  end
+
   @doc "Compute a deterministic SHA-256 digest for JSON-clean execution-binding data."
   @spec execution_binding_digest(map()) :: {:ok, String.t()} | {:error, atom()}
   def execution_binding_digest(value) when is_map(value) do

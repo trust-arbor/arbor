@@ -70,6 +70,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
                          egress_declared
                          egress_destination_resolver
                          egress_tier_resolver
+                         execution_dependencies
                          module
                          name
                          parameters_schema
@@ -330,12 +331,23 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         action["effect_class"] in @effect_classes and
         is_boolean(action["egress_declared"]) and
         is_boolean(action["egress_tier_resolver"]) and
-        is_boolean(action["egress_destination_resolver"]) and json_clean?(action)
+        is_boolean(action["egress_destination_resolver"]) and
+        valid_catalog_execution_dependencies?(action["execution_dependencies"]) and
+        json_clean?(action)
 
     if valid?, do: :ok, else: {:error, :malformed_action}
   end
 
   defp validate_catalog_action(_action), do: {:error, :malformed_action}
+
+  defp valid_catalog_execution_dependencies?(dependencies) when is_list(dependencies) do
+    Enum.all?(dependencies, fn
+      name when is_binary(name) -> String.valid?(name) and String.trim(name) != ""
+      _other -> false
+    end) and dependencies == Enum.sort(Enum.uniq(dependencies))
+  end
+
+  defp valid_catalog_execution_dependencies?(_dependencies), do: false
 
   defp resolve_template_source(%{template_source: source}), do: {:ok, source}
 

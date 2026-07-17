@@ -36,18 +36,28 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
         assert is_map(profile["review_strategy"])
         assert profile["required_nodes"] == Enum.sort(Enum.uniq(profile["required_nodes"]))
         assert profile["required_actions"] == Enum.sort(Enum.uniq(profile["required_actions"]))
-        assert profile["required_nested_actions"] == ["consensus_decide_review"]
+
+        assert profile["required_nested_actions"] ==
+                 Enum.sort(["consensus_decide_review", "git_commit"])
       end
     end
 
-    test "requires the frozen-ledger reducer in compiled execution manifests" do
+    test "requires the frozen-ledger reducer and git_commit in compiled execution manifests" do
       assert {:ok, profile} = Profiles.fetch_executable("default")
 
-      manifest = %{"actions" => [%{"name" => "consensus_decide_review"}]}
+      manifest = %{
+        "actions" => [%{"name" => "consensus_decide_review"}, %{"name" => "git_commit"}]
+      }
+
       assert :ok = Profiles.validate_execution_manifest(profile, manifest)
 
-      assert {:error, {:missing_nested_actions, ["consensus_decide_review"]}} =
+      assert {:error, {:missing_nested_actions, ["consensus_decide_review", "git_commit"]}} =
                Profiles.validate_execution_manifest(profile, %{"actions" => []})
+
+      assert {:error, {:missing_nested_actions, ["git_commit"]}} =
+               Profiles.validate_execution_manifest(profile, %{
+                 "actions" => [%{"name" => "consensus_decide_review"}]
+               })
 
       assert {:error, :invalid_manifest} = Profiles.validate_execution_manifest(profile, %{})
     end

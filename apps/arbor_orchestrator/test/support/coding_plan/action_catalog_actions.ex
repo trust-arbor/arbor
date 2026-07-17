@@ -166,6 +166,89 @@ defmodule Arbor.Actions.TestFixtures.UnrelatedBindingAction do
   end
 end
 
+defmodule Arbor.Actions.TestFixtures.DepLeafAction do
+  @moduledoc false
+
+  def to_tool do
+    %{
+      name: "dep_leaf_action",
+      description: "Leaf dependency fixture",
+      parameters_schema: %{"type" => "object", "properties" => %{}}
+    }
+  end
+end
+
+defmodule Arbor.Actions.TestFixtures.DepMidAction do
+  @moduledoc false
+
+  def to_tool do
+    %{
+      name: "dep_mid_action",
+      description: "Middle dependency fixture",
+      parameters_schema: %{"type" => "object", "properties" => %{}}
+    }
+  end
+
+  def execution_dependencies, do: [Arbor.Actions.TestFixtures.DepLeafAction]
+end
+
+defmodule Arbor.Actions.TestFixtures.DepRootAction do
+  @moduledoc false
+
+  def to_tool do
+    %{
+      name: "dep_root_action",
+      description: "Root dependency fixture",
+      parameters_schema: %{"type" => "object", "properties" => %{}}
+    }
+  end
+
+  def execution_dependencies,
+    do: [Arbor.Actions.TestFixtures.DepMidAction, Arbor.Actions.TestFixtures.DepLeafAction]
+end
+
+defmodule Arbor.Actions.TestFixtures.DepCycleAAction do
+  @moduledoc false
+
+  def to_tool do
+    %{
+      name: "dep_cycle_a_action",
+      description: "Cycle dependency fixture A",
+      parameters_schema: %{"type" => "object", "properties" => %{}}
+    }
+  end
+
+  def execution_dependencies, do: [Arbor.Actions.TestFixtures.DepCycleBAction]
+end
+
+defmodule Arbor.Actions.TestFixtures.DepCycleBAction do
+  @moduledoc false
+
+  def to_tool do
+    %{
+      name: "dep_cycle_b_action",
+      description: "Cycle dependency fixture B",
+      parameters_schema: %{"type" => "object", "properties" => %{}}
+    }
+  end
+
+  def execution_dependencies, do: [Arbor.Actions.TestFixtures.DepCycleAAction]
+end
+
+defmodule Arbor.Actions.TestFixtures.InvalidExecutionDependenciesAction do
+  @moduledoc false
+
+  def to_tool do
+    %{
+      name: "invalid_execution_dependencies_action",
+      description: "Invalid dependency fixture",
+      parameters_schema: %{"type" => "object", "properties" => %{}}
+    }
+  end
+
+  def execution_dependencies, do: ["not_a_module"]
+end
+
 defmodule Arbor.Actions.TestFixtures.SessionClassifyReplacementAction do
   @moduledoc false
 
