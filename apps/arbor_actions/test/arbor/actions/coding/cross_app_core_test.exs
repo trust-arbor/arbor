@@ -142,6 +142,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
         checks: %{
           compile: compile_fail,
           xref: Core.skipped_check("compile_failed"),
+          test_compile: Core.skipped_check("compile_failed"),
           test: Core.skipped_check("compile_failed")
         },
         base_commit: "abc123"
@@ -150,9 +151,98 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     refute evidence.passed
     assert evidence.reason == "compile_failed"
     assert evidence.xref["status"] == "skipped"
+    assert evidence.test_compile["status"] == "skipped"
     assert evidence.test["status"] == "skipped"
     assert evidence.affected_apps == ["alpha", "beta"]
     assert {:ok, _} = Jason.encode(evidence)
+  end
+
+  test "show requires test_compile and surfaces test_compile_failed as default reason" do
+    selection = %{
+      changed_files: ["apps/alpha/lib/a.ex"],
+      changed_apps: ["alpha"],
+      affected_apps: ["alpha"],
+      test_paths: ["apps/alpha/test"],
+      root_wide: false
+    }
+
+    pass_check =
+      Core.completed_check(%{
+        "exit_code" => 0,
+        "passed" => true,
+        "stdout_excerpt" => "ok",
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("1", 64),
+        "stderr_sha256" => String.duplicate("2", 64)
+      })
+
+    test_compile_fail =
+      Core.completed_check(
+        %{
+          "exit_code" => 1,
+          "passed" => false,
+          "stdout_excerpt" => "test env compile error",
+          "stderr_excerpt" => "",
+          "stdout_truncated" => false,
+          "stderr_truncated" => false,
+          "stdout_sha256" => String.duplicate("3", 64),
+          "stderr_sha256" => String.duplicate("4", 64)
+        },
+        reason: "test_compile_failed"
+      )
+
+    failed =
+      Core.show(%{
+        selection: selection,
+        checks: %{
+          compile: pass_check,
+          xref: pass_check,
+          test_compile: test_compile_fail,
+          test: Core.skipped_check("test_compile_failed")
+        },
+        base_commit: "abc123"
+      })
+
+    refute failed.passed
+    assert failed.reason == "test_compile_failed"
+    assert failed.test_compile["passed"] == false
+    assert failed.test["status"] == "skipped"
+    assert failed.test["reason"] == "test_compile_failed"
+
+    # Missing test_compile is not a pass — overall requires the stage.
+    missing_stage =
+      Core.show(%{
+        selection: selection,
+        checks: %{
+          compile: pass_check,
+          xref: pass_check,
+          test: pass_check
+        },
+        base_commit: "abc123"
+      })
+
+    refute missing_stage.passed
+    assert missing_stage.reason == "test_compile_failed"
+    refute missing_stage.test_compile["passed"]
+
+    all_pass =
+      Core.show(%{
+        selection: selection,
+        checks: %{
+          compile: pass_check,
+          xref: pass_check,
+          test_compile: pass_check,
+          test: pass_check
+        },
+        base_commit: "abc123"
+      })
+
+    assert all_pass.passed
+    assert all_pass.reason == "cross_app_validated"
+    assert all_pass.test_compile["passed"]
+    assert {:ok, _} = Jason.encode(all_pass)
   end
 
   test "next_test_step drives sequential one-path runs under a shared budget" do

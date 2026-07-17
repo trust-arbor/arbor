@@ -458,6 +458,280 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, ["test", "--", "apps/beta/test"]}
   end
 
+  test "validation checks run compile, xref, MIX_ENV=test compile, then tests in order", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+    resource = %{id: "validation-resource-fixture"}
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn path, args, opts ->
+      send(parent, {:mix_invocation, path, args, opts})
+
+      {:ok,
+       %{
+         exit_code: 0,
+         stdout: "ok #{Enum.join(args, " ")}",
+         stderr: "",
+         timed_out: false
+       }}
+    end)
+
+    assert {:ok, checks} =
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               30_000,
+               resource
+             )
+
+    assert checks.compile["passed"]
+    assert checks.xref["passed"]
+    assert checks.test_compile["passed"]
+    assert checks.test["passed"]
+
+    assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], dev_opts}
+    assert Keyword.get(dev_opts, :validation_resource) == resource
+    assert Keyword.get(dev_opts, :timeout) == 30_000
+    refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
+
+    assert_receive {:mix_invocation, ^worktree, ["xref", "graph"], xref_opts}
+    assert Keyword.get(xref_opts, :validation_resource) == resource
+    assert Keyword.get(xref_opts, :timeout) == 30_000
+
+    assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], test_opts}
+    assert Keyword.get(test_opts, :validation_resource) == resource
+    assert Keyword.get(test_opts, :timeout) == 30_000
+    assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
+
+    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test"], test_run_opts}
+    assert Keyword.get(test_run_opts, :validation_resource) == resource
+    assert Keyword.get(test_run_opts, :timeout) == 30_000
+
+    refute_received {:mix_invocation, _, _, _}
+  end
+
+  test "test-stage deadline starts only after successful MIX_ENV=test compile", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts, Agent.get(clock_agent, & &1)})
+
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          # Consume wall time during pre-test stages; must not start the shared
+          # app-test deadline until after MIX_ENV=test compile succeeds.
+          Agent.update(clock_agent, fn t -> t + 20_000 end)
+          {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
+
+        ["xref", "graph"] ->
+          Agent.update(clock_agent, fn t -> t + 20_000 end)
+          {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
+
+        ["test", "--", "apps/alpha/test"] ->
+          {:ok, %{exit_code: 0, stdout: "test ok", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("unexpected mix invocation: #{inspect(other)}")
+      end
+    end)
+
+    assert {:ok, checks} =
+             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 5_000, %{id: "res"})
+
+    assert checks.compile["passed"]
+    assert checks.xref["passed"]
+    assert checks.test_compile["passed"]
+    assert checks.test["passed"]
+
+    # Two compile invocations (dev + test env) and xref consume 60_000ms of wall
+    # clock before tests; the test stage still receives the full 5_000 budget.
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], dev_opts, 0}
+    refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
+
+    assert_receive {:mix_invocation, ["xref", "graph"], _xref_opts, 20_000}
+
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], test_compile_opts,
+                    40_000}
+
+    assert Keyword.get(test_compile_opts, :env) == %{"MIX_ENV" => "test"}
+
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"], test_opts, 60_000}
+    assert Keyword.get(test_opts, :timeout) == 5_000
+  end
+
+  test "fail-closed skips later stages after compile, xref, or test_compile failure", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:mix_invocation, args})
+
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          {:ok, %{exit_code: 1, stdout: "compile fail", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("must not run after compile failure: #{inspect(other)}")
+      end
+    end)
+
+    assert {:ok, compile_fail} =
+             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 10_000, %{id: "res"})
+
+    refute compile_fail.compile["passed"]
+    assert compile_fail.xref["status"] == "skipped"
+    assert compile_fail.test_compile["status"] == "skipped"
+    assert compile_fail.test["status"] == "skipped"
+    assert compile_fail.xref["reason"] == "compile_failed"
+    assert compile_fail.test_compile["reason"] == "compile_failed"
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"]}
+    refute_received {:mix_invocation, _}
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          if Keyword.get(opts, :env) == %{"MIX_ENV" => "test"} do
+            flunk("must not run test compile after xref failure")
+          else
+            {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
+          end
+
+        ["xref", "graph"] ->
+          {:ok, %{exit_code: 1, stdout: "xref fail", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("must not run after xref failure: #{inspect(other)}")
+      end
+    end)
+
+    assert {:ok, xref_fail} =
+             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 10_000, %{id: "res"})
+
+    assert xref_fail.compile["passed"]
+    refute xref_fail.xref["passed"]
+    assert xref_fail.test_compile["status"] == "skipped"
+    assert xref_fail.test["status"] == "skipped"
+    assert xref_fail.test_compile["reason"] == "xref_failed"
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _}
+    assert_receive {:mix_invocation, ["xref", "graph"], _}
+    refute_received {:mix_invocation, _, _}
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          if Keyword.get(opts, :env) == %{"MIX_ENV" => "test"} do
+            {:ok, %{exit_code: 1, stdout: "test compile fail", stderr: "", timed_out: false}}
+          else
+            {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
+          end
+
+        ["xref", "graph"] ->
+          {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
+
+        ["test" | _] ->
+          flunk("must not run tests after test_compile failure")
+
+        other ->
+          flunk("unexpected mix invocation: #{inspect(other)}")
+      end
+    end)
+
+    assert {:ok, test_compile_fail} =
+             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 10_000, %{id: "res"})
+
+    assert test_compile_fail.compile["passed"]
+    assert test_compile_fail.xref["passed"]
+    refute test_compile_fail.test_compile["passed"]
+    assert test_compile_fail.test_compile["reason"] == "test_compile_failed"
+    assert test_compile_fail.test["status"] == "skipped"
+    assert test_compile_fail.test["reason"] == "test_compile_failed"
+
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], dev_opts}
+    refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
+    assert_receive {:mix_invocation, ["xref", "graph"], _}
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], test_opts}
+    assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
+    refute_received {:mix_invocation, _, _}
+
+    evidence =
+      Core.show(%{
+        selection: %{
+          changed_files: [],
+          changed_apps: [],
+          affected_apps: ["alpha"],
+          test_paths: ["apps/alpha/test"],
+          root_wide: false
+        },
+        checks: test_compile_fail,
+        base_commit: "deadbeef"
+      })
+
+    refute evidence.passed
+    assert evidence.reason == "test_compile_failed"
+  end
+
+  test "test execution errors include the exact selected path", %{worktree: worktree} do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        ["xref", "graph"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        ["test", "--", "apps/alpha/test"] ->
+          {:ok, %{exit_code: 0, stdout: "alpha ok", stderr: "", timed_out: false}}
+
+        ["test", "--", "apps/beta/test"] ->
+          {:error, :operation_deadline_exceeded}
+
+        other ->
+          flunk("unexpected mix invocation: #{inspect(other)}")
+      end
+    end)
+
+    assert {:error, {:test_execution_failed, "apps/beta/test", :operation_deadline_exceeded}} =
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test", "apps/beta/test"],
+               30_000,
+               %{id: "res"}
+             )
+
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _}
+    assert_receive {:mix_invocation, ["xref", "graph"], _}
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], test_compile_opts}
+    assert Keyword.get(test_compile_opts, :env) == %{"MIX_ENV" => "test"}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"], _}
+    assert_receive {:mix_invocation, ["test", "--", "apps/beta/test"], _}
+    refute_received {:mix_invocation, _, _}
+  end
+
   defp mkdir_app_tests!(worktree, apps) do
     for app <- apps do
       File.mkdir_p!(Path.join(worktree, "apps/#{app}/test"))

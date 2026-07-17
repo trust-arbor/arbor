@@ -5,7 +5,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   Resolves an authorized workspace lease, derives changed files from the lease
   base through the dirty worktree (including untracked), parses candidate
   `apps/*/mix.exs` files as AST, selects the downstream app closure, and runs
-  compile → xref → focused tests via `Arbor.Actions.Mix.run_mix/3`.
+  compile → xref → test-env compile → focused tests via `Arbor.Actions.Mix.run_mix/3`.
+
+  The test-environment compile is an explicit `mix compile --warnings-as-errors`
+  under owner-controlled `MIX_ENV=test`. The shared app-test monotonic deadline
+  starts only after that stage succeeds, so cold test-env compilation cannot
+  consume the full test-stage budget.
 
   Affected-app tests run **sequentially**, one existing app test directory per
   fresh Mix process, under a single monotonic budget equal to the action's
@@ -36,6 +41,21 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   def run_app_tests(worktree_path, test_paths, timeout)
       when is_binary(worktree_path) and is_list(test_paths) and is_integer(timeout) do
     run_tests(worktree_path, test_paths, timeout)
+  end
+
+  @doc false
+  # Test seam: full compile → xref → test-compile → tests pipeline without lease setup.
+  @spec run_validation_checks(String.t(), [String.t()], pos_integer(), map() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def run_validation_checks(worktree_path, test_paths, timeout, resource \\ nil)
+      when is_binary(worktree_path) and is_list(test_paths) and is_integer(timeout) do
+    selection = %{test_paths: test_paths}
+
+    try do
+      run_checks(worktree_path, selection, timeout, resource)
+    catch
+      {:execution_error, reason} -> {:error, reason}
+    end
   end
 
   defp do_run(input, context) do
@@ -175,19 +195,33 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     if compile["passed"] do
       xref = run_xref(worktree_path, timeout, resource)
 
-      test =
-        if xref["passed"] do
-          run_tests(worktree_path, selection.test_paths, timeout, resource)
-        else
-          Core.skipped_check("xref_failed")
-        end
+      if xref["passed"] do
+        test_compile = run_test_compile(worktree_path, timeout, resource)
 
-      {:ok, %{compile: compile, xref: xref, test: test}}
+        test =
+          if test_compile["passed"] do
+            # Shared test-stage budget starts only after MIX_ENV=test compile.
+            run_tests(worktree_path, selection.test_paths, timeout, resource)
+          else
+            Core.skipped_check("test_compile_failed")
+          end
+
+        {:ok, %{compile: compile, xref: xref, test_compile: test_compile, test: test}}
+      else
+        {:ok,
+         %{
+           compile: compile,
+           xref: xref,
+           test_compile: Core.skipped_check("xref_failed"),
+           test: Core.skipped_check("xref_failed")
+         }}
+      end
     else
       {:ok,
        %{
          compile: compile,
          xref: Core.skipped_check("compile_failed"),
+         test_compile: Core.skipped_check("compile_failed"),
          test: Core.skipped_check("compile_failed")
        }}
     end
@@ -219,6 +253,27 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
       {:error, reason} ->
         throw({:execution_error, {:xref_execution_failed, reason}})
+    end
+  end
+
+  defp run_test_compile(path, timeout, resource) do
+    # Explicit MIX_ENV=test compile before the shared app-test deadline starts.
+    # Owner-controlled safe env only; same per-check timeout as other stages.
+    case run_mix(path, ["compile", "--warnings-as-errors"],
+           timeout: timeout,
+           validation_resource: resource,
+           env: %{"MIX_ENV" => "test"}
+         ) do
+      {:ok, result} ->
+        feedback = Core.feedback_from_result(result)
+        passed = Map.get(feedback, "passed") == true
+
+        Core.completed_check(feedback,
+          reason: if(passed, do: nil, else: "test_compile_failed")
+        )
+
+      {:error, reason} ->
+        throw({:execution_error, {:test_compile_execution_failed, reason}})
     end
   end
 
@@ -287,7 +342,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             end
 
           {:error, reason} ->
-            throw({:execution_error, {:test_execution_failed, reason}})
+            # Preserve the exact selected path from the owner-derived selection.
+            throw({:execution_error, {:test_execution_failed, path, reason}})
         end
     end
   end

@@ -180,14 +180,19 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       when is_map(selection) and is_map(checks) do
     compile = Map.get(checks, :compile) || Map.get(checks, "compile") || %{}
     xref = Map.get(checks, :xref) || Map.get(checks, "xref") || %{}
+    test_compile = Map.get(checks, :test_compile) || Map.get(checks, "test_compile") || %{}
     test = Map.get(checks, :test) || Map.get(checks, "test") || %{}
 
     compile_passed = Map.get(compile, :passed) || Map.get(compile, "passed") || false
     xref_passed = Map.get(xref, :passed) || Map.get(xref, "passed") || false
+
+    test_compile_passed =
+      Map.get(test_compile, :passed) || Map.get(test_compile, "passed") || false
+
     test_passed = Map.get(test, :passed) || Map.get(test, "passed") || false
 
-    passed = compile_passed and xref_passed and test_passed
-    reason = overall_reason(passed, compile, xref, test)
+    passed = compile_passed and xref_passed and test_compile_passed and test_passed
+    reason = overall_reason(passed, compile, xref, test_compile, test)
 
     %{
       passed: passed,
@@ -200,6 +205,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       root_wide: selection.root_wide,
       compile: normalize_check(compile),
       xref: normalize_check(xref),
+      test_compile: normalize_check(test_compile),
       test: normalize_check(test)
     }
   end
@@ -920,12 +926,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   defp valid_identifier?(_), do: false
 
-  defp overall_reason(true, _compile, _xref, _test), do: "cross_app_validated"
+  defp overall_reason(true, _compile, _xref, _test_compile, _test), do: "cross_app_validated"
 
-  defp overall_reason(false, compile, xref, test) do
+  defp overall_reason(false, compile, xref, test_compile, test) do
     cond do
       check_failed?(compile) -> check_reason(compile, "compile_failed")
       check_failed?(xref) -> check_reason(xref, "xref_failed")
+      check_failed?(test_compile) -> check_reason(test_compile, "test_compile_failed")
       check_failed?(test) -> check_reason(test, "tests_failed")
       true -> "validation_failed"
     end

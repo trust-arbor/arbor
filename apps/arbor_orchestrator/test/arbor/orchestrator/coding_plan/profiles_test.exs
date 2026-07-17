@@ -117,6 +117,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "timeout_max_ms" => 600_000,
                "selects_downstream_dependents" => true,
                "runs_xref_graph_evidence" => true,
+               "runs_test_environment_compile" => true,
                "claims_zero_cycles" => false
              }
 

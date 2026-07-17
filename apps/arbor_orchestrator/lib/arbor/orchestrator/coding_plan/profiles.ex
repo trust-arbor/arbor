@@ -1589,6 +1589,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "timeout_max_ms" => @spawn_capable_max_timeout_ms,
                   "selects_downstream_dependents" => true,
                   "runs_xref_graph_evidence" => true,
+                  "runs_test_environment_compile" => true,
                   "claims_zero_cycles" => false
                 },
                 "review_strategy" => @binding_council_review,

@@ -140,6 +140,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     assert result.test_paths == ["apps/alpha/test", "apps/beta/test"]
     assert result.compile["passed"]
     assert result.xref["passed"]
+    assert result.test_compile["passed"]
     assert result.test["passed"]
     assert is_binary(result.feedback_json)
     assert Jason.decode!(result.feedback_json)["passed"] == true
@@ -203,11 +204,15 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     assert result.reason == "compile_failed"
     refute result.compile["passed"]
     assert result.xref["status"] == "skipped"
+    assert result.test_compile["status"] == "skipped"
     assert result.test["status"] == "skipped"
     assert result.xref["reason"] == "compile_failed"
+    assert result.test_compile["reason"] == "compile_failed"
   end
 
-  test "test failure returns passed false after compile and xref", %{tmp_dir: tmp_dir} do
+  test "test failure returns passed false after compile, xref, and test compile", %{
+    tmp_dir: tmp_dir
+  } do
     fixture = leased_umbrella(tmp_dir)
 
     File.write!(Path.join(fixture.lease.worktree_path, "apps/alpha/lib/alpha.ex"), """
@@ -222,6 +227,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     refute result.passed
     assert result.compile["passed"]
     assert result.xref["passed"]
+    assert result.test_compile["passed"]
     refute result.test["passed"]
     assert result.reason == "tests_failed"
   end
