@@ -268,46 +268,95 @@ defmodule Arbor.Commands.Fallback do
     end)
   end
 
+  # Fail closed: every comma-separated component must be a recognized
+  # runtime=/provider=/model= field with a non-empty valid value. Unknown
+  # keys, malformed pairs, empty values (including empty components from
+  # doubled/leading/trailing commas), invalid atoms, and duplicate fields
+  # reject the whole entry — never silently drop a component and report
+  # success for a different configuration.
+  #
+  # Split without trim: true so empty components between commas are preserved
+  # and rejected rather than deleted before validation.
   defp parse_entry(str) do
     cleaned = String.trim(str)
 
     if cleaned == "" do
       {:error, "empty entry"}
     else
-      entry =
-        cleaned
-        |> String.split(",", trim: true)
-        |> Enum.reduce(%{}, fn pair, acc ->
-          case String.split(pair, "=", parts: 2) do
-            [k, v] ->
-              key = String.trim(k) |> safe_existing_atom()
-              value = String.trim(v)
+      pairs = String.split(cleaned, ",")
 
-              if key && key in [:runtime, :provider, :model] do
-                case coerce_value(key, value) do
-                  nil -> acc
-                  coerced -> Map.put(acc, key, coerced)
-                end
-              else
-                acc
-              end
+      case Enum.reduce_while(pairs, {:ok, %{}}, fn pair, {:ok, acc} ->
+             case parse_pair(pair, acc) do
+               {:ok, updated} -> {:cont, {:ok, updated}}
+               {:error, _} = err -> {:halt, err}
+             end
+           end) do
+        {:ok, entry} when entry == %{} ->
+          {:error, "no recognized fields (use runtime=, provider=, model=)"}
 
-            _ ->
-              acc
-          end
-        end)
+        {:ok, entry} ->
+          {:ok, entry}
 
-      if entry == %{} do
-        {:error, "no recognized fields (use runtime=, provider=, model=)"}
-      else
-        {:ok, entry}
+        {:error, _} = err ->
+          err
       end
     end
   end
 
+  defp parse_pair(pair, acc) do
+    trimmed_pair = String.trim(pair)
+
+    if trimmed_pair == "" do
+      {:error, "malformed pair '' (expected key=value)"}
+    else
+      case String.split(pair, "=", parts: 2) do
+        [k, v] ->
+          key_str = String.trim(k)
+          value = String.trim(v)
+
+          cond do
+            key_str == "" ->
+              {:error, "malformed pair '#{trimmed_pair}' (expected key=value)"}
+
+            value == "" ->
+              {:error, "empty value for '#{key_str}'"}
+
+            true ->
+              parse_known_field(key_str, value, acc)
+          end
+
+        _ ->
+          {:error, "malformed pair '#{trimmed_pair}' (expected key=value)"}
+      end
+    end
+  end
+
+  defp parse_known_field(key_str, value, acc) do
+    case safe_existing_atom(key_str) do
+      key when key in [:runtime, :provider, :model] ->
+        if Map.has_key?(acc, key) do
+          {:error, "duplicate field '#{key}'"}
+        else
+          case coerce_value(key, value) do
+            nil ->
+              {:error, "invalid #{key} value '#{value}'"}
+
+            coerced ->
+              {:ok, Map.put(acc, key, coerced)}
+          end
+        end
+
+      _ ->
+        {:error, "unknown field '#{key_str}' (use runtime=, provider=, model=)"}
+    end
+  end
+
+  # Runtime/provider atoms: only existing atoms (no new atom creation).
+  # Unknown strings return nil so the entry is rejected, not partially applied.
   defp coerce_value(:runtime, value), do: safe_existing_atom(value)
   defp coerce_value(:provider, value), do: safe_existing_atom(value)
-  defp coerce_value(:model, value), do: value
+  defp coerce_value(:model, value) when is_binary(value) and value != "", do: value
+  defp coerce_value(:model, _), do: nil
 
   defp safe_existing_atom(value) when is_binary(value) do
     String.to_existing_atom(value)

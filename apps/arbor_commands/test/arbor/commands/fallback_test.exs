@@ -128,18 +128,149 @@ defmodule Arbor.Commands.FallbackTest do
       assert text =~ "unknown subcommand"
     end
 
-    test "unknown atom in runtime value is dropped silently (DoS protection)" do
+    test "unknown atom in runtime value rejects entry (no new atoms)" do
       pid = start_fake_session([])
 
       # 'mystery_atom_xyzzy_that_doesnt_exist' isn't an existing atom →
-      # gets dropped from the entry → entry becomes %{}, set rejects it.
-      assert {:ok, %Result{text: text, type: :error}} =
+      # fail closed without creating a new atom or applying a partial entry.
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
                Fallback.execute(
                  "set runtime=mystery_atom_xyzzy_that_doesnt_exist",
                  ctx(agent_id: "x", session_pid: pid)
                )
 
-      assert text =~ "no recognized fields" or text =~ "needs at least one"
+      assert text =~ "invalid runtime value"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+    end
+
+    test "mixed valid+invalid fields reject without applying chain change" do
+      initial = [%{model: "keep-me"}]
+      pid = start_fake_session(initial)
+
+      # Valid provider + unknown runtime atom must not partially apply provider alone.
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "set provider=openai,runtime=mystery_atom_xyzzy_that_doesnt_exist",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "invalid runtime value"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
+    end
+
+    test "unknown key in multi-field entry rejects without applying" do
+      initial = [%{runtime: :acp}]
+      pid = start_fake_session(initial)
+
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "set provider=openai,bogus=value",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "unknown field"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
+    end
+
+    test "malformed pair rejects the whole entry" do
+      pid = start_fake_session([])
+
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "set provider=openai,not-a-pair",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "malformed pair"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+    end
+
+    test "duplicate fields reject as ambiguous" do
+      pid = start_fake_session([])
+
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "set provider=openai,provider=anthropic",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "duplicate field"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+    end
+
+    test "empty field value rejects the entry" do
+      pid = start_fake_session([])
+
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "set model=,provider=openai",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "empty value"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+    end
+
+    test "invalid second entry aborts set without applying first entry" do
+      initial = [%{model: "keep-me"}]
+      pid = start_fake_session(initial)
+
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "set runtime=acp ; model=good,unknown_key=x",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "unknown field"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
+    end
+
+    test "doubled commas reject without applying chain change" do
+      initial = [%{model: "keep-me"}]
+      pid = start_fake_session(initial)
+
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "set model=x,,provider=openai",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "malformed pair"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
+    end
+
+    test "leading comma rejects without applying chain change" do
+      initial = [%{runtime: :acp}]
+      pid = start_fake_session(initial)
+
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "set ,model=x",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "malformed pair"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
+    end
+
+    test "trailing comma rejects without applying chain change" do
+      initial = [%{provider: :openai}]
+      pid = start_fake_session(initial)
+
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "set model=x,",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "malformed pair"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
     end
   end
 
@@ -159,6 +290,21 @@ defmodule Arbor.Commands.FallbackTest do
                %{runtime: :acp},
                %{model: "claude-sonnet-4-6"}
              ]
+    end
+
+    test "mixed valid+invalid fields reject without appending" do
+      initial = [%{runtime: :acp}]
+      pid = start_fake_session(initial)
+
+      assert {:ok, %Result{text: text, type: :error, effects: effects}} =
+               Fallback.execute(
+                 "add provider=openai,runtime=mystery_atom_xyzzy_that_doesnt_exist",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "invalid runtime value"
+      refute Keyword.has_key?(effects, :fallback_chain_changed)
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
     end
 
     test "empty add → error" do
