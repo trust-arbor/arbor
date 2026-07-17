@@ -218,4 +218,34 @@ defmodule Mix.Tasks.Arbor.ReadinessTest do
       refute label =~ "applications ready"
     end
   end
+
+  describe "status_missing_label/1" do
+    test "ready reports none missing" do
+      assert Readiness.status_missing_label(:ready) == "none"
+    end
+
+    test "partial reports the missing app names" do
+      assert Readiness.status_missing_label(
+               {:partial, [:arbor_gateway, :arbor_web], [:arbor_common]}
+             ) == "arbor_gateway, arbor_web"
+    end
+
+    test "partial with empty missing list reports none" do
+      assert Readiness.status_missing_label({:partial, [], [:arbor_common]}) == "none"
+    end
+
+    test "observation unavailable reports unknown, not none" do
+      # Regression: status used to format an empty missing list as "none", which
+      # falsely implied every expected app was present when RPC observation failed.
+      assert Readiness.status_missing_label({:observation_unavailable, {:badrpc, :timeout}}) ==
+               "unknown"
+
+      assert Readiness.status_missing_label(
+               {:observation_unavailable, :invalid_which_applications}
+             ) == "unknown"
+
+      refute Readiness.status_missing_label({:observation_unavailable, {:badrpc, :nodedown}}) ==
+               "none"
+    end
+  end
 end

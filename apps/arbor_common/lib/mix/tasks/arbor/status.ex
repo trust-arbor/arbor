@@ -38,7 +38,7 @@ defmodule Mix.Tasks.Arbor.Status do
     procs = Config.rpc(node, :erlang, :system_info, [:process_count])
     memory_bytes = Config.rpc(node, :erlang, :memory, [:total])
     apps = fetch_arbor_apps(observation)
-    missing = missing_apps(readiness)
+    missing_label = Readiness.status_missing_label(readiness)
     pid = Config.read_pid()
 
     memory_mb =
@@ -59,7 +59,7 @@ defmodule Mix.Tasks.Arbor.Status do
       Processes:  #{procs}
       Arbor apps: #{format_apps(apps)}
       Expected:   #{length(expected)} umbrella apps
-      Missing:    #{format_apps(missing)}
+      Missing:    #{missing_label}
     ═══════════════════════════════════════
     """)
   end
@@ -100,9 +100,6 @@ defmodule Mix.Tasks.Arbor.Status do
   end
 
   defp fetch_arbor_apps(_), do: []
-
-  defp missing_apps({:partial, missing, _present}), do: missing
-  defp missing_apps(_), do: []
 
   defp format_duration(ms) do
     total_seconds = div(ms, 1000)

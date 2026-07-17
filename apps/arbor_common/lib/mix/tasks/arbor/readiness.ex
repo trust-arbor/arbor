@@ -222,4 +222,27 @@ defmodule Mix.Tasks.Arbor.Readiness do
   def status_label({:observation_unavailable, reason}) do
     "reachable (application observation unavailable: #{inspect(reason)})"
   end
+
+  @doc """
+  Formats the `Missing:` field for `mix arbor.status`.
+
+  - `:ready` → `"none"` (every expected app is present)
+  - `{:partial, missing, _}` → comma-separated missing app names, or `"none"` if empty
+  - `{:observation_unavailable, _}` → `"unknown"` (observation failed; do not imply
+    that no applications are missing)
+
+  Pure decision seam so unavailable readiness cannot be mislabeled as an empty
+  missing set.
+  """
+  @spec status_missing_label(readiness_result()) :: String.t()
+  def status_missing_label(:ready), do: "none"
+
+  def status_missing_label({:partial, missing, _present}) when is_list(missing) do
+    case missing do
+      [] -> "none"
+      apps -> Enum.map_join(apps, ", ", &to_string/1)
+    end
+  end
+
+  def status_missing_label({:observation_unavailable, _reason}), do: "unknown"
 end
