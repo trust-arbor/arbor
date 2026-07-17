@@ -27,6 +27,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # Combined raw Git inventory entries under selected test dirs before suffix
   # filtering / dedup / lstat (ignored/generated paths still consume this bound).
   @max_git_inventory_entries 8_000
+  # Closed Mix argv batch limits after exact-file normalization/lstat. Each
+  # invocation prepends `["test", "--"]`, so derive the available path slots
+  # from Shell's public non-bypassable argv ceiling.
+  # The sum of each path's UTF-8 bytes plus one separator byte must also stay
+  # under the byte ceiling. A single normalized path (max 1024 bytes) always
+  # fits both bounds.
+  @test_batch_fixed_args 2
+  @max_test_batch_files Arbor.Shell.spawn_capable_max_command_args() - @test_batch_fixed_args
+  @max_test_batch_arg_bytes 65_536
   @max_output_list 2_000
   # Process/stream excerpts and aggregate evidence are fixed-size by *bytes*.
   @max_output_excerpt_bytes 2_000
@@ -78,7 +87,17 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           root_wide: boolean()
         }
 
-  @typedoc "One completed (or budget-exhausted) per-app test invocation record."
+  @typedoc "One deterministic argv-safe batch of exact `*_test.exs` paths."
+  @type test_batch :: %{
+          label: String.t(),
+          paths: [String.t()],
+          index: pos_integer(),
+          total: pos_integer(),
+          count: pos_integer(),
+          inventory_sha256: String.t()
+        }
+
+  @typedoc "One completed (or budget-exhausted) batch test invocation record."
   @type app_test_result :: %{
           path: String.t(),
           passed: boolean(),
@@ -93,11 +112,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           stderr_sha256: String.t()
         }
 
-  @typedoc "Pure decision for the next sequential app-test Mix invocation."
+  @typedoc "Pure decision for the next sequential batch Mix invocation."
   @type test_step ::
           :complete
-          | {:run, String.t(), pos_integer(), [String.t()]}
-          | {:timeout, String.t(), [String.t()]}
+          | {:run, test_batch(), pos_integer(), [test_batch()]}
+          | {:timeout, test_batch(), [test_batch()]}
           | {:error, term()}
 
   @doc "Construct and validate the action's deliberately narrow input surface."
@@ -247,6 +266,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def max_git_inventory_entries, do: @max_git_inventory_entries
 
   @doc false
+  def max_test_batch_files, do: @max_test_batch_files
+
+  @doc false
+  def max_test_batch_arg_bytes, do: @max_test_batch_arg_bytes
+
+  @doc false
   def root_wide_path?(path) when is_binary(path) do
     cond do
       MapSet.member?(@root_wide_exact, path) -> true
@@ -385,16 +410,16 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   @doc """
-  Pure next-step decision for sequential per-file tests under dual budgets.
+  Pure next-step decision for sequential batch tests under dual budgets.
 
   `remaining_ms` is the aggregate test-stage budget remaining. Each child is
   capped by `min(operation_timeout_ms, remaining_ms)` so no Mix process may
   exceed the Shell spawn-capable ceiling even when aggregate budget remains.
 
   Returns:
-  - `:complete` when no paths remain
-  - `{:run, path, budget_ms, rest}` when budget remains
-  - `{:timeout, path, rest}` when budget is exhausted with paths left
+  - `:complete` when no batches remain
+  - `{:run, batch, budget_ms, rest}` when budget remains
+  - `{:timeout, batch, rest}` when budget is exhausted with batches left
   - `{:error, reason}` when arguments are malformed (fail closed; never skip)
   """
   @spec next_test_step(term(), term(), term()) :: test_step()
@@ -403,30 +428,260 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     :complete
   end
 
-  def next_test_step(remaining_ms, [path | rest], operation_timeout_ms)
-      when is_integer(remaining_ms) and remaining_ms <= 0 and is_binary(path) and path != "" and
-             is_list(rest) and is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
-    {:timeout, path, rest}
+  def next_test_step(remaining_ms, [batch | rest], operation_timeout_ms)
+      when is_integer(remaining_ms) and remaining_ms <= 0 and is_map(batch) and is_list(rest) and
+             is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
+    if valid_remaining_batches?([batch | rest]) do
+      {:timeout, batch, rest}
+    else
+      invalid_test_step_input(remaining_ms, [batch | rest], operation_timeout_ms)
+    end
   end
 
-  def next_test_step(remaining_ms, [path | rest], operation_timeout_ms)
-      when is_integer(remaining_ms) and remaining_ms > 0 and is_binary(path) and path != "" and
-             is_list(rest) and is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
-    {:run, path, min(operation_timeout_ms, remaining_ms), rest}
+  def next_test_step(remaining_ms, [batch | rest], operation_timeout_ms)
+      when is_integer(remaining_ms) and remaining_ms > 0 and is_map(batch) and is_list(rest) and
+             is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
+    if valid_remaining_batches?([batch | rest]) do
+      {:run, batch, min(operation_timeout_ms, remaining_ms), rest}
+    else
+      invalid_test_step_input(remaining_ms, [batch | rest], operation_timeout_ms)
+    end
   end
 
-  def next_test_step(remaining_ms, paths, operation_timeout_ms) do
+  def next_test_step(remaining_ms, batches, operation_timeout_ms) do
+    invalid_test_step_input(remaining_ms, batches, operation_timeout_ms)
+  end
+
+  defp invalid_test_step_input(remaining_ms, batches, operation_timeout_ms) do
     {:error,
      {:invalid_test_step_input,
       %{
         remaining_ms: remaining_ms,
-        paths_shape: paths_shape(paths),
+        batches_shape: batches_shape(batches),
         operation_timeout_ms: operation_timeout_ms
       }}}
   end
 
-  defp paths_shape(paths) when is_list(paths), do: {:list, length(paths)}
-  defp paths_shape(paths), do: {:not_list, paths}
+  defp batches_shape(batches) when is_list(batches), do: {:list, length(batches)}
+  defp batches_shape(batches), do: {:not_list, batches}
+
+  # Fail closed: never trust caller-supplied label/digest/path metadata.
+  # Recompute inventory bounds, SHA-256, deterministic label, and require the
+  # remaining list to be a coherent ordered suffix of a partition.
+  defp valid_remaining_batches?(batches) when is_list(batches) and batches != [] do
+    Enum.all?(batches, &valid_test_batch?/1) and coherent_remaining_batch_indices?(batches) and
+      exact_remaining_partition?(batches)
+  end
+
+  defp valid_remaining_batches?(_), do: false
+
+  defp valid_test_batch?(%{
+         label: label,
+         paths: paths,
+         index: index,
+         total: total,
+         count: count,
+         inventory_sha256: inventory_sha256
+       })
+       when is_binary(label) and is_list(paths) and is_integer(index) and is_integer(total) and
+              is_integer(count) and is_binary(inventory_sha256) do
+    with :ok <- validate_batch_member_paths(paths),
+         true <- index > 0 and total > 0 and index <= total,
+         true <- count == length(paths),
+         expected <- build_test_batch(paths, index, total) do
+      label == expected.label and inventory_sha256 == expected.inventory_sha256 and
+        count == expected.count and paths == expected.paths and index == expected.index and
+        total == expected.total
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_test_batch?(_), do: false
+
+  defp coherent_remaining_batch_indices?([%{index: first, total: total} | _] = batches)
+       when is_integer(first) and is_integer(total) and first > 0 and total > 0 do
+    n = length(batches)
+
+    Enum.with_index(batches, 0)
+    |> Enum.all?(fn {batch, offset} ->
+      is_map(batch) and batch.index == first + offset and batch.total == total
+    end) and first + n - 1 == total
+  end
+
+  defp coherent_remaining_batch_indices?(_), do: false
+
+  defp exact_remaining_partition?(batches) do
+    paths = Enum.flat_map(batches, & &1.paths)
+
+    with :ok <- validate_batch_source_files(paths),
+         {:ok, expected_paths} <- pack_test_batches(paths) do
+      expected_paths == Enum.map(batches, & &1.paths)
+    else
+      _ -> false
+    end
+  end
+
+  defp validate_batch_member_paths(paths) when is_list(paths) and paths != [] do
+    count = length(paths)
+
+    cond do
+      count > @max_test_batch_files ->
+        :error
+
+      true ->
+        Enum.reduce_while(paths, {:ok, nil, 0}, fn path, {:ok, prev, bytes} ->
+          case normalize_test_file_path(path) do
+            {:ok, ^path} ->
+              cost = path_arg_bytes(path)
+
+              cond do
+                is_binary(prev) and path <= prev ->
+                  {:halt, :error}
+
+                cost > @max_test_batch_arg_bytes ->
+                  {:halt, :error}
+
+                bytes + cost > @max_test_batch_arg_bytes ->
+                  {:halt, :error}
+
+                true ->
+                  {:cont, {:ok, path, bytes + cost}}
+              end
+
+            _ ->
+              {:halt, :error}
+          end
+        end)
+        |> case do
+          {:ok, _prev, _bytes} -> :ok
+          :error -> :error
+        end
+    end
+  end
+
+  defp validate_batch_member_paths(_), do: :error
+
+  @doc """
+  Deterministically partition verified, normalized `*_test.exs` paths into
+  argv-safe Mix batches.
+
+  Input must already be the post-normalization inventory: strictly sorted,
+  unique, and every path must re-normalize to itself. Partitioning is greedy
+  left-to-right under the closed file-count and argument-byte ceilings. Every
+  path appears in exactly one non-empty batch; labels bind inventory count and
+  SHA-256 over the exact batch paths.
+  """
+  @spec partition_test_batches(term()) :: {:ok, [test_batch()]} | {:error, term()}
+  def partition_test_batches([]), do: {:ok, []}
+
+  def partition_test_batches(files) when is_list(files) do
+    with :ok <- validate_batch_source_files(files),
+         {:ok, packed} <- pack_test_batches(files) do
+      total = length(packed)
+
+      batches =
+        packed
+        |> Enum.with_index(1)
+        |> Enum.map(fn {paths, index} -> build_test_batch(paths, index, total) end)
+
+      {:ok, batches}
+    end
+  end
+
+  def partition_test_batches(_), do: {:error, :invalid_test_batch_input}
+
+  defp validate_batch_source_files(files) do
+    if length(files) > @max_expanded_test_files do
+      {:error, :too_many_test_files}
+    else
+      Enum.reduce_while(files, {:ok, nil}, fn path, {:ok, prev} ->
+        case normalize_test_file_path(path) do
+          {:ok, ^path} ->
+            cond do
+              is_binary(prev) and path <= prev ->
+                {:halt, {:error, :unsorted_or_duplicate_test_files}}
+
+              path_arg_bytes(path) > @max_test_batch_arg_bytes ->
+                # Defensive: normalized paths are ≤1024 bytes and always fit.
+                {:halt, {:error, {:test_file_path_exceeds_batch_bytes, path}}}
+
+              true ->
+                {:cont, {:ok, path}}
+            end
+
+          {:ok, _other} ->
+            {:halt, {:error, {:non_normalized_test_file, path}}}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, _} -> :ok
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  defp pack_test_batches(files) do
+    {batches, current, _count, _bytes} =
+      Enum.reduce(files, {[], [], 0, 0}, fn path, {batches, current, count, bytes} ->
+        cost = path_arg_bytes(path)
+
+        cond do
+          current == [] ->
+            {batches, [path], 1, cost}
+
+          count + 1 > @max_test_batch_files or bytes + cost > @max_test_batch_arg_bytes ->
+            {[Enum.reverse(current) | batches], [path], 1, cost}
+
+          true ->
+            {batches, [path | current], count + 1, bytes + cost}
+        end
+      end)
+
+    final =
+      if current == [] do
+        Enum.reverse(batches)
+      else
+        Enum.reverse([Enum.reverse(current) | batches])
+      end
+
+    if final == [] or Enum.any?(final, &(&1 == [])) do
+      {:error, :empty_test_batch}
+    else
+      {:ok, final}
+    end
+  end
+
+  defp build_test_batch(paths, index, total)
+       when is_list(paths) and paths != [] and is_integer(index) and is_integer(total) do
+    count = length(paths)
+    inventory_sha256 = inventory_sha256(paths)
+    label = batch_label(index, total, count, inventory_sha256)
+
+    %{
+      label: label,
+      paths: paths,
+      index: index,
+      total: total,
+      count: count,
+      inventory_sha256: inventory_sha256
+    }
+  end
+
+  defp inventory_sha256(paths) when is_list(paths) do
+    # Paths reject NUL during normalization; join with NUL for exact inventory.
+    material = Enum.join(paths, <<0>>)
+    sha256(material)
+  end
+
+  defp batch_label(index, total, count, inventory_sha256) do
+    "batch-#{index}-of-#{total}-n#{count}-#{inventory_sha256}"
+  end
+
+  defp path_arg_bytes(path) when is_binary(path), do: byte_size(path) + 1
 
   @doc """
   Normalize and bound an expanded list of relative `*_test.exs` file paths.
@@ -511,17 +766,20 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def normalize_test_file_path(_), do: {:error, :invalid_test_file_path}
 
   @doc """
-  Classify one Mix process result for a single app test path.
+  Classify one Mix process result for a single inventory-bound batch label.
 
   Deadline/process wall-clock work stays in the shell; this only maps feedback
-  into a pure per-app record. Timed-out processes are failures with
+  into a pure batch record. Timed-out processes are failures with
   `tests_timed_out`; non-zero exits use the stable `tests_failed` reason.
   Timeout classification is driven solely by the `timed_out` option (exact
   shape from the shell), never by substring matching on output text.
+
+  `label` is the deterministic batch inventory label (count + SHA-256), never an
+  unbounded concatenation of file paths.
   """
   @spec classify_app_test_result(String.t(), map(), keyword()) :: app_test_result()
-  def classify_app_test_result(path, feedback, opts \\ [])
-      when is_binary(path) and is_map(feedback) and is_list(opts) do
+  def classify_app_test_result(label, feedback, opts \\ [])
+      when is_binary(label) and is_map(feedback) and is_list(opts) do
     timed_out = Keyword.get(opts, :timed_out, false) == true
     exit_code = Map.get(feedback, "exit_code") || Map.get(feedback, :exit_code)
     raw_passed = Map.get(feedback, "passed") || Map.get(feedback, :passed) || false
@@ -545,7 +803,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       )
 
     %{
-      path: path,
+      path: label,
       passed: passed,
       timed_out: timed_out,
       exit_code: exit_code,
@@ -564,15 +822,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   @doc """
-  Deterministic record for an app path that was not started because the shared
+  Deterministic record for a batch that was not started because the shared
   test-stage budget was already exhausted.
   """
   @spec budget_exhausted_result(String.t()) :: app_test_result()
-  def budget_exhausted_result(path) when is_binary(path) do
-    message = "test stage budget exhausted before " <> path
+  def budget_exhausted_result(label) when is_binary(label) do
+    message = "test stage budget exhausted before " <> label
 
     %{
-      path: path,
+      path: label,
       passed: false,
       timed_out: true,
       exit_code: nil,
@@ -587,13 +845,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   @doc """
-  Aggregate ordered per-app test results into the existing JSON-clean check shape.
+  Aggregate ordered batch test results into the existing JSON-clean check shape.
 
-  Excerpts are path-labeled and re-bounded to a fixed *byte* size independent of
-  app count. Aggregate hashes are derived from each path plus that process's
-  stdout/stderr hashes so completed invocations remain covered without retaining
-  unbounded process output. Prior successful children stay in the aggregate when
-  a later child fails or times out.
+  Excerpts are batch-label-labeled and re-bounded to a fixed *byte* size
+  independent of batch count. Aggregate hashes are derived from each batch label
+  plus that process's stdout/stderr hashes so completed invocations remain
+  covered without retaining unbounded process output. Prior successful children
+  stay in the aggregate when a later child fails or times out.
   """
   @spec aggregate_test_check([app_test_result()]) :: map()
   def aggregate_test_check([]), do: empty_pass_check("no_existing_test_dirs")

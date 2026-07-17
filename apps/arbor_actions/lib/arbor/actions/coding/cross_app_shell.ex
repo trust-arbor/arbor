@@ -14,10 +14,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
   Selected app test directories are expanded via git `ls-files` plus
   `ls-files --others --exclude-standard` into a deterministic bounded list of
-  `*_test.exs` files (ignored/generated paths never enter validation). The
+  exact `*_test.exs` files (ignored/generated paths never enter validation). The
   selected root, every listed file, and intermediate path components are
-  lstat'd without following symlinks. Each file runs sequentially in its own
-  Mix process under `min(per-operation ceiling, remaining aggregate stage budget)`.
+  lstat'd without following symlinks. Verified paths are then partitioned into
+  pure Core batches (Shell argv ceiling minus two fixed args, and <=64 KiB of
+  path+separator argument bytes)
+  and each batch runs as one argv-safe `mix test -- <exact paths...>` under
+  `min(per-operation ceiling, remaining aggregate stage budget)`. Never passes
+  raw directories or shell-joined globs.
   """
 
   alias Arbor.Actions.Coding.CrossApp.Core
@@ -39,7 +43,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   def run(_input, _context), do: {:error, :invalid_cross_app_input}
 
   @doc false
-  # Test seam: sequential per-file test stage under dual budgets.
+  # Test seam: sequential batch test stage under dual budgets.
   # 3-arity uses the same value for per-operation and aggregate stage ceilings.
   @spec run_app_tests(String.t(), [String.t()], pos_integer()) :: map()
   def run_app_tests(worktree_path, test_paths, timeout)
@@ -356,9 +360,19 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         Core.empty_pass_check("no_existing_test_files")
 
       {:ok, files} ->
-        # One shared absolute monotonic deadline for the whole test stage — not N× timeout.
-        deadline = monotonic_ms() + test_stage_timeout
-        run_tests_sequential(path, files, deadline, operation_timeout, resource, [])
+        case Core.partition_test_batches(files) do
+          {:ok, []} ->
+            Core.empty_pass_check("no_existing_test_files")
+
+          {:ok, batches} ->
+            # One shared absolute monotonic deadline for the whole test stage —
+            # not N× timeout and not one process per file.
+            deadline = monotonic_ms() + test_stage_timeout
+            run_tests_sequential(path, batches, deadline, operation_timeout, resource, [])
+
+          {:error, reason} ->
+            throw({:execution_error, {:test_batch_partition_failed, reason}})
+        end
 
       {:error, reason} ->
         throw({:execution_error, {:test_file_enumeration_failed, reason}})
@@ -367,7 +381,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
   defp run_tests_sequential(
          worktree_path,
-         remaining_paths,
+         remaining_batches,
          deadline,
          operation_timeout,
          resource,
@@ -376,23 +390,24 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     # Shared aggregate deadline checked before every child (including the first).
     remaining_ms = deadline - monotonic_ms()
 
-    case Core.next_test_step(remaining_ms, remaining_paths, operation_timeout) do
+    case Core.next_test_step(remaining_ms, remaining_batches, operation_timeout) do
       :complete ->
         Core.aggregate_test_check(Enum.reverse(acc))
 
-      {:timeout, path, _rest} ->
+      {:timeout, batch, _rest} ->
         # Budget already exhausted — do not launch this or any later child.
         # Preserve successful prior child evidence in `acc`.
-        Core.aggregate_test_check(Enum.reverse([Core.budget_exhausted_result(path) | acc]))
+        Core.aggregate_test_check(Enum.reverse([Core.budget_exhausted_result(batch.label) | acc]))
 
-      {:run, path, budget_ms, rest} ->
+      {:run, batch, budget_ms, rest} ->
         mix_opts =
           [timeout: budget_ms]
           |> then(fn opts ->
             if resource, do: Keyword.put(opts, :validation_resource, resource), else: opts
           end)
 
-        case run_mix(worktree_path, ["test", "--", path], mix_opts) do
+        # Exact multi-file batch argv — never shell-joined strings or directories.
+        case run_mix(worktree_path, ["test", "--" | batch.paths], mix_opts) do
           {:ok, result} ->
             # Re-check shared deadline immediately after every child, including the final one.
             remaining_after = deadline - monotonic_ms()
@@ -400,11 +415,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             timed_out = Core.child_timed_out?(runner_timeout, remaining_after)
 
             app_result =
-              Core.classify_app_test_result(path, Core.feedback_from_result(result),
+              Core.classify_app_test_result(batch.label, Core.feedback_from_result(result),
                 timed_out: timed_out
               )
 
-            # Stop after first failed/timed-out file — overall result is failed.
+            # Stop after first failed/timed-out batch — overall result is failed.
             # Prior successful children remain in the aggregate evidence.
             if app_result.passed do
               run_tests_sequential(
@@ -420,8 +435,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             end
 
           {:error, reason} ->
-            # Preserve the exact selected file path from expansion.
-            throw({:execution_error, {:test_execution_failed, path, reason}})
+            # Bound the error with the deterministic batch inventory label.
+            throw({:execution_error, {:test_execution_failed, batch.label, reason}})
         end
 
       {:error, reason} ->

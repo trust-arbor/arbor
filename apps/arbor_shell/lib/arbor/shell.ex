@@ -58,6 +58,7 @@ defmodule Arbor.Shell do
     Executor,
     PortSession,
     Sandbox,
+    SpawnCapableArgvLimits,
     SpawnCapableTimeout
   }
 
@@ -96,6 +97,19 @@ defmodule Arbor.Shell do
   """
   @spec spawn_capable_max_timeout_ms() :: pos_integer()
   def spawn_capable_max_timeout_ms, do: SpawnCapableTimeout.max_timeout_ms()
+
+  @doc """
+  Non-bypassable maximum argument count for one spawn-capable execution.
+
+  Producers that prepend fixed arguments must subtract those entries from this
+  Shell-owned ceiling rather than duplicate the current numeric value.
+  """
+  @spec spawn_capable_max_command_args() :: pos_integer()
+  def spawn_capable_max_command_args, do: SpawnCapableArgvLimits.max_command_args()
+
+  @doc "Non-bypassable maximum UTF-8 byte size for one spawn-capable argument."
+  @spec spawn_capable_max_command_arg_bytes() :: pos_integer()
+  def spawn_capable_max_command_arg_bytes, do: SpawnCapableArgvLimits.max_command_arg_bytes()
 
   # ===========================================================================
   # Public API — Compound shell (CapShell) feature gate

@@ -261,31 +261,40 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   test "next_test_step caps each child by min(operation ceiling, remaining aggregate)" do
     assert :complete = Core.next_test_step(10_000, [], 600_000)
 
-    assert {:run, "apps/alpha/test/a_test.exs", 5_000, ["apps/beta/test/b_test.exs"]} =
-             Core.next_test_step(
-               5_000,
-               ["apps/alpha/test/a_test.exs", "apps/beta/test/b_test.exs"],
-               600_000
-             )
+    assert {:ok, [single]} =
+             Core.partition_test_batches([
+               "apps/alpha/test/a_test.exs",
+               "apps/beta/test/b_test.exs"
+             ])
 
     # Remaining aggregate above operation ceiling still yields the operation cap.
-    assert {:run, "apps/alpha/test/a_test.exs", 30_000, []} =
-             Core.next_test_step(900_000, ["apps/alpha/test/a_test.exs"], 30_000)
+    assert {:run, ^single, 30_000, []} =
+             Core.next_test_step(900_000, [single], 30_000)
 
-    assert {:timeout, "apps/beta/test/b_test.exs", ["apps/gamma/test/c_test.exs"]} =
-             Core.next_test_step(
-               0,
-               ["apps/beta/test/b_test.exs", "apps/gamma/test/c_test.exs"],
-               600_000
-             )
+    assert single.count == 2
 
-    assert {:timeout, "apps/alpha/test/a_test.exs", []} =
-             Core.next_test_step(-3, ["apps/alpha/test/a_test.exs"], 10_000)
+    # Force two batches so timeout/rest shapes can be asserted.
+    many =
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
+      end
+
+    assert {:ok, [first, second] = batches} = Core.partition_test_batches(many)
+    assert length(batches) == 2
+
+    assert {:run, ^first, 5_000, [^second]} =
+             Core.next_test_step(5_000, batches, 600_000)
+
+    assert {:timeout, ^second, []} =
+             Core.next_test_step(0, [second], 600_000)
+
+    assert {:timeout, ^first, [^second]} =
+             Core.next_test_step(-3, [first, second], 10_000)
   end
 
   test "next_test_step malformed arguments fail closed rather than completing" do
     assert {:error, {:invalid_test_step_input, meta}} =
-             Core.next_test_step("not-int", ["apps/alpha/test/a_test.exs"], 10_000)
+             Core.next_test_step("not-int", [%{label: "x"}], 10_000)
 
     assert is_map(meta)
 
@@ -296,17 +305,116 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.next_test_step(10_000, [""], 10_000)
 
     assert {:error, {:invalid_test_step_input, _}} =
-             Core.next_test_step(10_000, ["apps/alpha/test/a_test.exs"], 0)
+             Core.next_test_step(10_000, [%{not: :a_batch}], 10_000)
+
+    assert {:ok, [batch]} = Core.partition_test_batches(["apps/alpha/test/a_test.exs"])
 
     assert {:error, {:invalid_test_step_input, _}} =
-             Core.next_test_step(10_000, ["apps/alpha/test/a_test.exs"], -1)
+             Core.next_test_step(10_000, [batch], 0)
 
     assert {:error, {:invalid_test_step_input, _}} =
-             Core.next_test_step(10_000, ["apps/alpha/test/a_test.exs"], "600000")
+             Core.next_test_step(10_000, [batch], -1)
 
-    # Empty remaining paths still require a positive operation ceiling.
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [batch], "600000")
+
+    # Empty remaining batches still require a positive operation ceiling.
     assert {:error, {:invalid_test_step_input, _}} =
              Core.next_test_step(10_000, [], 0)
+  end
+
+  test "next_test_step rejects forged batch metadata and incoherent remaining lists" do
+    assert {:ok, [honest]} = Core.partition_test_batches(["apps/alpha/test/a_test.exs"])
+    assert {:run, ^honest, 1_000, []} = Core.next_test_step(1_000, [honest], 1_000)
+
+    forged_digest = %{
+      honest
+      | inventory_sha256: String.duplicate("a", 64),
+        label: "batch-1-of-1-n1-" <> String.duplicate("a", 64)
+    }
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [forged_digest], 10_000)
+
+    forged_label = %{honest | label: "batch-forged"}
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [forged_label], 10_000)
+
+    # Unnormalized / unbounded path inventory must not pass.
+    bad_paths = %{
+      honest
+      | paths: ["/tmp/evil_test.exs"],
+        count: 1,
+        inventory_sha256: String.duplicate("b", 64),
+        label: "batch-1-of-1-n1-" <> String.duplicate("b", 64)
+    }
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [bad_paths], 10_000)
+
+    many =
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
+      end
+
+    assert {:ok, [first, second]} = Core.partition_test_batches(many)
+
+    # Remaining list must be a coherent ordered suffix (indices … total).
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [second, first], 10_000)
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [first], 10_000)
+
+    assert {:run, ^first, 10_000, [^second]} =
+             Core.next_test_step(10_000, [first, second], 10_000)
+
+    assert {:run, ^second, 10_000, []} =
+             Core.next_test_step(10_000, [second], 10_000)
+
+    # Valid-looking per-batch metadata cannot hide duplicate, reordered, or
+    # needlessly split inventory across batch boundaries.
+    duplicate_across_batches = [
+      signed_batch(["apps/alpha/test/a_test.exs"], 1, 2),
+      signed_batch(["apps/alpha/test/a_test.exs"], 2, 2)
+    ]
+
+    reordered_across_batches = [
+      signed_batch(["apps/alpha/test/b_test.exs"], 1, 2),
+      signed_batch(["apps/alpha/test/a_test.exs"], 2, 2)
+    ]
+
+    needlessly_split = [
+      signed_batch(["apps/alpha/test/a_test.exs"], 1, 2),
+      signed_batch(["apps/alpha/test/b_test.exs"], 2, 2)
+    ]
+
+    for forged <- [duplicate_across_batches, reordered_across_batches, needlessly_split] do
+      assert {:error, {:invalid_test_step_input, _}} =
+               Core.next_test_step(10_000, forged, 10_000)
+    end
+
+    # Oversized path list even with matching-looking fields fails closed.
+    oversized_paths =
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/g#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
+      end
+
+    material = Enum.join(oversized_paths, <<0>>)
+    sha = :crypto.hash(:sha256, material) |> Base.encode16(case: :lower)
+
+    oversized = %{
+      label: "batch-1-of-1-n#{length(oversized_paths)}-#{sha}",
+      paths: oversized_paths,
+      index: 1,
+      total: 1,
+      count: length(oversized_paths),
+      inventory_sha256: sha
+    }
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [oversized], 10_000)
   end
 
   test "normalize_expanded_test_files bounds, sorts, and rejects bad paths" do
@@ -332,6 +440,110 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
                  "apps/alpha/test/f#{i}_test.exs"
                end
              )
+  end
+
+  test "partition_test_batches is deterministic, exact-once, ordered, and bound-respecting" do
+    assert Core.max_test_batch_files() ==
+             Arbor.Shell.spawn_capable_max_command_args() - 2
+
+    assert Core.max_test_batch_arg_bytes() == 65_536
+
+    files = [
+      "apps/alpha/test/a_test.exs",
+      "apps/alpha/test/b_test.exs",
+      "apps/beta/test/c_test.exs"
+    ]
+
+    assert {:ok, [batch]} = Core.partition_test_batches(files)
+    assert batch.paths == files
+    assert batch.count == 3
+    assert batch.index == 1
+    assert batch.total == 1
+    assert batch.label == "batch-1-of-1-n3-#{batch.inventory_sha256}"
+    assert byte_size(batch.inventory_sha256) == 64
+
+    expected_sha =
+      :crypto.hash(:sha256, Enum.join(files, <<0>>)) |> Base.encode16(case: :lower)
+
+    assert batch.inventory_sha256 == expected_sha
+    assert Core.partition_test_batches(files) == {:ok, [batch]}
+
+    # Every path exactly once across batches; sorted order preserved.
+    many =
+      for i <- 1..(Core.max_test_batch_files() + 3) do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
+      end
+
+    assert {:ok, batches} = Core.partition_test_batches(many)
+    assert length(batches) == 2
+    assert Enum.at(batches, 0).count == Core.max_test_batch_files()
+    assert Enum.at(batches, 1).count == 3
+    assert Enum.flat_map(batches, & &1.paths) == many
+    assert Enum.all?(batches, fn b -> b.paths != [] end)
+
+    for b <- batches do
+      arg_bytes = Enum.reduce(b.paths, 0, fn p, acc -> acc + byte_size(p) + 1 end)
+      assert length(b.paths) <= Core.max_test_batch_files()
+      assert arg_bytes <= Core.max_test_batch_arg_bytes()
+      assert b.label =~ ~r/^batch-\d+-of-\d+-n\d+-[0-9a-f]{64}$/
+    end
+
+    # Byte-heavy valid paths split on the argument-byte ceiling.
+    # Build paths that each cost ~900 bytes so a few exceed 64 KiB.
+    long_stem = String.duplicate("p", 860)
+
+    heavy =
+      for i <- 1..80 do
+        "apps/alpha/test/#{long_stem}#{String.pad_leading(Integer.to_string(i), 3, "0")}_test.exs"
+      end
+
+    assert {:ok, heavy_batches} = Core.partition_test_batches(heavy)
+    assert length(heavy_batches) > 1
+    assert Enum.flat_map(heavy_batches, & &1.paths) == heavy
+
+    for b <- heavy_batches do
+      arg_bytes = Enum.reduce(b.paths, 0, fn p, acc -> acc + byte_size(p) + 1 end)
+      assert length(b.paths) <= Core.max_test_batch_files()
+      assert arg_bytes <= Core.max_test_batch_arg_bytes()
+      assert b.count == length(b.paths)
+    end
+
+    # A single normalized path always fits and forms one batch.
+    one = ["apps/alpha/test/solo_test.exs"]
+    assert {:ok, [solo]} = Core.partition_test_batches(one)
+    assert solo.paths == one
+    assert solo.total == 1
+  end
+
+  test "partition_test_batches fails closed on malformed or non-normalized input" do
+    assert {:error, :invalid_test_batch_input} = Core.partition_test_batches(:not_a_list)
+
+    assert {:error, :unsorted_or_duplicate_test_files} =
+             Core.partition_test_batches([
+               "apps/alpha/test/b_test.exs",
+               "apps/alpha/test/a_test.exs"
+             ])
+
+    assert {:error, :unsorted_or_duplicate_test_files} =
+             Core.partition_test_batches([
+               "apps/alpha/test/a_test.exs",
+               "apps/alpha/test/a_test.exs"
+             ])
+
+    assert {:error, :path_escape} =
+             Core.partition_test_batches(["apps/alpha/test/../x_test.exs"])
+
+    assert {:error, :absolute_test_file_path} =
+             Core.partition_test_batches(["/tmp/apps/alpha/test/a_test.exs"])
+
+    assert {:error, {:not_test_file, "apps/alpha/test/helper.exs"}} =
+             Core.partition_test_batches(["apps/alpha/test/helper.exs"])
+
+    # Whitespace-trimmed form differs from raw input → non-normalized.
+    assert {:error, {:non_normalized_test_file, " apps/alpha/test/a_test.exs"}} =
+             Core.partition_test_batches([" apps/alpha/test/a_test.exs"])
+
+    assert {:ok, []} = Core.partition_test_batches([])
   end
 
   test "classify_app_test_result preserves tests_failed vs tests_timed_out" do
@@ -610,5 +822,24 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:ok, selection} = Core.select(["apps/alpha/lib/alpha.ex"], graph)
     assert selection.affected_apps == ["alpha", "beta", "gamma"]
     assert selection.test_paths == ["apps/alpha/test", "apps/beta/test", "apps/gamma/test"]
+  end
+
+  defp signed_batch(paths, index, total) do
+    digest =
+      paths
+      |> Enum.join(<<0>>)
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+
+    count = length(paths)
+
+    %{
+      label: "batch-#{index}-of-#{total}-n#{count}-#{digest}",
+      paths: paths,
+      index: index,
+      total: total,
+      count: count,
+      inventory_sha256: digest
+    }
   end
 end

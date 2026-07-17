@@ -16,6 +16,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   """
 
   alias Arbor.Shell.AppleContainerPlanCore
+  alias Arbor.Shell.SpawnCapableArgvLimits
   alias Arbor.Shell.SpawnCapableTimeout
 
   @runtime_path "/usr/local/bin/container"
@@ -29,8 +30,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   @max_timeout_ms SpawnCapableTimeout.max_timeout_ms()
 
   @max_path_bytes 4_096
-  @max_command_args 256
-  @max_command_arg_bytes 4_096
+  @max_command_args SpawnCapableArgvLimits.max_command_args()
+  @max_command_arg_bytes SpawnCapableArgvLimits.max_command_arg_bytes()
   @max_name_bytes 63
   @min_name_bytes 2
   @max_env_entries 256

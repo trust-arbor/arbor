@@ -49,6 +49,8 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   never projects host executables into the validation unit.
   """
 
+  alias Arbor.Shell.SpawnCapableArgvLimits
+
   @runtime_executable "/usr/local/bin/container"
 
   # Fixed infrastructure selectors (not caller-configurable). Official Apple
@@ -137,8 +139,8 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @min_name_bytes 2
   @max_path_bytes 4_096
   @max_image_bytes 512
-  @max_command_args 256
-  @max_command_arg_bytes 4_096
+  @max_command_args SpawnCapableArgvLimits.max_command_args()
+  @max_command_arg_bytes SpawnCapableArgvLimits.max_command_arg_bytes()
 
   # Characters that alter Apple Container's comma-delimited --mount mini-language
   # when interpolated into source= values. Comma separates mount fields; equals
