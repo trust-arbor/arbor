@@ -24,14 +24,17 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
   @kernel_path "/usr/local/share/container/kernels/default.kernel"
   @name "arbor-val-unit01"
 
+  # Plan projections are host bind sources only — no host :tmp.
   @projections %{
     worktree: "/private/tmp/arbor-val/worktree",
     home: "/private/tmp/arbor-val/home",
-    tmp: "/private/tmp/arbor-val/tmp",
     build: "/private/tmp/arbor-val/build",
     deps: "/private/tmp/arbor-val/deps",
     mix_wrapper_dir: "/private/tmp/arbor-val/bin"
   }
+
+  # Host tmp path used only to prove it never enters the Apple plan.
+  @host_tmp_path "/private/tmp/arbor-val/tmp"
 
   @host_runtime_roots %{
     erlang: "/opt/homebrew/Cellar/erlang/28.4.1/lib/erlang",
@@ -123,19 +126,19 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  "--mount",
                  "type=bind,source=/private/tmp/arbor-val/home,target=/arbor/home",
                  "--mount",
-                 "type=bind,source=/private/tmp/arbor-val/tmp,target=/arbor/tmp",
-                 "--mount",
                  "type=bind,source=/private/tmp/arbor-val/build,target=/arbor/build",
                  "--mount",
                  "type=bind,source=/private/tmp/arbor-val/deps,target=/arbor/deps",
                  "--mount",
                  "type=bind,source=/private/tmp/arbor-val/bin,target=/arbor/bin,readonly",
+                 "--tmpfs",
+                 "/tmp",
                  "--workdir",
                  "/workspace",
                  "--env",
                  "HOME=/arbor/home",
                  "--env",
-                 "TMPDIR=/arbor/tmp",
+                 "TMPDIR=/tmp",
                  "--env",
                  "MIX_BUILD_PATH=/arbor/build",
                  "--env",
@@ -206,10 +209,38 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       refute String.contains?(mount_specs, "target=/usr/local,")
       refute String.contains?(mount_specs, "target=/usr/local/")
 
+      # Host tmp is not a plan projection and never appears in plan data/argv.
+      refute Map.has_key?(plan.projections, :tmp)
+      refute Map.has_key?(plan.projections, "tmp")
+      refute String.contains?(create_joined, @host_tmp_path)
+      refute String.contains?(inspect(plan), @host_tmp_path)
+      refute Enum.any?(create, &String.contains?(&1, "type=tmpfs"))
+      # Bind mounts never target guest /tmp; only the dedicated --tmpfs path token is /tmp.
+      refute Enum.any?(create, &String.contains?(&1, "target=/tmp"))
+
+      assert plan.guest_tmpfs == %{
+               guest_path: "/tmp",
+               argv_spec: "/tmp"
+             }
+
+      # Exactly one dedicated path-only --tmpfs option.
+      tmpfs_flag_indexes =
+        create
+        |> Enum.with_index()
+        |> Enum.filter(fn {token, _} -> token == "--tmpfs" end)
+        |> Enum.map(fn {_, idx} -> idx end)
+
+      assert length(tmpfs_flag_indexes) == 1
+      [tmpfs_idx] = tmpfs_flag_indexes
+      assert Enum.at(create, tmpfs_idx + 1) == "/tmp"
+      # No Docker-style size/mode options on the path token.
+      refute String.contains?(Enum.at(create, tmpfs_idx + 1), "size=")
+      refute String.contains?(Enum.at(create, tmpfs_idx + 1), "mode=")
+
+      # Mounts are host-source binds only.
       assert Enum.map(plan.mounts, & &1.guest_path) == [
                "/workspace",
                "/arbor/home",
-               "/arbor/tmp",
                "/arbor/build",
                "/arbor/deps",
                "/arbor/bin"
@@ -220,9 +251,12 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                :read_write,
                :read_write,
                :read_write,
-               :read_write,
                :read_only
              ]
+
+      assert Enum.all?(plan.mounts, &is_binary(&1.host_path))
+      refute Enum.any?(plan.mounts, &(&1.purpose == :tmp))
+      refute Enum.any?(plan.mounts, &(&1.guest_path == "/tmp"))
 
       # Runtime parent is not a mount purpose — only typed children + worktree/deps/wrapper.
       refute Enum.any?(plan.mounts, &(&1.purpose == :runtime))
@@ -254,6 +288,19 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert shown["guest_mix_home"] == "/usr/local/.mix"
       assert shown["guest_mix_archives"] == "/usr/local/.mix/archives"
       assert shown["guest_elixir_make_cache"] == "/usr/local/.cache/elixir_make"
+
+      assert shown["guest_tmpfs"] == %{
+               "guest_path" => "/tmp",
+               "argv_spec" => "/tmp"
+             }
+
+      refute Map.has_key?(shown["projections"], "tmp")
+      refute Enum.any?(shown["mounts"], &(&1["purpose"] == "tmp"))
+      refute Enum.any?(shown["mounts"], &(&1["guest_path"] == "/tmp"))
+      refute String.contains?(Jason.encode!(shown), @host_tmp_path)
+      assert "--tmpfs" in shown["argv"]["create"]
+      assert "/tmp" in shown["argv"]["create"]
+
       assert shown["argv"]["create"] == plan.argv.create
       assert Jason.encode!(shown)
     end
@@ -267,7 +314,6 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
         "projections" => %{
           "worktree" => @projections.worktree,
           "home" => @projections.home,
-          "tmp" => @projections.tmp,
           "build" => @projections.build,
           "deps" => @projections.deps,
           "mix_wrapper_dir" => @projections.mix_wrapper_dir
@@ -659,7 +705,6 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert purpose in [
                :worktree,
                :home,
-               :tmp,
                :build,
                :deps,
                :mix_wrapper_dir
@@ -713,7 +758,6 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       cases = [
         {{:worktree, "relative/worktree"}, :relative_path},
         {{:home, "/tmp/./home"}, :dot_segment},
-        {{:tmp, "/tmp/foo/../tmp"}, :dot_segment},
         {{:build, "/tmp//double"}, :non_canonical_path},
         {{:deps, "/tmp/deps/"}, :trailing_slash},
         {{:home, "/tmp/ho\0me"}, :nul_byte},
@@ -801,32 +845,32 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
       assert MapSet.new([c, d]) == MapSet.new([:home, :worktree])
 
-      # Read/write roots must not nest either direction (tmp under build).
-      nested_tmp =
+      # Read/write roots must not nest either direction (deps under build).
+      nested_deps =
         @projections
         |> Map.put(:build, "/private/tmp/arbor-val/build-root")
-        |> Map.put(:tmp, "/private/tmp/arbor-val/build-root/tmp")
+        |> Map.put(:deps, "/private/tmp/arbor-val/build-root/deps")
 
       assert {:error, {:overlapping_projection_paths, e, f}} =
-               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested_tmp))
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested_deps))
 
-      assert MapSet.new([e, f]) == MapSet.new([:build, :tmp])
+      assert MapSet.new([e, f]) == MapSet.new([:build, :deps])
 
-      # Opposite nesting direction (build under tmp).
+      # Opposite nesting direction (build under deps).
       nested_build =
         @projections
-        |> Map.put(:tmp, "/private/tmp/arbor-val/tmp-root")
-        |> Map.put(:build, "/private/tmp/arbor-val/tmp-root/build")
+        |> Map.put(:deps, "/private/tmp/arbor-val/deps-root")
+        |> Map.put(:build, "/private/tmp/arbor-val/deps-root/build")
 
       assert {:error, {:overlapping_projection_paths, g, h}} =
                AppleContainerPlanCore.new(Map.put(@valid_request, :projections, nested_build))
 
-      assert MapSet.new([g, h]) == MapSet.new([:tmp, :build])
+      assert MapSet.new([g, h]) == MapSet.new([:deps, :build])
 
-      # Every actual mount source pair remains subject to overlap rejection.
-      mount_purposes = [:worktree, :home, :tmp, :build, :deps, :mix_wrapper_dir]
+      # Every host bind projection pair remains subject to overlap rejection.
+      projection_purposes = [:worktree, :home, :build, :deps, :mix_wrapper_dir]
 
-      for parent <- mount_purposes, child <- mount_purposes, parent != child do
+      for parent <- projection_purposes, child <- projection_purposes, parent != child do
         nested =
           @projections
           |> Map.put(parent, "/private/tmp/arbor-val/overlap-parent")
@@ -837,6 +881,12 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
         assert MapSet.new([x, y]) == MapSet.new([parent, child])
       end
+
+      # Host :tmp is not an accepted plan projection key.
+      with_tmp = Map.put(@projections, :tmp, @host_tmp_path)
+
+      assert {:error, :unsupported_projection_keys} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :projections, with_tmp))
     end
 
     @tag :security_regression
@@ -857,7 +907,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  Map.put(@valid_request, :projections, with_runtime_string)
                )
 
-      # No mount source may be the common parent of home/tmp/build (runtime parent shape).
+      # No mount source may be the common parent of home/build/deps (runtime parent shape).
       # Using worktree as that parent would expose runner/result-style siblings if present.
       common_parent = "/private/tmp/arbor-val/revision-runtime"
 
@@ -865,8 +915,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
         @projections
         |> Map.put(:worktree, common_parent)
         |> Map.put(:home, common_parent <> "/home")
-        |> Map.put(:tmp, common_parent <> "/tmp")
         |> Map.put(:build, common_parent <> "/build")
+        |> Map.put(:deps, common_parent <> "/deps")
 
       assert {:error, {:overlapping_projection_paths, a, b}} =
                AppleContainerPlanCore.new(
@@ -874,30 +924,31 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                )
 
       assert MapSet.new([a, b])
-             |> MapSet.intersection(MapSet.new([:worktree, :home, :tmp, :build]))
+             |> MapSet.intersection(MapSet.new([:worktree, :home, :build, :deps]))
              |> MapSet.size() == 2
 
-      # Same common parent assigned to deps (also an RW mount source).
+      # Same common parent assigned to deps while nesting home/build.
       parent_as_deps =
         @projections
         |> Map.put(:deps, common_parent)
         |> Map.put(:home, common_parent <> "/home")
-        |> Map.put(:tmp, common_parent <> "/tmp")
         |> Map.put(:build, common_parent <> "/build")
 
       assert {:error, {:overlapping_projection_paths, c, d}} =
                AppleContainerPlanCore.new(Map.put(@valid_request, :projections, parent_as_deps))
 
       assert MapSet.new([c, d])
-             |> MapSet.intersection(MapSet.new([:deps, :home, :tmp, :build]))
+             |> MapSet.intersection(MapSet.new([:deps, :home, :build]))
              |> MapSet.size() == 2
 
-      # Successful plan never mounts a path that is an ancestor of home+tmp+build.
+      # Successful plan mounts only host bind sources; never host tmp path.
       assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
-      mount_sources = Enum.map(plan.mounts, & &1.host_path)
+      bind_sources = Enum.map(plan.mounts, & &1.host_path)
+      refute @host_tmp_path in bind_sources
+      refute String.contains?(inspect(plan), @host_tmp_path)
 
-      for source <- mount_sources do
-        children = [@projections.home, @projections.tmp, @projections.build]
+      for source <- bind_sources do
+        children = [@projections.home, @projections.build, @projections.deps]
 
         ancestor_of_all? =
           Enum.all?(children, fn child ->
@@ -905,7 +956,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
           end)
 
         refute ancestor_of_all?,
-               "mount source #{inspect(source)} must not be common parent of home/tmp/build"
+               "mount source #{inspect(source)} must not be common parent of home/build/deps"
       end
     end
 
@@ -959,6 +1010,40 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
 
       assert {:error, {:unsupported_request_keys, _}} =
                AppleContainerPlanCore.new(Map.put(@valid_request, :extra_flags, ["--privileged"]))
+    end
+
+    @tag :security_regression
+    test "rejects caller control of guest tmpfs path, size, or mode" do
+      for key <- [
+            :tmpfs,
+            :tmpfs_size,
+            :tmpfs_path,
+            :tmpfs_mode,
+            :guest_tmp,
+            :guest_tmpfs,
+            :guest_tmp_path,
+            :guest_tmpfs_size,
+            :guest_tmpfs_mode,
+            "tmpfs",
+            "tmpfs_size",
+            "guest_tmpfs"
+          ] do
+        assert {:error, {:unsupported_request_keys, _}} =
+                 AppleContainerPlanCore.new(Map.put(@valid_request, key, "/evil-tmp")),
+               "expected rejection for caller tmpfs key #{inspect(key)}"
+      end
+
+      # Successful create always uses the fixed dedicated path-only --tmpfs grammar.
+      assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+      create = plan.argv.create
+
+      assert Enum.count(create, &(&1 == "--tmpfs")) == 1
+      tmpfs_idx = Enum.find_index(create, &(&1 == "--tmpfs"))
+      assert Enum.at(create, tmpfs_idx + 1) == "/tmp"
+      refute Enum.any?(create, &String.contains?(&1, "type=tmpfs"))
+      refute Enum.any?(create, &String.contains?(&1, "size="))
+      refute Enum.any?(create, &String.contains?(&1, "mode="))
+      refute String.contains?(Enum.join(create, " "), @host_tmp_path)
     end
   end
 
@@ -1187,14 +1272,19 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert AppleContainerPlanCore.runtime_handler() == "container-runtime-linux"
       assert AppleContainerPlanCore.registry_scheme() == "https"
 
+      # Bind table is host sources only — guest tmp is private dedicated tmpfs.
       assert AppleContainerPlanCore.guest_mount_table() == [
                {:worktree, "/workspace", :read_write},
                {:home, "/arbor/home", :read_write},
-               {:tmp, "/arbor/tmp", :read_write},
                {:build, "/arbor/build", :read_write},
                {:deps, "/arbor/deps", :read_write},
                {:mix_wrapper_dir, "/arbor/bin", :read_only}
              ]
+
+      assert AppleContainerPlanCore.guest_tmpfs() == %{
+               guest_path: "/tmp",
+               argv_spec: "/tmp"
+             }
 
       assert AppleContainerPlanCore.guest_runtime_roots() == %{
                erlang: "/usr/local/lib/erlang",

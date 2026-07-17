@@ -32,10 +32,9 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
   @projections %{
     worktree: "/private/tmp/arbor-val/worktree",
     home: "/private/tmp/arbor-val/home",
-    tmp: "/private/tmp/arbor-val/tmp",
     build: "/private/tmp/arbor-val/build",
     deps: "/private/tmp/arbor-val/deps",
-    mix_wrapper: "/private/tmp/arbor-val/bin/mix"
+    mix_wrapper_dir: "/private/tmp/arbor-val/bin"
   }
 
   @host_runtime_roots %{

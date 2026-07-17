@@ -427,8 +427,34 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
                  "type=bind,source=/private/tmp/arbor-val/bin,target=/arbor/bin,readonly"
              }
 
-      assert wrapper_mount.mount_spec in spec.plan.argv.create
-      refute @mix_wrapper in spec.plan.argv.create
+      # Incoming envelope still requires :tmp; Apple plan omits host tmp entirely.
+      assert Enum.any?(
+               base_projections().read_write,
+               &(&1["purpose"] == "tmp" and &1["path"] == "/private/tmp/arbor-val/tmp")
+             )
+
+      refute Map.has_key?(spec.plan.projections, :tmp)
+      refute Enum.any?(spec.plan.mounts, &(&1.purpose == :tmp))
+      refute Enum.any?(spec.plan.mounts, &(&1.guest_path == "/tmp"))
+      refute String.contains?(inspect(spec.plan), "/private/tmp/arbor-val/tmp")
+
+      assert spec.plan.guest_tmpfs == %{
+               guest_path: "/tmp",
+               argv_spec: "/tmp"
+             }
+
+      create = spec.plan.argv.create
+      assert Enum.count(create, &(&1 == "--tmpfs")) == 1
+      tmpfs_idx = Enum.find_index(create, &(&1 == "--tmpfs"))
+      assert Enum.at(create, tmpfs_idx + 1) == "/tmp"
+      refute String.contains?(Enum.at(create, tmpfs_idx + 1), "size=")
+      refute String.contains?(Enum.at(create, tmpfs_idx + 1), "mode=")
+      refute Enum.any?(create, &String.contains?(&1, "type=tmpfs"))
+      refute Enum.any?(create, &String.contains?(&1, "source=/private/tmp/arbor-val/tmp"))
+      refute Enum.any?(create, &String.contains?(&1, "target=/tmp"))
+
+      assert wrapper_mount.mount_spec in create
+      refute @mix_wrapper in create
 
       # The derived directory is mount data only, never alternate tool authority.
       assert {:error, :tool_name_mix_wrapper_mismatch} =
@@ -444,10 +470,10 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
 
       assert spec.plan.projections.worktree == @worktree
       assert spec.plan.projections.home == "/private/tmp/arbor-val/home"
-      assert spec.plan.projections.tmp == "/private/tmp/arbor-val/tmp"
       assert spec.plan.projections.build == "/private/tmp/arbor-val/build"
       assert spec.plan.projections.deps == "/private/tmp/arbor-val/deps"
       assert spec.plan.projections.mix_wrapper_dir == @mix_wrapper_dir
+      refute Map.has_key?(spec.plan.projections, :tmp)
       refute Map.has_key?(spec.plan.projections, :mix_wrapper)
       refute Map.has_key?(spec.plan.projections, :runtime)
 
@@ -499,6 +525,12 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
 
       assert {:error, {:missing_projections, [:deps]}} =
                Core.new(valid_request(%{opts: valid_opts(filesystem_projections: missing)}))
+
+      # Owner resource envelope still requires :tmp for lifecycle accounting.
+      missing_tmp = delete_group_entry(base_projections(), :read_write, :tmp)
+
+      assert {:error, {:missing_projections, [:tmp]}} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: missing_tmp)}))
 
       extra =
         Map.update!(base_projections(), :read_write, fn list ->

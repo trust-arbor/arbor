@@ -21,10 +21,28 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   `Arbor.Shell.execute_spawn_capable/3`) interprets admitted plans after pure
   preflight and admission.
 
-  Every bind source in `:projections` is a host directory. In particular,
-  `:mix_wrapper_dir` is the canonical parent of the separately reviewed Mix
-  wrapper file. It is mounted read-only at fixed guest `/arbor/bin`, while the
-  fixed entrypoint remains `/arbor/bin/mix`.
+  Plan `:projections` are **host bind sources only** — every admitted projection
+  becomes a guest bind mount. In particular, `:mix_wrapper_dir` is the
+  canonical parent of the separately reviewed Mix wrapper file and is mounted
+  read-only at fixed guest `/arbor/bin`, while the fixed entrypoint remains
+  `/arbor/bin/mix`. Host Erlang/Elixir roots are provenance-only and are
+  intentionally absent. Revision runtime parents (owner of home/tmp/build +
+  runner/result) are cleanup ownership only — never a guest mount purpose.
+
+  **Guest temporary directory is never a host bind.** Apple virtiofs does not
+  provide stable inode identity for host bind mounts, so binding a host tmp
+  path into the guest breaks `Arbor.Shell.OwnedTree` identity checks. Create
+  argv therefore always emits the Apple Container 1.1.0 dedicated `--tmpfs`
+  option with the fixed path-only argv pair proven live:
+
+      `--tmpfs` `/tmp`
+
+  The CLI does not accept Docker-style size/mode options on this flag; the
+  guest defaults to a writable sticky directory (mode 1777). `TMPDIR` is
+  `/tmp`. Path is a planner constant — never caller/task controlled. The host
+  tmp path belongs to the broader owner resource envelope (ExecutionCore
+  `filesystem_projections`) and must not appear anywhere in this Apple
+  canonical plan, show output, mounts, or create argv.
 
   Hex, Rebar, verified precompiled NIF archives, and Linux-native build tools
   are image-owned. The planner only exposes their fixed guest locations; it
@@ -53,19 +71,22 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @guest_mix_archives "/usr/local/.mix/archives"
   @guest_elixir_make_cache "/usr/local/.cache/elixir_make"
 
+  # Fixed private guest tmpfs path (never host-bound). Apple Container 1.1.0
+  # create accepts the dedicated --tmpfs option as a path-only value; live proof
+  # mounts tmpfs at /tmp with sticky directory mode 1777 by default.
+  @guest_tmp_path "/tmp"
+
   # Local-only execution alias sinks. Port 0 is non-connectable; these strings
   # name operator-provisioned local store entries, not pull destinations.
   @workload_execution_alias_prefix "127.0.0.1:0/arbor/workload@sha256:"
   @init_execution_alias_prefix "127.0.0.1:0/arbor/vminit@sha256:"
 
-  # Required host projections and their fixed guest targets / modes.
-  # Host Erlang/Elixir roots are provenance-only and are intentionally absent.
-  # Revision runtime parents (owner of home/tmp/build + runner/result) are
-  # cleanup ownership only — never a guest mount purpose.
+  # Required host bind projections and their fixed guest targets / modes.
+  # Deliberately excludes host :tmp — guest /tmp is a private tmpfs
+  # (see guest_tmpfs/0 and build_argv/8), not a plan projection.
   @projection_specs [
     {:worktree, "/workspace", :read_write},
     {:home, "/arbor/home", :read_write},
-    {:tmp, "/arbor/tmp", :read_write},
     {:build, "/arbor/build", :read_write},
     {:deps, "/arbor/deps", :read_write},
     {:mix_wrapper_dir, @guest_mix_wrapper_dir, :read_only}
@@ -131,7 +152,6 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @type projections :: %{
           worktree: host_directory_path(),
           home: host_directory_path(),
-          tmp: host_directory_path(),
           build: host_directory_path(),
           deps: host_directory_path(),
           mix_wrapper_dir: host_directory_path()
@@ -142,12 +162,19 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
           elixir: host_path()
         }
 
+  # Bind mounts only — every entry has a host source. Guest tmpfs is separate.
   @type mount_plan :: %{
           purpose: atom(),
           host_path: host_directory_path(),
           guest_path: String.t(),
           mode: :read_only | :read_write,
           mount_spec: String.t()
+        }
+
+  @type guest_tmpfs :: %{
+          # Fixed guest mount path and exact second --tmpfs argv token (path-only).
+          guest_path: String.t(),
+          argv_spec: String.t()
         }
 
   @type argv_plans :: %{
@@ -179,7 +206,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
           guest_elixir_make_cache: String.t(),
           guest_workdir: String.t(),
           guest_mix_wrapper: String.t(),
+          guest_tmpfs: guest_tmpfs(),
           resource_limits: %{cpus: String.t(), memory: String.t()},
+          # Host-source bind mounts only (never guest tmpfs).
           mounts: [mount_plan()],
           env: [{String.t(), String.t()}],
           lifecycle: %{
@@ -215,8 +244,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
          {:ok, mix_env} <- fetch_mix_env(request),
          {:ok, command_args} <- fetch_command_args(request) do
       mounts = build_mounts(projections)
+      guest_tmpfs = guest_tmpfs()
       env = build_env(mix_env)
-      argv = build_argv(name, image, init_image, kernel_path, mounts, env, command_args)
+
+      argv =
+        build_argv(name, image, init_image, kernel_path, mounts, guest_tmpfs, env, command_args)
 
       plan = %{
         runtime_executable: @runtime_executable,
@@ -240,6 +272,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
         guest_elixir_make_cache: @guest_elixir_make_cache,
         guest_workdir: @guest_workdir,
         guest_mix_wrapper: @guest_mix_wrapper,
+        guest_tmpfs: guest_tmpfs,
         resource_limits: %{cpus: @cpus, memory: @memory},
         mounts: mounts,
         env: env,
@@ -287,6 +320,10 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       "guest_elixir_make_cache" => plan.guest_elixir_make_cache,
       "guest_workdir" => plan.guest_workdir,
       "guest_mix_wrapper" => plan.guest_mix_wrapper,
+      "guest_tmpfs" => %{
+        "guest_path" => plan.guest_tmpfs.guest_path,
+        "argv_spec" => plan.guest_tmpfs.argv_spec
+      },
       "resource_limits" => stringify_keys(plan.resource_limits),
       "mounts" =>
         Enum.map(plan.mounts, fn mount ->
@@ -318,9 +355,28 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @spec runtime_executable() :: String.t()
   def runtime_executable, do: @runtime_executable
 
-  @doc "Fixed guest mount table (purpose → guest path + mode)."
+  @doc """
+  Fixed guest **bind** mount table (purpose → guest path + mode).
+
+  Host bind sources only. Guest temporary storage is a private tmpfs (see
+  `guest_tmpfs/0`), never a plan projection or bind mount.
+  """
   @spec guest_mount_table() :: [{atom(), String.t(), :read_only | :read_write}]
   def guest_mount_table, do: @projection_specs
+
+  @doc """
+  Fixed private guest tmpfs at `/tmp`.
+
+  Path and the dedicated `--tmpfs` argv token are planner constants — never
+  caller-configurable. Apple Container 1.1.0 accepts path-only `--tmpfs` values.
+  """
+  @spec guest_tmpfs() :: guest_tmpfs()
+  def guest_tmpfs do
+    %{
+      guest_path: @guest_tmp_path,
+      argv_spec: @guest_tmp_path
+    }
+  end
 
   @doc "Fixed guest runtime roots attested by the reviewed image."
   @spec guest_runtime_roots() :: %{erlang: String.t(), elixir: String.t()}
@@ -1039,10 +1095,12 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   # ── Plan builders ──────────────────────────────────────────────────────
 
+  # Host-source bind mounts only. Guest /tmp is a private tmpfs emitted via
+  # the dedicated --tmpfs argv (see build_argv/8), not a bind mount record.
   defp build_mounts(projections) do
     Enum.map(@projection_specs, fn {purpose, guest_path, mode} ->
       host_path = Map.fetch!(projections, purpose)
-      mount_spec = mount_spec(host_path, guest_path, mode)
+      mount_spec = bind_mount_spec(host_path, guest_path, mode)
 
       %{
         purpose: purpose,
@@ -1054,11 +1112,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     end)
   end
 
-  defp mount_spec(host_path, guest_path, :read_write) do
+  defp bind_mount_spec(host_path, guest_path, :read_write) do
     "type=bind,source=#{host_path},target=#{guest_path}"
   end
 
-  defp mount_spec(host_path, guest_path, :read_only) do
+  defp bind_mount_spec(host_path, guest_path, :read_only) do
     "type=bind,source=#{host_path},target=#{guest_path},readonly"
   end
 
@@ -1067,7 +1125,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     # caller-selected value (already allowlisted).
     [
       {"HOME", "/arbor/home"},
-      {"TMPDIR", "/arbor/tmp"},
+      {"TMPDIR", @guest_tmp_path},
       {"MIX_BUILD_PATH", "/arbor/build"},
       {"MIX_DEPS_PATH", "/arbor/deps"},
       {"MIX_HOME", @guest_mix_home},
@@ -1080,7 +1138,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     ]
   end
 
-  defp build_argv(name, image, init_image, kernel_path, mounts, env, command_args) do
+  defp build_argv(name, image, init_image, kernel_path, mounts, guest_tmpfs, env, command_args) do
     # Force the reviewed wrapper via --entrypoint independently of image
     # metadata. After the local workload execution-alias token, append only
     # caller command_args — never a second /arbor/bin/mix positional token.
@@ -1089,6 +1147,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     # --network/--no-dns) are fixed or validated closed fields; they appear before
     # mounts and the workload alias so create management options are never
     # reinterpreted as init-process arguments after the image token.
+    #
+    # Guest tmp is the dedicated Apple Container 1.1.0 `--tmpfs` option with a
+    # fixed path-only token (`/tmp`) — never size/mode options, never a
+    # type=tmpfs --mount record, and never a host bind of the owner resource
+    # tmp path.
     #
     # `image` / `init_image` are already proven local execution aliases — never
     # external provisioning references.
@@ -1121,6 +1184,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
         @memory
       ]
       |> Kernel.++(mount_argv(mounts))
+      |> Kernel.++(["--tmpfs", guest_tmpfs.argv_spec])
       |> Kernel.++(["--workdir", @guest_workdir])
       |> Kernel.++(env_argv(env))
       |> Kernel.++(["--entrypoint", @guest_mix_wrapper, image])

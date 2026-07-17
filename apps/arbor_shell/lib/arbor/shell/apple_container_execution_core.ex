@@ -108,7 +108,10 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   @allowed_revisions MapSet.new(["candidate", "base"])
   @allowed_revision_atoms MapSet.new([:candidate, :base])
 
-  @plan_directory_projection_keys [:worktree, :home, :tmp, :build, :deps]
+  # Host bind sources only for Apple PlanCore. `:tmp` remains mandatory on the
+  # owner filesystem_projections envelope for broader validation lifecycle, but
+  # is omitted here — guest /tmp is a fixed private tmpfs, not a host bind.
+  @plan_directory_projection_keys [:worktree, :home, :build, :deps]
 
   @entry_logical_keys [:path, :mode, :purpose]
   @allowed_entry_keys MapSet.new(

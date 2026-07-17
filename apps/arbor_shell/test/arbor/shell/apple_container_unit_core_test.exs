@@ -22,10 +22,9 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
   @projections %{
     worktree: "/private/tmp/arbor-val/worktree",
     home: "/private/tmp/arbor-val/home",
-    tmp: "/private/tmp/arbor-val/tmp",
     build: "/private/tmp/arbor-val/build",
     deps: "/private/tmp/arbor-val/deps",
-    mix_wrapper: "/private/tmp/arbor-val/bin/mix"
+    mix_wrapper_dir: "/private/tmp/arbor-val/bin"
   }
 
   @host_runtime_roots %{
@@ -134,6 +133,63 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
 
       assert {:error, :plan_not_canonical} =
                Unit.new(%{plan | resource_limits: %{cpus: "99", memory: "99G"}})
+    end
+
+    @tag :security_regression
+    test "rejects forged guest tmpfs path and reintroduced host tmp bind", %{plan: plan} do
+      host_tmp = "/private/tmp/arbor-val/tmp"
+
+      # Canonical plan uses dedicated path-only --tmpfs; mounts stay bind-only.
+      assert plan.guest_tmpfs == %{guest_path: "/tmp", argv_spec: "/tmp"}
+      refute Enum.any?(plan.mounts, &(&1.purpose == :tmp))
+      assert Enum.count(plan.argv.create, &(&1 == "--tmpfs")) == 1
+      tmpfs_idx = Enum.find_index(plan.argv.create, &(&1 == "--tmpfs"))
+      assert Enum.at(plan.argv.create, tmpfs_idx + 1) == "/tmp"
+
+      forged_tmpfs = %{guest_path: "/evil/tmp", argv_spec: "/evil/tmp"}
+
+      forged_argv_path =
+        Map.update!(plan.argv, :create, fn create ->
+          # Replace only the --tmpfs path token, not arbitrary "/tmp" substrings.
+          create
+          |> Enum.with_index()
+          |> Enum.map(fn
+            {token, ^tmpfs_idx} -> token
+            {_token, idx} when idx == tmpfs_idx + 1 -> forged_tmpfs.argv_spec
+            {token, _} -> token
+          end)
+        end)
+
+      assert {:error, :plan_not_canonical} =
+               Unit.new(%{plan | guest_tmpfs: forged_tmpfs, argv: forged_argv_path})
+
+      # Reintroducing a host tmp bind mount must fail closed.
+      forged_mounts =
+        plan.mounts ++
+          [
+            %{
+              purpose: :tmp,
+              host_path: host_tmp,
+              guest_path: "/tmp",
+              mode: :read_write,
+              mount_spec: "type=bind,source=#{host_tmp},target=/tmp"
+            }
+          ]
+
+      forged_argv_bind =
+        Map.update!(plan.argv, :create, fn create ->
+          create
+          |> Enum.with_index()
+          |> Enum.reject(fn {_token, idx} -> idx in [tmpfs_idx, tmpfs_idx + 1] end)
+          |> Enum.map(&elem(&1, 0))
+          |> Kernel.++([
+            "--mount",
+            "type=bind,source=#{host_tmp},target=/tmp"
+          ])
+        end)
+
+      assert {:error, :plan_not_canonical} =
+               Unit.new(%{plan | mounts: forged_mounts, argv: forged_argv_bind})
     end
   end
 
