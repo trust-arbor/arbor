@@ -13,11 +13,9 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryCore do
   """
 
   alias Arbor.Shell.AppleContainerUnitCore
+  alias Arbor.Shell.AppleContainerUnitName
 
   @runtime_executable "/usr/local/bin/container"
-  @unit_name_prefix "arbor-v1-"
-  @unit_name_hex_bytes 32
-  @unit_name_re ~r/\Aarbor-v1-[0-9a-f]{32}\z/
 
   @max_cleanup_diagnostics 16
   @max_cleanup_rounds 10_000
@@ -175,26 +173,7 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryCore do
   defp verify_absent_argv,
     do: [@runtime_executable, "list", "--all", "--format", "json"]
 
-  defp validate_unit_name(name) when is_binary(name) do
-    cond do
-      not String.valid?(name) ->
-        {:error, :invalid_unit_name}
-
-      byte_size(name) != byte_size(@unit_name_prefix) + @unit_name_hex_bytes ->
-        {:error, :invalid_unit_name}
-
-      not String.starts_with?(name, @unit_name_prefix) ->
-        {:error, :invalid_unit_name}
-
-      not Regex.match?(@unit_name_re, name) ->
-        {:error, :invalid_unit_name}
-
-      true ->
-        {:ok, name}
-    end
-  end
-
-  defp validate_unit_name(_), do: {:error, :invalid_unit_name}
+  defp validate_unit_name(name), do: AppleContainerUnitName.validate(name)
 
   # --- State admission --------------------------------------------------------
 

@@ -21,7 +21,7 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
   @kernel "/usr/local/share/container/kernels/default.kernel"
   @mix_wrapper "/private/tmp/arbor-val/bin/mix"
   @worktree "/private/tmp/arbor-val/worktree"
-  @unit_name_re ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/
+  @unit_name_re ~r/\Aarbor-v1-[0-9a-f]{32}\z/
 
   @valid_admission %{
     "admitted" => true,
@@ -216,7 +216,7 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
       end,
       generate_unit_name: fn ->
         record(agent, :random_calls)
-        name = "a" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+        name = "arbor-v1-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
         record(agent, :generated_names, name)
         name
       end,
@@ -640,7 +640,7 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
         base_deps(agent, %{
           generate_unit_name: fn ->
             record(agent, :random_calls)
-            name = "u" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+            name = "arbor-v1-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
             record(agent, :generated_names, name)
             name
           end

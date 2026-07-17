@@ -21,12 +21,11 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
   @max_generation 9_007_199_254_740_991
   @max_map_keys 16
   @max_execution_id_bytes 256
-  @unit_name_prefix "arbor-v1-"
-  @unit_name_hex_bytes 32
   @token_hex_bytes 64
 
-  @unit_name_re ~r/\Aarbor-v1-[0-9a-f]{32}\z/
   @token_re ~r/\A[0-9a-f]{64}\z/
+
+  alias Arbor.Shell.AppleContainerUnitName
 
   # Closed journal surface (atom form). String aliases accepted only when the
   # atom form is absent — never both.
@@ -370,26 +369,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
 
   # --- Field validators -------------------------------------------------------
 
-  defp validate_unit_name(name) when is_binary(name) do
-    cond do
-      not String.valid?(name) ->
-        {:error, :invalid_unit_name}
-
-      byte_size(name) != byte_size(@unit_name_prefix) + @unit_name_hex_bytes ->
-        {:error, :invalid_unit_name}
-
-      not String.starts_with?(name, @unit_name_prefix) ->
-        {:error, :invalid_unit_name}
-
-      not Regex.match?(@unit_name_re, name) ->
-        {:error, :invalid_unit_name}
-
-      true ->
-        {:ok, name}
-    end
-  end
-
-  defp validate_unit_name(_), do: {:error, :invalid_unit_name}
+  defp validate_unit_name(name), do: AppleContainerUnitName.validate(name)
 
   defp validate_execution_id(id) when is_binary(id) do
     size = byte_size(id)

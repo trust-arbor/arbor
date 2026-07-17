@@ -63,6 +63,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
   alias Arbor.Shell.AppleContainerUnitDrainCoordinatorCore, as: Core
   alias Arbor.Shell.AppleContainerUnitJournal, as: Journal
+  alias Arbor.Shell.AppleContainerUnitName
   alias Arbor.Shell.AppleContainerUnitRecoveryReconciler, as: Reconciler
   alias Arbor.Shell.AppleContainerUnitRuntime
   alias Arbor.Shell.AppleContainerUnitWorker, as: Worker
@@ -1288,11 +1289,11 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   defp fetch_unit_name(%{plan: plan}) when is_map(plan) do
     name = Map.get(plan, :unit_name)
 
-    if is_binary(name) and byte_size(name) > 0 and byte_size(name) <= @max_unit_name_bytes and
-         String.valid?(name) do
+    with true <- is_binary(name) and byte_size(name) <= @max_unit_name_bytes,
+         {:ok, ^name} <- AppleContainerUnitName.validate(name) do
       {:ok, name}
     else
-      {:error, :invalid_unit_name}
+      _ -> {:error, :invalid_unit_name}
     end
   end
 

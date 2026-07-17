@@ -21,6 +21,7 @@ defmodule Arbor.Shell.AppleContainerExecutor do
   alias Arbor.Shell.AppleContainerProber
   alias Arbor.Shell.AppleContainerProbeRuntime
   alias Arbor.Shell.AppleContainerUnitDrainCoordinator
+  alias Arbor.Shell.AppleContainerUnitName
   alias Arbor.Shell.AppleContainerUnitWorker
   alias Arbor.Shell.ExecutablePolicy.Executable
   alias Arbor.Shell.ExecutionRegistry
@@ -35,8 +36,6 @@ defmodule Arbor.Shell.AppleContainerExecutor do
   @max_result_stdout_bytes 8_388_608
   @max_begin_timeout_ms 60_000
   @poll_ms 25
-  @unit_name_re ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/
-
   @allowed_test_dep_keys MapSet.new([
                            :probe,
                            :resolve_executable,
@@ -166,9 +165,10 @@ defmodule Arbor.Shell.AppleContainerExecutor do
   end
 
   defp generate_unit_name do
-    # Cryptographic randomness in the core-accepted lowercase DNS-like format.
-    # Caller opts never nominate this value.
-    "a" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    # Caller opts never nominate this value. The canonical mapping is shared
+    # with the durable journal and recovery state machine.
+    {:ok, name} = AppleContainerUnitName.from_entropy(:crypto.strong_rand_bytes(16))
+    name
   end
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
@@ -320,10 +320,9 @@ defmodule Arbor.Shell.AppleContainerExecutor do
   end
 
   defp validate_generated_unit_name(name) when is_binary(name) do
-    if byte_size(name) >= 2 and byte_size(name) <= 63 and Regex.match?(@unit_name_re, name) do
-      :ok
-    else
-      {:error, :unit_name_generation_failed}
+    case AppleContainerUnitName.validate(name) do
+      {:ok, ^name} -> :ok
+      {:error, :invalid_unit_name} -> {:error, :unit_name_generation_failed}
     end
   end
 
