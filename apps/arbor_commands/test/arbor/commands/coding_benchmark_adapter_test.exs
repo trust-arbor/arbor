@@ -11,6 +11,15 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.Plan
 
+  # Test-only ceiling for production-fixture scenarios that are expected to
+  # complete successfully (happy path, security regressions, artifact cases).
+  # Successful runs finish well under this budget; the cap only absorbs
+  # one-CPU/low-memory sandbox scheduling noise. Kept below ExUnit's default
+  # 60s per-test ceiling so paired legacy/pipeline execution still has outer
+  # headroom if a child hangs. Do not reuse for intentional timeout/
+  # cancellation/late-writer tests — those pass an explicit short deadline.
+  @successful_fixture_execution_timeout_ms 30_000
+
   @runtime_env [
     {:arbor_commands, :coding_benchmark_principal_id},
     {:arbor_commands, :coding_benchmark_legacy_executor_module},
@@ -591,7 +600,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
         assert String.starts_with?(artifact_root, scenario.artifact_root <> "/task-")
       end
 
-      assert context["timeout"] == 5_000
+      assert context["timeout"] == @successful_fixture_execution_timeout_ms
     end
 
     assert hd(report["pairs"])["comparison"]["status"] == "equivalent"
@@ -1586,7 +1595,10 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
     %{legacy: request.("legacy"), pair_root: pair_root, pipeline: request.("pipeline")}
   end
 
-  defp production_scenario!(timeout_ms \\ 5_000, cancellation_timeout_ms \\ 500) do
+  defp production_scenario!(
+         timeout_ms \\ @successful_fixture_execution_timeout_ms,
+         cancellation_timeout_ms \\ 500
+       ) do
     root = temp_directory!("coding-benchmark-production")
     scenario = Scenario.create!(root, ["happy"])
     artifact_root = configure_runtime!(root, timeout_ms, cancellation_timeout_ms)
