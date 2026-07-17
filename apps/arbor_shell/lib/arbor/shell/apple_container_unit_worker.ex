@@ -65,7 +65,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   @journal_retry_max_ms 2_000
 
   @required_runtime_callbacks [
-    {:start_command, 4},
+    {:start_command, 5},
     {:kill, 1},
     {:get_id, 1},
     {:get_result, 1},
@@ -722,7 +722,9 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     with :ok <- require_no_pending(state),
          {:ok, args} <- strip_runtime_prefix(argv, state.executable),
          {:ok, timeout_ms} <- phase_timeout(state, phase),
-         {:ok, max_output} <- phase_max_output(state, phase) do
+         {:ok, max_output} <- phase_max_output(state, phase),
+         {:ok, resource_profile} <- launch_resource_profile(state) do
+      # Profile is a distinct trusted argument — never a raw ceiling override in opts.
       opts = [
         cwd: "/",
         clear_env: true,
@@ -732,7 +734,13 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         max_output_bytes: max_output
       ]
 
-      case state.runtime.start_command(state.executable, args, @display_command, opts) do
+      case state.runtime.start_command(
+             state.executable,
+             args,
+             @display_command,
+             resource_profile,
+             opts
+           ) do
         {:ok, session} ->
           session_id =
             case state.runtime.get_id(session) do
@@ -764,6 +772,13 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
         handle_phase_launch_failure(state, phase, :launch_error)
     end
   end
+
+  # Exact admitted durable plan profile only — fail closed on unknown/malformed.
+  defp launch_resource_profile(%{spec: %{plan: plan}}) when is_map(plan) do
+    fetch_spec_resource_profile(plan)
+  end
+
+  defp launch_resource_profile(_state), do: {:error, :invalid_resource_profile}
 
   defp require_no_pending(%{pending_result: true}), do: {:error, :session_result_pending}
   defp require_no_pending(_), do: :ok

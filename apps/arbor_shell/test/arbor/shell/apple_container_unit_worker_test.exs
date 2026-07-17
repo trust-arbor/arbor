@@ -105,9 +105,13 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       GenServer.call(__MODULE__, :held_count)
     end
 
-    def start_command(executable, args, display_command, opts) do
+    def start_command(executable, args, display_command, resource_profile, opts) do
       ensure_started()
-      GenServer.call(__MODULE__, {:start_command, executable, args, display_command, opts})
+
+      GenServer.call(
+        __MODULE__,
+        {:start_command, executable, args, display_command, resource_profile, opts}
+      )
     end
 
     def kill(session) when is_pid(session) do
@@ -195,11 +199,16 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       {:reply, :ok, %{state | held: []}}
     end
 
-    def handle_call({:start_command, executable, args, display_command, opts}, _from, state) do
+    def handle_call(
+          {:start_command, executable, args, display_command, resource_profile, opts},
+          _from,
+          state
+        ) do
       call = %{
         executable: executable,
         args: args,
         display_command: display_command,
+        resource_profile: resource_profile,
         opts: opts
       }
 
@@ -990,6 +999,52 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       exec = await_registry_terminal(execution_id)
       assert exec.status == :failed
       assert exec.result.error == :list_containment_failure
+    end
+
+    test "production launch forwards admitted intensive profile through runtime boundary", %{
+      executable: executable
+    } do
+      assert {:ok, intensive_plan} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :resource_profile, :intensive))
+
+      assert {:ok, intensive_ceiling} = Shell.spawn_capable_max_timeout_ms(:intensive)
+      assert intensive_ceiling == 1_200_000
+
+      intensive_spec = %{
+        plan: intensive_plan,
+        timeout_ms: intensive_ceiling,
+        max_output_bytes: 8_192
+      }
+
+      script = [
+        success_list([]),
+        success(%{exit_code: 0, stdout: "created"}),
+        success(%{exit_code: 0, stdout: "ok", duration_ms: 12}),
+        success(%{exit_code: 0}),
+        success(%{exit_code: 0}),
+        success_list([])
+      ]
+
+      {execution_id, _worker, _} = start_and_begin(intensive_spec, executable, script)
+      assert {:ok, _result} = await_terminal(execution_id, 10_000)
+
+      calls = FakeRuntime.calls()
+      assert length(calls) == 6
+
+      for call <- calls do
+        assert call.resource_profile == :intensive
+        refute Keyword.has_key?(call.opts, :resource_profile)
+        refute Keyword.has_key?(call.opts, :max_timeout)
+        refute Keyword.has_key?(call.opts, :timeout_ceiling)
+      end
+
+      # Preflight list, create, and start use the remaining intensive operation budget.
+      for call <- Enum.take(calls, 3) do
+        timeout = Keyword.get(call.opts, :timeout)
+        assert is_integer(timeout)
+        assert timeout > 600_000
+        assert timeout <= intensive_ceiling
+      end
     end
   end
 

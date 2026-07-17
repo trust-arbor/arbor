@@ -10,10 +10,21 @@ defmodule Arbor.Shell.PortSession do
   use GenServer
 
   alias Arbor.Identifiers
-  alias Arbor.Shell.{ExecutablePolicy, ExecutionRegistry, Executor, ProcessGroup, Sandbox}
+
+  alias Arbor.Shell.{
+    ExecutablePolicy,
+    ExecutionRegistry,
+    Executor,
+    ProcessGroup,
+    Sandbox,
+    SpawnCapableTimeout
+  }
+
   alias Arbor.Signals
 
   @default_timeout 30_000
+  # Generic public Shell streaming / PortSession ceiling. Intensive spawn-capable
+  # Apple Container phases use start_supervised_direct_for_profile/5 instead.
   @max_stream_timeout 600_000
   @retention_ms 1_000
 
@@ -78,6 +89,60 @@ defmodule Arbor.Shell.PortSession do
     )
   end
 
+  # Internal direct session for already-admitted spawn-capable Apple Container
+  # phases. Timeout ceiling is selected only by the closed resource profile
+  # (`:standard` | `:intensive`) via SpawnCapableTimeout — never by a
+  # caller-supplied numeric max. Ordinary streaming/execute paths must keep
+  # using start_supervised_direct/4 and the generic @max_stream_timeout.
+  @doc false
+  @spec start_supervised_direct_for_profile(
+          String.t() | term(),
+          [String.t()],
+          String.t(),
+          term(),
+          keyword()
+        ) :: {:ok, pid()} | {:error, term()}
+  def start_supervised_direct_for_profile(
+        executable,
+        args,
+        display_command,
+        resource_profile,
+        opts \\ []
+      )
+
+  def start_supervised_direct_for_profile(
+        executable,
+        args,
+        display_command,
+        resource_profile,
+        opts
+      )
+      when is_list(args) and is_binary(display_command) and is_list(opts) do
+    # Fail closed before supervisor start so unknown profiles never reach init.
+    with {:ok, _timeout} <-
+           validate_timeout_for_profile(
+             Keyword.get(opts, :timeout, @default_timeout),
+             resource_profile
+           ) do
+      DynamicSupervisor.start_child(
+        Arbor.Shell.PortSessionSupervisor,
+        child_spec(
+          {:direct_owned_for_profile, self(), executable, args, display_command, resource_profile,
+           opts}
+        )
+      )
+    end
+  end
+
+  def start_supervised_direct_for_profile(
+        _executable,
+        _args,
+        _display_command,
+        _resource_profile,
+        _opts
+      ),
+      do: {:error, :invalid_stream_timeout}
+
   @doc false
   def start_link_owned(command, opts, owner_pid) when is_pid(owner_pid) do
     GenServer.start_link(__MODULE__, {:owned, owner_pid, command, opts})
@@ -89,6 +154,23 @@ defmodule Arbor.Shell.PortSession do
     GenServer.start_link(
       __MODULE__,
       {:direct_owned, owner_pid, executable, args, display_command, opts}
+    )
+  end
+
+  @doc false
+  def start_link_direct_owned_for_profile(
+        executable,
+        args,
+        display_command,
+        resource_profile,
+        opts,
+        owner_pid
+      )
+      when is_pid(owner_pid) do
+    GenServer.start_link(
+      __MODULE__,
+      {:direct_owned_for_profile, owner_pid, executable, args, display_command, resource_profile,
+       opts}
     )
   end
 
@@ -164,6 +246,20 @@ defmodule Arbor.Shell.PortSession do
     }
   end
 
+  def child_spec(
+        {:direct_owned_for_profile, owner_pid, executable, args, display_command,
+         resource_profile, opts}
+      ) do
+    %{
+      id: {__MODULE__, make_ref()},
+      start:
+        {__MODULE__, :start_link_direct_owned_for_profile,
+         [executable, args, display_command, resource_profile, opts, owner_pid]},
+      restart: :temporary,
+      type: :worker
+    }
+  end
+
   @impl true
   def init({:direct, executable, args, display_command, opts}) do
     init_session(executable, args, display_command, opts, parent_owner())
@@ -181,6 +277,20 @@ defmodule Arbor.Shell.PortSession do
 
   def init({:direct_owned, owner_pid, executable, args, display_command, opts}) do
     init_session(executable, args, display_command, opts, owner_pid)
+  end
+
+  def init(
+        {:direct_owned_for_profile, owner_pid, executable, args, display_command,
+         resource_profile, opts}
+      ) do
+    init_session_for_profile(
+      executable,
+      args,
+      display_command,
+      resource_profile,
+      opts,
+      owner_pid
+    )
   end
 
   @impl true
@@ -324,8 +434,34 @@ defmodule Arbor.Shell.PortSession do
   def terminate(_reason, _state), do: :ok
 
   defp init_session(executable, args, display_command, opts, owner_pid) do
-    with {:ok, timeout} <- validate_timeout(Keyword.get(opts, :timeout, @default_timeout)),
-         :ok <- validate_subscribers(Keyword.get(opts, :stream_to)),
+    with {:ok, timeout} <- validate_timeout(Keyword.get(opts, :timeout, @default_timeout)) do
+      build_session(executable, args, display_command, opts, owner_pid, timeout)
+    else
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp init_session_for_profile(
+         executable,
+         args,
+         display_command,
+         resource_profile,
+         opts,
+         owner_pid
+       ) do
+    with {:ok, timeout} <-
+           validate_timeout_for_profile(
+             Keyword.get(opts, :timeout, @default_timeout),
+             resource_profile
+           ) do
+      build_session(executable, args, display_command, opts, owner_pid, timeout)
+    else
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp build_session(executable, args, display_command, opts, owner_pid, timeout) do
+    with :ok <- validate_subscribers(Keyword.get(opts, :stream_to)),
          true <- is_pid(owner_pid) and Process.alive?(owner_pid) do
       start_time = Keyword.get(opts, :started_at, System.monotonic_time(:millisecond))
       deferred = Keyword.get(opts, :deferred)
@@ -545,6 +681,23 @@ defmodule Arbor.Shell.PortSession do
       do: {:ok, timeout}
 
   def validate_timeout(_timeout), do: {:error, :invalid_stream_timeout}
+
+  @doc false
+  @spec validate_timeout_for_profile(term(), term()) ::
+          {:ok, pos_integer()}
+          | {:error, :invalid_stream_timeout | :invalid_resource_profile}
+  def validate_timeout_for_profile(timeout, resource_profile) do
+    case SpawnCapableTimeout.validate_timeout_ms(timeout, resource_profile) do
+      :ok ->
+        {:ok, timeout}
+
+      {:error, :invalid_resource_profile} ->
+        {:error, :invalid_resource_profile}
+
+      {:error, _reason} ->
+        {:error, :invalid_stream_timeout}
+    end
+  end
 
   defp validate_subscribers(nil), do: :ok
   defp validate_subscribers(pid) when is_pid(pid), do: :ok

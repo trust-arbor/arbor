@@ -84,6 +84,83 @@ defmodule Arbor.Shell.PortSessionTest do
       assert {:error, :invalid_stream_timeout} =
                PortSession.start_supervised("sleep 60", stream_to: self(), timeout: :infinity)
     end
+
+    test "security regression: generic stream ceiling remains 600_000" do
+      assert {:error, :invalid_stream_timeout} = PortSession.validate_timeout(600_001)
+
+      assert {:error, :invalid_stream_timeout} =
+               PortSession.start_supervised("true", stream_to: self(), timeout: 600_001)
+    end
+
+    test "security regression: profile path standard rejects above 600_000" do
+      true_bin = System.find_executable("true") || "/usr/bin/true"
+
+      assert {:error, :invalid_stream_timeout} =
+               PortSession.validate_timeout_for_profile(600_001, :standard)
+
+      assert {:error, :invalid_stream_timeout} =
+               PortSession.start_supervised_direct_for_profile(
+                 true_bin,
+                 [],
+                 "true",
+                 :standard,
+                 stream_to: self(),
+                 timeout: 600_001
+               )
+    end
+
+    test "security regression: profile path intensive admits above 600_000 without waiting" do
+      true_bin = System.find_executable("true") || "/usr/bin/true"
+
+      assert {:ok, 600_001} = PortSession.validate_timeout_for_profile(600_001, :intensive)
+      assert {:ok, 1_200_000} = PortSession.validate_timeout_for_profile(1_200_000, :intensive)
+
+      assert {:ok, pid} =
+               PortSession.start_supervised_direct_for_profile(
+                 true_bin,
+                 [],
+                 "true",
+                 :intensive,
+                 stream_to: self(),
+                 timeout: 600_001
+               )
+
+      id = PortSession.get_id(pid)
+      assert_receive {:port_exit, ^id, 0, _output}, 5_000
+    end
+
+    test "security regression: profile path rejects unknown or malformed profiles" do
+      true_bin = System.find_executable("true") || "/usr/bin/true"
+
+      assert {:error, :invalid_resource_profile} =
+               PortSession.validate_timeout_for_profile(1_000, :turbo)
+
+      assert {:error, :invalid_resource_profile} =
+               PortSession.validate_timeout_for_profile(1_000, "intensive")
+
+      assert {:error, :invalid_resource_profile} =
+               PortSession.validate_timeout_for_profile(1_000, nil)
+
+      assert {:error, :invalid_resource_profile} =
+               PortSession.start_supervised_direct_for_profile(
+                 true_bin,
+                 [],
+                 "true",
+                 :turbo,
+                 stream_to: self(),
+                 timeout: 1_000
+               )
+
+      assert {:error, :invalid_resource_profile} =
+               PortSession.start_supervised_direct_for_profile(
+                 true_bin,
+                 [],
+                 "true",
+                 "intensive",
+                 stream_to: self(),
+                 timeout: 1_000
+               )
+    end
   end
 
   describe "streaming output ceiling" do
