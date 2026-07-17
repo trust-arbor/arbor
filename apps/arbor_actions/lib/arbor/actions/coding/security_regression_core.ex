@@ -9,7 +9,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
 
   @default_timeout 300_000
   @minimum_timeout 1_000
-  @maximum_timeout 600_000
+  # Derived from Shell spawn-capable ceiling so action limits cannot exceed admission.
+  @maximum_timeout Arbor.Shell.spawn_capable_max_timeout_ms()
   @allowed_param_keys [:review_attestation_id, :timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 
@@ -34,6 +35,12 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
           review_attestation_id: String.t(),
           timeout: pos_integer()
         }
+
+  @doc false
+  def default_timeout, do: @default_timeout
+
+  @doc false
+  def maximum_timeout, do: @maximum_timeout
 
   @doc "Construct and validate the action's deliberately narrow input surface."
   @spec new(map()) :: {:ok, input()} | {:error, atom()}
@@ -200,9 +207,6 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
 
   @doc false
   def artifact_version, do: @artifact_version
-
-  @doc false
-  def default_timeout, do: @default_timeout
 
   defp validate_param_keys(params) do
     valid? =

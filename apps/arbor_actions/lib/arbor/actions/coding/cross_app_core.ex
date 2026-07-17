@@ -9,7 +9,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   @default_timeout 300_000
   @minimum_timeout 1_000
-  @maximum_timeout 600_000
+  # Derived from Shell spawn-capable ceiling so action limits cannot exceed admission.
+  @maximum_timeout Arbor.Shell.spawn_capable_max_timeout_ms()
   @allowed_param_keys [:workspace_id, :timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 

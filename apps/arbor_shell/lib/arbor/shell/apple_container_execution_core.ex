@@ -16,6 +16,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   """
 
   alias Arbor.Shell.AppleContainerPlanCore
+  alias Arbor.Shell.SpawnCapableTimeout
 
   @runtime_path "/usr/local/bin/container"
   @guest_platform "linux/arm64"
@@ -23,8 +24,9 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   @default_max_output_bytes 8_388_608
   @hard_max_output_bytes 16_777_216
-  @min_timeout_ms 1
-  @max_timeout_ms 300_000
+  # Spawn-capable ceiling: one pure Shell source of truth (no local drift).
+  @min_timeout_ms SpawnCapableTimeout.min_timeout_ms()
+  @max_timeout_ms SpawnCapableTimeout.max_timeout_ms()
 
   @max_path_bytes 4_096
   @max_command_args 256

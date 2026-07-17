@@ -17,10 +17,20 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
     assert {:ok, %{timeout: 300_000}} = Core.new(%{workspace_id: "ws_opaque"})
 
-    assert {:ok, %{timeout: 600_000}} =
-             Core.new(%{workspace_id: "ws_opaque", timeout: "600000"})
+    ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
 
-    for invalid <- ["600001", "999", "0600000", "600000ms", " 600000"] do
+    assert Core.maximum_timeout() == ceiling
+
+    assert {:ok, %{timeout: ^ceiling}} =
+             Core.new(%{workspace_id: "ws_opaque", timeout: Integer.to_string(ceiling)})
+
+    for invalid <- [
+          Integer.to_string(ceiling + 1),
+          "999",
+          "0600000",
+          "600000ms",
+          " 600000"
+        ] do
       assert {:error, :invalid_timeout} =
                Core.new(%{workspace_id: "ws_opaque", timeout: invalid})
     end

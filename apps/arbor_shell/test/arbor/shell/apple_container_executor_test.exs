@@ -11,6 +11,7 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
   alias Arbor.Shell
   alias Arbor.Shell.AppleContainerExecutor, as: Executor
   alias Arbor.Shell.ExecutablePolicy.Executable
+  alias Arbor.Shell.SpawnCapableTimeout
 
   @moduletag :fast
 
@@ -442,6 +443,26 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
   end
 
   describe "deadline shrink" do
+    test "operation budgets above the probe ceiling cap only the probe sub-deadline", %{
+      agent: agent
+    } do
+      timeout = Shell.spawn_capable_max_timeout_ms()
+
+      assert {:ok, _result} =
+               Executor.execute_for_test(
+                 @mix_wrapper,
+                 ["compile"],
+                 valid_opts(timeout: timeout),
+                 base_deps(agent)
+               )
+
+      assert get_state(agent, :probe_calls) == [SpawnCapableTimeout.max_probe_deadline_ms()]
+
+      start_meta = hd(get_state(agent, :start_calls))
+      assert start_meta.timeout_ms > SpawnCapableTimeout.max_probe_deadline_ms()
+      assert start_meta.timeout_ms < timeout
+    end
+
     test "one deadline shrinks across a fake probe and before start", %{agent: agent} do
       timeout = 5_000
 

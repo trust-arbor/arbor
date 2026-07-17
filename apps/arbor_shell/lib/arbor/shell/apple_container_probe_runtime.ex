@@ -15,11 +15,12 @@ defmodule Arbor.Shell.AppleContainerProbeRuntime do
   alias Arbor.Shell.ExecutablePolicy.Executable
   alias Arbor.Shell.Executor
   alias Arbor.Shell.LinuxDependencyBaselineAuthority
+  alias Arbor.Shell.SpawnCapableTimeout
   alias Arbor.Shell.TrustedPath
   alias Arbor.Shell.TrustedPath.Identity
 
   @max_plugin_config_bytes 8_192
-  @max_probe_deadline_ms 300_000
+  @max_probe_deadline_ms SpawnCapableTimeout.max_probe_deadline_ms()
   @max_system_json_bytes 8_192
   @max_image_json_bytes 262_144
 

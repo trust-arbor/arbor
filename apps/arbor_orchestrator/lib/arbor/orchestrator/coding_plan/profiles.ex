@@ -10,6 +10,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   alias Arbor.Orchestrator.Graph
 
   @template_version "coding-change-v1"
+  # Shared Shell spawn-capable ceiling — must not drift above unit admission.
+  @spawn_capable_max_timeout_ms Arbor.Shell.spawn_capable_max_timeout_ms()
 
   @default_required_nodes Enum.sort(~w[
                     acquire_workspace
@@ -1468,7 +1470,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "validation_strategy" => %{
                   "action" => "mix_compile",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
-                  "timeout_max_ms" => 600_000
+                  "timeout_max_ms" => @spawn_capable_max_timeout_ms
                 },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
@@ -1491,7 +1493,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "authority_parameter" => "review_attestation_id",
                   "authority_source" => "review.review_attestation_id",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
-                  "timeout_max_ms" => 600_000,
+                  "timeout_max_ms" => @spawn_capable_max_timeout_ms,
                   "two_revision" => true
                 },
                 "review_strategy" => @binding_council_review,
@@ -1584,7 +1586,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "authority_parameter" => "workspace_id",
                   "authority_source" => "workspace_id",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
-                  "timeout_max_ms" => 600_000,
+                  "timeout_max_ms" => @spawn_capable_max_timeout_ms,
                   "selects_downstream_dependents" => true,
                   "runs_xref_graph_evidence" => true,
                   "claims_zero_cycles" => false

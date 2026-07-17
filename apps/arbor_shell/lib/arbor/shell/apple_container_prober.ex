@@ -17,9 +17,10 @@ defmodule Arbor.Shell.AppleContainerProber do
   alias Arbor.Shell.AppleContainerProbeRuntime
   alias Arbor.Shell.ExecutablePolicy.Executable
   alias Arbor.Shell.LinuxDependencyBaselineCore
+  alias Arbor.Shell.SpawnCapableTimeout
   alias Arbor.Shell.TrustedPath.Identity
 
-  @max_deadline_ms 300_000
+  @max_deadline_ms SpawnCapableTimeout.max_probe_deadline_ms()
   @global_output_budget 1_048_576
 
   @path_container "/usr/local/bin/container"

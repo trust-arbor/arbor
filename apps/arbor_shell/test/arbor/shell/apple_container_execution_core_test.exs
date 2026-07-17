@@ -371,8 +371,15 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
     end
 
     test "rejects timeout and max_output_bytes bounds without clamping" do
+      ceiling = Shell.spawn_capable_max_timeout_ms()
+
+      assert {:ok, spec} =
+               Core.new(valid_request(%{opts: valid_opts(timeout: ceiling)}))
+
+      assert spec.timeout_ms == ceiling
+
       assert {:error, :timeout_too_large} =
-               Core.new(valid_request(%{opts: valid_opts(timeout: 300_001)}))
+               Core.new(valid_request(%{opts: valid_opts(timeout: ceiling + 1)}))
 
       assert {:error, :timeout_too_small} =
                Core.new(valid_request(%{opts: valid_opts(timeout: 0)}))
@@ -382,6 +389,13 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
 
       assert {:error, :invalid_max_output_bytes} =
                Core.new(valid_request(%{opts: valid_opts(max_output_bytes: 0)}))
+    end
+
+    test "spawn-capable timeout ceiling is the shared Shell source of truth" do
+      assert Shell.spawn_capable_max_timeout_ms() == 600_000
+
+      assert Arbor.Shell.SpawnCapableTimeout.max_timeout_ms() ==
+               Shell.spawn_capable_max_timeout_ms()
     end
   end
 

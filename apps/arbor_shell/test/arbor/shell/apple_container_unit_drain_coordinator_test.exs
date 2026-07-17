@@ -1100,6 +1100,55 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
              ]
     end
 
+    test "admits spawn-capable ceiling timeout and rejects one above without clamping", %{
+      holder: holder
+    } do
+      ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
+      assert ceiling == 600_000
+
+      :ok = Snapshot.set({:ok, []})
+      :ok = FakeJournal.reset(entries: [])
+      :ok = FakeReconciler.reset(phase: "ready")
+      :ok = FakeWorker.reset(start_result: :spawn_worker)
+
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      :ok = SharedTrace.reset()
+      :ok = FakeClock.reset(5_000_000)
+
+      assert {:ok, worker} =
+               GenServer.call(
+                 pid,
+                 {:start_unit, %{spec_fixture() | timeout_ms: ceiling}, :executable,
+                  @execution_id, make_ref()}
+               )
+
+      assert is_pid(worker)
+      assert Process.alive?(worker)
+
+      assert SharedTrace.events() == [
+               :clock_monotonic,
+               {:journal_reserve, @unit_name, @execution_id},
+               {:worker_start, @execution_id, 5_000_000 + ceiling}
+             ]
+
+      # Second admission with oversize timeout fails closed before reserve.
+      :ok = SharedTrace.reset()
+      :ok = FakeJournal.reset(entries: [])
+      :ok = FakeWorker.reset(start_result: :spawn_worker)
+
+      assert {:error, :invalid_execution_spec} =
+               GenServer.call(
+                 pid,
+                 {:start_unit, %{spec_fixture() | timeout_ms: ceiling + 1}, :executable,
+                  "exec-coord-oversize", make_ref()}
+               )
+
+      assert SharedTrace.events() == []
+      assert FakeJournal.events() == []
+    end
+
     test "definite start failure completes the exact row", %{holder: holder} do
       :ok = Snapshot.set({:ok, []})
       :ok = FakeJournal.reset(entries: [])

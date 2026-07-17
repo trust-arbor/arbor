@@ -25,6 +25,7 @@ defmodule Arbor.Shell.AppleContainerExecutor do
   alias Arbor.Shell.AppleContainerUnitWorker
   alias Arbor.Shell.ExecutablePolicy.Executable
   alias Arbor.Shell.ExecutionRegistry
+  alias Arbor.Shell.SpawnCapableTimeout
 
   @runtime_path "/usr/local/bin/container"
   @display_command "container unit"
@@ -275,7 +276,9 @@ defmodule Arbor.Shell.AppleContainerExecutor do
   end
 
   defp run_probe(remaining_ms, deps) do
-    case safe_call(fn -> deps.probe.(remaining_ms) end) do
+    probe_deadline_ms = min(remaining_ms, SpawnCapableTimeout.max_probe_deadline_ms())
+
+    case safe_call(fn -> deps.probe.(probe_deadline_ms) end) do
       {:ok, admission} when is_map(admission) ->
         {:ok, admission}
 

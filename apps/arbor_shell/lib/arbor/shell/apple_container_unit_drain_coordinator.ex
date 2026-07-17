@@ -67,6 +67,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   alias Arbor.Shell.AppleContainerUnitRecoveryReconciler, as: Reconciler
   alias Arbor.Shell.AppleContainerUnitRuntime
   alias Arbor.Shell.AppleContainerUnitWorker, as: Worker
+  alias Arbor.Shell.SpawnCapableTimeout
 
   @name __MODULE__
   @unit_supervisor Arbor.Shell.AppleContainerUnitSupervisor
@@ -85,7 +86,10 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   @max_pending 1_024
   @max_execution_waiters 1_024
   @max_unit_name_bytes 64
+  # Operational handshake/call ceilings (not spawn-capable execution budgets).
   @max_timeout_ms 300_000
+  # Unit execution wall-clock from spawn-capable specs — shared pure ceiling.
+  @max_execution_timeout_ms SpawnCapableTimeout.max_timeout_ms()
 
   @allowed_test_keys MapSet.new([
                        :name,
@@ -1300,7 +1304,8 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   defp fetch_unit_name(_), do: {:error, :invalid_execution_spec}
 
   defp fetch_timeout_ms(%{timeout_ms: timeout_ms})
-       when is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= @max_timeout_ms do
+       when is_integer(timeout_ms) and timeout_ms > 0 and
+              timeout_ms <= @max_execution_timeout_ms do
     {:ok, timeout_ms}
   end
 

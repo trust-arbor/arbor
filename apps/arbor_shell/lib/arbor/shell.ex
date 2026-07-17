@@ -57,7 +57,8 @@ defmodule Arbor.Shell do
     ExecutionWorker,
     Executor,
     PortSession,
-    Sandbox
+    Sandbox,
+    SpawnCapableTimeout
   }
 
   alias Arbor.Signals
@@ -84,6 +85,17 @@ defmodule Arbor.Shell do
   """
   @spec max_output_bytes_limit() :: pos_integer()
   def max_output_bytes_limit, do: Executor.max_output_bytes_limit()
+
+  @doc """
+  Non-bypassable system hard maximum for spawn-capable execution timeouts (ms).
+
+  Public facade over `Arbor.Shell.SpawnCapableTimeout`. Coding validation
+  profiles and action cores must derive their validation ceilings from this
+  bound so they cannot advertise a timeout that Apple Container admission
+  rejects. Values above this ceiling fail closed without clamping.
+  """
+  @spec spawn_capable_max_timeout_ms() :: pos_integer()
+  def spawn_capable_max_timeout_ms, do: SpawnCapableTimeout.max_timeout_ms()
 
   # ===========================================================================
   # Public API — Compound shell (CapShell) feature gate

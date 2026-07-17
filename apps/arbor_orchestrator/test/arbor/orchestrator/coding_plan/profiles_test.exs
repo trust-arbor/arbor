@@ -129,6 +129,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:ok, 600_000} = Profiles.validation_timeout(cross_app, 900_000)
       assert {:ok, 120_000} = Profiles.validation_timeout(cross_app, 120_000)
 
+      # Profile ceilings derive from Shell spawn-capable admission bound.
+      assert cross_app["validation_strategy"]["timeout_max_ms"] ==
+               Arbor.Shell.spawn_capable_max_timeout_ms()
+
       drifted_source =
         put_in(
           cross_app,

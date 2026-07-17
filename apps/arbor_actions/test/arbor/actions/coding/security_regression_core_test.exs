@@ -18,6 +18,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
     assert {:ok, %{timeout: 300_000}} =
              Core.new(%{review_attestation_id: "review_attestation_opaque"})
 
+    assert Core.maximum_timeout() == Arbor.Shell.spawn_capable_max_timeout_ms()
+
     assert {:ok, %{timeout: 600_000}} =
              Core.new(%{
                review_attestation_id: "review_attestation_opaque",
