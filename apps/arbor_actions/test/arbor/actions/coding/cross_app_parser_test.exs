@@ -35,6 +35,44 @@ defmodule Arbor.Actions.Coding.CrossApp.ParserTest do
     assert app_def.deps == ["beta", "gamma"]
   end
 
+  test "parses the static project return after setup expressions" do
+    source = """
+    Code.require_file("mix_project_paths.exs")
+
+    defmodule Alpha.MixProject do
+      use Mix.Project
+
+      def project do
+        paths = Arbor.MixProjectPaths.project_paths(build_path: "../../_build")
+
+        [
+          app: :alpha,
+          build_path: paths[:build_path],
+          deps: deps()
+        ]
+      end
+
+      defp deps, do: [{:beta, in_umbrella: true}]
+    end
+    """
+
+    assert {:ok, %{app: "alpha", deps: ["beta"]}} = Parser.parse_mix_exs(source, "alpha")
+
+    dynamic_return = """
+    defmodule Alpha.MixProject do
+      use Mix.Project
+
+      def project do
+        project = [app: :alpha, deps: []]
+        project
+      end
+    end
+    """
+
+    assert {:error, :dynamic_or_malformed_project} =
+             Parser.parse_mix_exs(dynamic_return, "alpha")
+  end
+
   test "rejects dynamic, malformed, and oversized metadata without creating atoms" do
     novel = "hostile_unseen_app_name_zzzxxyy"
 

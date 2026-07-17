@@ -425,7 +425,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Parser do
 
   defp unwrap_do_body(body) do
     case call_form(body) do
-      {"__block__", [single]} -> single
+      # Elixir blocks return their final expression. Earlier setup expressions
+      # may compute unrelated project fields, but app/deps remain admissible
+      # only when the returned expression itself is a static keyword/list.
+      {"__block__", parts} when is_list(parts) and parts != [] -> List.last(parts)
       _ -> body
     end
   end
