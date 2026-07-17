@@ -20,8 +20,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   2. xref graph evidence (does not claim zero cycles)
   3. explicit `MIX_ENV=test` compile with `--warnings-as-errors`
   4. focused per-file tests under an aggregate monotonic budget that starts
-     only after the test-environment compile succeeds. Each Mix process is
-     capped by the intensive Shell spawn-capable ceiling (profile-aware).
+     only after the test-environment compile succeeds. Each Mix child is
+     capped by the intensive Shell spawn-capable ceiling (profile-aware,
+     hard max 1_200_000 ms) and receives at most two exact inventory files.
+     The aggregate test-stage budget is a separate reviewed ceiling
+     (hard max 2_400_000 ms), further bounded by the coding plan wall clock
+     at compile time. Exact inventory is preserved; tags are never excluded.
 
   Domain failures return `{:ok, %{passed: false, ...}}` so the DOT rework
   branch can run; authority/setup/execution failures return `{:error, reason}`.
@@ -47,7 +51,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
       test_stage_timeout: [
         type: :non_neg_integer,
         doc:
-          "Aggregate sequential test-stage timeout in milliseconds (1,000 to 1,200,000); may equal the intensive per-process Shell ceiling"
+          "Aggregate sequential test-stage timeout in milliseconds (1,000 to 2,400,000); distinct from the intensive per-process Shell ceiling"
       ]
     ]
 

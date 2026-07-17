@@ -121,6 +121,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
       assert {:ok, intensive_ceiling} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
       standard_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
+      stage_ceiling = Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
+      assert intensive_ceiling == 1_200_000
+      assert stage_ceiling == 2_400_000
 
       assert cross_app["validation_strategy"] == %{
                "action" => "coding_cross_app_validate",
@@ -129,7 +132,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => intensive_ceiling,
                "test_stage_timeout_budget_source" => "budgets.wall_clock_ms",
-               "test_stage_timeout_max_ms" => intensive_ceiling,
+               "test_stage_timeout_max_ms" => stage_ceiling,
                "selects_downstream_dependents" => true,
                "runs_xref_graph_evidence" => true,
                "runs_test_environment_compile" => true,
@@ -142,12 +145,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       refute "mix_test" in cross_app["required_actions"]
       assert "coding_cross_app_validate" in cross_app["semantic_policy"]["allowed_actions"]
 
-      # Intensive policy: per-op ceiling equals stage max; min with wall-clock.
+      # Per-op intensive ceiling vs aggregate stage max are independent; both min with wall-clock.
       assert {:ok, 900_000} = Profiles.validation_timeout(cross_app, 900_000)
       assert {:ok, 120_000} = Profiles.validation_timeout(cross_app, 120_000)
-      assert {:ok, intensive_ceiling} = Profiles.validation_timeout(cross_app, 1_500_000)
+      assert {:ok, ^intensive_ceiling} = Profiles.validation_timeout(cross_app, 1_500_000)
+      assert {:ok, ^intensive_ceiling} = Profiles.validation_timeout(cross_app, 2_500_000)
       assert {:ok, 900_000} = Profiles.validation_test_stage_timeout(cross_app, 900_000)
-      assert {:ok, 1_200_000} = Profiles.validation_test_stage_timeout(cross_app, 1_500_000)
+      assert {:ok, 1_500_000} = Profiles.validation_test_stage_timeout(cross_app, 1_500_000)
+      assert {:ok, ^stage_ceiling} = Profiles.validation_test_stage_timeout(cross_app, 2_500_000)
       assert {:ok, 120_000} = Profiles.validation_test_stage_timeout(cross_app, 120_000)
 
       # Profiles without aggregate-stage keys return nil (not an error).
@@ -185,14 +190,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:error, :invalid_validation_test_stage_timeout_policy} =
                Profiles.validation_test_stage_timeout(bad_stage_source, 900_000)
 
-      # cross_app per-op and stage ceilings derive from intensive Shell policy.
+      # Per-op from intensive Shell; aggregate stage from Actions facade hard max.
       assert cross_app["validation_strategy"]["timeout_max_ms"] == intensive_ceiling
 
       assert cross_app["validation_strategy"]["test_stage_timeout_max_ms"] ==
                Profiles.cross_app_test_stage_timeout_max_ms()
 
-      assert cross_app["validation_strategy"]["timeout_max_ms"] ==
-               cross_app["validation_strategy"]["test_stage_timeout_max_ms"]
+      assert Profiles.cross_app_test_stage_timeout_max_ms() == stage_ceiling
+
+      assert cross_app["validation_strategy"]["test_stage_timeout_max_ms"] >
+               cross_app["validation_strategy"]["timeout_max_ms"]
 
       assert cross_app["validation_strategy"]["timeout_max_ms"] > standard_ceiling
 

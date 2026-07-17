@@ -72,11 +72,21 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     assert {:error, :invalid_test_stage_timeout} =
              Arbor.Actions.Coding.CrossApp.Core.new(%{
                workspace_id: "ws_closed",
-               test_stage_timeout: 1_200_001
+               test_stage_timeout: 2_400_001
              })
 
-    # cross_app binds the intensive Shell ceiling (1_200_000); values above the
-    # standard 600_000 ms path are accepted here and fail only above intensive.
+    # Aggregate stage may exceed the intensive per-process ceiling.
+    assert {:ok, %{test_stage_timeout: 1_800_000}} =
+             Arbor.Actions.Coding.CrossApp.Core.new(%{
+               workspace_id: "ws_closed",
+               test_stage_timeout: 1_800_000
+             })
+
+    assert Arbor.Actions.cross_app_maximum_test_stage_timeout_ms() == 2_400_000
+
+    # cross_app binds the intensive Shell ceiling (1_200_000) for per-op only;
+    # values above the standard 600_000 ms path are accepted and fail only
+    # above intensive.
     assert {:ok, %{timeout: 600_001}} =
              Arbor.Actions.Coding.CrossApp.Core.new(%{
                workspace_id: "ws_closed",

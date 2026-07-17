@@ -13,7 +13,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   # Shared Shell spawn-capable ceilings — must not drift above unit admission.
   # `:standard` is the default for ordinary Mix / security_regression paths.
   @spawn_capable_max_timeout_ms Arbor.Shell.spawn_capable_max_timeout_ms()
-  # `:intensive` is reviewed only for cross_app contained validation stages.
+  # `:intensive` is reviewed only for cross_app contained validation stages
+  # (per-operation Mix child ceiling; hard max 1_200_000 ms).
   @spawn_capable_intensive_max_timeout_ms (case Arbor.Shell.spawn_capable_max_timeout_ms(
                                                   :intensive
                                                 ) do
@@ -26,9 +27,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                                    "coding-plan intensive spawn-capable ceiling requires a positive Shell intensive bound; got #{inspect(other)}"
                                            end)
   # Reviewed aggregate sequential test-stage ceiling for cross_app only.
-  # Equals the intensive Shell ceiling so one argv-safe batch can consume the
-  # full stage budget under the admitted intensive resource profile.
-  @cross_app_test_stage_timeout_max_ms @spawn_capable_intensive_max_timeout_ms
+  # Actions-owned hard max (2_400_000 ms), distinct from the intensive
+  # per-process Shell ceiling. Effective stage budget is
+  # min(this, plan wall_clock) at compile time.
+  @cross_app_test_stage_timeout_max_ms Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
 
   @default_required_nodes Enum.sort(~w[
                     acquire_workspace
@@ -1603,9 +1605,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "authority_parameter" => "workspace_id",
                   "authority_source" => "workspace_id",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
-                  # Intensive Shell profile: per-op may equal aggregate stage max.
+                  # Intensive Shell profile: per-op child ceiling only.
                   "timeout_max_ms" => @spawn_capable_intensive_max_timeout_ms,
                   "test_stage_timeout_budget_source" => "budgets.wall_clock_ms",
+                  # Aggregate sequential stage max from Actions facade (not Shell).
                   "test_stage_timeout_max_ms" => @cross_app_test_stage_timeout_max_ms,
                   "selects_downstream_dependents" => true,
                   "runs_xref_graph_evidence" => true,

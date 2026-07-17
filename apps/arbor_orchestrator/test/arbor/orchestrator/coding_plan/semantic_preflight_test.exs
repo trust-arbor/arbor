@@ -1542,7 +1542,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     graph = compiled_graph!(compilation.dot_source)
     assert {:ok, profile} = Profiles.fetch_executable("cross_app")
 
-    # Default plan wall-clock is 900_000; intensive max is 1_200_000 → both 900_000.
+    # Default plan wall-clock is 900_000; per-op max 1_200_000 and stage max
+    # 2_400_000 both min to 900_000.
     assert :ok =
              preflight(graph, profile["semantic_policy"],
                review_profile: "binding",

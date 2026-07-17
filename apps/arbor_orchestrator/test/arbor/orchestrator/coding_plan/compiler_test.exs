@@ -478,9 +478,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["action"] == "coding_cross_app_validate"
     assert validate["context_keys"] == "workspace_id"
     refute Map.has_key?(validate, "param.warnings_as_errors")
-    # Intensive Shell policy: per-op max 1_200_000, min with default wall-clock 900_000.
+    # Intensive per-op max 1_200_000 and aggregate stage max 2_400_000, both min
+    # with default wall-clock 900_000.
     assert validate["param.timeout"] == 900_000
-    # Aggregate test-stage budget is compiled from the same wall-clock budget.
     assert validate["param.test_stage_timeout"] == 900_000
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
@@ -528,9 +528,27 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:ok, compilation} = compile(plan, ctx)
     validate = node_attrs(parse!(compilation.dot_source), "validate")
 
-    # Intensive Shell policy: per-op and aggregate stage share 1_200_000 max.
+    # Per-op intensive Shell max is 1_200_000; aggregate stage max is 2_400_000
+    # and is further bounded only by the plan wall clock here.
     assert validate["param.timeout"] == 1_200_000
-    assert validate["param.test_stage_timeout"] == 1_200_000
+    assert validate["param.test_stage_timeout"] == 1_500_000
+  end
+
+  test "cross_app aggregate test-stage timeout never exceeds the Actions hard max", ctx do
+    plan =
+      plan!(%{
+        "validation_profile" => "cross_app",
+        "budgets" => %{"wall_clock_ms" => 3_000_000}
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    validate = node_attrs(parse!(compilation.dot_source), "validate")
+
+    assert validate["param.timeout"] == 1_200_000
+    assert validate["param.test_stage_timeout"] == 2_400_000
+
+    assert validate["param.test_stage_timeout"] ==
+             Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
   end
 
   test "cross_app human_required review does not weaken review routing", ctx do

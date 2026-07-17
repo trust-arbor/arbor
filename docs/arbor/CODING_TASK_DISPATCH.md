@@ -109,6 +109,20 @@ cross-app run, set both graph liveness bounds explicitly:
 }
 ```
 
+The `cross_app` validation profile compiles two distinct budgets into
+`coding_cross_app_validate`:
+
+- `param.timeout` — per contained Mix child process, intensive Shell profile,
+  hard maximum `1_200_000` ms (never widens the generic Shell ceiling)
+- `param.test_stage_timeout` — aggregate sequential test-stage budget, reviewed
+  hard maximum `2_400_000` ms from the Actions facade, further bounded by
+  `budgets.wall_clock_ms`
+
+Exact `*_test.exs` inventory is preserved (including slow and integration-tagged
+files). Paths are partitioned into sequential batches of at most two files per
+child under the existing argv-count and argv-byte ceilings; tags are never
+excluded to fit a budget.
+
 The optional top-level MCP dispatch `timeout` is an outer cancellation ceiling.
 The executor uses the smaller of that value and `budgets.wall_clock_ms`, so a
 larger dispatch timeout cannot extend an omitted or shorter plan budget. Omit

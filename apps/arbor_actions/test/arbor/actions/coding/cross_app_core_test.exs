@@ -24,10 +24,14 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert intensive_ceiling == 1_200_000
     standard_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
     assert standard_ceiling == 600_000
+    stage_ceiling = Core.maximum_test_stage_timeout()
+    assert stage_ceiling == 2_400_000
+    assert stage_ceiling == Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
 
-    # cross_app derives per-op and stage ceilings from intensive Shell policy.
+    # Per-op derives from intensive Shell; aggregate stage is a separate Actions max.
     assert Core.maximum_timeout() == intensive_ceiling
-    assert Core.maximum_test_stage_timeout() == intensive_ceiling
+    assert Core.maximum_test_stage_timeout() == stage_ceiling
+    assert Core.maximum_test_stage_timeout() > Core.maximum_timeout()
     assert Core.maximum_timeout() > standard_ceiling
 
     assert {:ok, %{timeout: ^intensive_ceiling}} =
@@ -36,12 +40,16 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
                timeout: Integer.to_string(intensive_ceiling)
              })
 
-    assert {:ok, %{test_stage_timeout: 1_200_000}} =
-             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "1200000"})
+    assert {:ok, %{test_stage_timeout: 2_400_000}} =
+             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "2400000"})
 
     # Values above the standard ceiling are valid for cross_app (intensive).
     assert {:ok, %{timeout: 900_000}} =
              Core.new(%{workspace_id: "ws_opaque", timeout: 900_000})
+
+    # Aggregate stage may exceed the intensive per-process ceiling.
+    assert {:ok, %{test_stage_timeout: 1_800_000}} =
+             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: 1_800_000})
 
     for invalid <- [
           Integer.to_string(intensive_ceiling + 1),
@@ -55,7 +63,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     end
 
     assert {:error, :invalid_test_stage_timeout} =
-             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: 1_200_001})
+             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: 2_400_001})
 
     assert {:error, :invalid_test_stage_timeout} =
              Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "999"})
@@ -284,6 +292,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.next_test_step(900_000, [single], 30_000)
 
     assert single.count == 2
+    assert single.count <= Core.max_test_batch_runtime_files()
 
     # Force two batches so timeout/rest shapes can be asserted.
     many =
@@ -455,30 +464,53 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   end
 
   test "partition_test_batches is deterministic, exact-once, ordered, and bound-respecting" do
-    assert Core.max_test_batch_files() ==
+    assert Core.max_test_batch_runtime_files() == 2
+
+    assert Core.max_test_batch_argv_files() ==
              Arbor.Shell.spawn_capable_max_command_args() - 2
 
+    assert Core.max_test_batch_files() ==
+             min(Core.max_test_batch_runtime_files(), Core.max_test_batch_argv_files())
+
+    assert Core.max_test_batch_files() == 2
     assert Core.max_test_batch_arg_bytes() == 65_536
 
+    # Two files fill the runtime cap in one batch.
+    pair = [
+      "apps/alpha/test/a_test.exs",
+      "apps/alpha/test/b_test.exs"
+    ]
+
+    assert {:ok, [pair_batch]} = Core.partition_test_batches(pair)
+    assert pair_batch.paths == pair
+    assert pair_batch.count == 2
+    assert pair_batch.index == 1
+    assert pair_batch.total == 1
+    assert pair_batch.label == "batch-1-of-1-n2-#{pair_batch.inventory_sha256}"
+    assert byte_size(pair_batch.inventory_sha256) == 64
+
+    expected_pair_sha =
+      :crypto.hash(:sha256, Enum.join(pair, <<0>>)) |> Base.encode16(case: :lower)
+
+    assert pair_batch.inventory_sha256 == expected_pair_sha
+    assert Core.partition_test_batches(pair) == {:ok, [pair_batch]}
+
+    # Three files split under the runtime cap of 2 while preserving exact inventory.
     files = [
       "apps/alpha/test/a_test.exs",
       "apps/alpha/test/b_test.exs",
       "apps/beta/test/c_test.exs"
     ]
 
-    assert {:ok, [batch]} = Core.partition_test_batches(files)
-    assert batch.paths == files
-    assert batch.count == 3
-    assert batch.index == 1
-    assert batch.total == 1
-    assert batch.label == "batch-1-of-1-n3-#{batch.inventory_sha256}"
-    assert byte_size(batch.inventory_sha256) == 64
+    assert {:ok, [first_of_three, second_of_three] = three_batches} =
+             Core.partition_test_batches(files)
 
-    expected_sha =
-      :crypto.hash(:sha256, Enum.join(files, <<0>>)) |> Base.encode16(case: :lower)
-
-    assert batch.inventory_sha256 == expected_sha
-    assert Core.partition_test_batches(files) == {:ok, [batch]}
+    assert first_of_three.paths == ["apps/alpha/test/a_test.exs", "apps/alpha/test/b_test.exs"]
+    assert second_of_three.paths == ["apps/beta/test/c_test.exs"]
+    assert first_of_three.count == 2
+    assert second_of_three.count == 1
+    assert Enum.flat_map(three_batches, & &1.paths) == files
+    assert Core.partition_test_batches(files) == {:ok, three_batches}
 
     # Every path exactly once across batches; sorted order preserved.
     many =
@@ -486,22 +518,25 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
         "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
       end
 
+    assert length(many) == 5
     assert {:ok, batches} = Core.partition_test_batches(many)
-    assert length(batches) == 2
+    assert length(batches) == 3
     assert Enum.at(batches, 0).count == Core.max_test_batch_files()
-    assert Enum.at(batches, 1).count == 3
+    assert Enum.at(batches, 1).count == Core.max_test_batch_files()
+    assert Enum.at(batches, 2).count == 1
     assert Enum.flat_map(batches, & &1.paths) == many
     assert Enum.all?(batches, fn b -> b.paths != [] end)
 
     for b <- batches do
       arg_bytes = Enum.reduce(b.paths, 0, fn p, acc -> acc + byte_size(p) + 1 end)
       assert length(b.paths) <= Core.max_test_batch_files()
+      assert length(b.paths) <= Core.max_test_batch_runtime_files()
       assert arg_bytes <= Core.max_test_batch_arg_bytes()
       assert b.label =~ ~r/^batch-\d+-of-\d+-n\d+-[0-9a-f]{64}$/
     end
 
-    # Byte-heavy valid paths split on the argument-byte ceiling.
-    # Build paths that each cost ~900 bytes so a few exceed 64 KiB.
+    # Byte-heavy valid paths still respect both file-count and argument-byte ceilings.
+    # Build paths that each cost ~900 bytes so packing never exceeds 64 KiB.
     long_stem = String.duplicate("p", 860)
 
     heavy =
@@ -516,6 +551,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     for b <- heavy_batches do
       arg_bytes = Enum.reduce(b.paths, 0, fn p, acc -> acc + byte_size(p) + 1 end)
       assert length(b.paths) <= Core.max_test_batch_files()
+      assert length(b.paths) <= Core.max_test_batch_runtime_files()
       assert arg_bytes <= Core.max_test_batch_arg_bytes()
       assert b.count == length(b.paths)
     end

@@ -878,30 +878,46 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 30_000, 60_000)
     assert check["passed"]
 
-    expected = [
+    # Runtime batch cap is 2 exact files; inventory is still complete and ordered.
+    assert Core.max_test_batch_files() == 2
+
+    expected_batch1 = [
       "test",
       "--",
       "apps/alpha/test/a_test.exs",
-      "apps/alpha/test/nested/m_test.exs",
+      "apps/alpha/test/nested/m_test.exs"
+    ]
+
+    expected_batch2 = [
+      "test",
+      "--",
       "apps/alpha/test/z_test.exs"
     ]
 
-    assert_receive {:mix_invocation, ^expected, opts1}
+    assert_receive {:mix_invocation, ^expected_batch1, opts1}
     assert Keyword.get(opts1, :timeout) == 30_000
+    assert_receive {:mix_invocation, ^expected_batch2, opts2}
+    assert Keyword.get(opts2, :timeout) == 30_000
     refute_received {:mix_invocation, ["test", "--", "apps/alpha/test/helper.exs"], _}
     refute_received {:mix_invocation, _, _}
   end
 
-  test "more than 254 verified files split into multiple within-limit batch invocations", %{
+  test "verified files above the runtime batch cap split into within-limit invocations", %{
     worktree: worktree
   } do
     parent = self()
     count = Core.max_test_batch_files() + 5
     paths = write_numbered_tests!(worktree, "alpha", count)
     assert {:ok, batches} = Core.partition_test_batches(paths)
-    assert length(batches) == 2
+    assert length(batches) == 4
+    assert Enum.flat_map(batches, & &1.paths) == paths
+
+    assert Core.max_test_batch_runtime_files() == 2
 
     assert Core.max_test_batch_files() ==
+             min(Core.max_test_batch_runtime_files(), Core.max_test_batch_argv_files())
+
+    assert Core.max_test_batch_argv_files() ==
              Arbor.Shell.spawn_capable_max_command_args() - 2
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
@@ -916,6 +932,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       assert_receive {:mix_invocation, ["test", "--" | received], opts}
       assert received == batch.paths
       assert length(received) <= Core.max_test_batch_files()
+      assert length(received) <= Core.max_test_batch_runtime_files()
       # Full argv remains inside Shell's closed admission ceiling.
       assert length(["test", "--" | received]) <=
                Arbor.Shell.spawn_capable_max_command_args()

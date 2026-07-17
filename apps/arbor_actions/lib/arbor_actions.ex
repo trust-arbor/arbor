@@ -169,6 +169,20 @@ defmodule Arbor.Actions do
   def coding_worktree_path(_base_dir, _branch_name),
     do: {:error, :invalid_coding_worktree_input}
 
+  @doc """
+  Reviewed hard maximum for the cross-app aggregate sequential test-stage
+  budget in milliseconds.
+
+  Distinct from the intensive Shell per-process ceiling (`1_200_000` ms).
+  Coding-plan profiles bind plan wall-clock against this Actions-owned value
+  when compiling `param.test_stage_timeout`; callers must not import
+  `Arbor.Actions.Coding.CrossApp.Core` directly.
+  """
+  @spec cross_app_maximum_test_stage_timeout_ms() :: pos_integer()
+  def cross_app_maximum_test_stage_timeout_ms do
+    Arbor.Actions.Coding.CrossApp.Core.maximum_test_stage_timeout()
+  end
+
   @approval_payload_keys [
     :content,
     "content",

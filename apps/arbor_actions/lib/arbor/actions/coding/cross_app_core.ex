@@ -21,18 +21,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
                           description:
                             "cross_app maximum_timeout requires a positive Shell intensive spawn-capable ceiling; got #{inspect(other)}"
                     end)
-  # Aggregate sequential test-stage ceiling may equal the intensive per-process
-  # Shell bound; both are reviewed for cross_app and fail closed above 1_200_000.
+  # Aggregate sequential test-stage ceiling is distinct from the intensive
+  # per-process Shell bound. Reviewed cross_app max is 2_400_000 ms so multiple
+  # intensive children can run under one stage without widening Shell ceilings.
+  # Effective stage budget is still min(this, plan wall_clock) at compile time.
   @default_test_stage_timeout 300_000
-  @maximum_test_stage_timeout (case Arbor.Shell.spawn_capable_max_timeout_ms(:intensive) do
-                                 {:ok, ms} when is_integer(ms) and ms > 0 ->
-                                   ms
-
-                                 other ->
-                                   raise CompileError,
-                                     description:
-                                       "cross_app maximum_test_stage_timeout requires a positive Shell intensive spawn-capable ceiling; got #{inspect(other)}"
-                               end)
+  @maximum_test_stage_timeout 2_400_000
   @allowed_param_keys [:workspace_id, :timeout, :test_stage_timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 
@@ -46,13 +40,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # filtering / dedup / lstat (ignored/generated paths still consume this bound).
   @max_git_inventory_entries 8_000
   # Closed Mix argv batch limits after exact-file normalization/lstat. Each
-  # invocation prepends `["test", "--"]`, so derive the available path slots
-  # from Shell's public non-bypassable argv ceiling.
-  # The sum of each path's UTF-8 bytes plus one separator byte must also stay
-  # under the byte ceiling. A single normalized path (max 1024 bytes) always
-  # fits both bounds.
+  # invocation prepends `["test", "--"]`. Path slots are the minimum of:
+  #   * Shell's public non-bypassable argv ceiling minus fixed args
+  #   * a reviewed runtime batch cap (at most 2 exact test files per child)
+  # so multi-file suites cannot exhaust the intensive per-process wall clock
+  # while still preserving the complete exact inventory across sequential
+  # batches. The sum of each path's UTF-8 bytes plus one separator byte must
+  # also stay under the byte ceiling. A single normalized path (max 1024
+  # bytes) always fits both bounds.
   @test_batch_fixed_args 2
-  @max_test_batch_files Arbor.Shell.spawn_capable_max_command_args() - @test_batch_fixed_args
+  @max_test_batch_runtime_files 2
+  @max_test_batch_argv_files Arbor.Shell.spawn_capable_max_command_args() - @test_batch_fixed_args
+  @max_test_batch_files min(@max_test_batch_runtime_files, @max_test_batch_argv_files)
   @max_test_batch_arg_bytes 65_536
   @max_output_list 2_000
   # Process/stream excerpts and aggregate evidence are fixed-size by *bytes*.
@@ -285,6 +284,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   @doc false
   def max_test_batch_files, do: @max_test_batch_files
+
+  @doc false
+  def max_test_batch_runtime_files, do: @max_test_batch_runtime_files
+
+  @doc false
+  def max_test_batch_argv_files, do: @max_test_batch_argv_files
 
   @doc false
   def max_test_batch_arg_bytes, do: @max_test_batch_arg_bytes
@@ -586,9 +591,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   Input must already be the post-normalization inventory: strictly sorted,
   unique, and every path must re-normalize to itself. Partitioning is greedy
-  left-to-right under the closed file-count and argument-byte ceilings. Every
-  path appears in exactly one non-empty batch; labels bind inventory count and
-  SHA-256 over the exact batch paths.
+  left-to-right under the closed runtime file-count cap (at most 2 files),
+  Shell argv-count ceiling, and argument-byte ceiling. Every path appears in
+  exactly one non-empty batch; labels bind inventory count and SHA-256 over
+  the exact batch paths. Slow/integration-tagged files are never excluded —
+  they remain in the exact inventory and are only split across sequential
+  children.
   """
   @spec partition_test_batches(term()) :: {:ok, [test_batch()]} | {:error, term()}
   def partition_test_batches([]), do: {:ok, []}
