@@ -85,6 +85,127 @@ defmodule Arbor.Actions.Coding.SubmitReviewReportTest do
                  %{}
                )
     end
+
+    test "fail-closed: unknown keys and malformed optional values are rejected" do
+      assert {:error, :invalid_report_field} =
+               SubmitReviewReport.run(
+                 %{"vote" => "approve", "extra" => "nope"},
+                 %{}
+               )
+
+      assert {:error, :invalid_finding_update} =
+               SubmitReviewReport.run(
+                 %{
+                   "vote" => "approve",
+                   "finding_updates" => [
+                     %{"id" => "f1", "state" => "fixed", "unknown" => true}
+                   ]
+                 },
+                 %{}
+               )
+
+      assert {:error, :invalid_report_field} =
+               SubmitReviewReport.run(
+                 %{
+                   "vote" => "approve",
+                   "finding_updates" => [
+                     %{"id" => "f1", "state" => "fixed", "evidence" => 123}
+                   ]
+                 },
+                 %{}
+               )
+
+      assert {:error, :invalid_report_field} =
+               SubmitReviewReport.run(
+                 %{
+                   "vote" => "reject",
+                   "new_findings" => [
+                     %{
+                       "title" => "x",
+                       "required_action" => "y",
+                       "severity" => "major",
+                       "anchor" => %{"path" => "lib/a.ex", "side" => "new", "line" => 1},
+                       "state" => "open"
+                     }
+                   ]
+                 },
+                 %{}
+               )
+    end
+
+    test "fail-closed: runtime validation enforces byte bounds and valid UTF-8" do
+      assert {:error, :invalid_report_field} =
+               SubmitReviewReport.run(
+                 %{
+                   "vote" => "reject",
+                   "new_findings" => [
+                     %{
+                       "title" => String.duplicate("x", 513),
+                       "required_action" => "fix it",
+                       "severity" => "major",
+                       "anchor" => %{"path" => "lib/a.ex", "side" => "new", "line" => 1}
+                     }
+                   ]
+                 },
+                 %{}
+               )
+
+      assert {:error, :invalid_report_field} =
+               SubmitReviewReport.run(
+                 %{
+                   "vote" => "reject",
+                   "new_findings" => [
+                     %{
+                       "title" => "invalid path",
+                       "required_action" => "fix it",
+                       "severity" => "major",
+                       "anchor" => %{
+                         "path" => String.duplicate("x", 1_025),
+                         "side" => "new",
+                         "line" => 1
+                       }
+                     }
+                   ]
+                 },
+                 %{}
+               )
+
+      assert {:error, :invalid_report_field} =
+               SubmitReviewReport.run(
+                 %{
+                   "vote" => "approve",
+                   "finding_updates" => [
+                     %{"id" => "f1", "state" => "fixed", "evidence" => <<255>>}
+                   ]
+                 },
+                 %{}
+               )
+    end
+
+    test "fail-closed: atom and string aliases cannot duplicate one logical key" do
+      assert {:error, :invalid_report_field} =
+               SubmitReviewReport.run(
+                 %{"vote" => "approve", vote: "reject"},
+                 %{}
+               )
+
+      assert {:error, :invalid_new_finding} =
+               SubmitReviewReport.run(
+                 %{
+                   "vote" => "reject",
+                   "new_findings" => [
+                     %{
+                       "title" => "duplicate",
+                       :title => "shadowed",
+                       "required_action" => "fix it",
+                       "severity" => "major",
+                       "anchor" => %{"path" => "lib/a.ex", "side" => "new", "line" => 1}
+                     }
+                   ]
+                 },
+                 %{}
+               )
+    end
   end
 
   describe "tool schema" do

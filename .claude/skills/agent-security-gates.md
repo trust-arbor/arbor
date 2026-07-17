@@ -174,6 +174,25 @@ another one. It doubles as user documentation — anyone standing up agents need
   run that graph. Set the matching trust rule deliberately; do not broaden to
   `arbor://action/consensus/**` or disable nested authorization.
 
+## 11. Binding council reviewers need exact terminal-report authority
+
+- **What:** each binding council compute node exposes
+  `coding_submit_review_report` as its sole terminal tool. Tool exposure and the
+  outer `council_review_change` capability do not authorize that child action;
+  execution uses the exact generated URI
+  `arbor://action/coding/review/submit`. The action registry registers that exact
+  URI at `arbor_actions` startup, so a broad manual registry prefix is neither
+  needed nor desirable.
+- **Symptom:** reviewers can read/search the candidate, but the terminal call is
+  denied. ToolLoop returns the failed result for one correction attempt and then
+  fails with `terminal_tool_submission_required`, so the council never produces a
+  binding report even though the model reached a vote.
+- **Action:** pin `coding_submit_review_report` in the compiled execution manifest,
+  grant the coding-agent principal the exact URI, and set the exact trust rule to
+  `:auto`. Template updates cover newly created agents only; reconcile the same
+  exact capability and rule on an existing live coding agent before dogfooding the
+  updated council. Do not broaden to `arbor://action/coding/**`.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -190,3 +209,6 @@ another one. It doubles as user documentation — anyone standing up agents need
    capability alone only names the namespace.
 9. For nested reviewed graphs, grant every pinned child action's exact canonical URI;
    outer-action and domain capabilities do not substitute for action authority.
+10. For binding council runs, grant and auto-trust the exact
+    `arbor://action/coding/review/submit` terminal action; reconcile existing agents
+    because template changes are not retroactive.

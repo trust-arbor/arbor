@@ -7,6 +7,9 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
   `new_findings`. Ledger-, owner-, cycle-, and delta-aware validation remains
   in `ReviewLedgerCore` / `Consensus.DecideReview` — this action only bounds
   the tool-schema contract and normalizes the three report fields.
+
+  Fail-closed: unknown keys and malformed optional values are rejected, never
+  silently dropped.
   """
 
   use Jido.Action,
@@ -74,14 +77,31 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
   def effect_class, do: :read
 
   @max_entries 8
+  @max_id_bytes 256
+  @max_title_bytes 512
+  @max_required_action_bytes 1_024
+  @max_evidence_bytes 2_048
+  @max_path_bytes 1_024
   @allowed_votes ~w(approve reject abstain)
   @allowed_update_states ~w(fixed open architectural_blocker)
   @allowed_severities ~w(blocking major minor nit)
+  @root_keys MapSet.new(["vote", "finding_updates", "new_findings"])
+  @update_keys MapSet.new(["id", "state", "title", "required_action", "evidence"])
+  @new_finding_keys MapSet.new([
+                      "title",
+                      "required_action",
+                      "severity",
+                      "anchor",
+                      "evidence",
+                      "state"
+                    ])
+  @anchor_keys MapSet.new(["path", "side", "line"])
 
   @impl true
   @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
   def run(params, _context) when is_map(params) do
-    with {:ok, vote} <- fetch_vote(params),
+    with :ok <- ensure_only_keys(params, @root_keys, :invalid_report_field),
+         {:ok, vote} <- fetch_vote(params),
          {:ok, updates} <- fetch_list(params, ["finding_updates", :finding_updates], []),
          {:ok, findings} <- fetch_list(params, ["new_findings", :new_findings], []),
          :ok <- bound_entry_count(updates, findings),
@@ -102,9 +122,14 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
 
   defp fetch_vote(params) do
     case param(params, ["vote", :vote]) do
-      vote when vote in @allowed_votes -> {:ok, vote}
-      vote when is_atom(vote) -> fetch_vote(%{"vote" => Atom.to_string(vote)})
-      _ -> {:error, :invalid_vote}
+      vote when vote in @allowed_votes ->
+        {:ok, vote}
+
+      vote when is_atom(vote) and vote in [:approve, :reject, :abstain] ->
+        {:ok, Atom.to_string(vote)}
+
+      _ ->
+        {:error, :invalid_vote}
     end
   end
 
@@ -133,23 +158,18 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
   end
 
   defp normalize_update(update) when is_map(update) do
-    with :ok <- ensure_string_keys(update),
-         id when is_binary(id) and id != "" <- map_get(update, "id"),
-         state when state in @allowed_update_states <- map_get(update, "state") do
+    with :ok <- ensure_only_keys(update, @update_keys, :invalid_finding_update),
+         {:ok, id} <- required_binary(update, "id", @max_id_bytes),
+         {:ok, state} <- required_enum(update, "state", @allowed_update_states),
+         {:ok, title} <- optional_binary(update, "title", @max_title_bytes),
+         {:ok, required_action} <-
+           optional_binary(update, "required_action", @max_required_action_bytes),
+         {:ok, evidence} <- optional_binary(update, "evidence", @max_evidence_bytes) do
       base = %{"id" => id, "state" => state}
-
-      optional =
-        Enum.reduce(["title", "required_action", "evidence"], base, fn key, acc ->
-          case map_get(update, key) do
-            value when is_binary(value) -> Map.put(acc, key, value)
-            nil -> acc
-            _ -> acc
-          end
-        end)
-
-      {:ok, optional}
-    else
-      _ -> {:error, :invalid_finding_update}
+      base = put_optional(base, "title", title)
+      base = put_optional(base, "required_action", required_action)
+      base = put_optional(base, "evidence", evidence)
+      {:ok, base}
     end
   end
 
@@ -166,12 +186,14 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
   end
 
   defp normalize_new_finding(finding) when is_map(finding) do
-    with :ok <- ensure_string_keys(finding),
-         title when is_binary(title) and title != "" <- map_get(finding, "title"),
-         required_action when is_binary(required_action) and required_action != "" <-
-           map_get(finding, "required_action"),
-         severity when severity in @allowed_severities <- map_get(finding, "severity"),
-         {:ok, anchor} <- normalize_anchor(map_get(finding, "anchor")) do
+    with :ok <- ensure_only_keys(finding, @new_finding_keys, :invalid_new_finding),
+         {:ok, title} <- required_binary(finding, "title", @max_title_bytes),
+         {:ok, required_action} <-
+           required_binary(finding, "required_action", @max_required_action_bytes),
+         {:ok, severity} <- required_enum(finding, "severity", @allowed_severities),
+         {:ok, anchor} <- normalize_anchor(map_get(finding, "anchor")),
+         {:ok, evidence} <- optional_binary(finding, "evidence", @max_evidence_bytes),
+         {:ok, state} <- optional_enum(finding, "state", ["architectural_blocker"]) do
       base = %{
         "title" => title,
         "required_action" => required_action,
@@ -179,39 +201,118 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
         "anchor" => anchor
       }
 
-      base =
-        case map_get(finding, "evidence") do
-          evidence when is_binary(evidence) -> Map.put(base, "evidence", evidence)
-          _ -> base
-        end
-
-      base =
-        case map_get(finding, "state") do
-          "architectural_blocker" -> Map.put(base, "state", "architectural_blocker")
-          nil -> base
-          _ -> base
-        end
-
+      base = put_optional(base, "evidence", evidence)
+      base = put_optional(base, "state", state)
       {:ok, base}
-    else
-      _ -> {:error, :invalid_new_finding}
     end
   end
 
   defp normalize_new_finding(_), do: {:error, :invalid_new_finding}
 
   defp normalize_anchor(anchor) when is_map(anchor) do
-    with :ok <- ensure_string_keys(anchor),
-         path when is_binary(path) and path != "" <- map_get(anchor, "path"),
-         side when side in ["new", "old"] <- map_get(anchor, "side"),
+    with :ok <- ensure_only_keys(anchor, @anchor_keys, :invalid_anchor),
+         {:ok, path} <- required_binary(anchor, "path", @max_path_bytes),
+         {:ok, side} <- required_enum(anchor, "side", ["new", "old"]),
          line when is_integer(line) and line > 0 <- map_get(anchor, "line") do
       {:ok, %{"path" => path, "side" => side, "line" => line}}
     else
+      {:error, reason} -> {:error, reason}
       _ -> {:error, :invalid_anchor}
     end
   end
 
   defp normalize_anchor(_), do: {:error, :invalid_anchor}
+
+  defp ensure_only_keys(map, allowed, error_reason) when is_map(map) do
+    keys =
+      map
+      |> Map.keys()
+      |> Enum.map(fn
+        key when is_atom(key) -> Atom.to_string(key)
+        key when is_binary(key) -> key
+        _ -> :invalid
+      end)
+
+    duplicate_key? = length(keys) != MapSet.size(MapSet.new(keys))
+
+    if Enum.any?(keys, &(&1 == :invalid)) or duplicate_key? do
+      {:error, error_reason}
+    else
+      unknown = Enum.reject(keys, &MapSet.member?(allowed, &1))
+      if unknown == [], do: :ok, else: {:error, error_reason}
+    end
+  end
+
+  defp required_binary(map, key, max_bytes) do
+    case map_get(map, key) do
+      value when is_binary(value) ->
+        if value != "" and bounded_utf8?(value, max_bytes),
+          do: {:ok, value},
+          else: {:error, :invalid_report_field}
+
+      _ ->
+        {:error, :invalid_report_field}
+    end
+  end
+
+  defp optional_binary(map, key, max_bytes) do
+    case map_has_key?(map, key) do
+      false ->
+        {:ok, :absent}
+
+      true ->
+        case map_get(map, key) do
+          value when is_binary(value) ->
+            if bounded_utf8?(value, max_bytes),
+              do: {:ok, value},
+              else: {:error, :invalid_report_field}
+
+          _ ->
+            {:error, :invalid_report_field}
+        end
+    end
+  end
+
+  defp bounded_utf8?(value, max_bytes) do
+    String.valid?(value) and byte_size(value) <= max_bytes
+  end
+
+  defp required_enum(map, key, allowed) do
+    case map_get(map, key) do
+      value when is_binary(value) ->
+        if value in allowed, do: {:ok, value}, else: {:error, :invalid_report_field}
+
+      value when is_atom(value) ->
+        string = Atom.to_string(value)
+        if string in allowed, do: {:ok, string}, else: {:error, :invalid_report_field}
+
+      _ ->
+        {:error, :invalid_report_field}
+    end
+  end
+
+  defp optional_enum(map, key, allowed) do
+    case map_has_key?(map, key) do
+      false ->
+        {:ok, :absent}
+
+      true ->
+        case map_get(map, key) do
+          value when is_binary(value) ->
+            if value in allowed, do: {:ok, value}, else: {:error, :invalid_report_field}
+
+          value when is_atom(value) ->
+            string = Atom.to_string(value)
+            if string in allowed, do: {:ok, string}, else: {:error, :invalid_report_field}
+
+          _ ->
+            {:error, :invalid_report_field}
+        end
+    end
+  end
+
+  defp put_optional(map, _key, :absent), do: map
+  defp put_optional(map, key, value), do: Map.put(map, key, value)
 
   defp param(params, keys) do
     Enum.find_value(keys, fn key ->
@@ -222,13 +323,20 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
     end)
   end
 
+  defp map_has_key?(map, key) when is_binary(key) do
+    Map.has_key?(map, key) or
+      Enum.any?(Map.keys(map), fn
+        atom when is_atom(atom) -> Atom.to_string(atom) == key
+        _ -> false
+      end)
+  end
+
   defp map_get(map, key) when is_binary(key) do
     case Map.fetch(map, key) do
       {:ok, value} ->
         value
 
       :error ->
-        # Prefer string keys; fall back only for schema-atomized known keys.
         Enum.find_value(Map.keys(map), fn
           atom when is_atom(atom) ->
             if Atom.to_string(atom) == key, do: Map.get(map, atom), else: nil
@@ -237,10 +345,6 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
             nil
         end)
     end
-  end
-
-  defp ensure_string_keys(map) when is_map(map) do
-    if Enum.all?(Map.keys(map), &(is_binary(&1) or is_atom(&1))), do: :ok, else: :error
   end
 
   defp reverse_ok({:ok, list}), do: {:ok, Enum.reverse(list)}

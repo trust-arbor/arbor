@@ -242,6 +242,30 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 
 ## Applied Learning
 
+**A Jido action schema is not automatic runtime validation for direct Arbor execution.**
+`Arbor.Actions.execute_action/3` invokes `action_module.run/2`; the Zoi schema shapes
+the model-facing tool definition but does not enforce its length, encoding, or
+duplicate-key constraints on that public path. Security- and protocol-sensitive
+actions must repeat their closed bounds behaviorally in `run/2`, reject atom/string
+aliases for the same logical key, and test the direct facade path (found 2026-07-17
+hardening the binding council terminal report action).
+
+**Admission ceilings must be supported by every lower execution layer.** Shell admitted
+an intensive Apple Container operation at 1,200,000 ms, but `PortSession` still applied
+its generic 600,000 ms stream ceiling and the unit worker redacted the launch rejection
+as `:list_containment_failure`. Keep the generic public ceiling closed; add a narrow
+profile-keyed internal path for an already-admitted durable plan, and test generic,
+standard, intensive, unknown-profile, and worker-forwarding behavior end to end (found
+2026-07-17 validating the binding council substrate).
+
+**Rotating OAuth refresh is a provider-keyed single-flight publication.** Concurrent
+callers must serialize on the provider, reread the store while holding the lock, and
+publish a complete valid access/refresh token pair atomically before any caller returns.
+Under-lock read failure, malformed stored or refreshed credentials, persistence failure,
+and refresh-token omission without a valid prior token all fail closed; exact store
+absence is the only condition that permits CLI bootstrap (found 2026-07-17 hardening
+subscription-backed council model refresh).
+
 **DOT `context_keys` must match the exact context keys producers emit.** The
 code-review council DOT used `review.review_cycle` while
 `CodeReviewRequest.to_context/1` only emitted `review.cycle` / `review_cycle`,

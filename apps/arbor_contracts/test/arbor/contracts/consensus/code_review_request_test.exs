@@ -291,6 +291,13 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert context["files"] == @valid_attrs.files
       assert context["intent"] == "Add a review loop"
       assert context["review.cycle"] == 1
+      # Production code-review-council.dot context_keys uses review.review_cycle
+      # (same review.* namespace form as review.finding_ledger / review.delta_ranges).
+      # ExecHandler looks up the exact dotted key then flattens the leaf to the
+      # action param name review_cycle — without this producer alias the param is
+      # silently missing and DecideReview returns invalid_review_cycle.
+      assert context["review.review_cycle"] == 1
+      assert context["review_cycle"] == 1
       assert context["review.finding_ledger"] == %{}
       assert context["review.delta_ranges"] == %{}
       assert context["review.request"]["delta_ranges"] == %{}
@@ -300,6 +307,25 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
 
       assert {:ok, _json} = Jason.encode(context)
       refute inspect(context) =~ "%CodeReviewRequest"
+    end
+
+    test "producer review.review_cycle survives ExecHandler leaf flatten into DecideReview params" do
+      # Exact producer → DOT context_keys → ExecHandler leaf → DecideReview contract.
+      {:ok, request} = CodeReviewRequest.new(Map.put(@valid_attrs, :review_cycle, 3))
+      context = CodeReviewRequest.to_context(request)
+      source_key = "review.review_cycle"
+      assert Map.has_key?(context, source_key)
+      assert context[source_key] == 3
+
+      # Mirror ExecHandler.action_param_name/1 leaf flatten (last dotted segment).
+      param_name =
+        case String.split(source_key, ".") do
+          [single] -> single
+          parts -> List.last(parts)
+        end
+
+      assert param_name == "review_cycle"
+      assert Map.has_key?(context, param_name) or context[source_key] == 3
     end
 
     test "preserves delta ranges in the canonical map and review context" do

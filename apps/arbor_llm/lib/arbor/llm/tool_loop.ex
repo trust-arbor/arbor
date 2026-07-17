@@ -93,41 +93,99 @@ defmodule Arbor.LLM.ToolLoop do
           :error -> ArborActionsExecutor.definitions()
         end
 
-      request = %{request | tools: tools}
+      case ensure_terminal_tools_subset(terminal_tools, tools) do
+        :ok ->
+          request = %{request | tools: tools}
 
-      loop(client, request, opts, %{
-        max_turns: max_turns,
-        workdir: workdir,
-        on_tool_call: on_tool_call,
-        tool_executor: tool_executor,
-        agent_id: identity.execution_principal,
-        executor_opts: identity.executor_opts,
-        signer: signer,
-        signing_authority: signing_authority,
-        signing_authority_present?: signing_authority_present?,
-        prompt_sanitizer_nonce:
-          Keyword.get_lazy(opts, :prompt_sanitizer_nonce, fn ->
-            @prompt_sanitizer.generate_nonce()
-          end),
-        turn: 0,
-        total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
-        discovered_tools: [],
-        accumulated_text: "",
-        tool_result_budget: ToolResultBudget.new(),
-        # Steering: an optional 0-arity callback that returns the next queued user message to
-        # fold into the conversation at an iteration boundary (or nil when none). Injected by the
-        # caller (the Session) so the tool loop stays generic — it never reaches into the Session.
-        on_steer_check: Keyword.get(opts, :on_steer_check),
-        # Per-tool CONSECUTIVE failure counter (reset on success). Backs the runaway guard:
-        # exponential backoff before retrying a recently-failed tool, and a hard cap that stops
-        # executing a tool that keeps failing so a broken/rate-limited tool can't loop forever.
-        tool_failures: %{},
-        terminal_tools: terminal_tools,
-        terminal_correction_attempted: false,
-        # Full tool set retained so a terminal-only correction turn can be built without
-        # losing non-terminal tools from the original request.
-        all_tools: tools
-      })
+          run_loop(
+            client,
+            request,
+            opts,
+            identity,
+            max_turns,
+            workdir,
+            on_tool_call,
+            tool_executor,
+            signer,
+            signing_authority,
+            signing_authority_present?,
+            terminal_tools,
+            tools
+          )
+
+        {:error, _} = error ->
+          error
+      end
+    end
+  end
+
+  defp run_loop(
+         client,
+         request,
+         opts,
+         identity,
+         max_turns,
+         workdir,
+         on_tool_call,
+         tool_executor,
+         signer,
+         signing_authority,
+         signing_authority_present?,
+         terminal_tools,
+         tools
+       ) do
+    loop(client, request, opts, %{
+      max_turns: max_turns,
+      workdir: workdir,
+      on_tool_call: on_tool_call,
+      tool_executor: tool_executor,
+      agent_id: identity.execution_principal,
+      executor_opts: identity.executor_opts,
+      signer: signer,
+      signing_authority: signing_authority,
+      signing_authority_present?: signing_authority_present?,
+      prompt_sanitizer_nonce:
+        Keyword.get_lazy(opts, :prompt_sanitizer_nonce, fn ->
+          @prompt_sanitizer.generate_nonce()
+        end),
+      turn: 0,
+      total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
+      discovered_tools: [],
+      accumulated_text: "",
+      tool_result_budget: ToolResultBudget.new(),
+      # Steering: an optional 0-arity callback that returns the next queued user message to
+      # fold into the conversation at an iteration boundary (or nil when none). Injected by the
+      # caller (the Session) so the tool loop stays generic — it never reaches into the Session.
+      on_steer_check: Keyword.get(opts, :on_steer_check),
+      # Per-tool CONSECUTIVE failure counter (reset on success). Backs the runaway guard:
+      # exponential backoff before retrying a recently-failed tool, and a hard cap that stops
+      # executing a tool that keeps failing so a broken/rate-limited tool can't loop forever.
+      tool_failures: %{},
+      terminal_tools: terminal_tools,
+      terminal_correction_attempted: false,
+      # Full tool set retained so a terminal-only correction turn can be built without
+      # losing non-terminal tools from the original request.
+      all_tools: tools
+    })
+  end
+
+  defp ensure_terminal_tools_subset(terminals, tools) do
+    cond do
+      not is_struct(terminals, MapSet) ->
+        :ok
+
+      MapSet.size(terminals) == 0 ->
+        :ok
+
+      true ->
+        available = MapSet.new(callable_tool_names(tools))
+        missing = MapSet.difference(terminals, available)
+
+        if MapSet.size(missing) == 0 do
+          :ok
+        else
+          {:error, {:terminal_tools_not_in_resolved_tools, Enum.sort(MapSet.to_list(missing))}}
+        end
     end
   end
 
@@ -223,6 +281,9 @@ defmodule Arbor.LLM.ToolLoop do
           [tc] = terminal_calls
 
           case Enum.find(tool_results, fn {_id, name, _result} -> name == tc.name end) do
+            {_id, _name, {:ok, :pending_approval, _proposal_id}} ->
+              :continue
+
             {_id, _name, {:ok, result}} ->
               case terminal_result_content(result) do
                 {:ok, content} -> {:terminal_success, content}
@@ -235,18 +296,25 @@ defmodule Arbor.LLM.ToolLoop do
 
             nil ->
               {:error, :ambiguous_terminal_tool_submission}
+
+            {_id, _name, _invalid_result} ->
+              {:error, :invalid_terminal_tool_result}
           end
       end
     end
   end
 
-  defp terminal_result_content(content) when is_binary(content) and content != "",
-    do: {:ok, content}
+  defp terminal_result_content(content) when is_binary(content) and content != "" do
+    case ToolResultBudget.account(content, ToolResultBudget.new()) do
+      {:ok, _budget} -> {:ok, content}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp terminal_result_content(map) when is_map(map) do
-    case Jason.encode(map) do
-      {:ok, json} -> {:ok, json}
-      {:error, _} -> {:error, :invalid_terminal_tool_result}
+    case ToolResultBudget.encode(map, ToolResultBudget.new()) do
+      {:ok, json, _budget} -> {:ok, json}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -294,6 +362,16 @@ defmodule Arbor.LLM.ToolLoop do
   end
 
   defp filter_tools_by_names(_tools, _names), do: []
+
+  defp ambiguous_terminal_call_shape?(tool_calls, terminals)
+       when is_list(tool_calls) and is_struct(terminals, MapSet) do
+    terminal_count =
+      Enum.count(tool_calls, fn tc -> MapSet.member?(terminals, tc.name) end)
+
+    terminal_count > 1 or (terminal_count == 1 and length(tool_calls) > 1)
+  end
+
+  defp ambiguous_terminal_call_shape?(_tool_calls, _terminals), do: false
 
   defp execution_identity(opts) do
     if Keyword.get(opts, :authorization, false) == true do
@@ -531,157 +609,170 @@ defmodule Arbor.LLM.ToolLoop do
           )
         end
 
-        if response.finish_reason == :tool_calls and tool_calls != [] do
-          # Snapshot the currently-callable tool names so the discovery-cap nudge can list them.
-          state = Map.put(state, :callable_tool_names, callable_tool_names(request.tools))
+        cond do
+          response.finish_reason == :tool_calls and tool_calls != [] and
+              ambiguous_terminal_call_shape?(tool_calls, state.terminal_tools) ->
+            # Reject the whole round before executing any tool. A mixed round may
+            # contain side effects, so detecting ambiguity only after execution is
+            # not fail-closed behavior.
+            {:error, :ambiguous_terminal_tool_submission}
 
-          # Execute each tool call
-          {tool_results, state} =
-            execute_tools(tool_calls, state)
+          response.finish_reason == :tool_calls and tool_calls != [] ->
+            # Snapshot the currently-callable tool names so the discovery-cap nudge can list them.
+            state = Map.put(state, :callable_tool_names, callable_tool_names(request.tools))
 
-          case classify_terminal_round(tool_calls, tool_results, state.terminal_tools) do
-            {:terminal_success, content} ->
-              {:ok,
-               %PipelineResponse{
-                 content: content,
-                 content_parts: response.content_parts || [],
-                 finish_reason: :terminal_tool,
-                 usage: state.total_usage,
-                 tool_rounds: state.turn + 1,
-                 raw: response.raw,
-                 discovered_tools: state.discovered_tools
-               }}
+            # Execute each tool call
+            {tool_results, state} =
+              execute_tools(tool_calls, state)
 
-            {:error, reason} ->
-              {:error, reason}
+            case classify_terminal_round(tool_calls, tool_results, state.terminal_tools) do
+              {:terminal_success, content} ->
+                # Successful terminal submission uses the ordinary successful stop
+                # reason so downstream consumers do not need a terminal-specific case.
+                {:ok,
+                 %PipelineResponse{
+                   content: content,
+                   content_parts: response.content_parts || [],
+                   finish_reason: :stop,
+                   usage: state.total_usage,
+                   tool_rounds: state.turn + 1,
+                   raw: response.raw,
+                   discovered_tools: state.discovered_tools
+                 }}
 
-            :continue ->
-              # Check if find_tools was called — inject discovered tools
-              {state, new_tool_defs} = extract_discovered_tools(tool_results, state)
+              {:error, reason} ->
+                {:error, reason}
 
-              # Preserve non-empty text from intermediate rounds. Trim-check so whitespace-only text
-              # (thinking models emit stray "\n" between tool rounds) doesn't count as real content —
-              # otherwise accumulated becomes "\n\n\n" and defeats the empty-text-after-tools retry below.
-              state =
-                if response.text && String.trim(response.text) != "" do
-                  Map.update(state, :accumulated_text, response.text, fn prev ->
-                    if prev == "" or is_nil(prev),
-                      do: response.text,
-                      else: prev <> "\n" <> response.text
-                  end)
-                else
-                  state
-                end
+              :continue ->
+                # Check if find_tools was called — inject discovered tools
+                {state, new_tool_defs} = extract_discovered_tools(tool_results, state)
 
-              # Build the assistant message with its tool calls
-              assistant_msg = build_assistant_message(response)
-
-              # Bound every raw result and the aggregate before it can become model input.
-              case build_tool_messages(
-                     tool_results,
-                     state.prompt_sanitizer_nonce,
-                     state.tool_result_budget
-                   ) do
-                {:ok, tool_msgs, next_budget} ->
-                  updated_messages = request.messages ++ [assistant_msg | tool_msgs]
-                  next_tools = merge_tool_definitions(request.tools, new_tool_defs)
-                  next_request = %{request | messages: updated_messages, tools: next_tools}
-                  next_request = apply_steering(next_request, state)
-
-                  loop(client, next_request, opts, %{
+                # Preserve non-empty text from intermediate rounds. Trim-check so whitespace-only text
+                # (thinking models emit stray "\n" between tool rounds) doesn't count as real content —
+                # otherwise accumulated becomes "\n\n\n" and defeats the empty-text-after-tools retry below.
+                state =
+                  if response.text && String.trim(response.text) != "" do
+                    Map.update(state, :accumulated_text, response.text, fn prev ->
+                      if prev == "" or is_nil(prev),
+                        do: response.text,
+                        else: prev <> "\n" <> response.text
+                    end)
+                  else
                     state
-                    | turn: state.turn + 1,
-                      tool_result_budget: next_budget
-                  })
+                  end
 
-                {:error, _reason} = error ->
-                  error
-              end
-          end
-        else
-          # Final response — return as normalized PipelineResponse
-          accumulated = Map.get(state, :accumulated_text) || ""
-          final_response = if is_binary(response.text), do: String.trim(response.text), else: ""
-          had_tools = request.tools not in [nil, []]
-          terminals? = terminal_tools_enabled?(state)
+                # Build the assistant message with its tool calls
+                assistant_msg = build_assistant_message(response)
 
-          cond do
-            # Terminal-tool contract: free-form final text is not a valid submission.
-            # Allow at most one bounded correction turn exposing only terminal tools.
-            terminals? and not state.terminal_correction_attempted ->
-              require Logger
+                # Bound every raw result and the aggregate before it can become model input.
+                case build_tool_messages(
+                       tool_results,
+                       state.prompt_sanitizer_nonce,
+                       state.tool_result_budget
+                     ) do
+                  {:ok, tool_msgs, next_budget} ->
+                    updated_messages = request.messages ++ [assistant_msg | tool_msgs]
+                    next_tools = merge_tool_definitions(request.tools, new_tool_defs)
+                    next_request = %{request | messages: updated_messages, tools: next_tools}
+                    next_request = apply_steering(next_request, state)
 
-              Logger.info(
-                "[ToolLoop] Free-form final text with terminal_tools configured; " <>
-                  "one correction turn for agent #{state.agent_id}"
-              )
+                    loop(client, next_request, opts, %{
+                      state
+                      | turn: state.turn + 1,
+                        tool_result_budget: next_budget
+                    })
 
-              correction_request = terminal_correction_request(request, state)
-
-              loop(client, correction_request, opts, %{
-                state
-                | turn: state.turn + 1,
-                  terminal_correction_attempted: true,
-                  # Drop non-terminal accumulation — only the terminal tool result is content.
-                  accumulated_text: ""
-              })
-
-            terminals? and state.terminal_correction_attempted ->
-              {:error, :terminal_tool_submission_required}
-
-            # The model finished (no further tool calls) but produced no text, and
-            # nothing was accumulated from earlier rounds — yet tools were on the
-            # table. Some providers return an empty final message after a tool
-            # round (or emit only a tool call and then stop). Force a final answer
-            # with tools stripped so the model MUST respond in text. The retry
-            # request sets tools: [], so `had_tools` is false next time — this
-            # cannot recurse a second time.
-            String.trim(final_response) == "" and String.trim(accumulated) == "" and had_tools ->
-              require Logger
-
-              Logger.info(
-                "[ToolLoop] Empty final text after #{state.turn + 1} round(s); " <>
-                  "retrying text-only for agent #{state.agent_id}"
-              )
-
-              retry_request = %{
-                request
-                | tools: [],
-                  messages: request.messages ++ [text_only_wrap_up_message()]
-              }
-
-              loop(client, retry_request, opts, state)
-
-            true ->
-              final_text =
-                case {accumulated, final_response} do
-                  {"", ""} -> ""
-                  {"", text} -> text
-                  {acc, ""} -> acc
-                  {acc, text} -> acc <> "\n\n" <> text
+                  {:error, _reason} = error ->
+                    error
                 end
+            end
 
-              if final_text == "" do
+          true ->
+            # Final response — return as normalized PipelineResponse
+            accumulated = Map.get(state, :accumulated_text) || ""
+            final_response = if is_binary(response.text), do: String.trim(response.text), else: ""
+            had_tools = request.tools not in [nil, []]
+            terminals? = terminal_tools_enabled?(state)
+
+            cond do
+              # Terminal-tool contract: free-form final text is not a valid submission.
+              # Allow at most one bounded correction turn exposing only terminal tools.
+              terminals? and not state.terminal_correction_attempted ->
                 require Logger
 
-                Logger.warning(
-                  "[ToolLoop] Final response has empty text after #{state.turn + 1} tool rounds. " <>
-                    "finish_reason=#{Arbor.LLM.ExternalTerm.inspect(response.finish_reason)} " <>
-                    "content_parts=#{Arbor.LLM.ExternalTerm.inspect(Enum.map(response.content_parts || [], & &1.kind))}"
+                Logger.info(
+                  "[ToolLoop] Free-form final text with terminal_tools configured; " <>
+                    "one correction turn for agent #{state.agent_id}"
                 )
-              end
 
-              {:ok,
-               %PipelineResponse{
-                 content: final_text,
-                 content_parts: response.content_parts || [],
-                 finish_reason: response.finish_reason,
-                 usage: state.total_usage,
-                 tool_rounds: state.turn + 1,
-                 raw: response.raw,
-                 discovered_tools: state.discovered_tools
-               }}
-          end
+                correction_request = terminal_correction_request(request, state)
+
+                # Do not advance :turn for the correction reservation — a free-form
+                # reply on the last normal turn must still get exactly one terminal-only
+                # correction call. terminal_correction_attempted bounds the retry.
+                loop(client, correction_request, opts, %{
+                  state
+                  | terminal_correction_attempted: true,
+                    # Drop non-terminal accumulation — only the terminal tool result is content.
+                    accumulated_text: ""
+                })
+
+              terminals? and state.terminal_correction_attempted ->
+                {:error, :terminal_tool_submission_required}
+
+              # The model finished (no further tool calls) but produced no text, and
+              # nothing was accumulated from earlier rounds — yet tools were on the
+              # table. Some providers return an empty final message after a tool
+              # round (or emit only a tool call and then stop). Force a final answer
+              # with tools stripped so the model MUST respond in text. The retry
+              # request sets tools: [], so `had_tools` is false next time — this
+              # cannot recurse a second time.
+              String.trim(final_response) == "" and String.trim(accumulated) == "" and had_tools ->
+                require Logger
+
+                Logger.info(
+                  "[ToolLoop] Empty final text after #{state.turn + 1} round(s); " <>
+                    "retrying text-only for agent #{state.agent_id}"
+                )
+
+                retry_request = %{
+                  request
+                  | tools: [],
+                    messages: request.messages ++ [text_only_wrap_up_message()]
+                }
+
+                loop(client, retry_request, opts, state)
+
+              true ->
+                final_text =
+                  case {accumulated, final_response} do
+                    {"", ""} -> ""
+                    {"", text} -> text
+                    {acc, ""} -> acc
+                    {acc, text} -> acc <> "\n\n" <> text
+                  end
+
+                if final_text == "" do
+                  require Logger
+
+                  Logger.warning(
+                    "[ToolLoop] Final response has empty text after #{state.turn + 1} tool rounds. " <>
+                      "finish_reason=#{Arbor.LLM.ExternalTerm.inspect(response.finish_reason)} " <>
+                      "content_parts=#{Arbor.LLM.ExternalTerm.inspect(Enum.map(response.content_parts || [], & &1.kind))}"
+                  )
+                end
+
+                {:ok,
+                 %PipelineResponse{
+                   content: final_text,
+                   content_parts: response.content_parts || [],
+                   finish_reason: response.finish_reason,
+                   usage: state.total_usage,
+                   tool_rounds: state.turn + 1,
+                   raw: response.raw,
+                   discovered_tools: state.discovered_tools
+                 }}
+            end
         end
 
       {:error, reason} = error ->

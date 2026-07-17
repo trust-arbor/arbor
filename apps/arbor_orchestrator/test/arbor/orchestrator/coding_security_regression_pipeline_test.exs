@@ -457,7 +457,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     }
   end
 
-  test "default plan budget reaches validator only as the opaque default-timeout call", ctx do
+  test "default plan budget pins the standard validator timeout", ctx do
     assert {{:ok, result}, calls} = run_fixture(:auto_success, ctx)
 
     assert result.context["status"] == "change_committed",
@@ -466,8 +466,10 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert [{"coding_security_regression_validate", validator_args}] =
              calls_for(calls, "coding_security_regression_validate")
 
-    assert validator_args == %{"review_attestation_id" => "attestation-1"}
-    refute Map.has_key?(validator_args, "timeout")
+    assert validator_args == %{
+             "review_attestation_id" => "attestation-1",
+             "timeout" => 600_000
+           }
 
     assert [{"council_review_change", review_args}] =
              calls_for(calls, "council_review_change")

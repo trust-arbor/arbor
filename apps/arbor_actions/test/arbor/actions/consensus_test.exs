@@ -1060,6 +1060,46 @@ defmodule Arbor.Actions.ConsensusTest do
       assert result["review_cycle"] == 1
     end
 
+    test "producer-to-consumer: CodeReviewRequest review.review_cycle leaf maps into DecideReview" do
+      alias Arbor.Contracts.Consensus.CodeReviewRequest
+
+      {:ok, request} =
+        CodeReviewRequest.new(%{
+          diff: "diff --git a/lib/a.ex b/lib/a.ex\n+def ok, do: :ok",
+          files: ["lib/a.ex"],
+          branch: "agent/review-loop",
+          review_cycle: 1
+        })
+
+      context = CodeReviewRequest.to_context(request)
+      # DOT context_keys entry emitted by the producer
+      assert context["review.review_cycle"] == 1
+
+      # ExecHandler leaf flatten of review.review_cycle → review_cycle param
+      leaf = List.last(String.split("review.review_cycle", "."))
+      assert leaf == "review_cycle"
+
+      results =
+        Enum.map(@review_perspectives, fn perspective ->
+          make_review_branch(perspective, review_report("approve"))
+        end)
+
+      # Params as ExecHandler would build them from context_keys values
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{
+                   "results" => results,
+                   leaf => context["review.review_cycle"],
+                   "finding_ledger" => review_ledger(),
+                   "delta_ranges" => %{}
+                 },
+                 %{}
+               )
+
+      assert result["review_cycle"] == 1
+      assert result["decision"] == "approved"
+    end
+
     test "prose and fenced JSON last_response remain abstentions (strict Jason.decode)" do
       # DecideReview intentionally exact-decodes JSON. Fenced markdown or prose
       # plus JSON must not be scraped or inferred into a vote.

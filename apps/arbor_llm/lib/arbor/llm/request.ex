@@ -8,7 +8,7 @@ defmodule Arbor.LLM.Request do
           model: String.t(),
           messages: [Message.t()],
           tools: [map()],
-          tool_choice: String.t() | nil,
+          tool_choice: String.t() | map() | nil,
           max_tokens: integer() | nil,
           temperature: float() | nil,
           top_p: float() | nil,

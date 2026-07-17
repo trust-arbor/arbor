@@ -940,7 +940,8 @@ defmodule Arbor.LLM.ToolLoopTest do
           terminal_tools: ["submit_report"]
         )
 
-      assert result.finish_reason == :terminal_tool
+      # Successful terminal submission uses the existing :stop contract, not a new atom.
+      assert result.finish_reason == :stop
 
       assert Jason.decode!(result.content) == %{
                "vote" => "approve",
@@ -962,7 +963,7 @@ defmodule Arbor.LLM.ToolLoopTest do
           terminal_tools: ["submit_report"]
         )
 
-      assert result.finish_reason == :terminal_tool
+      assert result.finish_reason == :stop
 
       assert Jason.decode!(result.content) == %{
                "vote" => "reject",
@@ -977,9 +978,47 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert {:error, :ambiguous_terminal_tool_submission} =
                ToolLoop.run(client, request("terminal_mixed_test"),
                  tools: terminal_tool_defs() ++ mock_read_tool_def(),
-                 tool_executor: __MODULE__.TerminalTools,
+                 tool_executor: __MODULE__.NeverExecuteTerminalTools,
                  terminal_tools: ["submit_report"]
                )
+    end
+
+    test "multiple terminal calls fail closed before any tool executes" do
+      client = build_client(__MODULE__.TerminalMultipleAdapter)
+
+      assert {:error, :ambiguous_terminal_tool_submission} =
+               ToolLoop.run(client, request("terminal_multiple_test"),
+                 tools: terminal_tool_defs(),
+                 tool_executor: __MODULE__.NeverExecuteTerminalTools,
+                 terminal_tools: ["submit_report"]
+               )
+    end
+
+    test "pending terminal approval is returned for correction instead of crashing" do
+      client = build_client(__MODULE__.TerminalPendingThenSucceedAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("terminal_pending_then_succeed_test"),
+          tools: terminal_tool_defs(),
+          tool_executor: __MODULE__.TerminalTools,
+          terminal_tools: ["submit_report"]
+        )
+
+      assert result.finish_reason == :stop
+      assert Jason.decode!(result.content)["vote"] == "approve"
+    end
+
+    test "oversized structured terminal results are rejected by the shared result budget" do
+      client = build_client(__MODULE__.TerminalHugeResultAdapter)
+
+      assert {:error, {:invalid_tool_result, {:decoded_term_limit_exceeded, boundary, 100_000}}} =
+               ToolLoop.run(client, request("terminal_huge_result_test"),
+                 tools: terminal_tool_defs(),
+                 tool_executor: __MODULE__.HugeTerminalTools,
+                 terminal_tools: ["submit_report"]
+               )
+
+      assert boundary in [:nodes, :list_items]
     end
 
     test "absent terminal_tools option preserves free-form final text compatibility" do
@@ -1012,13 +1051,58 @@ defmodule Arbor.LLM.ToolLoopTest do
           terminal_tools: ["submit_report"]
         )
 
-      assert result.finish_reason == :terminal_tool
+      assert result.finish_reason == :stop
 
       assert Jason.decode!(result.content) == %{
                "vote" => "approve",
                "finding_updates" => [],
                "new_findings" => []
              }
+    end
+
+    test "regression: sole successful terminal call terminates (classify must not always continue)" do
+      # If classify_terminal_round always returned :continue (e.g. a tautological
+      # guard like map_size(%{}) == 0), the loop would feed the tool result back
+      # and wait for free-form text instead of ending with only the action result.
+      client = build_client(__MODULE__.TerminalSuccessThenWouldLoopAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("terminal_success_no_continue_test"),
+          tools: terminal_tool_defs(),
+          tool_executor: __MODULE__.TerminalTools,
+          terminal_tools: ["submit_report"],
+          max_turns: 5
+        )
+
+      assert result.finish_reason == :stop
+      assert Jason.decode!(result.content)["vote"] == "approve"
+      # Adapter would raise if a second LLM call occurred after the terminal success.
+    end
+
+    test "correction turn is not skipped when free-form arrives on the last normal turn" do
+      client = build_client(__MODULE__.TerminalFreeFormThenSubmitAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("terminal_freeform_then_submit_test"),
+          tools: terminal_tool_defs(),
+          tool_executor: __MODULE__.TerminalTools,
+          terminal_tools: ["submit_report"],
+          max_turns: 1
+        )
+
+      assert result.finish_reason == :stop
+      assert Jason.decode!(result.content)["vote"] == "approve"
+    end
+
+    test "terminal_tools not in resolved tools fail closed at ToolLoop entry" do
+      client = build_client(NoToolsAdapter)
+
+      assert {:error, {:terminal_tools_not_in_resolved_tools, ["missing_tool"]}} =
+               ToolLoop.run(client, request("no_tools_test"),
+                 tools: terminal_tool_defs(),
+                 tool_executor: __MODULE__.TerminalTools,
+                 terminal_tools: ["missing_tool"]
+               )
     end
   end
 
@@ -1029,6 +1113,9 @@ defmodule Arbor.LLM.ToolLoopTest do
       case args do
         %{"vote" => "fail"} ->
           {:error, "invalid_vote"}
+
+        %{"vote" => "pending"} ->
+          {:ok, :pending_approval, "irq_terminal_test"}
 
         %{"vote" => vote} when vote in ["approve", "reject", "abstain"] ->
           {:ok,
@@ -1053,6 +1140,18 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
 
     def execute(name, _args, _workdir, _opts), do: {:error, "Unknown: #{name}"}
+  end
+
+  defmodule NeverExecuteTerminalTools do
+    def execute(name, _args, _workdir, _opts) do
+      raise "ambiguous terminal round executed #{name} before rejection"
+    end
+  end
+
+  defmodule HugeTerminalTools do
+    def execute("submit_report", _args, _workdir, _opts) do
+      {:ok, %{"items" => List.duplicate(0, 100_001)}}
+    end
   end
 
   defmodule TerminalSuccessAdapter do
@@ -1138,6 +1237,59 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
+  defmodule TerminalMultipleAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_multiple_test"
+
+    def complete(%Request{} = _request, _opts) do
+      {:ok,
+       %Response{
+         text: "",
+         finish_reason: :tool_calls,
+         content_parts: [
+           ContentPart.tool_call("t1", "submit_report", %{"vote" => "approve"}),
+           ContentPart.tool_call("t2", "submit_report", %{"vote" => "reject"})
+         ],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
+  defmodule TerminalPendingThenSucceedAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_pending_then_succeed_test"
+
+    def complete(%Request{} = request, _opts) do
+      vote = if Enum.any?(request.messages, &(&1.role == :tool)), do: "approve", else: "pending"
+
+      {:ok,
+       %Response{
+         text: "",
+         finish_reason: :tool_calls,
+         content_parts: [ContentPart.tool_call("t1", "submit_report", %{"vote" => vote})],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
+  defmodule TerminalHugeResultAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_huge_result_test"
+
+    def complete(%Request{} = _request, _opts) do
+      {:ok,
+       %Response{
+         text: "",
+         finish_reason: :tool_calls,
+         content_parts: [ContentPart.tool_call("t1", "submit_report", %{"vote" => "approve"})],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
   defmodule TerminalFreeFormThenStillFreeFormAdapter do
     @behaviour Arbor.LLM.ProviderAdapter
     def provider, do: "terminal_freeform_test"
@@ -1184,6 +1336,32 @@ defmodule Arbor.LLM.ToolLoopTest do
            raw: %{}
          }}
       end
+    end
+  end
+
+  defmodule TerminalSuccessThenWouldLoopAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_success_no_continue_test"
+
+    def complete(%Request{} = request, _opts) do
+      if Enum.any?(request.messages, &(&1.role == :tool)) do
+        raise "classify_terminal_round continued after a sole successful terminal submission"
+      end
+
+      {:ok,
+       %Response{
+         text: "",
+         finish_reason: :tool_calls,
+         content_parts: [
+           ContentPart.tool_call("t1", "submit_report", %{
+             "vote" => "approve",
+             "finding_updates" => [],
+             "new_findings" => []
+           })
+         ],
+         usage: %{},
+         raw: %{}
+       }}
     end
   end
 
