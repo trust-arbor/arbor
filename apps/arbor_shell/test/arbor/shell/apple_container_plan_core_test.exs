@@ -59,7 +59,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
   @invalid_utf8 <<0xC3, 0x28>>
 
   describe "positive exact create plan" do
-    test "builds full containment argv with fixed mounts, env, limits, and cleanup" do
+    test "builds full containment argv with image-owned archives and fixed execution policy" do
       assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
 
       assert plan.runtime_executable == "/usr/local/bin/container"
@@ -79,6 +79,10 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                erlang: "/usr/local/lib/erlang",
                elixir: "/usr/local"
              }
+
+      assert plan.guest_mix_home == "/usr/local/.mix"
+      assert plan.guest_mix_archives == "/usr/local/.mix/archives"
+      assert plan.guest_elixir_make_cache == "/usr/local/.cache/elixir_make"
 
       assert plan.resource_limits == %{cpus: "1", memory: "2G"}
       assert plan.lifecycle.preflight_order == [:verify_absent]
@@ -136,6 +140,12 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  "MIX_BUILD_PATH=/arbor/build",
                  "--env",
                  "MIX_DEPS_PATH=/arbor/deps",
+                 "--env",
+                 "MIX_HOME=/usr/local/.mix",
+                 "--env",
+                 "MIX_ARCHIVES=/usr/local/.mix/archives",
+                 "--env",
+                 "ELIXIR_MAKE_CACHE_DIR=/usr/local/.cache/elixir_make",
                  "--env",
                  "ARBOR_MIX_CONTAINED=1",
                  "--env",
@@ -241,6 +251,9 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert shown["platform"] == "linux/arm64"
       assert shown["runtime_handler"] == "container-runtime-linux"
       assert shown["registry_scheme"] == "https"
+      assert shown["guest_mix_home"] == "/usr/local/.mix"
+      assert shown["guest_mix_archives"] == "/usr/local/.mix/archives"
+      assert shown["guest_elixir_make_cache"] == "/usr/local/.cache/elixir_make"
       assert shown["argv"]["create"] == plan.argv.create
       assert Jason.encode!(shown)
     end
@@ -1293,6 +1306,9 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       "TMPDIR=",
       "MIX_BUILD_PATH=",
       "MIX_DEPS_PATH=",
+      "MIX_HOME=",
+      "MIX_ARCHIVES=",
+      "ELIXIR_MAKE_CACHE_DIR=",
       "ARBOR_MIX_CONTAINED=",
       "ARBOR_ERLANG_ROOT=",
       "ARBOR_ELIXIR_ROOT=",

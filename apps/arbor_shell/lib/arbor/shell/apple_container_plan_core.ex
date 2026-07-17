@@ -25,6 +25,10 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   `:mix_wrapper_dir` is the canonical parent of the separately reviewed Mix
   wrapper file. It is mounted read-only at fixed guest `/arbor/bin`, while the
   fixed entrypoint remains `/arbor/bin/mix`.
+
+  Hex, Rebar, verified precompiled NIF archives, and Linux-native build tools
+  are image-owned. The planner only exposes their fixed guest locations; it
+  never projects host executables into the validation unit.
   """
 
   @runtime_executable "/usr/local/bin/container"
@@ -45,6 +49,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @guest_mix_wrapper "/arbor/bin/mix"
   @guest_erlang_root "/usr/local/lib/erlang"
   @guest_elixir_root "/usr/local"
+  @guest_mix_home "/usr/local/.mix"
+  @guest_mix_archives "/usr/local/.mix/archives"
+  @guest_elixir_make_cache "/usr/local/.cache/elixir_make"
 
   # Local-only execution alias sinks. Port 0 is non-connectable; these strings
   # name operator-provisioned local store entries, not pull destinations.
@@ -167,6 +174,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
           projections: projections(),
           host_runtime_roots: host_runtime_roots(),
           guest_runtime_roots: %{erlang: String.t(), elixir: String.t()},
+          guest_mix_home: String.t(),
+          guest_mix_archives: String.t(),
+          guest_elixir_make_cache: String.t(),
           guest_workdir: String.t(),
           guest_mix_wrapper: String.t(),
           resource_limits: %{cpus: String.t(), memory: String.t()},
@@ -225,6 +235,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
           erlang: @guest_erlang_root,
           elixir: @guest_elixir_root
         },
+        guest_mix_home: @guest_mix_home,
+        guest_mix_archives: @guest_mix_archives,
+        guest_elixir_make_cache: @guest_elixir_make_cache,
         guest_workdir: @guest_workdir,
         guest_mix_wrapper: @guest_mix_wrapper,
         resource_limits: %{cpus: @cpus, memory: @memory},
@@ -269,6 +282,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       "projections" => stringify_keys(plan.projections),
       "host_runtime_roots" => stringify_keys(plan.host_runtime_roots),
       "guest_runtime_roots" => stringify_keys(plan.guest_runtime_roots),
+      "guest_mix_home" => plan.guest_mix_home,
+      "guest_mix_archives" => plan.guest_mix_archives,
+      "guest_elixir_make_cache" => plan.guest_elixir_make_cache,
       "guest_workdir" => plan.guest_workdir,
       "guest_mix_wrapper" => plan.guest_mix_wrapper,
       "resource_limits" => stringify_keys(plan.resource_limits),
@@ -1054,6 +1070,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       {"TMPDIR", "/arbor/tmp"},
       {"MIX_BUILD_PATH", "/arbor/build"},
       {"MIX_DEPS_PATH", "/arbor/deps"},
+      {"MIX_HOME", @guest_mix_home},
+      {"MIX_ARCHIVES", @guest_mix_archives},
+      {"ELIXIR_MAKE_CACHE_DIR", @guest_elixir_make_cache},
       {"ARBOR_MIX_CONTAINED", "1"},
       {"ARBOR_ERLANG_ROOT", @guest_erlang_root},
       {"ARBOR_ELIXIR_ROOT", @guest_elixir_root},
