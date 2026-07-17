@@ -20,23 +20,35 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:ok, %{timeout: 300_000, test_stage_timeout: 300_000}} =
              Core.new(%{workspace_id: "ws_opaque"})
 
-    ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
+    assert {:ok, intensive_ceiling} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
+    assert intensive_ceiling == 1_200_000
+    standard_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
+    assert standard_ceiling == 600_000
 
-    assert Core.maximum_timeout() == ceiling
-    assert Core.maximum_test_stage_timeout() == 1_200_000
+    # cross_app derives per-op and stage ceilings from intensive Shell policy.
+    assert Core.maximum_timeout() == intensive_ceiling
+    assert Core.maximum_test_stage_timeout() == intensive_ceiling
+    assert Core.maximum_timeout() > standard_ceiling
 
-    assert {:ok, %{timeout: ^ceiling}} =
-             Core.new(%{workspace_id: "ws_opaque", timeout: Integer.to_string(ceiling)})
+    assert {:ok, %{timeout: ^intensive_ceiling}} =
+             Core.new(%{
+               workspace_id: "ws_opaque",
+               timeout: Integer.to_string(intensive_ceiling)
+             })
 
     assert {:ok, %{test_stage_timeout: 1_200_000}} =
              Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "1200000"})
 
+    # Values above the standard ceiling are valid for cross_app (intensive).
+    assert {:ok, %{timeout: 900_000}} =
+             Core.new(%{workspace_id: "ws_opaque", timeout: 900_000})
+
     for invalid <- [
-          Integer.to_string(ceiling + 1),
+          Integer.to_string(intensive_ceiling + 1),
           "999",
-          "0600000",
-          "600000ms",
-          " 600000"
+          "01200000",
+          "1200000ms",
+          " 1200000"
         ] do
       assert {:error, :invalid_timeout} =
                Core.new(%{workspace_id: "ws_opaque", timeout: invalid})

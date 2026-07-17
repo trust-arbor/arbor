@@ -88,15 +88,34 @@ defmodule Arbor.Shell do
   def max_output_bytes_limit, do: Executor.max_output_bytes_limit()
 
   @doc """
-  Non-bypassable system hard maximum for spawn-capable execution timeouts (ms).
+  Non-bypassable system hard maximum for standard spawn-capable timeouts (ms).
 
-  Public facade over `Arbor.Shell.SpawnCapableTimeout`. Coding validation
-  profiles and action cores must derive their validation ceilings from this
-  bound so they cannot advertise a timeout that Apple Container admission
+  Public facade over `Arbor.Shell.SpawnCapableTimeout`. Returns the
+  `:standard` profile ceiling (600_000 ms). Coding validation profiles and
+  action cores that do not select `:intensive` must derive their ceilings from
+  this bound so they cannot advertise a timeout that Apple Container admission
   rejects. Values above this ceiling fail closed without clamping.
+
+  For a closed profile-aware ceiling, call `spawn_capable_max_timeout_ms/1`.
   """
   @spec spawn_capable_max_timeout_ms() :: pos_integer()
   def spawn_capable_max_timeout_ms, do: SpawnCapableTimeout.max_timeout_ms()
+
+  @doc """
+  Non-bypassable system hard maximum for a closed spawn-capable resource profile.
+
+  Accepts only the closed resource-profile atoms already used by
+  `execute_spawn_capable/3` (`:standard` | `:intensive`):
+
+    * `:standard` — 600_000 ms
+    * `:intensive` — 1_200_000 ms
+
+  Returns `{:ok, ms}` or `{:error, :invalid_resource_profile}`. Higher libraries
+  must not invent additional profiles or numeric overrides.
+  """
+  @spec spawn_capable_max_timeout_ms(term()) ::
+          {:ok, pos_integer()} | {:error, :invalid_resource_profile}
+  def spawn_capable_max_timeout_ms(profile), do: SpawnCapableTimeout.max_timeout_ms(profile)
 
   @doc """
   Non-bypassable maximum argument count for one spawn-capable execution.
@@ -466,10 +485,15 @@ defmodule Arbor.Shell do
 
   Optional `:resource_profile` is the only capacity control on this facade.
   When omitted, Shell defaults to `:standard` before building the PlanCore
-  request (PlanCore itself requires an explicit profile atom):
+  request (PlanCore itself requires an explicit profile atom). The same atom
+  also selects the non-bypassable wall-clock timeout ceiling:
 
-    * `:standard` — 1 CPU / 2G memory (default; preserves historical units)
-    * `:intensive` — 4 CPU / 4G memory
+    * `:standard` — 1 CPU / 2G memory; timeout ≤ 600_000 ms (default)
+    * `:intensive` — 4 CPU / 4G memory; timeout ≤ 1_200_000 ms
+
+  A caller cannot request an intensive timeout under `:standard`, and the
+  profile is bound into the admitted plan so durable reconstruction cannot
+  substitute a different capacity after admission.
 
   Raw `:cpus`, `:memory`, resource maps, strings, and other open limit overrides
   are never admitted through this facade or the pure execution/plan cores.

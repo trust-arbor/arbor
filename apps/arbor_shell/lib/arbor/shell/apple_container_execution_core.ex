@@ -25,9 +25,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   @default_max_output_bytes 8_388_608
   @hard_max_output_bytes 16_777_216
-  # Spawn-capable ceiling: one pure Shell source of truth (no local drift).
-  @min_timeout_ms SpawnCapableTimeout.min_timeout_ms()
-  @max_timeout_ms SpawnCapableTimeout.max_timeout_ms()
+  # Profile-aware timeout ceilings are resolved via SpawnCapableTimeout.
 
   @max_path_bytes 4_096
   @max_command_args SpawnCapableArgvLimits.max_command_args()
@@ -328,13 +326,13 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
          :ok <- reject_unknown_opt_keys(opts),
          :ok <- require_opt_keys(opts),
          {:ok, cwd} <- fetch_opt_cwd(opts),
-         {:ok, timeout} <- fetch_opt_timeout(opts),
+         {:ok, resource_profile} <- fetch_opt_resource_profile(opts),
+         {:ok, timeout} <- fetch_opt_timeout(opts, resource_profile),
          {:ok, max_output_bytes} <- fetch_opt_max_output_bytes(opts),
          :ok <- fetch_opt_sandbox(opts),
          {:ok, env} <- fetch_opt_env(opts),
          :ok <- fetch_opt_clear_env(opts),
-         {:ok, projections} <- fetch_opt_filesystem_projections(opts),
-         {:ok, resource_profile} <- fetch_opt_resource_profile(opts) do
+         {:ok, projections} <- fetch_opt_filesystem_projections(opts) do
       {:ok,
        %{
          cwd: cwd,
@@ -401,16 +399,15 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
-  defp fetch_opt_timeout(opts) do
+  # Timeout ceiling is keyed by the closed resource profile already selected for
+  # this request. Intensive timeouts cannot be admitted under :standard.
+  defp fetch_opt_timeout(opts, resource_profile) do
     case Keyword.fetch!(opts, :timeout) do
-      n when is_integer(n) and n >= @min_timeout_ms and n <= @max_timeout_ms ->
-        {:ok, n}
-
-      n when is_integer(n) and n > @max_timeout_ms ->
-        {:error, :timeout_too_large}
-
-      n when is_integer(n) and n < @min_timeout_ms ->
-        {:error, :timeout_too_small}
+      n when is_integer(n) ->
+        case SpawnCapableTimeout.validate_timeout_ms(n, resource_profile) do
+          :ok -> {:ok, n}
+          {:error, reason} -> {:error, reason}
+        end
 
       _other ->
         {:error, :invalid_timeout}

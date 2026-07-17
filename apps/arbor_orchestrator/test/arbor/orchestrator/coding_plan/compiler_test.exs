@@ -472,10 +472,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["action"] == "coding_cross_app_validate"
     assert validate["context_keys"] == "workspace_id"
     refute Map.has_key?(validate, "param.warnings_as_errors")
-    # Per-operation still capped at Shell spawn-capable ceiling.
-    assert validate["param.timeout"] == 600_000
-    # Aggregate test-stage budget is compiled from wall-clock (default 900s)
-    # and reviewed separately up to 1_200_000.
+    # Intensive Shell policy: per-op max 1_200_000, min with default wall-clock 900_000.
+    assert validate["param.timeout"] == 900_000
+    # Aggregate test-stage budget is compiled from the same wall-clock budget.
     assert validate["param.test_stage_timeout"] == 900_000
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
@@ -523,7 +522,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:ok, compilation} = compile(plan, ctx)
     validate = node_attrs(parse!(compilation.dot_source), "validate")
 
-    assert validate["param.timeout"] == 600_000
+    # Intensive Shell policy: per-op and aggregate stage share 1_200_000 max.
+    assert validate["param.timeout"] == 1_200_000
     assert validate["param.test_stage_timeout"] == 1_200_000
   end
 

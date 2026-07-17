@@ -36,6 +36,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   use GenServer
 
   alias Arbor.Shell.AppleContainerExecutionCore
+  alias Arbor.Shell.AppleContainerPlanCore
   alias Arbor.Shell.AppleContainerUnitCore, as: UnitCore
   alias Arbor.Shell.AppleContainerUnitDrainCoordinator
   alias Arbor.Shell.AppleContainerUnitJournal
@@ -43,6 +44,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   alias Arbor.Shell.AppleContainerUnitRuntime
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutionRegistry
+  alias Arbor.Shell.SpawnCapableTimeout
 
   @supervisor Arbor.Shell.AppleContainerUnitSupervisor
   @coordinator AppleContainerUnitDrainCoordinator
@@ -1546,13 +1548,36 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
   # Validation
   # ---------------------------------------------------------------------------
 
+  # Re-check timeout against the plan's admitted resource_profile so durable
+  # reconstruction cannot settle an intensive budget under a standard plan.
   defp validate_spec(%{plan: plan, timeout_ms: timeout_ms, max_output_bytes: max_output_bytes})
-       when is_map(plan) and is_integer(timeout_ms) and timeout_ms > 0 and
+       when is_map(plan) and is_integer(timeout_ms) and
               is_integer(max_output_bytes) and max_output_bytes > 0 do
-    :ok
+    with {:ok, profile} <- fetch_spec_resource_profile(plan),
+         :ok <- SpawnCapableTimeout.validate_timeout_ms(timeout_ms, profile) do
+      :ok
+    else
+      _ -> {:error, :invalid_execution_spec}
+    end
   end
 
   defp validate_spec(_), do: {:error, :invalid_execution_spec}
+
+  defp fetch_spec_resource_profile(plan) when is_map(plan) do
+    case {Map.fetch(plan, :resource_profile), Map.fetch(plan, "resource_profile")} do
+      {{:ok, profile}, :error} ->
+        AppleContainerPlanCore.normalize_resource_profile(profile)
+
+      {:error, {:ok, profile}} ->
+        AppleContainerPlanCore.normalize_resource_profile(profile)
+
+      {:error, :error} ->
+        {:ok, AppleContainerPlanCore.default_resource_profile()}
+
+      _other ->
+        {:error, :invalid_resource_profile}
+    end
+  end
 
   defp validate_executable(%ExecutablePolicy.Executable{path: @runtime_path}), do: :ok
 

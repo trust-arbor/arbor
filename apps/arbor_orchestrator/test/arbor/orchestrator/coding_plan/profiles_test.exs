@@ -119,14 +119,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:ok, cross_app} = Profiles.fetch_executable("cross_app")
       assert cross_app["executable"]
 
+      assert {:ok, intensive_ceiling} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
+      standard_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
+
       assert cross_app["validation_strategy"] == %{
                "action" => "coding_cross_app_validate",
                "authority_parameter" => "workspace_id",
                "authority_source" => "workspace_id",
                "timeout_budget_source" => "budgets.wall_clock_ms",
-               "timeout_max_ms" => 600_000,
+               "timeout_max_ms" => intensive_ceiling,
                "test_stage_timeout_budget_source" => "budgets.wall_clock_ms",
-               "test_stage_timeout_max_ms" => 1_200_000,
+               "test_stage_timeout_max_ms" => intensive_ceiling,
                "selects_downstream_dependents" => true,
                "runs_xref_graph_evidence" => true,
                "runs_test_environment_compile" => true,
@@ -139,8 +142,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       refute "mix_test" in cross_app["required_actions"]
       assert "coding_cross_app_validate" in cross_app["semantic_policy"]["allowed_actions"]
 
-      assert {:ok, 600_000} = Profiles.validation_timeout(cross_app, 900_000)
+      # Intensive policy: per-op ceiling equals stage max; min with wall-clock.
+      assert {:ok, 900_000} = Profiles.validation_timeout(cross_app, 900_000)
       assert {:ok, 120_000} = Profiles.validation_timeout(cross_app, 120_000)
+      assert {:ok, intensive_ceiling} = Profiles.validation_timeout(cross_app, 1_500_000)
       assert {:ok, 900_000} = Profiles.validation_test_stage_timeout(cross_app, 900_000)
       assert {:ok, 1_200_000} = Profiles.validation_test_stage_timeout(cross_app, 1_500_000)
       assert {:ok, 120_000} = Profiles.validation_test_stage_timeout(cross_app, 120_000)
@@ -180,16 +185,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:error, :invalid_validation_test_stage_timeout_policy} =
                Profiles.validation_test_stage_timeout(bad_stage_source, 900_000)
 
-      # Per-operation ceiling derives from Shell spawn-capable admission bound.
-      assert cross_app["validation_strategy"]["timeout_max_ms"] ==
-               Arbor.Shell.spawn_capable_max_timeout_ms()
+      # cross_app per-op and stage ceilings derive from intensive Shell policy.
+      assert cross_app["validation_strategy"]["timeout_max_ms"] == intensive_ceiling
 
-      # Aggregate stage ceiling is reviewed separately and may exceed Shell max.
       assert cross_app["validation_strategy"]["test_stage_timeout_max_ms"] ==
                Profiles.cross_app_test_stage_timeout_max_ms()
 
-      assert cross_app["validation_strategy"]["test_stage_timeout_max_ms"] >
-               Arbor.Shell.spawn_capable_max_timeout_ms()
+      assert cross_app["validation_strategy"]["timeout_max_ms"] ==
+               cross_app["validation_strategy"]["test_stage_timeout_max_ms"]
+
+      assert cross_app["validation_strategy"]["timeout_max_ms"] > standard_ceiling
+
+      # Other executable profiles retain the standard Shell ceiling.
+      assert default["validation_strategy"]["timeout_max_ms"] == standard_ceiling
+      assert security["validation_strategy"]["timeout_max_ms"] == standard_ceiling
 
       drifted_source =
         put_in(

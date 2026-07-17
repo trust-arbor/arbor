@@ -9,12 +9,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   @default_timeout 300_000
   @minimum_timeout 1_000
-  # Derived from Shell spawn-capable ceiling so action limits cannot exceed admission.
-  @maximum_timeout Arbor.Shell.spawn_capable_max_timeout_ms()
-  # Aggregate sequential test-stage ceiling is independent of the per-process
-  # Shell spawn-capable admission bound and is reviewed separately for cross_app.
+  # cross_app uses Shell :intensive resource_profile for every contained Mix
+  # stage, so per-operation timeout derives from the intensive spawn-capable
+  # ceiling (not the standard 600_000 ms default).
+  @maximum_timeout (case Arbor.Shell.spawn_capable_max_timeout_ms(:intensive) do
+                      {:ok, ms} -> ms
+                    end)
+  # Aggregate sequential test-stage ceiling may equal the intensive per-process
+  # Shell bound; both are reviewed for cross_app and fail closed above 1_200_000.
   @default_test_stage_timeout 300_000
-  @maximum_test_stage_timeout 1_200_000
+  @maximum_test_stage_timeout (case Arbor.Shell.spawn_capable_max_timeout_ms(:intensive) do
+                                 {:ok, ms} -> ms
+                               end)
   @allowed_param_keys [:workspace_id, :timeout, :test_stage_timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 
@@ -414,7 +420,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   `remaining_ms` is the aggregate test-stage budget remaining. Each child is
   capped by `min(operation_timeout_ms, remaining_ms)` so no Mix process may
-  exceed the Shell spawn-capable ceiling even when aggregate budget remains.
+  exceed the intensive Shell spawn-capable ceiling even when aggregate budget remains.
 
   Returns:
   - `:complete` when no batches remain

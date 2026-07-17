@@ -1105,6 +1105,8 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
     } do
       ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
       assert ceiling == 600_000
+      assert {:ok, intensive_ceiling} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
+      assert intensive_ceiling == 1_200_000
 
       :ok = Snapshot.set({:ok, []})
       :ok = FakeJournal.reset(entries: [])
@@ -1133,7 +1135,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
                {:worker_start, @execution_id, 5_000_000 + ceiling}
              ]
 
-      # Second admission with oversize timeout fails closed before reserve.
+      # Standard plan rejects intensive timeout before reserve (no clamping).
       :ok = SharedTrace.reset()
       :ok = FakeJournal.reset(entries: [])
       :ok = FakeWorker.reset(start_result: :spawn_worker)
@@ -1147,6 +1149,39 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
 
       assert SharedTrace.events() == []
       assert FakeJournal.events() == []
+
+      # Intensive plan admits intensive ceiling; larger values still fail closed.
+      intensive_spec = %{
+        plan: %{unit_name: @unit_name, resource_profile: :intensive},
+        timeout_ms: intensive_ceiling,
+        max_output_bytes: 8_192
+      }
+
+      :ok = FakeJournal.reset(entries: [])
+      :ok = FakeWorker.reset(start_result: :spawn_worker)
+      :ok = SharedTrace.reset()
+      :ok = FakeClock.reset(5_000_000)
+
+      assert {:ok, intensive_worker} =
+               GenServer.call(
+                 pid,
+                 {:start_unit, intensive_spec, :executable, "exec-coord-intensive", make_ref()}
+               )
+
+      assert is_pid(intensive_worker)
+
+      assert SharedTrace.events() == [
+               :clock_monotonic,
+               {:journal_reserve, @unit_name, "exec-coord-intensive"},
+               {:worker_start, "exec-coord-intensive", 5_000_000 + intensive_ceiling}
+             ]
+
+      assert {:error, :invalid_execution_spec} =
+               GenServer.call(
+                 pid,
+                 {:start_unit, %{intensive_spec | timeout_ms: intensive_ceiling + 1}, :executable,
+                  "exec-coord-intensive-oversize", make_ref()}
+               )
     end
 
     test "definite start failure completes the exact row", %{holder: holder} do

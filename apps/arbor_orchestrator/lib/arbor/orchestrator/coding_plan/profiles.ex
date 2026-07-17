@@ -10,11 +10,19 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   alias Arbor.Orchestrator.Graph
 
   @template_version "coding-change-v1"
-  # Shared Shell spawn-capable ceiling — must not drift above unit admission.
+  # Shared Shell spawn-capable ceilings — must not drift above unit admission.
+  # `:standard` is the default for ordinary Mix / security_regression paths.
   @spawn_capable_max_timeout_ms Arbor.Shell.spawn_capable_max_timeout_ms()
+  # `:intensive` is reviewed only for cross_app contained validation stages.
+  @spawn_capable_intensive_max_timeout_ms (case Arbor.Shell.spawn_capable_max_timeout_ms(
+                                                  :intensive
+                                                ) do
+                                             {:ok, ms} -> ms
+                                           end)
   # Reviewed aggregate sequential test-stage ceiling for cross_app only.
-  # Independent of the per-process Shell spawn-capable admission bound.
-  @cross_app_test_stage_timeout_max_ms 1_200_000
+  # Equals the intensive Shell ceiling so one argv-safe batch can consume the
+  # full stage budget under the admitted intensive resource profile.
+  @cross_app_test_stage_timeout_max_ms @spawn_capable_intensive_max_timeout_ms
 
   @default_required_nodes Enum.sort(~w[
                     acquire_workspace
@@ -1589,7 +1597,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "authority_parameter" => "workspace_id",
                   "authority_source" => "workspace_id",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
-                  "timeout_max_ms" => @spawn_capable_max_timeout_ms,
+                  # Intensive Shell profile: per-op may equal aggregate stage max.
+                  "timeout_max_ms" => @spawn_capable_intensive_max_timeout_ms,
                   "test_stage_timeout_budget_source" => "budgets.wall_clock_ms",
                   "test_stage_timeout_max_ms" => @cross_app_test_stage_timeout_max_ms,
                   "selects_downstream_dependents" => true,

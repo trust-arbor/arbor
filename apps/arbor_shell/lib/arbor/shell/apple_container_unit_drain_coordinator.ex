@@ -62,6 +62,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   use GenServer
 
   alias Arbor.Shell.AppleContainerUnitDrainCoordinatorCore, as: Core
+  alias Arbor.Shell.AppleContainerPlanCore
   alias Arbor.Shell.AppleContainerUnitJournal, as: Journal
   alias Arbor.Shell.AppleContainerUnitName
   alias Arbor.Shell.AppleContainerUnitRecoveryReconciler, as: Reconciler
@@ -88,8 +89,6 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   @max_unit_name_bytes 64
   # Operational handshake/call ceilings (not spawn-capable execution budgets).
   @max_timeout_ms 300_000
-  # Unit execution wall-clock from spawn-capable specs — shared pure ceiling.
-  @max_execution_timeout_ms SpawnCapableTimeout.max_timeout_ms()
 
   @allowed_test_keys MapSet.new([
                        :name,
@@ -1303,13 +1302,36 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
   defp fetch_unit_name(_), do: {:error, :invalid_execution_spec}
 
-  defp fetch_timeout_ms(%{timeout_ms: timeout_ms})
-       when is_integer(timeout_ms) and timeout_ms > 0 and
-              timeout_ms <= @max_execution_timeout_ms do
-    {:ok, timeout_ms}
+  # Timeout ceiling is keyed by the plan's admitted resource_profile so a
+  # standard unit cannot carry an intensive wall-clock budget after admission.
+  defp fetch_timeout_ms(%{timeout_ms: timeout_ms, plan: plan})
+       when is_integer(timeout_ms) and is_map(plan) do
+    with {:ok, profile} <- fetch_spec_resource_profile(plan),
+         :ok <- SpawnCapableTimeout.validate_timeout_ms(timeout_ms, profile) do
+      {:ok, timeout_ms}
+    else
+      _ -> {:error, :invalid_execution_spec}
+    end
   end
 
   defp fetch_timeout_ms(_), do: {:error, :invalid_execution_spec}
+
+  defp fetch_spec_resource_profile(plan) when is_map(plan) do
+    case {Map.fetch(plan, :resource_profile), Map.fetch(plan, "resource_profile")} do
+      {{:ok, profile}, :error} ->
+        AppleContainerPlanCore.normalize_resource_profile(profile)
+
+      {:error, {:ok, profile}} ->
+        AppleContainerPlanCore.normalize_resource_profile(profile)
+
+      {:error, :error} ->
+        # Legacy fixtures/plans omit the field → standard capacity + ceiling.
+        {:ok, AppleContainerPlanCore.default_resource_profile()}
+
+      _other ->
+        {:error, :invalid_resource_profile}
+    end
+  end
 
   defp validate_execution_id(id)
        when is_binary(id) and byte_size(id) > 0 and byte_size(id) <= @max_execution_id_bytes do

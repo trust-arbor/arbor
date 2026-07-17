@@ -491,11 +491,60 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
                Core.new(valid_request(%{opts: valid_opts(max_output_bytes: 0)}))
     end
 
+    @tag :security_regression
+    test "security regression: profile-aware timeout ceilings reject mismatches" do
+      standard_ceiling = Shell.spawn_capable_max_timeout_ms()
+      assert standard_ceiling == 600_000
+      assert {:ok, intensive_ceiling} = Shell.spawn_capable_max_timeout_ms(:intensive)
+      assert intensive_ceiling == 1_200_000
+
+      # Standard rejects above 600_000 without clamping.
+      assert {:error, :timeout_too_large} =
+               Core.new(valid_request(%{opts: valid_opts(timeout: standard_ceiling + 1)}))
+
+      assert {:error, :timeout_too_large} =
+               Core.new(
+                 valid_request(%{
+                   opts: valid_opts(timeout: intensive_ceiling, resource_profile: :standard)
+                 })
+               )
+
+      # Intensive admits up to 1_200_000 and rejects larger / unknown profiles.
+      assert {:ok, intensive_spec} =
+               Core.new(
+                 valid_request(%{
+                   opts: valid_opts(timeout: intensive_ceiling, resource_profile: :intensive)
+                 })
+               )
+
+      assert intensive_spec.timeout_ms == intensive_ceiling
+      assert intensive_spec.plan.resource_profile == :intensive
+
+      assert {:error, :timeout_too_large} =
+               Core.new(
+                 valid_request(%{
+                   opts: valid_opts(timeout: intensive_ceiling + 1, resource_profile: :intensive)
+                 })
+               )
+
+      assert {:error, :invalid_resource_profile} =
+               Core.new(
+                 valid_request(%{
+                   opts: valid_opts(timeout: intensive_ceiling, resource_profile: :turbo)
+                 })
+               )
+    end
+
     test "spawn-capable timeout ceiling is the shared Shell source of truth" do
       assert Shell.spawn_capable_max_timeout_ms() == 600_000
+      assert {:ok, 1_200_000} = Shell.spawn_capable_max_timeout_ms(:intensive)
+      assert {:error, :invalid_resource_profile} = Shell.spawn_capable_max_timeout_ms(:turbo)
 
       assert Arbor.Shell.SpawnCapableTimeout.max_timeout_ms() ==
                Shell.spawn_capable_max_timeout_ms()
+
+      assert Arbor.Shell.SpawnCapableTimeout.max_timeout_ms(:intensive) ==
+               Shell.spawn_capable_max_timeout_ms(:intensive)
     end
   end
 

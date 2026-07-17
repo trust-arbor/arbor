@@ -1541,10 +1541,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     graph = compiled_graph!(compilation.dot_source)
     assert {:ok, profile} = Profiles.fetch_executable("cross_app")
 
+    # Default plan wall-clock is 900_000; intensive max is 1_200_000 → both 900_000.
     assert :ok =
              preflight(graph, profile["semantic_policy"],
                review_profile: "binding",
-               validation_timeout_ms: 600_000,
+               validation_timeout_ms: 900_000,
                validation_test_stage_timeout_ms: 900_000
              )
 
@@ -1555,7 +1556,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:error, {:semantic_preflight_failed, wrong_errors}} =
              preflight(wrong_stage, profile["semantic_policy"],
                review_profile: "binding",
-               validation_timeout_ms: 600_000,
+               validation_timeout_ms: 900_000,
                validation_test_stage_timeout_ms: 900_000
              )
 
@@ -1568,7 +1569,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:error, {:semantic_preflight_failed, missing_errors}} =
              preflight(missing_stage, profile["semantic_policy"],
                review_profile: "binding",
-               validation_timeout_ms: 600_000,
+               validation_timeout_ms: 900_000,
                validation_test_stage_timeout_ms: 900_000
              )
 
@@ -1578,7 +1579,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:error, {:semantic_preflight_failed, absent_opt_errors}} =
              preflight(graph, profile["semantic_policy"],
                review_profile: "binding",
-               validation_timeout_ms: 600_000
+               validation_timeout_ms: 900_000
              )
 
     assert Enum.any?(absent_opt_errors, &(&1["code"] == "validation_parameter_violation"))
