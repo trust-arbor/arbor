@@ -661,12 +661,45 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
 
       {:ok, expected_cwd} = SafePath.resolve_real(resource.candidate_path)
       assert Keyword.get(invocation.opts, :cwd) == expected_cwd
+      # Ordinary Mix calls do not synthesize an Actions-owned profile default.
+      refute Keyword.has_key?(invocation.opts, :resource_profile)
 
       env_map = Map.new(invocation.env)
       assert env_map["HOME"] == resource.candidate_home_path
       assert env_map["TMPDIR"] == resource.candidate_tmp_path
       assert env_map["MIX_BUILD_PATH"] == resource.candidate_build_path
       assert env_map["MIX_DEPS_PATH"] == resource.candidate_deps_path
+      {:ok, :ok}
+    end)
+  end
+
+  test "run_mix forwards explicit resource_profile unchanged to Shell facade", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+    git!(fixture.lease.worktree_path, ["add", "-A"])
+    git!(fixture.lease.worktree_path, ["commit", "-m", "project"])
+
+    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
+      assert {:ok, _} =
+               MixAction.run_mix(resource.candidate_path, ["compile"],
+                 validation_resource: resource,
+                 resource_profile: :intensive
+               )
+
+      intensive = Arbor.Actions.TestMixShell.last_invocation()
+      assert Keyword.fetch!(intensive.opts, :resource_profile) == :intensive
+
+      # Invalid values are not normalized or dropped — Shell owns validation.
+      assert {:ok, _} =
+               MixAction.run_mix(resource.candidate_path, ["compile"],
+                 validation_resource: resource,
+                 resource_profile: :not_a_real_profile
+               )
+
+      invalid = Arbor.Actions.TestMixShell.last_invocation()
+      assert Keyword.fetch!(invalid.opts, :resource_profile) == :not_a_real_profile
       {:ok, :ok}
     end)
   end

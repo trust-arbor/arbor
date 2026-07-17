@@ -646,8 +646,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
+  # System-owned capacity for every contained Mix validation stage (compile,
+  # xref, test-env compile, test). Not caller-controlled; never exposed on a
+  # Jido schema. Shell validates the closed profile atom.
   defp run_mix(path, args, opts) do
     runner = Application.get_env(:arbor_actions, :cross_app_mix_runner, &MixAction.run_mix/3)
+    opts = Keyword.put(opts, :resource_profile, :intensive)
     runner.(path, args, opts)
   end
 

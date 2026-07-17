@@ -506,15 +506,18 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], dev_opts}
     assert Keyword.get(dev_opts, :validation_resource) == resource
     assert Keyword.get(dev_opts, :timeout) == 30_000
+    assert Keyword.get(dev_opts, :resource_profile) == :intensive
     refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
 
     assert_receive {:mix_invocation, ^worktree, ["xref", "graph"], xref_opts}
     assert Keyword.get(xref_opts, :validation_resource) == resource
     assert Keyword.get(xref_opts, :timeout) == 30_000
+    assert Keyword.get(xref_opts, :resource_profile) == :intensive
 
     assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], test_opts}
     assert Keyword.get(test_opts, :validation_resource) == resource
     assert Keyword.get(test_opts, :timeout) == 30_000
+    assert Keyword.get(test_opts, :resource_profile) == :intensive
     assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
 
     assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test/alpha_test.exs"],
@@ -522,6 +525,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert Keyword.get(test_run_opts, :validation_resource) == resource
     assert Keyword.get(test_run_opts, :timeout) == 30_000
+    assert Keyword.get(test_run_opts, :resource_profile) == :intensive
 
     refute_received {:mix_invocation, _, _, _}
   end

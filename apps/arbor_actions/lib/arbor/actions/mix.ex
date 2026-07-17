@@ -677,7 +677,7 @@ defmodule Arbor.Actions.Mix do
       {:ok, remaining} ->
         case prepare_mix_invocation(path, opts) do
           {:ok, prepared} ->
-            execute_prepared_mix(prepared, args, remaining, deadline_ms, bind_tree?)
+            execute_prepared_mix(prepared, args, remaining, deadline_ms, bind_tree?, opts)
 
           {:error, reason, ephemeral_root} ->
             settle_ephemeral_cleanup({:error, reason}, ephemeral_root)
@@ -688,14 +688,14 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
-  defp execute_prepared_mix(prepared, args, remaining, deadline_ms, bind_tree?) do
+  defp execute_prepared_mix(prepared, args, remaining, deadline_ms, bind_tree?, opts) do
     try do
       with {:ok, _} <- remaining_timeout(deadline_ms),
            {:ok, before_binding} <-
              maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms),
            {:ok, rem_after_bind} <- remaining_timeout(deadline_ms),
            {:ok, result} <-
-             invoke_spawn_capable(prepared, args, min(remaining, rem_after_bind)),
+             invoke_spawn_capable(prepared, args, min(remaining, rem_after_bind), opts),
            {:ok, after_binding} <-
              maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms),
            :ok <- assert_tree_stable(before_binding, after_binding) do
@@ -728,7 +728,10 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
-  defp invoke_spawn_capable(prepared, args, remaining) do
+  # Optional internal `:resource_profile` is forwarded unchanged to Shell.
+  # Actions does not default, normalize, or drop invalid values — Shell owns
+  # closed-profile validation (`:standard` | `:intensive`).
+  defp invoke_spawn_capable(prepared, args, remaining, opts) do
     shell_opts =
       [
         cwd: prepared.cwd,
@@ -739,10 +742,18 @@ defmodule Arbor.Actions.Mix do
         filesystem_projections: prepared.projections
       ]
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> maybe_put_resource_profile(opts)
 
     case prepared.shell_module.execute_spawn_capable(prepared.wrapper, args, shell_opts) do
       {:ok, result} -> {:ok, result}
       {:error, reason} -> {:error, inspect(reason)}
+    end
+  end
+
+  defp maybe_put_resource_profile(shell_opts, opts) do
+    case Keyword.fetch(opts, :resource_profile) do
+      {:ok, profile} -> Keyword.put(shell_opts, :resource_profile, profile)
+      :error -> shell_opts
     end
   end
 
