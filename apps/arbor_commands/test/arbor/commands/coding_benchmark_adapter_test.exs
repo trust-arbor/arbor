@@ -1,11 +1,13 @@
 defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
   use ExUnit.Case, async: false
 
-  @moduletag :fast
+  @moduletag :slow
+  @moduletag :integration
 
   alias Arbor.Commands.CodingBenchmark
   alias Arbor.Commands.CodingBenchmark.{Adapter, Git, LegacyAdapter, PipelineAdapter, Runtime}
   alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
+  alias Arbor.Commands.CodingBenchmarkTempRoot
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.Plan
 
@@ -1979,15 +1981,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterTest do
   end
 
   defp temp_directory!(prefix) do
-    path =
-      Path.join([
-        File.cwd!(),
-        ".tmp/arbor-coding-benchmark-tests",
-        "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
-      ])
-
-    File.mkdir_p!(path)
-    {:ok, path} = SafePath.resolve_real(path)
+    path = CodingBenchmarkTempRoot.create!(prefix)
     on_exit(fn -> File.rm_rf(path) end)
     path
   end

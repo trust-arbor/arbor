@@ -1,21 +1,17 @@
 defmodule Arbor.Commands.CodingBenchmark.MaterializerTest do
   use ExUnit.Case, async: false
 
-  @moduletag :fast
+  @moduletag :slow
+  @moduletag :integration
 
   alias Arbor.Commands.CodingBenchmark
   alias Arbor.Commands.CodingBenchmark.{Catalog, Git, Materializer}
+  alias Arbor.Commands.CodingBenchmarkTempRoot
   alias Arbor.Common.SafePath
   alias Mix.Tasks.Arbor.Coding.Benchmark.Prepare, as: PrepareTask
 
   setup do
-    root =
-      Path.join(
-        System.tmp_dir!(),
-        "coding-benchmark-materializer-#{System.unique_integer([:positive])}"
-      )
-
-    File.mkdir_p!(root)
+    root = CodingBenchmarkTempRoot.create!("coding-benchmark-materializer")
     on_exit(fn -> File.rm_rf(root) end)
     %{root: root}
   end

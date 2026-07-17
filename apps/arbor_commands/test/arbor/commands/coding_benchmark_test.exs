@@ -1,11 +1,13 @@
 defmodule Arbor.Commands.CodingBenchmarkTest do
   use ExUnit.Case, async: false
 
-  @moduletag :fast
+  @moduletag :slow
+  @moduletag :integration
 
   alias Arbor.Commands.CodingBenchmark
   alias Arbor.Commands.CodingBenchmark.Catalog
   alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
+  alias Arbor.Commands.CodingBenchmarkTempRoot
   alias Arbor.Common.SafePath
   alias Mix.Tasks.Arbor.Coding.Benchmark, as: BenchmarkTask
 
@@ -526,13 +528,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
   end
 
   defp scenario!(fixture_ids) do
-    root =
-      Path.join([
-        File.cwd!(),
-        ".tmp/arbor-coding-benchmark-tests",
-        "arbor-coding-benchmark-test-#{System.unique_integer([:positive, :monotonic])}"
-      ])
-
+    root = CodingBenchmarkTempRoot.create!("arbor-coding-benchmark-test")
     scenario = Scenario.create!(root, fixture_ids)
     configure_benchmark_runtime!(root)
     on_exit(fn -> File.rm_rf(root) end)
