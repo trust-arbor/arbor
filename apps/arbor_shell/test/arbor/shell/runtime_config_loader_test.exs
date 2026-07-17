@@ -158,10 +158,11 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
     assert image == @valid_document["image_policy"]["image"]
   end
 
-  test "runtime source keeps the optional loader branch data-only" do
+  test "runtime source keeps the optional loader branch data-only and out of test VMs" do
     runtime = Path.expand("../../../../../config/runtime.exs", __DIR__) |> File.read!()
 
     assert runtime =~ "ARBOR_APPLE_CONTAINER_CONFIG_PATH"
+    assert runtime =~ "if config_env() != :test do"
     refute runtime =~ "Arbor.Orchestrator"
     refute runtime =~ "Arbor.Agent"
   end

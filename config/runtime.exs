@@ -33,20 +33,21 @@ if File.exists?(dotenv_path) do
   end)
 end
 
-# Optional operator surface for the Apple Container runtime. The loader owns
-# all file trust, bounded parsing, and nested validation; this boundary only
-# publishes data to arbor_shell.
-if config_path = System.get_env("ARBOR_APPLE_CONTAINER_CONFIG_PATH") do
-  case Arbor.Shell.RuntimeConfigLoader.load(config_path) do
-    {:ok, values} ->
-      config :arbor_shell,
-        apple_container: values.apple_container,
-        linux_dependency_baseline: values.linux_dependency_baseline,
-        apple_container_image_policy: values.apple_container_image_policy,
-        apple_container_unit_journal_path: values.apple_container_unit_journal_path
+# Optional operator surface for the Apple Container runtime. Test VMs must not
+# inherit the live operator journal through an ambient parent-process env.
+if config_env() != :test do
+  if config_path = System.get_env("ARBOR_APPLE_CONTAINER_CONFIG_PATH") do
+    case Arbor.Shell.RuntimeConfigLoader.load(config_path) do
+      {:ok, values} ->
+        config :arbor_shell,
+          apple_container: values.apple_container,
+          linux_dependency_baseline: values.linux_dependency_baseline,
+          apple_container_image_policy: values.apple_container_image_policy,
+          apple_container_unit_journal_path: values.apple_container_unit_journal_path
 
-    {:error, _reason} ->
-      raise "invalid ARBOR_APPLE_CONTAINER_CONFIG_PATH configuration"
+      {:error, _reason} ->
+        raise "invalid ARBOR_APPLE_CONTAINER_CONFIG_PATH configuration"
+    end
   end
 end
 
