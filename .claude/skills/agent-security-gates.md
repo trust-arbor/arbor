@@ -139,6 +139,26 @@ another one. It doubles as user documentation — anyone standing up agents need
 - **Action:** add the canonical URI prefix to the registry's allowlist (e.g.
   `arbor://eval/search` was added for the eval fixture).
 
+## 9. Native ACP tool callbacks need subtree authority
+
+- **What:** starting an ACP session and authorizing the worker's native tool callbacks
+  are separate operations. `AcpSession.Handler` maps a bounded, machine-readable tool
+  name or kind to `arbor://acp/tool/<tool>`. A concrete `arbor://acp/tool` capability
+  does not authorize those child resources.
+- **Symptom:** the delegated worker starts normally, then its first native tool request
+  is denied or cancelled despite holding the base capability. Descriptive ACP titles
+  such as an entire shell command are not authorization identities and fail closed
+  unless the payload also supplies a canonical `name`, `toolName`, `tool_name`, `kind`,
+  or typed `toolCallId` prefix.
+- **Action:** for agents trusted to use their native ACP harness, grant the bounded
+  subtree explicitly:
+  ```elixir
+  Arbor.Security.grant(principal: agent_id, resource: "arbor://acp/tool/**")
+  ```
+  Set the `arbor://acp/tool` trust rule intentionally as a separate policy decision.
+  This subtree includes native execution tools, so do not grant it to read-only agents;
+  grant exact child URIs instead when the provider exposes stable canonical names.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -151,3 +171,5 @@ another one. It doubles as user documentation — anyone standing up agents need
 6. For **local** models egress is `:on_host → :allow`; for **cloud**, allow
    `external_provider` egress — and remember tainted→external is blocked by design.
 7. To watch `security.*` signals, subscribe with a `principal_id:` and **tolerate refusal**.
+8. For native ACP workers, grant exact callback URIs or `arbor://acp/tool/**`; the base
+   capability alone only names the namespace.

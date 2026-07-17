@@ -22,6 +22,8 @@ defmodule Arbor.AI.AcpSession.Handler do
   require Logger
 
   @default_permission_timeout_ms 60_000
+  @max_tool_name_bytes 128
+  @tool_name_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._~-]*\z/
 
   defstruct [
     :session_pid,
@@ -66,26 +68,27 @@ defmodule Arbor.AI.AcpSession.Handler do
   @doc """
   Handle permission requests from the ACP agent.
 
-  Checks `Arbor.Security.authorize/4` with a tool-specific capability URI.
-  Falls back to approved when no agent_id is set or Security is unavailable.
+  Checks `Arbor.Security.authorize/4` with a canonical, tool-specific capability
+  URI. Missing identities, unavailable security infrastructure, and unrecognized
+  tool identities fail closed.
   """
   def handle_permission_request(_session_id, tool_call, options, state) do
-    # Newer ACP spec (Gemini) carries the actual tool name on `toolCall.title`
-    # or a structured field; the older shape carried `"name"`. Try both so the
-    # capability URI reflects what the agent actually wants to do.
-    tool_name =
-      Map.get(tool_call, "name") ||
-        Map.get(tool_call, :name) ||
-        infer_tool_name(tool_call)
+    case canonical_tool_name(tool_call) do
+      {:ok, tool_name} ->
+        resource_uri = "arbor://acp/tool/#{tool_name}"
 
-    resource_uri = "arbor://acp/tool/#{tool_name}"
+        case authorize_action(state.agent_id, resource_uri, :execute, state) do
+          :authorized ->
+            {:ok, build_outcome(:approved, options), state}
 
-    case authorize_action(state.agent_id, resource_uri, :execute, state) do
-      :authorized ->
-        {:ok, build_outcome(:approved, options), state}
+          {:denied, reason} ->
+            Logger.info("AcpSession.Handler: denied permission for #{tool_name}: #{reason}")
+            {:ok, build_outcome(:rejected, options, reason), state}
+        end
 
-      {:denied, reason} ->
-        Logger.info("AcpSession.Handler: denied permission for #{tool_name}: #{reason}")
+      {:error, :unrecognized_tool_identity} ->
+        reason = "unrecognized canonical ACP tool identity"
+        Logger.info("AcpSession.Handler: denied permission: #{reason}")
         {:ok, build_outcome(:rejected, options, reason), state}
     end
   end
@@ -156,29 +159,51 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   defp pick_option(_options, _kinds), do: nil
 
-  # Newer ACP tool_call payloads (e.g. Gemini's) don't always include a
-  # bare `name` field; the human-readable identifier lives in `title` or
-  # is embedded in `toolCallId`. Best-effort extraction for capability
-  # URIs and audit logging — falls back to "unknown" when nothing is
-  # available.
-  defp infer_tool_name(tool_call) when is_map(tool_call) do
-    cond do
-      is_binary(tool_call["title"]) -> tool_call["title"]
-      is_binary(tool_call["toolCallId"]) -> extract_from_tool_call_id(tool_call["toolCallId"])
-      true -> "unknown"
+  # Capability identity comes from machine-readable ACP fields. `title` is a
+  # final compatibility fallback only when it is itself a bounded identifier;
+  # native agents may put an entire command description there.
+  defp canonical_tool_name(tool_call) when is_map(tool_call) do
+    candidates = [
+      Map.get(tool_call, "name") || Map.get(tool_call, :name),
+      Map.get(tool_call, "toolName") || Map.get(tool_call, :toolName),
+      Map.get(tool_call, "tool_name") || Map.get(tool_call, :tool_name),
+      Map.get(tool_call, "kind") || Map.get(tool_call, :kind),
+      extract_from_tool_call_id(
+        Map.get(tool_call, "toolCallId") || Map.get(tool_call, :toolCallId)
+      ),
+      Map.get(tool_call, "title") || Map.get(tool_call, :title)
+    ]
+
+    case Enum.find_value(candidates, &normalize_tool_name/1) do
+      nil -> {:error, :unrecognized_tool_identity}
+      tool_name -> {:ok, tool_name}
     end
   end
 
-  defp infer_tool_name(_), do: "unknown"
+  defp canonical_tool_name(_), do: {:error, :unrecognized_tool_identity}
+
+  defp normalize_tool_name(name) when is_atom(name) and name not in [nil, true, false],
+    do: normalize_tool_name(Atom.to_string(name))
+
+  defp normalize_tool_name(name) when is_binary(name) do
+    if name != "" and byte_size(name) <= @max_tool_name_bytes and String.valid?(name) and
+         Regex.match?(@tool_name_pattern, name) do
+      name
+    end
+  end
+
+  defp normalize_tool_name(_), do: nil
 
   # Gemini's toolCallId pattern: "<tool_name>__<tool_name>_<timestamp>_<idx>"
   # e.g. "run_shell_command__run_shell_command_1780853379688_0"
   defp extract_from_tool_call_id(id) when is_binary(id) do
     case String.split(id, "__", parts: 2) do
-      [name | _] when name != "" -> name
-      _ -> id
+      [name, _rest] when name != "" -> name
+      _ -> nil
     end
   end
+
+  defp extract_from_tool_call_id(_), do: nil
 
   @doc """
   Handle file read requests from the ACP agent.

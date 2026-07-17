@@ -38,10 +38,20 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
     def authorize(_agent_id, _uri, _action, _opts), do: exit(:timeout)
   end
 
+  defmodule RecordingSecurity do
+    @moduledoc false
+
+    def authorize(_agent_id, uri, action, _opts) do
+      send(Application.fetch_env!(:arbor_ai, :handler_authz_test_pid), {uri, action})
+      {:ok, :authorized}
+    end
+  end
+
   setup do
     on_exit(fn ->
       Application.delete_env(:arbor_ai, :file_guard_module)
       Application.delete_env(:arbor_ai, :security_module)
+      Application.delete_env(:arbor_ai, :handler_authz_test_pid)
     end)
 
     :ok
@@ -72,6 +82,42 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
 
       assert {:denied, _reason} =
                Handler.check_security_authorize("agent_x", "arbor://shell/exec/rm", :execute, %{})
+    end
+  end
+
+  describe "ACP tool identity security regression" do
+    test "uses structured kind instead of a human-readable command title" do
+      Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
+      Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
+      {:ok, state} = Handler.init(agent_id: "agent_x")
+
+      tool_call = %{
+        "kind" => "execute",
+        "title" => "Execute `cd /workspace && git status`",
+        "toolCallId" => "call-7752274a-0d51-433c-99e4-2899adc362d4-27"
+      }
+
+      assert {:ok, %{"outcome" => "approved"}, ^state} =
+               Handler.handle_permission_request("s1", tool_call, [], state)
+
+      assert_receive {"arbor://acp/tool/execute", :execute}
+    end
+
+    test "fails closed when only a descriptive title and opaque call id are available" do
+      Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
+      Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
+      {:ok, state} = Handler.init(agent_id: "agent_x")
+
+      tool_call = %{
+        "title" => "Execute `rm -rf /workspace`",
+        "toolCallId" => "call-opaque-27"
+      }
+
+      assert {:ok, %{"outcome" => "denied", "reason" => reason}, ^state} =
+               Handler.handle_permission_request("s1", tool_call, [], state)
+
+      assert reason =~ "tool identity"
+      refute_receive {_uri, :execute}
     end
   end
 

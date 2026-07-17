@@ -309,7 +309,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "arbor://action/coding/workspace/**" in resources
       assert "arbor://action/coding/review_tree/read" in resources
       assert "arbor://action/coding/review_tree/search" in resources
-      assert "arbor://acp/tool" in resources
+      assert "arbor://acp/tool/**" in resources
       assert "arbor://action/git/**" in resources
       assert "arbor://action/mix/**" in resources
       assert "arbor://action/council/review" in resources

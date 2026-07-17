@@ -94,7 +94,8 @@ defmodule Arbor.AI.AcpSession.Config do
     #   Layer 2 — Arbor's capability handler (`acp_session/handler.ex`): when the CLI ASKS
     #     (:default mode), Arbor authorizes `arbor://acp/tool/<ToolName>` against the session's
     #     agent_id capabilities. No cap → DENIED. So for :default you must ALSO grant the agent
-    #     `arbor://acp/tool/<Tool>` caps, or the ask is rejected.
+    #     `arbor://acp/tool/<Tool>` caps (or a bounded `arbor://acp/tool/**` subtree
+    #     cap), or the ask is rejected.
     #
     # RECON use (e.g. the coding-recon eval): the simplest working policy is `permission_mode:
     # :bypass` (CLI recons freely in its sandboxed cwd — read-only intent). For a tighter policy,

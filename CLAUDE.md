@@ -242,6 +242,32 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 
 ## Applied Learning
 
+**Inspect formatter diffs before staging a narrow change.** A source file may
+predate the current formatter and a one-line comment edit can trigger broad,
+unrelated layout churn. Format behavior-bearing files as required, then remove
+incidental whole-file rewrites so the review surface stays scoped (found
+2026-07-17 while correcting ACP eval-runner documentation).
+
+**Native ACP session access and native tool authority are separate gates.** The
+handler authorizes callbacks at `arbor://acp/tool/<canonical-name-or-kind>`, so an
+exact `arbor://acp/tool` capability does not cover them under segment-aware
+capability semantics. Grant exact child URIs or the bounded `arbor://acp/tool/**`
+subtree, and derive the child only from machine-readable protocol identity fields;
+human-readable titles may contain entire commands (found 2026-07-17 when Grok's
+structured `kind=execute` callback was misidentified by its descriptive title).
+
+**Exclude sentinel atoms before normalizing optional protocol fields.** In Elixir,
+`nil`, `true`, and `false` are atoms, so a broad `is_atom/1` conversion can turn a
+missing value into the valid-looking string `"nil"`. Guard those sentinels before
+`Atom.to_string/1`, especially when the result becomes an authorization identity
+or URI segment (found 2026-07-17 while normalizing native ACP tool identities).
+
+**Match the exact split shape when a delimiter proves structure.** A pattern such
+as `[head | _]` also matches a one-element list, so it does not prove that
+`String.split/3` found the expected delimiter. Use `[head, rest]` when the second
+part is the evidence that an opaque protocol ID embeds a typed prefix (found
+2026-07-17 while parsing ACP `toolCallId` values).
+
 **Do not run Mix commands in the main worktree while a compiled DOT task is
 active.** Even a targeted test may recompile transitive modules on disk while
 the running server still has the previous BEAM loaded. A task whose execution
