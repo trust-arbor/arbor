@@ -241,6 +241,43 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert "component" in status_tool.inputSchema.required
     end
 
+    test "arbor_status schema documents agent_id requirements and mcp registration meaning", %{
+      state: state
+    } do
+      {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
+      status_tool = Enum.find(tools, &(&1.name == "arbor_status"))
+      refute is_nil(status_tool)
+
+      desc = status_tool.description
+      assert desc =~ "agent_id is required"
+      assert desc =~ "component=memory"
+      assert desc =~ "component=capabilities"
+      assert desc =~ "component=goals"
+      assert desc =~ "component=mcp"
+      assert desc =~ "MCP client/server registrations"
+      assert desc =~ "not the current caller connection"
+      assert desc =~ "open agent list summary" or desc =~ "authorization-gated"
+
+      component_desc = status_tool.inputSchema.properties.component.description
+      assert component_desc =~ "requires agent_id"
+      assert component_desc =~ "not this caller connection"
+
+      agent_id_desc = status_tool.inputSchema.properties.agent_id.description
+      assert agent_id_desc =~ "Required for memory, capabilities, and goals"
+      assert agent_id_desc =~ "Not used for signals, pipelines, overview, or mcp"
+    end
+
+    test "arbor_actions schema documents progressive-disclosure category index", %{state: state} do
+      {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
+      actions_tool = Enum.find(tools, &(&1.name == "arbor_actions"))
+      refute is_nil(actions_tool)
+
+      assert actions_tool.description =~ "compact"
+      assert actions_tool.description =~ "category"
+      assert actions_tool.description =~ "not every action"
+      assert actions_tool.inputSchema.properties.category.description =~ "Omit for the compact"
+    end
+
     test "arbor_answer_approval requires id and decision", %{state: state} do
       {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
       approval_tool = Enum.find(tools, &(&1.name == "arbor_answer_approval"))
@@ -343,6 +380,11 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert result.isError == true
       assert [%{text: text}] = result.content
       assert text =~ "SignedRequest authentication"
+
+      assert text =~
+               "./bin/mix arbor.signer --key-file <path> --upstream http://localhost:4000/mcp"
+
+      assert text =~ "docs/arbor/EXTERNAL_MCP_CLIENT.md"
     end
 
     test "list_pending_approvals calls the shared API with filters", %{state: state} do
@@ -433,6 +475,11 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert result.isError == true
       assert [%{text: text}] = result.content
       assert text =~ "SignedRequest authentication"
+
+      assert text =~
+               "./bin/mix arbor.signer --key-file <path> --upstream http://localhost:4000/mcp"
+
+      assert text =~ "docs/arbor/EXTERNAL_MCP_CLIENT.md"
     end
 
     test "dispatch_task calls the shared API with caller, metadata, and timeout", %{state: state} do
@@ -503,6 +550,11 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert result.isError == true
       assert [%{text: text}] = result.content
       assert text =~ "SignedRequest authentication"
+
+      assert text =~
+               "./bin/mix arbor.signer --key-file <path> --upstream http://localhost:4000/mcp"
+
+      assert text =~ "docs/arbor/EXTERNAL_MCP_CLIENT.md"
     end
 
     test "cancel_task calls the shared API and returns cancelled status", %{state: state} do
@@ -532,6 +584,11 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert result.isError == true
       assert [%{text: text}] = result.content
       assert text =~ "SignedRequest authentication"
+
+      assert text =~
+               "./bin/mix arbor.signer --key-file <path> --upstream http://localhost:4000/mcp"
+
+      assert text =~ "docs/arbor/EXTERNAL_MCP_CLIENT.md"
     end
 
     test "steer_task calls the shared API with the signed caller and stable control result", %{
@@ -571,30 +628,54 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     # They pass from umbrella root but not from gateway app in isolation.
     @describetag :integration
 
-    test "lists all categories with no filter", %{state: state} do
+    test "no-filter returns compact sorted category index with counts and disclosure hint", %{
+      state: state
+    } do
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_actions", %{}, state)
 
       assert text =~ "# Arbor Actions"
-      # Should contain at least some well-known categories
-      assert text =~ "shell"
-      assert text =~ "file"
+      assert text =~ "Category index only"
+      assert text =~ "Call arbor_actions with category"
+      assert text =~ "progressive disclosure" or text =~ "progressive"
+
+      # Category names + counts; include dynamic mcp without requiring connections.
+      assert text =~ ~r/^- shell: \d+ actions$/m
+      assert text =~ ~r/^- file: \d+ actions$/m
+      assert text =~ ~r/^- mcp: \d+ actions$/m
+
+      # Deterministic sort: category lines must be alphabetical by name.
+      category_lines =
+        text
+        |> String.split("\n")
+        |> Enum.filter(&String.match?(&1, ~r/^- [a-z0-9_]+: \d+ actions$/))
+
+      assert category_lines == Enum.sort(category_lines)
+      assert Enum.any?(category_lines, &String.starts_with?(&1, "- mcp:"))
+
+      # Must not enumerate every action or include action descriptions.
+      refute text =~ "shell_execute"
+      refute text =~ "file_read"
+      refute text =~ "### "
+      refute text =~ ~r/^- [a-z_]+: .+:/m
     end
 
-    test "filters to a specific category", %{state: state} do
+    test "filters to a specific category with detailed tool listing", %{state: state} do
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_actions", %{"category" => "shell"}, state)
 
-      assert text =~ "shell"
+      assert text =~ "# shell actions"
       assert text =~ "shell_execute"
+      assert text =~ "### "
     end
 
-    test "returns error for unknown category", %{state: state} do
+    test "returns error for unknown category including mcp in available list", %{state: state} do
       {:ok, %{content: [%{type: "text", text: text}]}, _state} =
         Handler.handle_call_tool("arbor_actions", %{"category" => "nonexistent_xyz"}, state)
 
       assert text =~ "Unknown category"
       assert text =~ "Available:"
+      assert text =~ "mcp"
     end
   end
 
@@ -685,20 +766,28 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
     test "rejects execution without authenticated agent_id", %{state: state} do
       # No Process.put — simulates unauthenticated request
-      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
+      {:ok, result, _state} =
         Handler.handle_call_tool(
           "arbor_run",
           %{"action" => "file_exists", "params" => %{"path" => "/tmp"}},
           state
         )
 
+      assert result.isError == true
+      assert [%{type: "text", text: text}] = result.content
       # Must reject when no authenticated agent_id in process dict
-      assert text =~ "SignedRequest authentication" or text =~ "agent_id"
+      assert text =~ "SignedRequest authentication"
+
+      assert text =~
+               "./bin/mix arbor.signer --key-file <path> --upstream http://localhost:4000/mcp"
+
+      assert text =~ "docs/arbor/EXTERNAL_MCP_CLIENT.md"
+      assert text =~ "Direct HTTP/Bearer"
     end
 
     test "rejects execution when agent_id passed in params instead of auth", %{state: state} do
       # agent_id in params is ignored — must come from SignedRequestAuth
-      {:ok, %{content: [%{type: "text", text: text}]}, _state} =
+      {:ok, result, _state} =
         Handler.handle_call_tool(
           "arbor_run",
           %{
@@ -710,7 +799,14 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
         )
 
       # Should still reject — agent_id in params is not trusted
-      assert text =~ "SignedRequest authentication" or text =~ "agent_id"
+      assert result.isError == true
+      assert [%{type: "text", text: text}] = result.content
+      assert text =~ "SignedRequest authentication"
+
+      assert text =~
+               "./bin/mix arbor.signer --key-file <path> --upstream http://localhost:4000/mcp"
+
+      assert text =~ "docs/arbor/EXTERNAL_MCP_CLIENT.md"
     end
 
     test "handles missing params gracefully", %{state: state} do
@@ -761,6 +857,11 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
         assert [%{type: "text", text: text}] = result.content
         assert text =~ "SignedRequest authentication"
+
+        assert text =~
+                 "./bin/mix arbor.signer --key-file <path> --upstream http://localhost:4000/mcp"
+
+        assert text =~ "docs/arbor/EXTERNAL_MCP_CLIENT.md"
         refute text =~ "stateless"
         refute text =~ "arbor_dispatch_task"
       end

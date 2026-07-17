@@ -4,7 +4,7 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   Provides progressive-disclosure tools for interacting with Arbor:
 
-  - `arbor_actions` — List action categories and tool names (compact overview)
+  - `arbor_actions` — Progressive disclosure: category index by default; tools when filtered
   - `arbor_help` — Get detailed schema/description for a specific action
   - `arbor_run` — Execute an action with parameters
   - `arbor_status` — Inspect agent, memory, and signal state
@@ -109,15 +109,17 @@ defmodule Arbor.Gateway.MCP.Handler do
       %{
         name: "arbor_actions",
         description:
-          "List all available Arbor action categories and their tools. " <>
-            "Returns a compact overview — use arbor_help to get details on a specific action.",
+          "Progressive disclosure for Arbor actions. Without category, returns a compact " <>
+            "index of category names and per-category action counts only — not every action. " <>
+            "Pass category to list that category's tools; use arbor_help for a specific action schema.",
         inputSchema: %{
           type: "object",
           properties: %{
             category: %{
               type: "string",
               description:
-                "Optional: filter to a specific category (e.g. 'shell', 'file', 'git', 'memory')"
+                "Optional: filter to a specific category (e.g. 'shell', 'file', 'git', 'memory', 'mcp'). " <>
+                  "Omit for the compact category index."
             }
           }
         }
@@ -167,15 +169,24 @@ defmodule Arbor.Gateway.MCP.Handler do
       %{
         name: "arbor_status",
         description:
-          "Inspect Arbor system state: running agents, memory contents, signal activity, " <>
-            "trust tiers, and capabilities.",
+          "Inspect Arbor system state: running agents, memory, signals, capabilities, goals, " <>
+            "pipelines, overview, or MCP registrations. " <>
+            "agent_id is required for component=memory, component=capabilities, and component=goals " <>
+            "(and for per-agent detail under component=agents). " <>
+            "component=agents without agent_id returns an open agent list summary; " <>
+            "detail with agent_id remains authorization-gated. " <>
+            "component=mcp reports Arbor's MCP client/server registrations " <>
+            "(connected external MCP servers and agent MCP endpoints), not the current caller connection.",
         inputSchema: %{
           type: "object",
           properties: %{
             component: %{
               type: "string",
               description:
-                "What to inspect: 'agents', 'memory', 'signals', 'capabilities', 'goals', 'pipelines', 'overview'",
+                "What to inspect: 'agents' (open summary without agent_id; authorized detail with agent_id), " <>
+                  "'memory' (requires agent_id), 'signals', 'capabilities' (requires agent_id), " <>
+                  "'goals' (requires agent_id), 'pipelines', 'overview', " <>
+                  "'mcp' (Arbor MCP client/server registrations — not this caller connection)",
               enum: [
                 "agents",
                 "memory",
@@ -189,7 +200,10 @@ defmodule Arbor.Gateway.MCP.Handler do
             },
             agent_id: %{
               type: "string",
-              description: "Optional: filter to a specific agent's state"
+              description:
+                "Required for memory, capabilities, and goals. Optional for agents " <>
+                  "(open summary without it; authorized per-agent detail with it). " <>
+                  "Not used for signals, pipelines, overview, or mcp."
             }
           },
           required: ["component"]
@@ -393,13 +407,7 @@ defmodule Arbor.Gateway.MCP.Handler do
     # guidance error — never reach action lookup/execution for those names.
     case authenticated_agent_id() do
       nil ->
-        {:ok,
-         error_content(
-           "Error: arbor_run requires SignedRequest authentication. " <>
-             "No verified agent_id in the current request context. " <>
-             "Register an external agent via the dashboard and configure " <>
-             "the resulting private key in your tool's Arbor settings."
-         ), state}
+        {:ok, error_content(principal_auth_required_error("arbor_run")), state}
 
       agent_id ->
         if owner_bound_acp_action?(action_name) do
@@ -554,7 +562,8 @@ defmodule Arbor.Gateway.MCP.Handler do
           nil ->
             {:error,
              "arbor_status: no authenticated caller — refusing to disclose " <>
-               "#{component} for #{target_id}."}
+               "#{component} for #{target_id}. " <>
+               principal_auth_required_error("arbor_status")}
 
           caller_id ->
             authorize_caller_for_component(caller_id, component, target_id)
@@ -743,10 +752,20 @@ defmodule Arbor.Gateway.MCP.Handler do
         {:ok, id}
 
       _ ->
-        {:error,
-         "#{tool_name} requires SignedRequest authentication. No verified caller_id " <>
-           "is available in the current request context."}
+        {:error, principal_auth_required_error(tool_name)}
     end
+  end
+
+  # Shared fail-closed copy for principal-scoped MCP tools. Does not weaken
+  # SignedRequest/caller identity requirements — only points operators at the
+  # stdio signing proxy used by external MCP clients.
+  defp principal_auth_required_error(tool_name) when is_binary(tool_name) do
+    "Error: #{tool_name} requires SignedRequest authentication (a verified principal). " <>
+      "No verified caller_id/agent_id is available in the current request context. " <>
+      "Direct HTTP/Bearer is suitable only for tools that do not require a principal. " <>
+      "For principal-scoped tools, run the stdio signing proxy from the Arbor repository root: " <>
+      "./bin/mix arbor.signer --key-file <path> --upstream http://localhost:4000/mcp " <>
+      "(see docs/arbor/EXTERNAL_MCP_CLIENT.md)."
   end
 
   defp required_string_arg(args, key) do
@@ -850,57 +869,27 @@ defmodule Arbor.Gateway.MCP.Handler do
   defp format_tool_error(reason), do: "Error: #{inspect(reason)}"
 
   defp list_actions(nil) do
-    native_section =
-      case call_actions(:list_exposed_actions, []) do
-        {:ok, actions_map} ->
-          actions_map
-          |> Enum.sort_by(fn {category, _} -> category end)
-          |> Enum.map_join("\n\n", fn {category, modules} ->
-            tool_names =
-              Enum.map_join(modules, "\n", fn mod ->
-                try do
-                  "  - #{mod.name()}: #{truncate(mod.description(), 80)}"
-                rescue
-                  _ -> "  - #{inspect(mod)}"
-                end
-              end)
+    # Compact progressive-disclosure index: category names + counts only.
+    # Do not enumerate every action or include descriptions here.
+    counts = exposed_category_counts()
 
-            "## #{category}\n#{tool_names}"
-          end)
+    rows =
+      counts
+      |> Enum.sort_by(fn {category, _count} -> category end)
+      |> Enum.map_join("\n", fn {category, count} ->
+        "- #{category}: #{count} actions"
+      end)
 
-        {:error, _} ->
-          # Fallback for older facades mid-upgrade: filter pipeline_internal.
-          case call_actions(:list_actions, []) do
-            {:ok, actions_map} ->
-              actions_map
-              |> filter_pipeline_internal_map()
-              |> Enum.sort_by(fn {category, _} -> category end)
-              |> Enum.map_join("\n\n", fn {category, modules} ->
-                tool_names =
-                  Enum.map_join(modules, "\n", fn mod ->
-                    try do
-                      "  - #{mod.name()}: #{truncate(mod.description(), 80)}"
-                    rescue
-                      _ -> "  - #{inspect(mod)}"
-                    end
-                  end)
-
-                "## #{category}\n#{tool_names}"
-              end)
-
-            {:error, _} ->
-              ""
-          end
-      end
-
-    mcp_section = format_mcp_tools_section()
-
-    sections =
-      ["# Arbor Actions", native_section, mcp_section]
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.join("\n\n")
-
-    sections
+    [
+      "# Arbor Actions",
+      "",
+      "Category index only (progressive disclosure). Call arbor_actions with category " <>
+        "to list tools in that category (for example category \"shell\" or \"mcp\"). " <>
+        "Use arbor_help for a specific action schema.",
+      "",
+      rows
+    ]
+    |> Enum.join("\n")
   end
 
   defp list_actions("mcp") do
@@ -918,24 +907,22 @@ defmodule Arbor.Gateway.MCP.Handler do
         _ -> nil
       end
 
-    actions_map =
-      case call_actions(:list_exposed_actions, []) do
-        {:ok, map} ->
-          map
-
-        {:error, _} ->
-          case call_actions(:list_actions, []) do
-            {:ok, map} -> filter_pipeline_internal_map(map)
-            {:error, _} -> %{}
-          end
-      end
+    actions_map = exposed_actions_map()
 
     case Map.get(actions_map, category_atom) do
       nil when actions_map == %{} ->
         "Error: actions unavailable"
 
       nil ->
-        categories = actions_map |> Map.keys() |> Enum.sort() |> Enum.join(", ")
+        categories =
+          actions_map
+          |> Map.keys()
+          |> Enum.map(&to_string/1)
+          |> Kernel.++(["mcp"])
+          |> Enum.uniq()
+          |> Enum.sort()
+          |> Enum.join(", ")
+
         "Unknown category '#{category}'. Available: #{categories}"
 
       modules ->
@@ -949,6 +936,39 @@ defmodule Arbor.Gateway.MCP.Handler do
         end)
         |> then(&("# #{category} actions\n\n" <> &1))
     end
+  end
+
+  defp exposed_actions_map do
+    case call_actions(:list_exposed_actions, []) do
+      {:ok, map} when is_map(map) ->
+        map
+
+      {:error, _} ->
+        # Fallback for older facades mid-upgrade: filter pipeline_internal.
+        case call_actions(:list_actions, []) do
+          {:ok, map} -> filter_pipeline_internal_map(map)
+          {:error, _} -> %{}
+        end
+    end
+  end
+
+  # Deterministic category → count map for the no-filter index. Includes the
+  # dynamic `mcp` category (connected external MCP tools) without listing
+  # pipeline-internal actions.
+  defp exposed_category_counts do
+    native =
+      exposed_actions_map()
+      |> Enum.map(fn {category, modules} ->
+        {to_string(category), length(List.wrap(modules))}
+      end)
+      |> Map.new()
+
+    Map.put(native, "mcp", mcp_tool_count())
+  end
+
+  defp mcp_tool_count do
+    collect_mcp_tools_by_server()
+    |> Enum.reduce(0, fn {_server, tools}, acc -> acc + length(tools) end)
   end
 
   defp get_action_help(action_name) do

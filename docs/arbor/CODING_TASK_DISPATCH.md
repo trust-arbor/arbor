@@ -4,6 +4,10 @@ Operator guide for the stable structured coding path via signed MCP
 `arbor_dispatch_task`. Coding work is reviewable-change production, not
 automatic merge or unattended authorization.
 
+**External MCP client setup:** principal-scoped tools (including this dispatch
+path) require the stdio signing proxy, not bare HTTP/Bearer. See
+[EXTERNAL_MCP_CLIENT.md](./EXTERNAL_MCP_CLIENT.md).
+
 ## Canonical payload
 
 Dispatch with a signed MCP request. The stable coding envelope is:

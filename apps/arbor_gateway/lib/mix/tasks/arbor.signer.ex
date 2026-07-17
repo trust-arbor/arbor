@@ -27,22 +27,28 @@ defmodule Mix.Tasks.Arbor.Signer do
 
   ## MCP client configuration
 
-  In Claude Code's MCP config, replace the direct gateway HTTP entry with
-  a stdio entry that spawns this task:
+  Prefer the repository wrapper and an explicit upstream:
+
+      ./bin/mix arbor.signer --key-file <path> --upstream http://localhost:4000/mcp
+
+  MCP hosts do not reliably launch servers from the project directory. In
+  Claude Code's MCP config, replace the direct gateway HTTP entry with a stdio
+  entry that changes to the Arbor checkout before spawning this task:
 
       {
         "arbor": {
-          "command": "mix",
+          "command": "sh",
           "args": [
-            "arbor.signer",
-            "--key-file",
-            "$HOME/.claude/arbor-personal/claude_cli_mbp.arbor.key"
+            "-c",
+            "cd /absolute/path/to/arbor && exec ./bin/mix arbor.signer --key-file /absolute/path/to/agent.arbor.key --upstream http://localhost:4000/mcp"
           ]
         }
       }
 
   Each Claude Code session spawns its own proxy subprocess; the proxy
   exits cleanly when the parent closes its end of the pipe.
+
+  Canonical operator guide: `docs/arbor/EXTERNAL_MCP_CLIENT.md`.
 
   ## Why a subprocess instead of a daemon
 
