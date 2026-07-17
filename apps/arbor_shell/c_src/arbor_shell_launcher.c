@@ -55,6 +55,12 @@ extern char **environ;
 #define MAX_CONTROL_PACKET (16U * 1024U * 1024U)
 #define GROUP_KILL_GRACE_MS 1500
 
+#define EXECUTION_NO_FORK 0
+#define EXECUTION_APPLE_CONTAINER_PROBE 1
+
+#define APPLE_CONTAINER_CLI "/usr/local/bin/container"
+#define APPLE_CONTAINER_ALIAS_PREFIX "127.0.0.1:0/arbor/"
+
 #ifdef __APPLE__
 #define DARWIN_SANDBOX_EXEC "/usr/bin/sandbox-exec"
 #define DARWIN_NO_FORK_PROFILE "(version 1) (allow default) (deny process-fork)"
@@ -334,6 +340,52 @@ static int verify_identity(int fd, const struct stat *expected, const char *sha2
   if (actual.st_mode != expected->st_mode) return -7;
   if (digest_fd(fd, digest) != 0) return -8;
   return strcmp(digest, sha256) == 0 ? 0 : -9;
+}
+
+static int immutable_apple_container_alias(const char *reference) {
+  static const char *repositories[] = {"workload@sha256:", "vminit@sha256:"};
+  size_t prefix_length = strlen(APPLE_CONTAINER_ALIAS_PREFIX);
+
+  if (strncmp(reference, APPLE_CONTAINER_ALIAS_PREFIX, prefix_length) != 0) return 0;
+
+  const char *remainder = reference + prefix_length;
+  for (size_t i = 0; i < sizeof(repositories) / sizeof(repositories[0]); i++) {
+    size_t repository_length = strlen(repositories[i]);
+    if (strncmp(remainder, repositories[i], repository_length) != 0) continue;
+
+    const char *digest = remainder + repository_length;
+    if (strlen(digest) != 64) return 0;
+
+    for (size_t j = 0; j < 64; j++) {
+      if (!((digest[j] >= '0' && digest[j] <= '9') ||
+            (digest[j] >= 'a' && digest[j] <= 'f'))) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+
+  return 0;
+}
+
+static int reviewed_apple_container_probe(const char *path, int target_argc,
+                                          char **target_argv) {
+  if (strcmp(path, APPLE_CONTAINER_CLI) != 0 || target_argc < 1 ||
+      strcmp(target_argv[0], APPLE_CONTAINER_CLI) != 0) {
+    return 0;
+  }
+
+  if (target_argc == 5 && strcmp(target_argv[1], "system") == 0 &&
+      (strcmp(target_argv[2], "version") == 0 ||
+       strcmp(target_argv[2], "status") == 0) &&
+      strcmp(target_argv[3], "--format") == 0 &&
+      strcmp(target_argv[4], "json") == 0) {
+    return 1;
+  }
+
+  return target_argc == 4 && strcmp(target_argv[1], "image") == 0 &&
+         strcmp(target_argv[2], "inspect") == 0 &&
+         immutable_apple_container_alias(target_argv[3]);
 }
 
 #ifdef __APPLE__
@@ -799,11 +851,13 @@ static void send_terminal(uint8_t reason, int exit_code) {
 
 static void child_exec(int target_fd, int cwd_fd, const char *path, char **target_argv,
                        int input_fd, int output_fd, int start_fd, int ready_fd,
-                       const struct stat *expected, const char *sha256) {
+                       const struct stat *expected, const char *sha256,
+                       int execution_mode) {
   if (setsid() < 0) _exit(126);
   if (fchdir(cwd_fd) != 0) _exit(126);
   close(cwd_fd);
 #ifdef __linux__
+  if (execution_mode != EXECUTION_NO_FORK) _exit(126);
   if (install_linux_no_fork_filter() != 0) _exit(126);
 #endif
   uint8_t ready = 1;
@@ -837,12 +891,17 @@ static void child_exec(int target_fd, int cwd_fd, const char *path, char **targe
   }
   close(check_fd);
   close(target_fd);
-  darwin_exec_no_fork(path, target_argv);
+  if (execution_mode == EXECUTION_APPLE_CONTAINER_PROBE) {
+    execve(path, target_argv, environ);
+  } else {
+    darwin_exec_no_fork(path, target_argv);
+  }
 #else
   (void)target_fd;
   (void)target_argv;
   (void)expected;
   (void)sha256;
+  (void)execution_mode;
   _exit(126);
 #endif
 
@@ -850,7 +909,7 @@ static void child_exec(int target_fd, int cwd_fd, const char *path, char **targe
   _exit(127);
 }
 
-static int run_exec(int argc, char **argv) {
+static int run_exec(int argc, char **argv, int execution_mode) {
   if (argc < 17) {
     send_error("invalid launcher arguments");
     return 2;
@@ -874,6 +933,18 @@ static int run_exec(int argc, char **argv) {
     send_error("invalid launcher executable binding");
     return 2;
   }
+
+  if (execution_mode == EXECUTION_APPLE_CONTAINER_PROBE &&
+      !reviewed_apple_container_probe(path, argc - 16, &argv[16])) {
+    send_error("unreviewed Apple Container probe command");
+    return 2;
+  }
+#ifndef __APPLE__
+  if (execution_mode == EXECUTION_APPLE_CONTAINER_PROBE) {
+    send_error("Apple Container probe launcher unavailable");
+    return 126;
+  }
+#endif
 
   struct stat expected;
   memset(&expected, 0, sizeof(expected));
@@ -948,7 +1019,7 @@ static int run_exec(int argc, char **argv) {
     close(start_pipe[1]);
     close(ready_pipe[0]);
     child_exec(target_fd, cwd_fd, path, &argv[16], input_pipe[0], output_pipe[1],
-               start_pipe[0], ready_pipe[1], &expected, sha256);
+               start_pipe[0], ready_pipe[1], &expected, sha256, execution_mode);
   }
 
   close(cwd_fd);
@@ -1202,7 +1273,12 @@ static int run_kill(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   (void)signal(SIGPIPE, SIG_IGN);
-  if (argc >= 2 && strcmp(argv[1], "exec") == 0) return run_exec(argc, argv);
+  if (argc >= 2 && strcmp(argv[1], "exec") == 0) {
+    return run_exec(argc, argv, EXECUTION_NO_FORK);
+  }
+  if (argc >= 2 && strcmp(argv[1], "apple-container-probe") == 0) {
+    return run_exec(argc, argv, EXECUTION_APPLE_CONTAINER_PROBE);
+  }
   if (argc >= 2 && strcmp(argv[1], "kill") == 0) return run_kill(argc, argv);
   return 2;
 }

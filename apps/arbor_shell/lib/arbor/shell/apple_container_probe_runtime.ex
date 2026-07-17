@@ -7,6 +7,7 @@ defmodule Arbor.Shell.AppleContainerProbeRuntime do
   This module is not executable spawn authority.
   """
 
+  alias Arbor.Shell.AppleContainerAdmissionCore
   alias Arbor.Shell.AppleContainerControlPlaneAdmissionCore, as: ControlPlane
   alias Arbor.Shell.AppleContainerControlPlaneAuthority
   alias Arbor.Shell.AppleContainerImagePolicyAuthority
@@ -18,6 +19,12 @@ defmodule Arbor.Shell.AppleContainerProbeRuntime do
   alias Arbor.Shell.TrustedPath.Identity
 
   @max_plugin_config_bytes 8_192
+  @max_probe_deadline_ms 300_000
+  @max_system_json_bytes 8_192
+  @max_image_json_bytes 262_144
+
+  @container_path "/usr/local/bin/container"
+  @container_probe_option_keys [:clear_env, :cwd, :max_output_bytes, :timeout]
 
   @callback monotonic_ms() :: integer()
   @callback system_architecture() :: charlist() | binary()
@@ -66,13 +73,118 @@ defmodule Arbor.Shell.AppleContainerProbeRuntime do
   @spec run_bound(Executable.t(), [String.t()], keyword()) :: {:ok, map()} | {:error, term()}
   def run_bound(%Executable{} = executable, args, opts)
       when is_list(args) and is_list(opts) do
-    case Executor.run_bound(executable, args, opts) do
+    runner =
+      if executable.path == @container_path do
+        &run_apple_container_probe/3
+      else
+        &Executor.run_bound/3
+      end
+
+    case runner.(executable, args, opts) do
       {:ok, result} when is_map(result) -> {:ok, result}
       {:error, reason} -> {:error, bound_reason(reason)}
     end
   end
 
   def run_bound(_executable, _args, _opts), do: {:error, :invalid_run_bound}
+
+  @doc false
+  @spec authorize_container_probe_args(term(), term()) :: :ok | {:error, term()}
+  def authorize_container_probe_args(["system", operation, "--format", "json"], _policy)
+      when operation in ["version", "status"],
+      do: :ok
+
+  def authorize_container_probe_args(["image", "inspect", reference], policy)
+      when is_binary(reference) and is_map(policy) do
+    with {:ok, refs} <- AppleContainerAdmissionCore.execution_references(policy),
+         true <-
+           reference in [refs.image.execution_reference, refs.vminit.execution_reference] do
+      :ok
+    else
+      _ -> {:error, :unreviewed_apple_container_probe_command}
+    end
+  end
+
+  def authorize_container_probe_args(_args, _policy),
+    do: {:error, :unreviewed_apple_container_probe_command}
+
+  defp run_apple_container_probe(%Executable{} = executable, args, opts) do
+    started_at = monotonic_ms()
+
+    with {:ok, max_output_bytes} <- reviewed_container_probe(args),
+         :ok <- validate_container_probe_opts(opts, max_output_bytes),
+         :ok <- require_authority_cli_identity(executable),
+         :ok <- require_policy_alias(args),
+         {:ok, execution_opts} <- debit_probe_timeout(opts, started_at) do
+      Executor.run_apple_container_probe(executable, args, execution_opts)
+    end
+  end
+
+  defp reviewed_container_probe(["system", operation, "--format", "json"])
+       when operation in ["version", "status"],
+       do: {:ok, @max_system_json_bytes}
+
+  defp reviewed_container_probe(["image", "inspect", reference]) when is_binary(reference),
+    do: {:ok, @max_image_json_bytes}
+
+  defp reviewed_container_probe(_args), do: {:error, :unreviewed_apple_container_probe_command}
+
+  defp validate_container_probe_opts(opts, max_output_bytes) do
+    if Keyword.keyword?(opts) do
+      keys = opts |> Keyword.keys() |> Enum.sort()
+      timeout = Keyword.get(opts, :timeout)
+      output_bytes = Keyword.get(opts, :max_output_bytes)
+
+      if keys == @container_probe_option_keys and Keyword.get(opts, :cwd) == "/" and
+           Keyword.get(opts, :clear_env) == true and is_integer(timeout) and timeout > 0 and
+           timeout <= @max_probe_deadline_ms and is_integer(output_bytes) and output_bytes > 0 and
+           output_bytes <= max_output_bytes do
+        :ok
+      else
+        {:error, :invalid_apple_container_probe_options}
+      end
+    else
+      {:error, :invalid_apple_container_probe_options}
+    end
+  end
+
+  defp debit_probe_timeout(opts, started_at) do
+    remaining = Keyword.fetch!(opts, :timeout) - max(monotonic_ms() - started_at, 0)
+
+    if remaining > 0 do
+      {:ok, Keyword.put(opts, :timeout, remaining)}
+    else
+      {:error, :deadline_exhausted}
+    end
+  end
+
+  defp require_authority_cli_identity(%Executable{} = executable) do
+    with {:ok, bindings} <- checkout_control_plane_bindings(),
+         %Identity{} = identity <- Map.get(bindings, :cli_identity),
+         true <- executable_matches_identity?(executable, identity) do
+      :ok
+    else
+      _ -> {:error, :apple_container_probe_identity_mismatch}
+    end
+  end
+
+  defp require_policy_alias(["image", "inspect", reference]) do
+    with {:ok, policy} <- checkout_image_policy(),
+         :ok <- authorize_container_probe_args(["image", "inspect", reference], policy) do
+      :ok
+    end
+  end
+
+  defp require_policy_alias(["system", operation, "--format", "json"])
+       when operation in ["version", "status"],
+       do: :ok
+
+  defp executable_matches_identity?(%Executable{} = executable, %Identity{} = identity) do
+    executable.path == identity.path and executable.device == identity.device and
+      executable.inode == identity.inode and executable.size == identity.size and
+      executable.mtime == identity.mtime and executable.ctime == identity.ctime and
+      executable.mode == identity.mode and executable.sha256 == identity.sha256
+  end
 
   @doc false
   @spec checkout_control_plane_bindings() :: {:ok, map()} | {:error, term()}

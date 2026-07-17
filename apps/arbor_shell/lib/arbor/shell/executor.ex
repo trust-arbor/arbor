@@ -63,18 +63,27 @@ defmodule Arbor.Shell.Executor do
   @spec run_bound(Executable.t(), [String.t()], keyword()) ::
           {:ok, result()} | {:error, term()}
   def run_bound(%Executable{} = executable, args, opts \\ []) do
+    run_bound_with(&ProcessGroup.run_executable/6, executable, args, opts)
+  end
+
+  @doc false
+  @spec run_apple_container_probe(Executable.t(), [String.t()], keyword()) ::
+          {:ok, result()} | {:error, term()}
+  def run_apple_container_probe(%Executable{} = executable, args, opts) do
+    run_bound_with(
+      &ProcessGroup.run_apple_container_probe_executable/6,
+      executable,
+      args,
+      opts
+    )
+  end
+
+  defp run_bound_with(process_group_runner, executable, args, opts) do
     timeout = normalize_timeout(Keyword.get(opts, :timeout, @default_timeout))
     max_output_bytes = normalize_max_output_bytes(Keyword.get(opts, :max_output_bytes))
     start_time = System.monotonic_time(:millisecond)
 
-    case ProcessGroup.run_executable(
-           executable,
-           args,
-           opts,
-           start_time,
-           timeout,
-           max_output_bytes
-         ) do
+    case process_group_runner.(executable, args, opts, start_time, timeout, max_output_bytes) do
       {:ok, terminal} ->
         result_from_terminal(terminal, start_time)
 

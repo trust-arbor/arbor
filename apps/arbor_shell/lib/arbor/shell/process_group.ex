@@ -24,6 +24,9 @@ defmodule Arbor.Shell.ProcessGroup do
   @teardown_timeout_ms 2_000
   @cleanup_retry_ms 100
 
+  @generic_launcher_command "exec"
+  @apple_container_probe_launcher_command "apple-container-probe"
+
   defstruct [:port, :group_id, :deadline, :start_time, :max_output_bytes, stdin_open: true]
 
   @type t :: %__MODULE__{
@@ -65,7 +68,64 @@ defmodule Arbor.Shell.ProcessGroup do
           pos_integer()
         ) :: {:ok, map()} | {:error, term()}
   def run_executable(executable, args, opts, start_time, timeout, max_output_bytes) do
-    with {:ok, handle} <- open(executable, args, opts, start_time, timeout, max_output_bytes),
+    run_executable_with_launcher(
+      @generic_launcher_command,
+      executable,
+      args,
+      opts,
+      start_time,
+      timeout,
+      max_output_bytes
+    )
+  end
+
+  @doc false
+  @spec run_apple_container_probe_executable(
+          Executable.t(),
+          [String.t()],
+          keyword(),
+          integer(),
+          pos_integer(),
+          pos_integer()
+        ) :: {:ok, map()} | {:error, term()}
+  def run_apple_container_probe_executable(
+        executable,
+        args,
+        opts,
+        start_time,
+        timeout,
+        max_output_bytes
+      ) do
+    run_executable_with_launcher(
+      @apple_container_probe_launcher_command,
+      executable,
+      args,
+      opts,
+      start_time,
+      timeout,
+      max_output_bytes
+    )
+  end
+
+  defp run_executable_with_launcher(
+         launcher_command,
+         executable,
+         args,
+         opts,
+         start_time,
+         timeout,
+         max_output_bytes
+       ) do
+    with {:ok, handle} <-
+           open_with_launcher(
+             launcher_command,
+             executable,
+             args,
+             opts,
+             start_time,
+             timeout,
+             max_output_bytes
+           ),
          :ok <- start(handle, Keyword.get(opts, :stdin)),
          # One-shot path always closes child stdin after optional initial bytes so
          # EOF-reading programs (e.g. cat) exit. Interactive PortSession leaves
@@ -79,6 +139,27 @@ defmodule Arbor.Shell.ProcessGroup do
           {:ok, t()} | {:error, term()}
   def open(%Executable{} = executable, args, opts, start_time, timeout, max_output_bytes)
       when is_list(args) do
+    open_with_launcher(
+      @generic_launcher_command,
+      executable,
+      args,
+      opts,
+      start_time,
+      timeout,
+      max_output_bytes
+    )
+  end
+
+  defp open_with_launcher(
+         launcher_command,
+         %Executable{} = executable,
+         args,
+         opts,
+         start_time,
+         timeout,
+         max_output_bytes
+       )
+       when is_binary(launcher_command) and is_list(args) do
     deadline = start_time + timeout
 
     with :ok <- validate_args(args),
@@ -90,6 +171,7 @@ defmodule Arbor.Shell.ProcessGroup do
          {:ok, port} <-
            open_port(
              launcher,
+             launcher_command,
              executable,
              args,
              opts,
@@ -315,6 +397,7 @@ defmodule Arbor.Shell.ProcessGroup do
 
   defp open_port(
          launcher,
+         launcher_command,
          executable,
          args,
          opts,
@@ -324,7 +407,7 @@ defmodule Arbor.Shell.ProcessGroup do
          max_output_bytes
        ) do
     launcher_args = [
-      "exec",
+      launcher_command,
       Integer.to_string(timeout),
       Integer.to_string(max_output_bytes),
       Integer.to_string(executable.device),

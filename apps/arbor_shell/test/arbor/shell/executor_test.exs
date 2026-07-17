@@ -4,6 +4,7 @@ defmodule Arbor.Shell.ExecutorTest do
   @moduletag :fast
 
   alias Arbor.Shell
+  alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.Executor
 
   # Finite noisy producer: emits more frequently than a short absolute timeout
@@ -112,6 +113,38 @@ defmodule Arbor.Shell.ExecutorTest do
         {:error, _reason} -> :ok
         {:ok, %{exit_code: code}} when code != 0 -> :ok
       end
+    end
+
+    test "security regression: generic run_bound cannot enable fork mode through options" do
+      {:ok, executable} = ExecutablePolicy.resolve("python3")
+
+      {:ok, result} =
+        Executor.run_bound(
+          executable,
+          ["-c", "import os; os.fork(); print('unexpected-fork')"],
+          allow_fork: true,
+          fork_mode: :allow,
+          execution_mode: :apple_container_probe,
+          launcher_command: "apple-container-probe",
+          timeout: 5_000
+        )
+
+      assert result.exit_code != 0
+      refute result.stdout =~ "unexpected-fork"
+      refute result.timed_out
+      refute result.killed
+    end
+
+    test "security regression: native probe mode rejects non-container executables" do
+      {:ok, executable} = ExecutablePolicy.resolve("sh")
+
+      assert {:error, {:launcher_error, "unreviewed Apple Container probe command"}} =
+               Executor.run_apple_container_probe(executable, ["-c", "echo unexpected"],
+                 cwd: "/",
+                 clear_env: true,
+                 timeout: 5_000,
+                 max_output_bytes: 8_192
+               )
     end
   end
 
