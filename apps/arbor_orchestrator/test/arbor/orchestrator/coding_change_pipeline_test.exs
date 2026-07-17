@@ -1179,6 +1179,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert graph.nodes["commit_change"]
       refute Map.has_key?(graph.nodes["commit_change"].attrs, "project_interaction_control")
       assert graph.nodes["commit_change"].attrs["action"] == "coding_reviewed_commit"
+
+      assert graph.nodes["commit_change"].attrs["context_keys"] ==
+               "path,message,workspace_dirty,head_commit,workspace_id"
+
       refute Map.has_key?(graph.nodes, "adopt_head_commit")
       assert graph.nodes["route_commit_interaction"]
       assert graph.nodes["status_approval_denied"]
@@ -1792,6 +1796,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                Enum.find(calls, fn {name, _args} -> name == "coding_reviewed_commit" end)
 
       assert commit_args["message"] == "Coding agent change"
+      assert commit_args["workspace_id"] == "ws_fixture_1"
       refute commit_args["message"] =~ hostile_task
       assert_closed_and_released(calls)
     end

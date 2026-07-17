@@ -55,6 +55,11 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
         required: false,
         doc: "Alias for expected_head_commit when passed via context_keys"
       ],
+      workspace_id: [
+        type: :string,
+        required: false,
+        doc: "Active workspace lease that binds linked-worktree Git storage authority"
+      ],
       all: [
         type: :boolean,
         default: true,
@@ -69,7 +74,9 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
   alias Arbor.Actions
   alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Git
+  alias Arbor.Common.SafePath
   alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
 
@@ -82,6 +89,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
       workspace_dirty: :control,
       expected_head_commit: :control,
       head_commit: :control,
+      workspace_id: :control,
       all: :control,
       allow_empty: :control
     }
@@ -103,11 +111,13 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     agent_id = context_agent_id(context)
     dirty? = truthy?(Map.get(params, :workspace_dirty, true))
     expected_head = expected_head_commit(params)
+    workspace_id = workspace_id(params)
     git_params = git_commit_params(path, message, params)
     resource = Actions.canonical_uri_for(Git.Commit, git_params)
 
     result =
       with :ok <- require_expected_head(expected_head),
+           :ok <- verify_workspace_binding(path, workspace_id, context),
            :ok <- verify_head_matches(path, expected_head, dirty?),
            {:ok, signed_request} <- fresh_signed_request(resource, context),
            auth_context = put_signed_request(context, signed_request) do
@@ -119,6 +129,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
               auth_context,
               dirty?,
               path,
+              workspace_id,
               expected_head,
               nil,
               ""
@@ -132,6 +143,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
               auth_context,
               dirty?,
               path,
+              workspace_id,
               expected_head
             )
 
@@ -202,9 +214,19 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
   # -- await + decide --------------------------------------------------------
 
-  defp await_and_decide(agent_id, request_id, git_params, context, dirty?, path, expected_head) do
+  defp await_and_decide(
+         agent_id,
+         request_id,
+         git_params,
+         context,
+         dirty?,
+         path,
+         workspace_id,
+         expected_head
+       ) do
     with {:ok, request_id} <- ApprovalAnswer.validate_request_id(request_id),
          {:ok, decision} <- await_decision(agent_id, request_id, context),
+         :ok <- verify_workspace_binding(path, workspace_id, context),
          # Re-verify candidate revision after the wait — fail closed on drift.
          :ok <- verify_head_matches(path, expected_head, dirty?) do
       case decision do
@@ -215,6 +237,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
             context,
             dirty?,
             path,
+            workspace_id,
             expected_head,
             request_id,
             ""
@@ -298,20 +321,38 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
          context,
          dirty?,
          path,
+         workspace_id,
          expected_head,
          request_id,
          note
        ) do
-    with :ok <- verify_head_matches(path, expected_head, dirty?) do
+    with :ok <- verify_workspace_binding(path, workspace_id, context),
+         :ok <- verify_head_matches(path, expected_head, dirty?) do
       if dirty? do
-        execute_commit_once(agent_id, git_params, context, request_id, note, expected_head)
+        execute_commit_once(
+          agent_id,
+          git_params,
+          context,
+          workspace_id,
+          request_id,
+          note,
+          expected_head
+        )
       else
         adopt_head(path, expected_head, request_id, note)
       end
     end
   end
 
-  defp execute_commit_once(agent_id, git_params, context, request_id, note, expected_head) do
+  defp execute_commit_once(
+         agent_id,
+         git_params,
+         context,
+         workspace_id,
+         request_id,
+         note,
+         expected_head
+       ) do
     resource = Actions.canonical_uri_for(Git.Commit, git_params)
 
     # Fresh exact-resource SignedRequest for the nested git commit — never
@@ -337,7 +378,12 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
         |> Map.put(:allow_pipeline_internal, true)
         |> Map.put(:expected_head_commit, expected_head)
 
-      case Actions.authorize_and_execute(agent_id, Git.Commit, git_params, retry_context) do
+      execute_result =
+        with_workspace_storage_authority(workspace_id, git_params.path, context, fn ->
+          Actions.authorize_and_execute(agent_id, Git.Commit, git_params, retry_context)
+        end)
+
+      case execute_result do
         {:ok, result} when is_map(result) ->
           {:ok,
            %{
@@ -398,6 +444,14 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     end
   end
 
+  defp workspace_id(params) do
+    case Map.get(params, :workspace_id) || Map.get(params, "workspace_id") do
+      id when is_binary(id) and id != "" -> id
+      nil -> nil
+      _ -> :invalid
+    end
+  end
+
   defp require_expected_head(head) when is_binary(head) and head != "", do: :ok
   defp require_expected_head(_), do: {:error, :missing_expected_head_commit}
 
@@ -435,6 +489,61 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   end
 
   defp read_head(_), do: {:error, "invalid path"}
+
+  # -- linked-worktree storage authority -------------------------------------
+
+  defp verify_workspace_binding(_path, nil, _context), do: :ok
+
+  defp verify_workspace_binding(path, workspace_id, context) do
+    case resolve_workspace_storage(workspace_id, path, context) do
+      {:ok, _storage} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp with_workspace_storage_authority(nil, _path, _context, fun), do: fun.()
+
+  defp with_workspace_storage_authority(workspace_id, path, context, fun)
+       when is_function(fun, 0) do
+    with {:ok, %{repo_path: repo_path, worktree_path: worktree_path}} <-
+           resolve_workspace_storage(workspace_id, path, context) do
+      Git.with_storage_authority(repo_path, worktree_path, fun)
+    end
+  end
+
+  defp resolve_workspace_storage(workspace_id, path, context)
+       when is_binary(workspace_id) and workspace_id != "" and is_binary(path) do
+    caller = %{
+      task_id: Workspace.context_task_id(context),
+      principal_id: Workspace.context_principal_id(context)
+    }
+
+    with {:ok, lease} <- WorkspaceLeaseRegistry.inspect_lease(workspace_id, caller),
+         {:ok, repo_path} <- lease_path(lease, :repo_path),
+         {:ok, worktree_path} <- lease_path(lease, :worktree_path),
+         :ok <- require_same_canonical_path(path, worktree_path) do
+      {:ok, %{repo_path: repo_path, worktree_path: worktree_path}}
+    end
+  end
+
+  defp resolve_workspace_storage(_workspace_id, _path, _context),
+    do: {:error, :invalid_workspace_binding}
+
+  defp lease_path(lease, key) when is_map(lease) and is_atom(key) do
+    case Map.get(lease, key) || Map.get(lease, Atom.to_string(key)) do
+      path when is_binary(path) and path != "" -> {:ok, path}
+      _ -> {:error, {:invalid_workspace_lease, key}}
+    end
+  end
+
+  defp require_same_canonical_path(requested_path, leased_path) do
+    with {:ok, requested} <- SafePath.resolve_real(requested_path),
+         {:ok, leased} <- SafePath.resolve_real(leased_path) do
+      if requested == leased, do: :ok, else: {:error, :workspace_path_mismatch}
+    else
+      _ -> {:error, :invalid_workspace_path}
+    end
+  end
 
   # -- signing authority -----------------------------------------------------
 

@@ -4,6 +4,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
   @moduletag :fast
 
   alias Arbor.Actions.Coding.ReviewedCommit
+  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Contracts.Security.AuthContext
 
   defmodule AskGitCommitPolicy do
@@ -131,6 +132,72 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     assert :counters.get(signer_calls, 1) >= 1
 
     # No second ask remains pending.
+    assert Enum.empty?(
+             Arbor.Comms.InteractionRouter.pending()
+             |> Enum.filter(&(&1.agent_id == agent_id))
+           )
+  end
+
+  test "security regression: active lease authorizes its linked-worktree Git storage" do
+    {repo, _head} = init_clean_repo!()
+    agent_id = unique_agent("linked_storage")
+    task_id = unique_task("linked_storage")
+    lease = acquire_linked_worktree!(repo, task_id, agent_id)
+    File.write!(Path.join(lease.worktree_path, "change.txt"), "linked worktree change\n")
+    {:ok, head} = git_head(lease.worktree_path)
+
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer) |> Map.put(:task_id, task_id)
+
+    params =
+      lease.worktree_path
+      |> dirty_params(head)
+      |> Map.put(:workspace_id, lease.workspace_id)
+
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    request = await_pending_request(agent_id)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 5_000)
+    assert payload["interaction_outcome"] == ""
+    assert payload["commit_hash"] != head
+    assert {:ok, committed_head} = git_head(lease.worktree_path)
+    assert committed_head == payload["commit_hash"]
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, %{
+               task_id: task_id,
+               principal_id: agent_id
+             })
+  end
+
+  test "security regression: lease cannot authorize Git storage for another path" do
+    {repo, head} = init_clean_repo!()
+    agent_id = unique_agent("linked_mismatch")
+    task_id = unique_task("linked_mismatch")
+    lease = acquire_linked_worktree!(repo, task_id, agent_id)
+    File.write!(Path.join(repo, "change.txt"), "must remain uncommitted\n")
+
+    context =
+      agent_id
+      |> build_context(build_signer(agent_id))
+      |> Map.put(:task_id, task_id)
+
+    assert {:error, ":workspace_path_mismatch"} =
+             ReviewedCommit.run(
+               repo
+               |> dirty_params(head)
+               |> Map.put(:workspace_id, lease.workspace_id),
+               context
+             )
+
+    assert {:ok, ^head} = git_head(repo)
+
     assert Enum.empty?(
              Arbor.Comms.InteractionRouter.pending()
              |> Enum.filter(&(&1.agent_id == agent_id))
@@ -492,6 +559,32 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     {root, head}
   end
 
+  defp acquire_linked_worktree!(repo, task_id, principal_id) do
+    suffix = System.unique_integer([:positive])
+    base_dir = Path.join(System.tmp_dir!(), "reviewed_commit_worktrees_#{suffix}")
+    File.mkdir_p!(base_dir)
+    on_exit(fn -> File.rm_rf(base_dir) end)
+
+    assert {:ok, lease} =
+             WorkspaceLeaseRegistry.acquire(%{
+               repo_path: repo,
+               branch: "test/reviewed-commit-#{suffix}",
+               base_ref: "HEAD",
+               worktree_base_dir: base_dir,
+               task_id: task_id,
+               principal_id: principal_id
+             })
+
+    on_exit(fn ->
+      WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, %{
+        task_id: task_id,
+        principal_id: principal_id
+      })
+    end)
+
+    lease
+  end
+
   defp git_head(path) do
     case System.cmd("git", ["-C", path, "rev-parse", "HEAD"], stderr_to_stdout: true) do
       {out, 0} -> {:ok, String.trim(out)}
@@ -501,6 +594,10 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
 
   defp unique_agent(label) do
     "agent_rc_#{label}_#{System.unique_integer([:positive])}"
+  end
+
+  defp unique_task(label) do
+    "task_rc_#{label}_#{System.unique_integer([:positive])}"
   end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
