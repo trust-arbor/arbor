@@ -26,6 +26,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Coding.CrossApp.Validate,
     Arbor.Actions.Coding.ReviewTree.Read,
     Arbor.Actions.Coding.ReviewTree.Search,
+    Arbor.Actions.Coding.SubmitReviewReport,
     Arbor.Actions.Mix.Compile,
     Arbor.Actions.Mix.Test,
     Arbor.Actions.Coding.ReviewedCommit,
@@ -237,7 +238,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
                not Map.has_key?(binding, "execution_dependencies")
            end)
 
-    for action_name <- ~w(coding_review_tree_read coding_review_tree_search) do
+    for action_name <-
+          ~w(coding_review_tree_read coding_review_tree_search coding_submit_review_report) do
       assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
                binding["name"] == action_name
              end)
@@ -248,6 +250,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
            ]
 
     assert "arbor://action/coding/review_tree/search" in compilation.execution_manifest[
+             "capability_uris"
+           ]
+
+    assert "arbor://action/coding/review/submit" in compilation.execution_manifest[
              "capability_uris"
            ]
 

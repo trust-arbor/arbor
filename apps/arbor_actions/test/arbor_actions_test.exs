@@ -191,6 +191,11 @@ defmodule Arbor.ActionsTest do
                Application.app_dir(:arbor_actions, "priv/pipelines/code-review-council.dot")
 
       assert pipeline.source =~ "digraph code_review_council"
+      # Reviewers expose the terminal submit tool and mark it terminal.
+      assert pipeline.source =~ "coding_submit_review_report"
+      assert pipeline.source =~ ~s(terminal_tools="coding_submit_review_report")
+      assert pipeline.source =~ "review.review_cycle"
+      refute pipeline.source =~ "Return ONLY one strict JSON object"
     end
 
     test "fails closed for an unknown reviewed pipeline" do

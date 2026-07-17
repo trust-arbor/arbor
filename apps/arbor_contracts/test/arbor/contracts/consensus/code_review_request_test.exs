@@ -112,6 +112,12 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert request.delta_files == ["lib/a.ex"]
       assert request.delta_ranges == %{"lib/a.ex" => [[1, 3], [8, 10]]}
 
+      context = CodeReviewRequest.to_context(request)
+      # Production council DOT context_keys uses review.review_cycle.
+      assert context["review.review_cycle"] == 2
+      assert context["review_cycle"] == 2
+      assert context["review.cycle"] == 2
+
       assert {:error, {:invalid_field, :review_cycle, _}} =
                CodeReviewRequest.new(Map.put(@valid_attrs, :review_cycle, 0))
 

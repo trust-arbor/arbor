@@ -1037,6 +1037,58 @@ defmodule Arbor.Actions.ConsensusTest do
                )
     end
 
+    test "accepts the exact production review.review_cycle dotted key from DOT params" do
+      # ExecHandler may pass leaf names, but some nested/context maps keep the
+      # production dotted key from context_keys="...,review.review_cycle,...".
+      results =
+        Enum.map(@review_perspectives, fn perspective ->
+          make_review_branch(perspective, review_report("approve"))
+        end)
+
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{
+                   "parallel.results" => results,
+                   "review.review_cycle" => 1,
+                   "review.finding_ledger" => review_ledger(),
+                   "review.delta_ranges" => %{}
+                 },
+                 %{}
+               )
+
+      assert result["decision"] == "approved"
+      assert result["review_cycle"] == 1
+    end
+
+    test "prose and fenced JSON last_response remain abstentions (strict Jason.decode)" do
+      # DecideReview intentionally exact-decodes JSON. Fenced markdown or prose
+      # plus JSON must not be scraped or inferred into a vote.
+      fenced = """
+      Here is my review:
+
+      ```json
+      {"vote":"reject","finding_updates":[],"new_findings":[]}
+      ```
+      """
+
+      results = [
+        make_review_branch("correctness", review_report("approve")),
+        make_review_branch("security", fenced),
+        make_review_branch("maintainability", "I reject this change.")
+      ]
+
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{results: results, review_cycle: 1, finding_ledger: review_ledger()},
+                 %{}
+               )
+
+      assert result["perspective_votes"]["security"] == "abstain"
+      assert result["perspective_votes"]["maintainability"] == "abstain"
+      assert result["approve_count"] == 1
+      assert result["reject_count"] == 0
+    end
+
     test "fails closed on invalid cycle, ledger, and delta ranges" do
       assert {:error, %{"reason" => "invalid_review_cycle"}} =
                Consensus.DecideReview.run(

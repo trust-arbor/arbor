@@ -929,5 +929,287 @@ defmodule Arbor.LLM.ToolLoopTest do
 
       refute_received :huge_result_reached_next_model_call
     end
+
+    test "successful sole terminal tool returns only that action result as content" do
+      client = build_client(__MODULE__.TerminalSuccessAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("terminal_success_test"),
+          tools: terminal_tool_defs(),
+          tool_executor: __MODULE__.TerminalTools,
+          terminal_tools: ["submit_report"]
+        )
+
+      assert result.finish_reason == :terminal_tool
+
+      assert Jason.decode!(result.content) == %{
+               "vote" => "approve",
+               "finding_updates" => [],
+               "new_findings" => []
+             }
+
+      # Never append intermediate prose when a terminal tool succeeds.
+      refute result.content =~ "Thinking about the report"
+    end
+
+    test "failed terminal tool may be returned to the model for correction" do
+      client = build_client(__MODULE__.TerminalFailThenSucceedAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("terminal_fail_then_succeed_test"),
+          tools: terminal_tool_defs(),
+          tool_executor: __MODULE__.TerminalTools,
+          terminal_tools: ["submit_report"]
+        )
+
+      assert result.finish_reason == :terminal_tool
+
+      assert Jason.decode!(result.content) == %{
+               "vote" => "reject",
+               "finding_updates" => [],
+               "new_findings" => []
+             }
+    end
+
+    test "mixed terminal and non-terminal tool calls fail closed as ambiguous" do
+      client = build_client(__MODULE__.TerminalMixedAdapter)
+
+      assert {:error, :ambiguous_terminal_tool_submission} =
+               ToolLoop.run(client, request("terminal_mixed_test"),
+                 tools: terminal_tool_defs() ++ mock_read_tool_def(),
+                 tool_executor: __MODULE__.TerminalTools,
+                 terminal_tools: ["submit_report"]
+               )
+    end
+
+    test "absent terminal_tools option preserves free-form final text compatibility" do
+      client = build_client(NoToolsAdapter)
+
+      {:ok, result} = ToolLoop.run(client, request("no_tools_test"))
+
+      assert result.content == "Direct answer"
+      assert result.finish_reason == :stop
+    end
+
+    test "free-form final text with terminal_tools gets one correction then fails closed" do
+      client = build_client(__MODULE__.TerminalFreeFormThenStillFreeFormAdapter)
+
+      assert {:error, :terminal_tool_submission_required} =
+               ToolLoop.run(client, request("terminal_freeform_test"),
+                 tools: terminal_tool_defs(),
+                 tool_executor: __MODULE__.TerminalTools,
+                 terminal_tools: ["submit_report"]
+               )
+    end
+
+    test "free-form final text with terminal_tools succeeds if correction submits" do
+      client = build_client(__MODULE__.TerminalFreeFormThenSubmitAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("terminal_freeform_then_submit_test"),
+          tools: terminal_tool_defs(),
+          tool_executor: __MODULE__.TerminalTools,
+          terminal_tools: ["submit_report"]
+        )
+
+      assert result.finish_reason == :terminal_tool
+
+      assert Jason.decode!(result.content) == %{
+               "vote" => "approve",
+               "finding_updates" => [],
+               "new_findings" => []
+             }
+    end
+  end
+
+  # --- Terminal tool mocks ---
+
+  defmodule TerminalTools do
+    def execute("submit_report", args, _workdir, _opts) do
+      case args do
+        %{"vote" => "fail"} ->
+          {:error, "invalid_vote"}
+
+        %{"vote" => vote} when vote in ["approve", "reject", "abstain"] ->
+          {:ok,
+           Jason.encode!(%{
+             "vote" => vote,
+             "finding_updates" => Map.get(args, "finding_updates", []),
+             "new_findings" => Map.get(args, "new_findings", [])
+           })}
+
+        _ ->
+          {:error, "invalid_report"}
+      end
+    end
+
+    def execute("read_file", %{"path" => path}, workdir, _opts) do
+      full = Path.join(workdir, path)
+
+      case File.read(full) do
+        {:ok, content} -> {:ok, content}
+        {:error, reason} -> {:error, "Cannot read: #{reason}"}
+      end
+    end
+
+    def execute(name, _args, _workdir, _opts), do: {:error, "Unknown: #{name}"}
+  end
+
+  defmodule TerminalSuccessAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_success_test"
+
+    def complete(%Request{} = _request, _opts) do
+      {:ok,
+       %Response{
+         text: "Thinking about the report",
+         finish_reason: :tool_calls,
+         content_parts: [
+           ContentPart.text("Thinking about the report"),
+           ContentPart.tool_call("t1", "submit_report", %{
+             "vote" => "approve",
+             "finding_updates" => [],
+             "new_findings" => []
+           })
+         ],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
+  defmodule TerminalFailThenSucceedAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_fail_then_succeed_test"
+
+    def complete(%Request{} = request, _opts) do
+      tool_rounds = Enum.count(request.messages, &(&1.role == :tool))
+
+      if tool_rounds == 0 do
+        {:ok,
+         %Response{
+           text: "",
+           finish_reason: :tool_calls,
+           content_parts: [
+             ContentPart.tool_call("t1", "submit_report", %{"vote" => "fail"})
+           ],
+           usage: %{},
+           raw: %{}
+         }}
+      else
+        {:ok,
+         %Response{
+           text: "",
+           finish_reason: :tool_calls,
+           content_parts: [
+             ContentPart.tool_call("t2", "submit_report", %{
+               "vote" => "reject",
+               "finding_updates" => [],
+               "new_findings" => []
+             })
+           ],
+           usage: %{},
+           raw: %{}
+         }}
+      end
+    end
+  end
+
+  defmodule TerminalMixedAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_mixed_test"
+
+    def complete(%Request{} = _request, _opts) do
+      {:ok,
+       %Response{
+         text: "",
+         finish_reason: :tool_calls,
+         content_parts: [
+           ContentPart.tool_call("r1", "read_file", %{"path" => "x.txt"}),
+           ContentPart.tool_call("t1", "submit_report", %{
+             "vote" => "approve",
+             "finding_updates" => [],
+             "new_findings" => []
+           })
+         ],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
+  defmodule TerminalFreeFormThenStillFreeFormAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_freeform_test"
+
+    def complete(%Request{} = _request, _opts) do
+      {:ok,
+       %Response{
+         text: "Here is my review as prose instead of a tool call.",
+         finish_reason: :stop,
+         content_parts: [ContentPart.text("Here is my review as prose instead of a tool call.")],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
+  defmodule TerminalFreeFormThenSubmitAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_freeform_then_submit_test"
+
+    def complete(%Request{} = request, _opts) do
+      if Enum.any?(request.messages, &(&1.role == :user and &1.content =~ "terminal tool")) do
+        {:ok,
+         %Response{
+           text: "",
+           finish_reason: :tool_calls,
+           content_parts: [
+             ContentPart.tool_call("t1", "submit_report", %{
+               "vote" => "approve",
+               "finding_updates" => [],
+               "new_findings" => []
+             })
+           ],
+           usage: %{},
+           raw: %{}
+         }}
+      else
+        {:ok,
+         %Response{
+           text: ~s({"vote":"approve"}),
+           finish_reason: :stop,
+           content_parts: [ContentPart.text(~s({"vote":"approve"}))],
+           usage: %{},
+           raw: %{}
+         }}
+      end
+    end
+  end
+
+  defp terminal_tool_defs do
+    [
+      %{
+        "type" => "function",
+        "function" => %{
+          "name" => "submit_report",
+          "description" => "Submit report",
+          "parameters" => %{"type" => "object", "properties" => %{}}
+        }
+      }
+    ]
+  end
+
+  defp mock_read_tool_def do
+    [
+      %{
+        "type" => "function",
+        "function" => %{
+          "name" => "read_file",
+          "description" => "Read file",
+          "parameters" => %{"type" => "object", "properties" => %{}}
+        }
+      }
+    ]
   end
 end

@@ -53,7 +53,9 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
         assert node.attrs["use_tools"] == "true"
 
         assert node.attrs["tools"] ==
-                 "coding_review_tree_read,coding_review_tree_search"
+                 "coding_review_tree_read,coding_review_tree_search,coding_submit_review_report"
+
+        assert node.attrs["terminal_tools"] == "coding_submit_review_report"
 
         assert node.attrs["max_turns"] == "3"
         assert node.attrs["prompt_is_data"] == "true"
@@ -64,16 +66,16 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
       end
     end
 
-    test "reviewer prompts require strict frozen-ledger JSON reports" do
+    test "reviewer prompts require terminal coding_submit_review_report submission" do
       graph = load_graph()
 
       for reviewer <- Map.keys(@reviewers) do
         prompt = graph.nodes[reviewer].attrs["system_prompt"]
 
         assert prompt =~
-                 "Return ONLY one strict JSON object with exactly vote, finding_updates, new_findings"
+                 "call coding_submit_review_report exactly once with vote, finding_updates, and new_findings"
 
-        assert prompt =~ "never infer or emit prose outside JSON"
+        assert prompt =~ "do not emit free-form JSON text or fenced JSON as the final answer"
         assert prompt =~ "existing same-owner ledger id"
         assert prompt =~ "state fixed, open, or architectural_blocker"
         assert prompt =~ "severity blocking, major, minor, or nit"

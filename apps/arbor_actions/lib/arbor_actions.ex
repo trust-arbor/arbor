@@ -1229,7 +1229,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.Workspace.Release,
         Arbor.Actions.Coding.Workspace.CommittedChange,
         Arbor.Actions.Coding.ReviewTree.Read,
-        Arbor.Actions.Coding.ReviewTree.Search
+        Arbor.Actions.Coding.ReviewTree.Search,
+        Arbor.Actions.Coding.SubmitReviewReport
       ],
       background_checks: [
         Arbor.Actions.BackgroundChecks.Run
@@ -2267,6 +2268,7 @@ defmodule Arbor.Actions do
       "arbor://action/coding/workspace/committed_change",
     Arbor.Actions.Coding.ReviewTree.Read => "arbor://action/coding/review_tree/read",
     Arbor.Actions.Coding.ReviewTree.Search => "arbor://action/coding/review_tree/search",
+    Arbor.Actions.Coding.SubmitReviewReport => "arbor://action/coding/review/submit",
 
     # Background checks — routes through shell
     Arbor.Actions.BackgroundChecks.Run => "arbor://shell/exec",

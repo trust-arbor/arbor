@@ -66,6 +66,8 @@ required_capabilities:
   resource: "arbor://action/coding/review_tree/read"
 - description: "Search tracked files in the exact candidate or base tree during binding review"
   resource: "arbor://action/coding/review_tree/search"
+- description: "Submit a strict binding code-review report from a council reviewer"
+  resource: "arbor://action/coding/review/submit"
 - description: "Authorize canonical native ACP tool callbacks for delegated coding workers"
   resource: "arbor://acp/tool/**"
 - description: "Read repository files"
@@ -98,7 +100,9 @@ trust_preset:
     "arbor://action/coding/workspace": auto
     "arbor://action/coding/review_tree/read": auto
     "arbor://action/coding/review_tree/search": auto
+    "arbor://action/coding/review/submit": auto
     "arbor://acp/tool": auto
+
     "arbor://fs/read": auto
     "arbor://fs/list": auto
     "arbor://fs/write": auto

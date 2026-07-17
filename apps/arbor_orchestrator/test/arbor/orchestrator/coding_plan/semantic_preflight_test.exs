@@ -27,6 +27,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Arbor.Actions.Git.PR,
     Arbor.Actions.Coding.ReviewTree.Read,
     Arbor.Actions.Coding.ReviewTree.Search,
+    Arbor.Actions.Coding.SubmitReviewReport,
     Arbor.Actions.Council.ReviewChange,
     Arbor.Actions.Consensus.DecideReview
   ]

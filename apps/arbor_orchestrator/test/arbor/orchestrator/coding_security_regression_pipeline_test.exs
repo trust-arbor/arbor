@@ -15,6 +15,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.ReviewTree.Read,
     Arbor.Actions.Coding.ReviewTree.Search,
+    Arbor.Actions.Coding.SubmitReviewReport,
     Arbor.Actions.Coding.Workspace.Acquire,
     Arbor.Actions.Coding.Workspace.Inspect,
     Arbor.Actions.Coding.Workspace.Release,

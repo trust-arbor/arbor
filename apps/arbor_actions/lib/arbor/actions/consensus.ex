@@ -711,7 +711,10 @@ defmodule Arbor.Actions.Consensus do
 
     defp review_cycle_param(params) do
       params
-      |> param(["review_cycle", "review.cycle", :review_cycle], :missing)
+      |> param(
+        ["review_cycle", "review.review_cycle", "review.cycle", :review_cycle],
+        :missing
+      )
       |> parse_review_cycle()
     end
 

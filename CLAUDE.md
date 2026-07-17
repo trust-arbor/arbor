@@ -242,6 +242,24 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 
 ## Applied Learning
 
+**DOT `context_keys` must match the exact context keys producers emit.** The
+code-review council DOT used `review.review_cycle` while
+`CodeReviewRequest.to_context/1` only emitted `review.cycle` / `review_cycle`,
+so ExecHandler silently dropped the param and `DecideReview` failed with
+`invalid_review_cycle`. Mirror the production dotted key on both sides
+(`review.finding_ledger`-style), accept the dotted form in the action param
+lookup, and regress with the exact DOT-produced parameter map (found
+2026-07-17 when binding council reducers returned invalid_review_cycle).
+
+**Structured terminal output needs a tool contract, not prompt-only JSON.**
+Reviewers with tools still returned fenced JSON or prose; `DecideReview`
+correctly exact-decodes and abstains — do not strip fences or scrape prose.
+Expose a schema-bounded terminal Jido action, mark it via generic
+`ToolLoop`/`LlmHandler` `terminal_tools`, return only that action result as
+`PipelineResponse.content`, and allow at most one terminal-only correction
+turn when free-form text arrives (found 2026-07-17 fixing binding council
+reviewer reports).
+
 **Inspect formatter diffs before staging a narrow change.** A source file may
 predate the current formatter and a one-line comment edit can trigger broad,
 unrelated layout churn. Format behavior-bearing files as required, then remove

@@ -852,54 +852,141 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       # Annotate ask-mode tools with "(requires approval)" in description
       tool_defs = annotate_ask_mode_tools(tool_defs, agent_id)
 
-      # Authority presence is exclusive: malformed/nil authority values must
-      # fail closed in the executor rather than falling back to a signer from
-      # Engine opts or the JSON context.
-      signer =
-        if Keyword.has_key?(opts, :signing_authority) do
-          nil
-        else
-          Keyword.get(opts, :signer) || Context.get(context, "session.signer")
-        end
+      case parse_terminal_tools_attr(Map.get(node.attrs, "terminal_tools"), tool_defs) do
+        {:error, reason} ->
+          {:error, reason}
 
-      credential_opts =
-        if Keyword.has_key?(opts, :signing_authority) do
-          [signing_authority: Keyword.get(opts, :signing_authority)]
-        else
-          [signer: signer]
-        end
+        {:ok, terminal_tools} ->
+          # Authority presence is exclusive: malformed/nil authority values must
+          # fail closed in the executor rather than falling back to a signer from
+          # Engine opts or the JSON context.
+          signer =
+            if Keyword.has_key?(opts, :signing_authority) do
+              nil
+            else
+              Keyword.get(opts, :signer) || Context.get(context, "session.signer")
+            end
 
-      tool_loop_opts =
-        [
-          workdir: workdir,
-          max_turns: max_turns,
-          tools: tool_defs,
-          tool_executor: executor,
-          prompt_sanitizer_nonce: nonce,
-          on_tool_call: build_tool_callback(opts, node.id),
-          # Steering: a 0-arity closure (from the Session) that returns the next mid-turn user
-          # message to fold in at an iteration boundary. Opts get function-stripped for RPC, so
-          # (like signer) the closure travels in the context; read opts first, then context.
-          on_steer_check:
-            Keyword.get(opts, :steer_check) || Context.get(context, "session.steer_check")
-        ]
-        |> Keyword.merge(credential_opts)
-        |> Keyword.merge(authority_opts)
-        |> maybe_add_stream_callback(on_stream)
+          credential_opts =
+            if Keyword.has_key?(opts, :signing_authority) do
+              [signing_authority: Keyword.get(opts, :signing_authority)]
+            else
+              [signer: signer]
+            end
 
-      # Phase 4+ (B4): wrap ToolLoop in a fallback loop so per-agent
-      # fallback chains apply to tool turns too. ToolLoop itself stays in
-      # arbor_llm and uses Client.complete internally — moving it would
-      # require behaviour-injection through ToolLoop too. For now we accept
-      # that tool-loop fallback only supports provider/model swaps; :runtime
-      # entries are skipped with a warning (they'd require dispatching the
-      # whole loop through a different runtime, which is incoherent for a
-      # multi-turn conversation).
-      chain = Context.get(context, "session.llm_fallback_chain", [])
-      do_call = fn req -> tool_loop_attempt(client, req, tool_loop_opts) end
-      call_with_tool_loop_fallback(do_call, request, chain)
+          tool_loop_opts =
+            [
+              workdir: workdir,
+              max_turns: max_turns,
+              tools: tool_defs,
+              tool_executor: executor,
+              prompt_sanitizer_nonce: nonce,
+              on_tool_call: build_tool_callback(opts, node.id),
+              # Steering: a 0-arity closure (from the Session) that returns the next mid-turn user
+              # message to fold in at an iteration boundary. Opts get function-stripped for RPC, so
+              # (like signer) the closure travels in the context; read opts first, then context.
+              on_steer_check:
+                Keyword.get(opts, :steer_check) || Context.get(context, "session.steer_check")
+            ]
+            |> maybe_put_terminal_tools(terminal_tools)
+            |> Keyword.merge(credential_opts)
+            |> Keyword.merge(authority_opts)
+            |> maybe_add_stream_callback(on_stream)
+
+          # Phase 4+ (B4): wrap ToolLoop in a fallback loop so per-agent
+          # fallback chains apply to tool turns too. ToolLoop itself stays in
+          # arbor_llm and uses Client.complete internally — moving it would
+          # require behaviour-injection through ToolLoop too. For now we accept
+          # that tool-loop fallback only supports provider/model swaps; :runtime
+          # entries are skipped with a warning (they'd require dispatching the
+          # whole loop through a different runtime, which is incoherent for a
+          # multi-turn conversation).
+          chain = Context.get(context, "session.llm_fallback_chain", [])
+          do_call = fn req -> tool_loop_attempt(client, req, tool_loop_opts) end
+          call_with_tool_loop_fallback(do_call, request, chain)
+      end
     end
   end
+
+  @doc false
+  # Parse compute-node terminal_tools= CSV without minting atoms. Empty/absent is
+  # compatible (no terminal contract). Configured names must be a subset of the
+  # node's resolved tools so the model cannot be forced to call an unavailable tool.
+  # Public for focused unit tests of the DOT attribute contract.
+  def parse_terminal_tools_attr(nil, _tool_defs), do: {:ok, []}
+  def parse_terminal_tools_attr("", _tool_defs), do: {:ok, []}
+
+  def parse_terminal_tools_attr(csv, tool_defs) when is_binary(csv) do
+    names =
+      csv
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    parse_terminal_tools_attr(names, tool_defs)
+  end
+
+  def parse_terminal_tools_attr(names, tool_defs) when is_list(names) do
+    with {:ok, normalized} <- normalize_terminal_tool_names(names),
+         :ok <- ensure_terminal_subset(normalized, tool_defs) do
+      {:ok, normalized}
+    end
+  end
+
+  def parse_terminal_tools_attr(_other, _tool_defs), do: {:error, :invalid_terminal_tools}
+
+  defp normalize_terminal_tool_names(names) do
+    Enum.reduce_while(names, {:ok, []}, fn name, {:ok, acc} ->
+      cond do
+        not is_binary(name) ->
+          {:halt, {:error, :invalid_terminal_tool_name}}
+
+        not String.valid?(name) ->
+          {:halt, {:error, :invalid_terminal_tool_name}}
+
+        String.contains?(name, <<0>>) ->
+          {:halt, {:error, :invalid_terminal_tool_name}}
+
+        byte_size(name) > 128 ->
+          {:halt, {:error, :invalid_terminal_tool_name}}
+
+        not Regex.match?(~r/^[A-Za-z][A-Za-z0-9_.\/-]*$/, name) ->
+          {:halt, {:error, :invalid_terminal_tool_name}}
+
+        true ->
+          {:cont, {:ok, [name | acc]}}
+      end
+    end)
+    |> case do
+      {:ok, list} -> {:ok, Enum.reverse(Enum.uniq(list))}
+      error -> error
+    end
+  end
+
+  defp ensure_terminal_subset([], _tool_defs), do: :ok
+
+  defp ensure_terminal_subset(names, tool_defs) do
+    available =
+      tool_defs
+      |> Enum.map(fn
+        %{"function" => %{"name" => n}} when is_binary(n) -> n
+        %{function: %{name: n}} when is_binary(n) -> n
+        _ -> nil
+      end)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    missing = Enum.reject(names, &MapSet.member?(available, &1))
+
+    if missing == [] do
+      :ok
+    else
+      {:error, {:terminal_tools_not_in_resolved_tools, missing}}
+    end
+  end
+
+  defp maybe_put_terminal_tools(opts, []), do: opts
+  defp maybe_put_terminal_tools(opts, names), do: Keyword.put(opts, :terminal_tools, names)
 
   defp tool_loop_authority_opts(node, context, opts) do
     case {Keyword.get(opts, :authorization, false), Keyword.get(opts, :run_authorization)} do
@@ -960,6 +1047,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
       {:error, {:max_turns_reached, turns, _}} ->
         {:error, "Tool loop hit #{turns} turn limit without completing"}
+
+      {:error, :terminal_tool_submission_required} ->
+        {:error, "Terminal tool submission required; model returned free-form text"}
+
+      {:error, {:terminal_tool_submission_required, turns, _}} ->
+        {:error,
+         "Terminal tool submission required after #{turns} tool rounds without a valid submission"}
+
+      {:error, :ambiguous_terminal_tool_submission} ->
+        {:error, "Ambiguous terminal tool submission (mixed or multiple terminal calls)"}
 
       {:error, _} = error ->
         error

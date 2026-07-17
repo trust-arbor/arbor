@@ -182,6 +182,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
       "review.intent" => request.intent,
       "review.agent_id" => request.agent_id,
       "review.cycle" => request.review_cycle,
+      # Production council DOT context_keys use the review.* namespace form
+      # (review.review_cycle), matching review.finding_ledger / review.delta_ranges.
+      "review.review_cycle" => request.review_cycle,
       "review.prior_candidate_commit" => request.prior_candidate_commit,
       "review.delta_diff" => request.delta_diff,
       "review.delta_files" => request.delta_files,
