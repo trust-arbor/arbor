@@ -478,9 +478,19 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   end
 
   defp legacy_signer(context) do
-    case Map.get(context, :auth_context) do
-      %{signer: signer} when is_function(signer, 1) -> signer
-      _ -> Map.get(context, :signer)
+    auth_context_signer =
+      case Map.get(context, :auth_context) do
+        %{signer: signer} when is_function(signer, 1) -> signer
+        _ -> nil
+      end
+
+    direct_signer = Map.get(context, :signer)
+
+    cond do
+      is_function(auth_context_signer, 1) -> auth_context_signer
+      not is_nil(direct_signer) -> direct_signer
+      # The authority path exposes only this ephemeral signer, never its bearer.
+      true -> nested_opt(context, :signer)
     end
   end
 

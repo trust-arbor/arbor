@@ -244,6 +244,75 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     assert payload["adopted"] == true
   end
 
+  test "security regression: nested_engine_opts signer alone enables clean HEAD adoption" do
+    {repo, head} = init_clean_repo!()
+    agent_id = unique_agent("nested_signer_adopt")
+    grant_git_commit!(agent_id)
+
+    signer_calls = :counters.new(1, [])
+    nested_signer = build_counter_signer(signer_calls, agent_id)
+
+    context = %{
+      agent_id: agent_id,
+      auth_context: AuthContext.new(agent_id, signer: nil),
+      allow_pipeline_internal: true,
+      approval_timeout_ms: 3_000,
+      nested_engine_opts: [signer: nested_signer]
+    }
+
+    refute Map.has_key?(context, :signer)
+    refute Map.has_key?(context, :signing_authority)
+    refute Keyword.has_key?(context.nested_engine_opts, :signing_authority)
+
+    params = %{
+      path: repo,
+      message: "unused for clean adopt",
+      workspace_dirty: false,
+      expected_head_commit: head
+    }
+
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    request = await_pending_request(agent_id)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 5_000)
+    assert payload["interaction_outcome"] == ""
+    assert payload["commit_hash"] == head
+    assert payload["adopted"] == true
+    assert :counters.get(signer_calls, 1) >= 1
+  end
+
+  test "security regression: malformed direct signer cannot fall through to nested signer" do
+    {repo, head} = init_clean_repo!()
+    agent_id = unique_agent("malformed_direct_signer")
+    signer_calls = :counters.new(1, [])
+
+    context = %{
+      agent_id: agent_id,
+      auth_context: AuthContext.new(agent_id, signer: nil),
+      allow_pipeline_internal: true,
+      signer: :malformed,
+      nested_engine_opts: [signer: build_counter_signer(signer_calls, agent_id)]
+    }
+
+    assert {:error, "signing authority required for git commit"} =
+             ReviewedCommit.run(
+               %{
+                 path: repo,
+                 message: "must not adopt",
+                 workspace_dirty: false,
+                 expected_head_commit: head
+               },
+               context
+             )
+
+    assert :counters.get(signer_calls, 1) == 0
+  end
+
   test "security regression: head drift during approval fails closed" do
     {repo, head} = init_dirty_repo!()
     agent_id = unique_agent("drift")
