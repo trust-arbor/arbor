@@ -266,7 +266,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             if resource, do: Keyword.put(opts, :validation_resource, resource), else: opts
           end)
 
-        case run_mix(worktree_path, ["test", path], mix_opts) do
+        case run_mix(worktree_path, ["test", "--", path], mix_opts) do
           {:ok, result} ->
             # Re-check shared deadline immediately after every child, including the final one.
             remaining_after = deadline - monotonic_ms()

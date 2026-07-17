@@ -58,16 +58,16 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert check["exit_code"] == 0
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ^worktree, ["test", "apps/alpha/test"], opts1}
+    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test"], opts1}
     assert Keyword.get(opts1, :timeout) == 30_000
 
-    assert_receive {:mix_invocation, ^worktree, ["test", "apps/beta/test"], opts2}
+    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/beta/test"], opts2}
     assert is_integer(Keyword.get(opts2, :timeout))
     assert Keyword.get(opts2, :timeout) > 0
     assert Keyword.get(opts2, :timeout) <= 30_000
 
     # Never a single combined multi-root command.
-    refute_received {:mix_invocation, _, ["test", "apps/alpha/test", "apps/beta/test"], _}
+    refute_received {:mix_invocation, _, ["test", "--", "apps/alpha/test", "apps/beta/test"], _}
     refute_received {:mix_invocation, _, _}
   end
 
@@ -79,10 +79,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args})
 
       case args do
-        ["test", "apps/alpha/test"] ->
+        ["test", "--", "apps/alpha/test"] ->
           {:ok, %{exit_code: 0, stdout: "alpha ok", stderr: "", timed_out: false}}
 
-        ["test", "apps/beta/test"] ->
+        ["test", "--", "apps/beta/test"] ->
           {:ok, %{exit_code: 1, stdout: "beta fail", stderr: "", timed_out: false}}
 
         other ->
@@ -106,9 +106,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute String.contains?(check["stdout_excerpt"], "[apps/gamma/test]")
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
-    assert_receive {:mix_invocation, ["test", "apps/beta/test"]}
-    refute_received {:mix_invocation, ["test", "apps/gamma/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/beta/test"]}
+    refute_received {:mix_invocation, ["test", "--", "apps/gamma/test"]}
   end
 
   test "child that consumes remaining budget is timed out; later children never launch", %{
@@ -153,9 +153,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "apps/alpha/test"], opts}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"], opts}
     assert Keyword.get(opts, :timeout) == 5_000
-    refute_received {:mix_invocation, ["test", "apps/beta/test"], _}
+    refute_received {:mix_invocation, ["test", "--", "apps/beta/test"], _}
   end
 
   test "final child overrun after success-shaped runner result is still timed out", %{
@@ -178,12 +178,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["test", "apps/alpha/test"] ->
+        ["test", "--", "apps/alpha/test"] ->
           # Small advance; remaining budget stays positive.
           Agent.update(clock_agent, fn t -> t + 1_000 end)
           {:ok, %{exit_code: 0, stdout: "alpha ok", stderr: "", timed_out: false}}
 
-        ["test", "apps/omega/test"] ->
+        ["test", "--", "apps/omega/test"] ->
           # Final child returns success shape but consumes the shared deadline.
           Agent.update(clock_agent, fn _ -> 20_000 end)
           {:ok, %{exit_code: 0, stdout: "omega ok", stderr: "", timed_out: false}}
@@ -208,9 +208,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert String.contains?(check["stdout_excerpt"], "[apps/omega/test]")
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "apps/alpha/test"], opts1}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"], opts1}
     assert Keyword.get(opts1, :timeout) == 5_000
-    assert_receive {:mix_invocation, ["test", "apps/omega/test"], opts2}
+    assert_receive {:mix_invocation, ["test", "--", "apps/omega/test"], opts2}
     assert Keyword.get(opts2, :timeout) == 4_000
     refute_received {:mix_invocation, _, _}
   end
@@ -225,7 +225,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args})
 
       case args do
-        ["test", "apps/alpha/test"] ->
+        ["test", "--", "apps/alpha/test"] ->
           {:ok,
            %{
              exit_code: 1,
@@ -250,8 +250,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert text_fail["reason"] == "tests_failed"
     refute text_fail["reason"] == "tests_timed_out"
     assert String.contains?(text_fail["stdout_excerpt"], "timeout waiting")
-    assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
-    refute_received {:mix_invocation, ["test", "apps/beta/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
+    refute_received {:mix_invocation, ["test", "--", "apps/beta/test"]}
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
       send(parent, {:mix_invocation, {:exact, args}})
@@ -274,8 +274,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     refute exact["passed"]
     assert exact["reason"] == "tests_timed_out"
-    assert_receive {:mix_invocation, {:exact, ["test", "apps/alpha/test"]}}
-    refute_received {:mix_invocation, {:exact, ["test", "apps/beta/test"]}}
+    assert_receive {:mix_invocation, {:exact, ["test", "--", "apps/alpha/test"]}}
+    refute_received {:mix_invocation, {:exact, ["test", "--", "apps/beta/test"]}}
   end
 
   test "invalid UTF-8 process output is JSON-safe and hashed as raw bytes", %{worktree: worktree} do
@@ -325,7 +325,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     feedback = Core.feedback_from_result(%{exit_code: 1, stdout: raw, stderr: stderr_raw})
     assert feedback["stdout_sha256"] == raw_hash
     assert feedback["stderr_sha256"] == stderr_hash
-    assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
   end
 
   test "multibyte excerpt bounds never split UTF-8 codepoints", %{worktree: worktree} do
@@ -352,7 +352,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert String.valid?(check["stdout_excerpt"])
     assert String.contains?(check["stdout_excerpt"], "...[omitted]...")
     assert {:ok, _} = Jason.encode(check)
-    assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
   end
 
   test "no launch after deadline is already exhausted", %{worktree: worktree} do
@@ -454,8 +454,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert check["exit_code"] == 137
     assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test]")
 
-    assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
-    refute_received {:mix_invocation, ["test", "apps/beta/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
+    refute_received {:mix_invocation, ["test", "--", "apps/beta/test"]}
   end
 
   defp mkdir_app_tests!(worktree, apps) do
