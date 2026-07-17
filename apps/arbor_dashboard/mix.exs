@@ -1,15 +1,20 @@
+Code.require_file(Path.expand("../../build_support/mix_project_paths.exs", __DIR__))
+
 defmodule Arbor.Dashboard.MixProject do
   use Mix.Project
 
   @version "0.1.0"
 
   def project do
+    paths =
+      Arbor.MixProjectPaths.project_paths(build_path: "../../_build", deps_path: "../../deps")
+
     [
       app: :arbor_dashboard,
       version: @version,
-      build_path: "../../_build",
+      build_path: paths[:build_path],
       config_path: "../../config/config.exs",
-      deps_path: "../../deps",
+      deps_path: paths[:deps_path],
       lockfile: "../../mix.lock",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,

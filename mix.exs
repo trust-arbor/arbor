@@ -1,9 +1,15 @@
+Code.require_file(Path.join(__DIR__, "build_support/mix_project_paths.exs"))
+
 defmodule Arbor.MixProject do
   use Mix.Project
 
   def project do
+    paths = Arbor.MixProjectPaths.project_paths(build_path: "_build", deps_path: "deps")
+
     [
       apps_path: "apps",
+      build_path: paths[:build_path],
+      deps_path: paths[:deps_path],
       version: "2.0.0-dev",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
