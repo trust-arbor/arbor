@@ -17,6 +17,12 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
       @moduletag :slow
       @moduletag :integration
 
+      # Cross-app validation gives the whole contained test-file process a
+      # 600-second hard ceiling. Leave teardown margin while preventing
+      # ExUnit's unrelated 60-second default from preempting bounded fixture
+      # scenarios under one-CPU/virtiofs scheduling.
+      @moduletag timeout: 540_000
+
       alias Arbor.Commands.CodingBenchmark
       alias Arbor.Commands.CodingBenchmark.{Adapter, Git, LegacyAdapter, PipelineAdapter, Runtime}
       alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
@@ -50,7 +56,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
       # complete successfully (happy path, security regressions, artifact cases).
       # Successful runs finish well under this budget; the cap only absorbs
       # one-CPU/low-memory sandbox scheduling noise. Kept below ExUnit's default
-      # 60s per-test ceiling so paired legacy/pipeline execution still has outer
+      # 540s per-test ceiling so paired legacy/pipeline execution still has outer
       # headroom if a child hangs. Do not reuse for intentional timeout/
       # cancellation/late-writer tests — those pass an explicit short deadline.
       @successful_fixture_execution_timeout_ms 30_000
@@ -82,7 +88,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
   # complete successfully (happy path, security regressions, artifact cases).
   # Successful runs finish well under this budget; the cap only absorbs
   # one-CPU/low-memory sandbox scheduling noise. Kept below ExUnit's default
-  # 60s per-test ceiling so paired legacy/pipeline execution still has outer
+  # 540s per-test ceiling so paired legacy/pipeline execution still has outer
   # headroom if a child hangs. Do not reuse for intentional timeout/
   # cancellation/late-writer tests — those pass an explicit short deadline.
   @successful_fixture_execution_timeout_ms 30_000
