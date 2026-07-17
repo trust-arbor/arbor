@@ -142,6 +142,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   @default_validation_owner_cleanup_retry_limit 8
   @max_validation_owner_cleanup_retry_limit 32
 
+  # Actions-owned validation roots accumulate compiled Mix artifact trees
+  # (candidate-runtime/build/lib/<app>/ebin, ...). Depth-scaled Shell listing
+  # budgets must be raised for those wide directories; keep the ceiling at
+  # OwnedTree's public maximum and give cleanup a full bounded wall clock.
+  @validation_root_cleanup_listing_heap_words 8_000_000
+  @validation_root_cleanup_timeout_ms 10_000
+
   @type lease :: %{
           optional(:retention_marker_active) => boolean(),
           optional(:retention_repo_path) => String.t(),
@@ -2006,7 +2013,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     cond do
       is_binary(root) and is_map(identity) and Map.get(identity, :path) == root ->
-        case Arbor.Shell.remove_owned_tree(identity) do
+        case Arbor.Shell.remove_owned_tree(identity, validation_root_cleanup_opts()) do
           :ok -> :ok
           {:error, _reason} -> {:error, :validation_root_cleanup_failed}
         end
@@ -2020,6 +2027,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       true ->
         {:error, :invalid_resource_root}
     end
+  end
+
+  defp validation_root_cleanup_opts do
+    [
+      listing_heap_words: @validation_root_cleanup_listing_heap_words,
+      timeout_ms: @validation_root_cleanup_timeout_ms
+    ]
   end
 
   defp put_validation_resource(state, resource) do

@@ -338,6 +338,83 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     refute File.exists?(lease_root)
   end
 
+  test "security regression: validation root cleanup admits compiled-artifact-shaped trees under explicit bounds",
+       %{
+         tmp_dir: tmp_dir
+       } do
+    # Prove the generic OwnedTree default still rejects this exact shape so the
+    # WorkspaceLeaseRegistry policy remains the load-bearing fix.
+    probe_root = Path.join(tmp_dir, "compiled-artifact-probe")
+    assert {:ok, probe_identity} = Arbor.Shell.create_private_owned_tree(probe_root)
+
+    probe_ebin =
+      Path.join(probe_root, "candidate-runtime/build/lib/arbor_actions/ebin")
+
+    File.mkdir_p!(probe_ebin)
+    populate_compiled_artifact_ebin!(probe_ebin)
+
+    assert {:error, :cleanup_listing_memory_budget_exceeded} =
+             Arbor.Shell.remove_owned_tree(probe_identity)
+
+    assert File.dir?(probe_root)
+
+    assert :ok =
+             Arbor.Shell.remove_owned_tree(probe_identity,
+               listing_heap_words: 8_000_000,
+               timeout_ms: 10_000
+             )
+
+    refute File.exists?(probe_root)
+
+    fixture = leased_project(tmp_dir, valid_module())
+    Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    private =
+      WorkspaceLeaseRegistry
+      |> :sys.get_state()
+      |> Map.fetch!(:validation_resources)
+      |> Map.fetch!(resource.resource_id)
+
+    assert is_map(private.root_cleanup_identity)
+    assert private.root_cleanup_identity.path == resource.root_path
+    lease_root = dependency_lease_root(private)
+    assert is_binary(lease_root)
+    assert File.dir?(lease_root)
+
+    # Realistic Mix layout under the Actions-owned validation root. Release must
+    # succeed through the public WorkspaceLeaseRegistry lifecycle with the
+    # operation-specific listing/time bounds (fails on pre-fix defaults).
+    ebin =
+      Path.join(
+        resource.root_path,
+        "candidate-runtime/build/lib/arbor_actions/ebin"
+      )
+
+    File.mkdir_p!(ebin)
+    populate_compiled_artifact_ebin!(ebin)
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+
+    refute File.exists?(resource.root_path)
+    refute File.exists?(lease_root)
+
+    assert {:ok, []} =
+             WorkspaceLeaseRegistry.validation_resources(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+  end
+
   test "non-map dependency baseline view fails closed and releases the live Shell lease", %{
     tmp_dir: tmp_dir
   } do
@@ -2030,6 +2107,28 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   end
 
   defp valid_module, do: "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
+
+  # Wide ebin directory at candidate-runtime/build/lib/<app>/ebin depth with
+  # long beam-like names. Calibrated so depth-scaled listing under the generic
+  # OwnedTree default (2_000_000 words) fails while the validation-root policy
+  # (8_000_000 words) succeeds. Keep the fixture bounded and fast.
+  defp populate_compiled_artifact_ebin!(ebin_dir) do
+    name_prefix = "Elixir.Arbor.Actions.Coding.CompiledArtifact.Module"
+    name_suffix = ".LongBeamNameForValidationRootCleanupBudget.beam"
+    # ~120-byte names × 300 entries exhausts depth-5 scaled default heap.
+    file_count = 300
+
+    for index <- 1..file_count do
+      name =
+        name_prefix <>
+          String.pad_leading(Integer.to_string(index), 4, "0") <>
+          name_suffix
+
+      File.write!(Path.join(ebin_dir, name), "")
+    end
+
+    :ok
+  end
 
   defp git!(path, args) do
     {output, 0} = System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
