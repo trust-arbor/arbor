@@ -1057,15 +1057,22 @@ defmodule Arbor.Actions.Mix do
              {:ok, head} <-
                git_direct(["-C", worktree, "rev-parse", "HEAD"], deadline_ms),
              {:ok, paths} <- list_committable_paths(git_dir, worktree, deadline_ms, budget),
-             :ok <-
-               stage_committable_paths(
-                 private_git,
-                 private_index,
+             {:ok, staged_entries} <-
+               capture_committable_paths(
                  private_stage,
                  worktree,
                  paths,
                  deadline_ms,
                  budget
+               ),
+             {:ok, hashed_entries} <-
+               hash_staged_entries(private_git, staged_entries, deadline_ms),
+             :ok <-
+               populate_private_index(
+                 private_git,
+                 private_index,
+                 hashed_entries,
+                 deadline_ms
                ),
              {:ok, tree} <-
                git_direct(
@@ -1356,36 +1363,32 @@ defmodule Arbor.Actions.Mix do
     |> length()
   end
 
-  defp stage_committable_paths(
-         private_git,
-         private_index,
+  defp capture_committable_paths(
          private_stage,
          worktree,
          paths,
          deadline_ms,
          budget
        ) do
-    Enum.reduce_while(paths, {:ok, budget}, fn rel, {:ok, acc} ->
+    Enum.reduce_while(paths, {:ok, budget, []}, fn rel, {:ok, acc, entries} ->
       case remaining_timeout(deadline_ms) do
         {:error, reason} ->
           {:halt, {:error, reason}}
 
         {:ok, _} ->
-          case stage_one_path(
-                 private_git,
-                 private_index,
+          case capture_one_path(
                  private_stage,
                  worktree,
                  rel,
                  deadline_ms,
                  acc
                ) do
-            {:ok, next} ->
-              {:cont, {:ok, next}}
+            {:ok, entry, next} ->
+              {:cont, {:ok, next, [entry | entries]}}
 
             # Deleted tracked paths are omitted from the would-be commit tree.
             :skip ->
-              {:cont, {:ok, acc}}
+              {:cont, {:ok, acc, entries}}
 
             {:error, reason} ->
               {:halt, {:error, reason}}
@@ -1393,20 +1396,12 @@ defmodule Arbor.Actions.Mix do
       end
     end)
     |> case do
-      {:ok, _budget} -> :ok
+      {:ok, _budget, entries} -> {:ok, Enum.reverse(entries)}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp stage_one_path(
-         private_git,
-         private_index,
-         private_stage,
-         worktree,
-         rel,
-         deadline_ms,
-         budget
-       ) do
+  defp capture_one_path(private_stage, worktree, rel, deadline_ms, budget) do
     unless safe_index_path?(rel) do
       {:error, {:unsafe_index_path, bound_path(rel)}}
     else
@@ -1427,18 +1422,9 @@ defmodule Arbor.Actions.Mix do
                true <-
                  budget.bytes + byte_size(target) <= budget.max_bytes ||
                    {:error, :tree_binding_bounds_exceeded},
-               {:ok, oid} <-
-                 hash_object_stdin_no_filters(private_git, target, deadline_ms),
-               :ok <-
-                 update_index_cacheinfo(
-                   private_git,
-                   private_index,
-                   "120000",
-                   oid,
-                   rel,
-                   deadline_ms
-                 ) do
-            {:ok,
+               {:ok, stage_path} <-
+                 write_private_stage_bytes(private_stage, target, deadline_ms) do
+            {:ok, %{mode: "120000", path: rel, stage_path: stage_path},
              %{
                budget
                | entries: budget.entries + 1,
@@ -1455,26 +1441,17 @@ defmodule Arbor.Actions.Mix do
                true <-
                  budget.entries + 1 <= budget.max_entries ||
                    {:error, :tree_binding_bounds_exceeded},
-               {:ok, oid, size} <-
-                 hash_regular_file_via_private_stage(
-                   private_git,
+               {:ok, stage_path, size} <-
+                 capture_regular_file_to_private_stage(
                    private_stage,
                    abs,
                    before_stat,
                    budget,
                    deadline_ms
                  ),
-               mode_oct <- if(executable_mode?(mode), do: "100755", else: "100644"),
-               :ok <-
-                 update_index_cacheinfo(
-                   private_git,
-                   private_index,
-                   mode_oct,
-                   oid,
-                   rel,
-                   deadline_ms
-                 ) do
-            {:ok, %{budget | entries: budget.entries + 1, bytes: budget.bytes + size}}
+               mode_oct <- if(executable_mode?(mode), do: "100755", else: "100644") do
+            {:ok, %{mode: mode_oct, path: rel, stage_path: stage_path},
+             %{budget | entries: budget.entries + 1, bytes: budget.bytes + size}}
           else
             false -> {:error, :tree_binding_bounds_exceeded}
             {:error, reason} -> {:error, reason}
@@ -1501,12 +1478,13 @@ defmodule Arbor.Actions.Mix do
   end
 
   # Copy untrusted regular-file bytes through a validated descriptor into an
-  # invocation-private staging file, then hash that private copy. Never
-  # File.read/1 the worktree path wholesale into BEAM memory.
+  # invocation-private staging file. Never File.read/1 the worktree path
+  # wholesale into BEAM memory. The complete bounded staging set is hashed in
+  # one Git process after capture, avoiding one hash + one index rewrite per
+  # repository path.
   @tree_binding_copy_chunk 65_536
 
-  defp hash_regular_file_via_private_stage(
-         private_git,
+  defp capture_regular_file_to_private_stage(
          private_stage,
          abs,
          before_stat,
@@ -1523,21 +1501,41 @@ defmodule Arbor.Actions.Mix do
         stage_token = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
         stage_path = Path.join(private_stage, "blob-#{stage_token}")
 
+        with :ok <-
+               copy_regular_file_to_private_stage(
+                 abs,
+                 before_stat,
+                 stage_path,
+                 size,
+                 deadline_ms
+               ) do
+          {:ok, stage_path, size}
+        end
+    end
+  end
+
+  defp write_private_stage_bytes(private_stage, bytes, deadline_ms)
+       when is_binary(private_stage) and is_binary(bytes) do
+    stage_token = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+    stage_path = Path.join(private_stage, "blob-#{stage_token}")
+
+    with {:ok, _} <- remaining_timeout(deadline_ms),
+         {:ok, io} <-
+           :file.open(String.to_charlist(stage_path), [:write, :raw, :binary, :exclusive]) do
+      result =
         try do
-          with :ok <-
-                 copy_regular_file_to_private_stage(
-                   abs,
-                   before_stat,
-                   stage_path,
-                   size,
-                   deadline_ms
-                 ),
-               {:ok, oid} <- hash_object_file_no_filters(private_git, stage_path, deadline_ms) do
-            {:ok, oid, size}
+          case :file.write(io, bytes) do
+            :ok -> {:ok, stage_path}
+            other -> {:error, {:stage_write_failed, other}}
           end
         after
-          _ = File.rm(stage_path)
+          _ = :file.close(io)
         end
+
+      result
+    else
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:stage_write_failed, other}}
     end
   end
 
@@ -1750,6 +1748,17 @@ defmodule Arbor.Actions.Mix do
     :ok
   end
 
+  @doc false
+  def __test_set_tree_binding_git_observer__(fun) when is_function(fun, 1) do
+    Process.put({__MODULE__, :tree_binding_git_observer}, fun)
+    :ok
+  end
+
+  def __test_set_tree_binding_git_observer__(nil) do
+    Process.delete({__MODULE__, :tree_binding_git_observer})
+    :ok
+  end
+
   # Test-only: exercise the same fail-closed path gate used before update-index.
   @doc false
   def __test_reject_index_path__(path) when is_binary(path) do
@@ -1784,86 +1793,81 @@ defmodule Arbor.Actions.Mix do
   defp executable_mode?(mode) when is_integer(mode), do: Bitwise.band(mode, 0o111) != 0
   defp executable_mode?(_), do: false
 
-  defp hash_object_stdin_no_filters(private_git, content, deadline_ms) when is_binary(content) do
-    with {:ok, rem} <- remaining_timeout(deadline_ms),
-         {:ok, result} <-
-           Arbor.Shell.execute_direct(
-             "git",
-             isolated_git_args([
-               "--git-dir",
-               private_git,
-               "hash-object",
-               "--stdin",
-               "-w",
-               "--no-filters"
-             ]),
-             timeout: rem,
-             env: isolated_git_env([]),
-             clear_env: true,
-             sandbox: :none,
-             stdin: content
-           ),
-         oid when is_binary(oid) <- String.trim(result.stdout || ""),
-         true <- Regex.match?(~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, oid) do
-      {:ok, oid}
-    else
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :hash_object_failed}
-    end
-  end
+  defp hash_staged_entries(_private_git, [], _deadline_ms), do: {:ok, []}
 
-  defp hash_object_file_no_filters(private_git, file_path, deadline_ms)
-       when is_binary(file_path) do
-    with {:ok, rem} <- remaining_timeout(deadline_ms),
-         {:ok, result} <-
-           Arbor.Shell.execute_direct(
-             "git",
-             isolated_git_args([
+  defp hash_staged_entries(private_git, entries, deadline_ms) when is_list(entries) do
+    stdin =
+      entries
+      |> Enum.map(fn %{stage_path: stage_path} -> [stage_path, "\n"] end)
+      |> IO.iodata_to_binary()
+
+    with {:ok, output} <-
+           git_direct(
+             [
                "--git-dir",
                private_git,
                "hash-object",
                "-w",
                "--no-filters",
-               "--",
-               file_path
-             ]),
-             timeout: rem,
-             env: isolated_git_env([]),
-             clear_env: true,
-             sandbox: :none
+               "--stdin-paths"
+             ],
+             deadline_ms,
+             [],
+             stdin: stdin
            ),
-         oid when is_binary(oid) <- String.trim(result.stdout || ""),
-         true <- Regex.match?(~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, oid) do
-      {:ok, oid}
-    else
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :hash_object_failed}
+         {:ok, oids} <- parse_bulk_object_ids(output, length(entries)) do
+      {:ok,
+       Enum.zip_with(entries, oids, fn entry, oid ->
+         Map.put(entry, :oid, oid)
+       end)}
     end
   end
 
-  defp update_index_cacheinfo(private_git, private_index, mode, oid, path, deadline_ms) do
-    # Refuse path components that could escape or inject. Use the three-arg
-    # --cacheinfo form so paths containing commas remain well-formed.
-    if safe_index_path?(path) do
-      case git_direct(
-             [
-               "--git-dir",
-               private_git,
-               "update-index",
-               "--add",
-               "--cacheinfo",
-               mode,
-               oid,
-               path
-             ],
-             deadline_ms,
-             [{"GIT_INDEX_FILE", private_index}]
-           ) do
-        {:ok, _} -> :ok
-        {:error, reason} -> {:error, reason}
-      end
+  defp parse_bulk_object_ids(output, expected_count)
+       when is_binary(output) and is_integer(expected_count) and expected_count >= 0 do
+    oids = String.split(output, "\n", trim: true)
+
+    if length(oids) == expected_count and Enum.all?(oids, &valid_object_id?/1) do
+      {:ok, oids}
     else
-      {:error, {:unsafe_index_path, bound_path(path)}}
+      {:error, :hash_object_output_invalid}
+    end
+  end
+
+  defp valid_object_id?(oid) when is_binary(oid) do
+    Regex.match?(~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, oid)
+  end
+
+  defp valid_object_id?(_), do: false
+
+  defp populate_private_index(private_git, private_index, [], deadline_ms) do
+    case git_direct(
+           ["--git-dir", private_git, "read-tree", "--empty"],
+           deadline_ms,
+           [{"GIT_INDEX_FILE", private_index}]
+         ) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp populate_private_index(private_git, private_index, entries, deadline_ms)
+       when is_list(entries) do
+    index_info =
+      entries
+      |> Enum.map(fn %{mode: mode, oid: oid, path: path} ->
+        [mode, " ", oid, "\t", path, <<0>>]
+      end)
+      |> IO.iodata_to_binary()
+
+    case git_direct(
+           ["--git-dir", private_git, "update-index", "--add", "-z", "--index-info"],
+           deadline_ms,
+           [{"GIT_INDEX_FILE", private_index}],
+           stdin: index_info
+         ) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -1951,26 +1955,96 @@ defmodule Arbor.Actions.Mix do
 
   # Isolated, structured-argv git via the childless Shell primitive. Never uses
   # the candidate repo's local config for filter/hook/fsmonitor execution.
-  defp git_direct(args, deadline_ms, extra_env \\ [])
-       when is_list(args) and is_integer(deadline_ms) do
+  defp git_direct(args, deadline_ms, extra_env \\ [], exec_opts \\ [])
+       when is_list(args) and is_integer(deadline_ms) and is_list(exec_opts) do
+    maybe_observe_tree_binding_git(args)
+
+    shell_opts =
+      [
+        timeout: nil,
+        env: isolated_git_env(extra_env),
+        clear_env: true,
+        sandbox: :none,
+        stdin: Keyword.get(exec_opts, :stdin)
+      ]
+
     with {:ok, rem} <- remaining_timeout(deadline_ms),
          {:ok, result} <-
            Arbor.Shell.execute_direct(
              "git",
              isolated_git_args(args),
-             timeout: rem,
-             env: isolated_git_env(extra_env),
-             clear_env: true,
-             sandbox: :none
+             shell_opts
+             |> Keyword.put(:timeout, rem)
+             |> Enum.reject(fn {_key, value} -> is_nil(value) end)
            ) do
-      if result.exit_code == 0 do
-        {:ok, result.stdout || ""}
-      else
-        {:error, :git_failed}
-      end
+      classify_git_result(result, git_operation(args))
     else
       {:error, reason} -> {:error, reason}
-      _ -> {:error, :git_failed}
+      _ -> {:error, {:git_failed, git_operation(args), :unknown}}
+    end
+  end
+
+  defp classify_git_result(result, operation) when is_map(result) do
+    cond do
+      Map.get(result, :timed_out) == true ->
+        {:error, {:git_timeout, operation}}
+
+      Map.get(result, :output_limit_exceeded) == true or
+          Map.get(result, :output_truncated) == true ->
+        {:error, {:git_output_limit, operation}}
+
+      Map.get(result, :cancelled) == true ->
+        {:error, {:git_cancelled, operation}}
+
+      Map.get(result, :containment_failure) == true ->
+        {:error, {:git_containment_failed, operation}}
+
+      Map.get(result, :exit_code) == 0 ->
+        {:ok, Map.get(result, :stdout) || ""}
+
+      Map.get(result, :exit_code) == 137 ->
+        {:error, {:git_killed, operation}}
+
+      true ->
+        {:error, {:git_failed, operation, Map.get(result, :exit_code)}}
+    end
+  end
+
+  defp classify_git_result(_result, operation),
+    do: {:error, {:git_failed, operation, :invalid_result}}
+
+  defp git_operation(args) when is_list(args) do
+    Enum.find(
+      [
+        :hash_object,
+        :update_index,
+        :write_tree,
+        :read_tree,
+        :ls_files,
+        :rev_parse,
+        :init
+      ],
+      :git,
+      fn operation -> git_operation_arg(operation) in args end
+    )
+  end
+
+  defp git_operation_arg(:hash_object), do: "hash-object"
+  defp git_operation_arg(:update_index), do: "update-index"
+  defp git_operation_arg(:write_tree), do: "write-tree"
+  defp git_operation_arg(:read_tree), do: "read-tree"
+  defp git_operation_arg(:ls_files), do: "ls-files"
+  defp git_operation_arg(:rev_parse), do: "rev-parse"
+  defp git_operation_arg(:init), do: "init"
+
+  defp maybe_observe_tree_binding_git(args) when is_list(args) do
+    case Process.get({__MODULE__, :tree_binding_git_observer}) do
+      fun when is_function(fun, 1) ->
+        _ = fun.(git_operation(args))
+        :ok
+
+      _ ->
+        :ok
     end
   end
 

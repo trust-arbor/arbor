@@ -340,6 +340,23 @@ defmodule Arbor.ShellTest do
       assert String.contains?(result.stdout, "hello from stdin")
     end
 
+    test "large duplex stdin is framed so child output cannot deadlock the launcher" do
+      payload = :binary.copy("0123456789abcdef", 16_384)
+
+      assert {:ok, result} =
+               Shell.execute_direct("cat", [],
+                 sandbox: :none,
+                 stdin: payload,
+                 timeout: 5_000,
+                 max_output_bytes: byte_size(payload) + 1
+               )
+
+      assert result.exit_code == 0
+      refute result.timed_out
+      refute result.killed
+      assert result.stdout == payload
+    end
+
     test "handles invalid working directory" do
       # Invalid cwd results in either an error or a non-zero exit code
       result =

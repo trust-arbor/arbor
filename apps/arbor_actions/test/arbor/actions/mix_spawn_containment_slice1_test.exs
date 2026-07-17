@@ -786,6 +786,55 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     refute File.exists?(marker)
   end
 
+  test "large repository tree binding batches Git processes and preserves the exact tree", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    wt = fixture.lease.worktree_path
+    create_tiny_project(wt)
+
+    for index <- 1..128 do
+      path = Path.join([wt, "lib", "batch", "file_#{index}.txt"])
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "entry #{index}\n")
+    end
+
+    git!(wt, ["add", "-A"])
+    git!(wt, ["commit", "-m", "large binding fixture"])
+    File.write!(Path.join(wt, "untracked.txt"), "included in committable tree\n")
+
+    test_pid = self()
+
+    MixAction.__test_set_tree_binding_git_observer__(fn operation ->
+      send(test_pid, {:tree_binding_git, operation})
+    end)
+
+    binding =
+      try do
+        assert {:ok, binding} = MixAction.committable_tree_binding(wt, timeout: 30_000)
+        binding
+      after
+        MixAction.__test_set_tree_binding_git_observer__(nil)
+      end
+
+    operations = drain_tree_binding_git_operations([])
+
+    assert Enum.frequencies(operations) == %{
+             init: 1,
+             rev_parse: 3,
+             ls_files: 2,
+             hash_object: 1,
+             update_index: 1,
+             write_tree: 1
+           }
+
+    git!(wt, ["add", "-A"])
+    git!(wt, ["commit", "-m", "materialize expected tree"])
+    head = git!(wt, ["rev-parse", "HEAD"])
+    assert {:ok, expected_tree} = MixAction.commit_tree_oid(wt, head)
+    assert binding.tree_oid == expected_tree
+  end
+
   test "security regression: leading/trailing-space, foo..bar, and tab paths bind exactly",
        %{tmp_dir: tmp_dir} do
     fixture = leased_fixture(tmp_dir)
@@ -1300,4 +1349,13 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  defp drain_tree_binding_git_operations(acc) do
+    receive do
+      {:tree_binding_git, operation} ->
+        drain_tree_binding_git_operations([operation | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
 end

@@ -20,6 +20,7 @@ defmodule Arbor.Shell.ProcessGroup do
   @output_limit 2
   @cancelled 3
   @containment_failure 4
+  @stdin_frame_bytes 8_192
 
   @teardown_timeout_ms 2_000
   @cleanup_retry_ms 100
@@ -520,8 +521,23 @@ defmodule Arbor.Shell.ProcessGroup do
 
   defp maybe_send_stdin(_port, nil), do: :ok
 
-  defp maybe_send_stdin(port, stdin) when is_binary(stdin),
-    do: command(port, [<<@input>>, stdin])
+  defp maybe_send_stdin(port, stdin) when is_binary(stdin) do
+    send_stdin_frames(port, stdin)
+  end
+
+  defp send_stdin_frames(_port, <<>>), do: :ok
+
+  defp send_stdin_frames(port, stdin) when byte_size(stdin) <= @stdin_frame_bytes do
+    command(port, [<<@input>>, stdin])
+  end
+
+  defp send_stdin_frames(port, stdin) do
+    <<frame::binary-size(@stdin_frame_bytes), rest::binary>> = stdin
+
+    with :ok <- command(port, [<<@input>>, frame]) do
+      send_stdin_frames(port, rest)
+    end
+  end
 
   defp encode_input(nil), do: {:ok, nil}
 

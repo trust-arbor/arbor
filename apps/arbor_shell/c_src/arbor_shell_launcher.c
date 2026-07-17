@@ -1130,6 +1130,28 @@ static int run_exec(int argc, char **argv, int execution_mode) {
       break;
     }
 
+    /* Drain child output before accepting the next input frame. If both pipes
+     * are ready and input wins, a duplex child (for example cat or
+     * hash-object --stdin-paths) can fill stdout while the launcher blocks
+     * writing stdin. Bounded Elixir-side input frames plus output-first
+     * ordering keep both pipes making progress. */
+    if (fds[0].revents & (POLLIN | POLLHUP)) {
+      ssize_t count = read(output_pipe[0], output, sizeof(output));
+      if (count > 0) {
+        uint64_t available = max_output - output_bytes;
+        uint32_t retained = (uint32_t)((uint64_t)count < available ? (uint64_t)count : available);
+        if (retained > 0 && write_packet(TAG_OUTPUT, output, retained) != 0) {
+          reason = REASON_CANCELLED;
+          break;
+        }
+        output_bytes += retained;
+        if ((uint64_t)count > available) {
+          reason = REASON_OUTPUT_LIMIT;
+          break;
+        }
+      }
+    }
+
     if (fds[1].revents & (POLLIN | POLLHUP)) {
       uint8_t input_tag = 0;
       uint8_t *input_payload = NULL;
@@ -1167,23 +1189,6 @@ static int run_exec(int argc, char **argv, int execution_mode) {
         free(input_payload);
         reason = REASON_CANCELLED;
         break;
-      }
-    }
-
-    if (fds[0].revents & (POLLIN | POLLHUP)) {
-      ssize_t count = read(output_pipe[0], output, sizeof(output));
-      if (count > 0) {
-        uint64_t available = max_output - output_bytes;
-        uint32_t retained = (uint32_t)((uint64_t)count < available ? (uint64_t)count : available);
-        if (retained > 0 && write_packet(TAG_OUTPUT, output, retained) != 0) {
-          reason = REASON_CANCELLED;
-          break;
-        }
-        output_bytes += retained;
-        if ((uint64_t)count > available) {
-          reason = REASON_OUTPUT_LIMIT;
-          break;
-        }
       }
     }
 
