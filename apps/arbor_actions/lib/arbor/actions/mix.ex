@@ -2241,7 +2241,9 @@ defmodule Arbor.Actions.Mix do
       "TMP" => resource_paths.tmp_path,
       "TEMP" => resource_paths.tmp_path,
       "MIX_HOME" => Path.join(resource_paths.home_path, ".mix"),
-      "MIX_ARCHIVES" => Path.join(resource_paths.home_path, ".mix/archives"),
+      # Archives are executable tooling, not mutable project state. Use only the
+      # matching archive set shipped inside the already-projected Elixir root.
+      "MIX_ARCHIVES" => Path.join(roots.elixir_root, ".mix/archives"),
       "HEX_HOME" => Path.join(resource_paths.home_path, ".hex"),
       "REBAR_CACHE_DIR" => Path.join(resource_paths.home_path, ".cache/rebar3"),
       "MIX_BUILD_PATH" => resource_paths.build_path,

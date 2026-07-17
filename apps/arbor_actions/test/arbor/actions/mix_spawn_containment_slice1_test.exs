@@ -136,8 +136,11 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
       assert env["TMPDIR"] == resource.candidate_tmp_path
       assert env["MIX_BUILD_PATH"] == resource.candidate_build_path
       assert env["MIX_DEPS_PATH"] == resource.candidate_deps_path
+      assert env["MIX_ARCHIVES"] == Path.join(env["ARBOR_ELIXIR_ROOT"], ".mix/archives")
+      refute String.starts_with?(env["MIX_ARCHIVES"], env["HOME"])
       assert File.dir?(env["HOME"])
       assert File.dir?(env["MIX_BUILD_PATH"])
+      assert File.dir?(env["MIX_ARCHIVES"])
       assert env["ERL_LIBS"] == false
       assert String.starts_with?(env["PATH"], env["ARBOR_ERLANG_ROOT"] <> "/bin")
       {:ok, :ok}
