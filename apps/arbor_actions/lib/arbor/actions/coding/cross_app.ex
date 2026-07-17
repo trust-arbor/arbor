@@ -14,15 +14,22 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
 
   Derives changed files from the lease base through the dirty worktree,
   selects directly changed apps plus downstream in-umbrella dependents, then
-  runs umbrella compile (warnings-as-errors), xref graph evidence, and focused
-  app tests. Domain failures return `{:ok, %{passed: false, ...}}` so the DOT
-  rework branch can run; authority/setup/execution failures return `{:error, reason}`.
+  runs (fail-closed, later stages skipped on earlier failure):
+
+  1. umbrella compile with `--warnings-as-errors` (dev environment)
+  2. xref graph evidence (does not claim zero cycles)
+  3. explicit `MIX_ENV=test` compile with `--warnings-as-errors`
+  4. focused per-app tests under a shared monotonic budget that starts only
+     after the test-environment compile succeeds
+
+  Domain failures return `{:ok, %{passed: false, ...}}` so the DOT rework
+  branch can run; authority/setup/execution failures return `{:error, reason}`.
   """
 
   use Jido.Action,
     name: "coding_cross_app_validate",
     description:
-      "Validate compile, xref evidence, and downstream tests for the changed cross-app surface",
+      "Validate compile, xref, MIX_ENV=test compile, and downstream tests for the changed cross-app surface",
     category: "coding",
     tags: ["coding", "cross_app", "compile", "xref", "test", "umbrella"],
     schema: [
