@@ -73,8 +73,46 @@ authorization.
 
 Optional reviewed selectors on the plan:
 
+- `task_class` - workload class; must agree with the executable validation
+  profile when the compiler requires that binding
 - `validation_profile` - reviewed validation profile id
 - `review_profile` - reviewed review profile id (`binding`, `human_required`)
+
+Versioned plans are closed at every object boundary. Workspace fields belong
+under `workspace_policy`; a top-level `branch_name` is part of the legacy flat
+envelope and is rejected in a direct plan. Omit `branch_name` to let Arbor
+generate it:
+
+```json
+{
+  "workspace_policy": {
+    "mode": "isolated",
+    "branch_name": "feature/reviewable-change"
+  }
+}
+```
+
+Budgets also belong inside the plan. `budgets.wall_clock_ms` bounds the whole
+compiled coding graph, including implementation, validation, review, approval,
+and rework nodes. It defaults to 900,000 ms. For a deliberately longer
+cross-app run, set both graph liveness bounds explicitly:
+
+```json
+{
+  "task_class": "cross_app",
+  "validation_profile": "cross_app",
+  "review_profile": "binding",
+  "budgets": {
+    "wall_clock_ms": 3600000,
+    "inactivity_timeout_ms": 600000
+  }
+}
+```
+
+The optional top-level MCP dispatch `timeout` is an outer cancellation ceiling.
+The executor uses the smaller of that value and `budgets.wall_clock_ms`, so a
+larger dispatch timeout cannot extend an omitted or shorter plan budget. Omit
+the outer timeout unless a deliberately shorter task-wide limit is required.
 
 Ordinary string prompts and generic object tasks remain valid for non-coding
 dispatch. This guide documents the coding envelope only.
