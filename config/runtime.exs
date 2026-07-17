@@ -33,6 +33,23 @@ if File.exists?(dotenv_path) do
   end)
 end
 
+# Optional operator surface for the Apple Container runtime. The loader owns
+# all file trust, bounded parsing, and nested validation; this boundary only
+# publishes data to arbor_shell.
+if config_path = System.get_env("ARBOR_APPLE_CONTAINER_CONFIG_PATH") do
+  case Arbor.Shell.RuntimeConfigLoader.load(config_path) do
+    {:ok, values} ->
+      config :arbor_shell,
+        apple_container: values.apple_container,
+        linux_dependency_baseline: values.linux_dependency_baseline,
+        apple_container_image_policy: values.apple_container_image_policy,
+        apple_container_unit_journal_path: values.apple_container_unit_journal_path
+
+    {:error, _reason} ->
+      raise "invalid ARBOR_APPLE_CONTAINER_CONFIG_PATH configuration"
+  end
+end
+
 # Development creates a project-scoped temporary root so generated worktrees
 # stay outside the source checkout. Production has no workspace-scope default:
 # absent or invalid settings are rejected by CodingTaskExecutor before it starts
