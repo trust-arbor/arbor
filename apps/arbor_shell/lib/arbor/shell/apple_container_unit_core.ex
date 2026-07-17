@@ -258,7 +258,8 @@ defmodule Arbor.Shell.AppleContainerUnitCore do
          {:ok, projections} <- fetch_required_map(plan, :projections),
          {:ok, host_runtime_roots} <- fetch_required_map(plan, :host_runtime_roots),
          {:ok, mix_env} <- fetch_required_binary(plan, :mix_env),
-         {:ok, command_args} <- fetch_command_args_field(plan) do
+         {:ok, command_args} <- fetch_command_args_field(plan),
+         {:ok, resource_profile} <- fetch_resource_profile_field(plan) do
       {:ok,
        %{
          image: image,
@@ -268,8 +269,29 @@ defmodule Arbor.Shell.AppleContainerUnitCore do
          projections: projections,
          host_runtime_roots: host_runtime_roots,
          mix_env: mix_env,
-         command_args: command_args
+         command_args: command_args,
+         resource_profile: resource_profile
        }}
+    end
+  end
+
+  # Re-admit the closed profile via PlanCore (single allowlist / limit map).
+  # Legacy plans that omit the field are reconstructed as PlanCore's default
+  # (`:standard`; see `normalize_legacy_resource_profile/1`).
+  defp fetch_resource_profile_field(plan) do
+    case {Map.fetch(plan, :resource_profile), Map.fetch(plan, "resource_profile")} do
+      {{:ok, profile}, :error} ->
+        AppleContainerPlanCore.normalize_resource_profile(profile)
+
+      {:error, {:ok, profile}} ->
+        AppleContainerPlanCore.normalize_resource_profile(profile)
+
+      {:error, :error} ->
+        # Compatibility: missing field → explicit default for PlanCore.
+        {:ok, AppleContainerPlanCore.default_resource_profile()}
+
+      _other ->
+        {:error, :invalid_resource_profile}
     end
   end
 
@@ -340,10 +362,24 @@ defmodule Arbor.Shell.AppleContainerUnitCore do
   end
 
   defp require_exact_plan(supplied, canonical) do
+    # Legacy plans may omit `:resource_profile`; reconstruction makes them
+    # explicitly `:standard` before equality so standard units still admit.
+    supplied = normalize_legacy_resource_profile(supplied)
+
     if supplied == canonical do
       :ok
     else
       {:error, :plan_not_canonical}
+    end
+  end
+
+  defp normalize_legacy_resource_profile(plan) when is_map(plan) do
+    cond do
+      Map.has_key?(plan, :resource_profile) or Map.has_key?(plan, "resource_profile") ->
+        plan
+
+      true ->
+        Map.put(plan, :resource_profile, AppleContainerPlanCore.default_resource_profile())
     end
   end
 

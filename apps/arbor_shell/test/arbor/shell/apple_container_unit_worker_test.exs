@@ -50,7 +50,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     projections: @projections,
     host_runtime_roots: @host_runtime_roots,
     mix_env: "test",
-    command_args: ["test", "apps/arbor_shell/test/example_test.exs"]
+    command_args: ["test", "apps/arbor_shell/test/example_test.exs"],
+    resource_profile: :standard
   }
 
   defmodule FakeRuntime do

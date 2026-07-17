@@ -58,9 +58,17 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @runtime_handler "container-runtime-linux"
   @registry_scheme "https"
 
-  # Fixed resource limits for deterministic, bounded validation units.
-  @cpus "1"
-  @memory "2G"
+  # Closed resource profiles only — never caller-provided numeric limits.
+  # This module is the single source of truth for the allowlist and fixed
+  # cpus/memory mapping (`normalize_resource_profile/1`, `resource_limits_for/1`).
+  # Request construction requires an explicit profile atom; facade defaulting
+  # (optional opt omitted → `default_resource_profile/0`) lives in
+  # AppleContainerExecutionCore. `:standard` = 1 CPU / 2G; `:intensive` = 4/4G.
+  @default_resource_profile :standard
+  @resource_profiles %{
+    standard: %{cpus: "1", memory: "2G"},
+    intensive: %{cpus: "4", memory: "4G"}
+  }
 
   @guest_workdir "/workspace"
   @guest_mix_wrapper_dir "/arbor/bin"
@@ -106,6 +114,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   # Logical top-level fields (atom form). String aliases are accepted only when
   # the atom form is absent — never both.
   # `:image` / `:init_image` carry local execution aliases (not provisioning refs).
+  # `:resource_profile` is a required closed atom (`:standard` | `:intensive`).
   @logical_request_keys [
     :image,
     :init_image,
@@ -114,7 +123,8 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     :projections,
     :host_runtime_roots,
     :mix_env,
-    :command_args
+    :command_args,
+    :resource_profile
   ]
 
   # Closed request surface — any other key fails closed.
@@ -207,6 +217,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
           guest_workdir: String.t(),
           guest_mix_wrapper: String.t(),
           guest_tmpfs: guest_tmpfs(),
+          resource_profile: :standard | :intensive,
           resource_limits: %{cpus: String.t(), memory: String.t()},
           # Host-source bind mounts only (never guest tmpfs).
           mounts: [mount_plan()],
@@ -223,10 +234,11 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   Construct and validate an immutable Apple Container command plan.
 
   Returns `{:ok, plan}` with deterministic argv for create, start/attach,
-  force-stop, delete, and exact-ID absence verification. Fails closed on any
-  non-local execution alias, mutable tag, unsafe name, non-canonical
-  projection, open environment, or attempt to control guest targets / network /
-  extra flags.
+  force-stop, delete, and exact-ID absence verification. Requires an explicit
+  closed `:resource_profile` (`:standard` | `:intensive`) — facade defaulting
+  is not performed here. Fails closed on any non-local execution alias, mutable
+  tag, unsafe name, non-canonical projection, open environment, raw cpus/memory
+  overrides, or attempt to control guest targets / network / extra flags.
 
   Create argv embeds only the admitted local execution aliases — never an
   externally routable provisioning reference.
@@ -242,13 +254,25 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
          {:ok, kernel_path} <- fetch_kernel_path(request, projections),
          {:ok, host_runtime_roots} <- fetch_host_runtime_roots(request),
          {:ok, mix_env} <- fetch_mix_env(request),
-         {:ok, command_args} <- fetch_command_args(request) do
+         {:ok, command_args} <- fetch_command_args(request),
+         {:ok, resource_profile} <- fetch_resource_profile(request),
+         {:ok, resource_limits} <- resource_limits_for(resource_profile) do
       mounts = build_mounts(projections)
       guest_tmpfs = guest_tmpfs()
       env = build_env(mix_env)
 
       argv =
-        build_argv(name, image, init_image, kernel_path, mounts, guest_tmpfs, env, command_args)
+        build_argv(
+          name,
+          image,
+          init_image,
+          kernel_path,
+          mounts,
+          guest_tmpfs,
+          env,
+          command_args,
+          resource_limits
+        )
 
       plan = %{
         runtime_executable: @runtime_executable,
@@ -273,7 +297,8 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
         guest_workdir: @guest_workdir,
         guest_mix_wrapper: @guest_mix_wrapper,
         guest_tmpfs: guest_tmpfs,
-        resource_limits: %{cpus: @cpus, memory: @memory},
+        resource_profile: resource_profile,
+        resource_limits: resource_limits,
         mounts: mounts,
         env: env,
         lifecycle: %{
@@ -324,6 +349,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
         "guest_path" => plan.guest_tmpfs.guest_path,
         "argv_spec" => plan.guest_tmpfs.argv_spec
       },
+      "resource_profile" => Atom.to_string(plan.resource_profile),
       "resource_limits" => stringify_keys(plan.resource_limits),
       "mounts" =>
         Enum.map(plan.mounts, fn mount ->
@@ -382,9 +408,65 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @spec guest_runtime_roots() :: %{erlang: String.t(), elixir: String.t()}
   def guest_runtime_roots, do: %{erlang: @guest_erlang_root, elixir: @guest_elixir_root}
 
-  @doc "Fixed resource limits applied to every create plan."
+  @doc """
+  Default closed resource-profile atom (`:standard`).
+
+  Used only by facade/legacy reconstruction when a profile is omitted. Plan
+  requests still require an explicit profile field.
+  """
+  @spec default_resource_profile() :: :standard
+  def default_resource_profile, do: @default_resource_profile
+
+  @doc """
+  Normalize a resource-profile value against the closed Shell-owned allowlist.
+
+  Total: returns `{:ok, profile}` for `:standard` | `:intensive`, otherwise
+  `{:error, :invalid_resource_profile}` — never raises. Strings, maps, integers,
+  and unknown atoms all fail closed.
+  """
+  @spec normalize_resource_profile(term()) ::
+          {:ok, :standard | :intensive} | {:error, :invalid_resource_profile}
+  def normalize_resource_profile(profile) when is_atom(profile) do
+    if Map.has_key?(@resource_profiles, profile) do
+      {:ok, profile}
+    else
+      {:error, :invalid_resource_profile}
+    end
+  end
+
+  def normalize_resource_profile(_other), do: {:error, :invalid_resource_profile}
+
+  @doc """
+  Fixed resource limits for a closed profile atom.
+
+  Total: `{:ok, %{cpus: ..., memory: ...}}` for admitted profiles, otherwise
+  `{:error, :invalid_resource_profile}` — never raises and never admits raw
+  caller-supplied numeric limits.
+  """
+  @spec resource_limits_for(term()) ::
+          {:ok, %{cpus: String.t(), memory: String.t()}}
+          | {:error, :invalid_resource_profile}
+  def resource_limits_for(profile) do
+    with {:ok, profile} <- normalize_resource_profile(profile) do
+      case Map.fetch(@resource_profiles, profile) do
+        {:ok, limits} -> {:ok, limits}
+        :error -> {:error, :invalid_resource_profile}
+      end
+    end
+  end
+
+  @doc """
+  Standard-profile resource limits (1 CPU / 2G) for diagnostics.
+
+  Prefer `resource_limits_for/1` when the selected profile is known. Callers
+  select capacity only via the closed `:resource_profile` atom — raw
+  cpus/memory values are never admitted.
+  """
   @spec resource_limits() :: %{cpus: String.t(), memory: String.t()}
-  def resource_limits, do: %{cpus: @cpus, memory: @memory}
+  def resource_limits do
+    {:ok, limits} = resource_limits_for(@default_resource_profile)
+    limits
+  end
 
   @doc "Fixed guest platform selector applied to every create plan."
   @spec platform() :: String.t()
@@ -529,6 +611,22 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       nil -> {:ok, []}
       args when is_list(args) -> validate_command_args(args)
       _other -> {:error, :invalid_command_args}
+    end
+  end
+
+  # Required closed atom selector. Omitted key → `:missing_resource_profile`.
+  # Present values go through `normalize_resource_profile/1` (single allowlist).
+  # Raw :cpus/:memory never reach here — they are unsupported request keys.
+  defp fetch_resource_profile(request) do
+    has_atom? = Map.has_key?(request, :resource_profile)
+    has_string? = Map.has_key?(request, "resource_profile")
+
+    cond do
+      not has_atom? and not has_string? ->
+        {:error, :missing_resource_profile}
+
+      true ->
+        normalize_resource_profile(get_field(request, :resource_profile))
     end
   end
 
@@ -1138,7 +1236,17 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     ]
   end
 
-  defp build_argv(name, image, init_image, kernel_path, mounts, guest_tmpfs, env, command_args) do
+  defp build_argv(
+         name,
+         image,
+         init_image,
+         kernel_path,
+         mounts,
+         guest_tmpfs,
+         env,
+         command_args,
+         resource_limits
+       ) do
     # Force the reviewed wrapper via --entrypoint independently of image
     # metadata. After the local workload execution-alias token, append only
     # caller command_args — never a second /arbor/bin/mix positional token.
@@ -1152,6 +1260,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     # fixed path-only token (`/tmp`) — never size/mode options, never a
     # type=tmpfs --mount record, and never a host bind of the owner resource
     # tmp path.
+    #
+    # Resource limits come only from the closed profile map — never raw caller
+    # cpus/memory values.
     #
     # `image` / `init_image` are already proven local execution aliases — never
     # external provisioning references.
@@ -1179,9 +1290,9 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
         "--cap-drop",
         "ALL",
         "--cpus",
-        @cpus,
+        resource_limits.cpus,
         "--memory",
-        @memory
+        resource_limits.memory
       ]
       |> Kernel.++(mount_argv(mounts))
       |> Kernel.++(["--tmpfs", guest_tmpfs.argv_spec])

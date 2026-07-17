@@ -55,7 +55,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     projections: @projections,
     host_runtime_roots: @host_runtime_roots_valid,
     mix_env: "test",
-    command_args: ["test", "apps/arbor_shell/test/example_test.exs"]
+    command_args: ["test", "apps/arbor_shell/test/example_test.exs"],
+    resource_profile: :standard
   }
 
   # Invalid UTF-8 binary (lone continuation byte) — must never raise.
@@ -87,6 +88,7 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert plan.guest_mix_archives == "/usr/local/.mix/archives"
       assert plan.guest_elixir_make_cache == "/usr/local/.cache/elixir_make"
 
+      assert plan.resource_profile == :standard
       assert plan.resource_limits == %{cpus: "1", memory: "2G"}
       assert plan.lifecycle.preflight_order == [:verify_absent]
       assert plan.lifecycle.start_order == [:create, :start]
@@ -294,6 +296,9 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                "argv_spec" => "/tmp"
              }
 
+      assert shown["resource_profile"] == "standard"
+      assert shown["resource_limits"] == %{"cpus" => "1", "memory" => "2G"}
+
       refute Map.has_key?(shown["projections"], "tmp")
       refute Enum.any?(shown["mounts"], &(&1["purpose"] == "tmp"))
       refute Enum.any?(shown["mounts"], &(&1["guest_path"] == "/tmp"))
@@ -323,11 +328,13 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
           "elixir" => @host_runtime_roots_valid.elixir
         },
         "mix_env" => "prod",
-        "command_args" => ["compile"]
+        "command_args" => ["compile"],
+        "resource_profile" => :standard
       }
 
       assert {:ok, plan} = AppleContainerPlanCore.new(request)
       assert plan.mix_env == "prod"
+      assert plan.resource_profile == :standard
       assert plan.init_image == @init_image
       assert plan.kernel_path == @kernel_path
       assert Enum.take(plan.argv.create, -1) == ["compile"]
@@ -1265,6 +1272,107 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     end
   end
 
+  describe "closed resource profiles" do
+    test "explicit standard profile produces 1 CPU / 2G plan and create argv" do
+      assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+      assert plan.resource_profile == :standard
+      assert plan.resource_limits == %{cpus: "1", memory: "2G"}
+
+      create = plan.argv.create
+      cpus_idx = Enum.find_index(create, &(&1 == "--cpus"))
+      memory_idx = Enum.find_index(create, &(&1 == "--memory"))
+      assert Enum.at(create, cpus_idx + 1) == "1"
+      assert Enum.at(create, memory_idx + 1) == "2G"
+      assert Enum.count(create, &(&1 == "--cpus")) == 1
+      assert Enum.count(create, &(&1 == "--memory")) == 1
+    end
+
+    test "intensive profile produces 4 CPU / 4G in plan and create argv" do
+      assert {:ok, plan} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :resource_profile, :intensive))
+
+      assert plan.resource_profile == :intensive
+      assert plan.resource_limits == %{cpus: "4", memory: "4G"}
+
+      create = plan.argv.create
+      cpus_idx = Enum.find_index(create, &(&1 == "--cpus"))
+      memory_idx = Enum.find_index(create, &(&1 == "--memory"))
+      assert Enum.at(create, cpus_idx + 1) == "4"
+      assert Enum.at(create, memory_idx + 1) == "4G"
+    end
+
+    test "show reports selected profile and mapped limits" do
+      assert {:ok, standard} = AppleContainerPlanCore.new(@valid_request)
+      shown_standard = AppleContainerPlanCore.show(standard)
+      assert shown_standard["resource_profile"] == "standard"
+      assert shown_standard["resource_limits"] == %{"cpus" => "1", "memory" => "2G"}
+
+      assert {:ok, intensive} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :resource_profile, :intensive))
+
+      shown_intensive = AppleContainerPlanCore.show(intensive)
+      assert shown_intensive["resource_profile"] == "intensive"
+      assert shown_intensive["resource_limits"] == %{"cpus" => "4", "memory" => "4G"}
+      assert Jason.encode!(shown_intensive)
+    end
+
+    @tag :security_regression
+    test "security regression: missing profile and raw/string/map overrides fail closed" do
+      # PlanCore requires an explicit profile — facade defaulting is not here.
+      assert {:error, :missing_resource_profile} =
+               AppleContainerPlanCore.new(Map.delete(@valid_request, :resource_profile))
+
+      # Unknown atoms, strings, maps, integers, booleans, and nil all fail closed.
+      for bad <- [
+            :turbo,
+            :standard_plus,
+            :high,
+            "standard",
+            "intensive",
+            "4",
+            4,
+            4.0,
+            true,
+            false,
+            nil,
+            %{cpus: "4", memory: "4G"},
+            %{"cpus" => "4"},
+            [:intensive],
+            {:standard}
+          ] do
+        assert {:error, :invalid_resource_profile} =
+                 AppleContainerPlanCore.new(Map.put(@valid_request, :resource_profile, bad)),
+               "expected rejection for profile #{inspect(bad)}"
+      end
+
+      # Raw limit keys and open resource maps remain outside the closed surface.
+      for key <- [:cpus, :memory, :resource_limits, :resources] do
+        assert {:error, {:unsupported_request_keys, _}} =
+                 AppleContainerPlanCore.new(Map.put(@valid_request, key, "4")),
+               "expected rejection for open key #{inspect(key)}"
+      end
+
+      assert {:error, {:unsupported_request_keys, _}} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :cpus, "99"))
+
+      assert {:error, {:unsupported_request_keys, _}} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :memory, "99G"))
+
+      assert {:error, {:unsupported_request_keys, _}} =
+               AppleContainerPlanCore.new(
+                 Map.put(@valid_request, :resource_limits, %{cpus: "4", memory: "4G"})
+               )
+
+      # Duplicate atom/string aliases for the closed selector fail closed.
+      assert {:error, {:duplicate_request_key_alias, :resource_profile}} =
+               AppleContainerPlanCore.new(
+                 @valid_request
+                 |> Map.put(:resource_profile, :intensive)
+                 |> Map.put("resource_profile", :intensive)
+               )
+    end
+  end
+
   describe "constants surface" do
     test "exports fixed executable, guest mounts, infrastructure, and resource limits" do
       assert AppleContainerPlanCore.runtime_executable() == "/usr/local/bin/container"
@@ -1291,7 +1399,34 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                elixir: "/usr/local"
              }
 
+      # Standard diagnostic API plus total profile policy (never raises).
+      assert AppleContainerPlanCore.default_resource_profile() == :standard
       assert AppleContainerPlanCore.resource_limits() == %{cpus: "1", memory: "2G"}
+
+      assert {:ok, :standard} = AppleContainerPlanCore.normalize_resource_profile(:standard)
+      assert {:ok, :intensive} = AppleContainerPlanCore.normalize_resource_profile(:intensive)
+
+      assert {:error, :invalid_resource_profile} =
+               AppleContainerPlanCore.normalize_resource_profile(:turbo)
+
+      assert {:error, :invalid_resource_profile} =
+               AppleContainerPlanCore.normalize_resource_profile("standard")
+
+      assert {:error, :invalid_resource_profile} =
+               AppleContainerPlanCore.normalize_resource_profile(%{cpus: "4"})
+
+      assert {:ok, %{cpus: "1", memory: "2G"}} =
+               AppleContainerPlanCore.resource_limits_for(:standard)
+
+      assert {:ok, %{cpus: "4", memory: "4G"}} =
+               AppleContainerPlanCore.resource_limits_for(:intensive)
+
+      assert {:error, :invalid_resource_profile} =
+               AppleContainerPlanCore.resource_limits_for(:turbo)
+
+      assert {:error, :invalid_resource_profile} =
+               AppleContainerPlanCore.resource_limits_for("intensive")
+
       assert AppleContainerPlanCore.allowed_mix_envs() == ["dev", "prod", "test"]
     end
   end

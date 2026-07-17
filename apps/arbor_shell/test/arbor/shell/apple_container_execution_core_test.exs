@@ -277,8 +277,40 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       assert shown["plan"]["image"] == @workload
       assert shown["plan"]["init_image"] == @vminit
       assert shown["plan"]["kernel_path"] == @kernel
+      assert shown["plan"]["resource_profile"] == "standard"
+      assert shown["plan"]["resource_limits"] == %{"cpus" => "1", "memory" => "2G"}
       refute inspect(shown) =~ "super-secret"
       refute Map.has_key?(shown, "env")
+    end
+
+    test "defaults to standard resource profile 1 CPU / 2G" do
+      assert {:ok, spec} = Core.new(valid_request(%{args: ["compile"]}))
+      assert spec.plan.resource_profile == :standard
+      assert spec.plan.resource_limits == %{cpus: "1", memory: "2G"}
+
+      create = spec.plan.argv.create
+      cpus_idx = Enum.find_index(create, &(&1 == "--cpus"))
+      memory_idx = Enum.find_index(create, &(&1 == "--memory"))
+      assert Enum.at(create, cpus_idx + 1) == "1"
+      assert Enum.at(create, memory_idx + 1) == "2G"
+    end
+
+    test "intensive resource profile produces 4 CPU / 4G create argv" do
+      assert {:ok, spec} =
+               Core.new(valid_request(%{opts: valid_opts(resource_profile: :intensive)}))
+
+      assert spec.plan.resource_profile == :intensive
+      assert spec.plan.resource_limits == %{cpus: "4", memory: "4G"}
+
+      create = spec.plan.argv.create
+      cpus_idx = Enum.find_index(create, &(&1 == "--cpus"))
+      memory_idx = Enum.find_index(create, &(&1 == "--memory"))
+      assert Enum.at(create, cpus_idx + 1) == "4"
+      assert Enum.at(create, memory_idx + 1) == "4G"
+
+      shown = Core.show(spec)
+      assert shown["plan"]["resource_profile"] == "intensive"
+      assert shown["plan"]["resource_limits"] == %{"cpus" => "4", "memory" => "4G"}
     end
 
     test "string-keyed input aliases work without atom duplicates" do
@@ -323,6 +355,74 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
   end
 
   describe "adversarial options and bounds" do
+    @tag :security_regression
+    test "security regression: invalid resource profiles and raw limit opts fail closed" do
+      # Strings, maps, unknown atoms, integers, booleans, and nil all fail closed.
+      for bad <- [
+            :turbo,
+            :high,
+            :standard_plus,
+            "standard",
+            "intensive",
+            "4",
+            4,
+            4.0,
+            true,
+            false,
+            nil,
+            %{cpus: "4", memory: "4G"},
+            %{"cpus" => "4"},
+            [:intensive],
+            {:standard}
+          ] do
+        assert {:error, :invalid_resource_profile} =
+                 Core.new(valid_request(%{opts: valid_opts(resource_profile: bad)})),
+               "expected rejection for profile #{inspect(bad)}"
+      end
+
+      # Raw capacity opts are never admitted (no exceptions for any of these keys).
+      for key <- [:cpus, :memory, :resource_limits, :resources] do
+        assert {:error, {:unsupported_opt_keys, _}} =
+                 Core.new(valid_request(%{opts: valid_opts() ++ [{key, "4"}]})),
+               "expected rejection for open opt #{inspect(key)}"
+      end
+
+      assert {:error, {:unsupported_opt_keys, _}} =
+               Core.new(valid_request(%{opts: valid_opts() ++ [cpus: "99"]}))
+
+      assert {:error, {:unsupported_opt_keys, _}} =
+               Core.new(valid_request(%{opts: valid_opts() ++ [memory: "99G"]}))
+
+      assert {:error, {:unsupported_opt_keys, _}} =
+               Core.new(
+                 valid_request(%{
+                   opts: valid_opts() ++ [resource_limits: %{cpus: "4", memory: "4G"}]
+                 })
+               )
+
+      # Preflight shares the same fail-closed reasons without admission.
+      assert {:error, :invalid_resource_profile} =
+               Core.validate_request(
+                 @mix_wrapper,
+                 ["compile"],
+                 valid_opts(resource_profile: "intensive")
+               )
+
+      assert {:error, :invalid_resource_profile} =
+               Core.validate_request(
+                 @mix_wrapper,
+                 ["compile"],
+                 valid_opts(resource_profile: %{cpus: "4"})
+               )
+
+      assert {:error, {:unsupported_opt_keys, _}} =
+               Core.validate_request(
+                 @mix_wrapper,
+                 ["compile"],
+                 valid_opts() ++ [cpus: "4", memory: "4G"]
+               )
+    end
+
     test "rejects unknown and duplicate top-level keys" do
       assert {:error, {:unsupported_execution_request_keys, _}} =
                Core.new(Map.put(valid_request(), :extra, 1))

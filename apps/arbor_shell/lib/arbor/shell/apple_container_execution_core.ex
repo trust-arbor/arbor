@@ -47,7 +47,10 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
                       :sandbox,
                       :env,
                       :clear_env,
-                      :filesystem_projections
+                      :filesystem_projections,
+                      # Optional closed capacity selector (:standard | :intensive).
+                      # Raw :cpus/:memory and open resource maps are never admitted.
+                      :resource_profile
                     ])
 
   @required_opt_keys [:cwd, :timeout, :sandbox, :env, :clear_env, :filesystem_projections]
@@ -157,7 +160,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
              prepared.projections,
              prepared.mix_wrapper_dir,
              prepared.mix_env,
-             prepared.command_args
+             prepared.command_args,
+             prepared.resource_profile
            ),
          {:ok, plan} <- AppleContainerPlanCore.new(plan_request) do
       {:ok,
@@ -243,6 +247,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
          mix_env: mix_env,
          mix_wrapper_dir: mix_wrapper_dir,
          projections: projections,
+         resource_profile: settings.resource_profile,
          timeout: settings.timeout,
          max_output_bytes: settings.max_output_bytes
        }}
@@ -327,14 +332,16 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
          :ok <- fetch_opt_sandbox(opts),
          {:ok, env} <- fetch_opt_env(opts),
          :ok <- fetch_opt_clear_env(opts),
-         {:ok, projections} <- fetch_opt_filesystem_projections(opts) do
+         {:ok, projections} <- fetch_opt_filesystem_projections(opts),
+         {:ok, resource_profile} <- fetch_opt_resource_profile(opts) do
       {:ok,
        %{
          cwd: cwd,
          timeout: timeout,
          max_output_bytes: max_output_bytes,
          env: env,
-         filesystem_projections: projections
+         filesystem_projections: projections,
+         resource_profile: resource_profile
        }}
     end
   end
@@ -455,6 +462,20 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
       projections when is_map(projections) -> {:ok, projections}
       # Legacy flat lists are rejected; only the closed grouped envelope is admitted.
       _other -> {:error, :invalid_filesystem_projections}
+    end
+  end
+
+  # Optional facade opt owned by Shell. Omitted → PlanCore's default profile
+  # (only defaulting site). Always emits an explicit atom into PlanCore via the
+  # shared `normalize_resource_profile/1` allowlist. Raw `:cpus` / `:memory`
+  # remain unsupported opt keys and never reach this path.
+  defp fetch_opt_resource_profile(opts) do
+    case Keyword.fetch(opts, :resource_profile) do
+      :error ->
+        {:ok, AppleContainerPlanCore.default_resource_profile()}
+
+      {:ok, profile} ->
+        AppleContainerPlanCore.normalize_resource_profile(profile)
     end
   end
 
@@ -1389,7 +1410,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
          projections,
          mix_wrapper_dir,
          mix_env,
-         command_args
+         command_args,
+         resource_profile
        ) do
     plan_projections =
       @plan_directory_projection_keys
@@ -1411,7 +1433,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
       projections: plan_projections,
       host_runtime_roots: host_runtime_roots,
       mix_env: mix_env,
-      command_args: command_args
+      command_args: command_args,
+      resource_profile: resource_profile
     }
   end
 

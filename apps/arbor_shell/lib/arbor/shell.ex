@@ -447,6 +447,18 @@ defmodule Arbor.Shell do
   Pure preflight runs first: relative tool names (for example `"mix"`),
   malformed opts, and other request shape errors fail closed before admission,
   registry ownership, or candidate unit work.
+
+  ## Resource capacity (closed profile selector)
+
+  Optional `:resource_profile` is the only capacity control on this facade.
+  When omitted, Shell defaults to `:standard` before building the PlanCore
+  request (PlanCore itself requires an explicit profile atom):
+
+    * `:standard` — 1 CPU / 2G memory (default; preserves historical units)
+    * `:intensive` — 4 CPU / 4G memory
+
+  Raw `:cpus`, `:memory`, resource maps, strings, and other open limit overrides
+  are never admitted through this facade or the pure execution/plan cores.
   """
   @spec execute_spawn_capable(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}

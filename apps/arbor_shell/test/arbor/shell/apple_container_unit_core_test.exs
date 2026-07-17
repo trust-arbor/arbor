@@ -40,7 +40,8 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
     projections: @projections,
     host_runtime_roots: @host_runtime_roots,
     mix_env: "test",
-    command_args: ["test", "apps/arbor_shell/test/example_test.exs"]
+    command_args: ["test", "apps/arbor_shell/test/example_test.exs"],
+    resource_profile: :standard
   }
 
   setup do
@@ -90,8 +91,9 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
 
       assert {:error, :plan_not_canonical} = Unit.new(altered_life)
 
-      # String-keyed show map is not a canonical plan.
-      assert {:error, :plan_not_canonical} = Unit.new(AppleContainerPlanCore.show(plan))
+      # String-keyed show map is not a canonical plan (profile value is a string).
+      assert {:error, :invalid_resource_profile} =
+               Unit.new(AppleContainerPlanCore.show(plan))
 
       # Request-only map is not a full plan.
       assert {:error, :plan_not_canonical} = Unit.new(@valid_request)
@@ -133,6 +135,55 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
 
       assert {:error, :plan_not_canonical} =
                Unit.new(%{plan | resource_limits: %{cpus: "99", memory: "99G"}})
+    end
+
+    test "intensive plan remains intensive through canonical re-admission" do
+      assert {:ok, intensive} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :resource_profile, :intensive))
+
+      assert intensive.resource_profile == :intensive
+      assert intensive.resource_limits == %{cpus: "4", memory: "4G"}
+
+      assert {:ok, state, effects} = Unit.new(intensive)
+      assert state.stage == :preflight
+      assert effects == [{:run, :verify_absent, intensive.argv.verify_absent}]
+
+      # Re-admitted argv preserves intensive create limits (not standard 1/2).
+      create = state.argv.create
+      cpus_idx = Enum.find_index(create, &(&1 == "--cpus"))
+      memory_idx = Enum.find_index(create, &(&1 == "--memory"))
+      assert Enum.at(create, cpus_idx + 1) == "4"
+      assert Enum.at(create, memory_idx + 1) == "4G"
+      assert state.argv.create == intensive.argv.create
+    end
+
+    test "legacy missing-profile plan is reconstructed as explicit standard" do
+      assert {:ok, standard} = AppleContainerPlanCore.new(@valid_request)
+      assert standard.resource_profile == :standard
+
+      # Plans that predate the field omit resource_profile; reconstruction fills
+      # `:standard` and admits when the remainder matches the standard plan.
+      legacy = Map.delete(standard, :resource_profile)
+      refute Map.has_key?(legacy, :resource_profile)
+
+      assert {:ok, state, effects} = Unit.new(legacy)
+      assert state.stage == :preflight
+      assert effects == [{:run, :verify_absent, standard.argv.verify_absent}]
+
+      create = state.argv.create
+      cpus_idx = Enum.find_index(create, &(&1 == "--cpus"))
+      memory_idx = Enum.find_index(create, &(&1 == "--memory"))
+      assert Enum.at(create, cpus_idx + 1) == "1"
+      assert Enum.at(create, memory_idx + 1) == "2G"
+      assert state.argv.create == standard.argv.create
+
+      # Intensive argv without a profile cannot be smuggled as intensive — the
+      # missing field reconstructs as standard and equality fails closed.
+      assert {:ok, intensive} =
+               AppleContainerPlanCore.new(Map.put(@valid_request, :resource_profile, :intensive))
+
+      forged_legacy = Map.delete(intensive, :resource_profile)
+      assert {:error, :plan_not_canonical} = Unit.new(forged_legacy)
     end
 
     @tag :security_regression
