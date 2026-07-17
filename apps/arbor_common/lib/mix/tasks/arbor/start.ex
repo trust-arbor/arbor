@@ -19,7 +19,7 @@ defmodule Mix.Tasks.Arbor.Start do
      Bounded by a short timeout (default 15s).
   2. **Application readiness** — every umbrella app from `Mix.Project.apps_paths/0`
      appears in remote `:application.which_applications/0`. Bounded by a longer
-     cold-start budget (default 300s) because sequential umbrella boot can take
+     cold-start budget (default 600s) because sequential umbrella boot can take
      minutes on a cold machine.
 
   Success is reported only when both phases pass. Timeout diagnostics distinguish
@@ -49,8 +49,8 @@ defmodule Mix.Tasks.Arbor.Start do
 
   # Short bound for distribution ping only — not full application readiness.
   @node_timeout_ms 15_000
-  # Cold umbrella boot measured ~163s (2026-07-16); 300s is a conservative default.
-  @app_timeout_ms 300_000
+  # Cold umbrella boot measured ~296s (2026-07-17); 600s keeps operational margin.
+  @app_timeout_ms 600_000
   @poll_interval_ms 500
   # Per-RPC ceiling; each call is also clamped to the remaining absolute budget.
   @rpc_timeout_ms 5_000

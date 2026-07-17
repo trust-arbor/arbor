@@ -174,11 +174,11 @@ defmodule Mix.Tasks.Arbor.ReadinessTest do
         Readiness.timeout_diagnostic(
           {:partial, [:arbor_gateway], [:arbor_common]},
           @expected,
-          300_000
+          600_000
         )
 
       assert msg =~ "applications did not all start"
-      assert msg =~ "300 seconds"
+      assert msg =~ "600 seconds"
       assert msg =~ "Missing:"
       assert msg =~ "arbor_gateway"
     end
@@ -188,7 +188,7 @@ defmodule Mix.Tasks.Arbor.ReadinessTest do
         Readiness.timeout_diagnostic(
           {:observation_unavailable, {:badrpc, :timeout}},
           @expected,
-          300_000
+          600_000
         )
 
       assert msg =~ "could not be observed"
