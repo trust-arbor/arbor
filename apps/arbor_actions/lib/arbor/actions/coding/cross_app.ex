@@ -19,8 +19,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   1. umbrella compile with `--warnings-as-errors` (dev environment)
   2. xref graph evidence (does not claim zero cycles)
   3. explicit `MIX_ENV=test` compile with `--warnings-as-errors`
-  4. focused per-app tests under a shared monotonic budget that starts only
-     after the test-environment compile succeeds
+  4. focused per-file tests under an aggregate monotonic budget that starts
+     only after the test-environment compile succeeds. Each Mix process is
+     still capped by the per-operation Shell spawn-capable ceiling.
 
   Domain failures return `{:ok, %{passed: false, ...}}` so the DOT rework
   branch can run; authority/setup/execution failures return `{:error, reason}`.
@@ -40,7 +41,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
       ],
       timeout: [
         type: :non_neg_integer,
-        doc: "Per-check timeout in milliseconds (1,000 to 600,000)"
+        doc: "Per-operation Mix process timeout in milliseconds (1,000 to 600,000)"
+      ],
+      test_stage_timeout: [
+        type: :non_neg_integer,
+        doc:
+          "Aggregate sequential test-stage timeout in milliseconds (1,000 to 1,200,000); independent of per-process Shell ceiling"
       ]
     ]
 
@@ -51,7 +57,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   def taint_roles do
     %{
       workspace_id: :control,
-      timeout: :control
+      timeout: :control,
+      test_stage_timeout: :control
     }
   end
 

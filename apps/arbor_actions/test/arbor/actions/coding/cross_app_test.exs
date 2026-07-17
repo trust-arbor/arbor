@@ -42,6 +42,46 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
              "arbor://action/coding/cross_app/validate"
   end
 
+  test "closed action input accepts timeout and test_stage_timeout only" do
+    # Action schema declares the dual budgets as control parameters.
+    schema_keys = Keyword.keys(Validate.schema())
+
+    assert :workspace_id in schema_keys
+    assert :timeout in schema_keys
+    assert :test_stage_timeout in schema_keys
+
+    # Closed Core surface: only workspace_id, timeout, test_stage_timeout.
+    assert {:ok, input} =
+             Arbor.Actions.Coding.CrossApp.Core.new(%{
+               workspace_id: "ws_closed",
+               timeout: 10_000,
+               test_stage_timeout: 20_000
+             })
+
+    assert input.timeout == 10_000
+    assert input.test_stage_timeout == 20_000
+
+    assert {:error, :unsupported_parameter} =
+             Arbor.Actions.Coding.CrossApp.Core.new(%{
+               workspace_id: "ws_closed",
+               timeout: 10_000,
+               test_stage_timeout: 20_000,
+               extra: true
+             })
+
+    assert {:error, :invalid_test_stage_timeout} =
+             Arbor.Actions.Coding.CrossApp.Core.new(%{
+               workspace_id: "ws_closed",
+               test_stage_timeout: 1_200_001
+             })
+
+    assert {:error, :invalid_timeout} =
+             Arbor.Actions.Coding.CrossApp.Core.new(%{
+               workspace_id: "ws_closed",
+               timeout: 600_001
+             })
+  end
+
   test "enforces lease authority: opaque workspace_id alone is not enough", %{tmp_dir: tmp_dir} do
     fixture = leased_umbrella(tmp_dir)
     workspace_id = fixture.lease.workspace_id

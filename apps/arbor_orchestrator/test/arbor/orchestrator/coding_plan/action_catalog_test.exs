@@ -173,6 +173,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
 
       assert {:ok, validate} = ActionCatalog.fetch(snapshot, "coding_cross_app_validate")
       assert validate["module"] == Atom.to_string(Arbor.Actions.Coding.CrossApp.Validate)
+
+      props = get_in(validate, ["parameters_schema", "properties"]) || %{}
+      assert Map.has_key?(props, "workspace_id")
+      assert Map.has_key?(props, "timeout")
+      assert Map.has_key?(props, "test_stage_timeout")
     end
   end
 

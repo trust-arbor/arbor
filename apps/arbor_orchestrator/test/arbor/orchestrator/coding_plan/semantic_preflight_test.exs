@@ -19,6 +19,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Arbor.Actions.Coding.Workspace.CommittedChange,
     Arbor.Actions.Coding.Workspace.RecoverySummary,
     Arbor.Actions.Coding.SecurityRegression.Validate,
+    Arbor.Actions.Coding.CrossApp.Validate,
     Arbor.Actions.Mix.Compile,
     Arbor.Actions.Mix.Test,
     Arbor.Actions.Coding.ReviewedCommit,
@@ -1531,6 +1532,56 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                ]
              end)
     end
+  end
+
+  test "cross_app enforces exact aggregate test_stage_timeout and rejects missing/wrong values",
+       ctx do
+    plan = plan!(%{"validation_profile" => "cross_app"})
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("cross_app")
+
+    assert :ok =
+             preflight(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               validation_timeout_ms: 600_000,
+               validation_test_stage_timeout_ms: 900_000
+             )
+
+    # Wrong aggregate value fails closed.
+    wrong_stage =
+      update_in(graph.nodes["validate"].attrs, &Map.put(&1, "param.test_stage_timeout", 899_999))
+
+    assert {:error, {:semantic_preflight_failed, wrong_errors}} =
+             preflight(wrong_stage, profile["semantic_policy"],
+               review_profile: "binding",
+               validation_timeout_ms: 600_000,
+               validation_test_stage_timeout_ms: 900_000
+             )
+
+    assert Enum.any?(wrong_errors, &(&1["code"] == "validation_parameter_violation"))
+
+    # Missing aggregate param fails closed when the profile requires it.
+    missing_stage =
+      update_in(graph.nodes["validate"].attrs, &Map.delete(&1, "param.test_stage_timeout"))
+
+    assert {:error, {:semantic_preflight_failed, missing_errors}} =
+             preflight(missing_stage, profile["semantic_policy"],
+               review_profile: "binding",
+               validation_timeout_ms: 600_000,
+               validation_test_stage_timeout_ms: 900_000
+             )
+
+    assert Enum.any?(missing_errors, &(&1["code"] == "validation_parameter_violation"))
+
+    # Omitting the preflight option for a cross_app graph also fails closed.
+    assert {:error, {:semantic_preflight_failed, absent_opt_errors}} =
+             preflight(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               validation_timeout_ms: 600_000
+             )
+
+    assert Enum.any?(absent_opt_errors, &(&1["code"] == "validation_parameter_violation"))
   end
 
   defp compile(plan, ctx, template_source \\ nil) do

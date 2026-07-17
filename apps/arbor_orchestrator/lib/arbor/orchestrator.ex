@@ -388,6 +388,8 @@ defmodule Arbor.Orchestrator do
          {:ok, profile} <- Profiles.fetch_executable(plan.validation_profile),
          {:ok, validation_timeout_ms} <-
            Profiles.validation_timeout(profile, plan.budgets["wall_clock_ms"]),
+         {:ok, validation_test_stage_timeout_ms} <-
+           Profiles.validation_test_stage_timeout(profile, plan.budgets["wall_clock_ms"]),
          :ok <- Profiles.validate_requirements(profile, compiled_graph),
          :ok <-
            SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
@@ -395,7 +397,8 @@ defmodule Arbor.Orchestrator do
              worker_use_pool: plan.worker["use_pool"],
              worker_resume_session_id: plan.worker["resume_session_id"],
              rework_max_cycles: plan.rework["max_cycles"],
-             validation_timeout_ms: validation_timeout_ms
+             validation_timeout_ms: validation_timeout_ms,
+             validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
            ),
          {:ok, live_catalog} <- ActionCatalog.snapshot(),
          {:ok, _action_bindings} <-

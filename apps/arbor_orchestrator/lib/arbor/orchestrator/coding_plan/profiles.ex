@@ -12,6 +12,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @template_version "coding-change-v1"
   # Shared Shell spawn-capable ceiling — must not drift above unit admission.
   @spawn_capable_max_timeout_ms Arbor.Shell.spawn_capable_max_timeout_ms()
+  # Reviewed aggregate sequential test-stage ceiling for cross_app only.
+  # Independent of the per-process Shell spawn-capable admission bound.
+  @cross_app_test_stage_timeout_max_ms 1_200_000
 
   @default_required_nodes Enum.sort(~w[
                     acquire_workspace
@@ -1587,6 +1590,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "authority_source" => "workspace_id",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
                   "timeout_max_ms" => @spawn_capable_max_timeout_ms,
+                  "test_stage_timeout_budget_source" => "budgets.wall_clock_ms",
+                  "test_stage_timeout_max_ms" => @cross_app_test_stage_timeout_max_ms,
                   "selects_downstream_dependents" => true,
                   "runs_xref_graph_evidence" => true,
                   "runs_test_environment_compile" => true,
@@ -1682,7 +1687,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     end
   end
 
-  @doc "Bound a plan wall-clock budget to the reviewed validation ceiling."
+  @doc "Bound a plan wall-clock budget to the reviewed per-operation validation ceiling."
   @spec validation_timeout(descriptor(), term()) ::
           {:ok, pos_integer()} | {:error, :invalid_validation_timeout_policy}
   def validation_timeout(
@@ -1701,6 +1706,48 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   def validation_timeout(_profile, _wall_clock_ms),
     do: {:error, :invalid_validation_timeout_policy}
+
+  @doc """
+  Bound a plan wall-clock budget to the reviewed aggregate test-stage ceiling.
+
+  Returns:
+  - `{:ok, nil}` only when the profile declares **no** aggregate-stage keys
+  - `{:ok, timeout_ms}` when both `test_stage_timeout_budget_source` and
+    `test_stage_timeout_max_ms` are present and well-formed
+  - `{:error, :invalid_validation_test_stage_timeout_policy}` for partial or
+    malformed aggregate-stage declarations (never coerced to nil)
+  """
+  @spec validation_test_stage_timeout(descriptor(), term()) ::
+          {:ok, pos_integer() | nil}
+          | {:error, :invalid_validation_test_stage_timeout_policy}
+  def validation_test_stage_timeout(
+        %{"validation_strategy" => strategy},
+        wall_clock_ms
+      )
+      when is_map(strategy) and is_integer(wall_clock_ms) and wall_clock_ms > 0 do
+    has_max? = Map.has_key?(strategy, "test_stage_timeout_max_ms")
+    has_source? = Map.has_key?(strategy, "test_stage_timeout_budget_source")
+
+    cond do
+      not has_max? and not has_source? ->
+        {:ok, nil}
+
+      has_max? and has_source? and
+        strategy["test_stage_timeout_budget_source"] == "budgets.wall_clock_ms" and
+        is_integer(strategy["test_stage_timeout_max_ms"]) and
+          strategy["test_stage_timeout_max_ms"] > 0 ->
+        {:ok, min(strategy["test_stage_timeout_max_ms"], wall_clock_ms)}
+
+      true ->
+        {:error, :invalid_validation_test_stage_timeout_policy}
+    end
+  end
+
+  def validation_test_stage_timeout(_profile, _wall_clock_ms),
+    do: {:error, :invalid_validation_test_stage_timeout_policy}
+
+  @doc false
+  def cross_app_test_stage_timeout_max_ms, do: @cross_app_test_stage_timeout_max_ms
 
   @doc "Verifies that a compiled execution manifest contains reviewed nested actions."
   @spec validate_execution_manifest(descriptor(), map()) ::

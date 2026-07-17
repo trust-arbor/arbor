@@ -11,13 +11,22 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @minimum_timeout 1_000
   # Derived from Shell spawn-capable ceiling so action limits cannot exceed admission.
   @maximum_timeout Arbor.Shell.spawn_capable_max_timeout_ms()
-  @allowed_param_keys [:workspace_id, :timeout]
+  # Aggregate sequential test-stage ceiling is independent of the per-process
+  # Shell spawn-capable admission bound and is reviewed separately for cross_app.
+  @default_test_stage_timeout 300_000
+  @maximum_test_stage_timeout 1_200_000
+  @allowed_param_keys [:workspace_id, :timeout, :test_stage_timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 
   @max_changed_files 2_000
   @max_apps 256
   @max_identifier_bytes 64
   @max_test_paths 256
+  # Expanded per-file list after directory expansion (tracked + untracked).
+  @max_expanded_test_files 2_000
+  # Combined raw Git inventory entries under selected test dirs before suffix
+  # filtering / dedup / lstat (ignored/generated paths still consume this bound).
+  @max_git_inventory_entries 8_000
   @max_output_list 2_000
   # Process/stream excerpts and aggregate evidence are fixed-size by *bytes*.
   @max_output_excerpt_bytes 2_000
@@ -40,7 +49,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @typedoc "Normalized, side-effect-free action input."
   @type input :: %{
           workspace_id: String.t(),
-          timeout: pos_integer()
+          timeout: pos_integer(),
+          test_stage_timeout: pos_integer()
         }
 
   @typedoc "One umbrella app's static dependency metadata."
@@ -88,14 +98,22 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           :complete
           | {:run, String.t(), pos_integer(), [String.t()]}
           | {:timeout, String.t(), [String.t()]}
+          | {:error, term()}
 
   @doc "Construct and validate the action's deliberately narrow input surface."
   @spec new(map()) :: {:ok, input()} | {:error, atom()}
   def new(params) when is_map(params) do
     with :ok <- validate_param_keys(params),
          {:ok, workspace_id} <- validate_workspace_id(param(params, :workspace_id)),
-         {:ok, timeout} <- validate_timeout(param(params, :timeout)) do
-      {:ok, %{workspace_id: workspace_id, timeout: timeout}}
+         {:ok, timeout} <- validate_timeout(param(params, :timeout)),
+         {:ok, test_stage_timeout} <-
+           validate_test_stage_timeout(param(params, :test_stage_timeout)) do
+      {:ok,
+       %{
+         workspace_id: workspace_id,
+         timeout: timeout,
+         test_stage_timeout: test_stage_timeout
+       }}
     end
   end
 
@@ -215,6 +233,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   @doc false
   def maximum_timeout, do: @maximum_timeout
+
+  @doc false
+  def default_test_stage_timeout, do: @default_test_stage_timeout
+
+  @doc false
+  def maximum_test_stage_timeout, do: @maximum_test_stage_timeout
+
+  @doc false
+  def max_expanded_test_files, do: @max_expanded_test_files
+
+  @doc false
+  def max_git_inventory_entries, do: @max_git_inventory_entries
 
   @doc false
   def root_wide_path?(path) when is_binary(path) do
@@ -355,30 +385,130 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   @doc """
-  Pure next-step decision for sequential per-app tests under a shared budget.
+  Pure next-step decision for sequential per-file tests under dual budgets.
 
-  `remaining_ms` is computed by the shell from a single monotonic deadline for
-  the entire test stage. Returns:
+  `remaining_ms` is the aggregate test-stage budget remaining. Each child is
+  capped by `min(operation_timeout_ms, remaining_ms)` so no Mix process may
+  exceed the Shell spawn-capable ceiling even when aggregate budget remains.
+
+  Returns:
   - `:complete` when no paths remain
   - `{:run, path, budget_ms, rest}` when budget remains
   - `{:timeout, path, rest}` when budget is exhausted with paths left
+  - `{:error, reason}` when arguments are malformed (fail closed; never skip)
   """
-  @spec next_test_step(integer(), [String.t()]) :: test_step()
-  def next_test_step(_remaining_ms, []) do
+  @spec next_test_step(term(), term(), term()) :: test_step()
+  def next_test_step(_remaining_ms, [], operation_timeout_ms)
+      when is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
     :complete
   end
 
-  def next_test_step(remaining_ms, [path | rest])
-      when is_integer(remaining_ms) and remaining_ms <= 0 and is_binary(path) do
+  def next_test_step(remaining_ms, [path | rest], operation_timeout_ms)
+      when is_integer(remaining_ms) and remaining_ms <= 0 and is_binary(path) and path != "" and
+             is_list(rest) and is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
     {:timeout, path, rest}
   end
 
-  def next_test_step(remaining_ms, [path | rest])
-      when is_integer(remaining_ms) and remaining_ms > 0 and is_binary(path) do
-    {:run, path, remaining_ms, rest}
+  def next_test_step(remaining_ms, [path | rest], operation_timeout_ms)
+      when is_integer(remaining_ms) and remaining_ms > 0 and is_binary(path) and path != "" and
+             is_list(rest) and is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
+    {:run, path, min(operation_timeout_ms, remaining_ms), rest}
   end
 
-  def next_test_step(_, _), do: :complete
+  def next_test_step(remaining_ms, paths, operation_timeout_ms) do
+    {:error,
+     {:invalid_test_step_input,
+      %{
+        remaining_ms: remaining_ms,
+        paths_shape: paths_shape(paths),
+        operation_timeout_ms: operation_timeout_ms
+      }}}
+  end
+
+  defp paths_shape(paths) when is_list(paths), do: {:list, length(paths)}
+  defp paths_shape(paths), do: {:not_list, paths}
+
+  @doc """
+  Normalize and bound an expanded list of relative `*_test.exs` file paths.
+
+  Pure path grammar only — the shell must already reject symlinks via lstat.
+  Fails closed on empty components, escapes, absolute paths, non-test suffixes,
+  oversized inventories, and overlong path bytes.
+  """
+  @spec normalize_expanded_test_files([String.t()]) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def normalize_expanded_test_files(files) when is_list(files) do
+    if length(files) > @max_expanded_test_files do
+      {:error, :too_many_test_files}
+    else
+      Enum.reduce_while(files, {:ok, []}, fn path, {:ok, acc} ->
+        case normalize_test_file_path(path) do
+          {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, collected} ->
+          {:ok, collected |> Enum.reverse() |> Enum.uniq() |> Enum.sort()}
+
+        {:error, _} = error ->
+          error
+      end
+    end
+  end
+
+  def normalize_expanded_test_files(_), do: {:error, :invalid_test_file_list}
+
+  @doc false
+  def normalize_test_file_path(path) when is_binary(path) do
+    trimmed = String.trim(path)
+
+    cond do
+      trimmed == "" ->
+        {:error, :empty_test_file_path}
+
+      not String.valid?(trimmed) ->
+        {:error, :invalid_test_file_path}
+
+      String.contains?(trimmed, <<0>>) ->
+        {:error, :invalid_test_file_path}
+
+      String.starts_with?(trimmed, "/") ->
+        {:error, :absolute_test_file_path}
+
+      String.contains?(trimmed, "\\") ->
+        {:error, :invalid_test_file_path}
+
+      String.contains?(trimmed, "..") ->
+        {:error, :path_escape}
+
+      byte_size(trimmed) > 1_024 ->
+        {:error, :test_file_path_too_long}
+
+      not String.ends_with?(trimmed, "_test.exs") ->
+        {:error, {:not_test_file, trimmed}}
+
+      true ->
+        case Path.split(trimmed) do
+          ["apps", app, "test" | rest] when app != "" and rest != [] ->
+            cond do
+              not valid_identifier?(app) ->
+                {:error, {:invalid_app_dir, app}}
+
+              Enum.any?(rest, &(&1 == "" or &1 == "." or &1 == "..")) ->
+                {:error, :invalid_test_file_path}
+
+              true ->
+                {:ok, Path.join(["apps", app, "test" | rest])}
+            end
+
+          _ ->
+            {:error, {:not_app_test_path, trimmed}}
+        end
+    end
+  end
+
+  def normalize_test_file_path(_), do: {:error, :invalid_test_file_path}
 
   @doc """
   Classify one Mix process result for a single app test path.
@@ -771,6 +901,27 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   defp validate_timeout(_timeout), do: {:error, :invalid_timeout}
+
+  defp validate_test_stage_timeout(nil), do: {:ok, @default_test_stage_timeout}
+
+  defp validate_test_stage_timeout(timeout)
+       when is_integer(timeout) and timeout >= @minimum_timeout and
+              timeout <= @maximum_test_stage_timeout,
+       do: {:ok, timeout}
+
+  defp validate_test_stage_timeout(timeout) when is_binary(timeout) do
+    case Integer.parse(timeout) do
+      {parsed, ""} ->
+        if Integer.to_string(parsed) == timeout,
+          do: validate_test_stage_timeout(parsed),
+          else: {:error, :invalid_test_stage_timeout}
+
+      _other ->
+        {:error, :invalid_test_stage_timeout}
+    end
+  end
+
+  defp validate_test_stage_timeout(_timeout), do: {:error, :invalid_test_stage_timeout}
 
   defp validate_app_def_count(app_defs) do
     if length(app_defs) <= @max_apps, do: :ok, else: {:error, :too_many_apps}

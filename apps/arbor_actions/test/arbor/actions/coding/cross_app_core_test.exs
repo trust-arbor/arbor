@@ -5,24 +5,31 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
   @moduletag :fast
 
-  test "accepts only bounded workspace_id and optional timeout" do
+  test "accepts only bounded workspace_id, optional timeout, and test_stage_timeout" do
     assert {:ok, input} =
              Core.new(%{
                workspace_id: "ws_opaque",
-               timeout: 10_000
+               timeout: 10_000,
+               test_stage_timeout: 20_000
              })
 
     assert input.workspace_id == "ws_opaque"
     assert input.timeout == 10_000
+    assert input.test_stage_timeout == 20_000
 
-    assert {:ok, %{timeout: 300_000}} = Core.new(%{workspace_id: "ws_opaque"})
+    assert {:ok, %{timeout: 300_000, test_stage_timeout: 300_000}} =
+             Core.new(%{workspace_id: "ws_opaque"})
 
     ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
 
     assert Core.maximum_timeout() == ceiling
+    assert Core.maximum_test_stage_timeout() == 1_200_000
 
     assert {:ok, %{timeout: ^ceiling}} =
              Core.new(%{workspace_id: "ws_opaque", timeout: Integer.to_string(ceiling)})
+
+    assert {:ok, %{test_stage_timeout: 1_200_000}} =
+             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "1200000"})
 
     for invalid <- [
           Integer.to_string(ceiling + 1),
@@ -34,6 +41,12 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
       assert {:error, :invalid_timeout} =
                Core.new(%{workspace_id: "ws_opaque", timeout: invalid})
     end
+
+    assert {:error, :invalid_test_stage_timeout} =
+             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: 1_200_001})
+
+    assert {:error, :invalid_test_stage_timeout} =
+             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "999"})
 
     assert {:error, :unsupported_parameter} =
              Core.new(%{workspace_id: "ws_opaque", path: "/tmp/repo"})
@@ -245,17 +258,80 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:ok, _} = Jason.encode(all_pass)
   end
 
-  test "next_test_step drives sequential one-path runs under a shared budget" do
-    assert :complete = Core.next_test_step(10_000, [])
+  test "next_test_step caps each child by min(operation ceiling, remaining aggregate)" do
+    assert :complete = Core.next_test_step(10_000, [], 600_000)
 
-    assert {:run, "apps/alpha/test", 5_000, ["apps/beta/test"]} =
-             Core.next_test_step(5_000, ["apps/alpha/test", "apps/beta/test"])
+    assert {:run, "apps/alpha/test/a_test.exs", 5_000, ["apps/beta/test/b_test.exs"]} =
+             Core.next_test_step(
+               5_000,
+               ["apps/alpha/test/a_test.exs", "apps/beta/test/b_test.exs"],
+               600_000
+             )
 
-    assert {:timeout, "apps/beta/test", ["apps/gamma/test"]} =
-             Core.next_test_step(0, ["apps/beta/test", "apps/gamma/test"])
+    # Remaining aggregate above operation ceiling still yields the operation cap.
+    assert {:run, "apps/alpha/test/a_test.exs", 30_000, []} =
+             Core.next_test_step(900_000, ["apps/alpha/test/a_test.exs"], 30_000)
 
-    assert {:timeout, "apps/alpha/test", []} =
-             Core.next_test_step(-3, ["apps/alpha/test"])
+    assert {:timeout, "apps/beta/test/b_test.exs", ["apps/gamma/test/c_test.exs"]} =
+             Core.next_test_step(
+               0,
+               ["apps/beta/test/b_test.exs", "apps/gamma/test/c_test.exs"],
+               600_000
+             )
+
+    assert {:timeout, "apps/alpha/test/a_test.exs", []} =
+             Core.next_test_step(-3, ["apps/alpha/test/a_test.exs"], 10_000)
+  end
+
+  test "next_test_step malformed arguments fail closed rather than completing" do
+    assert {:error, {:invalid_test_step_input, meta}} =
+             Core.next_test_step("not-int", ["apps/alpha/test/a_test.exs"], 10_000)
+
+    assert is_map(meta)
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, :not_a_list, 10_000)
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [""], 10_000)
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, ["apps/alpha/test/a_test.exs"], 0)
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, ["apps/alpha/test/a_test.exs"], -1)
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, ["apps/alpha/test/a_test.exs"], "600000")
+
+    # Empty remaining paths still require a positive operation ceiling.
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [], 0)
+  end
+
+  test "normalize_expanded_test_files bounds, sorts, and rejects bad paths" do
+    assert {:ok, ["apps/alpha/test/a_test.exs", "apps/alpha/test/nested/b_test.exs"]} =
+             Core.normalize_expanded_test_files([
+               "apps/alpha/test/nested/b_test.exs",
+               "apps/alpha/test/a_test.exs",
+               "apps/alpha/test/a_test.exs"
+             ])
+
+    assert {:error, :path_escape} =
+             Core.normalize_expanded_test_files(["apps/alpha/test/../secret_test.exs"])
+
+    assert {:error, :absolute_test_file_path} =
+             Core.normalize_expanded_test_files(["/tmp/apps/alpha/test/a_test.exs"])
+
+    assert {:error, {:not_test_file, "apps/alpha/test/helper.exs"}} =
+             Core.normalize_expanded_test_files(["apps/alpha/test/helper.exs"])
+
+    assert {:error, :too_many_test_files} =
+             Core.normalize_expanded_test_files(
+               for i <- 1..(Core.max_expanded_test_files() + 1) do
+                 "apps/alpha/test/f#{i}_test.exs"
+               end
+             )
   end
 
   test "classify_app_test_result preserves tests_failed vs tests_timed_out" do

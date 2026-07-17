@@ -143,8 +143,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     * `:rework_max_cycles` — required integer from `0` through `2`, bound to the
       normalized plan. Every shared-total rework gate must use this threshold.
     * `:validation_timeout_ms` — required positive integer derived from the
-      normalized plan and reviewed profile ceiling. Validation nodes must bind
-      this exact value.
+      normalized plan and reviewed profile per-operation ceiling. Validation
+      nodes must bind this exact value.
+    * `:validation_test_stage_timeout_ms` — optional positive integer for
+      profiles with a reviewed aggregate test-stage ceiling (cross_app). When
+      present, `param.test_stage_timeout` must match exactly.
   """
   @spec validate(Graph.t(), policy(), keyword()) :: :ok | {:error, validate_error()}
   def validate(graph, policy, opts \\ [])
@@ -156,6 +159,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {:ok, worker_continuity} <- normalize_worker_continuity(opts),
          {:ok, rework_max_cycles} <- normalize_rework_max_cycles(opts),
          {:ok, validation_timeout_ms} <- normalize_validation_timeout_ms(opts),
+         {:ok, validation_test_stage_timeout_ms} <-
+           normalize_validation_test_stage_timeout_ms(opts),
          :ok <- require_compiled(graph) do
       errors =
         []
@@ -170,7 +175,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_worker_recovery_bindings(graph, policy, worker_continuity)
         |> check_review_convergence_bindings(graph, policy, rework_max_cycles)
         |> check_workspace_cleanup_topology(graph)
-        |> check_profile_bindings(graph, policy, review_profile, validation_timeout_ms)
+        |> check_profile_bindings(
+          graph,
+          policy,
+          review_profile,
+          validation_timeout_ms,
+          validation_test_stage_timeout_ms
+        )
         |> check_reachability_and_dominance(graph, policy, review_profile)
         |> Enum.sort_by(&error_sort_key/1)
 
@@ -789,6 +800,23 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
       {:ok, other} ->
         {:error, {:invalid_semantic_policy, {:invalid_validation_timeout_ms, other}}}
+    end
+  end
+
+  defp normalize_validation_test_stage_timeout_ms(opts) do
+    case Keyword.fetch(opts, :validation_test_stage_timeout_ms) do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, timeout_ms} when is_integer(timeout_ms) and timeout_ms > 0 ->
+        {:ok, timeout_ms}
+
+      :error ->
+        # Optional except for profiles that emit param.test_stage_timeout.
+        {:ok, nil}
+
+      {:ok, other} ->
+        {:error, {:invalid_semantic_policy, {:invalid_validation_test_stage_timeout_ms, other}}}
     end
   end
 
@@ -2610,7 +2638,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          graph,
          %{"validation_profile" => "default"},
          _review,
-         validation_timeout_ms
+         validation_timeout_ms,
+         _validation_test_stage_timeout_ms
        ) do
     check_validation_parameters(
       errors,
@@ -2628,14 +2657,37 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          graph,
          %{"validation_profile" => "cross_app"},
          _review,
-         validation_timeout_ms
-       ) do
+         validation_timeout_ms,
+         validation_test_stage_timeout_ms
+       )
+       when is_integer(validation_test_stage_timeout_ms) and
+              validation_test_stage_timeout_ms > 0 do
     check_validation_parameters(
       errors,
       graph,
-      %{"param.timeout" => validation_timeout_ms},
+      %{
+        "param.timeout" => validation_timeout_ms,
+        "param.test_stage_timeout" => validation_test_stage_timeout_ms
+      },
       "validation_parameter_violation"
     )
+  end
+
+  defp check_profile_bindings(
+         errors,
+         _graph,
+         %{"validation_profile" => "cross_app"},
+         _review,
+         _validation_timeout_ms,
+         validation_test_stage_timeout_ms
+       ) do
+    [
+      error("validation_parameter_violation", "validate", %{
+        "missing_validation_test_stage_timeout_ms" => true,
+        "got" => validation_test_stage_timeout_ms
+      })
+      | errors
+    ]
   end
 
   defp check_profile_bindings(
@@ -2643,7 +2695,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          graph,
          %{"validation_profile" => "security_regression"},
          review_profile,
-         validation_timeout_ms
+         validation_timeout_ms,
+         _validation_test_stage_timeout_ms
        ) do
     errors
     |> reject_security_review_none(review_profile)
@@ -2653,8 +2706,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     |> check_security_topology(graph, review_profile)
   end
 
-  defp check_profile_bindings(errors, _graph, _policy, _review_profile, _validation_timeout_ms),
-    do: errors
+  defp check_profile_bindings(
+         errors,
+         _graph,
+         _policy,
+         _review_profile,
+         _validation_timeout_ms,
+         _validation_test_stage_timeout_ms
+       ),
+       do: errors
 
   defp reject_security_review_none(errors, "none") do
     [

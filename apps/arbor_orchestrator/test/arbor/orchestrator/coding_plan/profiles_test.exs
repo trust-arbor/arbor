@@ -115,6 +115,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "authority_source" => "workspace_id",
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => 600_000,
+               "test_stage_timeout_budget_source" => "budgets.wall_clock_ms",
+               "test_stage_timeout_max_ms" => 1_200_000,
                "selects_downstream_dependents" => true,
                "runs_xref_graph_evidence" => true,
                "runs_test_environment_compile" => true,
@@ -129,9 +131,54 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
       assert {:ok, 600_000} = Profiles.validation_timeout(cross_app, 900_000)
       assert {:ok, 120_000} = Profiles.validation_timeout(cross_app, 120_000)
+      assert {:ok, 900_000} = Profiles.validation_test_stage_timeout(cross_app, 900_000)
+      assert {:ok, 1_200_000} = Profiles.validation_test_stage_timeout(cross_app, 1_500_000)
+      assert {:ok, 120_000} = Profiles.validation_test_stage_timeout(cross_app, 120_000)
 
-      # Profile ceilings derive from Shell spawn-capable admission bound.
+      # Profiles without aggregate-stage keys return nil (not an error).
+      assert {:ok, nil} = Profiles.validation_test_stage_timeout(default, 900_000)
+      assert {:ok, nil} = Profiles.validation_test_stage_timeout(security, 900_000)
+
+      # Partial/malformed aggregate declarations fail closed — never coerced to nil.
+      missing_source =
+        update_in(
+          cross_app,
+          ["validation_strategy"],
+          &Map.delete(&1, "test_stage_timeout_budget_source")
+        )
+
+      assert {:error, :invalid_validation_test_stage_timeout_policy} =
+               Profiles.validation_test_stage_timeout(missing_source, 900_000)
+
+      missing_max =
+        update_in(
+          cross_app,
+          ["validation_strategy"],
+          &Map.delete(&1, "test_stage_timeout_max_ms")
+        )
+
+      assert {:error, :invalid_validation_test_stage_timeout_policy} =
+               Profiles.validation_test_stage_timeout(missing_max, 900_000)
+
+      bad_stage_source =
+        put_in(
+          cross_app,
+          ["validation_strategy", "test_stage_timeout_budget_source"],
+          "unreviewed.budget"
+        )
+
+      assert {:error, :invalid_validation_test_stage_timeout_policy} =
+               Profiles.validation_test_stage_timeout(bad_stage_source, 900_000)
+
+      # Per-operation ceiling derives from Shell spawn-capable admission bound.
       assert cross_app["validation_strategy"]["timeout_max_ms"] ==
+               Arbor.Shell.spawn_capable_max_timeout_ms()
+
+      # Aggregate stage ceiling is reviewed separately and may exceed Shell max.
+      assert cross_app["validation_strategy"]["test_stage_timeout_max_ms"] ==
+               Profiles.cross_app_test_stage_timeout_max_ms()
+
+      assert cross_app["validation_strategy"]["test_stage_timeout_max_ms"] >
                Arbor.Shell.spawn_capable_max_timeout_ms()
 
       drifted_source =

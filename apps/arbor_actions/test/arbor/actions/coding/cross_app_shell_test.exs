@@ -18,6 +18,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     File.rm_rf!(worktree)
     File.mkdir_p!(worktree)
+    init_git_repo!(worktree)
 
     on_exit(fn ->
       File.rm_rf!(worktree)
@@ -58,10 +59,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert check["exit_code"] == 0
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test"], opts1}
+    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test/alpha_test.exs"],
+                    opts1}
+
     assert Keyword.get(opts1, :timeout) == 30_000
 
-    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/beta/test"], opts2}
+    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/beta/test/beta_test.exs"],
+                    opts2}
+
     assert is_integer(Keyword.get(opts2, :timeout))
     assert Keyword.get(opts2, :timeout) > 0
     assert Keyword.get(opts2, :timeout) <= 30_000
@@ -79,10 +84,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args})
 
       case args do
-        ["test", "--", "apps/alpha/test"] ->
+        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
           {:ok, %{exit_code: 0, stdout: "alpha ok", stderr: "", timed_out: false}}
 
-        ["test", "--", "apps/beta/test"] ->
+        ["test", "--", "apps/beta/test/beta_test.exs"] ->
           {:ok, %{exit_code: 1, stdout: "beta fail", stderr: "", timed_out: false}}
 
         other ->
@@ -100,15 +105,15 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute check["passed"]
     assert check["reason"] == "tests_failed"
     assert check["exit_code"] == 1
-    assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test]")
+    assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test/alpha_test.exs]")
     assert String.contains?(check["stdout_excerpt"], "alpha ok")
-    assert String.contains?(check["stdout_excerpt"], "[apps/beta/test]")
-    refute String.contains?(check["stdout_excerpt"], "[apps/gamma/test]")
+    assert String.contains?(check["stdout_excerpt"], "[apps/beta/test/beta_test.exs]")
+    refute String.contains?(check["stdout_excerpt"], "[apps/gamma/test/gamma_test.exs]")
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
-    assert_receive {:mix_invocation, ["test", "--", "apps/beta/test"]}
-    refute_received {:mix_invocation, ["test", "--", "apps/gamma/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/beta/test/beta_test.exs"]}
+    refute_received {:mix_invocation, ["test", "--", "apps/gamma/test/gamma_test.exs"]}
   end
 
   test "child that consumes remaining budget is timed out; later children never launch", %{
@@ -145,17 +150,20 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     refute check["passed"]
     assert check["reason"] == "tests_timed_out"
-    assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test]")
+    assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test/alpha_test.exs]")
     # Alpha itself overran the shared budget — classified as timeout, not pass.
-    refute String.contains?(check["stdout_excerpt"], "budget exhausted before apps/beta")
+    refute String.contains?(
+             check["stdout_excerpt"],
+             "budget exhausted before apps/beta/test/beta_test.exs"
+           )
 
     assert byte_size(check["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
 
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"], opts}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], opts}
     assert Keyword.get(opts, :timeout) == 5_000
-    refute_received {:mix_invocation, ["test", "--", "apps/beta/test"], _}
+    refute_received {:mix_invocation, ["test", "--", "apps/beta/test/beta_test.exs"], _}
   end
 
   test "final child overrun after success-shaped runner result is still timed out", %{
@@ -178,12 +186,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["test", "--", "apps/alpha/test"] ->
+        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
           # Small advance; remaining budget stays positive.
           Agent.update(clock_agent, fn t -> t + 1_000 end)
           {:ok, %{exit_code: 0, stdout: "alpha ok", stderr: "", timed_out: false}}
 
-        ["test", "--", "apps/omega/test"] ->
+        ["test", "--", "apps/omega/test/omega_test.exs"] ->
           # Final child returns success shape but consumes the shared deadline.
           Agent.update(clock_agent, fn _ -> 20_000 end)
           {:ok, %{exit_code: 0, stdout: "omega ok", stderr: "", timed_out: false}}
@@ -203,14 +211,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute check["passed"]
     assert check["reason"] == "tests_timed_out"
     # Earlier success evidence preserved.
-    assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test]")
+    assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test/alpha_test.exs]")
     assert String.contains?(check["stdout_excerpt"], "alpha ok")
-    assert String.contains?(check["stdout_excerpt"], "[apps/omega/test]")
+    assert String.contains?(check["stdout_excerpt"], "[apps/omega/test/omega_test.exs]")
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"], opts1}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], opts1}
     assert Keyword.get(opts1, :timeout) == 5_000
-    assert_receive {:mix_invocation, ["test", "--", "apps/omega/test"], opts2}
+    assert_receive {:mix_invocation, ["test", "--", "apps/omega/test/omega_test.exs"], opts2}
     assert Keyword.get(opts2, :timeout) == 4_000
     refute_received {:mix_invocation, _, _}
   end
@@ -225,7 +233,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args})
 
       case args do
-        ["test", "--", "apps/alpha/test"] ->
+        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
           {:ok,
            %{
              exit_code: 1,
@@ -250,8 +258,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert text_fail["reason"] == "tests_failed"
     refute text_fail["reason"] == "tests_timed_out"
     assert String.contains?(text_fail["stdout_excerpt"], "timeout waiting")
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
-    refute_received {:mix_invocation, ["test", "--", "apps/beta/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
+    refute_received {:mix_invocation, ["test", "--", "apps/beta/test/beta_test.exs"]}
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
       send(parent, {:mix_invocation, {:exact, args}})
@@ -274,8 +282,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     refute exact["passed"]
     assert exact["reason"] == "tests_timed_out"
-    assert_receive {:mix_invocation, {:exact, ["test", "--", "apps/alpha/test"]}}
-    refute_received {:mix_invocation, {:exact, ["test", "--", "apps/beta/test"]}}
+    assert_receive {:mix_invocation, {:exact, ["test", "--", "apps/alpha/test/alpha_test.exs"]}}
+    refute_received {:mix_invocation, {:exact, ["test", "--", "apps/beta/test/beta_test.exs"]}}
   end
 
   test "invalid UTF-8 process output is JSON-safe and hashed as raw bytes", %{worktree: worktree} do
@@ -289,14 +297,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     expected_aggregate =
       :crypto.hash(
         :sha256,
-        "apps/alpha/test\n" <> raw_hash
+        "apps/alpha/test/alpha_test.exs\n" <> raw_hash
       )
       |> Base.encode16(case: :lower)
 
     expected_stderr_aggregate =
       :crypto.hash(
         :sha256,
-        "apps/alpha/test\n" <> stderr_hash
+        "apps/alpha/test/alpha_test.exs\n" <> stderr_hash
       )
       |> Base.encode16(case: :lower)
 
@@ -325,7 +333,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     feedback = Core.feedback_from_result(%{exit_code: 1, stdout: raw, stderr: stderr_raw})
     assert feedback["stdout_sha256"] == raw_hash
     assert feedback["stderr_sha256"] == stderr_hash
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
   end
 
   test "multibyte excerpt bounds never split UTF-8 codepoints", %{worktree: worktree} do
@@ -352,7 +360,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert String.valid?(check["stdout_excerpt"])
     assert String.contains?(check["stdout_excerpt"], "...[omitted]...")
     assert {:ok, _} = Jason.encode(check)
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
   end
 
   test "no launch after deadline is already exhausted", %{worktree: worktree} do
@@ -387,7 +395,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     refute check["passed"]
     assert check["reason"] == "tests_timed_out"
-    assert String.contains?(check["stdout_excerpt"], "budget exhausted before apps/alpha/test")
+
+    assert String.contains?(
+             check["stdout_excerpt"],
+             "budget exhausted before apps/alpha/test/alpha_test.exs"
+           )
+
     refute_received {:mix_invocation, _}
     assert {:ok, _} = Jason.encode(check)
   end
@@ -408,7 +421,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       )
 
     assert check["passed"]
-    assert check["reason"] == "no_existing_test_dirs"
+    assert check["reason"] == "no_existing_test_files"
     refute_received {:mix_invocation, _}
   end
 
@@ -452,10 +465,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute check["passed"]
     assert check["reason"] == "tests_timed_out"
     assert check["exit_code"] == 137
-    assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test]")
+    assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test/alpha_test.exs]")
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"]}
-    refute_received {:mix_invocation, ["test", "--", "apps/beta/test"]}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
+    refute_received {:mix_invocation, ["test", "--", "apps/beta/test/beta_test.exs"]}
   end
 
   test "validation checks run compile, xref, MIX_ENV=test compile, then tests in order", %{
@@ -504,7 +517,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(test_opts, :timeout) == 30_000
     assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
 
-    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test"], test_run_opts}
+    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test/alpha_test.exs"],
+                    test_run_opts}
+
     assert Keyword.get(test_run_opts, :validation_resource) == resource
     assert Keyword.get(test_run_opts, :timeout) == 30_000
 
@@ -541,7 +556,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
           Agent.update(clock_agent, fn t -> t + 20_000 end)
           {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
 
-        ["test", "--", "apps/alpha/test"] ->
+        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
           {:ok, %{exit_code: 0, stdout: "test ok", stderr: "", timed_out: false}}
 
         other ->
@@ -569,7 +584,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert Keyword.get(test_compile_opts, :env) == %{"MIX_ENV" => "test"}
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"], test_opts, 60_000}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], test_opts,
+                    60_000}
+
     assert Keyword.get(test_opts, :timeout) == 5_000
   end
 
@@ -704,10 +721,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         ["xref", "graph"] ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        ["test", "--", "apps/alpha/test"] ->
+        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
           {:ok, %{exit_code: 0, stdout: "alpha ok", stderr: "", timed_out: false}}
 
-        ["test", "--", "apps/beta/test"] ->
+        ["test", "--", "apps/beta/test/beta_test.exs"] ->
           {:error, :operation_deadline_exceeded}
 
         other ->
@@ -715,7 +732,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
-    assert {:error, {:test_execution_failed, "apps/beta/test", :operation_deadline_exceeded}} =
+    assert {:error,
+            {:test_execution_failed, "apps/beta/test/beta_test.exs", :operation_deadline_exceeded}} =
              Shell.run_validation_checks(
                worktree,
                ["apps/alpha/test", "apps/beta/test"],
@@ -727,15 +745,214 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert_receive {:mix_invocation, ["xref", "graph"], _}
     assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], test_compile_opts}
     assert Keyword.get(test_compile_opts, :env) == %{"MIX_ENV" => "test"}
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test"], _}
-    assert_receive {:mix_invocation, ["test", "--", "apps/beta/test"], _}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], _}
+    assert_receive {:mix_invocation, ["test", "--", "apps/beta/test/beta_test.exs"], _}
     refute_received {:mix_invocation, _, _}
+  end
+
+  test "expands app test dirs into sequential per-file mix invocations", %{worktree: worktree} do
+    parent = self()
+    dir = Path.join(worktree, "apps/alpha/test")
+    File.mkdir_p!(Path.join(dir, "nested"))
+    File.write!(Path.join(dir, "z_test.exs"), "defmodule ZTest do\nend\n")
+    File.write!(Path.join(dir, "a_test.exs"), "defmodule ATest do\nend\n")
+    File.write!(Path.join([dir, "nested", "m_test.exs"]), "defmodule MTest do\nend\n")
+    File.write!(Path.join(dir, "helper.exs"), "defmodule Helper do\nend\n")
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 30_000, 60_000)
+    assert check["passed"]
+
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/a_test.exs"], opts1}
+    assert Keyword.get(opts1, :timeout) == 30_000
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/nested/m_test.exs"], _}
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/z_test.exs"], _}
+    refute_received {:mix_invocation, ["test", "--", "apps/alpha/test/helper.exs"], _}
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "operation timeout caps each child below remaining aggregate stage budget", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test", "apps/beta/test"], 10_000, 100_000)
+    assert check["passed"]
+
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], opts1}
+    assert Keyword.get(opts1, :timeout) == 10_000
+    assert_receive {:mix_invocation, ["test", "--", "apps/beta/test/beta_test.exs"], opts2}
+    assert Keyword.get(opts2, :timeout) == 10_000
+  end
+
+  test "gitignored test files are excluded from expansion inventory", %{worktree: worktree} do
+    parent = self()
+    dir = Path.join(worktree, "apps/alpha/test")
+    File.mkdir_p!(dir)
+    File.write!(Path.join(worktree, ".gitignore"), "_generated_test.exs\n")
+    File.write!(Path.join(dir, "kept_test.exs"), "defmodule KeptTest do\nend\n")
+    File.write!(Path.join(dir, "_generated_test.exs"), "defmodule GeneratedTest do\nend\n")
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 20_000)
+    assert check["passed"]
+
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/kept_test.exs"], _}
+    refute_received {:mix_invocation, ["test", "--", "apps/alpha/test/_generated_test.exs"], _}
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "malformed next_test_step input becomes an execution error, not silent success", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:mix_invocation, args})
+      flunk("must not run mix with malformed step: #{inspect(args)}")
+    end)
+
+    # operation_timeout 0 is malformed for next_test_step; Shell must not complete
+    # the stage as a silent pass after expansion finds real files.
+    thrown = catch_throw(Shell.run_app_tests(worktree, ["apps/alpha/test"], 0, 10_000))
+
+    assert match?(
+             {:execution_error, {:invalid_test_step, {:invalid_test_step_input, _}}},
+             thrown
+           )
+
+    refute_received {:mix_invocation, _}
+
+    # Public validation checks surface converts the throw into {:error, reason}.
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        ["xref", "graph"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("must not run tests with malformed step: #{inspect(other)}")
+      end
+    end)
+
+    assert {:error, {:invalid_test_step, {:invalid_test_step_input, _}}} =
+             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 0, 10_000, %{id: "r"})
+  end
+
+  test "symlink test files fail closed without launching mix tests", %{worktree: worktree} do
+    parent = self()
+    dir = Path.join(worktree, "apps/alpha/test")
+    File.mkdir_p!(dir)
+    real = Path.join(worktree, "outside_test.exs")
+    File.write!(real, "defmodule Outside do\nend\n")
+    link = Path.join(dir, "linked_test.exs")
+    File.ln_s!(real, link)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        ["xref", "graph"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("must not run tests after symlink enumeration: #{inspect(other)}")
+      end
+    end)
+
+    assert {:error, {:test_file_enumeration_failed, {:symlink_rejected, :path_component, rel}}} =
+             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 10_000, 20_000, %{id: "r"})
+
+    assert rel == "apps/alpha/test/linked_test.exs"
+    refute_received {:mix_invocation, ["test" | _], _}
+  end
+
+  test "aggregate stage budget is independent of pre-test compile wall time", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts, Agent.get(clock_agent, & &1)})
+
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          Agent.update(clock_agent, fn t -> t + 50_000 end)
+          {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
+
+        ["xref", "graph"] ->
+          Agent.update(clock_agent, fn t -> t + 50_000 end)
+          {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
+
+        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
+          {:ok, %{exit_code: 0, stdout: "test ok", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("unexpected mix invocation: #{inspect(other)}")
+      end
+    end)
+
+    # Per-op 5s, aggregate stage 8s — pre-test stages burn 150s of wall clock
+    # but must not reduce the aggregate stage budget started after test compile.
+    assert {:ok, checks} =
+             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 5_000, 8_000, %{id: "res"})
+
+    assert checks.test["passed"]
+
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], test_opts,
+                    _}
+
+    assert Keyword.get(test_opts, :timeout) == 5_000
   end
 
   defp mkdir_app_tests!(worktree, apps) do
     for app <- apps do
-      File.mkdir_p!(Path.join(worktree, "apps/#{app}/test"))
+      dir = Path.join(worktree, "apps/#{app}/test")
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, "#{app}_test.exs"),
+        "defmodule #{Macro.camelize(app)}Test do\nend\n"
+      )
     end
+  end
+
+  defp init_git_repo!(worktree) do
+    {_, 0} = System.cmd("git", ["init"], cd: worktree, stderr_to_stdout: true)
+    {_, 0} = System.cmd("git", ["config", "user.email", "test@arbor.local"], cd: worktree)
+    {_, 0} = System.cmd("git", ["config", "user.name", "CrossApp Test"], cd: worktree)
+    :ok
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_actions, key)

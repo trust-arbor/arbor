@@ -453,7 +453,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["action"] == "coding_cross_app_validate"
     assert validate["context_keys"] == "workspace_id"
     refute Map.has_key?(validate, "param.warnings_as_errors")
+    # Per-operation still capped at Shell spawn-capable ceiling.
     assert validate["param.timeout"] == 600_000
+    # Aggregate test-stage budget is compiled from wall-clock (default 900s)
+    # and reviewed separately up to 1_200_000.
+    assert validate["param.test_stage_timeout"] == 900_000
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
 
@@ -487,6 +491,21 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     validate = node_attrs(parse!(compilation.dot_source), "validate")
 
     assert validate["param.timeout"] == 120_000
+    assert validate["param.test_stage_timeout"] == 120_000
+  end
+
+  test "cross_app distinguishes per-operation and aggregate test-stage ceilings", ctx do
+    plan =
+      plan!(%{
+        "validation_profile" => "cross_app",
+        "budgets" => %{"wall_clock_ms" => 1_500_000}
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    validate = node_attrs(parse!(compilation.dot_source), "validate")
+
+    assert validate["param.timeout"] == 600_000
+    assert validate["param.test_stage_timeout"] == 1_200_000
   end
 
   test "cross_app human_required review does not weaken review routing", ctx do
