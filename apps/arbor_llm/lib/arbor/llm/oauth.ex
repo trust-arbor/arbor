@@ -14,6 +14,10 @@ defmodule Arbor.LLM.OAuth do
   ~/code/hermes-agent). Verified live 2026-07-03: agents run on ChatGPT (gpt-5.4-mini) AND SuperGrok
   (grok-4) subscriptions.
 
+  Concurrent refresh is single-flighted per provider via a `:global` transaction so rotating
+  refresh tokens are not consumed twice. Successful rotating refreshes and CLI imports fail closed
+  unless the full token set is durably published with atomic same-directory rename.
+
   ## SECURITY — Anthropic is HARD-REFUSED
 
   Using a Claude subscription OAuth token programmatically is against Anthropic's ToS. This module
@@ -29,6 +33,11 @@ defmodule Arbor.LLM.OAuth do
 
   @max_oauth_response_bytes 1_048_576
   @max_access_token_bytes 65_536
+  @max_refresh_token_bytes 65_536
+  @max_token_json_bytes 1_048_576
+  # Cover one concurrent refresh (~20s) plus margin; lock is released on owner death.
+  @refresh_lock_retries 20
+  @default_store_dir "~/.arbor/oauth"
 
   # Keep the "*_oauth" provider atoms alive so callers that String.to_existing_atom a provider
   # string (e.g. the eval runner's normalize_provider) can resolve "openai_oauth"/"xai_oauth".
@@ -63,25 +72,21 @@ defmodule Arbor.LLM.OAuth do
   def access_token(provider) do
     with {:ok, key, config} <- resolve(provider),
          {:ok, tokens} <- read_tokens(key, config) do
-      cached = tokens["access_token"]
+      case usable_access_token(tokens, config) do
+        {:ok, token} ->
+          {:ok, token}
 
-      cond do
-        is_binary(cached) and byte_size(cached) <= @max_access_token_bytes and
-            not expiring?(cached, config.skew_s) ->
-          {:ok, cached}
-
-        is_binary(tokens["refresh_token"]) ->
+        :refresh ->
           # No valid cached access_token (grok stores ONLY a refresh_token; openai's cached one may
           # be expiring) — mint one via refresh. Providers ROTATE the refresh_token, so we WRITE
           # the rotated tokens back to the Arbor-owned store (~/.arbor/oauth), never the CLI file —
           # so the CLI credential is never consumed and the next call has a fresh refresh_token.
-          with {:ok, refreshed} <- refresh(key, config, tokens["refresh_token"]) do
-            write_stored(key, Map.merge(tokens, refreshed))
-            {:ok, refreshed["access_token"]}
+          # Single-flight the refresh so concurrent same-provider callers do not race rotation.
+          if is_binary(tokens["refresh_token"]) do
+            refresh_singleflight(key, config)
+          else
+            {:error, :no_usable_token}
           end
-
-        true ->
-          {:error, :no_usable_token}
       end
     end
   end
@@ -110,7 +115,7 @@ defmodule Arbor.LLM.OAuth do
   def configured?(provider) do
     case resolve(provider) do
       {:ok, key, config} ->
-        File.exists?(store_path(key)) or File.exists?(Path.expand(config.file))
+        File.exists?(store_path(key)) or File.exists?(cli_path(key, config))
 
       _ ->
         false
@@ -155,40 +160,55 @@ defmodule Arbor.LLM.OAuth do
   # first use. This is what makes rotation safe — write-back keeps the Arbor store current without
   # ever consuming the CLI credential.
   defp read_tokens(key, config) do
+    case read_stored_tokens(key) do
+      {:ok, tokens} ->
+        {:ok, tokens}
+
+      {:error, {:token_file_unreadable, :enoent}} ->
+        import_from_cli(key, config)
+
+      {:error, reason} ->
+        # CLI import is first-use bootstrap only. Falling back after corruption or an
+        # unreadable store could resurrect a consumed rotating refresh token.
+        {:error, {:oauth_token_store_read_failed, reason}}
+    end
+  end
+
+  defp read_stored_tokens(key) do
     case read_json(store_path(key)) do
       {:ok, %{"access_token" => _} = tokens} -> {:ok, tokens}
       {:ok, %{"refresh_token" => _} = tokens} -> {:ok, tokens}
-      _ -> import_from_cli(key, config)
+      {:ok, _other} -> {:error, :invalid_token_store}
+      {:error, _reason} = error -> error
     end
   end
 
   defp import_from_cli(key, config) do
-    with {:ok, tokens} <- read_cli_tokens(key, config) do
-      write_stored(key, tokens)
+    with {:ok, tokens} <- read_cli_tokens(key, config),
+         :ok <- write_stored(key, tokens) do
       {:ok, tokens}
     end
   end
 
   defp read_cli_tokens(:openai, config) do
-    with {:ok, json} <- read_json(config.file),
+    with {:ok, json} <- read_json(cli_path(:openai, config)),
          %{"tokens" => %{} = tokens} <- json do
       {:ok, tokens}
     else
-      _ -> {:error, {:no_tokens_in_file, config.file}}
+      _ -> {:error, {:no_tokens_in_file, cli_path(:openai, config)}}
     end
   end
 
   # Grok stores the token object under a single "https://auth.x.ai::<uuid>" key.
   defp read_cli_tokens(:xai, config) do
-    with {:ok, json} <- read_json(config.file),
+    with {:ok, json} <- read_json(cli_path(:xai, config)),
          [{_key, %{} = tokens} | _] <- Map.to_list(json) do
       {:ok, tokens}
     else
-      _ -> {:error, {:no_tokens_in_file, config.file}}
+      _ -> {:error, {:no_tokens_in_file, cli_path(:xai, config)}}
     end
   end
 
-  @store_dir "~/.arbor/oauth"
   @token_json_limits [
     max_bytes: 1_048_576,
     max_nodes: 10_000,
@@ -203,15 +223,281 @@ defmodule Arbor.LLM.OAuth do
     max_map_keys: 200,
     max_list_items: 1_000
   ]
-  defp store_path(key), do: Path.expand("#{@store_dir}/#{key}.json")
 
-  # Persist tokens to the Arbor-owned store (0600). Returns the tokens for pipelining.
+  defp store_dir do
+    case Application.get_env(:arbor_llm, :oauth_store_dir) do
+      dir when is_binary(dir) and byte_size(dir) > 0 ->
+        Path.expand(dir)
+
+      _ ->
+        Path.expand(@default_store_dir)
+    end
+  end
+
+  defp store_path(key), do: Path.join(store_dir(), "#{key}.json")
+
+  # Test-only CLI path override — production never sets :oauth_cli_files.
+  defp cli_path(key, config) do
+    case Application.get_env(:arbor_llm, :oauth_cli_files) do
+      %{} = files ->
+        case Map.get(files, key) || Map.get(files, Atom.to_string(key)) do
+          path when is_binary(path) and byte_size(path) > 0 -> Path.expand(path)
+          _ -> Path.expand(config.file)
+        end
+
+      _ ->
+        Path.expand(config.file)
+    end
+  end
+
+  defp usable_access_token(tokens, config) when is_map(tokens) do
+    cached = tokens["access_token"]
+
+    if is_binary(cached) and byte_size(cached) <= @max_access_token_bytes and
+         not expiring?(cached, config.skew_s) do
+      {:ok, cached}
+    else
+      :refresh
+    end
+  end
+
+  defp refresh_singleflight(key, config) do
+    id = {{__MODULE__, :refresh, key}, self()}
+    nodes = [node() | Node.list()]
+
+    case :global.trans(
+           id,
+           fn -> refresh_under_lock(key, config) end,
+           nodes,
+           @refresh_lock_retries
+         ) do
+      :aborted ->
+        {:error, :oauth_refresh_lock_aborted}
+
+      result ->
+        result
+    end
+  end
+
+  # Called only while holding the provider-scoped :global lock.
+  defp refresh_under_lock(key, config) do
+    # Double-check the Arbor-owned store: another caller may have already refreshed + persisted.
+    case read_stored_tokens(key) do
+      {:ok, latest} ->
+        case usable_access_token(latest, config) do
+          {:ok, token} ->
+            {:ok, token}
+
+          :refresh ->
+            refresh_and_persist(key, config, latest)
+        end
+
+      {:error, reason} ->
+        # The pre-lock snapshot may contain a rotating refresh token already consumed by
+        # another lock holder. Never reuse it when the authoritative store cannot be reread.
+        {:error, {:oauth_token_store_reread_failed, reason}}
+    end
+  end
+
+  defp refresh_and_persist(key, config, tokens) do
+    refresh_token = tokens["refresh_token"]
+
+    if is_binary(refresh_token) do
+      with {:ok, refreshed} <- refresh(key, config, refresh_token),
+           {:ok, access} <- validate_refreshed_access_token(refreshed),
+           merged = Map.merge(tokens, refreshed),
+           :ok <- validate_effective_refresh_token(merged),
+           :ok <- write_stored(key, merged) do
+        {:ok, access}
+      end
+    else
+      {:error, :no_usable_token}
+    end
+  end
+
+  # Validate access-token shape/size BEFORE replacing durable credentials so a
+  # malformed refresh response cannot clobber a still-valid rotated token set.
+  defp validate_refreshed_access_token(%{"access_token" => access})
+       when is_binary(access) and byte_size(access) > 0 and
+              byte_size(access) <= @max_access_token_bytes do
+    if String.valid?(access) do
+      {:ok, access}
+    else
+      {:error, {:invalid_refreshed_access_token, :invalid_utf8}}
+    end
+  end
+
+  defp validate_refreshed_access_token(%{"access_token" => access}) when is_binary(access) do
+    {:error, {:invalid_refreshed_access_token, :oversized}}
+  end
+
+  defp validate_refreshed_access_token(_refreshed) do
+    {:error, {:invalid_refreshed_access_token, :missing_or_not_binary}}
+  end
+
+  defp validate_effective_refresh_token(%{"refresh_token" => refresh_token})
+       when is_binary(refresh_token) and byte_size(refresh_token) > 0 and
+              byte_size(refresh_token) <= @max_refresh_token_bytes do
+    if String.valid?(refresh_token) do
+      :ok
+    else
+      {:error, {:invalid_refreshed_refresh_token, :invalid_utf8}}
+    end
+  end
+
+  defp validate_effective_refresh_token(%{"refresh_token" => refresh_token})
+       when is_binary(refresh_token) do
+    {:error, {:invalid_refreshed_refresh_token, :empty_or_oversized}}
+  end
+
+  defp validate_effective_refresh_token(_tokens) do
+    {:error, {:invalid_refreshed_refresh_token, :missing_or_not_binary}}
+  end
+
+  # Persist tokens to the Arbor-owned store via atomic same-directory publication.
+  # Encode first; exclusive temp (mode 0600 before content); write + fsync; rename over target;
+  # fsync the parent directory so the directory entry is crash-durable; ensure final mode 0600.
+  # Never delete the old target before rename. Failures clean the temp and return an error.
   defp write_stored(key, tokens) do
-    path = store_path(key)
-    File.mkdir_p(Path.dirname(path))
-    File.write(path, Jason.encode!(tokens))
-    File.chmod(path, 0o600)
-    tokens
+    with {:ok, json} <- encode_token_json(tokens) do
+      path = store_path(key)
+      dir = Path.dirname(path)
+
+      with :ok <- ensure_store_dir(dir),
+           {:ok, tmp} <- create_temp_path(dir, key),
+           :ok <- write_temp_token_file(tmp, json) do
+        case File.rename(tmp, path) do
+          :ok ->
+            with :ok <- fsync_directory(dir),
+                 :ok <- ensure_final_mode(path) do
+              :ok
+            end
+
+          {:error, reason} ->
+            _ = File.rm(tmp)
+            {:error, {:token_store_write_failed, reason}}
+        end
+      end
+    end
+  end
+
+  # Directory fsync makes the rename durable across crash/power loss on filesystems
+  # that only guarantee directory-entry durability after sync of the parent dir.
+  # OTP requires the :directory mode; plain [:raw, :read] returns :eisdir.
+  defp fsync_directory(dir) when is_binary(dir) do
+    case :file.open(dir, [:raw, :read, :directory]) do
+      {:ok, io} ->
+        try do
+          case :file.sync(io) do
+            :ok -> :ok
+            {:error, reason} -> {:error, {:token_store_write_failed, {:dir_fsync_failed, reason}}}
+          end
+        after
+          _ = close_io_silent(io)
+        end
+
+      {:error, reason} ->
+        {:error, {:token_store_write_failed, {:dir_open_failed, reason}}}
+    end
+  end
+
+  defp encode_token_json(tokens) when is_map(tokens) do
+    case Jason.encode(tokens) do
+      {:ok, json} when is_binary(json) and byte_size(json) <= @max_token_json_bytes ->
+        {:ok, json}
+
+      {:ok, json} when is_binary(json) ->
+        {:error, {:token_store_write_failed, :token_json_too_large}}
+
+      {:error, reason} ->
+        {:error, {:token_store_write_failed, {:encode_failed, reason}}}
+    end
+  end
+
+  defp encode_token_json(_tokens), do: {:error, {:token_store_write_failed, :invalid_tokens}}
+
+  defp ensure_store_dir(dir) do
+    case File.mkdir_p(dir) do
+      :ok ->
+        # Best-effort private directory; content publication still enforces file mode 0600.
+        _ = File.chmod(dir, 0o700)
+        :ok
+
+      {:error, reason} ->
+        {:error, {:token_store_write_failed, reason}}
+    end
+  end
+
+  defp create_temp_path(dir, key) do
+    suffix =
+      Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    tmp =
+      Path.join(dir, ".#{key}.#{System.unique_integer([:positive])}.#{suffix}.tmp")
+
+    {:ok, tmp}
+  end
+
+  defp write_temp_token_file(tmp, json) do
+    # Exclusive create so concurrent writers never share a temp path.
+    case :file.open(tmp, [:raw, :binary, :write, :exclusive]) do
+      {:ok, io} ->
+        try do
+          # Mode 0600 BEFORE writing credential bytes.
+          with :ok <- :file.change_mode(tmp, 0o600),
+               :ok <- :file.write(io, json),
+               :ok <- :file.sync(io),
+               :ok <- :file.close(io) do
+            :ok
+          else
+            {:error, reason} ->
+              _ = close_io_silent(io)
+              _ = File.rm(tmp)
+              {:error, {:token_store_write_failed, reason}}
+          end
+        rescue
+          e ->
+            _ = close_io_silent(io)
+            _ = File.rm(tmp)
+            {:error, {:token_store_write_failed, Exception.message(e)}}
+        catch
+          kind, reason ->
+            _ = close_io_silent(io)
+            _ = File.rm(tmp)
+            {:error, {:token_store_write_failed, {kind, reason}}}
+        end
+
+      {:error, reason} ->
+        _ = File.rm(tmp)
+        {:error, {:token_store_write_failed, reason}}
+    end
+  end
+
+  defp ensure_final_mode(path) do
+    case File.chmod(path, 0o600) do
+      :ok ->
+        case File.stat(path) do
+          {:ok, %{mode: mode}} when Bitwise.band(mode, 0o777) == 0o600 ->
+            :ok
+
+          {:ok, _} ->
+            {:error, {:token_store_write_failed, :insecure_mode}}
+
+          {:error, reason} ->
+            {:error, {:token_store_write_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:token_store_write_failed, reason}}
+    end
+  end
+
+  defp close_io_silent(io) do
+    try do
+      :file.close(io)
+    catch
+      _, _ -> :ok
+    end
   end
 
   defp read_json(path) do
@@ -239,7 +525,19 @@ defmodule Arbor.LLM.OAuth do
 
   # ── refresh: mint an access_token from a refresh_token (form-encoded OAuth token endpoint) ──
 
-  defp refresh(:openai, config, refresh_token) do
+  # Test seam: Application env `:oauth_refresh_fun` (arity 3) replaces network refresh.
+  # Production never sets this; public access_token/1 behavior is unchanged when unset.
+  defp refresh(key, config, refresh_token) do
+    case Application.get_env(:arbor_llm, :oauth_refresh_fun) do
+      fun when is_function(fun, 3) ->
+        fun.(key, config, refresh_token)
+
+      _ ->
+        do_refresh(key, config, refresh_token)
+    end
+  end
+
+  defp do_refresh(:openai, config, refresh_token) do
     post_token(config.refresh_url, %{
       "grant_type" => "refresh_token",
       "refresh_token" => refresh_token,
@@ -247,7 +545,7 @@ defmodule Arbor.LLM.OAuth do
     })
   end
 
-  defp refresh(:xai, config, refresh_token) do
+  defp do_refresh(:xai, config, refresh_token) do
     with {:ok, token_endpoint} <- xai_token_endpoint(config.discovery_url) do
       post_token(token_endpoint, %{
         "grant_type" => "refresh_token",
