@@ -142,6 +142,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       continuity parameters to that exact normalized plan.
     * `:rework_max_cycles` — required integer from `0` through `2`, bound to the
       normalized plan. Every shared-total rework gate must use this threshold.
+    * `:validation_timeout_ms` — required positive integer derived from the
+      normalized plan and reviewed profile ceiling. Validation nodes must bind
+      this exact value.
   """
   @spec validate(Graph.t(), policy(), keyword()) :: :ok | {:error, validate_error()}
   def validate(graph, policy, opts \\ [])
@@ -152,6 +155,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {:ok, review_profile} <- normalize_review_profile(opts),
          {:ok, worker_continuity} <- normalize_worker_continuity(opts),
          {:ok, rework_max_cycles} <- normalize_rework_max_cycles(opts),
+         {:ok, validation_timeout_ms} <- normalize_validation_timeout_ms(opts),
          :ok <- require_compiled(graph) do
       errors =
         []
@@ -166,7 +170,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_worker_recovery_bindings(graph, policy, worker_continuity)
         |> check_review_convergence_bindings(graph, policy, rework_max_cycles)
         |> check_workspace_cleanup_topology(graph)
-        |> check_profile_bindings(graph, policy, review_profile)
+        |> check_profile_bindings(graph, policy, review_profile, validation_timeout_ms)
         |> check_reachability_and_dominance(graph, policy, review_profile)
         |> Enum.sort_by(&error_sort_key/1)
 
@@ -772,6 +776,19 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
       {:ok, other} ->
         {:error, {:invalid_semantic_policy, {:invalid_rework_max_cycles, other}}}
+    end
+  end
+
+  defp normalize_validation_timeout_ms(opts) do
+    case Keyword.fetch(opts, :validation_timeout_ms) do
+      {:ok, timeout_ms} when is_integer(timeout_ms) and timeout_ms > 0 ->
+        {:ok, timeout_ms}
+
+      :error ->
+        {:error, {:invalid_semantic_policy, :missing_validation_timeout_ms}}
+
+      {:ok, other} ->
+        {:error, {:invalid_semantic_policy, {:invalid_validation_timeout_ms, other}}}
     end
   end
 
@@ -2588,24 +2605,56 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   # --- profile-specific reviewed bindings ----------------------------------
 
-  defp check_profile_bindings(errors, _graph, %{"validation_profile" => "default"}, _review),
-    do: errors
+  defp check_profile_bindings(
+         errors,
+         graph,
+         %{"validation_profile" => "default"},
+         _review,
+         validation_timeout_ms
+       ) do
+    check_validation_parameters(
+      errors,
+      graph,
+      %{
+        "param.timeout" => validation_timeout_ms,
+        "param.warnings_as_errors" => true
+      },
+      "validation_parameter_violation"
+    )
+  end
+
+  defp check_profile_bindings(
+         errors,
+         graph,
+         %{"validation_profile" => "cross_app"},
+         _review,
+         validation_timeout_ms
+       ) do
+    check_validation_parameters(
+      errors,
+      graph,
+      %{"param.timeout" => validation_timeout_ms},
+      "validation_parameter_violation"
+    )
+  end
 
   defp check_profile_bindings(
          errors,
          graph,
          %{"validation_profile" => "security_regression"},
-         review_profile
+         review_profile,
+         validation_timeout_ms
        ) do
     errors
     |> reject_security_review_none(review_profile)
     |> check_security_node_bindings(graph)
-    |> check_security_validator_parameters(graph)
+    |> check_security_validator_parameters(graph, validation_timeout_ms)
     |> check_security_protected_writers(graph)
     |> check_security_topology(graph, review_profile)
   end
 
-  defp check_profile_bindings(errors, _graph, _policy, _review_profile), do: errors
+  defp check_profile_bindings(errors, _graph, _policy, _review_profile, _validation_timeout_ms),
+    do: errors
 
   defp reject_security_review_none(errors, "none") do
     [
@@ -2762,7 +2811,16 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_security_validator_parameters(errors, graph) do
+  defp check_security_validator_parameters(errors, graph, validation_timeout_ms) do
+    check_validation_parameters(
+      errors,
+      graph,
+      %{"param.timeout" => validation_timeout_ms},
+      "security_validator_parameter_violation"
+    )
+  end
+
+  defp check_validation_parameters(errors, graph, expected, error_code) do
     case Map.fetch(graph.nodes, "validate") do
       :error ->
         errors
@@ -2776,13 +2834,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           end)
           |> Map.new()
 
-        expected = %{}
-
         if actual == expected do
           errors
         else
           [
-            error("security_validator_parameter_violation", "validate", %{
+            error(error_code, "validate", %{
               "expected" => expected,
               "actual" => actual
             })

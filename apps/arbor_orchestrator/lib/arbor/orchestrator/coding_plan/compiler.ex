@@ -101,6 +101,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     with {:ok, plan} <- normalize_plan(plan),
          {:ok, opts} <- normalize_options(opts),
          {:ok, profile} <- Profiles.fetch_executable(plan.validation_profile),
+         {:ok, validation_timeout_ms} <-
+           Profiles.validation_timeout(profile, plan.budgets["wall_clock_ms"]),
          :ok <- validate_supported_features(plan),
          {:ok, action_catalog} <- resolve_action_catalog(opts),
          {:ok, template_source} <- resolve_template_source(opts),
@@ -109,7 +111,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, plan_fingerprint} <- fingerprint(plan_map, :plan),
          {:ok, template_graph} <- parse_dot(template_source, :template_parse_failed),
          {:ok, generated_graph} <-
-           apply_reviewed_mutations(template_graph, plan, plan_fingerprint, action_catalog),
+           apply_reviewed_mutations(
+             template_graph,
+             plan,
+             validation_timeout_ms,
+             plan_fingerprint,
+             action_catalog
+           ),
          dot_source = DotSerializer.serialize(generated_graph),
          :ok <- SemanticPreflight.validate_source(dot_source),
          {:ok, final_graph} <- parse_dot(dot_source, :generated_dot_parse_failed),
@@ -128,7 +136,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              worker_resume_session_id: plan.worker["resume_session_id"],
              worker_permission_mode: plan.worker["permission_mode"],
              worker_model: plan.worker["model"],
-             rework_max_cycles: plan.rework["max_cycles"]
+             rework_max_cycles: plan.rework["max_cycles"],
+             validation_timeout_ms: validation_timeout_ms
            ),
          graph_hash = sha256(dot_source),
          {:ok, {execution_manifest, execution_manifest_digest}} <-
@@ -381,14 +390,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end
   end
 
-  defp apply_reviewed_mutations(graph, plan, plan_fingerprint, action_catalog) do
+  defp apply_reviewed_mutations(
+         graph,
+         plan,
+         validation_timeout_ms,
+         plan_fingerprint,
+         action_catalog
+       ) do
     with {:ok, graph} <- rewrite_classification(graph, plan.task_class),
          {:ok, graph} <- rewrite_worker_open(graph, plan.worker),
          {:ok, graph} <- rewrite_worker_recovery_open(graph, plan.worker),
          {:ok, graph} <- rewrite_worker_close(graph, plan.worker),
          {:ok, graph} <- rewrite_prompt_budgets(graph),
          {:ok, graph} <- rewrite_rework_budget(graph, plan.rework["max_cycles"]),
-         {:ok, graph} <- rewrite_profile_flow(graph, plan),
+         {:ok, graph} <- rewrite_profile_flow(graph, plan, validation_timeout_ms),
          {:ok, graph} <-
            rewrite_review_route(graph, plan.review_profile, plan.validation_profile),
          :ok <- require_action_node(graph, "review_change", "council_review_change") do
@@ -479,27 +494,36 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end)
   end
 
-  defp rewrite_profile_flow(graph, %Plan{validation_profile: "default"}) do
-    with {:ok, graph} <- rewrite_default_validation(graph) do
-      drop_security_dormant_nodes(graph)
-    end
-  end
-
-  defp rewrite_profile_flow(graph, %Plan{validation_profile: "cross_app"}) do
-    with {:ok, graph} <- rewrite_cross_app_validation(graph) do
+  defp rewrite_profile_flow(
+         graph,
+         %Plan{validation_profile: "default"},
+         validation_timeout_ms
+       ) do
+    with {:ok, graph} <- rewrite_default_validation(graph, validation_timeout_ms) do
       drop_security_dormant_nodes(graph)
     end
   end
 
   defp rewrite_profile_flow(
          graph,
-         %Plan{validation_profile: "security_regression"} = plan
+         %Plan{validation_profile: "cross_app"},
+         validation_timeout_ms
+       ) do
+    with {:ok, graph} <- rewrite_cross_app_validation(graph, validation_timeout_ms) do
+      drop_security_dormant_nodes(graph)
+    end
+  end
+
+  defp rewrite_profile_flow(
+         graph,
+         %Plan{validation_profile: "security_regression"} = plan,
+         validation_timeout_ms
        ) do
     max_cycles = plan.rework["max_cycles"]
 
     with :ok <- validate_security_test_paths(plan.requested_paths),
          {:ok, graph} <- remove_security_dormant_seed_edges(graph),
-         {:ok, graph} <- rewrite_security_validator(graph),
+         {:ok, graph} <- rewrite_security_validator(graph, validation_timeout_ms),
          {:ok, graph} <- rewrite_security_review(graph),
          {:ok, graph} <- rewrite_security_rework_prompt(graph),
          {:ok, graph} <-
@@ -567,36 +591,39 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end
   end
 
-  defp rewrite_default_validation(graph) do
+  defp rewrite_default_validation(graph, timeout) do
     update_node(graph, "validate", fn attrs ->
       with :ok <- require_action_attrs(attrs, "mix_compile") do
         {:ok,
          attrs
          |> Map.put("context_keys", "path,workspace_id")
-         |> Map.put("param.warnings_as_errors", true)}
+         |> Map.put("param.warnings_as_errors", true)
+         |> Map.put("param.timeout", timeout)}
       end
     end)
   end
 
-  defp rewrite_cross_app_validation(graph) do
+  defp rewrite_cross_app_validation(graph, timeout) do
     update_node(graph, "validate", fn attrs ->
       with :ok <- require_action_attrs(attrs, "mix_compile") do
         {:ok,
          attrs
          |> Map.put("action", "coding_cross_app_validate")
          |> Map.put("context_keys", "workspace_id")
+         |> Map.put("param.timeout", timeout)
          |> Map.delete("param.warnings_as_errors")}
       end
     end)
   end
 
-  defp rewrite_security_validator(graph) do
+  defp rewrite_security_validator(graph, timeout) do
     update_node(graph, "validate", fn attrs ->
       with :ok <- require_action_attrs(attrs, "mix_compile") do
         {:ok,
          attrs
          |> Map.put("action", "coding_security_regression_validate")
          |> Map.put("context_keys", "review_attestation_id")
+         |> Map.put("param.timeout", timeout)
          |> Map.delete("param.warnings_as_errors")}
       end
     end)

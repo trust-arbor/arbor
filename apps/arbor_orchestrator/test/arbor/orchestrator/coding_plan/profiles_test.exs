@@ -54,7 +54,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
     test "exposes only reviewed enforceable validation strategies" do
       assert {:ok, default} = Profiles.fetch_executable("default")
-      assert default["validation_strategy"] == %{"action" => "mix_compile"}
+
+      assert default["validation_strategy"] == %{
+               "action" => "mix_compile",
+               "timeout_budget_source" => "budgets.wall_clock_ms",
+               "timeout_max_ms" => 600_000
+             }
 
       assert default["review_strategy"] == %{
                "action" => "council_review_change",
@@ -80,9 +85,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "action" => "coding_security_regression_validate",
                "authority_parameter" => "review_attestation_id",
                "authority_source" => "review.review_attestation_id",
-               "per_revision_timeout_default_ms" => 300_000,
-               "per_revision_timeout_max_ms" => 600_000,
-               "uses_default_timeout" => true,
+               "timeout_budget_source" => "budgets.wall_clock_ms",
+               "timeout_max_ms" => 600_000,
                "two_revision" => true
              }
 
@@ -109,9 +113,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "action" => "coding_cross_app_validate",
                "authority_parameter" => "workspace_id",
                "authority_source" => "workspace_id",
-               "per_check_timeout_default_ms" => 300_000,
-               "per_check_timeout_max_ms" => 600_000,
-               "uses_default_timeout" => true,
+               "timeout_budget_source" => "budgets.wall_clock_ms",
+               "timeout_max_ms" => 600_000,
                "selects_downstream_dependents" => true,
                "runs_xref_graph_evidence" => true,
                "claims_zero_cycles" => false
@@ -122,6 +125,19 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       refute "mix_compile" in cross_app["required_actions"]
       refute "mix_test" in cross_app["required_actions"]
       assert "coding_cross_app_validate" in cross_app["semantic_policy"]["allowed_actions"]
+
+      assert {:ok, 600_000} = Profiles.validation_timeout(cross_app, 900_000)
+      assert {:ok, 120_000} = Profiles.validation_timeout(cross_app, 120_000)
+
+      drifted_source =
+        put_in(
+          cross_app,
+          ["validation_strategy", "timeout_budget_source"],
+          "unreviewed.budget"
+        )
+
+      assert {:error, :invalid_validation_timeout_policy} =
+               Profiles.validation_timeout(drifted_source, 900_000)
 
       for node <- ~w[
             inspect_workspace

@@ -1465,7 +1465,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "template_version" => @template_version,
                 "required_nodes" => @default_required_nodes,
                 "required_actions" => @default_required_actions,
-                "validation_strategy" => %{"action" => "mix_compile"},
+                "validation_strategy" => %{
+                  "action" => "mix_compile",
+                  "timeout_budget_source" => "budgets.wall_clock_ms",
+                  "timeout_max_ms" => 600_000
+                },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
                   @semantic_policy_base
@@ -1486,9 +1490,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "action" => "coding_security_regression_validate",
                   "authority_parameter" => "review_attestation_id",
                   "authority_source" => "review.review_attestation_id",
-                  "per_revision_timeout_default_ms" => 300_000,
-                  "per_revision_timeout_max_ms" => 600_000,
-                  "uses_default_timeout" => true,
+                  "timeout_budget_source" => "budgets.wall_clock_ms",
+                  "timeout_max_ms" => 600_000,
                   "two_revision" => true
                 },
                 "review_strategy" => @binding_council_review,
@@ -1580,9 +1583,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "action" => "coding_cross_app_validate",
                   "authority_parameter" => "workspace_id",
                   "authority_source" => "workspace_id",
-                  "per_check_timeout_default_ms" => 300_000,
-                  "per_check_timeout_max_ms" => 600_000,
-                  "uses_default_timeout" => true,
+                  "timeout_budget_source" => "budgets.wall_clock_ms",
+                  "timeout_max_ms" => 600_000,
                   "selects_downstream_dependents" => true,
                   "runs_xref_graph_evidence" => true,
                   "claims_zero_cycles" => false
@@ -1676,6 +1678,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       end
     end
   end
+
+  @doc "Bound a plan wall-clock budget to the reviewed validation ceiling."
+  @spec validation_timeout(descriptor(), term()) ::
+          {:ok, pos_integer()} | {:error, :invalid_validation_timeout_policy}
+  def validation_timeout(
+        %{
+          "validation_strategy" => %{
+            "timeout_budget_source" => "budgets.wall_clock_ms",
+            "timeout_max_ms" => timeout_max_ms
+          }
+        },
+        wall_clock_ms
+      )
+      when is_integer(timeout_max_ms) and timeout_max_ms > 0 and
+             is_integer(wall_clock_ms) and wall_clock_ms > 0 do
+    {:ok, min(timeout_max_ms, wall_clock_ms)}
+  end
+
+  def validation_timeout(_profile, _wall_clock_ms),
+    do: {:error, :invalid_validation_timeout_policy}
 
   @doc "Verifies that a compiled execution manifest contains reviewed nested actions."
   @spec validate_execution_manifest(descriptor(), map()) ::

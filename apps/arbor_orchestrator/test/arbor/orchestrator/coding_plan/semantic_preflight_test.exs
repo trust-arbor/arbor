@@ -50,6 +50,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert :ok =
              preflight(graph, profile["semantic_policy"], review_profile: "binding")
 
+    wrong_timeout =
+      update_in(graph.nodes["validate"].attrs, &Map.put(&1, "param.timeout", 599_999))
+
+    assert {:error, {:semantic_preflight_failed, timeout_errors}} =
+             preflight(wrong_timeout, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(timeout_errors, &(&1["code"] == "validation_parameter_violation"))
+
     # Structural: skip-review edge removed so review dominates publication.
     refute has_edge?(
              parse!(compilation.dot_source),
@@ -73,6 +81,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              SemanticPreflight.validate(graph, profile["semantic_policy"],
                review_profile: "binding",
                rework_max_cycles: "2"
+             )
+
+    assert {:error, {:invalid_semantic_policy, :missing_validation_timeout_ms}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_max_cycles: 2
              )
   end
 
@@ -379,6 +393,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         graph.nodes["validate"].attrs,
         &Map.put(&1, "param.test_paths", ["test/forged_test.exs"])
       ),
+      update_in(graph.nodes["validate"].attrs, &Map.put(&1, "param.timeout", 599_999)),
       update_in(
         graph.nodes["hoist_review_attestation_id"].attrs,
         &Map.put(&1, "source_key", "forged.review_attestation_id")
@@ -1567,7 +1582,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     SemanticPreflight.validate(
       graph,
       policy,
-      Keyword.put_new(opts, :rework_max_cycles, 2)
+      opts
+      |> Keyword.put_new(:rework_max_cycles, 2)
+      |> Keyword.put_new(:validation_timeout_ms, 600_000)
     )
   end
 

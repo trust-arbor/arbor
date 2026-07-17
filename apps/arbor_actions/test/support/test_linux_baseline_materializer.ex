@@ -29,7 +29,11 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
   @doc false
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
-    Agent.start_link(fn -> %{acquire: :ok, release_failures: 0} end, name: name)
+
+    Agent.start_link(
+      fn -> %{acquire: :ok, release_failures: 0, last_acquire_deadline_ms: nil} end,
+      name: name
+    )
   end
 
   @doc false
@@ -41,7 +45,16 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
   @doc false
   def reset_seams do
     ensure_agent()
-    Agent.update(__MODULE__, fn _ -> %{acquire: :ok, release_failures: 0} end)
+
+    Agent.update(__MODULE__, fn _ ->
+      %{acquire: :ok, release_failures: 0, last_acquire_deadline_ms: nil}
+    end)
+  end
+
+  @doc false
+  def last_acquire_deadline_ms do
+    ensure_agent()
+    Agent.get(__MODULE__, &Map.get(&1, :last_acquire_deadline_ms))
   end
 
   @doc false
@@ -87,6 +100,12 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
   def acquire_linux_dependency_baseline_lease(deadline_ms)
       when is_integer(deadline_ms) and deadline_ms > 0 and deadline_ms <= @max_deadline_ms do
     ensure_agent()
+
+    Agent.update(
+      __MODULE__,
+      &Map.put(&1, :last_acquire_deadline_ms, deadline_ms)
+    )
+
     mode = Agent.get(__MODULE__, &Map.get(&1, :acquire, :ok))
 
     # One-shot seam: clear after read so subsequent acquires are normal.

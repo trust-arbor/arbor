@@ -314,9 +314,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["action"] == "mix_compile"
     assert validate["context_keys"] == "path,workspace_id"
     assert validate["param.warnings_as_errors"] == true
+    assert validate["param.timeout"] == 600_000
   end
 
-  test "security regression compiles exact reviewed-tree bindings with the measured timeout default",
+  test "security regression compiles exact reviewed-tree bindings with a plan-bounded timeout",
        ctx do
     requested_paths = [
       "apps/arbor_shell/test/shell_security_test.exs",
@@ -335,7 +336,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     validate = node_attrs(graph, "validate")
     assert validate["action"] == "coding_security_regression_validate"
     assert validate["context_keys"] == "review_attestation_id"
-    refute Map.has_key?(validate, "param.timeout")
+    assert validate["param.timeout"] == 600_000
     refute Map.has_key?(validate, "param.warnings_as_errors")
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
@@ -452,7 +453,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["action"] == "coding_cross_app_validate"
     assert validate["context_keys"] == "workspace_id"
     refute Map.has_key?(validate, "param.warnings_as_errors")
-    refute Map.has_key?(validate, "param.timeout")
+    assert validate["param.timeout"] == 600_000
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
 
@@ -473,6 +474,19 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert "arbor://action/coding/cross_app/validate" in compilation.execution_manifest[
              "capability_uris"
            ]
+  end
+
+  test "cross_app validation timeout never exceeds the plan wall-clock budget", ctx do
+    plan =
+      plan!(%{
+        "validation_profile" => "cross_app",
+        "budgets" => %{"wall_clock_ms" => 120_000}
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    validate = node_attrs(parse!(compilation.dot_source), "validate")
+
+    assert validate["param.timeout"] == 120_000
   end
 
   test "cross_app human_required review does not weaken review routing", ctx do

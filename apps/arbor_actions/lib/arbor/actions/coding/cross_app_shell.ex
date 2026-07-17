@@ -47,9 +47,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          {:ok, graph} <- Core.build_graph(app_defs),
          {:ok, selection} <- Core.select(changed_files, graph),
          {:ok, checks} <-
-           MixAction.with_validation_resource(input.workspace_id, context, fn resource ->
-             run_checks(worktree_path, selection, input.timeout, resource)
-           end) do
+           MixAction.with_validation_resource(
+             input.workspace_id,
+             context,
+             fn resource ->
+               run_checks(worktree_path, selection, input.timeout, resource)
+             end,
+             timeout: input.timeout
+           ) do
       evidence =
         Core.show(%{
           selection: selection,

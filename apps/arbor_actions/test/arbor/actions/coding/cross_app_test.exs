@@ -5,6 +5,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
   alias Arbor.Actions.Coding.CrossApp.Validate
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.TestLinuxBaselineMaterializer
 
   @moduletag :slow
 
@@ -145,6 +146,31 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     # Does not claim zero-cycle validation.
     refute Map.has_key?(result, :cycles)
     refute Map.has_key?(result, "cycles")
+  end
+
+  test "forwards the validated timeout to dependency resource setup", %{tmp_dir: tmp_dir} do
+    TestLinuxBaselineMaterializer.reset_seams()
+    fixture = leased_umbrella(tmp_dir)
+
+    File.write!(Path.join(fixture.lease.worktree_path, "apps/alpha/lib/alpha.ex"), """
+    defmodule Alpha do
+      def value, do: 1
+      def timeout_probe, do: :ok
+    end
+    """)
+
+    assert {:ok, result} =
+             Validate.run(
+               %{workspace_id: fixture.lease.workspace_id, timeout: 500_000},
+               fixture.context
+             )
+
+    assert result.passed
+
+    setup_budget = TestLinuxBaselineMaterializer.last_acquire_deadline_ms()
+    assert is_integer(setup_budget)
+    assert setup_budget > 450_000
+    assert setup_budget <= 500_000
   end
 
   test "compile failure skips xref and tests and returns passed false", %{tmp_dir: tmp_dir} do
