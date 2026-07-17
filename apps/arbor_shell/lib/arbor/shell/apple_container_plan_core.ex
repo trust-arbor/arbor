@@ -422,9 +422,13 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @doc """
   Normalize a resource-profile value against the closed Shell-owned allowlist.
 
-  Total: returns `{:ok, profile}` for `:standard` | `:intensive`, otherwise
-  `{:error, :invalid_resource_profile}` — never raises. Strings, maps, integers,
-  and unknown atoms all fail closed.
+  Request-time contract: returns `{:ok, profile}` for the admitted atoms
+  `:standard` | `:intensive` only. Strings, maps, integers, and unknown atoms
+  all fail closed with `{:error, :invalid_resource_profile}` — never raises.
+
+  For reconstructed durable / JSON-clean plans that re-admit serialized
+  `"standard"` / `"intensive"` strings, use `normalize_durable_resource_profile/1`.
+  Do not broaden this function.
   """
   @spec normalize_resource_profile(term()) ::
           {:ok, :standard | :intensive} | {:error, :invalid_resource_profile}
@@ -437,6 +441,34 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   end
 
   def normalize_resource_profile(_other), do: {:error, :invalid_resource_profile}
+
+  @doc """
+  Normalize a durable / serialized resource-profile value.
+
+  Closed allowlist of:
+    * atoms `:standard` | `:intensive` (same as request-time)
+    * their JSON-clean string forms `"standard"` | `"intensive"` (from `show/1`)
+
+  Everything else — including other strings, maps, integers, and unknown atoms —
+  fails closed with `{:error, :invalid_resource_profile}`. Pure and total: never
+  raises and never invents additional profiles.
+
+  Request-time plan construction must continue to use
+  `normalize_resource_profile/1` (atoms only). Workers and drain coordinators
+  re-admitting reconstructed plan maps must use this durable normalizer so a
+  serialized plan can safely re-enter timeout validation without duplicated
+  string conversion logic.
+  """
+  @spec normalize_durable_resource_profile(term()) ::
+          {:ok, :standard | :intensive} | {:error, :invalid_resource_profile}
+  def normalize_durable_resource_profile(profile) when is_atom(profile) do
+    normalize_resource_profile(profile)
+  end
+
+  def normalize_durable_resource_profile("standard"), do: {:ok, :standard}
+  def normalize_durable_resource_profile("intensive"), do: {:ok, :intensive}
+
+  def normalize_durable_resource_profile(_other), do: {:error, :invalid_resource_profile}
 
   @doc """
   Fixed resource limits for a closed profile atom.

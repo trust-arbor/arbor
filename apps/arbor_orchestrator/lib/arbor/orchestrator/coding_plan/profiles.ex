@@ -17,7 +17,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @spawn_capable_intensive_max_timeout_ms (case Arbor.Shell.spawn_capable_max_timeout_ms(
                                                   :intensive
                                                 ) do
-                                             {:ok, ms} -> ms
+                                             {:ok, ms} when is_integer(ms) and ms > 0 ->
+                                               ms
+
+                                             other ->
+                                               raise CompileError,
+                                                 description:
+                                                   "coding-plan intensive spawn-capable ceiling requires a positive Shell intensive bound; got #{inspect(other)}"
                                            end)
   # Reviewed aggregate sequential test-stage ceiling for cross_app only.
   # Equals the intensive Shell ceiling so one argv-safe batch can consume the

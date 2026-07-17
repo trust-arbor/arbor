@@ -1409,11 +1409,37 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert {:error, :invalid_resource_profile} =
                AppleContainerPlanCore.normalize_resource_profile(:turbo)
 
+      # Request-time contract remains atom-only; strings fail closed.
       assert {:error, :invalid_resource_profile} =
                AppleContainerPlanCore.normalize_resource_profile("standard")
 
       assert {:error, :invalid_resource_profile} =
                AppleContainerPlanCore.normalize_resource_profile(%{cpus: "4"})
+
+      # Durable re-admission admits atoms and the exact JSON-clean show/1 forms.
+      assert {:ok, :standard} =
+               AppleContainerPlanCore.normalize_durable_resource_profile(:standard)
+
+      assert {:ok, :intensive} =
+               AppleContainerPlanCore.normalize_durable_resource_profile(:intensive)
+
+      assert {:ok, :standard} =
+               AppleContainerPlanCore.normalize_durable_resource_profile("standard")
+
+      assert {:ok, :intensive} =
+               AppleContainerPlanCore.normalize_durable_resource_profile("intensive")
+
+      assert {:error, :invalid_resource_profile} =
+               AppleContainerPlanCore.normalize_durable_resource_profile(:turbo)
+
+      assert {:error, :invalid_resource_profile} =
+               AppleContainerPlanCore.normalize_durable_resource_profile("turbo")
+
+      assert {:error, :invalid_resource_profile} =
+               AppleContainerPlanCore.normalize_durable_resource_profile("Standard")
+
+      assert {:error, :invalid_resource_profile} =
+               AppleContainerPlanCore.normalize_durable_resource_profile(%{cpus: "4"})
 
       assert {:ok, %{cpus: "1", memory: "2G"}} =
                AppleContainerPlanCore.resource_limits_for(:standard)

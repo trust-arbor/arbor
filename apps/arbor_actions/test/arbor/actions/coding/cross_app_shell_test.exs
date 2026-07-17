@@ -562,6 +562,71 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _, _, _}
   end
 
+  test "operation timeout above 600000 reaches Mix execution with resource_profile intensive", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+    resource = %{id: "validation-resource-intensive-timeout"}
+    standard_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
+    assert standard_ceiling == 600_000
+    assert {:ok, intensive_ceiling} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
+    assert intensive_ceiling == 1_200_000
+    # Above standard Shell ceiling, within intensive cross_app action ceiling.
+    operation_timeout = standard_ceiling + 1
+    assert operation_timeout == 600_001
+    assert operation_timeout <= Core.maximum_timeout()
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn path, args, opts ->
+      send(parent, {:mix_invocation, path, args, opts})
+
+      {:ok,
+       %{
+         exit_code: 0,
+         stdout: "ok #{Enum.join(args, " ")}",
+         stderr: "",
+         timed_out: false
+       }}
+    end)
+
+    assert {:ok, checks} =
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               operation_timeout,
+               intensive_ceiling,
+               resource
+             )
+
+    assert checks.compile["passed"]
+    assert checks.xref["passed"]
+    assert checks.test_compile["passed"]
+    assert checks.test["passed"]
+
+    # Last-mile: every contained Mix stage carries the above-standard timeout
+    # and the system-owned intensive resource profile (not caller-selectable).
+    assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], dev_opts}
+    assert Keyword.get(dev_opts, :timeout) == operation_timeout
+    assert Keyword.get(dev_opts, :resource_profile) == :intensive
+
+    assert_receive {:mix_invocation, ^worktree, ["xref", "graph"], xref_opts}
+    assert Keyword.get(xref_opts, :timeout) == operation_timeout
+    assert Keyword.get(xref_opts, :resource_profile) == :intensive
+
+    assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], test_opts}
+    assert Keyword.get(test_opts, :timeout) == operation_timeout
+    assert Keyword.get(test_opts, :resource_profile) == :intensive
+    assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
+
+    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test/alpha_test.exs"],
+                    test_run_opts}
+
+    assert Keyword.get(test_run_opts, :timeout) == operation_timeout
+    assert Keyword.get(test_run_opts, :resource_profile) == :intensive
+
+    refute_received {:mix_invocation, _, _, _}
+  end
+
   test "test-stage deadline starts only after successful MIX_ENV=test compile", %{
     worktree: worktree
   } do

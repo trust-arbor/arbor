@@ -1182,6 +1182,54 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
                  {:start_unit, %{intensive_spec | timeout_ms: intensive_ceiling + 1}, :executable,
                   "exec-coord-intensive-oversize", make_ref()}
                )
+
+      # JSON-clean serialized profile re-admits intensive ceiling without duplicate conversion.
+      # unit_name stays atom-keyed (admission identity); only resource_profile is string form.
+      serialized_intensive_spec = %{
+        plan: %{"resource_profile" => "intensive", unit_name: @unit_name},
+        timeout_ms: intensive_ceiling,
+        max_output_bytes: 8_192
+      }
+
+      :ok = FakeJournal.reset(entries: [])
+      :ok = FakeWorker.reset(start_result: :spawn_worker)
+      :ok = SharedTrace.reset()
+      :ok = FakeClock.reset(5_000_000)
+
+      assert {:ok, serialized_worker} =
+               GenServer.call(
+                 pid,
+                 {:start_unit, serialized_intensive_spec, :executable,
+                  "exec-coord-serialized-intensive", make_ref()}
+               )
+
+      assert is_pid(serialized_worker)
+
+      assert SharedTrace.events() == [
+               :clock_monotonic,
+               {:journal_reserve, @unit_name, "exec-coord-serialized-intensive"},
+               {:worker_start, "exec-coord-serialized-intensive", 5_000_000 + intensive_ceiling}
+             ]
+
+      # Serialized standard still rejects above the historical ceiling.
+      serialized_standard_over = %{
+        plan: %{"resource_profile" => "standard", unit_name: @unit_name},
+        timeout_ms: ceiling + 1,
+        max_output_bytes: 8_192
+      }
+
+      :ok = SharedTrace.reset()
+      :ok = FakeJournal.reset(entries: [])
+
+      assert {:error, :invalid_execution_spec} =
+               GenServer.call(
+                 pid,
+                 {:start_unit, serialized_standard_over, :executable,
+                  "exec-coord-serialized-standard-oversize", make_ref()}
+               )
+
+      assert SharedTrace.events() == []
+      assert FakeJournal.events() == []
     end
 
     test "definite start failure completes the exact row", %{holder: holder} do

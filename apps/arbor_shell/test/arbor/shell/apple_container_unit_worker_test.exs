@@ -1371,6 +1371,109 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       assert unit_child_pids() == []
     end
 
+    test "profile-aware timeout: standard rejects above 600000; intensive admits 1200000 including JSON form",
+         %{
+           executable: executable
+         } do
+      before = unit_child_count()
+      start_ref = make_ref()
+      standard_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
+      assert standard_ceiling == 600_000
+      assert {:ok, intensive_ceiling} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
+      assert intensive_ceiling == 1_200_000
+
+      # Standard atom profile rejects one above the historical 600_000 ceiling.
+      standard_over = %{
+        plan: %{unit_name: @name, resource_profile: :standard},
+        timeout_ms: standard_ceiling + 1,
+        max_output_bytes: 8_192
+      }
+
+      assert {:error, :invalid_execution_spec} =
+               Worker.start_under_coordinator(
+                 standard_over,
+                 executable,
+                 "exec_standard_oversize",
+                 start_ref,
+                 self()
+               )
+
+      # Standard ceiling still admits under :standard (then durable gate).
+      standard_ok = %{standard_over | timeout_ms: standard_ceiling}
+
+      assert {:error, :durable_unit_admission_required} =
+               Worker.start_under_coordinator(
+                 standard_ok,
+                 executable,
+                 "exec_standard_ok",
+                 start_ref,
+                 self()
+               )
+
+      # Intensive atom admits the intensive ceiling (1_200_000).
+      intensive_ok = %{
+        plan: %{unit_name: @name, resource_profile: :intensive},
+        timeout_ms: intensive_ceiling,
+        max_output_bytes: 8_192
+      }
+
+      assert {:error, :durable_unit_admission_required} =
+               Worker.start_under_coordinator(
+                 intensive_ok,
+                 executable,
+                 "exec_intensive_ok",
+                 start_ref,
+                 self()
+               )
+
+      # JSON-clean serialized profile re-admits the intensive ceiling safely.
+      serialized_intensive = %{
+        plan: %{"unit_name" => @name, "resource_profile" => "intensive"},
+        timeout_ms: intensive_ceiling,
+        max_output_bytes: 8_192
+      }
+
+      assert {:error, :durable_unit_admission_required} =
+               Worker.start_under_coordinator(
+                 serialized_intensive,
+                 executable,
+                 "exec_serialized_intensive",
+                 start_ref,
+                 self()
+               )
+
+      # JSON-clean standard still rejects above 600_000 (no silent upgrade).
+      serialized_standard_over = %{
+        plan: %{"unit_name" => @name, "resource_profile" => "standard"},
+        timeout_ms: standard_ceiling + 1,
+        max_output_bytes: 8_192
+      }
+
+      assert {:error, :invalid_execution_spec} =
+               Worker.start_under_coordinator(
+                 serialized_standard_over,
+                 executable,
+                 "exec_serialized_standard_oversize",
+                 start_ref,
+                 self()
+               )
+
+      # Intensive still rejects above its own ceiling.
+      intensive_over = %{intensive_ok | timeout_ms: intensive_ceiling + 1}
+
+      assert {:error, :invalid_execution_spec} =
+               Worker.start_under_coordinator(
+                 intensive_over,
+                 executable,
+                 "exec_intensive_oversize",
+                 start_ref,
+                 self()
+               )
+
+      assert unit_child_count() == before
+      assert unit_child_pids() == []
+    end
+
     test "security regression: durable coordinator start rejects non-coordinator callers", %{
       spec: spec,
       executable: executable

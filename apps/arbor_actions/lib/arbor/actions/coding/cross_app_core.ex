@@ -13,13 +13,25 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # stage, so per-operation timeout derives from the intensive spawn-capable
   # ceiling (not the standard 600_000 ms default).
   @maximum_timeout (case Arbor.Shell.spawn_capable_max_timeout_ms(:intensive) do
-                      {:ok, ms} -> ms
+                      {:ok, ms} when is_integer(ms) and ms > 0 ->
+                        ms
+
+                      other ->
+                        raise CompileError,
+                          description:
+                            "cross_app maximum_timeout requires a positive Shell intensive spawn-capable ceiling; got #{inspect(other)}"
                     end)
   # Aggregate sequential test-stage ceiling may equal the intensive per-process
   # Shell bound; both are reviewed for cross_app and fail closed above 1_200_000.
   @default_test_stage_timeout 300_000
   @maximum_test_stage_timeout (case Arbor.Shell.spawn_capable_max_timeout_ms(:intensive) do
-                                 {:ok, ms} -> ms
+                                 {:ok, ms} when is_integer(ms) and ms > 0 ->
+                                   ms
+
+                                 other ->
+                                   raise CompileError,
+                                     description:
+                                       "cross_app maximum_test_stage_timeout requires a positive Shell intensive spawn-capable ceiling; got #{inspect(other)}"
                                end)
   @allowed_param_keys [:workspace_id, :timeout, :test_stage_timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)

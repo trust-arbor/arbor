@@ -1319,10 +1319,11 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   defp fetch_spec_resource_profile(plan) when is_map(plan) do
     case {Map.fetch(plan, :resource_profile), Map.fetch(plan, "resource_profile")} do
       {{:ok, profile}, :error} ->
-        AppleContainerPlanCore.normalize_resource_profile(profile)
+        # Durable normalizer: admits atoms and JSON-clean "standard"/"intensive".
+        AppleContainerPlanCore.normalize_durable_resource_profile(profile)
 
       {:error, {:ok, profile}} ->
-        AppleContainerPlanCore.normalize_resource_profile(profile)
+        AppleContainerPlanCore.normalize_durable_resource_profile(profile)
 
       {:error, :error} ->
         # Legacy fixtures/plans omit the field → standard capacity + ceiling.
