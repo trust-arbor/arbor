@@ -1632,8 +1632,20 @@ digraph CodingChangeV1 {
     output_key="approval_note"
   ]
 
+  // Owner-derived: snapshot the inspected candidate HEAD before the worker
+  // rework turn. coding_reviewed_commit rework returns no commit_hash, so use
+  // head_commit (from inspect), never worker output. Enables dirty rework on a
+  // clean self-committed candidate without treating it as ambiguous mixed mode.
+  snapshot_operator_prior_commit [
+    type="transform",
+    transform="identity",
+    source_key="head_commit",
+    output_key="prior_commit"
+  ]
+
   hoist_approval_request_id_rework -> hoist_approval_note_rework
-  hoist_approval_note_rework -> check_operator_rework_category_budget
+  hoist_approval_note_rework -> snapshot_operator_prior_commit
+  snapshot_operator_prior_commit -> check_operator_rework_category_budget
 
   check_operator_rework_category_budget -> legacy_status_operator_approval_rework [condition="context.operator_rework_count>=1"]
   check_operator_rework_category_budget -> check_operator_rework_total_budget [condition="context.operator_rework_count<1"]

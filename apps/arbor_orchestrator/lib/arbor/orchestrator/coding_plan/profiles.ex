@@ -115,6 +115,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     route_review
                     route_success_workspace_retention
                     status_approval_denied
+                    snapshot_operator_prior_commit
                     snapshot_review_prior_candidate_commit
                     snapshot_review_prior_commit
                     acp_session_status
@@ -878,6 +879,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "expression" => "validation",
         "output_key" => "rework_kind"
       }
+    },
+    %{
+      "node_id" => "snapshot_operator_prior_commit",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "head_commit",
+        "output_key" => "prior_commit"
+      }
     }
   ]
 
@@ -1158,7 +1168,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     ],
     ["build_operator_rework_prompt", "capture_pre_turn_workspace", nil],
     ["build_review_rework_prompt", "capture_pre_turn_workspace", nil],
-    ["build_validation_rework_prompt", "capture_pre_turn_workspace", nil]
+    ["build_validation_rework_prompt", "capture_pre_turn_workspace", nil],
+    ["hoist_approval_note_rework", "snapshot_operator_prior_commit", nil],
+    ["snapshot_operator_prior_commit", "check_operator_rework_category_budget", nil]
   ]
 
   @review_convergence_edges [
@@ -1252,7 +1264,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "finding_ledger" => ["hoist_review_finding_ledger", "init_finding_ledger"],
       "operator_rework_count" => ["inc_operator_rework_count", "init_operator_rework_count"],
       "prior_candidate_commit" => ["snapshot_review_prior_candidate_commit"],
-      "prior_commit" => ["snapshot_review_prior_commit"],
+      "prior_commit" => ["snapshot_operator_prior_commit", "snapshot_review_prior_commit"],
       "review_rework_count" => ["inc_review_rework_count", "init_review_rework_count"],
       "review_defaults" => ["init_review_defaults"],
       "review_cycle" => ["hoist_review_cycle", "inc_review_cycle", "init_review_cycle"],
@@ -1331,7 +1343,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "snapshot_review_prior_candidate_commit",
         "snapshot_validation_prior_candidate_commit"
       ],
-      "prior_commit" => ["snapshot_review_prior_commit", "snapshot_validation_prior_commit"],
+      "prior_commit" => [
+        "snapshot_operator_prior_commit",
+        "snapshot_review_prior_commit",
+        "snapshot_validation_prior_commit"
+      ],
       "review_rework_count" => ["inc_review_rework_count", "init_review_rework_count"],
       "review_defaults" => ["init_review_defaults"],
       "review_cycle" => [

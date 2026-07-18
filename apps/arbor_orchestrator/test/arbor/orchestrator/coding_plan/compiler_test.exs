@@ -153,6 +153,29 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert edge_target(graph, "hoist_workspace_fingerprint", nil) == "route_turn_progress"
   end
 
+  test "security regression: operator rework owner-snapshots inspected head into prior_commit",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = parse!(compilation.dot_source)
+
+    snapshot = node_attrs(graph, "snapshot_operator_prior_commit")
+    assert snapshot["type"] == "transform"
+    assert snapshot["transform"] == "identity"
+    # Owner-derived inspected candidate HEAD — never commit_hash (empty on rework)
+    # and never worker output.
+    assert snapshot["source_key"] == "head_commit"
+    assert snapshot["output_key"] == "prior_commit"
+
+    assert edge_target(graph, "hoist_approval_note_rework", nil) ==
+             "snapshot_operator_prior_commit"
+
+    assert edge_target(graph, "snapshot_operator_prior_commit", nil) ==
+             "check_operator_rework_category_budget"
+
+    # Rework path still returns through a fresh coding_reviewed_commit gate.
+    assert node_attrs(graph, "commit_change")["context_keys"] =~ "prior_commit"
+  end
+
   test "security regression: commit-before-validate profile omits upstream tree; fingerprint still required",
        ctx do
     plan =

@@ -598,6 +598,68 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     assert {:ok, ^advanced_head} = git_head(worktree)
   end
 
+  test "security regression: dirty rework after operator rework admits inspected prior head under lease" do
+    # Simulates the post-operator-rework continuity invariant: graph snapshotted
+    # head_commit into prior_commit before the worker rework turn. A clean
+    # self-committed candidate (HEAD advanced from base) with residual dirty
+    # edits is then admitted; without prior it remains rejected.
+    {repo, _head} = init_clean_repo!()
+    agent_id = unique_agent("op_rework_prior")
+    task_id = unique_task("op_rework_prior")
+    lease = acquire_linked_worktree!(repo, task_id, agent_id)
+    worktree = lease.worktree_path
+
+    # Clean self-commit advances HEAD past lease base (the adoption case).
+    File.write!(Path.join(worktree, "self.txt"), "self-committed candidate\n")
+
+    assert {_, 0} =
+             System.cmd("git", ["-C", worktree, "add", "self.txt"], stderr_to_stdout: true)
+
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", worktree, "commit", "-m", "self commit candidate"],
+               stderr_to_stdout: true
+             )
+
+    {:ok, inspected_head} = git_head(worktree)
+    assert inspected_head != lease.base_commit
+
+    # Worker then leaves dirty residual edits on that inspected HEAD.
+    File.write!(Path.join(worktree, "rework_dirt.txt"), "operator rework dirt\n")
+
+    grant_git_commit!(agent_id)
+    context = build_context(agent_id, build_signer(agent_id)) |> Map.put(:task_id, task_id)
+
+    # Without owner-snapshotted prior: false mixed-mode rejection.
+    assert {:error, denied} =
+             ReviewedCommit.run(
+               dirty_params(worktree, inspected_head)
+               |> Map.put(:workspace_id, lease.workspace_id),
+               context
+             )
+
+    assert denied =~ "ambiguous dirty worktree"
+
+    # With owner-snapshotted prior (= inspected head_commit): admitted.
+    params =
+      dirty_params(worktree, inspected_head)
+      |> Map.put(:workspace_id, lease.workspace_id)
+      |> Map.put(:prior_commit, inspected_head)
+
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    request = await_pending_request(agent_id, 250)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 10_000)
+    assert payload["interaction_outcome"] == ""
+    assert payload["commit_hash"] != inspected_head
+  end
+
   test "security regression: dirty rework on trusted prior pipeline commit succeeds under lease" do
     {repo, _head} = init_clean_repo!()
     agent_id = unique_agent("prior_rework")

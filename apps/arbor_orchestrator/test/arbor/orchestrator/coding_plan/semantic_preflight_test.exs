@@ -937,8 +937,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     bypassed =
       inject_edge(
         ctx.template_source,
-        "hoist_approval_note_rework -> check_operator_rework_category_budget",
-        "hoist_approval_note_rework -> inc_operator_total_rework_count [condition=\"context.bypass_operator_budget=true\"]"
+        "snapshot_operator_prior_commit -> check_operator_rework_category_budget",
+        "snapshot_operator_prior_commit -> inc_operator_total_rework_count [condition=\"context.bypass_operator_budget=true\"]"
       )
 
     assert_semantic_error(
