@@ -257,9 +257,13 @@ defmodule Arbor.Commands.Fallback do
   # `/fallback set` takes a semicolon-separated list of entries. Each
   # entry is its own comma-separated key=value list (same shape as the
   # `--fallback` flag in `mix arbor.doctor`).
+  #
+  # Split without trim: true so empty segments from leading, trailing, or
+  # doubled semicolons are preserved and rejected rather than silently
+  # dropped before validation (mirrors comma-component handling in parse_entry/1).
   defp parse_entries(str) do
     str
-    |> String.split(";", trim: true)
+    |> String.split(";")
     |> Enum.reduce_while({:ok, []}, fn entry_str, {:ok, acc} ->
       case parse_entry(entry_str) do
         {:ok, entry} -> {:cont, {:ok, acc ++ [entry]}}

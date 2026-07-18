@@ -272,6 +272,51 @@ defmodule Arbor.Commands.FallbackTest do
       refute Keyword.has_key?(effects, :fallback_chain_changed)
       assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
     end
+
+    test "doubled semicolons reject empty segment without applying chain change" do
+      initial = [%{model: "keep-me"}]
+      pid = start_fake_session(initial)
+
+      assert {:ok, %Result{text: text, type: :error, action: nil, effects: effects}} =
+               Fallback.execute(
+                 "set runtime=acp ;; model=claude-sonnet-4-6",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "empty entry"
+      assert effects == []
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
+    end
+
+    test "leading semicolon rejects empty segment without applying chain change" do
+      initial = [%{runtime: :acp}]
+      pid = start_fake_session(initial)
+
+      assert {:ok, %Result{text: text, type: :error, action: nil, effects: effects}} =
+               Fallback.execute(
+                 "set ;model=claude-sonnet-4-6",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "empty entry"
+      assert effects == []
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
+    end
+
+    test "trailing semicolon rejects empty segment without applying chain change" do
+      initial = [%{provider: :openai}]
+      pid = start_fake_session(initial)
+
+      assert {:ok, %Result{text: text, type: :error, action: nil, effects: effects}} =
+               Fallback.execute(
+                 "set runtime=acp;",
+                 ctx(agent_id: "x", session_pid: pid)
+               )
+
+      assert text =~ "empty entry"
+      assert effects == []
+      assert {:ok, ^initial} = GenServer.call(pid, :get_fallback_chain)
+    end
   end
 
   describe "execute/2 — add" do
