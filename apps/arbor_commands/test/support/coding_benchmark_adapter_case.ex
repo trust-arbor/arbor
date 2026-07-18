@@ -75,9 +75,17 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
           production_scenario!: 1,
           production_scenario!: 2,
           row: 2,
+          assert_optional_artifact_accepted: 1,
+          assert_optional_artifact_rejected: 1,
+          assert_pipeline_artifact_descriptors_accepted: 1,
+          assert_pipeline_artifact_descriptors_rejected: 1,
+          baseline_pipeline_artifact_descriptors: 0,
+          baseline_pipeline_artifact_descriptors: 1,
           run_production_artifact_case: 1,
           run_production_scenario: 1,
           run_production_scenario: 2,
+          synthetic_transcript_descriptor: 0,
+          synthetic_transcript_descriptor: 1,
           temp_directory!: 1,
           valid_transcript_descriptor: 1
         ]
@@ -917,6 +925,94 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
 
     assert {:ok, report} = run_production_scenario(scenario)
     report
+  end
+
+  @doc false
+  def assert_optional_artifact_accepted(transform) when is_function(transform, 2) do
+    report = run_production_artifact_case(transform)
+    verification = row(report, "pipeline")["artifact_hash_verification"]
+
+    assert verification["graph_hash_verified"] == true
+    assert verification["status"] == "passed"
+    assert report["summary"]["equivalent_pairs"] == 1
+    assert hd(report["pairs"])["comparison"]["status"] == "equivalent"
+    report
+  end
+
+  @doc false
+  def assert_optional_artifact_rejected(transform) when is_function(transform, 2) do
+    verification =
+      transform
+      |> run_production_artifact_case()
+      |> row("pipeline")
+      |> Map.fetch!("artifact_hash_verification")
+
+    assert verification["graph_hash_verified"] == false
+    assert verification["status"] == "failed"
+    verification
+  end
+
+  # Descriptor-schema mutations exercise the public production gate without
+  # cloning fixtures or compiling coding plans. Root is a synthetic absolute
+  # path only; no filesystem materialization is required for the envelope check.
+  @descriptor_evidence_root "/tmp/arbor-coding-benchmark-descriptor-evidence"
+
+  @doc false
+  def baseline_pipeline_artifact_descriptors(root \\ @descriptor_evidence_root)
+      when is_binary(root) do
+    %{
+      "coding_plan_path" => Path.join(root, "coding-plan.json"),
+      "coding_pipeline_path" => Path.join(root, "coding-pipeline.dot"),
+      "compile_manifest_path" => Path.join(root, "coding-compile-manifest.json"),
+      "compiler_version" => "test-compiler",
+      "graph_hash" => String.duplicate("a", 64)
+    }
+  end
+
+  @doc false
+  def synthetic_transcript_descriptor(root \\ @descriptor_evidence_root)
+      when is_binary(root) do
+    path = Path.join(root, "acp-transcript.json")
+    content = Jason.encode!(%{"schema_version" => 1})
+
+    %{
+      "path" => path,
+      "sha256" => sha256(content),
+      "byte_size" => byte_size(content),
+      "turns_retained" => 2,
+      "turns_seen" => 3,
+      "turns_omitted" => 1,
+      "turns_truncated" => true,
+      "aggregate_truncated" => false,
+      "schema_version" => 1,
+      "task_id" => "coding-benchmark-pipeline-transcript"
+    }
+  end
+
+  @doc false
+  def assert_pipeline_artifact_descriptors_accepted(transform)
+      when is_function(transform, 2) do
+    root = @descriptor_evidence_root
+    artifacts = transform.(baseline_pipeline_artifact_descriptors(root), root)
+
+    assert {:ok, provenance} = CodingBenchmark.validate_pipeline_artifact_descriptors(artifacts)
+    assert Map.has_key?(provenance, "graph_hash")
+    assert Map.has_key?(provenance, "coding_pipeline_path")
+    refute Map.has_key?(provenance, "workspace_release")
+    refute Map.has_key?(provenance, "acp_transcript")
+    provenance
+  end
+
+  @doc false
+  def assert_pipeline_artifact_descriptors_rejected(transform)
+      when is_function(transform, 2) do
+    root = @descriptor_evidence_root
+    artifacts = transform.(baseline_pipeline_artifact_descriptors(root), root)
+
+    assert {:error, :invalid_artifact_descriptors} =
+             CodingBenchmark.validate_pipeline_artifact_descriptors(artifacts)
+
+    :ok
   end
 
   def valid_transcript_descriptor(root) do

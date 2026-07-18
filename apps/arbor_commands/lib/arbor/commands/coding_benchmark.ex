@@ -200,6 +200,26 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   def run(_manifest, _opts), do: runtime_error("options", "expected_keyword_list")
 
+  @doc """
+  Validate the closed pipeline artifact descriptor envelope used by strict
+  production provenance verification.
+
+  This is the same gate that runs before trusted artifact reads: required
+  provenance keys must be present, only the reviewed key set is admitted, and
+  any optional `workspace_release` / `acp_transcript` descriptors must satisfy
+  their public contracts. Successful validation returns the required provenance
+  subset only; optional evidence is never elevated into authority fields.
+  """
+  @spec validate_pipeline_artifact_descriptors(term()) ::
+          {:ok, json_map()} | {:error, :invalid_artifact_descriptors}
+  def validate_pipeline_artifact_descriptors(artifacts)
+      when is_map(artifacts) and not is_struct(artifacts) do
+    validated_provenance_artifacts(artifacts)
+  end
+
+  def validate_pipeline_artifact_descriptors(_artifacts),
+    do: {:error, :invalid_artifact_descriptors}
+
   defp fixtures(fixtures) when is_list(fixtures) and fixtures != [] do
     if length(fixtures) <= @max_fixtures do
       fixtures

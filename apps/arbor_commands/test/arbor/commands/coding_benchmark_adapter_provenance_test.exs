@@ -30,130 +30,166 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterProvenanceTest do
     assert tampered["status"] == "failed"
   end
 
-  test "known optional artifact evidence does not change provenance authority or parity" do
-    cases = [
-      {"workspace_release",
-       fn artifacts, _root ->
-         Map.put(artifacts, "workspace_release", %{
-           "workspace_release_status" => "retained",
-           "workspace_expires_at" => "2026-07-17T12:00:00Z"
-         })
-       end},
-      {"workspace_release and acp_transcript",
-       fn artifacts, root ->
-         artifacts
-         |> Map.put("workspace_release", %{"workspace_release_status" => "removed"})
-         |> Map.put("acp_transcript", valid_transcript_descriptor(root))
-       end}
-    ]
+  # Descriptor-schema mutations hit the public production gate without cloning
+  # fixtures. One accepted and one rejected full production scenario below
+  # prove the same gate is wired into end-to-end provenance verification.
 
-    for {label, transform} <- cases do
-      report = run_production_artifact_case(transform)
-      verification = row(report, "pipeline")["artifact_hash_verification"]
-
-      assert verification["graph_hash_verified"] == true, label
-      assert verification["status"] == "passed", label
-      assert report["summary"]["equivalent_pairs"] == 1, label
-      assert hd(report["pairs"])["comparison"]["status"] == "equivalent", label
-    end
+  test "known optional artifact evidence: workspace_release is admitted by descriptor gate" do
+    assert_pipeline_artifact_descriptors_accepted(fn artifacts, _root ->
+      Map.put(artifacts, "workspace_release", %{
+        "workspace_release_status" => "retained",
+        "workspace_expires_at" => "2026-07-17T12:00:00Z"
+      })
+    end)
   end
 
-  test "security regression: optional artifact evidence remains closed and bounded" do
-    transcript_mutation = fn mutation ->
-      fn artifacts, root ->
-        descriptor = root |> valid_transcript_descriptor() |> mutation.()
-        Map.put(artifacts, "acp_transcript", descriptor)
-      end
-    end
-
-    cases = [
-      {"unknown top-level artifact",
-       fn artifacts, _root -> Map.put(artifacts, "unexpected_evidence", %{}) end},
-      {"workspace_release unknown field",
-       fn artifacts, _root ->
-         Map.put(artifacts, "workspace_release", %{
-           "workspace_release_status" => "retained",
-           "workspace_id" => "inline-authority"
-         })
-       end},
-      {"workspace_release oversized scalar",
-       fn artifacts, _root ->
-         Map.put(artifacts, "workspace_release", %{
-           "workspace_release_status" => String.duplicate("x", 257)
-         })
-       end},
-      {"workspace_release unknown status",
-       fn artifacts, _root ->
-         Map.put(artifacts, "workspace_release", %{
-           "workspace_release_status" => "pending"
-         })
-       end},
-      {"workspace_release non-ISO workspace_expires_at",
-       fn artifacts, _root ->
-         Map.put(artifacts, "workspace_release", %{
-           "workspace_release_status" => "retained",
-           "workspace_expires_at" => "not-a-timestamp"
-         })
-       end},
-      {"inline transcript turns",
-       transcript_mutation.(fn descriptor -> Map.put(descriptor, "turns", []) end)},
-      {"inline transcript stream",
-       transcript_mutation.(fn descriptor -> Map.put(descriptor, "stream", %{}) end)},
-      {"non-canonical transcript path",
-       transcript_mutation.(fn descriptor ->
-         Map.put(descriptor, "path", Path.join(descriptor["path"], "../transcript.json"))
-       end)},
-      {"uppercase transcript digest",
-       transcript_mutation.(fn descriptor ->
-         Map.update!(descriptor, "sha256", &String.upcase/1)
-       end)},
-      {"oversized transcript",
-       transcript_mutation.(fn descriptor -> Map.put(descriptor, "byte_size", 512_001) end)},
-      {"inconsistent transcript counts",
-       transcript_mutation.(fn descriptor -> Map.put(descriptor, "turns_seen", 4) end)},
-      {"inconsistent transcript truncation",
-       transcript_mutation.(fn descriptor -> Map.put(descriptor, "turns_truncated", false) end)},
-      {"invalid transcript aggregate flag",
-       transcript_mutation.(fn descriptor ->
-         Map.put(descriptor, "aggregate_truncated", "false")
-       end)},
-      {"invalid transcript schema",
-       transcript_mutation.(fn descriptor -> Map.put(descriptor, "schema_version", 2) end)},
-      {"blank transcript task id",
-       transcript_mutation.(fn descriptor -> Map.put(descriptor, "task_id", " ") end)}
-    ]
-
-    for {label, transform} <- cases do
-      verification =
-        transform
-        |> run_production_artifact_case()
-        |> row("pipeline")
-        |> Map.fetch!("artifact_hash_verification")
-
-      assert verification["graph_hash_verified"] == false, label
-      assert verification["status"] == "failed", label
-    end
+  test "known optional artifact evidence: workspace_release and acp_transcript are admitted by descriptor gate" do
+    assert_pipeline_artifact_descriptors_accepted(fn artifacts, root ->
+      artifacts
+      |> Map.put("workspace_release", %{"workspace_release_status" => "removed"})
+      |> Map.put("acp_transcript", synthetic_transcript_descriptor(root))
+    end)
   end
 
-  test "security regression: required provenance cannot be omitted or overridden" do
-    cases = [
-      {"missing graph hash", fn artifacts, _root -> Map.delete(artifacts, "graph_hash") end},
-      {"duplicate graph hash",
-       fn artifacts, _root -> Map.put(artifacts, :graph_hash, String.duplicate("0", 64)) end},
-      {"mismatched graph hash",
-       fn artifacts, _root -> Map.put(artifacts, "graph_hash", String.duplicate("0", 64)) end}
-    ]
+  test "security regression: optional artifact evidence rejects unknown top-level artifact" do
+    assert_pipeline_artifact_descriptors_rejected(fn artifacts, _root ->
+      Map.put(artifacts, "unexpected_evidence", %{})
+    end)
+  end
 
-    for {label, transform} <- cases do
-      verification =
-        transform
-        |> run_production_artifact_case()
-        |> row("pipeline")
-        |> Map.fetch!("artifact_hash_verification")
+  test "security regression: optional artifact evidence rejects workspace_release unknown field" do
+    assert_pipeline_artifact_descriptors_rejected(fn artifacts, _root ->
+      Map.put(artifacts, "workspace_release", %{
+        "workspace_release_status" => "retained",
+        "workspace_id" => "inline-authority"
+      })
+    end)
+  end
 
-      assert verification["graph_hash_verified"] == false, label
-      assert verification["status"] == "failed", label
-    end
+  test "security regression: optional artifact evidence rejects workspace_release oversized scalar" do
+    assert_pipeline_artifact_descriptors_rejected(fn artifacts, _root ->
+      Map.put(artifacts, "workspace_release", %{
+        "workspace_release_status" => String.duplicate("x", 257)
+      })
+    end)
+  end
+
+  test "security regression: optional artifact evidence rejects workspace_release unknown status" do
+    assert_pipeline_artifact_descriptors_rejected(fn artifacts, _root ->
+      Map.put(artifacts, "workspace_release", %{
+        "workspace_release_status" => "pending"
+      })
+    end)
+  end
+
+  test "security regression: optional artifact evidence rejects workspace_release non-ISO workspace_expires_at" do
+    assert_pipeline_artifact_descriptors_rejected(fn artifacts, _root ->
+      Map.put(artifacts, "workspace_release", %{
+        "workspace_release_status" => "retained",
+        "workspace_expires_at" => "not-a-timestamp"
+      })
+    end)
+  end
+
+  test "security regression: optional artifact evidence rejects inline transcript turns" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor -> Map.put(descriptor, "turns", []) end)
+    )
+  end
+
+  test "security regression: optional artifact evidence rejects inline transcript stream" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor -> Map.put(descriptor, "stream", %{}) end)
+    )
+  end
+
+  test "security regression: optional artifact evidence rejects non-canonical transcript path" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor ->
+        Map.put(descriptor, "path", Path.join(descriptor["path"], "../transcript.json"))
+      end)
+    )
+  end
+
+  test "security regression: optional artifact evidence rejects uppercase transcript digest" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor ->
+        Map.update!(descriptor, "sha256", &String.upcase/1)
+      end)
+    )
+  end
+
+  test "security regression: optional artifact evidence rejects oversized transcript" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor -> Map.put(descriptor, "byte_size", 512_001) end)
+    )
+  end
+
+  test "security regression: optional artifact evidence rejects inconsistent transcript counts" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor -> Map.put(descriptor, "turns_seen", 4) end)
+    )
+  end
+
+  test "security regression: optional artifact evidence rejects inconsistent transcript truncation" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor -> Map.put(descriptor, "turns_truncated", false) end)
+    )
+  end
+
+  test "security regression: optional artifact evidence rejects invalid transcript aggregate flag" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor ->
+        Map.put(descriptor, "aggregate_truncated", "false")
+      end)
+    )
+  end
+
+  test "security regression: optional artifact evidence rejects invalid transcript schema" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor -> Map.put(descriptor, "schema_version", 2) end)
+    )
+  end
+
+  test "security regression: optional artifact evidence rejects blank transcript task id" do
+    assert_pipeline_artifact_descriptors_rejected(
+      transcript_mutation(fn descriptor -> Map.put(descriptor, "task_id", " ") end)
+    )
+  end
+
+  test "security regression: required provenance rejects missing graph hash" do
+    assert_pipeline_artifact_descriptors_rejected(fn artifacts, _root ->
+      Map.delete(artifacts, "graph_hash")
+    end)
+  end
+
+  test "security regression: required provenance rejects duplicate graph hash" do
+    assert_pipeline_artifact_descriptors_rejected(fn artifacts, _root ->
+      Map.put(artifacts, :graph_hash, String.duplicate("0", 64))
+    end)
+  end
+
+  test "known optional artifact evidence through production preserves authority and parity" do
+    assert_optional_artifact_accepted(fn artifacts, root ->
+      artifacts
+      |> Map.put("workspace_release", %{
+        "workspace_release_status" => "retained",
+        "workspace_expires_at" => "2026-07-17T12:00:00Z"
+      })
+      |> Map.put("acp_transcript", valid_transcript_descriptor(root))
+    end)
+  end
+
+  test "security regression: invalid optional artifact evidence fails production provenance" do
+    assert_optional_artifact_rejected(fn artifacts, _root ->
+      Map.put(artifacts, "unexpected_evidence", %{})
+    end)
+  end
+
+  test "security regression: mismatched graph hash fails production provenance" do
+    assert_optional_artifact_rejected(fn artifacts, _root ->
+      Map.put(artifacts, "graph_hash", String.duplicate("0", 64))
+    end)
   end
 
   test "provenance artifact swaps are rejected immediately before reads" do
@@ -247,6 +283,13 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterProvenanceTest do
                "reason" => "verifier_timeout:1000",
                "status" => "failed"
              }
+    end
+  end
+
+  defp transcript_mutation(mutation) when is_function(mutation, 1) do
+    fn artifacts, root ->
+      descriptor = root |> synthetic_transcript_descriptor() |> mutation.()
+      Map.put(artifacts, "acp_transcript", descriptor)
     end
   end
 end
