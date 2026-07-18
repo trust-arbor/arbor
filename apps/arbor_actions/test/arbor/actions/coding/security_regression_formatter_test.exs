@@ -37,16 +37,28 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
              Formatter.normalize_runner_argv(["--", "-e", "test/a_test.exs"])
   end
 
-  test "security regression: generated runner strips mix-run -- before artifact write" do
+  test "security regression: generated runner stores owner path before Mix.Task.run; suite_finished never rereads argv" do
     assert {:ok, source} = Formatter.runner_source(@module_name)
 
-    # Both top-level suite launch and suite_finished must strip the separator.
+    # One-time argv parse + strip at script body, then store before Mix.
     assert source =~ "case System.argv() do"
     assert source =~ ~s(["--" | rest] -> rest)
-    assert source =~ "security-regression runner missing artifact path argument"
-    assert source =~ "security-regression runner missing reviewed test paths"
+    assert source =~ "store_artifact_path!(artifact_path)"
+    assert source =~ "Mix.Task.run(\"test\""
 
-    # Must not treat raw System.argv head as the artifact without stripping.
+    # Formatter-owned state holds the path; suite_finished must not touch argv.
+    assert source =~ "artifact_path: artifact_path"
+    assert source =~ "Map.fetch!(state, :artifact_path)"
+    assert source =~ "security-regression runner missing stored artifact path"
+
+    suite_finished =
+      source
+      |> String.split("def handle_cast({:suite_finished")
+      |> Enum.at(1)
+      |> String.split("def handle_cast(_event")
+      |> hd()
+
+    refute suite_finished =~ "System.argv()"
     refute source =~ ~r/\[artifact_path \| _tests\] = System\.argv\(\)/
     refute source =~ ~r/\[artifact_path \| test_paths\] = System\.argv\(\)/
   end

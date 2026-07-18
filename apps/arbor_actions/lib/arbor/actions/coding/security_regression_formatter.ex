@@ -29,9 +29,11 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       mix run --no-start <runner.exs> -- <result.etf> <tests...>
 
   `Mix.Tasks.Run` places everything after the script file into `System.argv/0`,
-  which **includes the leading `--` separator**. Consumers must strip that
-  separator before treating the next token as the owner result path; treating
-  `"--"` as the artifact path writes into the worktree and falsely trips
+  which **includes the leading `--` separator**. The script strips that
+  separator once, stores the owner-issued result path in formatter-owned state
+  **before** `Mix.Task.run/2`, and never rereads `System.argv/0` at
+  `suite_finished` — Mix may replace argv with the selected test paths, which
+  would otherwise overwrite a reviewed test file and falsely trip
   source-identity / workspace-fingerprint checks.
   """
   @spec runner_source(String.t()) :: {:ok, String.t()} | {:error, atom()}
@@ -102,10 +104,35 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
 
       @artifact_tag #{artifact_tag}
       @artifact_version #{artifact_version}
+      @artifact_path_key {__MODULE__, :owner_artifact_path}
+
+      # Capture the owner-issued result path before Mix.Task.run may replace
+      # System.argv with the selected test paths.
+      def store_artifact_path!(path)
+          when is_binary(path) and path != "" and path != "--" and
+                 not String.starts_with?(path, "-") do
+        :persistent_term.put(@artifact_path_key, path)
+        :ok
+      end
+
+      def store_artifact_path!(_path) do
+        raise "security-regression runner missing artifact path argument"
+      end
 
       def init(_opts) do
+        artifact_path =
+          case :persistent_term.get(@artifact_path_key, :missing) do
+            path when is_binary(path) and path != "" and path != "--" and
+                        not String.starts_with?(path, "-") ->
+              path
+
+            _other ->
+              raise "security-regression runner missing stored artifact path"
+          end
+
         {:ok,
          %{
+           artifact_path: artifact_path,
            excluded: 0,
            executed: 0,
            invalid: 0,
@@ -188,24 +215,14 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
 
       def handle_cast({:suite_finished, _times}, state) do
         completed = %{state | suite_completed: true}
-        artifact = {@artifact_tag, @artifact_version, completed}
+        # Counts only in the published artifact — never re-export artifact_path.
+        counts = Map.drop(completed, [:artifact_path])
+        artifact = {@artifact_tag, @artifact_version, counts}
         bytes = :erlang.term_to_binary(artifact, [:deterministic])
 
-        # Mix.Tasks.Run leaves the owner `--` separator in System.argv/0.
-        # Strip it so the next token is the owner result path, not a worktree write.
-        argv =
-          case System.argv() do
-            ["--" | rest] -> rest
-            rest -> rest
-          end
-
-        [artifact_path | _tests] = argv
-
-        if not is_binary(artifact_path) or artifact_path == "" or artifact_path == "--" or
-             String.starts_with?(artifact_path, "-") do
-          raise "security-regression runner missing artifact path argument"
-        end
-
+        # Owner path from formatter-owned state only. Never reread System.argv:
+        # Mix.Task.run("test", ...) may have replaced argv with selected tests.
+        artifact_path = Map.fetch!(state, :artifact_path)
         temporary = artifact_path <> ".tmp"
 
         File.write!(temporary, bytes, [:binary])
@@ -236,8 +253,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       defp failure_from_test?(_failure, _test), do: false
     end
 
-    # Same mix-run argv contract as suite_finished: strip the leading `--`
-    # that Mix.Tasks.Run retains after `mix run --no-start runner.exs -- ...`.
+    # Strip Mix.Tasks.Run's retained `--` once. Store the owner result path in
+    # formatter-owned state before Mix.Task.run can mutate System.argv.
     argv =
       case System.argv() do
         ["--" | rest] -> rest
@@ -254,6 +271,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
     if test_paths == [] do
       raise "security-regression runner missing reviewed test paths"
     end
+
+    #{module_name}.store_artifact_path!(artifact_path)
 
     Mix.Task.run("test", [
       "--formatter",
