@@ -167,6 +167,120 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
     test "security regression: workspace alias populates canonical cwd" do
       assert {:ok, profile} = SessionProfile.from_opts(:claude, workspace: "/tmp/ws")
       assert profile.cwd == Path.expand("/tmp/ws")
+      assert profile.tool_workspace == Path.expand("/tmp/ws")
+      assert profile.workspace_plan == nil
+      assert SessionProfile.session_binding(profile) == [cwd: Path.expand("/tmp/ws")]
+    end
+
+    test "security regression: cwd nil + binary workspace binds alias cwd" do
+      path = "/tmp/ws_nil_cwd_#{System.unique_integer([:positive])}"
+      expected = Path.expand(path)
+
+      assert {:ok, profile} =
+               SessionProfile.from_opts(:claude, cwd: nil, workspace: path)
+
+      assert profile.cwd == expected
+      assert profile.tool_workspace == expected
+      assert profile.workspace_plan == nil
+      assert Keyword.get(SessionProfile.session_binding(profile), :cwd) == expected
+      refute Keyword.has_key?(SessionProfile.session_binding(profile), :workspace)
+    end
+
+    test "security regression: whitespace and relative paths canonicalize once" do
+      rel = "rel_ws_#{System.unique_integer([:positive])}"
+      expected_rel = Path.expand(rel)
+
+      assert {:ok, spaced} =
+               SessionProfile.from_opts(:claude, cwd: "  /tmp/spaced_ws  ")
+
+      assert spaced.cwd == Path.expand("/tmp/spaced_ws")
+      assert Keyword.get(SessionProfile.session_binding(spaced), :cwd) == spaced.cwd
+
+      assert {:ok, relative} = SessionProfile.from_opts(:claude, workspace: "  #{rel}  ")
+      assert relative.cwd == expected_rel
+      assert relative.tool_workspace == expected_rel
+      assert Keyword.get(SessionProfile.session_binding(relative), :cwd) == expected_rel
+    end
+
+    test "security regression: structured directory workspace is accepted and hashed" do
+      path = "/tmp/dir_plan_#{System.unique_integer([:positive])}"
+      expected = Path.expand(path)
+
+      assert {:ok, profile} =
+               SessionProfile.from_opts(:claude,
+                 task_id: "task_dir",
+                 workspace: {:directory, "  #{path}  "}
+               )
+
+      assert profile.cwd == expected
+      assert profile.workspace_plan == {:directory, expected}
+      assert profile.tool_workspace == nil
+
+      binding = SessionProfile.session_binding(profile)
+      assert Keyword.get(binding, :cwd) == expected
+      assert Keyword.get(binding, :workspace) == {:directory, expected}
+
+      assert {:ok, same} =
+               SessionProfile.from_opts(:claude,
+                 task_id: "task_dir",
+                 workspace: {:directory, path}
+               )
+
+      assert SessionProfile.compatible?(profile, same)
+
+      assert {:ok, other_plan} =
+               SessionProfile.from_opts(:claude,
+                 task_id: "task_dir",
+                 workspace: {:directory, path <> "_other"}
+               )
+
+      refute SessionProfile.compatible?(profile, other_plan)
+    end
+
+    test "security regression: distinct structured worktree plans are incompatible" do
+      assert {:ok, a} =
+               SessionProfile.from_opts(:claude,
+                 task_id: "task_wt",
+                 workspace: {:worktree, [branch: "feature-a", base_dir: "/tmp/base_a"]}
+               )
+
+      assert {:ok, b} =
+               SessionProfile.from_opts(:claude,
+                 task_id: "task_wt",
+                 workspace: {:worktree, [branch: "feature-b", base_dir: "/tmp/base_a"]}
+               )
+
+      assert a.workspace_plan ==
+               {:worktree, [base_dir: Path.expand("/tmp/base_a"), branch: "feature-a"]}
+
+      assert a.cwd == nil
+      assert a.tool_workspace == nil
+      refute SessionProfile.compatible?(a, b)
+
+      assert Keyword.get(SessionProfile.session_binding(a), :workspace) == a.workspace_plan
+      refute Keyword.has_key?(SessionProfile.session_binding(a), :cwd)
+    end
+
+    test "security regression: malformed structured workspace plans are rejected" do
+      assert {:error, {:invalid, :workspace, :bad_type}} =
+               SessionProfile.from_opts(:claude, workspace: {:other, "/tmp/x"})
+
+      assert {:error, {:invalid, :workspace, :bad_type}} =
+               SessionProfile.from_opts(:claude, workspace: %{directory: "/tmp/x"})
+
+      assert {:error, {:invalid, :workspace, :unknown_worktree_keys}} =
+               SessionProfile.from_opts(:claude,
+                 workspace: {:worktree, [branch: "ok", extra: true]}
+               )
+
+      assert {:error, {:invalid, :workspace, :bad_worktree_opts}} =
+               SessionProfile.from_opts(:claude, workspace: {:worktree, "not-a-keyword"})
+
+      assert {:error, {:invalid, :workspace, :blank}} =
+               SessionProfile.from_opts(:claude, workspace: {:directory, "   "})
+
+      assert {:error, {:invalid, :workspace, :bad_type}} =
+               SessionProfile.from_opts(:claude, workspace: {:directory, 123})
     end
 
     test "security regression: immutable startup opts are fingerprinted not stored" do

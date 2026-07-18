@@ -41,12 +41,14 @@ per-run managed handle.
 
 **Pool reuse is task-scoped and fail-closed.** Managed checkout includes the
 coding `task_id` in the pool `SessionProfile` together with agent identity,
-canonical cwd/workspace, model, tool modules, trust domain, and a fingerprint
-of immutable startup configuration. The same coding task may reuse a compatible
-local `AcpSession` process. A different task must never inherit a prior task's
-provider conversation, terminal cwd, or ToolServer/MCP endpoint merely because
-an idle pooled process exists. One-shot steering such as `cd NEW_WORKTREE` is
-not a workspace rebind.
+canonical cwd, structured workspace-plan identity (`{:directory, path}` /
+`{:worktree, opts}` when supplied), binary tool-workspace scope, model, tool
+modules, trust domain, and a fingerprint of immutable startup configuration.
+The same coding task may reuse a compatible local `AcpSession` process. A
+different task must never inherit a prior task's provider conversation, terminal
+cwd, workspace plan, or ToolServer/MCP endpoint merely because an idle pooled
+process exists. One-shot steering such as `cd NEW_WORKTREE` is not a workspace
+rebind.
 
 **Cross-task provider continuity is explicit only.** To continue a prior
 provider conversation, set both `resume_provider` and `resume_session_id`. That

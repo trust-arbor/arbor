@@ -13,7 +13,11 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   - `agent_id` — owning Arbor agent ID (`nil` matches only `nil`)
   - `trust_domain` — security boundary; sessions never cross domains
   - `model` — model override bound at session start
-  - `cwd` — canonical workspace/cwd bound at session start
+  - `cwd` — exact canonical path forwarded to `AcpSession` as `:cwd`
+  - `workspace_plan` — normalized structured session workspace for `AcpSession`
+    (`nil`, `{:directory, path}`, or `{:worktree, opts}` only)
+  - `tool_workspace` — binary ToolServer filesystem scope from the pool-only
+    binary `:workspace` alias (`nil` when absent or when workspace is structured)
   - `task_id` — coding task scope; pooled coding checkouts are task-scoped
   - `startup_fingerprint` — full SHA-256 hex digest of immutable startup opts
     (`adapter_opts`, `client_opts`, `capabilities`); raw values are never stored
@@ -23,19 +27,39 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     the full profile is also compatible)
   - `profile_hash` — full SHA-256 hex digest over every immutable reuse boundary
 
+  ## Workspace forms (checkout opts)
+
+  - **Binary** `:workspace` — pool compatibility alias for session `:cwd` (when
+    explicit `:cwd` is absent/`nil`) and ToolServer FS scope. Never forwarded
+    to `AcpSession` as `:workspace`.
+  - **Structured** `{:directory, path}` — session-owned directory plan; path is
+    canonicalized and bound into both `cwd` (when no explicit `:cwd`) and
+    `workspace_plan`.
+  - **Structured** `{:worktree, opts}` — session-owned worktree plan; only
+    `:branch` / `:base_dir` (optional, normalized). Plan identity is hashed;
+    runtime path materialization stays in `AcpSession`.
+  - Explicit non-`nil` `:cwd` always wins over a binary workspace alias for the
+    session cwd binding.
+
   ## Matching Rules
 
   1. Same `affinity_key` returns that session only when profiles are fully
      compatible; incompatible affinity is an explicit conflict, busy affinity
      is an explicit busy error
-  2. Same `profile_hash` (provider, tools, agent, trust, model, cwd, task,
-     startup fingerprint) → eligible for local process reuse
-  3. Different task/cwd/model/agent/trust/startup config → never reuse
+  2. Same `profile_hash` (provider, tools, agent, trust, model, cwd, workspace
+     plan, tool workspace, task, startup fingerprint) → eligible for local
+     process reuse
+  3. Different task/cwd/workspace plan/model/agent/trust/startup config → never reuse
   4. Explicit cross-task provider continuity uses `resume_provider` +
      `resume_session_id` and must mint a fresh local process before loading
      that provider conversation
   5. No match → mint fresh session
   """
+
+  @type workspace_plan ::
+          nil
+          | {:directory, String.t()}
+          | {:worktree, keyword()}
 
   @type t :: %__MODULE__{
           provider: atom(),
@@ -44,6 +68,8 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
           trust_domain: atom() | nil,
           model: String.t() | nil,
           cwd: String.t() | nil,
+          workspace_plan: workspace_plan(),
+          tool_workspace: String.t() | nil,
           task_id: String.t() | nil,
           startup_fingerprint: String.t() | nil,
           name: String.t() | nil,
@@ -58,6 +84,8 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     :trust_domain,
     :model,
     :cwd,
+    :workspace_plan,
+    :tool_workspace,
     :task_id,
     :startup_fingerprint,
     :name,
@@ -133,7 +161,7 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
          {:ok, affinity_key} <-
            validate_optional_id(Keyword.get(opts, :affinity_key), :affinity_key),
          {:ok, model} <- validate_model(Keyword.get(opts, :model)),
-         {:ok, cwd} <- validate_cwd(cwd_value(opts)),
+         {:ok, cwd, workspace_plan, tool_workspace} <- resolve_workspace_scope(opts),
          {:ok, tool_modules} <- validate_tool_modules(Keyword.get(opts, :tool_modules, [])),
          {:ok, trust_domain} <- validate_trust_domain(Keyword.get(opts, :trust_domain)),
          {:ok, tags} <- validate_tags(Keyword.get(opts, :tags, %{})),
@@ -146,6 +174,8 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
           trust_domain: trust_domain,
           model: model,
           cwd: cwd,
+          workspace_plan: workspace_plan,
+          tool_workspace: tool_workspace,
           task_id: task_id,
           name: name,
           tags: tags,
@@ -161,12 +191,17 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
 
   def from_opts(_provider, _opts), do: {:error, :invalid_checkout_opts}
 
-  defp cwd_value(opts) do
-    case Keyword.fetch(opts, :cwd) do
-      {:ok, nil} -> Keyword.get(opts, :workspace)
-      {:ok, cwd} -> cwd
-      :error -> Keyword.get(opts, :workspace)
-    end
+  @doc """
+  Exact session-start binding derived from a validated profile.
+
+  Used by `AcpPool` so spawn never independently re-normalizes raw checkout
+  opts for `:cwd` / structured `:workspace`.
+  """
+  @spec session_binding(t()) :: keyword()
+  def session_binding(%__MODULE__{} = profile) do
+    []
+    |> maybe_put_binding(:cwd, profile.cwd)
+    |> maybe_put_binding(:workspace, profile.workspace_plan)
   end
 
   @doc """
@@ -183,6 +218,8 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
       a.trust_domain == b.trust_domain and
       a.model == b.model and
       a.cwd == b.cwd and
+      a.workspace_plan == b.workspace_plan and
+      a.tool_workspace == b.tool_workspace and
       a.task_id == b.task_id and
       a.startup_fingerprint == b.startup_fingerprint and
       a.tool_modules == b.tool_modules
@@ -246,19 +283,31 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
       |> Enum.sort()
 
     material = {
-      :acp_profile_v1,
+      :acp_profile_v2,
       profile.provider,
       tools,
       profile.agent_id,
       profile.trust_domain,
       profile.model,
       profile.cwd,
+      canonicalize_workspace_plan_for_hash(profile.workspace_plan),
+      profile.tool_workspace,
       profile.task_id,
       profile.startup_fingerprint
     }
 
     sha256_hex(:erlang.term_to_binary(material, [:deterministic]))
   end
+
+  defp canonicalize_workspace_plan_for_hash(nil), do: nil
+  defp canonicalize_workspace_plan_for_hash({:directory, path}), do: {:directory, path}
+
+  defp canonicalize_workspace_plan_for_hash({:worktree, opts}) when is_list(opts) do
+    # Keyword order is not identity; sort by key for a stable digest.
+    {:worktree, Enum.sort_by(opts, fn {k, _} -> k end)}
+  end
+
+  defp canonicalize_workspace_plan_for_hash(other), do: other
 
   defp sha256_hex(binary) when is_binary(binary) do
     :crypto.hash(:sha256, binary) |> Base.encode16(case: :lower)
@@ -335,34 +384,170 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
 
   defp validate_model(_), do: {:error, {:invalid, :model, :bad_type}}
 
-  defp validate_cwd(nil), do: {:ok, nil}
+  # Resolve explicit :cwd + :workspace into the exact values the pool will
+  # bind on AcpSession / ToolServer. Never leave raw untrimmed/unexpanded paths
+  # for spawn to re-derive independently.
+  defp resolve_workspace_scope(opts) when is_list(opts) do
+    with {:ok, workspace_plan, tool_workspace, alias_cwd} <-
+           normalize_workspace(Keyword.get(opts, :workspace)),
+         {:ok, cwd} <- resolve_session_cwd(opts, alias_cwd) do
+      {:ok, cwd, workspace_plan, tool_workspace}
+    end
+  end
 
-  defp validate_cwd(path) when is_binary(path) do
+  defp resolve_session_cwd(opts, alias_cwd) do
+    case Keyword.fetch(opts, :cwd) do
+      # Explicit nil is the binary/structured workspace compatibility alias.
+      {:ok, nil} ->
+        {:ok, alias_cwd}
+
+      {:ok, cwd} ->
+        # Explicit non-nil cwd wins over binary workspace for session binding.
+        validate_path_field(cwd, :cwd)
+
+      :error ->
+        {:ok, alias_cwd}
+    end
+  end
+
+  defp normalize_workspace(nil), do: {:ok, nil, nil, nil}
+
+  # Binary workspace is pool-only: ToolServer FS scope + optional cwd alias.
+  # Never becomes AcpSession.workspace_plan/1 input.
+  defp normalize_workspace(path) when is_binary(path) do
+    case validate_path_field(path, :workspace) do
+      {:ok, expanded} -> {:ok, nil, expanded, expanded}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp normalize_workspace({:directory, path}) do
+    case validate_path_field(path, :workspace) do
+      {:ok, expanded} -> {:ok, {:directory, expanded}, nil, expanded}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp normalize_workspace({:worktree, wt_opts}) when is_list(wt_opts) do
+    case validate_worktree_opts(wt_opts) do
+      {:ok, normalized} -> {:ok, {:worktree, normalized}, nil, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Second element present but not a list (e.g. binary/map).
+  defp normalize_workspace({:worktree, _invalid}),
+    do: {:error, {:invalid, :workspace, :bad_worktree_opts}}
+
+  defp normalize_workspace(_), do: {:error, {:invalid, :workspace, :bad_type}}
+
+  defp validate_worktree_opts(opts) when is_list(opts) do
+    if keyword_list?(opts) do
+      allowed = [:branch, :base_dir]
+      keys = Keyword.keys(opts)
+
+      cond do
+        length(keys) > 16 ->
+          {:error, {:invalid, :workspace, :too_many_worktree_opts}}
+
+        Enum.any?(keys, &(&1 not in allowed)) ->
+          {:error, {:invalid, :workspace, :unknown_worktree_keys}}
+
+        true ->
+          with {:ok, branch} <- validate_worktree_branch(Keyword.get(opts, :branch)),
+               {:ok, base_dir} <- validate_worktree_base_dir(Keyword.get(opts, :base_dir)) do
+            normalized =
+              []
+              |> maybe_put_binding(:branch, branch)
+              |> maybe_put_binding(:base_dir, base_dir)
+              # Stable identity independent of input key order.
+              |> Enum.sort_by(fn {k, _} -> k end)
+
+            {:ok, normalized}
+          end
+      end
+    else
+      {:error, {:invalid, :workspace, :bad_worktree_opts}}
+    end
+  end
+
+  defp validate_worktree_opts(_), do: {:error, {:invalid, :workspace, :bad_worktree_opts}}
+
+  defp validate_worktree_branch(nil), do: {:ok, nil}
+
+  defp validate_worktree_branch(branch) when is_binary(branch) do
+    case validate_bounded_string(branch, :workspace, @max_id_bytes) do
+      {:ok, trimmed} -> {:ok, trimmed}
+      {:error, {:invalid, :workspace, reason}} -> {:error, {:invalid, :workspace, reason}}
+    end
+  end
+
+  defp validate_worktree_branch(_), do: {:error, {:invalid, :workspace, :bad_worktree_branch}}
+
+  defp validate_worktree_base_dir(nil), do: {:ok, nil}
+
+  defp validate_worktree_base_dir(path) when is_binary(path) do
+    validate_path_field(path, :workspace)
+  end
+
+  defp validate_worktree_base_dir(_), do: {:error, {:invalid, :workspace, :bad_worktree_base_dir}}
+
+  defp validate_path_field(nil, field), do: {:error, {:invalid, field, :blank}}
+
+  defp validate_path_field(path, field) when is_binary(path) do
     trimmed = String.trim(path)
 
     cond do
       trimmed == "" ->
-        {:error, {:invalid, :cwd, :blank}}
+        {:error, {:invalid, field, :blank}}
 
       byte_size(trimmed) > @max_cwd_bytes ->
-        {:error, {:invalid, :cwd, :too_long}}
+        {:error, {:invalid, field, :too_long}}
 
       String.contains?(trimmed, <<0>>) ->
-        {:error, {:invalid, :cwd, :nul_byte}}
+        {:error, {:invalid, field, :nul_byte}}
 
       not String.valid?(trimmed) ->
-        {:error, {:invalid, :cwd, :invalid_utf8}}
+        {:error, {:invalid, field, :invalid_utf8}}
 
       true ->
         try do
           {:ok, Path.expand(trimmed)}
         rescue
-          _ -> {:error, {:invalid, :cwd, :expand_failed}}
+          _ -> {:error, {:invalid, field, :expand_failed}}
         end
     end
   end
 
-  defp validate_cwd(_), do: {:error, {:invalid, :cwd, :bad_type}}
+  defp validate_path_field(_path, field), do: {:error, {:invalid, field, :bad_type}}
+
+  defp validate_bounded_string(value, field, max_bytes) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    cond do
+      trimmed == "" ->
+        {:error, {:invalid, field, :blank}}
+
+      byte_size(trimmed) > max_bytes ->
+        {:error, {:invalid, field, :too_long}}
+
+      String.contains?(trimmed, <<0>>) ->
+        {:error, {:invalid, field, :nul_byte}}
+
+      not String.valid?(trimmed) ->
+        {:error, {:invalid, field, :invalid_utf8}}
+
+      true ->
+        {:ok, trimmed}
+    end
+  end
+
+  defp keyword_list?([]), do: true
+  defp keyword_list?([{key, _} | rest]) when is_atom(key), do: keyword_list?(rest)
+  defp keyword_list?(_), do: false
+
+  defp maybe_put_binding(kw, _key, nil), do: kw
+  defp maybe_put_binding(kw, key, value), do: Keyword.put(kw, key, value)
 
   defp validate_tool_modules(nil), do: {:ok, []}
 

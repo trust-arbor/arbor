@@ -32,6 +32,27 @@ defmodule Arbor.AI.AcpPoolTest do
     @moduledoc false
 
     def start_link(opts) do
+      cond do
+        opts[:gate] ->
+          # Deterministic post-spawn expiry: block client adoption until the
+          # checkout deadline fails await_ready, then proceed so close can run.
+          if is_pid(opts[:test_pid]) do
+            send(opts[:test_pid], {:client_start_gated, self()})
+          end
+
+          receive do
+            :proceed -> :ok
+          after
+            2_000 -> :ok
+          end
+
+        is_integer(opts[:start_delay_ms]) and opts[:start_delay_ms] > 0 ->
+          Process.sleep(opts[:start_delay_ms])
+
+        true ->
+          :ok
+      end
+
       Agent.start_link(fn -> opts end)
     end
 
@@ -587,14 +608,142 @@ defmodule Arbor.AI.AcpPoolTest do
       assert info.cwd == expected_cwd
       assert info.task_id == "ws_task"
 
-      # Pool promotes binary workspace to session :cwd and drops binary
-      # :workspace before AcpSession.start (pool-boundary alias only).
+      # Pool binds profile-canonical cwd and never forwards binary :workspace.
       session_state = :sys.get_state(session)
       assert Keyword.get(session_state.opts, :cwd) == expected_cwd
       refute Keyword.has_key?(session_state.opts, :workspace)
       assert session_state.workspace == nil
 
       :ok = AcpPool.close_session(session)
+    end
+
+    test "security regression: cwd nil + binary workspace binds profile cwd to session" do
+      workspace =
+        Path.join(System.tmp_dir!(), "acp_pool_ws_nil_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(workspace)
+      on_exit(fn -> File.rm_rf(workspace) end)
+
+      expected_cwd = Path.expand(workspace)
+
+      assert {:ok, session} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 cwd: nil,
+                 workspace: workspace,
+                 agent_id: "ws_nil_agent",
+                 task_id: "ws_nil_task"
+               )
+
+      [info] = AcpPool.sessions()
+      assert info.cwd == expected_cwd
+
+      session_state = :sys.get_state(session)
+      assert Keyword.get(session_state.opts, :cwd) == expected_cwd
+      refute Keyword.has_key?(session_state.opts, :workspace)
+      assert session_state.workspace == nil
+
+      :ok = AcpPool.close_session(session)
+    end
+
+    test "security regression: whitespace/relative workspace canonicalizes into session opts" do
+      rel_name = "acp_pool_rel_ws_#{System.unique_integer([:positive])}"
+      abs = Path.expand(rel_name)
+      File.mkdir_p!(abs)
+      on_exit(fn -> File.rm_rf(abs) end)
+
+      assert {:ok, session} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 workspace: "  #{rel_name}  ",
+                 agent_id: "ws_rel_agent",
+                 task_id: "ws_rel_task"
+               )
+
+      [info] = AcpPool.sessions()
+      assert info.cwd == abs
+
+      session_state = :sys.get_state(session)
+      assert Keyword.get(session_state.opts, :cwd) == abs
+      refute Keyword.has_key?(session_state.opts, :workspace)
+
+      :ok = AcpPool.close_session(session)
+    end
+
+    test "security regression: structured directory workspace reaches AcpSession plan" do
+      dir =
+        Path.join(System.tmp_dir!(), "acp_pool_dir_plan_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      expected = Path.expand(dir)
+
+      assert {:ok, session} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 workspace: {:directory, "  #{dir}  "},
+                 agent_id: "dir_agent",
+                 task_id: "dir_task"
+               )
+
+      [info] = AcpPool.sessions()
+      assert info.cwd == expected
+
+      session_state = :sys.get_state(session)
+      assert Keyword.get(session_state.opts, :cwd) == expected
+      assert Keyword.get(session_state.opts, :workspace) == {:directory, expected}
+      assert session_state.workspace == {:directory, expected}
+
+      :ok = AcpPool.close_session(session)
+    end
+
+    test "security regression: distinct structured workspace plans never reuse" do
+      dir_a =
+        Path.join(System.tmp_dir!(), "acp_pool_plan_a_#{System.unique_integer([:positive])}")
+
+      dir_b =
+        Path.join(System.tmp_dir!(), "acp_pool_plan_b_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(dir_a)
+      File.mkdir_p!(dir_b)
+      on_exit(fn -> File.rm_rf(dir_a) end)
+      on_exit(fn -> File.rm_rf(dir_b) end)
+
+      base = [
+        client_opts: @test_client_opts,
+        agent_id: "plan_agent",
+        task_id: "same_task"
+      ]
+
+      assert {:ok, s1} =
+               AcpPool.checkout(:test, base ++ [workspace: {:directory, dir_a}])
+
+      :ok = AcpPool.checkin(s1)
+
+      assert {:ok, s2} =
+               AcpPool.checkout(:test, base ++ [workspace: {:directory, dir_b}])
+
+      refute s2 == s1
+
+      :ok = AcpPool.close_session(s1)
+      :ok = AcpPool.close_session(s2)
+    end
+
+    test "security regression: malformed structured workspace is rejected before spawn" do
+      assert {:error, {:invalid, :workspace, :bad_type}} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 workspace: {:other, "/tmp/x"}
+               )
+
+      assert {:error, {:invalid, :workspace, :unknown_worktree_keys}} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 workspace: {:worktree, [branch: "ok", not_allowed: true]}
+               )
+
+      assert AcpPool.sessions() == []
     end
 
     test "security regression: explicit cwd wins over binary workspace alias" do
@@ -627,11 +776,57 @@ defmodule Arbor.AI.AcpPoolTest do
       assert info.cwd == expected_cwd
 
       session_state = :sys.get_state(session)
-      # Explicit :cwd is preserved (put_new); binary :workspace is dropped.
-      assert Path.expand(Keyword.get(session_state.opts, :cwd)) == expected_cwd
+      # Explicit :cwd is profile-bound; binary :workspace is dropped at spawn.
+      assert Keyword.get(session_state.opts, :cwd) == expected_cwd
       refute Keyword.has_key?(session_state.opts, :workspace)
 
       :ok = AcpPool.close_session(session)
+    end
+
+    test "security regression: post-spawn deadline expiry uses graceful close" do
+      # Distinguishes cleanup_expired_spawn's safe_close path from Process.exit
+      # :kill: graceful close stops the session with :normal after await_ready
+      # fails on the post-spawn deadline; kill exits with :killed and skips
+      # terminate/2 client disconnect / workspace cleanup.
+      original = Application.get_env(:arbor_ai, :acp_client_module)
+      Application.put_env(:arbor_ai, :acp_client_module, DisconnectClient)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_ai, :acp_client_module, original),
+          else: Application.delete_env(:arbor_ai, :acp_client_module)
+      end)
+
+      test_pid = self()
+
+      checkout_task =
+        Task.async(fn ->
+          AcpPool.checkout(:test,
+            timeout: 60,
+            client_opts: [test_pid: test_pid, gate: true]
+          )
+        end)
+
+      assert_receive {:client_start_gated, starter}, 500
+
+      # Client start worker is linked to the AcpSession that owns initialize_client.
+      session_pid =
+        case Process.info(starter, :links) do
+          {:links, links} -> Enum.find(links, &is_pid/1)
+          _ -> nil
+        end
+
+      assert is_pid(session_pid)
+      ref = Process.monitor(session_pid)
+
+      assert {:error, _reason} = Task.await(checkout_task, 1_000)
+      # Best-effort release if the start worker survived the deadline path.
+      send(starter, :proceed)
+
+      assert_receive {:DOWN, ^ref, :process, ^session_pid, reason}, 1_000
+      # AcpSession.close stops with :normal; Process.exit(pid, :kill) is :killed.
+      assert reason == :normal
+      assert AcpPool.sessions() == []
     end
 
     test "security regression: busy sessions at max still exhaust; idle only is evictable" do

@@ -122,9 +122,16 @@ defmodule Arbor.AI.AcpPool do
   ## Options
 
   - `:model` — model override for the session (immutable reuse boundary)
-  - `:cwd` / `:workspace` — working directory (canonicalized; immutable).
-    A binary `:workspace` is the pool alias for both session cwd and ToolServer
-    filesystem scope.
+  - `:cwd` — explicit session working directory (canonicalized; immutable).
+    Non-`nil` values take precedence over a binary `:workspace` alias.
+  - `:workspace` — one of:
+    - **binary path** — pool-only alias for session `:cwd` (when `:cwd` is
+      absent/`nil`) and ToolServer filesystem scope; never forwarded to
+      `AcpSession` as `:workspace`
+    - **`{:directory, path}`** — structured session directory plan (existing
+      `AcpSession` shape); path is canonicalized and plan identity is hashed
+    - **`{:worktree, opts}`** — structured session worktree plan with optional
+      `:branch` / `:base_dir` only; plan identity is hashed
   - `:timeout` — checkout timeout (default: 30_000)
   - `:agent_id` — owning Arbor agent ID (`nil` matches only `nil`)
   - `:task_id` — coding task scope; same task may reuse a compatible process,
@@ -536,7 +543,7 @@ defmodule Arbor.AI.AcpPool do
   end
 
   defp do_mint_session(provider, opts, caller_pid, state, profile) do
-    case spawn_session(provider, opts) do
+    case spawn_session(provider, opts, profile) do
       {:ok, pid, tool_server} ->
         case Arbor.AI.Timeout.ensure_active(opts) do
           :ok ->
@@ -634,8 +641,11 @@ defmodule Arbor.AI.AcpPool do
     %{state | sessions: sessions, monitors: monitors}
   end
 
+  # Post-spawn deadline / await_ready failure: same graceful close path as
+  # eviction/idle cleanup so AcpSession.terminate/2 still disconnects the client
+  # and cleans session-owned workspaces. Never Process.exit(:kill) here.
   defp cleanup_expired_spawn(pid, tool_server) do
-    if is_pid(pid) and Process.alive?(pid), do: Process.exit(pid, :kill)
+    safe_close(pid)
     if tool_server, do: stop_tool_server_async(tool_server)
 
     :ok
@@ -814,22 +824,23 @@ defmodule Arbor.AI.AcpPool do
     |> MapSet.size()
   end
 
-  defp spawn_session(provider, opts) do
-    tool_modules = Keyword.get(opts, :tool_modules, [])
-    agent_id = Keyword.get(opts, :agent_id)
-    # Binary workspace is ToolServer filesystem scope; structured plans are
-    # for session-owned worktrees/directories. Bare :cwd stays a session opt.
-    workspace = Keyword.get(opts, :workspace)
+  # Spawn using validated SessionProfile bindings for cwd/workspace so the
+  # session process identity matches profile_hash (no independent re-expand of
+  # raw opts). Binary tool scope comes from profile.tool_workspace only.
+  defp spawn_session(provider, opts, %SessionProfile{} = profile) do
+    tool_modules = profile.tool_modules || []
+    agent_id = profile.agent_id
+    tool_workspace = profile.tool_workspace
 
     # Start a ToolServer if the session needs action tools
-    {tool_server, mcp_servers} = maybe_start_tool_server(tool_modules, agent_id, workspace)
+    {tool_server, mcp_servers} = maybe_start_tool_server(tool_modules, agent_id, tool_workspace)
 
     session_opts =
       opts
       |> Keyword.put(:provider, provider)
       |> Keyword.put_new(:owner, self())
       |> Keyword.put_new(:client_opts, Keyword.get(opts, :client_opts))
-      |> Keyword.put_new(:agent_id, agent_id)
+      |> Keyword.put(:agent_id, agent_id)
 
     # Pass mcp_servers so AcpSession can include them in create_session
     session_opts =
@@ -839,9 +850,8 @@ defmodule Arbor.AI.AcpPool do
         session_opts
       end
 
-    # Drop only confirmed pool/matching keys. AcpSession does not accept these;
-    # do not strip provider/session startup keys (cwd, model, client_opts,
-    # adapter_opts, capabilities, workspace, mcp_servers, agent_id, etc.).
+    # Drop pool/matching keys and raw cwd/workspace — re-bind from the profile
+    # so AcpSession receives the exact canonical values used for reuse identity.
     # Managed-only keys (server, session_id, create_session) are stripped by
     # AcpManaged before checkout — not silently dropped here.
     pool_only_keys = [
@@ -851,18 +861,15 @@ defmodule Arbor.AI.AcpPool do
       :name,
       :tags,
       :task_id,
-      :principal_id
+      :principal_id,
+      :cwd,
+      :workspace
     ]
 
     session_opts =
       session_opts
       |> Keyword.drop(pool_only_keys)
-      # Binary :workspace is a pool-only compatibility alias (ToolServer scope
-      # already received the original binary above). Promote to session :cwd
-      # with explicit :cwd precedence, then drop binary :workspace so
-      # AcpSession never sees a bare path. Structured {:directory,_}/
-      # {:worktree,_} plans pass through unchanged.
-      |> prepare_session_workspace_opts()
+      |> Keyword.merge(SessionProfile.session_binding(profile))
 
     deadline = Keyword.fetch!(opts, :deadline_ms)
 
@@ -884,20 +891,6 @@ defmodule Arbor.AI.AcpPool do
         # Clean up ToolServer if session failed to start
         if tool_server, do: ToolServer.stop(tool_server.ref)
         {:error, reason}
-    end
-  end
-
-  # Pool boundary only: binary workspace → session cwd; never forward binary
-  # workspace into AcpSession.workspace_plan/1.
-  defp prepare_session_workspace_opts(opts) do
-    case Keyword.get(opts, :workspace) do
-      path when is_binary(path) and path != "" ->
-        opts
-        |> Keyword.put_new(:cwd, Path.expand(path))
-        |> Keyword.delete(:workspace)
-
-      _structured_or_absent ->
-        opts
     end
   end
 

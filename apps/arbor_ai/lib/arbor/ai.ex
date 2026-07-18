@@ -899,14 +899,17 @@ defmodule Arbor.AI do
   via `acp_checkin/1` when done.
 
   Reuse is fail-closed over the full `SessionProfile` (agent, task scope,
-  cwd/workspace, model, tools, trust domain, and immutable startup fingerprint).
+  cwd, structured workspace plan, tool workspace scope, model, tools, trust
+  domain, and immutable startup fingerprint).
   Different coding tasks never inherit another task's provider conversation or
   cwd implicitly; cross-task continuity is only via explicit managed resume.
 
   ## Options
 
   - `:model` — model override (immutable reuse boundary)
-  - `:cwd` / `:workspace` — working directory (canonicalized; immutable)
+  - `:cwd` — explicit session working directory (canonicalized; immutable)
+  - `:workspace` — binary path (pool cwd/ToolServer alias) or structured
+    `{:directory, path}` / `{:worktree, opts}` session plan
   - `:task_id` — coding task scope for pool matching
   - `:agent_id` — owning agent (`nil` matches only `nil`)
   - `:timeout` — checkout timeout (default: 30_000)
