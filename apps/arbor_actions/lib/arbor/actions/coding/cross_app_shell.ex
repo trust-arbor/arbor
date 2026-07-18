@@ -127,6 +127,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          {:ok, app_defs} <- Parser.parse_many(sources),
          {:ok, graph} <- Core.build_graph(app_defs),
          {:ok, selection} <- Core.select(changed_files, graph),
+         # Capture the exact committable tree across the full aggregate validation
+         # window (not a post-test snapshot alone). Mutating validation fails closed.
+         {:ok, before_binding} <- MixAction.committable_tree_binding(worktree_path),
          {:ok, checks} <-
            MixAction.with_validation_resource(
              input.workspace_id,
@@ -142,25 +145,29 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
              end,
              # Resource setup is bound by the per-operation ceiling, not aggregate stage.
              timeout: input.timeout
-           ) do
+           ),
+         {:ok, after_binding} <- MixAction.committable_tree_binding(worktree_path),
+         :ok <- assert_validation_tree_stable(before_binding, after_binding) do
       evidence =
         Core.show(%{
           selection: selection,
           checks: checks,
           base_commit: base_commit
         })
+        |> Map.put(:validated_tree_oid, before_binding.tree_oid)
+        |> Map.put(:validated_head, before_binding.head)
 
-      with {:ok, binding} <- MixAction.committable_tree_binding(worktree_path) do
-        evidence =
-          evidence
-          |> Map.put(:validated_tree_oid, binding.tree_oid)
-          |> Map.put(:validated_head, binding.head)
-
-        feedback_json = Jason.encode!(evidence)
-        {:ok, Map.put(evidence, :feedback_json, feedback_json)}
-      end
+      feedback_json = Jason.encode!(evidence)
+      {:ok, Map.put(evidence, :feedback_json, feedback_json)}
     end
   end
+
+  defp assert_validation_tree_stable(%{tree_oid: before}, %{tree_oid: after_oid})
+       when is_binary(before) and before != "" and before == after_oid,
+       do: :ok
+
+  defp assert_validation_tree_stable(_before, _after),
+    do: {:error, :validation_tree_mutated}
 
   defp resolve_lease(workspace_id, context) do
     caller = %{

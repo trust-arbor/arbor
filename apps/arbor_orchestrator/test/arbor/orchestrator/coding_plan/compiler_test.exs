@@ -129,11 +129,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "hoist_workspace_fingerprint")["output_key"] ==
              "workspace_fingerprint"
 
-    assert node_attrs(graph, "hoist_committable_tree_oid")["source_key"] ==
-             "inspect.committable_tree_oid"
-
-    # Inspect-time tree is observability only; commit binding uses validation.
-    assert node_attrs(graph, "hoist_committable_tree_oid")["output_key"] == "committable_tree_oid"
+    # Inspect stays fingerprint-only; tree binding comes from validation.
+    refute Map.has_key?(graph.nodes, "hoist_committable_tree_oid")
 
     assert node_attrs(graph, "hoist_expected_workspace_fingerprint")["source_key"] ==
              "workspace_fingerprint"
@@ -153,7 +150,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              "hoist_expected_tree_oid"
 
     assert edge_target(graph, "hoist_expected_tree_oid", nil) == "commit_change"
-    assert edge_target(graph, "hoist_workspace_fingerprint", nil) == "hoist_committable_tree_oid"
+    assert edge_target(graph, "hoist_workspace_fingerprint", nil) == "route_turn_progress"
   end
 
   test "security regression: commit-before-validate profile omits upstream tree; fingerprint still required",

@@ -523,17 +523,10 @@ digraph CodingChangeV1 {
     output_key="workspace_fingerprint"
   ]
 
-  // Inspect-time committable tree is observability only. Commit binding uses
-  // validation.validated_tree_oid when validate-before-commit (default/cross_app).
-  // security_regression commits before its validator, so expected_tree_oid is
-  // omitted there and coding_reviewed_commit computes+freezes the tree itself.
-  hoist_committable_tree_oid [
-    type="transform",
-    transform="identity",
-    source_key="inspect.committable_tree_oid",
-    output_key="committable_tree_oid"
-  ]
-
+  // Commit binding: fingerprint from inspect; tree from validation when
+  // validate-before-commit (default/cross_app). security_regression commits
+  // before its validator, so expected_tree_oid is omitted there and
+  // coding_reviewed_commit computes+freezes the tree at the commit gate.
   hoist_expected_workspace_fingerprint [
     type="transform",
     transform="identity",
@@ -1565,8 +1558,7 @@ digraph CodingChangeV1 {
   check_workspace_exists -> hoist_dirty [condition="context.inspect.exists=true"]
   hoist_dirty -> hoist_changed -> hoist_head_commit
   hoist_head_commit -> hoist_turn_progressed -> hoist_workspace_fingerprint
-  hoist_workspace_fingerprint -> hoist_committable_tree_oid
-  hoist_committable_tree_oid -> route_turn_progress
+  hoist_workspace_fingerprint -> route_turn_progress
 
   // Per-turn progress: initial no-op => no_changes; rework no-op => pipeline_error
   // so a prior candidate is never re-presented as fresh work.

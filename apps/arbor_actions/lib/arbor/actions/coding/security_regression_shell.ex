@@ -62,22 +62,6 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
 
       case {result, cleanup} do
         {{:ok, evidence}, {:ok, _released}} ->
-          evidence =
-            case Map.get(evidence, :attested_candidate_tree_oid) ||
-                   Map.get(evidence, "attested_candidate_tree_oid") do
-              oid when is_binary(oid) and oid != "" ->
-                evidence
-                |> Map.put(:validated_tree_oid, oid)
-                |> Map.put_new(
-                  :validated_head,
-                  Map.get(evidence, :attested_candidate_commit) ||
-                    Map.get(evidence, "attested_candidate_commit")
-                )
-
-              _ ->
-                evidence
-            end
-
           feedback_json = Jason.encode!(evidence)
           {:ok, Map.put(evidence, :feedback_json, feedback_json)}
 
