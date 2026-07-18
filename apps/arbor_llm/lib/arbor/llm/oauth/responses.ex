@@ -29,7 +29,7 @@ defmodule Arbor.LLM.OAuth.Responses do
     xai: "https://api.x.ai/v1/responses"
   }
 
-  @default_models %{openai: "gpt-5.5", xai: "grok-4.3"}
+  @default_models %{openai: "gpt-5.5", xai: "grok-4.5"}
 
   @doc """
   `complete(provider, %{instructions, input, tools}, opts)` → `{:ok, %{text, tool_calls}}`.

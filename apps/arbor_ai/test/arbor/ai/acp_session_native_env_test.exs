@@ -76,4 +76,23 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
       refute Keyword.has_key?(opts, :env)
     end
   end
+
+  describe "configured Grok provider" do
+    test "pins grok-4.5 before the stdio subcommand" do
+      assert {:ok, opts} = Config.resolve(:grok, [])
+
+      assert Keyword.get(opts, :command) ==
+               ["grok", "agent", "--model", "grok-4.5", "stdio"]
+    end
+
+    test "built-in fallback also pins grok-4.5" do
+      providers = Application.get_env(:arbor_ai, :acp_providers, %{})
+      Application.put_env(:arbor_ai, :acp_providers, Map.delete(providers, :grok))
+
+      assert {:ok, opts} = Config.resolve(:grok, [])
+
+      assert Keyword.get(opts, :command) ==
+               ["grok", "agent", "--model", "grok-4.5", "stdio"]
+    end
+  end
 end
