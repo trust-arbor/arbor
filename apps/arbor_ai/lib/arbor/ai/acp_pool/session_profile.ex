@@ -15,13 +15,13 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   - `model` — model override bound at session start
   - `cwd` — canonical workspace/cwd bound at session start
   - `task_id` — coding task scope; pooled coding checkouts are task-scoped
-  - `startup_fingerprint` — deterministic hash of immutable startup opts
+  - `startup_fingerprint` — full SHA-256 hex digest of immutable startup opts
     (`adapter_opts`, `client_opts`, `capabilities`); raw values are never stored
   - `name` — human-readable identifier for dashboards
   - `tags` — arbitrary metadata map for developer grouping
   - `affinity_key` — sticky routing key (same key → same session only when
     the full profile is also compatible)
-  - `profile_hash` — computed SHA over every immutable reuse boundary
+  - `profile_hash` — full SHA-256 hex digest over every immutable reuse boundary
 
   ## Matching Rules
 
@@ -67,41 +67,60 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     tags: %{}
   ]
 
-  # Keys considered secret-bearing; redacted before fingerprint materialization
-  # so diagnostics never retain raw values (the fingerprint is still over the
-  # redacted canonical form plus presence markers).
-  @secret_key_fragments ~w(
-    password token secret api_key authorization auth credential
-    refresh_token access_token private_key signing_key bearer
-  )
-
-  @max_fingerprint_depth 8
-  @max_fingerprint_entries 64
-  @max_fingerprint_binary_bytes 4_096
+  # Keys accepted by struct!/2. Startup config keys are consumed before construct.
+  @struct_keys [
+    :provider,
+    :tool_modules,
+    :agent_id,
+    :trust_domain,
+    :model,
+    :cwd,
+    :task_id,
+    :startup_fingerprint,
+    :name,
+    :tags,
+    :affinity_key,
+    :profile_hash
+  ]
 
   @doc """
   Build a SessionProfile from options, computing the profile hash.
 
   ## Options
 
-  Accepts all struct fields as keyword opts. `profile_hash` is computed
-  automatically. When `startup_fingerprint` is omitted, it is derived from
-  `:adapter_opts`, `:client_opts`, and `:capabilities` in `opts`.
+  Accepts all struct fields as keyword opts plus startup config keys
+  `:adapter_opts`, `:client_opts`, and `:capabilities` (fingerprinted only;
+  never stored). `profile_hash` is computed automatically.
 
       SessionProfile.new(provider: :claude, tool_modules: [Trust.ListPresets])
   """
   @spec new(keyword()) :: t()
   def new(opts) when is_list(opts) do
-    {startup_fp, opts} =
-      case Keyword.pop(opts, :startup_fingerprint) do
-        {nil, rest} -> {compute_startup_fingerprint(rest), rest}
-        {fp, rest} when is_binary(fp) -> {fp, rest}
-        {_other, rest} -> {compute_startup_fingerprint(rest), rest}
+    {explicit_fp, opts} = Keyword.pop(opts, :startup_fingerprint)
+
+    {adapter_opts, opts} = Keyword.pop(opts, :adapter_opts)
+    {client_opts, opts} = Keyword.pop(opts, :client_opts)
+    {capabilities, opts} = Keyword.pop(opts, :capabilities)
+
+    startup_fp =
+      case explicit_fp do
+        fp when is_binary(fp) and fp != "" ->
+          fp
+
+        _ ->
+          compute_startup_fingerprint(
+            adapter_opts: adapter_opts,
+            client_opts: client_opts,
+            capabilities: capabilities
+          )
       end
 
-    profile =
-      struct!(__MODULE__, Keyword.put(opts, :startup_fingerprint, startup_fp))
+    profile_opts =
+      opts
+      |> Keyword.take(@struct_keys)
+      |> Keyword.put(:startup_fingerprint, startup_fp)
 
+    profile = struct!(__MODULE__, profile_opts)
     %{profile | profile_hash: compute_hash(profile)}
   end
 
@@ -123,7 +142,9 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
       name: Keyword.get(opts, :name) || generate_name(provider, opts),
       tags: normalize_tags(Keyword.get(opts, :tags, %{})),
       affinity_key: normalize_optional_id(Keyword.get(opts, :affinity_key)),
-      startup_fingerprint: compute_startup_fingerprint(opts)
+      adapter_opts: Keyword.get(opts, :adapter_opts),
+      client_opts: Keyword.get(opts, :client_opts),
+      capabilities: Keyword.get(opts, :capabilities)
     )
   end
 
@@ -169,29 +190,29 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   end
 
   @doc """
-  Deterministic fingerprint of immutable caller-controlled startup configuration.
+  Full SHA-256 hex digest of immutable caller-controlled startup configuration.
 
-  Hashes a JSON-safe canonical form of `adapter_opts`, `client_opts`, and
-  `capabilities`. Secret-looking keys are redacted before encoding so the
-  material never retains credentials; only the resulting hex digest is stored.
+  Canonicalizes `adapter_opts`, `client_opts`, and `capabilities` completely
+  (including secret-bearing values) then hashes the deterministic term encoding.
+  Only the digest is retained — never the raw material.
+
+  Terms that cannot be safely/completely canonicalized yield a unique
+  non-reusable fingerprint so distinct or unsupported configs never collide.
   """
   @spec compute_startup_fingerprint(keyword() | map()) :: String.t()
   def compute_startup_fingerprint(opts) when is_list(opts) or is_map(opts) do
-    material = %{
-      "adapter_opts" => normalize_for_fingerprint(get_opt(opts, :adapter_opts)),
-      "client_opts" => normalize_for_fingerprint(get_opt(opts, :client_opts)),
-      "capabilities" => normalize_for_fingerprint(get_opt(opts, :capabilities))
+    material = {
+      :acp_startup_v1,
+      canonicalize(get_opt(opts, :adapter_opts)),
+      canonicalize(get_opt(opts, :client_opts)),
+      canonicalize(get_opt(opts, :capabilities))
     }
 
-    encoded =
-      case Jason.encode(material) do
-        {:ok, json} -> json
-        {:error, _} -> inspect(material, limit: 200, printable_limit: 200)
-      end
-
-    :crypto.hash(:sha256, encoded)
-    |> Base.encode16(case: :lower)
-    |> binary_part(0, 16)
+    sha256_hex(:erlang.term_to_binary(material, [:deterministic]))
+  rescue
+    _ ->
+      # Fail closed: non-encodable startup material is never reusable.
+      non_reusable_fingerprint()
   end
 
   def compute_startup_fingerprint(_), do: compute_startup_fingerprint([])
@@ -205,26 +226,33 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
       |> Enum.map(&to_string/1)
       |> Enum.sort()
 
-    parts = [
-      "provider=#{encode_scalar(profile.provider)}",
-      "tools=#{Enum.join(tools, ",")}",
-      "agent=#{encode_scalar(profile.agent_id)}",
-      "trust=#{encode_scalar(profile.trust_domain)}",
-      "model=#{encode_scalar(profile.model)}",
-      "cwd=#{encode_scalar(profile.cwd)}",
-      "task=#{encode_scalar(profile.task_id)}",
-      "startup=#{encode_scalar(profile.startup_fingerprint)}"
-    ]
+    material = {
+      :acp_profile_v1,
+      profile.provider,
+      tools,
+      profile.agent_id,
+      profile.trust_domain,
+      profile.model,
+      profile.cwd,
+      profile.task_id,
+      profile.startup_fingerprint
+    }
 
-    :crypto.hash(:sha256, Enum.join(parts, "|"))
-    |> Base.encode16(case: :lower)
-    |> binary_part(0, 16)
+    sha256_hex(:erlang.term_to_binary(material, [:deterministic]))
   end
 
-  defp encode_scalar(nil), do: "nil"
-  defp encode_scalar(value) when is_atom(value), do: "a:" <> Atom.to_string(value)
-  defp encode_scalar(value) when is_binary(value), do: "b:" <> value
-  defp encode_scalar(value), do: "t:" <> inspect(value, limit: 50, printable_limit: 50)
+  defp sha256_hex(binary) when is_binary(binary) do
+    :crypto.hash(:sha256, binary) |> Base.encode16(case: :lower)
+  end
+
+  defp non_reusable_fingerprint do
+    sha256_hex(
+      :erlang.term_to_binary(
+        {:acp_startup_non_reusable, :crypto.strong_rand_bytes(16)},
+        [:deterministic]
+      )
+    )
+  end
 
   defp normalize_tool_modules(nil), do: []
 
@@ -283,7 +311,6 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
       trimmed == "" ->
         nil
 
-      # Reject NUL / control bytes so path work stays bounded and JSON-safe
       String.contains?(trimmed, <<0>>) ->
         nil
 
@@ -304,114 +331,65 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     Map.get(opts, key) || Map.get(opts, Atom.to_string(key))
   end
 
-  defp normalize_for_fingerprint(term), do: normalize_for_fingerprint(term, 0)
+  # Complete deterministic encoding — no truncation, no secret redaction, no
+  # phash2/inspect lossy fallbacks. Keyword lists and maps become sorted
+  # key/value tuples so equal logical configs hash identically.
+  defp canonicalize(nil), do: nil
+  defp canonicalize(true), do: true
+  defp canonicalize(false), do: false
+  defp canonicalize(value) when is_atom(value), do: value
+  defp canonicalize(value) when is_integer(value), do: value
+  defp canonicalize(value) when is_float(value), do: value
+  defp canonicalize(value) when is_binary(value), do: value
 
-  defp normalize_for_fingerprint(_term, depth) when depth > @max_fingerprint_depth do
-    %{"__truncated__" => "max_depth"}
-  end
-
-  defp normalize_for_fingerprint(nil, _depth), do: nil
-  defp normalize_for_fingerprint(true, _depth), do: true
-  defp normalize_for_fingerprint(false, _depth), do: false
-
-  defp normalize_for_fingerprint(value, _depth) when is_atom(value),
-    do: %{"__atom__" => Atom.to_string(value)}
-
-  defp normalize_for_fingerprint(value, _depth) when is_integer(value) do
-    # Bound bignums so fingerprint material stays finite
-    digits = value |> Integer.to_string() |> byte_size()
-
-    if digits > 64 do
-      %{"__integer__" => "overflow", "digits" => digits}
-    else
-      value
-    end
-  end
-
-  defp normalize_for_fingerprint(value, _depth) when is_float(value), do: value
-
-  defp normalize_for_fingerprint(value, _depth) when is_binary(value) do
-    if byte_size(value) > @max_fingerprint_binary_bytes do
-      digest =
-        :crypto.hash(:sha256, value) |> Base.encode16(case: :lower) |> binary_part(0, 16)
-
-      %{
-        "__binary__" => "truncated",
-        "byte_size" => byte_size(value),
-        "sha256_16" => digest
-      }
-    else
-      if String.valid?(value) do
-        value
-      else
-        digest =
-          :crypto.hash(:sha256, value) |> Base.encode16(case: :lower) |> binary_part(0, 16)
-
-        %{"__bytes__" => digest, "byte_size" => byte_size(value)}
-      end
-    end
-  end
-
-  defp normalize_for_fingerprint(list, depth) when is_list(list) do
+  defp canonicalize(list) when is_list(list) do
     if keyword_list?(list) do
-      list
-      |> Enum.take(@max_fingerprint_entries)
-      |> Enum.map(fn {k, v} ->
-        key = normalize_key(k)
+      entries =
+        list
+        |> Enum.map(fn {k, v} -> {canonicalize_key(k), canonicalize(v)} end)
+        |> Enum.sort_by(fn {k, _} -> sort_key(k) end)
 
-        value =
-          if secret_key?(key),
-            do: %{"__redacted__" => true},
-            else: normalize_for_fingerprint(v, depth + 1)
-
-        {key, value}
-      end)
-      |> Enum.sort_by(&elem(&1, 0))
-      |> Map.new()
+      {:kw, entries}
     else
-      list
-      |> Enum.take(@max_fingerprint_entries)
-      |> Enum.map(&normalize_for_fingerprint(&1, depth + 1))
+      {:list, Enum.map(list, &canonicalize/1)}
     end
   end
 
-  defp normalize_for_fingerprint(map, depth) when is_map(map) do
-    map
-    |> Enum.take(@max_fingerprint_entries)
-    |> Enum.map(fn {k, v} ->
-      key = normalize_key(k)
-
-      value =
-        if secret_key?(key),
-          do: %{"__redacted__" => true},
-          else: normalize_for_fingerprint(v, depth + 1)
-
-      {key, value}
-    end)
-    |> Enum.sort_by(&elem(&1, 0))
-    |> Map.new()
+  defp canonicalize(%{__struct__: mod} = struct) do
+    {:struct, mod, canonicalize(Map.from_struct(struct))}
   end
 
-  defp normalize_for_fingerprint(other, _depth) do
-    %{"__term__" => :erlang.phash2(other)}
+  defp canonicalize(map) when is_map(map) do
+    entries =
+      map
+      |> Enum.map(fn {k, v} -> {canonicalize_key(k), canonicalize(v)} end)
+      |> Enum.sort_by(fn {k, _} -> sort_key(k) end)
+
+    {:map, entries}
   end
+
+  defp canonicalize(tuple) when is_tuple(tuple) do
+    {:tuple, tuple |> Tuple.to_list() |> Enum.map(&canonicalize/1)}
+  end
+
+  defp canonicalize(other) do
+    # PIDs, refs, ports, funs: full term encoding so distinct values never collide.
+    {:opaque, :erlang.term_to_binary(other, [:deterministic])}
+  end
+
+  defp canonicalize_key(key) when is_atom(key), do: {:a, Atom.to_string(key)}
+  defp canonicalize_key(key) when is_binary(key), do: {:b, key}
+  defp canonicalize_key(key) when is_integer(key), do: {:i, key}
+  defp canonicalize_key(key), do: {:t, :erlang.term_to_binary(key, [:deterministic])}
+
+  defp sort_key({:a, s}), do: {0, s}
+  defp sort_key({:b, s}), do: {1, s}
+  defp sort_key({:i, i}), do: {2, i}
+  defp sort_key({:t, bin}), do: {3, bin}
 
   defp keyword_list?([]), do: true
-
   defp keyword_list?([{key, _value} | rest]) when is_atom(key), do: keyword_list?(rest)
-
   defp keyword_list?(_), do: false
-
-  defp normalize_key(key) when is_atom(key), do: Atom.to_string(key)
-  defp normalize_key(key) when is_binary(key), do: key
-  defp normalize_key(key), do: inspect(key, limit: 32)
-
-  defp secret_key?(key) when is_binary(key) do
-    lowered = String.downcase(key)
-    Enum.any?(@secret_key_fragments, &String.contains?(lowered, &1))
-  end
-
-  defp secret_key?(_), do: false
 
   defp generate_name(provider, opts) do
     agent_id = Keyword.get(opts, :agent_id)

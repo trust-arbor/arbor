@@ -447,17 +447,17 @@ defmodule Arbor.AI.AcpPool do
 
   defp do_checkout(provider, opts, caller_pid, state) do
     profile = SessionProfile.from_opts(provider, opts)
-    tool_modules = Keyword.get(opts, :tool_modules, [])
-    agent_id = Keyword.get(opts, :agent_id)
-    # ToolServer workspace scope is the structured :workspace plan, not bare cwd.
-    workspace = Keyword.get(opts, :workspace)
 
     case find_by_affinity(state, profile) do
       {:ok, entry, state} ->
-        state =
-          checkout_compatible_session(state, entry, caller_pid, tool_modules, agent_id, workspace)
+        case checkout_compatible_session(state, entry, caller_pid) do
+          {:ok, state, entry} ->
+            finalize_existing_checkout(state, entry, opts)
 
-        finalize_existing_checkout(state, entry, opts)
+          {:stale_closed, state} ->
+            # Closed a tool-bound/stale idle entry; mint rather than reuse.
+            mint_session(provider, opts, caller_pid, state, profile)
+        end
 
       {:conflict, state} ->
         {:reply, {:error, :affinity_conflict}, state}
@@ -468,48 +468,45 @@ defmodule Arbor.AI.AcpPool do
       {:no_affinity, state} ->
         case find_compatible_session(state, profile) do
           {:ok, entry, state} ->
-            state =
-              checkout_compatible_session(
-                state,
-                entry,
-                caller_pid,
-                tool_modules,
-                agent_id,
-                workspace
-              )
+            case checkout_compatible_session(state, entry, caller_pid) do
+              {:ok, state, entry} ->
+                finalize_existing_checkout(state, entry, opts)
 
-            finalize_existing_checkout(state, entry, opts)
+              {:stale_closed, state} ->
+                mint_session(provider, opts, caller_pid, state, profile)
+            end
 
           {:none, state} ->
-            max = max_for_provider(state.config, provider)
-            current = count_for_provider(state, provider)
-
-            if current < max do
-              case spawn_session(provider, opts) do
-                {:ok, pid, tool_server} ->
-                  case Arbor.AI.Timeout.ensure_active(opts) do
-                    :ok ->
-                      {state, _ref} =
-                        register_session(state, pid, profile, caller_pid, tool_server)
-
-                      Logger.debug(
-                        "AcpPool: minted #{profile.name} (#{SessionProfile.urn(profile)})"
-                      )
-
-                      {:reply, {:ok, pid}, state}
-
-                    {:error, reason} ->
-                      cleanup_expired_spawn(pid, tool_server)
-                      {:reply, {:error, reason}, state}
-                  end
-
-                {:error, reason} ->
-                  {:reply, {:error, {:spawn_failed, reason}}, state}
-              end
-            else
-              {:reply, {:error, :pool_exhausted}, state}
-            end
+            mint_session(provider, opts, caller_pid, state, profile)
         end
+    end
+  end
+
+  defp mint_session(provider, opts, caller_pid, state, profile) do
+    max = max_for_provider(state.config, provider)
+    current = count_for_provider(state, provider)
+
+    if current < max do
+      case spawn_session(provider, opts) do
+        {:ok, pid, tool_server} ->
+          case Arbor.AI.Timeout.ensure_active(opts) do
+            :ok ->
+              {state, _ref} = register_session(state, pid, profile, caller_pid, tool_server)
+
+              Logger.debug("AcpPool: minted #{profile.name} (#{SessionProfile.urn(profile)})")
+
+              {:reply, {:ok, pid}, state}
+
+            {:error, reason} ->
+              cleanup_expired_spawn(pid, tool_server)
+              {:reply, {:error, reason}, state}
+          end
+
+        {:error, reason} ->
+          {:reply, {:error, {:spawn_failed, reason}}, state}
+      end
+    else
+      {:reply, {:error, :pool_exhausted}, state}
     end
   end
 
@@ -668,19 +665,28 @@ defmodule Arbor.AI.AcpPool do
         # Skip sessions reserved by an affinity key — they belong to their owner
         affinity_reserved = profile && profile.affinity_key != nil
 
-        if not affinity_reserved and SessionProfile.compatible?(requested, profile) do
-          case validate_session(pid) do
-            :ok ->
-              {:ok, entry, state}
+        cond do
+          tool_bound_session?(entry) ->
+            # Idle tool-bound entry is always stale; close and keep searching.
+            Logger.debug("AcpPool: removing stale tool-bound session #{inspect(pid)}")
+            safe_close(pid)
+            state = remove_session(state, ref)
+            try_compatible_refs(state, rest, requested)
 
-            {:error, _reason} ->
-              Logger.debug("AcpPool: removing unhealthy session #{inspect(pid)}")
-              safe_close(pid)
-              state = remove_session(state, ref)
-              try_compatible_refs(state, rest, requested)
-          end
-        else
-          try_compatible_refs(state, rest, requested)
+          not affinity_reserved and SessionProfile.compatible?(requested, profile) ->
+            case validate_session(pid) do
+              :ok ->
+                {:ok, entry, state}
+
+              {:error, _reason} ->
+                Logger.debug("AcpPool: removing unhealthy session #{inspect(pid)}")
+                safe_close(pid)
+                state = remove_session(state, ref)
+                try_compatible_refs(state, rest, requested)
+            end
+
+          true ->
+            try_compatible_refs(state, rest, requested)
         end
 
       _ ->
@@ -744,27 +750,22 @@ defmodule Arbor.AI.AcpPool do
         session_opts
       end
 
-    # Remove pool-only / unsupported child opts before passing to AcpSession.
-    # task_id scopes pool reuse but is not an AcpSession start option.
-    pool_keys = [
+    # Drop only confirmed pool/matching keys. AcpSession does not accept these;
+    # do not strip provider/session startup keys (cwd, model, client_opts,
+    # adapter_opts, capabilities, workspace, mcp_servers, agent_id, etc.).
+    # Managed-only keys (server, session_id, create_session) are stripped by
+    # AcpManaged before checkout — not silently dropped here.
+    pool_only_keys = [
       :tool_modules,
       :trust_domain,
       :affinity_key,
       :name,
       :tags,
       :task_id,
-      :principal_id,
-      :use_pool,
-      :pooled,
-      :return_to_pool,
-      :pool_module,
-      :session_module,
-      :create_session,
-      :session_id,
-      :server
+      :principal_id
     ]
 
-    session_opts = Keyword.drop(session_opts, pool_keys)
+    session_opts = Keyword.drop(session_opts, pool_only_keys)
 
     deadline = Keyword.fetch!(opts, :deadline_ms)
 
@@ -854,17 +855,21 @@ defmodule Arbor.AI.AcpPool do
     {state, ref}
   end
 
-  # Compatible idle reuse only applies to sessions that are not tool-bound
-  # after ToolServer teardown (tool-enabled entries are closed on checkin).
-  defp checkout_compatible_session(state, entry, caller_pid, tool_modules, agent_id, workspace) do
-    if tool_bound_session?(entry) or tool_modules != [] do
-      # Defensive: never reattach a replacement ToolServer the provider does not know about.
-      # Mint path should have been taken; if we somehow reach here, check out without reattach
-      # and leave tools as-is only when the original endpoint is still live.
-      checkout_session(state, entry.ref, caller_pid, entry.tool_server)
+  # Compatible idle reuse only for non-tool sessions. Tool-bound or stale
+  # tool-profile entries must never be checked out (provider MCP is immutable).
+  defp checkout_compatible_session(state, entry, caller_pid) do
+    if tool_bound_session?(entry) do
+      Logger.debug(
+        "AcpPool: refusing tool-bound/stale session #{inspect(entry.pid)}; closing and minting"
+      )
+
+      state = remove_session(state, entry.ref)
+      safe_close(entry.pid)
+      {:stale_closed, state}
     else
-      {_tool_server, _mcp} = maybe_start_tool_server(tool_modules, agent_id, workspace)
-      checkout_session(state, entry.ref, caller_pid, nil)
+      state = checkout_session(state, entry.ref, caller_pid, nil)
+      entry = Map.fetch!(state.sessions, entry.ref)
+      {:ok, state, entry}
     end
   end
 

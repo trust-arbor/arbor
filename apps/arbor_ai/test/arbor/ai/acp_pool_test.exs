@@ -702,6 +702,60 @@ defmodule Arbor.AI.AcpPoolTest do
       :ok = AcpPool.close_session(next)
     end
 
+    test "security regression: tool-bound idle entry is closed not checked out" do
+      # Simulate a stale pool entry that still has tool_modules on the profile
+      # (should never remain idle after checkin, but defensive path must mint).
+      {:ok, session} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          tool_modules: [TestToolAction],
+          agent_id: "stale_tools",
+          task_id: "task_stale"
+        )
+
+      # Force the entry idle without going through checkin close path by
+      # replacing pool state — then a later compatible checkout must close it.
+      pool = Process.whereis(AcpPool)
+
+      :sys.replace_state(pool, fn state ->
+        {ref, entry} =
+          Enum.find_value(state.sessions, fn {r, e} ->
+            if e.pid == session, do: {r, e}
+          end)
+
+        # Stop the live ToolServer so the entry looks like post-teardown stale
+        if entry.tool_server, do: Arbor.AI.AcpPool.ToolServer.stop(entry.tool_server.ref)
+
+        sessions =
+          Map.put(state.sessions, ref, %{
+            entry
+            | status: :idle,
+              checked_out_by: nil,
+              tool_server: nil,
+              taint: :tainted
+          })
+
+        %{state | sessions: sessions}
+      end)
+
+      Process.sleep(30)
+
+      {:ok, next} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          tool_modules: [TestToolAction],
+          agent_id: "stale_tools",
+          task_id: "task_stale"
+        )
+
+      # Must mint a new process — never hand out the stale tool-bound pid
+      refute next == session
+      refute Process.alive?(session)
+      assert Process.alive?(next)
+
+      :ok = AcpPool.close_session(next)
+    end
+
     test "auto-checkin on caller crash closes tool-enabled session" do
       test_pid = self()
 

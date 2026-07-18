@@ -9,8 +9,30 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
     test "computes profile hash from provider and tools" do
       profile = SessionProfile.new(provider: :claude, tool_modules: [MyApp.Trust.List])
       assert is_binary(profile.profile_hash)
-      assert String.length(profile.profile_hash) == 16
+      # Full SHA-256 hex digest (security boundary)
+      assert String.length(profile.profile_hash) == 64
       assert is_binary(profile.startup_fingerprint)
+      assert String.length(profile.startup_fingerprint) == 64
+    end
+
+    test "security regression: consumes startup config keys without raising on struct!" do
+      profile =
+        SessionProfile.new(
+          provider: :claude,
+          tool_modules: [ModA],
+          adapter_opts: [mode: :strict],
+          client_opts: [command: ["echo", "x"], token: "tok-1"],
+          capabilities: %{fs: true}
+        )
+
+      assert profile.provider == :claude
+      assert is_binary(profile.startup_fingerprint)
+      assert String.length(profile.startup_fingerprint) == 64
+      # Raw startup opts are never stored on the profile
+      refute Map.has_key?(profile, :adapter_opts)
+      refute Map.has_key?(profile, :client_opts)
+      refute Map.has_key?(profile, :capabilities)
+      refute inspect(profile) =~ "tok-1"
     end
 
     test "same provider and tools produce same hash" do
@@ -117,6 +139,7 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
       refute p1.startup_fingerprint == p2.startup_fingerprint
       assert p1.startup_fingerprint == p3.startup_fingerprint
       refute p1.profile_hash == p2.profile_hash
+      assert String.length(p1.startup_fingerprint) == 64
 
       # Profile must remain log/JSON safe — no raw secret values
       refute inspect(p1) =~ "secret-a"
@@ -128,6 +151,43 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
                  agent: p1.agent_id,
                  task: p1.task_id
                })
+    end
+
+    test "security regression: identical commands with different tokens do not share fingerprint" do
+      base_cmd = ["echo", "same-command"]
+
+      p1 =
+        SessionProfile.from_opts(:claude,
+          client_opts: [command: base_cmd, token: "credential-alpha"]
+        )
+
+      p2 =
+        SessionProfile.from_opts(:claude,
+          client_opts: [command: base_cmd, token: "credential-beta"]
+        )
+
+      p3 =
+        SessionProfile.from_opts(:claude,
+          client_opts: [command: base_cmd, api_key: "key-one"]
+        )
+
+      p4 =
+        SessionProfile.from_opts(:claude,
+          client_opts: [command: base_cmd, api_key: "key-two"]
+        )
+
+      # Only the secret value differs — fingerprints must not collide
+      refute p1.startup_fingerprint == p2.startup_fingerprint
+      refute p3.startup_fingerprint == p4.startup_fingerprint
+      refute p1.profile_hash == p2.profile_hash
+
+      # Same full secret material still matches
+      p1b =
+        SessionProfile.from_opts(:claude,
+          client_opts: [command: base_cmd, token: "credential-alpha"]
+        )
+
+      assert p1.startup_fingerprint == p1b.startup_fingerprint
     end
   end
 
