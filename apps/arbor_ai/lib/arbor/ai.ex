@@ -875,18 +875,31 @@ defmodule Arbor.AI do
   def acp_known_provider?(_), do: false
 
   @doc """
-  Classify whether an ACP resume failed because the provider does not support
-  the `load_session` capability.
+  Classify whether an ACP resume failed for a structural, recoverable reason.
 
-  This is deliberately an exact structural match. Provider messages, generic
-  JSON-RPC errors, transport failures, and timeouts are not evidence that a
-  fresh session is safe to start.
+  Exact matches only:
+
+  - `{:unsupported_capability, :load_session}` — provider lacks resume
+  - string-keyed wire error with `"code" => -32002` (ACP resource not found)
+  - string-keyed JSON-RPC internal error (`"code" => -32603`) whose nested
+    `"data" => %{"code" => "FS_NOT_FOUND"}` proves the provider session's path
+    is gone (workspace rebinding / deleted worktree)
+
+  Provider message/detail text is never inspected. Generic `-32603`, auth,
+  transport, timeout, rate-limit, and atom-keyed lookalikes are
+  `:not_resume_unavailable` (fail closed — do not start a fresh conversation).
   """
   @spec classify_resume_unavailability(term()) :: :resume_unavailable | :not_resume_unavailable
   def classify_resume_unavailability({:unsupported_capability, :load_session}),
     do: :resume_unavailable
 
   def classify_resume_unavailability(%{"code" => -32_002}), do: :resume_unavailable
+
+  def classify_resume_unavailability(%{
+        "code" => -32_603,
+        "data" => %{"code" => "FS_NOT_FOUND"}
+      }),
+      do: :resume_unavailable
 
   def classify_resume_unavailability(_reason), do: :not_resume_unavailable
 
@@ -898,19 +911,23 @@ defmodule Arbor.AI do
   Returns `{:ok, session_pid}` on success. The session must be returned
   via `acp_checkin/1` when done.
 
-  Reuse is fail-closed over the full `SessionProfile` (agent, task scope,
-  cwd, structured workspace plan, tool workspace scope, model, tools, trust
-  domain, and immutable startup fingerprint).
-  Different coding tasks never inherit another task's provider conversation or
-  cwd implicitly; cross-task continuity is only via explicit managed resume.
+  Reuse is fail-closed over the full `Arbor.AI.AcpPool.SessionProfile`.
+  **Matching identity** includes `task_id`, `cwd`, and `model` together with
+  agent identity, structured workspace plan, tool workspace scope, tools, trust
+  domain, and immutable startup fingerprint. Different coding tasks never
+  inherit another task's provider conversation or cwd implicitly; cross-task
+  continuity is only via explicit managed resume (`session_id` on
+  `acp_managed_start_session/2`).
 
   ## Options
 
-  - `:model` — model override (immutable reuse boundary)
-  - `:cwd` — explicit session working directory (canonicalized; immutable)
-  - `:workspace` — binary path (pool cwd/ToolServer alias) or structured
-    `{:directory, path}` / `{:worktree, opts}` session plan
-  - `:task_id` — coding task scope for pool matching
+  - `:model` — model override (immutable `SessionProfile` matching identity)
+  - `:cwd` — explicit session working directory (canonicalized; matching identity)
+  - `:workspace` — binary path (legacy cwd/ToolServer alias) **or** structured
+    session plan participating in profile matching:
+    - `{:directory, path}` — absolute directory binding
+    - `{:worktree, opts}` — worktree plan binding (normalized plan identity)
+  - `:task_id` — coding task scope for pool matching identity
   - `:agent_id` — owning agent (`nil` matches only `nil`)
   - `:timeout` — checkout timeout (default: 30_000)
   """

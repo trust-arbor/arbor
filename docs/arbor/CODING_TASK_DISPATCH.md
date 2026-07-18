@@ -39,16 +39,38 @@ Reviewed coding plans use the ACP pool by default (`worker.use_pool: true`).
 The workflow returns a pooled process after use while invalidating its
 per-run managed handle.
 
-**Pool reuse is task-scoped and fail-closed.** Managed checkout includes the
-coding `task_id` in the pool `SessionProfile` together with agent identity,
-canonical cwd, structured workspace-plan identity (`{:directory, path}` /
-`{:worktree, opts}` when supplied), binary tool-workspace scope, model, tool
-modules, trust domain, and a fingerprint of immutable startup configuration.
+**Pool reuse is task-scoped and fail-closed.** Managed checkout goes through
+`Arbor.AI.acp_checkout/2` into `Arbor.AI.AcpPool`, which matches only on a full
+`Arbor.AI.AcpPool.SessionProfile`. **Matching identity fields** (must all agree
+for reuse):
+
+| Identity field | Role |
+| --- | --- |
+| `task_id` | Coding task scope — different tasks never share a pool entry |
+| `cwd` | Canonical session working directory |
+| `model` | Explicit model override (or absence of one) |
+| agent / principal | Owning agent identity |
+| workspace plan | Structured form when supplied (see below) |
+| tool workspace scope | Binary tool-workspace binding |
+| tools / trust domain | Tool modules and trust domain |
+| startup fingerprint | Immutable startup configuration digest |
+
 The same coding task may reuse a compatible local `AcpSession` process. A
 different task must never inherit a prior task's provider conversation, terminal
 cwd, workspace plan, or ToolServer/MCP endpoint merely because an idle pooled
 process exists. One-shot steering such as `cd NEW_WORKTREE` is not a workspace
 rebind.
+
+**Structured workspace forms on checkout.** `Arbor.AI.acp_checkout/2` accepts
+`:workspace` as either a binary path (legacy cwd/ToolServer alias) or a
+structured session plan:
+
+- `{:directory, path}` — bind the session to that absolute directory
+- `{:worktree, opts}` — bind to a worktree plan (opts are provider-owned;
+  identity is the normalized plan, not a free-form string)
+
+These structured forms participate in `SessionProfile` matching; they are not
+advisory metadata.
 
 **Cross-task provider continuity is explicit only.** To continue a prior
 provider conversation, set both `resume_provider` and `resume_session_id`. That
@@ -86,11 +108,48 @@ required together, and the plan is rejected before compilation if either is
 missing or the providers differ. Arbor never infers a provider from opaque
 session ID text.
 
-The compiler maps `resume_session_id` only to `acp_start_session.session_id`.
-It does not replace the Engine session, task principal, signer, or verified run
-authorization. Pool affinity never bypasses profile compatibility: an
-incompatible affinity key returns a conflict, and a busy same-affinity checkout
-returns busy rather than minting a duplicate session.
+The compiler maps `resume_session_id` only to `acp_start_session.session_id`
+on the initial `open_worker` node. It does not replace the Engine session, task
+principal, signer, or verified run authorization. Pool affinity never bypasses
+profile compatibility: an incompatible affinity key returns a conflict, and a
+busy same-affinity checkout returns busy rather than minting a duplicate session.
+
+### Resume unavailable → one fresh-conversation recovery
+
+When the reviewed plan supplies a non-nil `worker.resume_session_id`, the
+compiler also sets
+`param.fallback_to_fresh_on_resume_unavailable=true` on initial `open_worker`
+(and always on `open_recovery_worker`). Ordinary fresh starts omit that flag.
+Semantic preflight binds the flag exactly to `worker_resume_session_id`:
+required `true` for explicit resume, absent otherwise; forged enable/disable
+fails closed.
+
+At runtime, `Arbor.Actions.Acp.StartSession` calls
+`Arbor.AI.acp_managed_start_session/2`. If resume was requested, the flag is
+true, and `Arbor.AI.classify_resume_unavailability/1` returns
+`:resume_unavailable`, StartSession retries **exactly once** without
+`session_id` (`create_session: true`), starts a new provider conversation, and
+reports:
+
+| Result field | Fresh-recovery value |
+| --- | --- |
+| `continuity` | `"fresh_recovery"` |
+| `session_id` | Replacement provider conversation id |
+| `worker_session_id` | New managed handle |
+
+Exact structural resume-unavailable evidence (message/detail text is **never**
+inspected):
+
+- `{:unsupported_capability, :load_session}`
+- string-keyed wire error `"code" => -32002`
+- string-keyed JSON-RPC `"code" => -32603` with nested
+  `"data" => %{"code" => "FS_NOT_FOUND"}` (provider session path gone — e.g.
+  Grok resume against a newly allocated worktree)
+
+Generic `-32603`, auth, transport, timeout, rate-limit, and atom-keyed
+lookalikes stay `:not_resume_unavailable` and do **not** retry. The public
+task result still surfaces the replacement `worker_provider_session_id` for a
+later explicit resume; Git worktree continuity remains a separate invariant.
 
 Optional reviewed selectors on the plan:
 

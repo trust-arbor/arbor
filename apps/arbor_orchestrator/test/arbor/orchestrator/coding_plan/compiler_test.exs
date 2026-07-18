@@ -401,6 +401,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert open_worker["param.use_pool"] == "false"
     assert open_worker["param.session_id"] == resume_id
+    # Explicit resume enables one fresh-conversation recovery when the provider
+    # session path is structurally unavailable (e.g. FS_NOT_FOUND).
+    assert open_worker["param.fallback_to_fresh_on_resume_unavailable"] == true
     assert open_worker["context_keys"] == "provider,cwd,model"
     recovery_open = node_attrs(graph, "open_recovery_worker")
     assert recovery_open["param.use_pool"] == "false"

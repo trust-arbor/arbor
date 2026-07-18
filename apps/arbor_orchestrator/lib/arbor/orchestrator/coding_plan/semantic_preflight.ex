@@ -2244,6 +2244,20 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         expected_permission = continuity_value(continuity, :permission_mode, nil)
         expected_model = continuity_value(continuity, :model, :unknown)
 
+        # Bound to reviewed worker_resume_session_id: true for explicit resume
+        # or recovery reopen; absent for ordinary fresh open_worker.
+        expected_fallback =
+          cond do
+            recovery? ->
+              true
+
+            match?(%{resume_session_id: sid} when is_binary(sid), continuity) ->
+              true
+
+            true ->
+              nil
+          end
+
         expected_context_keys =
           case {recovery?, expected_model} do
             {false, nil} -> "provider,cwd"
@@ -2261,7 +2275,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           }
           |> maybe_expected(
             "param.fallback_to_fresh_on_resume_unavailable",
-            if(recovery?, do: true, else: nil)
+            expected_fallback
           )
           |> maybe_expected("param.permission_mode", expected_permission)
 
@@ -2297,12 +2311,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
               | errors
             ]
 
-          Map.get(attrs, "param.fallback_to_fresh_on_resume_unavailable") == true ->
+          # Ordinary fresh open_worker: flag must be absent (forged true/false fails).
+          is_nil(expected_fallback) and
+              Map.has_key?(attrs, "param.fallback_to_fresh_on_resume_unavailable") ->
             [
               error("worker_recovery_start_binding_mismatch", node_id, %{
                 "attribute" => "param.fallback_to_fresh_on_resume_unavailable",
                 "expected" => nil,
-                "actual" => true
+                "actual" => Map.get(attrs, "param.fallback_to_fresh_on_resume_unavailable")
               })
               | errors
             ]

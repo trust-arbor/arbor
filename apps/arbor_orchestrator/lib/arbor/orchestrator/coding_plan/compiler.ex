@@ -448,15 +448,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         context_keys =
           if is_nil(worker["model"]), do: "provider,cwd", else: "provider,cwd,model"
 
-        {:ok,
-         attrs
-         |> Map.put("context_keys", context_keys)
-         |> Map.put("param.permission_mode", worker["permission_mode"])
-         |> Map.put("param.use_pool", bool_string(worker["use_pool"]))
-         |> Map.put("output_prefix", "worker")
-         |> Map.put("max_retries", "0")
-         |> Map.delete("param.fallback_to_fresh_on_resume_unavailable")
-         |> put_optional_static_param("param.session_id", worker["resume_session_id"])}
+        attrs =
+          attrs
+          |> Map.put("context_keys", context_keys)
+          |> Map.put("param.permission_mode", worker["permission_mode"])
+          |> Map.put("param.use_pool", bool_string(worker["use_pool"]))
+          |> Map.put("output_prefix", "worker")
+          |> Map.put("max_retries", "0")
+          |> put_optional_static_param("param.session_id", worker["resume_session_id"])
+
+        # Explicit provider-session resume may hit FS_NOT_FOUND when the prior
+        # workspace path is gone. Enable one fresh-conversation recovery only
+        # for that reviewed resume path; ordinary fresh starts omit the flag.
+        attrs =
+          if is_nil(worker["resume_session_id"]) do
+            Map.delete(attrs, "param.fallback_to_fresh_on_resume_unavailable")
+          else
+            Map.put(attrs, "param.fallback_to_fresh_on_resume_unavailable", true)
+          end
+
+        {:ok, attrs}
       end
     end)
   end

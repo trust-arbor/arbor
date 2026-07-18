@@ -471,12 +471,21 @@ defmodule Arbor.Actions.AcpTest do
       refute_receive {:managed_start, :claude, _opts}
     end
 
-    test "timeout, transport, and JSON-RPC errors do not trigger a fresh retry" do
+    test "timeout, transport, generic -32603, and non-FS JSON-RPC errors do not retry" do
       for reason <- [
             :timeout,
             {:transport_error, :closed},
             %{"code" => -32601, "message" => "load_session is not supported"},
-            %{"error" => %{"code" => -32601, "message" => "method not found"}}
+            %{"error" => %{"code" => -32601, "message" => "method not found"}},
+            # Generic internal error without nested data.code == FS_NOT_FOUND.
+            %{"code" => -32_603, "message" => "Path not found."},
+            %{
+              "code" => -32_603,
+              "data" => %{"code" => "AUTH_FAILED"},
+              "message" => "unauthorized"
+            },
+            # Atom-keyed lookalike must not classify.
+            %{code: -32_603, data: %{code: "FS_NOT_FOUND"}}
           ] do
         install_fake_ai()
         :persistent_term.put({FakeAI, :start_result}, {:error, reason})
@@ -531,6 +540,78 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(first_opts, :session_id) == "provider-session-missing"
       refute Keyword.has_key?(fallback_opts, :session_id)
       assert Keyword.get(fallback_opts, :create_session) == true
+    end
+
+    test "exact FS_NOT_FOUND wire error retries once without session_id and reports fresh_recovery" do
+      install_fake_ai()
+
+      # Exact live shape from task_187330 (Grok resume against a new worktree).
+      fs_not_found = %{
+        "code" => -32_603,
+        "data" => %{
+          "code" => "FS_NOT_FOUND",
+          "detail" => "No such file or directory (os error 2)"
+        },
+        "message" => "Path not found."
+      }
+
+      :persistent_term.put(
+        {FakeAI, :start_results},
+        [
+          {:error, fs_not_found},
+          {:ok,
+           %{
+             worker_session_id: "acp_worker_fs_not_found_recovery",
+             session_id: "provider_sess_fresh_after_fs_not_found",
+             provider: "grok",
+             model: "grok-code-fast",
+             status: "ready",
+             pooled: true
+           }}
+        ]
+      )
+
+      assert {:ok, result} =
+               Acp.StartSession.run(
+                 %{
+                   provider: "grok",
+                   model: "grok-code-fast",
+                   cwd: "/new/isolated/worktree",
+                   session_id: "provider-session-from-prior-task",
+                   use_pool: true,
+                   fallback_to_fresh_on_resume_unavailable: true,
+                   permission_mode: "default",
+                   timeout: 60_000
+                 },
+                 %{
+                   auth_context: %AuthContext{principal_id: "agent_resume"},
+                   task_id: "task_187330_fixture"
+                 }
+               )
+
+      assert result.continuity == "fresh_recovery"
+      assert result.session_id == "provider_sess_fresh_after_fs_not_found"
+      assert result.worker_session_id == "acp_worker_fs_not_found_recovery"
+      assert result.provider == "grok"
+
+      assert_receive {:managed_start, :grok, first_opts}
+      assert_receive {:managed_start, :grok, second_opts}
+      refute_receive {:managed_start, :grok, _opts}
+
+      assert Keyword.get(first_opts, :session_id) == "provider-session-from-prior-task"
+      assert Keyword.get(first_opts, :create_session) == nil
+      assert Keyword.get(first_opts, :use_pool) == true
+      assert Keyword.get(first_opts, :agent_id) == "agent_resume"
+      assert Keyword.get(first_opts, :task_id) == "task_187330_fixture"
+
+      # Fresh recovery omits the failed resume id and forces a new conversation.
+      assert Keyword.get(second_opts, :session_id) == nil
+      assert Keyword.get(second_opts, :create_session) == true
+      assert Keyword.get(second_opts, :use_pool) == true
+      assert Keyword.get(second_opts, :model) == Keyword.get(first_opts, :model)
+      assert Keyword.get(second_opts, :cwd) == Keyword.get(first_opts, :cwd)
+      assert Keyword.get(second_opts, :agent_id) == Keyword.get(first_opts, :agent_id)
+      assert Keyword.get(second_opts, :task_id) == Keyword.get(first_opts, :task_id)
     end
 
     test "duplicate fallback keys are rejected before managed start" do

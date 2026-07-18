@@ -1496,6 +1496,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         &Map.put(&1, "param.fallback_to_fresh_on_resume_unavailable", true)
       ),
       update_in(
+        graph.nodes["open_worker"].attrs,
+        &Map.put(&1, "param.fallback_to_fresh_on_resume_unavailable", false)
+      ),
+      update_in(
         graph.nodes["open_recovery_worker"].attrs,
         &Map.put(&1, "param.session_id", "forged-session")
       ),
@@ -1533,6 +1537,90 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                ]
              end)
     end
+  end
+
+  test "explicit resume binds open_worker fallback flag; forged enable/disable fails", ctx do
+    resume_id = "provider-session-continue-preflight"
+
+    plan =
+      plan!(%{
+        "worker" => %{
+          "provider" => "grok",
+          "model" => "grok-code-fast",
+          "use_pool" => true,
+          "resume_provider" => "grok",
+          "resume_session_id" => resume_id
+        }
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    # Compiled explicit-resume plan must carry the flag and pass preflight.
+    assert graph.nodes["open_worker"].attrs["param.fallback_to_fresh_on_resume_unavailable"] ==
+             true
+
+    assert :ok =
+             preflight(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               worker_use_pool: true,
+               worker_resume_session_id: resume_id,
+               worker_permission_mode: "default",
+               worker_model: "grok-code-fast"
+             )
+
+    # Forged disable (flag removed or false) fails when resume is bound.
+    for mutated <- [
+          update_in(
+            graph.nodes["open_worker"].attrs,
+            &Map.delete(&1, "param.fallback_to_fresh_on_resume_unavailable")
+          ),
+          update_in(
+            graph.nodes["open_worker"].attrs,
+            &Map.put(&1, "param.fallback_to_fresh_on_resume_unavailable", false)
+          )
+        ] do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"],
+                 review_profile: "binding",
+                 worker_use_pool: true,
+                 worker_resume_session_id: resume_id,
+                 worker_permission_mode: "default",
+                 worker_model: "grok-code-fast"
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == "worker_recovery_start_binding_mismatch" and
+                 error["node_id"] == "open_worker" and
+                 error["detail"]["attribute"] ==
+                   "param.fallback_to_fresh_on_resume_unavailable"
+             end)
+    end
+
+    # Non-resume plan: recovery node must still require the flag.
+    assert {:ok, non_resume_compilation} = compile(plan!(), ctx)
+    non_resume = compiled_graph!(non_resume_compilation.dot_source)
+
+    recovery_disabled =
+      update_in(
+        non_resume.nodes["open_recovery_worker"].attrs,
+        &Map.delete(&1, "param.fallback_to_fresh_on_resume_unavailable")
+      )
+
+    assert {:error, {:semantic_preflight_failed, recovery_errors}} =
+             preflight(recovery_disabled, profile["semantic_policy"],
+               review_profile: "binding",
+               worker_use_pool: true,
+               worker_resume_session_id: nil
+             )
+
+    assert Enum.any?(recovery_errors, fn error ->
+             error["code"] == "worker_recovery_start_binding_mismatch" and
+               error["node_id"] == "open_recovery_worker" and
+               error["detail"]["attribute"] ==
+                 "param.fallback_to_fresh_on_resume_unavailable"
+           end)
   end
 
   test "cross_app enforces exact aggregate test_stage_timeout and rejects missing/wrong values",
