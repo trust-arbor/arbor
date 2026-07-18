@@ -242,6 +242,26 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 
 ## Applied Learning
 
+**Terminal-tool contracts need a reserved terminal-only request after normal
+inspection/tool rounds are exhausted.** That reserved request must expose only
+terminal definitions, force tool choice, run exactly once, and reject fabricated
+non-terminal calls before execution (found 2026-07-18 after the ToolLoop
+terminal-submission fix).
+
+**Never mutate a delegated worktree after owner inspection has pinned its
+validation fingerprint.** Put temporary build output outside the worktree from
+the outset or remove it before the worker turn ends; mid-validation cleanup
+correctly produces `:validation_tree_mutated` (found 2026-07-18 during council
+smoke after terminal-submission hardening).
+
+**A rotating OAuth refresh token cannot be safely cloned into two independently
+refreshing stores.** The 2026-07-18 council failure showed `~/.arbor/oauth/openai.json`
+remained from 2026-07-04 while `~/.codex/auth.json` rotated on 2026-07-12;
+per-provider single-flight worked, but both serialized calls used the stale
+Arbor-owned credential. Prefer an independently acquired Arbor OAuth
+session/token family; do not consume or overwrite a CLI-owned rotating
+credential as a retry workaround (found 2026-07-18 during council smoke).
+
 **A Jido action schema is not automatic runtime validation for direct Arbor execution.**
 `Arbor.Actions.execute_action/3` invokes `action_module.run/2`; the Zoi schema shapes
 the model-facing tool definition but does not enforce its length, encoding, or
