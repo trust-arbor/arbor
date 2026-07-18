@@ -4,6 +4,18 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
   alias Arbor.Consensus.Evaluators.Consult
   alias Arbor.Consensus.TestHelpers.{FailingAdvisoryEvaluator, TestAdvisoryEvaluator}
 
+  # Mirrors production Engine.Context: get/3 only, no fetch/2. Values live in an
+  # internal map so Map.has_key?/2 on the struct itself cannot detect presence.
+  defmodule GetOnlyContext do
+    defstruct values: %{}
+
+    def new(values) when is_map(values), do: %__MODULE__{values: values}
+
+    def get(%__MODULE__{values: values}, key, default \\ nil) do
+      Map.get(values, key, default)
+    end
+  end
+
   @moduletag :fast
 
   describe "ask/3" do
@@ -312,6 +324,280 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
 
         assert {:error, {:bound_council_override, ^key}} =
                  Consult.decide(TestAdvisoryEvaluator, "Review this change", opts)
+      end
+    end
+  end
+
+  describe "decide/3 review decision projection" do
+    @review_fields [
+      :review_cycle,
+      :finding_ledger,
+      :findings,
+      :out_of_scope,
+      :review_disposition,
+      :blocking_ids,
+      :blocking_reasons,
+      :human_required
+    ]
+
+    test "projects closed review metadata from exec.decide.* Engine context" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      finding_ledger = %{
+        "review_cycle" => 1,
+        "findings" => %{},
+        "cycles" => %{},
+        "out_of_scope" => []
+      }
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{
+             "exec.decide.decision" => "approved",
+             "exec.decide.approve_count" => 3,
+             "exec.decide.reject_count" => 0,
+             "exec.decide.abstain_count" => 0,
+             "exec.decide.quorum_met" => true,
+             "exec.decide.review_cycle" => 1,
+             "exec.decide.finding_ledger" => finding_ledger,
+             "exec.decide.findings" => [],
+             "exec.decide.out_of_scope" => [],
+             "exec.decide.review_disposition" => "accept",
+             "exec.decide.blocking_ids" => [],
+             "exec.decide.blocking_reasons" => [],
+             "exec.decide.human_required" => false,
+             # Must not forward arbitrary nested context outside the allowlist.
+             "exec.decide.secret_internal" => "must-not-project",
+             "exec.decide.arbitrary_payload" => %{"x" => 1}
+           }
+         }}
+      end
+
+      assert {:ok, decision} =
+               Consult.decide(TestAdvisoryEvaluator, "Project exec.decide review fields",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert decision.decision == "approved"
+      assert decision.approve_count == 3
+      assert decision.quorum_met == true
+      assert decision.review_cycle == 1
+      assert decision.finding_ledger == finding_ledger
+      assert decision.findings == []
+      assert decision.out_of_scope == []
+      assert decision.review_disposition == "accept"
+      assert decision.blocking_ids == []
+      assert decision.blocking_reasons == []
+      # Legitimate false must survive; absence is what omits the key.
+      assert decision.human_required == false
+      assert Map.has_key?(decision, :human_required)
+
+      refute Map.has_key?(decision, :secret_internal)
+      refute Map.has_key?(decision, "secret_internal")
+      refute Map.has_key?(decision, :arbitrary_payload)
+      refute Map.has_key?(decision, "arbitrary_payload")
+    end
+
+    test "falls back to council.* review fields for legacy prefix compatibility" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{
+             "council.decision" => "rejected",
+             "council.approve_count" => 1,
+             "council.reject_count" => 2,
+             "council.abstain_count" => 0,
+             "council.quorum_met" => true,
+             "council.review_cycle" => 2,
+             "council.finding_ledger" => %{"review_cycle" => 2, "findings" => %{}},
+             "council.review_disposition" => "human_review",
+             "council.blocking_ids" => ["finding-1"],
+             "council.blocking_reasons" => [%{"id" => "finding-1", "reason" => "open"}],
+             "council.human_required" => true,
+             "council.findings" => [%{"id" => "finding-1"}],
+             "council.out_of_scope" => [%{"id" => "oos-1"}]
+           }
+         }}
+      end
+
+      assert {:ok, decision} =
+               Consult.decide(TestAdvisoryEvaluator, "Project council.* review fields",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert decision.decision == "rejected"
+      assert decision.review_cycle == 2
+      assert decision.finding_ledger == %{"review_cycle" => 2, "findings" => %{}}
+      assert decision.review_disposition == "human_review"
+      assert decision.blocking_ids == ["finding-1"]
+      assert decision.blocking_reasons == [%{"id" => "finding-1", "reason" => "open"}]
+      assert decision.human_required == true
+      assert decision.findings == [%{"id" => "finding-1"}]
+      assert decision.out_of_scope == [%{"id" => "oos-1"}]
+    end
+
+    test "prefers exec.decide.* over council.* when both prefixes are present" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{
+             "exec.decide.decision" => "approved",
+             "council.decision" => "rejected",
+             "exec.decide.review_cycle" => 3,
+             "council.review_cycle" => 1,
+             "exec.decide.human_required" => false,
+             "council.human_required" => true,
+             "exec.decide.review_disposition" => "accept",
+             "council.review_disposition" => "human_review"
+           }
+         }}
+      end
+
+      assert {:ok, decision} =
+               Consult.decide(TestAdvisoryEvaluator, "Prefer exec.decide prefix",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert decision.decision == "approved"
+      assert decision.review_cycle == 3
+      assert decision.human_required == false
+      assert decision.review_disposition == "accept"
+    end
+
+    test "ordinary generic council decisions have no review-specific keys" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{
+             "exec.decide.decision" => "approved",
+             "exec.decide.approve_count" => 4,
+             "exec.decide.reject_count" => 0,
+             "exec.decide.abstain_count" => 0,
+             "exec.decide.quorum_met" => true,
+             "exec.decide.status" => "decided"
+           }
+         }}
+      end
+
+      assert {:ok, decision} =
+               Consult.decide(TestAdvisoryEvaluator, "Generic council only",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert decision.decision == "approved"
+      assert decision.approve_count == 4
+      assert decision.quorum_met == true
+
+      for field <- @review_fields do
+        refute Map.has_key?(decision, field),
+               "generic decision must not invent review key #{inspect(field)}"
+      end
+
+      # Explicit non-review keys that must also stay absent (never defaulted).
+      refute Map.has_key?(decision, :human_required)
+      refute Map.has_key?(decision, "human_required")
+    end
+
+    test "projects review metadata through get/3-only context structs (Engine.Context shape)" do
+      # Production Arbor.Orchestrator.Engine.Context exports get/3, not fetch/2.
+      # Presence detection must use an unforgeable sentinel via get/3 so live
+      # nested Engine results keep review fields (including false/empty/nil).
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      finding_ledger = %{"review_cycle" => 1, "findings" => %{}}
+
+      values = %{
+        "exec.decide.decision" => "approved",
+        "exec.decide.approve_count" => 2,
+        "exec.decide.reject_count" => 0,
+        "exec.decide.abstain_count" => 0,
+        "exec.decide.quorum_met" => true,
+        "exec.decide.review_cycle" => 1,
+        "exec.decide.finding_ledger" => finding_ledger,
+        # Present nil must survive presence detection (distinct from absence).
+        "exec.decide.findings" => nil,
+        "exec.decide.out_of_scope" => [],
+        "exec.decide.review_disposition" => "accept",
+        "exec.decide.blocking_ids" => [],
+        "exec.decide.blocking_reasons" => [],
+        # Legitimate false must survive presence detection.
+        "exec.decide.human_required" => false,
+        "exec.decide.secret_internal" => "must-not-project"
+      }
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok, %{context: GetOnlyContext.new(values)}}
+      end
+
+      assert {:ok, decision} =
+               Consult.decide(TestAdvisoryEvaluator, "get/3-only context projection",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert decision.decision == "approved"
+      assert decision.review_cycle == 1
+      assert decision.finding_ledger == finding_ledger
+      assert decision.findings == nil
+      assert decision.out_of_scope == []
+      assert decision.review_disposition == "accept"
+      assert decision.blocking_ids == []
+      assert decision.blocking_reasons == []
+      assert decision.human_required == false
+      assert Map.has_key?(decision, :human_required)
+      assert Map.has_key?(decision, :findings)
+
+      refute Map.has_key?(decision, :secret_internal)
+      refute Map.has_key?(decision, "secret_internal")
+    end
+
+    test "get/3-only generic decisions still omit every review-specific key" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context:
+             GetOnlyContext.new(%{
+               "exec.decide.decision" => "approved",
+               "exec.decide.approve_count" => 3,
+               "exec.decide.reject_count" => 0,
+               "exec.decide.abstain_count" => 0,
+               "exec.decide.quorum_met" => true,
+               "exec.decide.status" => "decided"
+             })
+         }}
+      end
+
+      assert {:ok, decision} =
+               Consult.decide(TestAdvisoryEvaluator, "get/3-only generic decision",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert decision.decision == "approved"
+      assert decision.approve_count == 3
+
+      for field <- @review_fields do
+        refute Map.has_key?(decision, field),
+               "get/3-only generic decision must not invent #{inspect(field)}"
       end
     end
   end

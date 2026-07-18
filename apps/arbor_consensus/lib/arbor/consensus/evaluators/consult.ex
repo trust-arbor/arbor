@@ -365,6 +365,21 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     end
   end
 
+  # Closed allowlist of code-review council fields emitted by
+  # `consensus_decide_review` (and legacy council-prefixed equivalents).
+  # Projected only when present so ordinary generic council decisions remain
+  # free of review-specific keys (never default `human_required: false`).
+  @review_decision_fields [
+    :review_cycle,
+    :finding_ledger,
+    :findings,
+    :out_of_scope,
+    :review_disposition,
+    :blocking_ids,
+    :blocking_reasons,
+    :human_required
+  ]
+
   defp extract_decision_from_result(result) do
     # Engine returns a result struct with context
     ctx =
@@ -386,42 +401,96 @@ defmodule Arbor.Consensus.Evaluators.Consult do
         get_context_val(ctx, "council.decision")
 
     if decision do
-      {:ok,
-       %{
-         decision: decision,
-         approve_count:
-           get_context_val(ctx, "exec.decide.approve_count") ||
-             get_context_val(ctx, "council.approve_count", 0),
-         reject_count:
-           get_context_val(ctx, "exec.decide.reject_count") ||
-             get_context_val(ctx, "council.reject_count", 0),
-         abstain_count:
-           get_context_val(ctx, "exec.decide.abstain_count") ||
-             get_context_val(ctx, "council.abstain_count", 0),
-         quorum_met:
-           get_context_val(ctx, "exec.decide.quorum_met") ||
-             get_context_val(ctx, "council.quorum_met", false),
-         average_confidence:
-           get_context_val(ctx, "exec.decide.average_confidence") ||
-             get_context_val(ctx, "council.average_confidence", 0.0),
-         primary_concerns:
-           get_context_val(ctx, "exec.decide.primary_concerns") ||
-             get_context_val(ctx, "council.primary_concerns", "[]"),
-         perspective_votes:
-           get_context_val(ctx, "exec.decide.perspective_votes") ||
-             get_context_val(ctx, "council.perspective_votes", %{}),
-         security_veto:
-           get_context_val(ctx, "exec.decide.security_veto") ||
-             get_context_val(ctx, "council.security_veto", false),
-         vetoes:
-           get_context_val(ctx, "exec.decide.vetoes") ||
-             get_context_val(ctx, "council.vetoes", []),
-         status:
-           get_context_val(ctx, "exec.decide.status") ||
-             get_context_val(ctx, "consensus.status", "unknown")
-       }}
+      base = %{
+        decision: decision,
+        approve_count:
+          get_context_val(ctx, "exec.decide.approve_count") ||
+            get_context_val(ctx, "council.approve_count", 0),
+        reject_count:
+          get_context_val(ctx, "exec.decide.reject_count") ||
+            get_context_val(ctx, "council.reject_count", 0),
+        abstain_count:
+          get_context_val(ctx, "exec.decide.abstain_count") ||
+            get_context_val(ctx, "council.abstain_count", 0),
+        quorum_met:
+          get_context_val(ctx, "exec.decide.quorum_met") ||
+            get_context_val(ctx, "council.quorum_met", false),
+        average_confidence:
+          get_context_val(ctx, "exec.decide.average_confidence") ||
+            get_context_val(ctx, "council.average_confidence", 0.0),
+        primary_concerns:
+          get_context_val(ctx, "exec.decide.primary_concerns") ||
+            get_context_val(ctx, "council.primary_concerns", "[]"),
+        perspective_votes:
+          get_context_val(ctx, "exec.decide.perspective_votes") ||
+            get_context_val(ctx, "council.perspective_votes", %{}),
+        security_veto:
+          get_context_val(ctx, "exec.decide.security_veto") ||
+            get_context_val(ctx, "council.security_veto", false),
+        vetoes:
+          get_context_val(ctx, "exec.decide.vetoes") ||
+            get_context_val(ctx, "council.vetoes", []),
+        status:
+          get_context_val(ctx, "exec.decide.status") ||
+            get_context_val(ctx, "consensus.status", "unknown")
+      }
+
+      {:ok, Map.merge(base, project_review_decision_fields(ctx))}
     else
       {:error, :no_decision_in_result}
+    end
+  end
+
+  # Presence-aware projection: only copy allowlisted review fields that the
+  # engine context actually carries under `exec.decide.*` (preferred) or
+  # `council.*` (legacy). Preserves false, 0, [], and %{} — never invents keys.
+  defp project_review_decision_fields(ctx) do
+    Enum.reduce(@review_decision_fields, %{}, fn field, acc ->
+      case fetch_decide_field(ctx, field) do
+        {:ok, value} -> Map.put(acc, field, value)
+        :error -> acc
+      end
+    end)
+  end
+
+  defp fetch_decide_field(ctx, field) when is_atom(field) do
+    name = Atom.to_string(field)
+
+    case fetch_context_val(ctx, "exec.decide." <> name) do
+      {:ok, _} = ok ->
+        ok
+
+      :error ->
+        fetch_context_val(ctx, "council." <> name)
+    end
+  end
+
+  defp fetch_context_val(ctx, key) when is_binary(key) do
+    cond do
+      # Prefer fetch/2 when a context type exports true presence semantics.
+      is_struct(ctx) and function_exported?(ctx.__struct__, :fetch, 2) ->
+        case apply(ctx.__struct__, :fetch, [ctx, key]) do
+          {:ok, value} -> {:ok, value}
+          :error -> :error
+          _other -> :error
+        end
+
+      # Production Engine.Context (and similar) only export get/3. Detect
+      # presence with an unforgeable sentinel so legitimate false, "", [], %{},
+      # 0, and nil values are preserved while absent keys stay omitted.
+      is_struct(ctx) and function_exported?(ctx.__struct__, :get, 3) ->
+        sentinel = make_ref()
+
+        case apply(ctx.__struct__, :get, [ctx, key, sentinel]) do
+          ^sentinel -> :error
+          value -> {:ok, value}
+        end
+
+      is_map(ctx) and Map.has_key?(ctx, key) ->
+        {:ok, Map.get(ctx, key)}
+
+      true ->
+        :error
     end
   end
 
