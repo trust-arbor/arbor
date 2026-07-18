@@ -70,6 +70,41 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
 
   def apply_cycle(_ledger, _review_cycle, _reports), do: {:error, :invalid_cycle_input}
 
+  @doc """
+  Project a perspective report to its authority before strict ledger application.
+
+  Drops only `finding_updates` whose ids resolve to **known** findings owned by
+  another perspective. Those entries must never mutate foreign findings and must
+  not invalidate otherwise complete same-owner evidence.
+
+  Unknown ids and malformed same-owner updates are preserved so strict validation
+  still fails closed. Direct `apply_cycle/3` calls that retain cross-owner updates
+  continue to reject them.
+  """
+  @spec project_report_to_authority(String.t(), map(), map()) :: map()
+  def project_report_to_authority(owner, report, ledger)
+      when is_binary(owner) and is_map(report) and is_map(ledger) do
+    case normalize_ledger(ledger) do
+      {:ok, normalized} ->
+        case Map.fetch(report, "finding_updates") do
+          {:ok, updates} when is_list(updates) ->
+            projected =
+              Enum.reject(updates, &foreign_owned_finding_update?(owner, &1, normalized))
+
+            Map.put(report, "finding_updates", projected)
+
+          _ ->
+            report
+        end
+
+      {:error, _reason} ->
+        report
+    end
+  end
+
+  def project_report_to_authority(_owner, report, _ledger) when is_map(report), do: report
+  def project_report_to_authority(_owner, report, _ledger), do: report
+
   @doc "Return the review-specific disposition and deterministic reasons."
   @spec decision(map()) :: map()
   def decision(ledger) when is_map(ledger) do
@@ -257,6 +292,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
          true <- Enum.all?(Map.keys(report), &(&1 in allowed)),
          {:ok, vote} <- validate_vote(Map.get(report, "vote")),
          {:ok, updates} <- validate_updates(owner, Map.get(report, "finding_updates", []), ledger),
+         :ok <- require_owned_active_updates(owner, updates, ledger),
          {:ok, new_findings} <- validate_new_findings(owner, Map.get(report, "new_findings", [])),
          true <- length(updates) + length(new_findings) <= @max_findings_per_perspective do
       {:ok, %{"vote" => vote, "finding_updates" => updates, "new_findings" => new_findings}}
@@ -268,6 +304,59 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
   end
 
   defp validate_report(owner, _report, _ledger), do: {:error, {:invalid_report, owner}}
+
+  # Recheck cycles require explicit owner disposition for every active finding the
+  # perspective owns. Omitting an owned active finding is not silent "still open"
+  # evidence — the report is invalid and the consumer boundary abstains.
+  defp require_owned_active_updates(_owner, _updates, %{"review_cycle" => 0}), do: :ok
+
+  defp require_owned_active_updates(owner, updates, ledger) when is_list(updates) do
+    active_ids =
+      ledger["findings"]
+      |> Map.values()
+      |> Enum.filter(&(&1["owner"] == owner and active?(&1)))
+      |> Enum.map(& &1["id"])
+      |> Enum.sort()
+
+    active_id_set = MapSet.new(active_ids)
+
+    active_update_ids =
+      updates
+      |> Enum.map(& &1["id"])
+      |> Enum.filter(&MapSet.member?(active_id_set, &1))
+
+    cond do
+      length(active_update_ids) != length(Enum.uniq(active_update_ids)) ->
+        {:error, {:duplicate_owned_finding_update, owner}}
+
+      Enum.sort(active_update_ids) != active_ids ->
+        {:error, {:incomplete_owned_finding_updates, owner}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp require_owned_active_updates(owner, _updates, _ledger),
+    do: {:error, {:incomplete_owned_finding_updates, owner}}
+
+  defp foreign_owned_finding_update?(owner, update, ledger) when is_map(update) do
+    case Map.get(update, "id") do
+      id when is_binary(id) ->
+        case Map.get(ledger["findings"], id) do
+          %{"owner" => finding_owner} when is_binary(finding_owner) ->
+            finding_owner != owner
+
+          _ ->
+            false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp foreign_owned_finding_update?(_owner, _update, _ledger), do: false
 
   defp validate_vote(vote) when vote in @votes, do: {:ok, vote}
   defp validate_vote(_vote), do: {:error, :invalid_vote}
@@ -909,6 +998,13 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
         &(&1["blocks_merge"] == true or &1["state"] == "architectural_blocker")
       )
 
+    reported_owners = reported_owners_this_cycle(ledger)
+
+    {confirmed_blocking, unconfirmed_blocking} =
+      blocking
+      |> Enum.reject(&(&1["state"] == "architectural_blocker"))
+      |> Enum.split_with(&MapSet.member?(reported_owners, &1["owner"]))
+
     security_veto = Map.get(votes, "security") == "reject"
 
     reasons =
@@ -916,9 +1012,16 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
       |> Enum.sort_by(& &1["id"])
       |> Enum.map(fn finding ->
         reason =
-          if finding["state"] == "architectural_blocker",
-            do: "architectural_blocker",
-            else: blocker_reason(finding)
+          cond do
+            finding["state"] == "architectural_blocker" ->
+              "architectural_blocker"
+
+            not MapSet.member?(reported_owners, finding["owner"]) ->
+              "unconfirmed_blocker"
+
+            true ->
+              blocker_reason(finding)
+          end
 
         %{"id" => finding["id"], "reason" => reason}
       end)
@@ -930,10 +1033,33 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
 
     disposition =
       cond do
-        security_veto or architectural != [] -> "human_review"
-        blocking != [] -> "rework"
-        vote_counts["approve"] > vote_counts["reject"] and vote_counts["approve"] > 0 -> "accept"
-        true -> "rework"
+        security_veto or architectural != [] ->
+          "human_review"
+
+        # Owner never reconfirmed this cycle — do not spend another worker rework turn.
+        unconfirmed_blocking != [] ->
+          "human_review"
+
+        # Explicitly reopened/reconfirmed merge blockers still require worker rework.
+        confirmed_blocking != [] ->
+          "rework"
+
+        vote_counts["approve"] > vote_counts["reject"] and vote_counts["approve"] > 0 ->
+          "accept"
+
+        # True all-abstain / no actionable finding — escalate, do not rework.
+        vote_counts["approve"] == 0 and vote_counts["reject"] == 0 ->
+          "human_review"
+
+        true ->
+          "rework"
+      end
+
+    reasons =
+      if disposition == "human_review" and reasons == [] do
+        [%{"id" => "council", "reason" => "all_abstain"}]
+      else
+        reasons
       end
 
     %{
@@ -947,6 +1073,19 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
 
   defp blocker_reason(finding) do
     if finding["severity"] == "major", do: "corroborated_major", else: "active_blocking"
+  end
+
+  defp reported_owners_this_cycle(ledger) do
+    case ledger["review_cycle"] do
+      cycle when is_integer(cycle) and cycle > 0 ->
+        owners =
+          get_in(ledger, ["cycles", Integer.to_string(cycle), "reported_owners"]) || []
+
+        if is_list(owners), do: MapSet.new(owners), else: MapSet.new()
+
+      _ ->
+        MapSet.new()
+    end
   end
 
   defp latest_votes(ledger) do

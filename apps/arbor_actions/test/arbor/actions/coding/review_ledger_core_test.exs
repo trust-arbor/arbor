@@ -92,15 +92,159 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
              })
   end
 
-  test "missing updates leave active findings open" do
+  test "recheck reports must update every owned active finding exactly once" do
+    {:ok, ledger} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report(new_findings: [finding("must fix", "blocking")])
+      })
+
+    id = ledger["findings"] |> Map.keys() |> hd()
+
+    # Omitting an owned active finding is invalid on recheck (not silent stale open).
+    assert {:error, {:incomplete_owned_finding_updates, "correctness"}} =
+             apply_cycle(ledger, 2, %{"correctness" => report()})
+
+    # Without a valid owner report, the stale blocker stays and routes human_review.
+    {:ok, unconfirmed} = apply_cycle(ledger, 2, %{})
+    assert unconfirmed["findings"][id]["state"] == "open"
+    decision = ReviewLedgerCore.decision(unconfirmed)
+    assert decision["disposition"] == "human_review"
+    assert decision["blocking_reasons"] == [%{"id" => id, "reason" => "unconfirmed_blocker"}]
+  end
+
+  test "projects foreign finding updates away without mutating them or invalidating same-owner evidence" do
+    {:ok, ledger} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report(new_findings: [finding("owned by correctness", "blocking", 10)]),
+        "security" => report(new_findings: [finding("owned by security", "blocking", 20)]),
+        "maintainability" =>
+          report(new_findings: [finding("owned by maintainability", "blocking", 30)])
+      })
+
+    correctness_id =
+      ledger["findings"]
+      |> Map.values()
+      |> Enum.find(&(&1["owner"] == "correctness"))
+      |> Map.fetch!("id")
+
+    security_id =
+      ledger["findings"]
+      |> Map.values()
+      |> Enum.find(&(&1["owner"] == "security"))
+      |> Map.fetch!("id")
+
+    maintainability_id =
+      ledger["findings"]
+      |> Map.values()
+      |> Enum.find(&(&1["owner"] == "maintainability"))
+      |> Map.fetch!("id")
+
+    mixed_report =
+      report(
+        finding_updates: [
+          %{"id" => correctness_id, "state" => "fixed"},
+          # Semantically duplicate foreign id — must be ignored by projection.
+          %{"id" => security_id, "state" => "fixed"}
+        ]
+      )
+
+    projected =
+      ReviewLedgerCore.project_report_to_authority("correctness", mixed_report, ledger)
+
+    assert projected["finding_updates"] == [%{"id" => correctness_id, "state" => "fixed"}]
+
+    # Direct apply_cycle still rejects retained cross-owner mutation attempts.
+    assert {:error, {:cross_owner_update, "correctness"}} =
+             apply_cycle(ledger, 2, %{"correctness" => mixed_report})
+
+    # After projection, complete same-owner evidence applies; foreign stays open.
+    {:ok, fixed} =
+      apply_cycle(ledger, 2, %{
+        "correctness" => projected,
+        "security" => report(finding_updates: [%{"id" => security_id, "state" => "fixed"}]),
+        "maintainability" =>
+          report(finding_updates: [%{"id" => maintainability_id, "state" => "fixed"}])
+      })
+
+    assert fixed["findings"][correctness_id]["state"] == "fixed"
+    assert fixed["findings"][security_id]["state"] == "fixed"
+    assert fixed["findings"][maintainability_id]["state"] == "fixed"
+    assert ReviewLedgerCore.decision(fixed)["disposition"] == "accept"
+  end
+
+  test "unknown finding ids still fail closed after authority projection" do
     {:ok, ledger} =
       apply_cycle(new_ledger(), 1, %{"correctness" => report(new_findings: [finding()])})
 
     id = ledger["findings"] |> Map.keys() |> hd()
 
-    {:ok, rechecked} = apply_cycle(ledger, 2, %{"correctness" => report()})
-    assert rechecked["findings"][id]["state"] == "open"
-    assert ReviewLedgerCore.decision(rechecked)["security_veto"] == false
+    report_with_unknown =
+      report(
+        finding_updates: [
+          %{"id" => id, "state" => "fixed"},
+          %{"id" => "deadbeef" <> String.duplicate("0", 56), "state" => "fixed"}
+        ]
+      )
+
+    projected =
+      ReviewLedgerCore.project_report_to_authority("correctness", report_with_unknown, ledger)
+
+    # Unknown id is preserved (not a known foreign finding) and fails closed.
+    assert length(projected["finding_updates"]) == 2
+
+    assert {:error, :unknown_finding} =
+             apply_cycle(ledger, 2, %{"correctness" => projected})
+  end
+
+  test "explicitly reconfirmed blockers remain rework; unconfirmed blockers escalate" do
+    {:ok, ledger} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report(new_findings: [finding("must fix", "blocking", 10)]),
+        "security" => report(new_findings: [finding("also blocking", "blocking", 20)])
+      })
+
+    correctness_id =
+      ledger["findings"]
+      |> Map.values()
+      |> Enum.find(&(&1["owner"] == "correctness"))
+      |> Map.fetch!("id")
+
+    security_id =
+      ledger["findings"]
+      |> Map.values()
+      |> Enum.find(&(&1["owner"] == "security"))
+      |> Map.fetch!("id")
+
+    # Correctness reconfirms open; security never reports this cycle.
+    {:ok, rechecked} =
+      apply_cycle(ledger, 2, %{
+        "correctness" => report(finding_updates: [%{"id" => correctness_id, "state" => "open"}])
+      })
+
+    decision = ReviewLedgerCore.decision(rechecked)
+    # Unconfirmed security blocker dominates routing to human_review.
+    assert decision["disposition"] == "human_review"
+
+    assert %{"id" => ^security_id, "reason" => "unconfirmed_blocker"} =
+             Enum.find(decision["blocking_reasons"], &(&1["id"] == security_id))
+
+    assert %{"id" => ^correctness_id, "reason" => "active_blocking"} =
+             Enum.find(decision["blocking_reasons"], &(&1["id"] == correctness_id))
+
+    # When every owner reconfirms, confirmed blockers route rework.
+    {:ok, reconfirmed} =
+      apply_cycle(ledger, 2, %{
+        "correctness" => report(finding_updates: [%{"id" => correctness_id, "state" => "open"}]),
+        "security" => report(finding_updates: [%{"id" => security_id, "state" => "open"}])
+      })
+
+    reconfirmed_decision = ReviewLedgerCore.decision(reconfirmed)
+    assert reconfirmed_decision["disposition"] == "rework"
+
+    assert Enum.all?(
+             reconfirmed_decision["blocking_reasons"],
+             &(&1["reason"] == "active_blocking")
+           )
   end
 
   test "preserves a new architectural blocker and escalates it regardless of severity" do
@@ -229,8 +373,12 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
 
     {:ok, only_reject} = apply_cycle(new_ledger(), 1, %{"correctness" => report("reject")})
     only_reject_decision = ReviewLedgerCore.decision(only_reject)
-    assert only_reject_decision["disposition"] == "rework"
+    assert only_reject_decision["disposition"] == "human_review"
     assert only_reject_decision["vote_counts"] == %{"approve" => 0, "reject" => 0, "abstain" => 3}
+
+    assert only_reject_decision["blocking_reasons"] == [
+             %{"id" => "council", "reason" => "all_abstain"}
+           ]
   end
 
   test "an uncorroborated major reject plus an approve is accepted" do
@@ -297,7 +445,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
     assert votes["maintainability"] == "reject"
   end
 
-  test "uses symbolic majority and treats all abstain as rework" do
+  test "uses symbolic majority and treats all abstain as human_review" do
     {:ok, accepted} =
       apply_cycle(new_ledger(), 1, %{
         "correctness" => report("approve"),
@@ -309,8 +457,9 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
 
     {:ok, abstained} = apply_cycle(new_ledger(), 1, %{})
     decision = ReviewLedgerCore.decision(abstained)
-    assert decision["disposition"] == "rework"
+    assert decision["disposition"] == "human_review"
     assert decision["vote_counts"] == %{"approve" => 0, "reject" => 0, "abstain" => 3}
+    assert decision["blocking_reasons"] == [%{"id" => "council", "reason" => "all_abstain"}]
   end
 
   test "returns deterministic sorted findings and JSON-clean context" do

@@ -924,7 +924,7 @@ defmodule Arbor.Actions.ConsensusTest do
       assert [%{"reason" => "outside_delta", "state" => "out_of_scope"}] = result["out_of_scope"]
     end
 
-    test "all abstentions remain a rework decision" do
+    test "all abstentions route to human_review without consuming rework" do
       results =
         Enum.map(@review_perspectives, fn perspective ->
           make_review_branch(perspective, review_report("abstain"))
@@ -936,10 +936,12 @@ defmodule Arbor.Actions.ConsensusTest do
                  %{}
                )
 
-      assert result["decision"] == "deadlock"
-      assert result["review_disposition"] == "rework"
+      assert result["decision"] == "rejected"
+      assert result["review_disposition"] == "human_review"
+      assert result["human_required"]
       assert result["abstain_count"] == 3
       refute result["quorum_met"]
+      assert result["blocking_reasons"] == [%{"id" => "council", "reason" => "all_abstain"}]
     end
 
     test "public perspective votes use severity-backed effective rejects" do
@@ -1162,6 +1164,171 @@ defmodule Arbor.Actions.ConsensusTest do
 
       assert {:ok, %{decision: "approved"}} =
                Consensus.Decide.run(%{results: results, question: "generic behavior"}, %{})
+    end
+
+    test "mixed recheck reports drop foreign finding ids and keep complete same-owner fixes" do
+      # Reproduces task_45506: two perspectives approve with all own findings fixed
+      # but each also copies one foreign finding id. Pre-fix this rejected both
+      # useful reports, left stale blockers, and routed rework → worker_turn_no_progress.
+      assert {:ok, first} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("reject",
+                         new_findings: [review_finding("contract issue", "blocking", 10)]
+                       )
+                     ),
+                     make_review_branch(
+                       "security",
+                       review_report("reject",
+                         new_findings: [review_finding("perf issue", "blocking", 20)]
+                       )
+                     ),
+                     make_review_branch(
+                       "maintainability",
+                       review_report("reject",
+                         new_findings: [review_finding("docs issue", "blocking", 30)]
+                       )
+                     )
+                   ],
+                   review_cycle: 1,
+                   finding_ledger: review_ledger()
+                 },
+                 %{}
+               )
+
+      findings_by_owner =
+        Map.new(first["findings"], fn finding -> {finding["owner"], finding} end)
+
+      correctness_id = findings_by_owner["correctness"]["id"]
+      security_id = findings_by_owner["security"]["id"]
+      maintainability_id = findings_by_owner["maintainability"]["id"]
+
+      assert {:ok, second} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("approve",
+                         finding_updates: [
+                           %{"id" => correctness_id, "state" => "fixed"},
+                           # Foreign docs/maintainability id — projected away.
+                           %{"id" => maintainability_id, "state" => "fixed"}
+                         ]
+                       )
+                     ),
+                     make_review_branch(
+                       "security",
+                       review_report("approve",
+                         finding_updates: [
+                           %{"id" => security_id, "state" => "fixed"},
+                           # Foreign correctness id — projected away.
+                           %{"id" => correctness_id, "state" => "fixed"}
+                         ]
+                       )
+                     ),
+                     make_review_branch(
+                       "maintainability",
+                       review_report("approve",
+                         finding_updates: [
+                           %{"id" => maintainability_id, "state" => "fixed"}
+                         ]
+                       )
+                     )
+                   ],
+                   review_cycle: 2,
+                   finding_ledger: first["finding_ledger"],
+                   delta_ranges: %{}
+                 },
+                 %{}
+               )
+
+      assert second["decision"] == "approved"
+      assert second["review_disposition"] == "accept"
+      assert Enum.all?(second["findings"], &(&1["state"] == "fixed"))
+      assert second["perspective_votes"]["correctness"] == "approve"
+      assert second["perspective_votes"]["security"] == "approve"
+      assert second["perspective_votes"]["maintainability"] == "approve"
+    end
+
+    test "incomplete same-owner recheck reports abstain; unconfirmed blockers go human_review" do
+      assert {:ok, first} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("reject",
+                         new_findings: [review_finding("must fix", "blocking", 10)]
+                       )
+                     ),
+                     make_review_branch("security", review_report("approve")),
+                     make_review_branch("maintainability", review_report("approve"))
+                   ],
+                   review_cycle: 1,
+                   finding_ledger: review_ledger()
+                 },
+                 %{}
+               )
+
+      [stored] = first["findings"]
+
+      # Incomplete report (omits owned active finding) becomes abstention.
+      assert {:ok, incomplete} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch("correctness", review_report("approve")),
+                     make_review_branch("security", review_report("approve")),
+                     make_review_branch("maintainability", review_report("approve"))
+                   ],
+                   review_cycle: 2,
+                   finding_ledger: first["finding_ledger"],
+                   delta_ranges: %{}
+                 },
+                 %{}
+               )
+
+      assert incomplete["perspective_votes"]["correctness"] == "abstain"
+      assert incomplete["findings"] |> hd() |> Map.get("state") == "open"
+      assert incomplete["review_disposition"] == "human_review"
+      assert incomplete["human_required"]
+
+      assert incomplete["blocking_reasons"] == [
+               %{"id" => stored["id"], "reason" => "unconfirmed_blocker"}
+             ]
+
+      # Explicit reconfirm of the blocker still routes rework.
+      assert {:ok, reconfirmed} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("reject",
+                         finding_updates: [%{"id" => stored["id"], "state" => "open"}]
+                       )
+                     ),
+                     make_review_branch("security", review_report("approve")),
+                     make_review_branch("maintainability", review_report("approve"))
+                   ],
+                   review_cycle: 2,
+                   finding_ledger: first["finding_ledger"],
+                   delta_ranges: %{}
+                 },
+                 %{}
+               )
+
+      assert reconfirmed["review_disposition"] == "rework"
+
+      assert reconfirmed["blocking_reasons"] == [
+               %{"id" => stored["id"], "reason" => "active_blocking"}
+             ]
+
+      refute reconfirmed["human_required"]
     end
   end
 

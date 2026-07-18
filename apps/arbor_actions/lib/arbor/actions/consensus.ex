@@ -787,6 +787,8 @@ defmodule Arbor.Actions.Consensus do
            %{} = context_updates <- Map.get(branch, "context_updates"),
            response when is_binary(response) <- Map.get(context_updates, "last_response"),
            {:ok, report} when is_map(report) <- Jason.decode(response),
+           report <-
+             ReviewLedgerCore.project_report_to_authority(perspective, report, ledger),
            true <- valid_report?(ledger, review_cycle, delta_ranges, perspective, report) do
         {:ok, perspective, report}
       else
