@@ -368,6 +368,13 @@ defmodule Arbor.AI.AcpPoolTest do
       assert {:error, {:invalid, :cwd, :blank}} =
                AcpPool.checkout(:test, client_opts: @test_client_opts, cwd: "  ")
 
+      assert {:error, {:invalid, :cwd, :bad_type}} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 cwd: false,
+                 workspace: "/tmp/valid"
+               )
+
       assert {:error, {:invalid, :task_id, :blank}} =
                AcpPool.checkout(:test, client_opts: @test_client_opts, task_id: "")
 

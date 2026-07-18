@@ -129,8 +129,7 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
          {:ok, affinity_key} <-
            validate_optional_id(Keyword.get(opts, :affinity_key), :affinity_key),
          {:ok, model} <- validate_model(Keyword.get(opts, :model)),
-         {:ok, cwd} <-
-           validate_cwd(Keyword.get(opts, :cwd) || Keyword.get(opts, :workspace)),
+         {:ok, cwd} <- validate_cwd(cwd_value(opts)),
          {:ok, tool_modules} <- validate_tool_modules(Keyword.get(opts, :tool_modules, [])),
          {:ok, trust_domain} <- validate_trust_domain(Keyword.get(opts, :trust_domain)),
          {:ok, tags} <- validate_tags(Keyword.get(opts, :tags, %{})),
@@ -157,6 +156,14 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   end
 
   def from_opts(_provider, _opts), do: {:error, :invalid_checkout_opts}
+
+  defp cwd_value(opts) do
+    case Keyword.fetch(opts, :cwd) do
+      {:ok, nil} -> Keyword.get(opts, :workspace)
+      {:ok, cwd} -> cwd
+      :error -> Keyword.get(opts, :workspace)
+    end
+  end
 
   @doc """
   Check if two profiles are compatible for session reuse.

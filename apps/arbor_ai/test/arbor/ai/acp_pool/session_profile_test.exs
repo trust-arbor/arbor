@@ -279,6 +279,9 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
       assert {:error, {:invalid, :cwd, :bad_type}} =
                SessionProfile.from_opts(:claude, cwd: %{not: "a path"})
 
+      assert {:error, {:invalid, :cwd, :bad_type}} =
+               SessionProfile.from_opts(:claude, cwd: false, workspace: "/tmp/valid")
+
       assert {:error, {:invalid, :task_id, :blank}} =
                SessionProfile.from_opts(:claude, task_id: "")
 
