@@ -12,6 +12,8 @@ defmodule Mix.Tasks.Arbor.Recompile do
   """
   use Mix.Task
 
+  @requirements ["compile"]
+
   alias Arbor.Common.CodeReloader
   alias Mix.Tasks.Arbor.Helpers, as: Config
 
