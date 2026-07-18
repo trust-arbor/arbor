@@ -2371,7 +2371,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       end
     end
 
-    test "security regression: aggregate raw inventory bytes and JSON node bounds" do
+    test "security regression: aggregate raw inventory bytes and JSON node bounds", %{
+      tmp_dir: tmp_dir
+    } do
       # Node count during ordered normalization (before full decode budgets).
       # Build a shallow object with more than max_json_nodes leaf members.
       max_nodes = Core.max_json_nodes()
@@ -2385,7 +2387,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       assert {:error, :retention_structure_oversized} = Core.decode_json_bytes(oversized)
 
       # Aggregate on-disk inventory bound: many large files under one journal root.
-      tmp = Path.join(System.tmp_dir!(), "agg-inv-#{System.unique_integer([:positive])}")
+      # Use ActionCase tmp_dir (not System.tmp_dir!) so Linux guests with /tmp
+      # parents pass durable-store parent-permission checks.
+      tmp = Path.join(tmp_dir, "agg-inv-#{System.unique_integer([:positive])}")
       File.mkdir_p!(tmp)
       File.chmod!(tmp, 0o700)
       # Write enough large-ish files that lstat size sum exceeds aggregate ceiling
