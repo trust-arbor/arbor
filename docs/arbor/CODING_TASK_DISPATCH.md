@@ -103,11 +103,16 @@ cross-app run, set both graph liveness bounds explicitly:
   "validation_profile": "cross_app",
   "review_profile": "binding",
   "budgets": {
-    "wall_clock_ms": 3600000,
+    "wall_clock_ms": 5400000,
     "inactivity_timeout_ms": 600000
   }
 }
 ```
+
+A `5_400_000` ms (90 minute) plan wall clock leaves bounded headroom for
+compile, xref, test-environment compile, review, and related non-test stages;
+the sequential test stage remains hard-capped at `4_200_000` ms via
+`min(aggregate ceiling, budgets.wall_clock_ms)`.
 
 The `cross_app` validation profile compiles two distinct budgets into
 `coding_cross_app_validate`:
@@ -115,8 +120,8 @@ The `cross_app` validation profile compiles two distinct budgets into
 - `param.timeout` — per contained Mix child process, intensive Shell profile,
   hard maximum `1_200_000` ms (never widens the generic Shell ceiling)
 - `param.test_stage_timeout` — aggregate sequential test-stage budget, reviewed
-  hard maximum `2_400_000` ms from the Actions facade, further bounded by
-  `budgets.wall_clock_ms`
+  hard maximum `4_200_000` ms (70 minutes) from the Actions facade, further
+  bounded by `budgets.wall_clock_ms`
 
 Exact `*_test.exs` inventory is preserved (including slow and integration-tagged
 files). Paths are partitioned into sequential batches of exactly one file per

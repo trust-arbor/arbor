@@ -24,7 +24,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
      capped by the intensive Shell spawn-capable ceiling (profile-aware,
      hard max 1_200_000 ms) and receives exactly one exact inventory file.
      The aggregate test-stage budget is a separate reviewed ceiling
-     (hard max 2_400_000 ms), further bounded by the coding plan wall clock
+     (hard max 4_200_000 ms), further bounded by the coding plan wall clock
      at compile time. Exact inventory is preserved; tags are never excluded.
 
   Domain failures return `{:ok, %{passed: false, ...}}` so the DOT rework
@@ -51,7 +51,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
       test_stage_timeout: [
         type: :non_neg_integer,
         doc:
-          "Aggregate sequential test-stage timeout in milliseconds (1,000 to 2,400,000); distinct from the intensive per-process Shell ceiling"
+          "Aggregate sequential test-stage timeout in milliseconds (1,000 to 4,200,000); distinct from the intensive per-process Shell ceiling"
       ]
     ]
 

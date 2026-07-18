@@ -27,7 +27,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                                    "coding-plan intensive spawn-capable ceiling requires a positive Shell intensive bound; got #{inspect(other)}"
                                            end)
   # Reviewed aggregate sequential test-stage ceiling for cross_app only.
-  # Actions-owned hard max (2_400_000 ms), distinct from the intensive
+  # Actions-owned hard max (4_200_000 ms / 70 min), distinct from the intensive
   # per-process Shell ceiling. Effective stage budget is
   # min(this, plan wall_clock) at compile time.
   @cross_app_test_stage_timeout_max_ms Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()

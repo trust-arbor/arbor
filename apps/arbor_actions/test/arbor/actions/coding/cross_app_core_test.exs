@@ -25,7 +25,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     standard_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
     assert standard_ceiling == 600_000
     stage_ceiling = Core.maximum_test_stage_timeout()
-    assert stage_ceiling == 2_400_000
+    assert stage_ceiling == 4_200_000
     assert stage_ceiling == Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
 
     # Per-op derives from intensive Shell; aggregate stage is a separate Actions max.
@@ -40,8 +40,8 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
                timeout: Integer.to_string(intensive_ceiling)
              })
 
-    assert {:ok, %{test_stage_timeout: 2_400_000}} =
-             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "2400000"})
+    assert {:ok, %{test_stage_timeout: 4_200_000}} =
+             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "4200000"})
 
     # Values above the standard ceiling are valid for cross_app (intensive).
     assert {:ok, %{timeout: 900_000}} =
@@ -63,7 +63,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     end
 
     assert {:error, :invalid_test_stage_timeout} =
-             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: 2_400_001})
+             Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: 4_200_001})
 
     assert {:error, :invalid_test_stage_timeout} =
              Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "999"})

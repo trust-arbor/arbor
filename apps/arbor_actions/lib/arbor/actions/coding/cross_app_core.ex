@@ -22,11 +22,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
                             "cross_app maximum_timeout requires a positive Shell intensive spawn-capable ceiling; got #{inspect(other)}"
                     end)
   # Aggregate sequential test-stage ceiling is distinct from the intensive
-  # per-process Shell bound. Reviewed cross_app max is 2_400_000 ms so multiple
-  # intensive children can run under one stage without widening Shell ceilings.
+  # per-process Shell bound. Reviewed cross_app max is 4_200_000 ms (70 min)
+  # so sequential one-file intensive children can complete a full inventory
+  # without widening Shell ceilings (live task_19076 exhausted 40 min on
+  # batch 7 of 40 after four healthy children alone took ~2_007 s).
   # Effective stage budget is still min(this, plan wall_clock) at compile time.
   @default_test_stage_timeout 300_000
-  @maximum_test_stage_timeout 2_400_000
+  @maximum_test_stage_timeout 4_200_000
   @allowed_param_keys [:workspace_id, :timeout, :test_stage_timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 
