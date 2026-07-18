@@ -281,18 +281,20 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   test "next_test_step caps each child by min(operation ceiling, remaining aggregate)" do
     assert :complete = Core.next_test_step(10_000, [], 600_000)
 
-    assert {:ok, [single]} =
+    assert {:ok, [first_of_pair | rest_of_pair] = pair_batches} =
              Core.partition_test_batches([
                "apps/alpha/test/a_test.exs",
                "apps/beta/test/b_test.exs"
              ])
 
-    # Remaining aggregate above operation ceiling still yields the operation cap.
-    assert {:run, ^single, 30_000, []} =
-             Core.next_test_step(900_000, [single], 30_000)
+    assert length(pair_batches) == 2
+    assert first_of_pair.count == 1
+    assert first_of_pair.count == Core.max_test_batch_runtime_files()
+    assert Enum.all?(pair_batches, &(&1.count == 1))
 
-    assert single.count == 2
-    assert single.count <= Core.max_test_batch_runtime_files()
+    # Remaining aggregate above operation ceiling still yields the operation cap.
+    assert {:run, ^first_of_pair, 30_000, ^rest_of_pair} =
+             Core.next_test_step(900_000, pair_batches, 30_000)
 
     # Force two batches so timeout/rest shapes can be asserted.
     many =
@@ -394,8 +396,9 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:run, ^second, 10_000, []} =
              Core.next_test_step(10_000, [second], 10_000)
 
-    # Valid-looking per-batch metadata cannot hide duplicate, reordered, or
-    # needlessly split inventory across batch boundaries.
+    # Valid-looking per-batch metadata cannot hide duplicate or reordered
+    # inventory across batch boundaries. Under the one-file runtime cap, two
+    # ordered single-file batches are the correct partition (not forged).
     duplicate_across_batches = [
       signed_batch(["apps/alpha/test/a_test.exs"], 1, 2),
       signed_batch(["apps/alpha/test/a_test.exs"], 2, 2)
@@ -406,15 +409,42 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
       signed_batch(["apps/alpha/test/a_test.exs"], 2, 2)
     ]
 
-    needlessly_split = [
+    for forged <- [duplicate_across_batches, reordered_across_batches] do
+      assert {:error, {:invalid_test_step_input, _}} =
+               Core.next_test_step(10_000, forged, 10_000)
+    end
+
+    correct_one_file_each = [
       signed_batch(["apps/alpha/test/a_test.exs"], 1, 2),
       signed_batch(["apps/alpha/test/b_test.exs"], 2, 2)
     ]
 
-    for forged <- [duplicate_across_batches, reordered_across_batches, needlessly_split] do
-      assert {:error, {:invalid_test_step_input, _}} =
-               Core.next_test_step(10_000, forged, 10_000)
-    end
+    assert {:run, first_correct, 10_000, [second_correct]} =
+             Core.next_test_step(10_000, correct_one_file_each, 10_000)
+
+    assert first_correct.paths == ["apps/alpha/test/a_test.exs"]
+    assert second_correct.paths == ["apps/alpha/test/b_test.exs"]
+
+    # Overpacked multi-file child under the one-file runtime cap fails closed.
+    overpacked_paths = [
+      "apps/alpha/test/a_test.exs",
+      "apps/alpha/test/b_test.exs"
+    ]
+
+    overpacked_material = Enum.join(overpacked_paths, <<0>>)
+    overpacked_sha = :crypto.hash(:sha256, overpacked_material) |> Base.encode16(case: :lower)
+
+    overpacked = %{
+      label: "batch-1-of-1-n#{length(overpacked_paths)}-#{overpacked_sha}",
+      paths: overpacked_paths,
+      index: 1,
+      total: 1,
+      count: length(overpacked_paths),
+      inventory_sha256: overpacked_sha
+    }
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [overpacked], 10_000)
 
     # Oversized path list even with matching-looking fields fails closed.
     oversized_paths =
@@ -464,7 +494,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   end
 
   test "partition_test_batches is deterministic, exact-once, ordered, and bound-respecting" do
-    assert Core.max_test_batch_runtime_files() == 2
+    assert Core.max_test_batch_runtime_files() == 1
 
     assert Core.max_test_batch_argv_files() ==
              Arbor.Shell.spawn_capable_max_command_args() - 2
@@ -472,43 +502,51 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert Core.max_test_batch_files() ==
              min(Core.max_test_batch_runtime_files(), Core.max_test_batch_argv_files())
 
-    assert Core.max_test_batch_files() == 2
+    assert Core.max_test_batch_files() == 1
     assert Core.max_test_batch_arg_bytes() == 65_536
 
-    # Two files fill the runtime cap in one batch.
+    # Two files split under the one-file runtime cap while preserving inventory.
     pair = [
       "apps/alpha/test/a_test.exs",
       "apps/alpha/test/b_test.exs"
     ]
 
-    assert {:ok, [pair_batch]} = Core.partition_test_batches(pair)
-    assert pair_batch.paths == pair
-    assert pair_batch.count == 2
-    assert pair_batch.index == 1
-    assert pair_batch.total == 1
-    assert pair_batch.label == "batch-1-of-1-n2-#{pair_batch.inventory_sha256}"
-    assert byte_size(pair_batch.inventory_sha256) == 64
+    assert {:ok, [pair_first, pair_second] = pair_batches} = Core.partition_test_batches(pair)
+    assert pair_first.paths == ["apps/alpha/test/a_test.exs"]
+    assert pair_second.paths == ["apps/alpha/test/b_test.exs"]
+    assert pair_first.count == 1
+    assert pair_second.count == 1
+    assert pair_first.index == 1
+    assert pair_second.index == 2
+    assert pair_first.total == 2
+    assert pair_second.total == 2
+    assert pair_first.label == "batch-1-of-2-n1-#{pair_first.inventory_sha256}"
+    assert pair_second.label == "batch-2-of-2-n1-#{pair_second.inventory_sha256}"
+    assert byte_size(pair_first.inventory_sha256) == 64
 
-    expected_pair_sha =
-      :crypto.hash(:sha256, Enum.join(pair, <<0>>)) |> Base.encode16(case: :lower)
+    expected_first_sha =
+      :crypto.hash(:sha256, "apps/alpha/test/a_test.exs") |> Base.encode16(case: :lower)
 
-    assert pair_batch.inventory_sha256 == expected_pair_sha
-    assert Core.partition_test_batches(pair) == {:ok, [pair_batch]}
+    assert pair_first.inventory_sha256 == expected_first_sha
+    assert Enum.flat_map(pair_batches, & &1.paths) == pair
+    assert Core.partition_test_batches(pair) == {:ok, pair_batches}
 
-    # Three files split under the runtime cap of 2 while preserving exact inventory.
+    # Three files split under the runtime cap of 1 while preserving exact inventory.
     files = [
       "apps/alpha/test/a_test.exs",
       "apps/alpha/test/b_test.exs",
       "apps/beta/test/c_test.exs"
     ]
 
-    assert {:ok, [first_of_three, second_of_three] = three_batches} =
+    assert {:ok, [first_of_three, second_of_three, third_of_three] = three_batches} =
              Core.partition_test_batches(files)
 
-    assert first_of_three.paths == ["apps/alpha/test/a_test.exs", "apps/alpha/test/b_test.exs"]
-    assert second_of_three.paths == ["apps/beta/test/c_test.exs"]
-    assert first_of_three.count == 2
+    assert first_of_three.paths == ["apps/alpha/test/a_test.exs"]
+    assert second_of_three.paths == ["apps/alpha/test/b_test.exs"]
+    assert third_of_three.paths == ["apps/beta/test/c_test.exs"]
+    assert first_of_three.count == 1
     assert second_of_three.count == 1
+    assert third_of_three.count == 1
     assert Enum.flat_map(three_batches, & &1.paths) == files
     assert Core.partition_test_batches(files) == {:ok, three_batches}
 
@@ -518,21 +556,23 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
         "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
       end
 
-    assert length(many) == 5
+    assert length(many) == 4
     assert {:ok, batches} = Core.partition_test_batches(many)
-    assert length(batches) == 3
+    assert length(batches) == 4
     assert Enum.at(batches, 0).count == Core.max_test_batch_files()
     assert Enum.at(batches, 1).count == Core.max_test_batch_files()
-    assert Enum.at(batches, 2).count == 1
+    assert Enum.at(batches, 2).count == Core.max_test_batch_files()
+    assert Enum.at(batches, 3).count == 1
     assert Enum.flat_map(batches, & &1.paths) == many
     assert Enum.all?(batches, fn b -> b.paths != [] end)
 
     for b <- batches do
       arg_bytes = Enum.reduce(b.paths, 0, fn p, acc -> acc + byte_size(p) + 1 end)
+      assert length(b.paths) == 1
       assert length(b.paths) <= Core.max_test_batch_files()
       assert length(b.paths) <= Core.max_test_batch_runtime_files()
       assert arg_bytes <= Core.max_test_batch_arg_bytes()
-      assert b.label =~ ~r/^batch-\d+-of-\d+-n\d+-[0-9a-f]{64}$/
+      assert b.label =~ ~r/^batch-\d+-of-\d+-n1-[0-9a-f]{64}$/
     end
 
     # Byte-heavy valid paths still respect both file-count and argument-byte ceilings.
@@ -545,11 +585,12 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
       end
 
     assert {:ok, heavy_batches} = Core.partition_test_batches(heavy)
-    assert length(heavy_batches) > 1
+    assert length(heavy_batches) == length(heavy)
     assert Enum.flat_map(heavy_batches, & &1.paths) == heavy
 
     for b <- heavy_batches do
       arg_bytes = Enum.reduce(b.paths, 0, fn p, acc -> acc + byte_size(p) + 1 end)
+      assert length(b.paths) == 1
       assert length(b.paths) <= Core.max_test_batch_files()
       assert length(b.paths) <= Core.max_test_batch_runtime_files()
       assert arg_bytes <= Core.max_test_batch_arg_bytes()
@@ -561,6 +602,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:ok, [solo]} = Core.partition_test_batches(one)
     assert solo.paths == one
     assert solo.total == 1
+    assert solo.count == 1
   end
 
   test "partition_test_batches fails closed on malformed or non-normalized input" do

@@ -119,7 +119,7 @@ The `cross_app` validation profile compiles two distinct budgets into
   `budgets.wall_clock_ms`
 
 Exact `*_test.exs` inventory is preserved (including slow and integration-tagged
-files). Paths are partitioned into sequential batches of at most two files per
+files). Paths are partitioned into sequential batches of exactly one file per
 child under the existing argv-count and argv-byte ceilings; tags are never
 excluded to fit a budget.
 

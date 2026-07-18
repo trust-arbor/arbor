@@ -22,7 +22,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   4. focused per-file tests under an aggregate monotonic budget that starts
      only after the test-environment compile succeeds. Each Mix child is
      capped by the intensive Shell spawn-capable ceiling (profile-aware,
-     hard max 1_200_000 ms) and receives at most two exact inventory files.
+     hard max 1_200_000 ms) and receives exactly one exact inventory file.
      The aggregate test-stage budget is a separate reviewed ceiling
      (hard max 2_400_000 ms), further bounded by the coding plan wall clock
      at compile time. Exact inventory is preserved; tags are never excluded.

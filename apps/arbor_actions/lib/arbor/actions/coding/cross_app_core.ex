@@ -42,14 +42,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # Closed Mix argv batch limits after exact-file normalization/lstat. Each
   # invocation prepends `["test", "--"]`. Path slots are the minimum of:
   #   * Shell's public non-bypassable argv ceiling minus fixed args
-  #   * a reviewed runtime batch cap (at most 2 exact test files per child)
+  #   * a reviewed runtime batch cap (exactly 1 exact test file per child)
   # so multi-file suites cannot exhaust the intensive per-process wall clock
   # while still preserving the complete exact inventory across sequential
   # batches. The sum of each path's UTF-8 bytes plus one separator byte must
   # also stay under the byte ceiling. A single normalized path (max 1024
-  # bytes) always fits both bounds.
+  # bytes) always fits both bounds. Live task_9412 showed two-file batches
+  # progressing too slowly under the 1_200_000 ms intensive child ceiling.
   @test_batch_fixed_args 2
-  @max_test_batch_runtime_files 2
+  @max_test_batch_runtime_files 1
   @max_test_batch_argv_files Arbor.Shell.spawn_capable_max_command_args() - @test_batch_fixed_args
   @max_test_batch_files min(@max_test_batch_runtime_files, @max_test_batch_argv_files)
   @max_test_batch_arg_bytes 65_536
@@ -591,12 +592,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   Input must already be the post-normalization inventory: strictly sorted,
   unique, and every path must re-normalize to itself. Partitioning is greedy
-  left-to-right under the closed runtime file-count cap (at most 2 files),
-  Shell argv-count ceiling, and argument-byte ceiling. Every path appears in
-  exactly one non-empty batch; labels bind inventory count and SHA-256 over
-  the exact batch paths. Slow/integration-tagged files are never excluded —
-  they remain in the exact inventory and are only split across sequential
-  children.
+  left-to-right under the closed runtime file-count cap (exactly 1 file per
+  child), Shell argv-count ceiling, and argument-byte ceiling. Every path
+  appears in exactly one non-empty batch; labels bind inventory count and
+  SHA-256 over the exact batch paths. Slow/integration-tagged files are never
+  excluded — they remain in the exact inventory and are only split across
+  sequential children.
   """
   @spec partition_test_batches(term()) :: {:ok, [test_batch()]} | {:error, term()}
   def partition_test_batches([]), do: {:ok, []}
