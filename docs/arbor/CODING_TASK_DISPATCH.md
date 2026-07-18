@@ -95,7 +95,7 @@ keeping the new task's authorization and execution identity independent:
 {
   "worker": {
     "provider": "grok",
-    "model": "grok-code-fast",
+    "model": "grok-4.5",
     "use_pool": true,
     "resume_provider": "grok",
     "resume_session_id": "provider-session-id-from-prior-result"
