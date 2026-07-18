@@ -16,8 +16,10 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   - `cwd` — exact canonical path forwarded to `AcpSession` as `:cwd`
   - `workspace_plan` — normalized structured session workspace for `AcpSession`
     (`nil`, `{:directory, path}`, or `{:worktree, opts}` only)
-  - `tool_workspace` — binary ToolServer filesystem scope from the pool-only
-    binary `:workspace` alias (`nil` when absent or when workspace is structured)
+  - `tool_workspace` — binary ToolServer filesystem scope when known before
+    spawn: pool binary `:workspace` alias and structured `{:directory, path}`
+    both bind the canonical path; `nil` when absent, or for structured
+    `{:worktree, opts}` (path is only known after `AcpSession` materializes it)
   - `task_id` — coding task scope; pooled coding checkouts are task-scoped
   - `startup_fingerprint` — full SHA-256 hex digest of immutable startup opts
     (`adapter_opts`, `client_opts`, `capabilities`); raw values are never stored
@@ -33,11 +35,14 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     explicit `:cwd` is absent/`nil`) and ToolServer FS scope. Never forwarded
     to `AcpSession` as `:workspace`.
   - **Structured** `{:directory, path}` — session-owned directory plan; path is
-    canonicalized and bound into both `cwd` (when no explicit `:cwd`) and
-    `workspace_plan`.
+    canonicalized into `cwd` (when no explicit `:cwd`), `workspace_plan`, and
+    `tool_workspace` so ToolServer can scope tools to that known path.
   - **Structured** `{:worktree, opts}` — session-owned worktree plan; only
     `:branch` / `:base_dir` (optional, normalized). Plan identity is hashed;
-    runtime path materialization stays in `AcpSession`.
+    runtime path materialization stays in `AcpSession`. Because the generated
+    path is unknowable at profile construction, nonempty `tool_modules` with a
+    worktree plan fail closed (`:worktree_tools_unscoped`). Unscoped tools with
+    no workspace (or binary/directory scope) remain allowed.
   - Explicit non-`nil` `:cwd` always wins over a binary workspace alias for the
     session cwd binding.
 
@@ -165,8 +170,7 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
          {:ok, model} <- validate_model(Keyword.get(opts, :model)),
          {:ok, cwd, workspace_plan, tool_workspace} <- resolve_workspace_scope(opts),
          {:ok, tool_modules} <- validate_tool_modules(Keyword.get(opts, :tool_modules, [])),
-         :ok <-
-           reject_tools_without_bound_workspace(tool_modules, tool_workspace, workspace_plan),
+         :ok <- reject_worktree_tools_without_scope(tool_modules, tool_workspace, workspace_plan),
          {:ok, trust_domain} <- validate_trust_domain(Keyword.get(opts, :trust_domain)),
          {:ok, tags} <- validate_tags(Keyword.get(opts, :tags, %{})),
          {:ok, name} <- validate_name(Keyword.get(opts, :name), provider, opts, tool_modules) do
@@ -449,19 +453,18 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
 
   defp normalize_workspace(_), do: {:error, {:invalid, :workspace, :bad_type}}
 
-  # Tool-enabled sessions require a bound ToolServer workspace path. Structured
-  # worktrees only know that path after AcpSession materialization, so tools +
-  # worktree fail closed at the profile boundary.
-  defp reject_tools_without_bound_workspace([], _tool_workspace, _plan), do: :ok
+  # Only structured worktrees lack a pre-spawn ToolServer path. Tools without
+  # any workspace (or with binary/directory tool_workspace) remain allowed.
+  defp reject_worktree_tools_without_scope([], _tool_workspace, _plan), do: :ok
 
-  defp reject_tools_without_bound_workspace(_tools, tool_workspace, _plan)
+  defp reject_worktree_tools_without_scope(_tools, tool_workspace, _plan)
        when is_binary(tool_workspace) and tool_workspace != "",
        do: :ok
 
-  defp reject_tools_without_bound_workspace(_tools, _tool_workspace, {:worktree, _opts}),
+  defp reject_worktree_tools_without_scope(_tools, _tool_workspace, {:worktree, _opts}),
     do: {:error, {:invalid, :workspace, :worktree_tools_unscoped}}
 
-  defp reject_tools_without_bound_workspace(_tools, _tool_workspace, _plan), do: :ok
+  defp reject_worktree_tools_without_scope(_tools, _tool_workspace, _plan), do: :ok
 
   # Bounded recursive walk: stop before the option ceiling, admit each allowed
   # key at most once, and never call Keyword.keys/length on unbounded input.
