@@ -26,6 +26,26 @@ defmodule Arbor.AI.AcpPoolTest do
     def disconnect(client), do: Agent.stop(client, :normal)
   end
 
+  # Observes graceful AcpSession.close/terminate client teardown. Raw
+  # Process.exit(:kill) skips terminate/2 and never invokes disconnect/1.
+  defmodule DisconnectClient do
+    @moduledoc false
+
+    def start_link(opts) do
+      Agent.start_link(fn -> opts end)
+    end
+
+    def disconnect(client) do
+      opts = Agent.get(client, & &1)
+
+      if is_pid(opts[:test_pid]) do
+        send(opts[:test_pid], {:pool_client_disconnect, client})
+      end
+
+      Agent.stop(client, :normal)
+    end
+  end
+
   setup do
     # Start the DynamicSupervisor and Pool for each test
     start_supervised!(Arbor.AI.AcpPool.Supervisor)
@@ -489,11 +509,90 @@ defmodule Arbor.AI.AcpPoolTest do
       assert status.max == 2
       assert length(AcpPool.sessions()) <= 2
 
-      # Evicted LRU (s1) must be fully cleaned from indexes and process tree
+      # Evicted LRU (s1) must be fully cleaned from indexes immediately;
+      # process death is bounded-eventual (graceful close is async).
       refute Enum.any?(AcpPool.sessions(), &(&1.pid == s1))
-      refute Process.alive?(s1)
+      assert_process_exits(s1, 1_000)
 
       :ok = AcpPool.checkin(s3)
+    end
+
+    test "security regression: capacity eviction uses graceful close (client disconnect)" do
+      # Distinguishes safe_close/AcpSession.close from Process.exit(:kill):
+      # only the graceful path runs terminate/2 → client disconnect/1.
+      original = Application.get_env(:arbor_ai, :acp_client_module)
+      Application.put_env(:arbor_ai, :acp_client_module, DisconnectClient)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:arbor_ai, :acp_client_module, original),
+          else: Application.delete_env(:arbor_ai, :acp_client_module)
+      end)
+
+      restart_pool!(default_max: 1, default_idle_timeout_ms: 300_000)
+
+      agent = "coding_agent_evict_#{System.unique_integer([:positive])}"
+      client_opts = [test_pid: self()]
+
+      {:ok, s1} =
+        AcpPool.checkout(:test,
+          client_opts: client_opts,
+          agent_id: agent,
+          task_id: "evict_1",
+          cwd: "/tmp/evict_1_#{System.unique_integer([:positive])}"
+        )
+
+      :ok = AcpPool.checkin(s1)
+      refute_receive {:pool_client_disconnect, _}, 30
+
+      {:ok, s2} =
+        AcpPool.checkout(:test,
+          client_opts: client_opts,
+          agent_id: agent,
+          task_id: "evict_2",
+          cwd: "/tmp/evict_2_#{System.unique_integer([:positive])}"
+        )
+
+      refute s2 == s1
+      refute Enum.any?(AcpPool.sessions(), &(&1.pid == s1))
+
+      assert_receive {:pool_client_disconnect, _client}, 1_000
+      assert_process_exits(s1, 1_000)
+      assert Process.alive?(s2)
+
+      :ok = AcpPool.checkin(s2)
+    end
+
+    test "security regression: binary workspace checkout binds canonical session cwd" do
+      workspace =
+        Path.join(System.tmp_dir!(), "acp_pool_ws_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(workspace)
+      on_exit(fn -> File.rm_rf(workspace) end)
+
+      expected_cwd = Path.expand(workspace)
+
+      assert {:ok, session} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 workspace: workspace,
+                 agent_id: "ws_agent",
+                 task_id: "ws_task"
+               )
+
+      assert Process.alive?(session)
+
+      [info] = AcpPool.sessions()
+      assert info.pid == session
+      assert info.cwd == expected_cwd
+      assert info.task_id == "ws_task"
+
+      # Session opts must also carry the promoted cwd (not only the profile).
+      session_state = :sys.get_state(session)
+      assert Keyword.get(session_state.opts, :cwd) == expected_cwd
+      assert session_state.workspace == {:directory, expected_cwd}
+
+      :ok = AcpPool.close_session(session)
     end
 
     test "security regression: busy sessions at max still exhaust; idle only is evictable" do
@@ -541,6 +640,31 @@ defmodule Arbor.AI.AcpPoolTest do
          opts
        )}
     )
+  end
+
+  defp assert_process_exits(pid, timeout_ms)
+       when is_pid(pid) and is_integer(timeout_ms) and timeout_ms > 0 do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    Stream.repeatedly(fn ->
+      if Process.alive?(pid) do
+        Process.sleep(10)
+        :alive
+      else
+        :dead
+      end
+    end)
+    |> Enum.find(fn
+      :dead -> true
+      :alive -> System.monotonic_time(:millisecond) >= deadline
+    end)
+    |> case do
+      :dead ->
+        :ok
+
+      :alive ->
+        flunk("expected #{inspect(pid)} to exit within #{timeout_ms}ms")
+    end
   end
 
   describe "affinity" do
