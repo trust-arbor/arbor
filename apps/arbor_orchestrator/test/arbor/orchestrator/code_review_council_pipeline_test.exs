@@ -93,7 +93,10 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
         assert prompt =~ "Do not reject or submit new_findings for issues outside that delta"
         assert prompt =~ "supported blocking/architectural finding"
         assert prompt =~ "record major findings, but a major alone does not justify reject"
-        assert prompt =~ "corroborated majors block through ledger aggregation"
+
+        assert prompt =~
+                 "corroborated majors and active majors from at least two distinct owners block through ledger aggregation"
+
         refute prompt =~ "materially supported major finding"
         assert prompt =~ "Minor/nit do not reject"
         assert prompt =~ "Approve when no blocking issue remains in this perspective"

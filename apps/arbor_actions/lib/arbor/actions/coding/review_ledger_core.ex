@@ -755,12 +755,8 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
     do: Enum.any?(out_of_scope, &(is_map(&1) and Map.get(&1, "id") == id))
 
   defp recompute_derived(ledger) do
-    major_owner_counts =
-      ledger["findings"]
-      |> Map.values()
-      |> Enum.filter(&(&1["severity"] == "major" and active?(&1)))
-      |> Enum.group_by(& &1["issue_key"], & &1["owner"])
-      |> Map.new(fn {issue_key, owners} -> {issue_key, MapSet.size(MapSet.new(owners))} end)
+    major_owner_counts = major_issue_owner_counts(ledger)
+    independent_major_quorum? = independent_major_quorum?(ledger)
 
     findings =
       Enum.reduce(ledger["findings"], %{}, fn {id, finding}, acc ->
@@ -768,12 +764,39 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
           active?(finding) and
             (finding["severity"] == "blocking" or
                (finding["severity"] == "major" and
-                  Map.get(major_owner_counts, finding["issue_key"], 0) >= 2))
+                  (Map.get(major_owner_counts, finding["issue_key"], 0) >= 2 or
+                     independent_major_quorum?)))
 
         Map.put(acc, id, Map.put(finding, "blocks_merge", blocks_merge))
       end)
 
     Map.put(ledger, "findings", findings)
+  end
+
+  # Active majors grouped by exact issue_key → distinct owner count.
+  # Same path/side/line/title from ≥2 owners is corroborated_major.
+  defp major_issue_owner_counts(ledger) do
+    ledger
+    |> active_major_findings()
+    |> Enum.group_by(& &1["issue_key"], & &1["owner"])
+    |> Map.new(fn {issue_key, owners} -> {issue_key, MapSet.size(MapSet.new(owners))} end)
+  end
+
+  # Two distinct owners with any active majors form an independent-major quorum,
+  # even when their exact issue_key values differ.
+  defp independent_major_quorum?(ledger) do
+    ledger
+    |> active_major_findings()
+    |> Enum.map(& &1["owner"])
+    |> MapSet.new()
+    |> MapSet.size()
+    |> Kernel.>=(2)
+  end
+
+  defp active_major_findings(ledger) do
+    ledger["findings"]
+    |> Map.values()
+    |> Enum.filter(&(&1["severity"] == "major" and active?(&1)))
   end
 
   defp active?(finding), do: finding["state"] in @active_states
@@ -1006,6 +1029,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
       |> Enum.split_with(&MapSet.member?(reported_owners, &1["owner"]))
 
     security_veto = Map.get(votes, "security") == "reject"
+    major_owner_counts = major_issue_owner_counts(ledger)
 
     reasons =
       blocking
@@ -1020,7 +1044,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
               "unconfirmed_blocker"
 
             true ->
-              blocker_reason(finding)
+              blocker_reason(finding, major_owner_counts)
           end
 
         %{"id" => finding["id"], "reason" => reason}
@@ -1071,8 +1095,17 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
     }
   end
 
-  defp blocker_reason(finding) do
-    if finding["severity"] == "major", do: "corroborated_major", else: "active_blocking"
+  defp blocker_reason(finding, major_owner_counts) do
+    cond do
+      finding["severity"] != "major" ->
+        "active_blocking"
+
+      Map.get(major_owner_counts, finding["issue_key"], 0) >= 2 ->
+        "corroborated_major"
+
+      true ->
+        "independent_major_quorum"
+    end
   end
 
   defp reported_owners_this_cycle(ledger) do

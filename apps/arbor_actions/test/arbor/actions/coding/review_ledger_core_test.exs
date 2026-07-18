@@ -325,6 +325,112 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
     assert Enum.any?(decision["blocking_reasons"], &(&1["reason"] == "corroborated_major"))
   end
 
+  test "independent majors from distinct owners rework even with different titles and lines" do
+    # Live shape: same real defect, distinct titles and nearby-but-different anchors.
+    four_owners = [
+      "correctness",
+      "security",
+      "maintainability",
+      "edge_cases_error_handling"
+    ]
+
+    {:ok, empty} = ReviewLedgerCore.new(%{"perspectives" => four_owners})
+
+    {:ok, ledger} =
+      apply_cycle(empty, 1, %{
+        "correctness" => report(new_findings: [finding("Missing blank rejection", "major", 12)]),
+        "security" =>
+          report(new_findings: [finding("Whitespace-only returns ok empty", "major", 14)]),
+        "maintainability" =>
+          report(new_findings: [finding("Blank binary not treated as error", "major", 11)]),
+        "edge_cases_error_handling" =>
+          report(new_findings: [finding("normalize_label blank path", "major", 15)])
+      })
+
+    findings = Map.values(ledger["findings"])
+    assert length(findings) == 4
+    assert Enum.all?(findings, &(&1["blocks_merge"] == true))
+    assert MapSet.size(MapSet.new(Enum.map(findings, & &1["issue_key"]))) == 4
+
+    decision = ReviewLedgerCore.decision(ledger)
+    assert decision["disposition"] == "rework"
+    assert length(decision["blocking_ids"]) == 4
+
+    assert Enum.all?(
+             decision["blocking_reasons"],
+             &(&1["reason"] == "independent_major_quorum")
+           )
+  end
+
+  test "one owner cannot veto with one or many uncorroborated majors" do
+    {:ok, single} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report("reject", new_findings: [finding("solo major", "major", 10)]),
+        "security" => report("approve"),
+        "maintainability" => report("approve")
+      })
+
+    single_decision = ReviewLedgerCore.decision(single)
+    assert single_decision["disposition"] == "accept"
+    assert single_decision["blocking_ids"] == []
+    refute Enum.any?(Map.values(single["findings"]), & &1["blocks_merge"])
+
+    {:ok, multi} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" =>
+          report("reject",
+            new_findings: [
+              finding("first solo major", "major", 10),
+              finding("second solo major", "major", 20)
+            ]
+          ),
+        "security" => report("approve"),
+        "maintainability" => report("approve")
+      })
+
+    multi_decision = ReviewLedgerCore.decision(multi)
+    assert multi_decision["disposition"] == "accept"
+    assert multi_decision["blocking_ids"] == []
+    refute Enum.any?(Map.values(multi["findings"]), & &1["blocks_merge"])
+  end
+
+  test "fixing one independent major clears the quorum when only one owner remains" do
+    {:ok, ledger} =
+      apply_cycle(new_ledger(), 1, %{
+        "correctness" => report(new_findings: [finding("owner a major", "major", 10)]),
+        "security" => report(new_findings: [finding("owner b major", "major", 20)])
+      })
+
+    correctness_id =
+      ledger["findings"]
+      |> Map.values()
+      |> Enum.find(&(&1["owner"] == "correctness"))
+      |> Map.fetch!("id")
+
+    security_id =
+      ledger["findings"]
+      |> Map.values()
+      |> Enum.find(&(&1["owner"] == "security"))
+      |> Map.fetch!("id")
+
+    assert ReviewLedgerCore.decision(ledger)["disposition"] == "rework"
+
+    {:ok, reduced} =
+      apply_cycle(ledger, 2, %{
+        "correctness" => report(finding_updates: [%{"id" => correctness_id, "state" => "fixed"}]),
+        "security" => report(finding_updates: [%{"id" => security_id, "state" => "open"}])
+      })
+
+    remaining = reduced["findings"][security_id]
+    refute remaining["blocks_merge"]
+    assert remaining["state"] == "open"
+
+    decision = ReviewLedgerCore.decision(reduced)
+    assert decision["disposition"] == "accept"
+    assert decision["blocking_ids"] == []
+    refute Enum.any?(decision["blocking_reasons"], &(&1["reason"] == "independent_major_quorum"))
+  end
+
   test "architectural blockers and security veto force human review" do
     {:ok, ledger} =
       apply_cycle(new_ledger(), 1, %{"correctness" => report(new_findings: [finding()])})

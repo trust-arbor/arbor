@@ -894,6 +894,44 @@ defmodule Arbor.Actions.ConsensusTest do
       refute result["human_required"]
     end
 
+    test "independent major findings from distinct owners rework through the ledger" do
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("approve",
+                         new_findings: [review_finding("Missing blank rejection", "major", 12)]
+                       )
+                     ),
+                     make_review_branch(
+                       "security",
+                       review_report("approve",
+                         new_findings: [
+                           review_finding("Whitespace-only returns ok empty", "major", 14)
+                         ]
+                       )
+                     )
+                   ],
+                   review_cycle: 1,
+                   finding_ledger: review_ledger()
+                 },
+                 %{}
+               )
+
+      assert result["decision"] == "deadlock"
+      assert result["review_disposition"] == "rework"
+      assert result["blocking_ids"] |> length() == 2
+
+      assert Enum.all?(
+               result["blocking_reasons"],
+               &(&1["reason"] == "independent_major_quorum")
+             )
+
+      refute result["human_required"]
+    end
+
     test "routes an out-of-delta new finding to the side channel" do
       assert {:ok, initial} =
                Consensus.DecideReview.run(
