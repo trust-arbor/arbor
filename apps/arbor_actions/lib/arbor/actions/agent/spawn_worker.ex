@@ -63,7 +63,11 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
       # cloud model for a bounded sub-task, or a local/private model for sensitive data.
       # Both default to the system default when omitted.
       model: [type: :string, doc: "Worker LLM model (default: system default)"],
-      provider: [type: :string, doc: "Worker LLM provider, e.g. 'lm_studio'/'ollama'/'openrouter' (default: system default)"]
+      provider: [
+        type: :string,
+        doc:
+          "Worker LLM provider, e.g. 'lm_studio'/'ollama'/'openrouter' (default: system default)"
+      ]
     ]
 
   require Logger
@@ -184,12 +188,14 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
     if Code.ensure_loaded?(tm) and
          function_exported?(tm, :get_trust_profile, 1) do
       case apply(tm, :get_trust_profile, [agent_id]) do
-        {:ok, parent_profile} ->
+        {:ok, _parent_profile} ->
+          # Profile present: bound each URI through the public Trust effective_mode
+          # boundary (segment-aware). Per-URI failures fail closed to :block and must
+          # never reach unbounded_fallback / fail-open bulk :auto grants.
           rules =
-            Map.new(requested_uris, fn uri ->
-              # Check parent's effective mode for this URI
-              parent_mode = resolve_parent_mode(parent_profile, uri)
-              {uri, parent_mode}
+            requested_uris
+            |> Map.new(fn uri ->
+              {uri, resolve_parent_mode(tm, agent_id, uri)}
             end)
             |> Enum.reject(fn {_uri, mode} -> mode == :block end)
             |> Map.new()
@@ -231,26 +237,25 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
     end
   end
 
-  defp resolve_parent_mode(profile, uri) do
-    # Check profile rules for this URI or its prefix
-    case Map.get(profile.rules || %{}, uri) do
-      nil ->
-        # Try prefix match (e.g., "arbor://fs/read" matches "arbor://fs" rule)
-        prefix_match =
-          (profile.rules || %{})
-          |> Enum.find(fn {rule_uri, _mode} ->
-            String.starts_with?(uri, rule_uri)
-          end)
-
-        case prefix_match do
-          {_prefix, mode} -> mode
-          nil -> profile.baseline || :block
-        end
-
-      mode ->
-        mode
+  # Resolve one requested URI against the parent's trust via the public effective_mode
+  # boundary. Closed modes only; malformed returns and exceptions fail THIS URI closed
+  # to :block (not the outer unbounded_fallback).
+  defp resolve_parent_mode(tm, agent_id, uri) do
+    if function_exported?(tm, :effective_mode, 2) do
+      try do
+        normalize_effective_mode(apply(tm, :effective_mode, [agent_id, uri]))
+      rescue
+        _ -> :block
+      catch
+        _, _ -> :block
+      end
+    else
+      :block
     end
   end
+
+  defp normalize_effective_mode(mode) when mode in [:block, :ask, :allow, :auto], do: mode
+  defp normalize_effective_mode(_malformed), do: :block
 
   # ── Worker lifecycle ─────────────────────────────────────────────
 
@@ -596,9 +601,7 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
       |> Enum.filter(fn {name, _mod, _meta} ->
         case apply(actions_mod, :tool_name_to_canonical_uri, [name]) do
           {:ok, tool_uri} ->
-            Enum.any?(uris, fn uri ->
-              tool_uri == uri or String.starts_with?(tool_uri, uri)
-            end)
+            Enum.any?(uris, fn uri -> tool_uri_covered_by_scoped?(tool_uri, uri) end)
 
           _ ->
             false
@@ -611,6 +614,18 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
   rescue
     _ -> []
   end
+
+  # Segment-aware coverage: a scoped capability URI covers a tool URI only when the
+  # scoped URI is an exact match or a true path-prefix (whole segments). Raw
+  # String.starts_with?/2 would admit sibling tools such as wait_for_navigation under wait.
+  # Public for security-regression tests only.
+  @doc false
+  def tool_uri_covered_by_scoped?(tool_uri, scoped_uri)
+      when is_binary(tool_uri) and is_binary(scoped_uri) do
+    Arbor.Contracts.Security.CapabilityUri.prefix_match?(scoped_uri, tool_uri)
+  end
+
+  def tool_uri_covered_by_scoped?(_tool_uri, _scoped_uri), do: false
 
   # Runtime bridge for LLMDefaults (Level 2 module)
   # Worker provider comes from the coordinator (an LLM) — untrusted input. Validate against

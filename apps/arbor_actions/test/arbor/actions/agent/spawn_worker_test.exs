@@ -18,6 +18,11 @@ defmodule Arbor.Actions.Agent.SpawnWorkerTest do
   defmodule StubResolver do
     def search("file read", _opts), do: [match("arbor://fs/read")]
     def search("shell execute", _opts), do: [match("arbor://shell/exec")]
+    def search("browser wait", _opts), do: [match("arbor://action/browser/wait")]
+
+    def search("browser wait for navigation", _opts),
+      do: [match("arbor://action/browser/wait_for_navigation")]
+
     def search(_intent, _opts), do: []
     defp match(uri), do: %{descriptor: %{metadata: %{capability_uri: uri}}}
   end
@@ -31,11 +36,47 @@ defmodule Arbor.Actions.Agent.SpawnWorkerTest do
          baseline: :block
        }}
     end
+
+    def effective_mode(_agent_id, "arbor://fs/read"), do: :allow
+    def effective_mode(_agent_id, "arbor://shell/exec"), do: :block
+    def effective_mode(_agent_id, _uri), do: :block
   end
 
   # Parent with NO trust profile (the edge case behind the fail-open).
   defmodule StubTrustMissing do
     def get_trust_profile(_agent_id), do: {:error, :not_found}
+  end
+
+  # Parent that allows only the exact browser wait URI (sibling wait_for_navigation blocked).
+  defmodule StubTrustBrowserWaitOnly do
+    def get_trust_profile(_agent_id) do
+      {:ok,
+       %{
+         rules: %{"arbor://action/browser/wait" => :allow},
+         baseline: :block
+       }}
+    end
+
+    def effective_mode(_agent_id, "arbor://action/browser/wait"), do: :allow
+    def effective_mode(_agent_id, _uri), do: :block
+  end
+
+  # Parent profile present but effective_mode returns a non-closed value.
+  defmodule StubTrustInvalidMode do
+    def get_trust_profile(_agent_id) do
+      {:ok, %{rules: %{}, baseline: :allow}}
+    end
+
+    def effective_mode(_agent_id, _uri), do: :not_a_real_mode
+  end
+
+  # Parent profile present but effective_mode raises (must not bulk fail-open).
+  defmodule StubTrustRaises do
+    def get_trust_profile(_agent_id) do
+      {:ok, %{rules: %{}, baseline: :allow}}
+    end
+
+    def effective_mode(_agent_id, _uri), do: raise("effective_mode boom")
   end
 
   setup do
@@ -92,6 +133,61 @@ defmodule Arbor.Actions.Agent.SpawnWorkerTest do
                SpawnWorker.resolve_and_intersect("orphan-agent", ["shell execute"])
 
       assert Map.has_key?(rules, "arbor://shell/exec")
+    end
+  end
+
+  describe "security regression: segment-aware capability URI intersection" do
+    test "exact browser wait is allowed; sibling wait_for_navigation is denied" do
+      Application.put_env(:arbor_actions, :spawn_worker_trust_mod, StubTrustBrowserWaitOnly)
+
+      assert {:ok, rules} =
+               SpawnWorker.resolve_and_intersect("parent-agent", ["browser wait"])
+
+      assert Map.has_key?(rules, "arbor://action/browser/wait")
+
+      # Sibling URI shares a textual prefix but is a different segment; raw
+      # String.starts_with?/2 would incorrectly admit it under a wait-only rule.
+      assert {:error, {:no_capabilities_allowed, ["arbor://action/browser/wait_for_navigation"]}} =
+               SpawnWorker.resolve_and_intersect("parent-agent", ["browser wait for navigation"])
+    end
+
+    test "invalid effective_mode returns fail closed to :block" do
+      Application.put_env(:arbor_actions, :spawn_worker_trust_mod, StubTrustInvalidMode)
+
+      assert {:error, {:no_capabilities_allowed, _}} =
+               SpawnWorker.resolve_and_intersect("parent-agent", ["file read"])
+    end
+
+    test "effective_mode exception fails closed even when spawn_worker_fail_open=true" do
+      Application.put_env(:arbor_actions, :spawn_worker_trust_mod, StubTrustRaises)
+      Application.put_env(:arbor_actions, :spawn_worker_fail_open, true)
+
+      # Profile is present; a per-URI exception must NOT reach the outer unbounded
+      # fail-open path that would grant bulk :auto capabilities.
+      assert {:error, {:no_capabilities_allowed, _}} =
+               SpawnWorker.resolve_and_intersect("parent-agent", ["file read", "shell execute"])
+    end
+  end
+
+  describe "security regression: segment-aware tool exposure coverage" do
+    test "scoped wait URI does not cover sibling wait_for_navigation tool URI" do
+      # Raw String.starts_with?(".../wait_for_navigation", ".../wait") is true;
+      # segment-aware prefix_match?/2 must keep siblings out of tool exposure.
+      refute SpawnWorker.tool_uri_covered_by_scoped?(
+               "arbor://action/browser/wait_for_navigation",
+               "arbor://action/browser/wait"
+             )
+
+      assert SpawnWorker.tool_uri_covered_by_scoped?(
+               "arbor://action/browser/wait",
+               "arbor://action/browser/wait"
+             )
+
+      # Legitimate descendant under a real path segment remains covered.
+      assert SpawnWorker.tool_uri_covered_by_scoped?(
+               "arbor://fs/read/project/file.ex",
+               "arbor://fs/read"
+             )
     end
   end
 end
