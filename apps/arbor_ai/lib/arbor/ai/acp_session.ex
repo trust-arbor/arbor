@@ -1420,14 +1420,8 @@ defmodule Arbor.AI.AcpSession do
 
         {:worktree_pending, path, branch}
 
-      {:directory, path} when is_binary(path) ->
+      {:directory, path} ->
         {:directory_pending, path}
-
-      # Pool binary workspace alias: bind as session cwd/FS scope without
-      # managed worktree lifecycle. Already-materialized {:directory, path}
-      # so existence preflight is not required (coding dirs may appear later).
-      path when is_binary(path) and path != "" ->
-        {:directory, Path.expand(path)}
 
       nil ->
         nil

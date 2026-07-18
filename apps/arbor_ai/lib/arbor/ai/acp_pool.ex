@@ -857,9 +857,12 @@ defmodule Arbor.AI.AcpPool do
     session_opts =
       session_opts
       |> Keyword.drop(pool_only_keys)
-      # Binary pool workspace alias: keep ToolServer binary scope above, and
-      # bind the same path as the session's canonical cwd before start.
-      |> promote_binary_workspace_cwd()
+      # Binary :workspace is a pool-only compatibility alias (ToolServer scope
+      # already received the original binary above). Promote to session :cwd
+      # with explicit :cwd precedence, then drop binary :workspace so
+      # AcpSession never sees a bare path. Structured {:directory,_}/
+      # {:worktree,_} plans pass through unchanged.
+      |> prepare_session_workspace_opts()
 
     deadline = Keyword.fetch!(opts, :deadline_ms)
 
@@ -884,14 +887,16 @@ defmodule Arbor.AI.AcpPool do
     end
   end
 
-  # Binary :workspace is the pool alias for session cwd. Structured
-  # `{:directory, _}` / `{:worktree, _}` plans stay unchanged for AcpSession.
-  defp promote_binary_workspace_cwd(opts) do
+  # Pool boundary only: binary workspace → session cwd; never forward binary
+  # workspace into AcpSession.workspace_plan/1.
+  defp prepare_session_workspace_opts(opts) do
     case Keyword.get(opts, :workspace) do
       path when is_binary(path) and path != "" ->
-        Keyword.put_new(opts, :cwd, Path.expand(path))
+        opts
+        |> Keyword.put_new(:cwd, Path.expand(path))
+        |> Keyword.delete(:workspace)
 
-      _other ->
+      _structured_or_absent ->
         opts
     end
   end

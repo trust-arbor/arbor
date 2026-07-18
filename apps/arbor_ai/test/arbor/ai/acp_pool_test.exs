@@ -587,10 +587,49 @@ defmodule Arbor.AI.AcpPoolTest do
       assert info.cwd == expected_cwd
       assert info.task_id == "ws_task"
 
-      # Session opts must also carry the promoted cwd (not only the profile).
+      # Pool promotes binary workspace to session :cwd and drops binary
+      # :workspace before AcpSession.start (pool-boundary alias only).
       session_state = :sys.get_state(session)
       assert Keyword.get(session_state.opts, :cwd) == expected_cwd
-      assert session_state.workspace == {:directory, expected_cwd}
+      refute Keyword.has_key?(session_state.opts, :workspace)
+      assert session_state.workspace == nil
+
+      :ok = AcpPool.close_session(session)
+    end
+
+    test "security regression: explicit cwd wins over binary workspace alias" do
+      workspace =
+        Path.join(System.tmp_dir!(), "acp_pool_ws_alias_#{System.unique_integer([:positive])}")
+
+      explicit_cwd =
+        Path.join(
+          System.tmp_dir!(),
+          "acp_pool_cwd_explicit_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(explicit_cwd)
+      on_exit(fn -> File.rm_rf(workspace) end)
+      on_exit(fn -> File.rm_rf(explicit_cwd) end)
+
+      expected_cwd = Path.expand(explicit_cwd)
+
+      assert {:ok, session} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 workspace: workspace,
+                 cwd: explicit_cwd,
+                 agent_id: "ws_cwd_agent",
+                 task_id: "ws_cwd_task"
+               )
+
+      [info] = AcpPool.sessions()
+      assert info.cwd == expected_cwd
+
+      session_state = :sys.get_state(session)
+      # Explicit :cwd is preserved (put_new); binary :workspace is dropped.
+      assert Path.expand(Keyword.get(session_state.opts, :cwd)) == expected_cwd
+      refute Keyword.has_key?(session_state.opts, :workspace)
 
       :ok = AcpPool.close_session(session)
     end
