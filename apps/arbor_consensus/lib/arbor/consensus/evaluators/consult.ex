@@ -380,8 +380,24 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     :human_required
   ]
 
+  # Engine returns {:ok, run_result} even when final_outcome.status is :fail.
+  # Inspect the terminal outcome first so a failed pipeline cannot surface
+  # stale decision keys from context as a successful council decision.
+  @max_council_failure_reason_bytes 512
+
   defp extract_decision_from_result(result) do
-    # Engine returns a result struct with context
+    case terminal_pipeline_failure(result) do
+      {:failed, failure_reason} ->
+        {:error, {:council_pipeline_failed, failure_reason}}
+
+      :ok ->
+        extract_decision_from_context(result)
+    end
+  end
+
+  defp extract_decision_from_context(result) do
+    # Engine returns a result struct/map with context; injected test runners
+    # may return the context map directly.
     ctx =
       cond do
         is_map(result) and Map.has_key?(result, :context) ->
@@ -440,6 +456,82 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       {:error, :no_decision_in_result}
     end
   end
+
+  # Duck-type Engine run_result.final_outcome without importing orchestrator
+  # internals. Absent/nil final_outcome keeps the legacy extraction path for
+  # injected runners. :success and :partial_success continue extraction.
+  defp terminal_pipeline_failure(result) when is_map(result) do
+    case fetch_result_field(result, :final_outcome) do
+      {:ok, outcome} when not is_nil(outcome) ->
+        if failed_terminal_status?(fetch_outcome_field(outcome, :status)) do
+          {:failed, bound_failure_reason(fetch_outcome_field(outcome, :failure_reason))}
+        else
+          :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp terminal_pipeline_failure(_result), do: :ok
+
+  defp failed_terminal_status?(:fail), do: true
+  defp failed_terminal_status?("fail"), do: true
+  defp failed_terminal_status?(:failed), do: true
+  defp failed_terminal_status?("failed"), do: true
+  defp failed_terminal_status?(_), do: false
+
+  defp fetch_result_field(result, key) when is_map(result) and is_atom(key) do
+    cond do
+      is_struct(result) and Map.has_key?(result, key) ->
+        {:ok, Map.get(result, key)}
+
+      Map.has_key?(result, key) ->
+        {:ok, Map.get(result, key)}
+
+      Map.has_key?(result, Atom.to_string(key)) ->
+        {:ok, Map.get(result, Atom.to_string(key))}
+
+      true ->
+        :error
+    end
+  end
+
+  # Outcome may be a struct (Engine.Outcome) or atom/string-keyed map.
+  # Avoid pattern-matching a foreign struct type so consensus stays free of
+  # orchestrator compile-time deps.
+  defp fetch_outcome_field(outcome, key) when is_map(outcome) and is_atom(key) do
+    cond do
+      is_struct(outcome) and Map.has_key?(outcome, key) ->
+        Map.get(outcome, key)
+
+      Map.has_key?(outcome, key) ->
+        Map.get(outcome, key)
+
+      Map.has_key?(outcome, Atom.to_string(key)) ->
+        Map.get(outcome, Atom.to_string(key))
+
+      true ->
+        nil
+    end
+  end
+
+  defp fetch_outcome_field(_outcome, _key), do: nil
+
+  defp bound_failure_reason(reason) when is_binary(reason) do
+    if byte_size(reason) <= @max_council_failure_reason_bytes do
+      reason
+    else
+      binary_part(reason, 0, @max_council_failure_reason_bytes)
+    end
+  end
+
+  defp bound_failure_reason(reason) when is_atom(reason) and not is_nil(reason) do
+    Atom.to_string(reason)
+  end
+
+  defp bound_failure_reason(_), do: "pipeline failed"
 
   # Presence-aware projection: only copy allowlisted review fields that the
   # engine context actually carries under `exec.decide.*` (preferred) or

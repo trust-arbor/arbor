@@ -700,15 +700,49 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert Adapter.translate_tool_choice("") == nil
     end
 
-    test "map-shape pins a specific tool — passed through unchanged" do
+    test "canonical ReqLLM specific-tool form is preserved as atom-key map" do
       req_llm_form = %{type: "tool", name: "get_weather"}
       assert Adapter.translate_tool_choice(req_llm_form) == req_llm_form
 
-      openai_form = %{"type" => "function", "function" => %{"name" => "get_weather"}}
-      assert Adapter.translate_tool_choice(openai_form) == openai_form
+      string_key_form = %{"type" => "tool", "name" => "get_weather"}
+
+      assert Adapter.translate_tool_choice(string_key_form) == %{
+               type: "tool",
+               name: "get_weather"
+             }
     end
 
-    test "unknown shapes default to nil (don't crash req_llm downstream)" do
+    test "OpenAI nested function forms normalize to canonical atom-key map" do
+      string_openai = %{"type" => "function", "function" => %{"name" => "get_weather"}}
+
+      assert Adapter.translate_tool_choice(string_openai) == %{
+               type: "tool",
+               name: "get_weather"
+             }
+
+      atom_openai = %{type: "function", function: %{name: "get_weather"}}
+
+      assert Adapter.translate_tool_choice(atom_openai) == %{
+               type: "tool",
+               name: "get_weather"
+             }
+
+      mixed = %{"type" => "function", "function" => %{name: "get_weather"}}
+
+      assert Adapter.translate_tool_choice(mixed) == %{
+               type: "tool",
+               name: "get_weather"
+             }
+    end
+
+    test "malformed and unknown map shapes are dropped (not forwarded)" do
+      assert Adapter.translate_tool_choice(%{"type" => "function"}) == nil
+      assert Adapter.translate_tool_choice(%{type: "function", function: %{}}) == nil
+      assert Adapter.translate_tool_choice(%{type: "tool"}) == nil
+      assert Adapter.translate_tool_choice(%{type: "tool", name: ""}) == nil
+      assert Adapter.translate_tool_choice(%{type: "tool", name: :atom_name}) == nil
+      assert Adapter.translate_tool_choice(%{type: "other", name: "x"}) == nil
+      assert Adapter.translate_tool_choice(%{}) == nil
       assert Adapter.translate_tool_choice(123) == nil
       assert Adapter.translate_tool_choice([]) == nil
     end
@@ -751,6 +785,30 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
 
       opts = Adapter.build_req_opts(req, [])
       assert opts[:tool_choice] == %{type: "tool", name: "a"}
+    end
+
+    test "ToolLoop reserved-terminal OpenAI nested tool_choice normalizes in build_req_opts/2" do
+      # Production failure (binding council): ToolLoop emits the OpenAI nested
+      # string-key map; ReqLLM/NimbleOptions rejects it before transport.
+      # build_req_opts/2 must emit the canonical atom-key form.
+      reserved_terminal_choice = %{
+        "type" => "function",
+        "function" => %{"name" => "coding_submit_review_report"}
+      }
+
+      req = %Request{
+        provider: "openai",
+        model: "gpt-4",
+        tools: [tool_map("coding_submit_review_report")],
+        tool_choice: reserved_terminal_choice
+      }
+
+      opts = Adapter.build_req_opts(req, [])
+
+      assert opts[:tool_choice] == %{
+               type: "tool",
+               name: "coding_submit_review_report"
+             }
     end
 
     test "empty tools list does not add :tools to opts" do

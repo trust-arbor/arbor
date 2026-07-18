@@ -808,23 +808,26 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp translate_tool(_), do: nil
 
   @doc """
-  Translate Arbor's `tool_choice` value to what req_llm's providers
-  accept.
+  Translate Arbor's `tool_choice` value to what req_llm accepts.
 
-  req_llm's openai provider only handles map-shape `tool_choice` — the
-  OpenAI-spec strings (`"auto"`, `"none"`, `"required"`) reach
-  `translate_tool_choice_format/1` and crash with `BadMapError`. We
-  handle them at this boundary:
+  req_llm/NimbleOptions rejects string-keyed maps and OpenAI's nested
+  function-choice form before transport. Canonical specific-tool form is
+  the atom-keyed `%{type: "tool", name: binary_name}`; provider adapters
+  translate that to wire formats.
 
-    * `"auto"` (the default behavior) → `nil` (omit; providers default
-      to auto when tools are present, so this is a no-op semantically).
-    * `"none"` / `"required"` → `nil` (omit; the caller wanting these
-      semantics should clear `tools` or pin to a specific tool
-      respectively, both of which the prompt + tool list already
-      handle without `tool_choice`).
-    * Map shape (e.g. `%{type: "tool", name: "foo"}` or
-      OpenAI's `%{"type" => "function", "function" => %{"name" => "foo"}}`)
-      → pass through.
+  Boundary rules:
+
+    * `"auto"` / `:auto` → `nil` (omit; providers default to auto when
+      tools are present).
+    * `"none"` / `"required"` and atom forms → `nil` (omit; clear tools
+      or pin a specific tool instead).
+    * Canonical `%{type: "tool", name: name}` (atom or string keys) →
+      `%{type: "tool", name: binary_name}`.
+    * OpenAI nested `%{type: "function", function: %{name: name}}`
+      (atom or string keys, including the ToolLoop reserved-terminal
+      shape) → the same canonical map.
+    * Malformed or unknown map shapes → `nil` (do not forward values
+      ReqLLM will reject).
 
   Public for testability.
   """
@@ -837,8 +840,46 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def translate_tool_choice(:none), do: nil
   def translate_tool_choice("required"), do: nil
   def translate_tool_choice(:required), do: nil
-  def translate_tool_choice(%{} = map), do: map
+
+  def translate_tool_choice(%{} = map) do
+    case normalize_specific_tool_choice(map) do
+      {:ok, canonical} -> canonical
+      :error -> nil
+    end
+  end
+
   def translate_tool_choice(_), do: nil
+
+  # ReqLLM canonical specific-tool choice: atom-keyed %{type: "tool", name: binary}.
+  defp normalize_specific_tool_choice(map) when is_map(map) do
+    with {:ok, name} <- extract_tool_choice_name(map),
+         true <- is_binary(name) and name != "" do
+      {:ok, %{type: "tool", name: name}}
+    else
+      _ -> :error
+    end
+  end
+
+  # Canonical tool form (atom or string keys).
+  defp extract_tool_choice_name(%{type: "tool", name: name}), do: {:ok, name}
+  defp extract_tool_choice_name(%{"type" => "tool", "name" => name}), do: {:ok, name}
+
+  # OpenAI nested function form (atom or string keys). ToolLoop's reserved
+  # terminal forced-choice uses the string-key nested shape.
+  defp extract_tool_choice_name(%{type: "function", function: function}) when is_map(function) do
+    extract_nested_function_name(function)
+  end
+
+  defp extract_tool_choice_name(%{"type" => "function", "function" => function})
+       when is_map(function) do
+    extract_nested_function_name(function)
+  end
+
+  defp extract_tool_choice_name(_), do: :error
+
+  defp extract_nested_function_name(%{name: name}), do: {:ok, name}
+  defp extract_nested_function_name(%{"name" => name}), do: {:ok, name}
+  defp extract_nested_function_name(_), do: :error
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)

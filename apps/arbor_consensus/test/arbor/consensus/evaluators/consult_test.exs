@@ -16,6 +16,12 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
     end
   end
 
+  # Duck-typed stand-in for Engine.Outcome fields Consult inspects. Lives only
+  # in this test so consensus stays free of orchestrator compile-time deps.
+  defmodule FakeOutcome do
+    defstruct status: nil, failure_reason: nil
+  end
+
   @moduletag :fast
 
   describe "ask/3" do
@@ -599,6 +605,144 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
         refute Map.has_key?(decision, field),
                "get/3-only generic decision must not invent #{inspect(field)}"
       end
+    end
+  end
+
+  describe "decide/3 terminal Engine outcome causality" do
+    # Arbor Engine returns {:ok, run_result} even when final_outcome.status is
+    # :fail (e.g. parallel.fan_in "All parallel candidates failed"). Consult
+    # must fail closed on that terminal failure rather than inventing
+    # :no_decision_in_result or accepting stale decision keys from context.
+
+    test "failed terminal outcome without decision returns council_pipeline_failed" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{},
+           final_outcome: %{
+             status: :fail,
+             failure_reason: "All parallel candidates failed"
+           }
+         }}
+      end
+
+      assert {:error, {:council_pipeline_failed, "All parallel candidates failed"}} =
+               Consult.decide(TestAdvisoryEvaluator, "Failed fan-in with no decision",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+    end
+
+    test "failed terminal outcome rejects stale decision keys from context" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{
+             "exec.decide.decision" => "approved",
+             "exec.decide.approve_count" => 5,
+             "exec.decide.quorum_met" => true,
+             "council.decision" => "approved"
+           },
+           final_outcome: %{
+             "status" => "fail",
+             "failure_reason" => "All parallel candidates failed"
+           }
+         }}
+      end
+
+      assert {:error, {:council_pipeline_failed, "All parallel candidates failed"}} =
+               Consult.decide(TestAdvisoryEvaluator, "Failed fan-in with stale decision keys",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+    end
+
+    test "successful terminal outcome still extracts decision" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{
+             "exec.decide.decision" => "approved",
+             "exec.decide.approve_count" => 3,
+             "exec.decide.reject_count" => 0,
+             "exec.decide.abstain_count" => 0,
+             "exec.decide.quorum_met" => true
+           },
+           final_outcome: %{status: :success, failure_reason: nil}
+         }}
+      end
+
+      assert {:ok, decision} =
+               Consult.decide(TestAdvisoryEvaluator, "Successful terminal outcome",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert decision.decision == "approved"
+      assert decision.approve_count == 3
+    end
+
+    test "partial_success terminal outcome still extracts decision" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{"council.decision" => "rejected", "council.quorum_met" => true},
+           final_outcome: %{status: :partial_success}
+         }}
+      end
+
+      assert {:ok, decision} =
+               Consult.decide(TestAdvisoryEvaluator, "Partial-success terminal outcome",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert decision.decision == "rejected"
+    end
+
+    test "omitted final_outcome keeps simple injected-engine compatibility" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok, %{context: %{"council.decision" => "approved"}}}
+      end
+
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(TestAdvisoryEvaluator, "No final_outcome field",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+    end
+
+    test "struct-shaped final_outcome with fail status is causal" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      # Mimic Engine.Outcome without importing orchestrator internals.
+      outcome = %FakeOutcome{status: :fail, failure_reason: "handler exploded"}
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok, %{context: %{"exec.decide.decision" => "approved"}, final_outcome: outcome}}
+      end
+
+      assert {:error, {:council_pipeline_failed, "handler exploded"}} =
+               Consult.decide(TestAdvisoryEvaluator, "Struct final_outcome fail",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
     end
   end
 
