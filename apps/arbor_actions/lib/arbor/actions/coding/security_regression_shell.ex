@@ -318,7 +318,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
       Path.join([
         Map.get(resource, :base_runner_dir_path) ||
           Path.join(Map.get(resource, :base_runtime_path) || resource.root_path, "runner"),
-        Arbor.Shell.validation_runner_script_basename()
+        "runner.exs"
       ])
   end
 

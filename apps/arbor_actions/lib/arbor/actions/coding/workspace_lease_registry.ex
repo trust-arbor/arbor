@@ -1354,8 +1354,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     candidate_result_dir = Path.join(candidate_runtime, "result")
     base_runner_dir = Path.join(base_runtime, "runner")
     base_result_dir = Path.join(base_runtime, "result")
-    runner_script = Arbor.Shell.validation_runner_script_basename()
-    result_name = Arbor.Shell.validation_result_basename()
+    # Exact owner-issued basenames (not evidence_type labels).
+    runner_script = "runner.exs"
+    result_name = "result.etf"
 
     %{
       resource_id: resource_id,

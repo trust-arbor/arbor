@@ -1411,16 +1411,16 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                {:mix_wrapper_dir, "/arbor/bin", :read_only}
              ]
 
-      assert AppleContainerPlanCore.guest_validation_runner_script() ==
-               "/arbor/validation/runner/runner.exs"
+      paths = AppleContainerPlanCore.security_regression_path_map()
 
-      assert AppleContainerPlanCore.guest_validation_result_file() ==
-               "/arbor/validation/result/reviewed_regression_evidence"
-
-      assert Shell.guest_validation_runner_script() ==
-               AppleContainerPlanCore.guest_validation_runner_script()
-
-      assert Shell.validation_result_basename() == "reviewed_regression_evidence"
+      assert paths == %{
+               runner_dir: "/arbor/validation/runner",
+               result_dir: "/arbor/validation/result",
+               runner_script_basename: "runner.exs",
+               result_basename: "result.etf",
+               guest_runner_script: "/arbor/validation/runner/runner.exs",
+               guest_result_file: "/arbor/validation/result/result.etf"
+             }
 
       assert AppleContainerPlanCore.guest_tmpfs() == %{
                guest_path: "/tmp",

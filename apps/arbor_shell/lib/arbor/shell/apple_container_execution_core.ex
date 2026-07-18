@@ -952,14 +952,17 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   defp finalize_mix_argv({:security_regression_run, host_runner, host_result, tests}, projections)
        when is_binary(host_runner) and is_binary(host_result) and is_list(tests) do
-    with :ok <- verify_security_regression_host_paths(host_runner, host_result, projections) do
+    paths = AppleContainerPlanCore.security_regression_path_map()
+
+    with :ok <-
+           verify_security_regression_host_paths(host_runner, host_result, projections, paths) do
       {:ok,
        [
          "run",
          "--no-start",
-         AppleContainerPlanCore.guest_validation_runner_script(),
+         paths.guest_runner_script,
          "--",
-         AppleContainerPlanCore.guest_validation_result_file()
+         paths.guest_result_file
          | tests
        ]}
     end
@@ -967,15 +970,12 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   defp finalize_mix_argv(_matched, _projections), do: {:error, :unsupported_mix_command}
 
-  defp verify_security_regression_host_paths(host_runner, host_result, projections) do
+  defp verify_security_regression_host_paths(host_runner, host_result, projections, paths) do
     runner_dir = Map.fetch!(projections, :validation_runner).path
     result_dir = Map.fetch!(projections, :validation_result).path
 
-    expected_runner =
-      Path.join(runner_dir, AppleContainerPlanCore.validation_runner_script_basename())
-
-    expected_result =
-      Path.join(result_dir, AppleContainerPlanCore.validation_result_basename())
+    expected_runner = Path.join(runner_dir, paths.runner_script_basename)
+    expected_result = Path.join(result_dir, paths.result_basename)
 
     with {:ok, host_runner} <- validate_absolute_canonical_path(host_runner),
          {:ok, host_result} <- validate_absolute_canonical_path(host_result),

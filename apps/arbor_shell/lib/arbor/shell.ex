@@ -51,7 +51,6 @@ defmodule Arbor.Shell do
 
   alias Arbor.Shell.{
     AppleContainerExecutor,
-    AppleContainerPlanCore,
     CapShell,
     ExecutablePolicy,
     ExecutionRegistry,
@@ -504,30 +503,6 @@ defmodule Arbor.Shell do
   def execute_spawn_capable(tool_name, args, opts \\ []) do
     AppleContainerExecutor.execute(tool_name, args, opts)
   end
-
-  @doc "Fixed guest directory for the security-regression ExUnit runner mount."
-  @spec guest_validation_runner_dir() :: String.t()
-  defdelegate guest_validation_runner_dir(), to: AppleContainerPlanCore
-
-  @doc "Fixed guest directory for the security-regression result artifact mount."
-  @spec guest_validation_result_dir() :: String.t()
-  defdelegate guest_validation_result_dir(), to: AppleContainerPlanCore
-
-  @doc "Closed basename of the owner-issued security-regression runner script."
-  @spec validation_runner_script_basename() :: String.t()
-  defdelegate validation_runner_script_basename(), to: AppleContainerPlanCore
-
-  @doc "Closed basename of the owner-issued security-regression evidence file."
-  @spec validation_result_basename() :: String.t()
-  defdelegate validation_result_basename(), to: AppleContainerPlanCore
-
-  @doc "Fixed guest path of the security-regression runner script."
-  @spec guest_validation_runner_script() :: String.t()
-  defdelegate guest_validation_runner_script(), to: AppleContainerPlanCore
-
-  @doc "Fixed guest path of the security-regression evidence file."
-  @spec guest_validation_result_file() :: String.t()
-  defdelegate guest_validation_result_file(), to: AppleContainerPlanCore
 
   @doc """
   Acquire a Shell-owned Linux dependency-baseline materialization lease.

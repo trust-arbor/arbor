@@ -95,10 +95,12 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   # Fixed validation runner/result guest mounts (sibling dirs under /arbor/validation).
   # Host revision runtime parents remain unprojected; only these typed children mount.
+  # Owner-issued basenames are exact: runner.exs and result.etf.
+  # (reviewed_regression_evidence is an evidence_type value, not a filesystem name.)
   @guest_validation_runner_dir "/arbor/validation/runner"
   @guest_validation_result_dir "/arbor/validation/result"
   @validation_runner_script_basename "runner.exs"
-  @validation_result_basename "reviewed_regression_evidence"
+  @validation_result_basename "result.etf"
   @guest_validation_runner_script Path.join(
                                     @guest_validation_runner_dir,
                                     @validation_runner_script_basename
@@ -431,29 +433,27 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @spec guest_runtime_roots() :: %{erlang: String.t(), elixir: String.t()}
   def guest_runtime_roots, do: %{erlang: @guest_erlang_root, elixir: @guest_elixir_root}
 
-  @doc "Fixed guest directory for the security-regression ExUnit runner (read-only bind)."
-  @spec guest_validation_runner_dir() :: String.t()
-  def guest_validation_runner_dir, do: @guest_validation_runner_dir
-
-  @doc "Fixed guest directory for the security-regression result artifact (read-write bind)."
-  @spec guest_validation_result_dir() :: String.t()
-  def guest_validation_result_dir, do: @guest_validation_result_dir
-
-  @doc "Closed basename for the owner-issued security-regression runner script."
-  @spec validation_runner_script_basename() :: String.t()
-  def validation_runner_script_basename, do: @validation_runner_script_basename
-
-  @doc "Closed basename for the owner-issued security-regression evidence file."
-  @spec validation_result_basename() :: String.t()
-  def validation_result_basename, do: @validation_result_basename
-
-  @doc "Fixed guest path of the security-regression runner script inside the runner mount."
-  @spec guest_validation_runner_script() :: String.t()
-  def guest_validation_runner_script, do: @guest_validation_runner_script
-
-  @doc "Fixed guest path of the security-regression evidence file inside the result mount."
-  @spec guest_validation_result_file() :: String.t()
-  def guest_validation_result_file, do: @guest_validation_result_file
+  # Closed mapping for same-library ExecutionCore host-path verification and
+  # guest argv rewrite. Not a public facade — Actions must not call this.
+  @doc false
+  @spec security_regression_path_map() :: %{
+          runner_dir: String.t(),
+          result_dir: String.t(),
+          runner_script_basename: String.t(),
+          result_basename: String.t(),
+          guest_runner_script: String.t(),
+          guest_result_file: String.t()
+        }
+  def security_regression_path_map do
+    %{
+      runner_dir: @guest_validation_runner_dir,
+      result_dir: @guest_validation_result_dir,
+      runner_script_basename: @validation_runner_script_basename,
+      result_basename: @validation_result_basename,
+      guest_runner_script: @guest_validation_runner_script,
+      guest_result_file: @guest_validation_result_file
+    }
+  end
 
   @doc """
   Default closed resource-profile atom (`:standard`).

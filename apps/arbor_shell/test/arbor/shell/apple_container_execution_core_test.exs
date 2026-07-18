@@ -52,7 +52,11 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
   @validation_runner_dir "/private/tmp/arbor-val/runner"
   @validation_result_dir "/private/tmp/arbor-val/result"
   @validation_runner_script Path.join(@validation_runner_dir, "runner.exs")
-  @validation_result_file Path.join(@validation_result_dir, "reviewed_regression_evidence")
+  @validation_result_file Path.join(@validation_result_dir, "result.etf")
+  @guest_validation_runner_script "/arbor/validation/runner/runner.exs"
+  @guest_validation_result_file "/arbor/validation/result/result.etf"
+  @guest_validation_runner_dir "/arbor/validation/runner"
+  @guest_validation_result_dir "/arbor/validation/result"
 
   defp base_projections(revision \\ "candidate") do
     %{
@@ -204,9 +208,9 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       assert spec.plan.command_args == [
                "run",
                "--no-start",
-               Shell.guest_validation_runner_script(),
+               @guest_validation_runner_script,
                "--",
-               Shell.guest_validation_result_file(),
+               @guest_validation_result_file,
                "apps/arbor_actions/test/example_test.exs"
              ]
 
@@ -217,9 +221,9 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       result_mount = Enum.find(spec.plan.mounts, &(&1.purpose == :validation_result))
 
       assert runner_mount.mode == :read_only
-      assert runner_mount.guest_path == Shell.guest_validation_runner_dir()
+      assert runner_mount.guest_path == @guest_validation_runner_dir
       assert result_mount.mode == :read_write
-      assert result_mount.guest_path == Shell.guest_validation_result_dir()
+      assert result_mount.guest_path == @guest_validation_result_dir
     end
 
     @tag :security_regression

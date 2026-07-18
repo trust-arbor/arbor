@@ -373,17 +373,14 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
       assert File.dir?(resource.base_runner_dir_path)
       assert File.dir?(resource.base_result_dir_path)
 
-      runner_name = Arbor.Shell.validation_runner_script_basename()
-      result_name = Arbor.Shell.validation_result_basename()
-
       assert resource.candidate_runner_path ==
-               Path.join(resource.candidate_runner_dir_path, runner_name)
+               Path.join(resource.candidate_runner_dir_path, "runner.exs")
 
       assert resource.candidate_result_path ==
-               Path.join(resource.candidate_result_dir_path, result_name)
+               Path.join(resource.candidate_result_dir_path, "result.etf")
 
-      assert resource.base_runner_path == Path.join(resource.base_runner_dir_path, runner_name)
-      assert resource.base_result_path == Path.join(resource.base_result_dir_path, result_name)
+      assert resource.base_runner_path == Path.join(resource.base_runner_dir_path, "runner.exs")
+      assert resource.base_result_path == Path.join(resource.base_result_dir_path, "result.etf")
 
       assert {:ok, candidate} = MixAction.projections_for_resource(resource, :candidate)
       assert {:ok, base} = MixAction.projections_for_resource(resource, :base)
