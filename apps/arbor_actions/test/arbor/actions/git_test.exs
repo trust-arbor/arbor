@@ -555,6 +555,137 @@ defmodule Arbor.Actions.GitTest do
       # Undeclared actions default to :read; git.commit mutates the repo.
       assert Egress.effect_class_for(Git.Commit) == :local_write
     end
+
+    test "security regression: matching expected_head and expected_tree bindings succeed", %{
+      repo_path: repo_path
+    } do
+      create_file(repo_path, "bound.txt", "bound content")
+      {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      head = String.trim(head)
+
+      assert {:ok, binding} = Arbor.Actions.Mix.committable_tree_binding(repo_path)
+
+      assert {:ok, result} =
+               Git.Commit.run(
+                 %{
+                   path: repo_path,
+                   message: "bound commit",
+                   all: true,
+                   expected_head_commit: head,
+                   expected_tree_oid: binding.tree_oid
+                 },
+                 %{}
+               )
+
+      assert String.length(result.commit_hash) >= 7
+      assert result.commit_hash != head
+
+      assert {:ok, tree} =
+               Arbor.Actions.Mix.commit_tree_oid(repo_path, result.commit_hash)
+
+      assert tree == binding.tree_oid
+    end
+
+    test "security regression: expected_head mismatch fails before mutation", %{
+      repo_path: repo_path
+    } do
+      create_file(repo_path, "head-mismatch.txt", "content")
+      {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      head = String.trim(head)
+      fake_head = String.duplicate("a", 40)
+
+      assert {:ok, binding} = Arbor.Actions.Mix.committable_tree_binding(repo_path)
+
+      assert {:error, message} =
+               Git.Commit.run(
+                 %{
+                   path: repo_path,
+                   message: "must not commit",
+                   all: true,
+                   expected_head_commit: fake_head,
+                   expected_tree_oid: binding.tree_oid
+                 },
+                 %{}
+               )
+
+      assert message =~ "head mismatch"
+      {still, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      assert String.trim(still) == head
+    end
+
+    test "security regression: expected_tree mismatch fails before mutation", %{
+      repo_path: repo_path
+    } do
+      create_file(repo_path, "tree-mismatch.txt", "content")
+      {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      head = String.trim(head)
+      fake_tree = String.duplicate("b", 40)
+
+      assert {:error, message} =
+               Git.Commit.run(
+                 %{
+                   path: repo_path,
+                   message: "must not commit",
+                   all: true,
+                   expected_head_commit: head,
+                   expected_tree_oid: fake_tree
+                 },
+                 %{}
+               )
+
+      assert message =~ "tree mismatch"
+      {still, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      assert String.trim(still) == head
+    end
+
+    test "security regression: empty expected bindings are invalid not absent", %{
+      repo_path: repo_path
+    } do
+      create_file(repo_path, "empty-bind.txt", "content")
+      {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      head = String.trim(head)
+
+      assert {:error, message} =
+               Git.Commit.run(
+                 %{
+                   path: repo_path,
+                   message: "must not commit",
+                   all: true,
+                   expected_head_commit: ""
+                 },
+                 %{}
+               )
+
+      assert message =~ "expected_head_commit is invalid"
+      {still, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      assert String.trim(still) == head
+
+      assert {:error, tree_message} =
+               Git.Commit.run(
+                 %{
+                   path: repo_path,
+                   message: "must not commit",
+                   all: true,
+                   expected_tree_oid: "not-an-oid"
+                 },
+                 %{}
+               )
+
+      assert tree_message =~ "expected_tree_oid is invalid"
+      {still2, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      assert String.trim(still2) == head
+    end
+
+    test "security regression: absent expected bindings keep ordinary commit behavior", %{
+      repo_path: repo_path
+    } do
+      create_file(repo_path, "ordinary.txt", "content")
+
+      assert {:ok, result} =
+               Git.Commit.run(%{path: repo_path, message: "ordinary", all: true}, %{})
+
+      assert String.length(result.commit_hash) >= 7
+    end
   end
 
   describe "Log" do

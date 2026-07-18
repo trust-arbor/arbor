@@ -649,6 +649,59 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   @doc false
+  # Exact full commit OID must resolve in the worktree repository. Rejects ref
+  # names, expressions, and short hashes so control inputs cannot smuggle text.
+  @spec verify_exact_commit_object(String.t(), String.t()) :: :ok | {:error, term()}
+  def verify_exact_commit_object(worktree_path, commit)
+      when is_binary(worktree_path) and is_binary(commit) do
+    with :ok <- require_exact_commit_hash(commit) do
+      case git(worktree_path, ["rev-parse", "--verify", "#{commit}^{commit}"]) do
+        {:ok, output} ->
+          if String.trim(output) == commit, do: :ok, else: {:error, :prior_commit_missing}
+
+        {:error, _reason} ->
+          {:error, :prior_commit_missing}
+      end
+    else
+      {:error, :invalid_base_commit} -> {:error, :invalid_prior_commit}
+      {:error, _} = error -> error
+    end
+  end
+
+  def verify_exact_commit_object(_worktree_path, _commit), do: {:error, :invalid_prior_commit}
+
+  @doc false
+  # True when `ancestor` is an ancestor of `descendant` (or identical). Used to
+  # bind pipeline prior_commit control to lease-base lineage rather than any
+  # existing object in the object store.
+  @spec verify_commit_ancestry(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def verify_commit_ancestry(worktree_path, ancestor, descendant)
+      when is_binary(worktree_path) and is_binary(ancestor) and is_binary(descendant) do
+    with :ok <- require_exact_commit_hash(ancestor),
+         :ok <- require_exact_commit_hash(descendant) do
+      if ancestor == descendant do
+        :ok
+      else
+        case System.cmd(
+               "git",
+               ["-C", worktree_path, "merge-base", "--is-ancestor", ancestor, descendant],
+               stderr_to_stdout: true
+             ) do
+          {_output, 0} -> :ok
+          {_output, 1} -> {:error, :prior_commit_not_ancestor}
+          {_output, _code} -> {:error, :prior_commit_ancestry_check_failed}
+        end
+      end
+    else
+      {:error, :invalid_base_commit} -> {:error, :invalid_prior_commit}
+      {:error, _} = error -> error
+    end
+  end
+
+  def verify_commit_ancestry(_worktree_path, _ancestor, _descendant),
+    do: {:error, :invalid_prior_commit}
+
+  @doc false
   # Bounded, deterministic owner-observed workspace identity for turn-progress
   # detection. The fixed digest covers HEAD, every staged index entry, and the
   # content/metadata of every unstaged or untracked path. No diff or file body

@@ -760,12 +760,20 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
       |> dirty_params(head)
       |> Map.put(:workspace_id, lease.workspace_id)
 
+    bindings = content_bindings!(lease.worktree_path)
     task = Task.async(fn -> ReviewedCommit.run(params, context) end)
     request = await_pending_request(agent_id)
 
-    assert request.metadata[:approval_context][:expected_workspace_fingerprint] ||
-             get_in(request.metadata, [:approval_context, :expected_tree_oid]) ||
-             true
+    approval_ctx =
+      request.metadata[:approval_context] || request.metadata["approval_context"] || %{}
+
+    assert (approval_ctx[:expected_workspace_fingerprint] ||
+              approval_ctx["expected_workspace_fingerprint"]) == bindings.fingerprint
+
+    assert (approval_ctx[:expected_tree_oid] || approval_ctx["expected_tree_oid"]) ==
+             bindings.tree_oid
+
+    assert (approval_ctx[:expected_head_commit] || approval_ctx["expected_head_commit"]) == head
 
     assert :ok =
              Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
@@ -777,6 +785,74 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     assert payload["commit_hash"] != head
     assert {:ok, committed} = git_head(lease.worktree_path)
     assert committed == payload["commit_hash"]
+  end
+
+  test "security regression: prior_commit not ancestral to lease base fails closed" do
+    {repo, _head} = init_clean_repo!()
+    agent_id = unique_agent("prior_non_ancestor")
+    task_id = unique_task("prior_non_ancestor")
+    lease = acquire_linked_worktree!(repo, task_id, agent_id)
+    worktree = lease.worktree_path
+
+    # Build an unrelated history in a second clone so the OID exists only if we
+    # never fetch it — instead create an orphan commit via a temporary branch
+    # then delete the branch, keeping the object reachable for rev-parse.
+    # Simpler: commit on main, then reset worktree to base while keeping the
+    # orphaned commit as "prior" is wrong. Use a commit from repo main that is
+    # NOT an ancestor of the worktree HEAD after we rewrite history.
+    #
+    # Concrete: advance worktree, then set prior to a commit that is a
+    # sibling/unrelated object by committing on a detached orphan.
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", worktree, "checkout", "--orphan", "orphan-side"],
+               stderr_to_stdout: true
+             )
+
+    File.write!(Path.join(worktree, "orphan.txt"), "unrelated lineage\n")
+
+    assert {_, 0} =
+             System.cmd("git", ["-C", worktree, "add", "orphan.txt"], stderr_to_stdout: true)
+
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", worktree, "commit", "-m", "orphan"],
+               stderr_to_stdout: true
+             )
+
+    {:ok, orphan} = git_head(worktree)
+
+    # Return to lease base lineage and make ordinary dirt there.
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", worktree, "checkout", "-f", lease.base_commit],
+               stderr_to_stdout: true
+             )
+
+    File.write!(Path.join(worktree, "feature.txt"), "dirt on base\n")
+    {:ok, head} = git_head(worktree)
+    assert head == lease.base_commit
+
+    grant_git_commit!(agent_id)
+    context = build_context(agent_id, build_signer(agent_id)) |> Map.put(:task_id, task_id)
+
+    # prior is a real commit object but not on base→HEAD ancestry.
+    params =
+      worktree
+      |> dirty_params(head)
+      |> Map.put(:workspace_id, lease.workspace_id)
+      |> Map.put(:prior_commit, orphan)
+
+    assert {:error, message} = ReviewedCommit.run(params, context)
+    assert message =~ "prior_commit" or message =~ "ancestor"
+
+    assert Enum.empty?(
+             Arbor.Comms.InteractionRouter.pending()
+             |> Enum.filter(&(&1.agent_id == agent_id))
+           )
   end
 
   # -- helpers ---------------------------------------------------------------

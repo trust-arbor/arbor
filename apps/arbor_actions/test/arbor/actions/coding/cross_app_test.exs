@@ -207,6 +207,55 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     refute Map.has_key?(result, "cycles")
   end
 
+  test "security regression: CrossApp emits validated_tree_oid and rejects validation-time mutation",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_umbrella(tmp_dir)
+    worktree = fixture.lease.worktree_path
+
+    File.write!(Path.join(worktree, "apps/alpha/lib/alpha.ex"), """
+    defmodule Alpha do
+      def value, do: 1
+      def tree_probe, do: :ok
+    end
+    """)
+
+    previous_runner = Application.get_env(:arbor_actions, :cross_app_mix_runner)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, _args, _opts ->
+      {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+    end)
+
+    on_exit(fn ->
+      if is_nil(previous_runner) do
+        Application.delete_env(:arbor_actions, :cross_app_mix_runner)
+      else
+        Application.put_env(:arbor_actions, :cross_app_mix_runner, previous_runner)
+      end
+    end)
+
+    assert {:ok, before_binding} = Arbor.Actions.Mix.committable_tree_binding(worktree)
+
+    assert {:ok, result} =
+             Validate.run(%{workspace_id: fixture.lease.workspace_id}, fixture.context)
+
+    tree_oid = Map.get(result, :validated_tree_oid) || Map.get(result, "validated_tree_oid")
+    assert is_binary(tree_oid) and tree_oid != ""
+    assert tree_oid == before_binding.tree_oid
+    assert Regex.match?(~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, tree_oid)
+
+    # Mutation during the aggregate validation window fails closed.
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn path, args, _opts ->
+      if args == ["compile", "--warnings-as-errors"] do
+        File.write!(Path.join(path, "validation_mutated.txt"), "mutated during validation\n")
+      end
+
+      {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+    end)
+
+    assert {:error, :validation_tree_mutated} =
+             Validate.run(%{workspace_id: fixture.lease.workspace_id}, fixture.context)
+  end
+
   test "forwards the validated timeout to dependency resource setup", %{tmp_dir: tmp_dir} do
     TestLinuxBaselineMaterializer.reset_seams()
     fixture = leased_umbrella(tmp_dir)

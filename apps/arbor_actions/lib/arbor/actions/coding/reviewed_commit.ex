@@ -170,12 +170,17 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     prior_commit = prior_commit(params)
 
     result =
-      with {:ok, bindings} <- resolve_candidate_bindings(path, params),
+      with :ok <- verify_workspace_binding(path, workspace_id, context),
+           # Lease/path authority first — only then probe tree/fingerprint/Git.
+           {:ok, bindings} <- resolve_candidate_bindings(path, params),
            git_params = git_commit_params(path, message, params, bindings),
-           # prior_commit is approval control identity only — never a nested Git param.
-           auth_params = Map.put(git_params, :prior_commit, prior_commit),
+           # Approval identity carries fingerprint + prior; nested Git only gets
+           # exact head/tree bindings.
+           auth_params =
+             git_params
+             |> Map.put(:prior_commit, prior_commit)
+             |> Map.put(:expected_workspace_fingerprint, bindings.fingerprint),
            resource = Actions.canonical_uri_for(Git.Commit, git_params),
-           :ok <- verify_workspace_binding(path, workspace_id, context),
            :ok <-
              reject_ambiguous_dirty_advanced_head(
                path,
@@ -700,7 +705,10 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     with {:ok, lease} <- resolve_workspace_lease(workspace_id, context),
          {:ok, base_commit} <- lease_base_commit(lease),
          {:ok, head} <- read_head(path),
-         {:ok, trusted_prior} <- validate_optional_prior_commit(path, prior_commit) do
+         # Lease base must be ancestral to current HEAD even on the base-dirty path.
+         :ok <- Workspace.verify_commit_ancestry(path, base_commit, head),
+         {:ok, trusted_prior} <-
+           validate_optional_prior_commit(path, base_commit, head, prior_commit) do
       cond do
         head == base_commit ->
           :ok
@@ -722,35 +730,23 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   end
 
   # Absent prior is fine (initial cycle). Present prior must be an exact full
-  # commit OID that resolves in this repository — never ref names or text.
-  defp validate_optional_prior_commit(_path, nil), do: {:ok, nil}
+  # commit OID that exists and lies on the lease-base → HEAD lineage — never
+  # arbitrary ref text or an unrelated existing object.
+  defp validate_optional_prior_commit(_path, _base, _head, nil), do: {:ok, nil}
 
-  defp validate_optional_prior_commit(path, prior)
-       when is_binary(path) and is_binary(prior) and prior != "" do
+  defp validate_optional_prior_commit(path, base, head, prior)
+       when is_binary(path) and is_binary(base) and is_binary(head) and is_binary(prior) and
+              prior != "" do
     with :ok <- require_git_oid(prior, :missing_prior_commit, :invalid_prior_commit),
-         :ok <- require_prior_commit_object(path, prior) do
+         :ok <- Workspace.verify_exact_commit_object(path, prior),
+         :ok <- Workspace.verify_commit_ancestry(path, base, prior),
+         :ok <- Workspace.verify_commit_ancestry(path, prior, head) do
       {:ok, prior}
     end
   end
 
-  defp validate_optional_prior_commit(_path, _prior), do: {:error, :invalid_prior_commit}
-
-  defp require_prior_commit_object(path, prior) when is_binary(path) and is_binary(prior) do
-    # Bounded identity check only: exact OID already validated; resolve the
-    # commit object without going through the full Git facade storage audit
-    # (which is not required for a pure object-existence probe).
-    case System.cmd(
-           "git",
-           ["-C", path, "rev-parse", "--verify", "#{prior}^{commit}"],
-           stderr_to_stdout: true
-         ) do
-      {output, 0} ->
-        if String.trim(output) == prior, do: :ok, else: {:error, :prior_commit_missing}
-
-      _other ->
-        {:error, :prior_commit_missing}
-    end
-  end
+  defp validate_optional_prior_commit(_path, _base, _head, _prior),
+    do: {:error, :invalid_prior_commit}
 
   defp resolve_workspace_lease(workspace_id, context)
        when is_binary(workspace_id) and workspace_id != "" do
@@ -992,7 +988,6 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
       all: truthy?(Map.get(params, :all, true)),
       allow_empty: truthy?(Map.get(params, :allow_empty, false)),
       expected_head_commit: bindings.head,
-      expected_workspace_fingerprint: bindings.fingerprint,
       expected_tree_oid: bindings.tree_oid
     }
   end
@@ -1082,6 +1077,14 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   defp format_error(:invalid_prior_commit), do: "prior_commit is invalid"
   defp format_error(:missing_prior_commit), do: "prior_commit is required"
   defp format_error(:prior_commit_missing), do: "prior_commit is not a commit in this repository"
+
+  defp format_error(:prior_commit_not_ancestor),
+    do: "prior_commit is not on the lease-base to HEAD ancestry chain"
+
+  defp format_error(:prior_commit_ancestry_check_failed),
+    do: "prior_commit ancestry check failed"
+
+  defp format_error(:invalid_commit_hash), do: "commit hash is invalid"
 
   defp format_error({:ambiguous_dirty_advanced_head, base, head, prior}) do
     prior_text = if is_binary(prior) and prior != "", do: prior, else: ""

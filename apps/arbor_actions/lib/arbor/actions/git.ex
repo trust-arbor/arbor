@@ -1303,20 +1303,14 @@ defmodule Arbor.Actions.Git do
           type: :string,
           required: false,
           doc: "Optional exact committable-tree binding enforced at the mutating boundary"
-        ],
-        # Accepted and ignored by ordinary schema validation when nested owners
-        # forward the full reviewed-commit binding map; tree enforcement uses
-        # expected_tree_oid only.
-        expected_workspace_fingerprint: [
-          type: :string,
-          required: false,
-          doc: "Optional passthrough fingerprint identity from nested owners"
         ]
       ]
 
     alias Arbor.Actions
     alias Arbor.Actions.Git
     alias Arbor.Actions.Mix, as: MixAction
+
+    @git_oid_re ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
 
     def taint_roles do
       %{
@@ -1326,8 +1320,7 @@ defmodule Arbor.Actions.Git do
         all: :control,
         allow_empty: :control,
         expected_head_commit: :control,
-        expected_tree_oid: :control,
-        expected_workspace_fingerprint: :control
+        expected_tree_oid: :control
       }
     end
 
@@ -1369,9 +1362,12 @@ defmodule Arbor.Actions.Git do
       end
     end
 
-    defp verify_optional_head(_path, nil), do: :ok
+    # :absent — key omitted / nil (ordinary callers; skip check)
+    # {:ok, oid} — well-formed binding
+    # {:error, reason} — present but empty/malformed (fail closed before mutate)
+    defp verify_optional_head(_path, :absent), do: :ok
 
-    defp verify_optional_head(path, expected) when is_binary(expected) and expected != "" do
+    defp verify_optional_head(path, {:ok, expected}) do
       case get_commit_hash(path) do
         {:ok, ^expected} -> :ok
         {:ok, actual} -> {:error, "head mismatch: expected=#{expected} actual=#{actual}"}
@@ -1379,11 +1375,12 @@ defmodule Arbor.Actions.Git do
       end
     end
 
-    defp verify_optional_head(_path, _), do: {:error, "expected_head_commit is invalid"}
+    defp verify_optional_head(_path, {:error, reason}),
+      do: {:error, "expected_head_commit is #{reason}"}
 
-    defp verify_optional_tree(_path, nil), do: :ok
+    defp verify_optional_tree(_path, :absent), do: :ok
 
-    defp verify_optional_tree(path, expected) when is_binary(expected) and expected != "" do
+    defp verify_optional_tree(path, {:ok, expected}) do
       case MixAction.committable_tree_binding(path) do
         {:ok, %{tree_oid: ^expected}} ->
           :ok
@@ -1396,16 +1393,17 @@ defmodule Arbor.Actions.Git do
       end
     end
 
-    defp verify_optional_tree(_path, _), do: {:error, "expected_tree_oid is invalid"}
+    defp verify_optional_tree(_path, {:error, reason}),
+      do: {:error, "expected_tree_oid is #{reason}"}
 
     # Post-commit: compare the new commit object's tree to the expected binding.
     defp verify_optional_post_commit_tree(path, hash, params)
          when is_binary(path) and is_binary(hash) do
       case optional_binding(params, :expected_tree_oid) do
-        nil ->
+        :absent ->
           :ok
 
-        expected when is_binary(expected) and expected != "" ->
+        {:ok, expected} ->
           case MixAction.commit_tree_oid(path, hash) do
             {:ok, ^expected} ->
               :ok
@@ -1417,15 +1415,34 @@ defmodule Arbor.Actions.Git do
               {:error, "resulting tree lookup failed: #{inspect(reason)}"}
           end
 
-        _ ->
-          {:error, "expected_tree_oid is invalid"}
+        {:error, reason} ->
+          {:error, "expected_tree_oid is #{reason}"}
       end
     end
 
     defp optional_binding(params, key) when is_atom(key) do
-      case Map.get(params, key) || Map.get(params, Atom.to_string(key)) do
-        value when is_binary(value) and value != "" -> value
-        _ -> nil
+      raw =
+        cond do
+          Map.has_key?(params, key) -> Map.get(params, key)
+          Map.has_key?(params, Atom.to_string(key)) -> Map.get(params, Atom.to_string(key))
+          true -> :__missing__
+        end
+
+      case raw do
+        :__missing__ ->
+          :absent
+
+        nil ->
+          :absent
+
+        value when is_binary(value) and value == "" ->
+          {:error, "invalid"}
+
+        value when is_binary(value) ->
+          if Regex.match?(@git_oid_re, value), do: {:ok, value}, else: {:error, "invalid"}
+
+        _ ->
+          {:error, "invalid"}
       end
     end
 
