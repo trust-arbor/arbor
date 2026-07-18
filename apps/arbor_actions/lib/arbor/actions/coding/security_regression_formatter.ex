@@ -108,11 +108,15 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
 
       # Capture the owner-issued result path before Mix.Task.run may replace
       # System.argv with the selected test paths.
-      def store_artifact_path!(path)
-          when is_binary(path) and path != "" and path != "--" and
-                 not String.starts_with?(path, "-") do
-        :persistent_term.put(@artifact_path_key, path)
-        :ok
+      # Path checks stay in function bodies — remote calls such as
+      # String.starts_with?/2 are not valid Elixir guards (OTP/Elixir 1.19).
+      def store_artifact_path!(path) when is_binary(path) do
+        if valid_owner_artifact_path?(path) do
+          :persistent_term.put(@artifact_path_key, path)
+          :ok
+        else
+          raise "security-regression runner missing artifact path argument"
+        end
       end
 
       def store_artifact_path!(_path) do
@@ -122,9 +126,12 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       def init(_opts) do
         artifact_path =
           case :persistent_term.get(@artifact_path_key, :missing) do
-            path when is_binary(path) and path != "" and path != "--" and
-                        not String.starts_with?(path, "-") ->
-              path
+            path when is_binary(path) ->
+              if valid_owner_artifact_path?(path) do
+                path
+              else
+                raise "security-regression runner missing stored artifact path"
+              end
 
             _other ->
               raise "security-regression runner missing stored artifact path"
@@ -233,6 +240,12 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       end
 
       def handle_cast(_event, state), do: {:noreply, state}
+
+      defp valid_owner_artifact_path?(path) when is_binary(path) do
+        path != "" and path != "--" and not String.starts_with?(path, "-")
+      end
+
+      defp valid_owner_artifact_path?(_path), do: false
 
       defp increment(state, key), do: Map.update!(state, key, &(&1 + 1))
 

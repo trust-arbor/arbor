@@ -50,6 +50,11 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
     assert source =~ "artifact_path: artifact_path"
     assert source =~ "Map.fetch!(state, :artifact_path)"
     assert source =~ "security-regression runner missing stored artifact path"
+    assert source =~ "valid_owner_artifact_path?"
+
+    # Remote calls must not appear in guards (Elixir 1.19 rejects them).
+    refute source =~ ~r/when[^\n]*String\.starts_with\?/
+    refute source =~ ~r/when[^\n]*not String\.starts_with\?/
 
     suite_finished =
       source
@@ -61,5 +66,65 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
     refute suite_finished =~ "System.argv()"
     refute source =~ ~r/\[artifact_path \| _tests\] = System\.argv\(\)/
     refute source =~ ~r/\[artifact_path \| test_paths\] = System\.argv\(\)/
+  end
+
+  test "security regression: generated formatter module compiles under pinned Elixir" do
+    # Behavioral compile of the formatter GenServer only — not the script tail
+    # that would invoke Mix.Task.run. Proves String.starts_with?/2 is not in a
+    # guard and the store/init path is loadable.
+    module_name =
+      "ArborSecurityRegressionFormatter.M" <>
+        (:crypto.strong_rand_bytes(16) |> Base.encode16(case: :upper))
+
+    assert {:ok, source} = Formatter.runner_source(module_name)
+    module_ast = extract_defmodule_ast!(source)
+
+    compiled =
+      try do
+        Code.compile_quoted(module_ast)
+      rescue
+        error ->
+          flunk(
+            "generated security-regression runner failed to compile: #{Exception.message(error)}"
+          )
+      end
+
+    assert [{mod, _beam} | _] = compiled
+    assert mod == String.to_existing_atom("Elixir." <> module_name)
+
+    artifact = "/private/tmp/arbor-val/result/result.etf"
+    assert :ok = mod.store_artifact_path!(artifact)
+    assert {:ok, state} = mod.init([])
+    assert state.artifact_path == artifact
+
+    assert_raise RuntimeError, ~r/missing artifact path/, fn ->
+      mod.store_artifact_path!("--")
+    end
+
+    assert_raise RuntimeError, ~r/missing artifact path/, fn ->
+      mod.store_artifact_path!("-e")
+    end
+
+    :code.purge(mod)
+    :code.delete(mod)
+  end
+
+  defp extract_defmodule_ast!(source) when is_binary(source) do
+    assert {:ok, ast} = Code.string_to_quoted(source)
+
+    module_ast =
+      case ast do
+        {:__block__, _meta, forms} when is_list(forms) ->
+          Enum.find(forms, &match?({:defmodule, _, _}, &1))
+
+        {:defmodule, _, _} = form ->
+          form
+
+        _other ->
+          nil
+      end
+
+    assert is_tuple(module_ast)
+    module_ast
   end
 end
