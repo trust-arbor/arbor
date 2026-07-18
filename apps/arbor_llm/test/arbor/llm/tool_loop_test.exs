@@ -1104,6 +1104,152 @@ defmodule Arbor.LLM.ToolLoopTest do
                  terminal_tools: ["missing_tool"]
                )
     end
+
+    @tag :tmp_dir
+    test "max_turns inspection rounds may be followed by one reserved terminal submission", %{
+      tmp_dir: tmp_dir
+    } do
+      File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
+      client = build_client(__MODULE__.TerminalReservationAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("terminal_reservation_test"),
+          tools: terminal_tool_defs() ++ mock_read_tool_def(),
+          tool_executor: __MODULE__.TerminalTools,
+          terminal_tools: ["submit_report"],
+          max_turns: 3,
+          workdir: tmp_dir
+        )
+
+      assert result.finish_reason == :stop
+
+      assert Jason.decode!(result.content) == %{
+               "vote" => "approve",
+               "finding_updates" => [],
+               "new_findings" => []
+             }
+    end
+
+    @tag :tmp_dir
+    test "reserved post-max_turns request exposes only terminal tools with forced tool_choice",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
+      client = build_client(__MODULE__.TerminalReservationAdapter)
+
+      req = %{
+        request("terminal_reservation_test")
+        | provider_options: %{test_pid: self()}
+      }
+
+      {:ok, _result} =
+        ToolLoop.run(client, req,
+          tools: terminal_tool_defs() ++ mock_read_tool_def(),
+          tool_executor: __MODULE__.TerminalTools,
+          terminal_tools: ["submit_report"],
+          max_turns: 3,
+          workdir: tmp_dir
+        )
+
+      assert_receive {:terminal_reservation_request, tools, tool_choice, messages}
+      tool_names = Enum.map(tools, &get_in(&1, ["function", "name"]))
+      assert tool_names == ["submit_report"]
+      refute "read_file" in tool_names
+
+      assert tool_choice == %{
+               "type" => "function",
+               "function" => %{"name" => "submit_report"}
+             }
+
+      # Full conversation from normal inspection rounds is preserved.
+      assert Enum.any?(messages, &(&1.role == :tool))
+      assert Enum.any?(messages, &(&1.role == :user and &1.content =~ "terminal tool"))
+      assert Enum.any?(messages, &(&1.role == :user and &1.content =~ "exhausted"))
+    end
+
+    @tag :tmp_dir
+    test "terminal reservation after max_turns is exactly once and fails closed without submission",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
+      client = build_client(__MODULE__.TerminalReservationAdapter)
+
+      req = %{
+        request("terminal_reservation_test")
+        | provider_options: %{test_pid: self(), reserved_response: :free_form}
+      }
+
+      assert {:error, reason} =
+               ToolLoop.run(client, req,
+                 tools: terminal_tool_defs() ++ mock_read_tool_def(),
+                 tool_executor: __MODULE__.TerminalTools,
+                 terminal_tools: ["submit_report"],
+                 max_turns: 3,
+                 workdir: tmp_dir
+               )
+
+      assert reason == :terminal_tool_submission_required or
+               match?({:terminal_tool_submission_required, _, _}, reason)
+
+      # 3 normal inspection rounds + exactly 1 reserved terminal-only call.
+      call_kinds =
+        Stream.repeatedly(fn ->
+          receive do
+            {:llm_call, kind} -> kind
+          after
+            0 -> :done
+          end
+        end)
+        |> Enum.take_while(&(&1 != :done))
+
+      assert call_kinds == [:normal, :normal, :normal, :reserved]
+      refute_receive {:llm_call, _}
+    end
+
+    @tag :tmp_dir
+    test "reserved terminal-only request rejects fabricated non-terminal call before execution",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
+      client = build_client(__MODULE__.TerminalReservationAdapter)
+
+      req = %{
+        request("terminal_reservation_test")
+        | provider_options: %{test_pid: self(), reserved_response: :fabricated_read}
+      }
+
+      assert {:error, :terminal_tool_submission_required} =
+               ToolLoop.run(client, req,
+                 tools: terminal_tool_defs() ++ mock_read_tool_def(),
+                 tool_executor: __MODULE__.NeverExecuteReservedReadTools,
+                 terminal_tools: ["submit_report"],
+                 max_turns: 3,
+                 workdir: tmp_dir
+               )
+
+      assert_receive {:terminal_reservation_request, tools, tool_choice, _messages}
+      assert Enum.map(tools, &get_in(&1, ["function", "name"])) == ["submit_report"]
+
+      assert tool_choice == %{
+               "type" => "function",
+               "function" => %{"name" => "submit_report"}
+             }
+
+      refute_receive :reserved_nonterminal_executed
+    end
+
+    @tag :tmp_dir
+    test "max_turns without terminal_tools still uses free-form wrap-up (non-terminal unchanged)",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "x.txt"), "data")
+      client = build_client(MaxTurnsAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("max_turns_test"),
+          workdir: tmp_dir,
+          max_turns: 3,
+          tool_executor: MockTools
+        )
+
+      assert result.finish_reason == :max_turns
+    end
   end
 
   # --- Terminal tool mocks ---
@@ -1362,6 +1508,115 @@ defmodule Arbor.LLM.ToolLoopTest do
          usage: %{},
          raw: %{}
        }}
+    end
+  end
+
+  defmodule TerminalReservationAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "terminal_reservation_test"
+
+    def complete(%Request{} = request, _opts) do
+      tool_names =
+        Enum.map(request.tools || [], fn
+          %{"function" => %{"name" => name}} -> name
+          %{function: %{name: name}} -> name
+          _ -> nil
+        end)
+        |> Enum.reject(&is_nil/1)
+
+      reserved? =
+        tool_names == ["submit_report"] and
+          match?(
+            %{"type" => "function", "function" => %{"name" => "submit_report"}},
+            request.tool_choice
+          )
+
+      provider_options = request.provider_options || %{}
+      reserved_response = Map.get(provider_options, :reserved_response, :submit)
+
+      case Map.get(provider_options, :test_pid) do
+        pid when is_pid(pid) ->
+          send(pid, {:llm_call, if(reserved?, do: :reserved, else: :normal)})
+
+          if reserved? do
+            send(
+              pid,
+              {:terminal_reservation_request, request.tools, request.tool_choice,
+               request.messages}
+            )
+          end
+
+        _ ->
+          :ok
+      end
+
+      case {reserved?, reserved_response} do
+        {false, _response} ->
+          inspection_response()
+
+        {true, :submit} ->
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :tool_calls,
+             content_parts: [
+               ContentPart.tool_call("t1", "submit_report", %{
+                 "vote" => "approve",
+                 "finding_updates" => [],
+                 "new_findings" => []
+               })
+             ],
+             usage: %{},
+             raw: %{}
+           }}
+
+        {true, :free_form} ->
+          {:ok,
+           %Response{
+             text: "Still prose, no terminal call",
+             finish_reason: :stop,
+             content_parts: [ContentPart.text("Still prose, no terminal call")],
+             usage: %{},
+             raw: %{}
+           }}
+
+        {true, :fabricated_read} ->
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :tool_calls,
+             content_parts: [
+               ContentPart.tool_call("fabricated", "read_file", %{
+                 "path" => "must-not-execute"
+               })
+             ],
+             usage: %{},
+             raw: %{}
+           }}
+      end
+    end
+
+    defp inspection_response do
+      id = "inspect_" <> Integer.to_string(System.unique_integer([:positive]))
+
+      {:ok,
+       %Response{
+         text: "",
+         finish_reason: :tool_calls,
+         content_parts: [ContentPart.tool_call(id, "read_file", %{"path" => "snapshot.txt"})],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
+  defmodule NeverExecuteReservedReadTools do
+    def execute("read_file", %{"path" => "snapshot.txt"}, workdir, _opts),
+      do: File.read(Path.join(workdir, "snapshot.txt"))
+
+    def execute("read_file", %{"path" => "must-not-execute"}, _workdir, _opts) do
+      send(self(), :reserved_nonterminal_executed)
+      raise "reserved non-terminal call reached the executor"
     end
   end
 

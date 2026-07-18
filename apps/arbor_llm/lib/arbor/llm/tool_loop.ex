@@ -26,9 +26,12 @@ defmodule Arbor.LLM.ToolLoop do
       structured result. A successful sole terminal-tool call terminates the
       loop immediately and returns ONLY that action result as
       `PipelineResponse.content` (never accumulated prose). A failed terminal
-      call may be returned to the model for correction. Mixed or multiple
-      terminal submissions fail closed as ambiguous. Absent/`[]` preserves
-      existing free-form final-text behavior.
+      call may be returned to the model for correction. Free-form final text
+      and normal `max_turns` exhaustion each allow exactly one reserved
+      terminal-only LLM request (forced `tool_choice`, terminal definitions
+      only, prior conversation preserved); a second miss fails closed. Mixed
+      or multiple terminal submissions fail closed as ambiguous. Absent/`[]`
+      preserves existing free-form final-text / max_turns wrap-up behavior.
 
   ## Example
 
@@ -335,12 +338,15 @@ defmodule Arbor.LLM.ToolLoop do
 
     names_csv = Enum.join(terminal_names, ", ")
 
+    # Covers both free-form final replies and normal max_turns exhaustion:
+    # the reserved call is the only chance left to submit via a terminal tool.
     correction_msg =
       Message.new(
         :user,
-        "Your previous reply was free-form text, but this turn requires a terminal tool " <>
-          "submission. Call exactly one of these tools now with the required arguments and " <>
-          "do not emit free-form final text: #{names_csv}."
+        "A terminal tool submission is required to complete this turn. " <>
+          "Either you replied with free-form text, or normal tool-call rounds are exhausted. " <>
+          "Call exactly one of these tools now with the required arguments and " <>
+          "do not emit free-form final text or non-terminal tool calls: #{names_csv}."
       )
 
     %{
@@ -372,6 +378,16 @@ defmodule Arbor.LLM.ToolLoop do
   end
 
   defp ambiguous_terminal_call_shape?(_tool_calls, _terminals), do: false
+
+  defp invalid_reserved_terminal_call_shape?(
+         tool_calls,
+         %{terminal_correction_attempted: true, terminal_tools: terminals}
+       )
+       when is_list(tool_calls) and is_struct(terminals, MapSet) do
+    Enum.any?(tool_calls, fn tc -> not MapSet.member?(terminals, tc.name) end)
+  end
+
+  defp invalid_reserved_terminal_call_shape?(_tool_calls, _state), do: false
 
   defp execution_identity(opts) do
     if Keyword.get(opts, :authorization, false) == true do
@@ -478,11 +494,33 @@ defmodule Arbor.LLM.ToolLoop do
   defp maybe_put_executor_opt(opts, _key, nil), do: opts
   defp maybe_put_executor_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp loop(client, request, _opts, %{turn: turn, max_turns: max} = state)
+  defp loop(client, request, opts, %{turn: turn, max_turns: max} = state)
        when turn >= max do
     if terminal_tools_enabled?(state) do
-      # Terminal-tool contracts cannot fall back to free-form text wrap-up.
-      {:error, {:terminal_tool_submission_required, turn, state.total_usage}}
+      if state.terminal_correction_attempted do
+        # Reservation already consumed (or exhausted again after the reserved call).
+        {:error, {:terminal_tool_submission_required, turn, state.total_usage}}
+      else
+        # After normal max_turns exhaustion, reserve exactly one terminal-only LLM
+        # request. Do not fall back to free-form text under a terminal contract.
+        require Logger
+
+        Logger.info(
+          "[ToolLoop] Hit #{max} turn limit with terminal_tools configured; " <>
+            "one reserved terminal-only submission for agent #{state.agent_id}"
+        )
+
+        correction_request = terminal_correction_request(request, state)
+
+        # Allow exactly one more main-loop iteration past normal max_turns.
+        # terminal_correction_attempted bounds the reservation to a single use.
+        loop(client, correction_request, opts, %{
+          state
+          | terminal_correction_attempted: true,
+            max_turns: turn + 1,
+            accumulated_text: ""
+        })
+      end
     else
       # Tool loop exhausted — make one final text-only call so the LLM
       # MUST respond with text instead of more tool calls
@@ -610,6 +648,12 @@ defmodule Arbor.LLM.ToolLoop do
         end
 
         cond do
+          response.finish_reason == :tool_calls and tool_calls != [] and
+              invalid_reserved_terminal_call_shape?(tool_calls, state) ->
+            # A provider may fabricate a call to a tool omitted from the reserved
+            # request. Reject before execution so terminal-only means terminal-only.
+            {:error, :terminal_tool_submission_required}
+
           response.finish_reason == :tool_calls and tool_calls != [] and
               ambiguous_terminal_call_shape?(tool_calls, state.terminal_tools) ->
             # Reject the whole round before executing any tool. A mixed round may
