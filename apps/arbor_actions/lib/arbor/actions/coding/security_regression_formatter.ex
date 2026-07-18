@@ -5,20 +5,29 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
   The child process writes one Erlang external-term artifact only after receiving
   `suite_finished`. The parent validates that artifact against an exact schema;
   human-oriented CLI output is never used as proof.
+
+  ## Level A boundary
+
+  This harness is **not** a hostile-runtime proof channel. Candidate code shares
+  the BEAM with the generated formatter; the artifact path is owner-selected and
+  supplied as the first `System.argv()` entry after `--`. Do not claim T4 /
+  hostile-runtime integrity from this Level A evidence path.
   """
 
   alias Arbor.Actions.Coding.SecurityRegression.Core
 
-  @doc "Render a self-contained runner with a resource-private module and artifact path."
-  @spec runner_source(String.t(), String.t()) :: {:ok, String.t()} | {:error, atom()}
-  def runner_source(module_name, artifact_path)
-      when is_binary(module_name) and is_binary(artifact_path) do
-    with :ok <- validate_module_name(module_name),
-         true <- Path.type(artifact_path) == :absolute do
+  @doc """
+  Render a self-contained runner.
+
+  The artifact path is **not** embedded: the owner passes the host (or guest)
+  path as the first argument after `--`, followed by selected relative tests.
+  """
+  @spec runner_source(String.t()) :: {:ok, String.t()} | {:error, atom()}
+  def runner_source(module_name) when is_binary(module_name) do
+    with :ok <- validate_module_name(module_name) do
       {:ok,
        render_runner(
          module_name,
-         inspect(artifact_path),
          inspect(Core.artifact_tag()),
          Core.artifact_version()
        )}
@@ -27,8 +36,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
     end
   end
 
-  def runner_source(_module_name, _artifact_path),
-    do: {:error, :invalid_formatter_configuration}
+  def runner_source(_module_name), do: {:error, :invalid_formatter_configuration}
 
   defp validate_module_name(module_name) do
     if Regex.match?(~r/\AArborSecurityRegressionFormatter\.M[A-F0-9]{32}\z/, module_name) do
@@ -38,12 +46,11 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
     end
   end
 
-  defp render_runner(module_name, artifact_path, artifact_tag, artifact_version) do
+  defp render_runner(module_name, artifact_tag, artifact_version) do
     """
     defmodule #{module_name} do
       use GenServer
 
-      @artifact_path #{artifact_path}
       @artifact_tag #{artifact_tag}
       @artifact_version #{artifact_version}
 
@@ -134,11 +141,18 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
         completed = %{state | suite_completed: true}
         artifact = {@artifact_tag, @artifact_version, completed}
         bytes = :erlang.term_to_binary(artifact, [:deterministic])
-        temporary = @artifact_path <> ".tmp"
+
+        [artifact_path | _tests] = System.argv()
+
+        if not is_binary(artifact_path) or artifact_path == "" do
+          raise "security-regression runner missing artifact path argument"
+        end
+
+        temporary = artifact_path <> ".tmp"
 
         File.write!(temporary, bytes, [:binary])
         File.chmod!(temporary, 0o600)
-        File.rename!(temporary, @artifact_path)
+        File.rename!(temporary, artifact_path)
 
         {:noreply, completed}
       end
@@ -164,6 +178,12 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       defp failure_from_test?(_failure, _test), do: false
     end
 
+    [artifact_path | test_paths] = System.argv()
+
+    if not is_binary(artifact_path) or artifact_path == "" do
+      raise "security-regression runner missing artifact path argument"
+    end
+
     Mix.Task.run("test", [
       "--formatter",
       #{inspect(module_name)},
@@ -176,7 +196,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       "--no-color",
       "--exit-status",
       "2"
-      | System.argv()
+      | test_paths
     ])
     """
   end

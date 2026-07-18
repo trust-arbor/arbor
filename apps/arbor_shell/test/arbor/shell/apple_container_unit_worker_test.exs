@@ -34,6 +34,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
     home: "/private/tmp/arbor-val/home",
     build: "/private/tmp/arbor-val/build",
     deps: "/private/tmp/arbor-val/deps",
+    validation_runner: "/private/tmp/arbor-val/runner",
+    validation_result: "/private/tmp/arbor-val/result",
     mix_wrapper_dir: "/private/tmp/arbor-val/bin"
   }
 

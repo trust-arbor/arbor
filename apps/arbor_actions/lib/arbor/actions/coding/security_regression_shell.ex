@@ -125,7 +125,6 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
              :ok <-
                write_runner(
                  revision_runner_path(resource, :candidate),
-                 resource.candidate_result_path,
                  formatter_module_name(resource.resource_id)
                ) do
           leg =
@@ -213,7 +212,6 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
         with :ok <-
                write_runner(
                  revision_runner_path(snapshot, :base),
-                 snapshot.base_result_path,
                  formatter_module_name(snapshot.resource_id)
                ) do
           leg =
@@ -251,7 +249,9 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
   defp run_leg(root, build_path, result_path, runner_path, input, resource) do
     _ = File.rm(result_path)
 
-    args = ["run", "--no-start", runner_path, "--" | input.test_paths]
+    # Owner-issued host paths only. Shell rewrites runner/result to fixed guest
+    # paths after exact projection verification (Level A harness evidence).
+    args = ["run", "--no-start", runner_path, "--", result_path | input.test_paths]
     revision = if root == resource.candidate_path, do: :candidate, else: :base
 
     # Module-owned contained env always wins over any path-bearing keys. Pass
@@ -315,7 +315,11 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
 
   defp revision_runner_path(resource, :base) do
     Map.get(resource, :base_runner_path) ||
-      Path.join(Map.get(resource, :base_runtime_path) || resource.root_path, "runner.exs")
+      Path.join([
+        Map.get(resource, :base_runner_dir_path) ||
+          Path.join(Map.get(resource, :base_runtime_path) || resource.root_path, "runner"),
+        Arbor.Shell.validation_runner_script_basename()
+      ])
   end
 
   defp stage_sources(resource, test_paths) do
@@ -620,8 +624,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     _error -> {:error, :git_failed}
   end
 
-  defp write_runner(path, artifact_path, module_name) do
-    with {:ok, source} <- Formatter.runner_source(module_name, artifact_path),
+  defp write_runner(path, module_name) do
+    with {:ok, source} <- Formatter.runner_source(module_name),
          :ok <- atomic_write(path, source, 0o600) do
       :ok
     else

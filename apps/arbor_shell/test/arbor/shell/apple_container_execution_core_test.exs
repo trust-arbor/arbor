@@ -49,6 +49,11 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
     }
   end
 
+  @validation_runner_dir "/private/tmp/arbor-val/runner"
+  @validation_result_dir "/private/tmp/arbor-val/result"
+  @validation_runner_script Path.join(@validation_runner_dir, "runner.exs")
+  @validation_result_file Path.join(@validation_result_dir, "reviewed_regression_evidence")
+
   defp base_projections(revision \\ "candidate") do
     %{
       read_only: [
@@ -58,14 +63,16 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
           :runtime_erlang
         ),
         actions_entry("/opt/homebrew/Cellar/elixir/1.19.5", :read_only, :runtime_elixir),
-        actions_entry(@mix_wrapper, :read_only, :mix_wrapper)
+        actions_entry(@mix_wrapper, :read_only, :mix_wrapper),
+        actions_entry(@validation_runner_dir, :read_only, :validation_runner)
       ],
       read_write: [
         actions_entry(@worktree, :read_write, :worktree),
         actions_entry("/private/tmp/arbor-val/home", :read_write, :home),
         actions_entry("/private/tmp/arbor-val/tmp", :read_write, :tmp),
         actions_entry("/private/tmp/arbor-val/build", :read_write, :build),
-        actions_entry("/private/tmp/arbor-val/deps", :read_write, :deps)
+        actions_entry("/private/tmp/arbor-val/deps", :read_write, :deps),
+        actions_entry(@validation_result_dir, :read_write, :validation_result)
       ],
       revision: revision
     }
@@ -179,6 +186,123 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
 
         assert spec.plan.command_args == ["xref", "graph", "--format", format]
       end
+    end
+
+    @tag :security_regression
+    test "security regression: exact mix run --no-start harness rewrites host paths to guest" do
+      args = [
+        "run",
+        "--no-start",
+        @validation_runner_script,
+        "--",
+        @validation_result_file,
+        "apps/arbor_actions/test/example_test.exs"
+      ]
+
+      assert {:ok, spec} = Core.new(valid_request(%{args: args}))
+
+      assert spec.plan.command_args == [
+               "run",
+               "--no-start",
+               Shell.guest_validation_runner_script(),
+               "--",
+               Shell.guest_validation_result_file(),
+               "apps/arbor_actions/test/example_test.exs"
+             ]
+
+      assert spec.plan.projections.validation_runner == @validation_runner_dir
+      assert spec.plan.projections.validation_result == @validation_result_dir
+
+      runner_mount = Enum.find(spec.plan.mounts, &(&1.purpose == :validation_runner))
+      result_mount = Enum.find(spec.plan.mounts, &(&1.purpose == :validation_result))
+
+      assert runner_mount.mode == :read_only
+      assert runner_mount.guest_path == Shell.guest_validation_runner_dir()
+      assert result_mount.mode == :read_write
+      assert result_mount.guest_path == Shell.guest_validation_result_dir()
+    end
+
+    @tag :security_regression
+    test "security regression: unsupported run forms remain fail-closed" do
+      # Pre-fix: any `mix run` returned unsupported_mix_command before harness admission.
+      # Relative path after `--` is not an owner-issued result path.
+      assert {:error, :invalid_security_regression_result} =
+               Core.new(
+                 valid_request(%{
+                   args: [
+                     "run",
+                     "--no-start",
+                     @validation_runner_script,
+                     "--",
+                     "apps/arbor_actions/test/example_test.exs"
+                   ]
+                 })
+               )
+
+      assert {:error, :unsupported_mix_command} =
+               Core.new(valid_request(%{args: ["run", "-e", "1+1"]}))
+
+      assert {:error, :unsupported_mix_command} =
+               Core.new(
+                 valid_request(%{
+                   args: ["run", @validation_runner_script, "--", @validation_result_file]
+                 })
+               )
+
+      assert {:error, :empty_test_paths} =
+               Core.new(
+                 valid_request(%{
+                   args: [
+                     "run",
+                     "--no-start",
+                     @validation_runner_script,
+                     "--",
+                     @validation_result_file
+                   ]
+                 })
+               )
+
+      assert {:error, :validation_runner_path_mismatch} =
+               Core.new(
+                 valid_request(%{
+                   args: [
+                     "run",
+                     "--no-start",
+                     Path.join(@validation_runner_dir, "other.exs"),
+                     "--",
+                     @validation_result_file,
+                     "apps/arbor_actions/test/example_test.exs"
+                   ]
+                 })
+               )
+
+      assert {:error, :validation_result_path_mismatch} =
+               Core.new(
+                 valid_request(%{
+                   args: [
+                     "run",
+                     "--no-start",
+                     @validation_runner_script,
+                     "--",
+                     Path.join(@validation_result_dir, "other.etf"),
+                     "apps/arbor_actions/test/example_test.exs"
+                   ]
+                 })
+               )
+
+      assert {:error, :absolute_test_path} =
+               Core.new(
+                 valid_request(%{
+                   args: [
+                     "run",
+                     "--no-start",
+                     @validation_runner_script,
+                     "--",
+                     @validation_result_file,
+                     "/tmp/evil_test.exs"
+                   ]
+                 })
+               )
     end
 
     test "test bare and with ordered flags and paths" do

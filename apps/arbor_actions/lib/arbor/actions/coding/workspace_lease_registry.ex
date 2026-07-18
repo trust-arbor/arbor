@@ -216,7 +216,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           candidate_tmp_path: String.t(),
           candidate_build_path: String.t(),
           candidate_deps_path: String.t() | nil,
+          candidate_runner_dir_path: String.t(),
           candidate_runner_path: String.t(),
+          candidate_result_dir_path: String.t(),
           candidate_result_path: String.t(),
           base_runtime_path: String.t(),
           base_home_path: String.t(),
@@ -225,7 +227,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           base_deps_path: String.t() | nil,
           base_worktree_path: String.t(),
           base_cleanup_identity: map() | nil,
+          base_runner_dir_path: String.t(),
           base_runner_path: String.t(),
+          base_result_dir_path: String.t(),
           base_result_path: String.t(),
           resource_owner_pid: pid() | nil,
           resource_owner_ref: reference() | nil,
@@ -1346,6 +1350,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     candidate_runtime = Path.join(root_path, "candidate-runtime")
     base_runtime = Path.join(root_path, "base-runtime")
     stage_parent = Path.join(root_path, "staging")
+    candidate_runner_dir = Path.join(candidate_runtime, "runner")
+    candidate_result_dir = Path.join(candidate_runtime, "result")
+    base_runner_dir = Path.join(base_runtime, "runner")
+    base_result_dir = Path.join(base_runtime, "result")
+    runner_script = Arbor.Shell.validation_runner_script_basename()
+    result_name = Arbor.Shell.validation_result_basename()
 
     %{
       resource_id: resource_id,
@@ -1378,8 +1388,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       candidate_build_path: Path.join(candidate_runtime, "build"),
       # Filled from Shell baseline lease view after successful acquire.
       candidate_deps_path: nil,
-      candidate_runner_path: Path.join(candidate_runtime, "runner.exs"),
-      candidate_result_path: Path.join(candidate_runtime, "result.etf"),
+      # Sibling dirs under the unprojected runtime parent — projected as
+      # validation_runner (RO) and validation_result (RW), never the parent.
+      candidate_runner_dir_path: candidate_runner_dir,
+      candidate_runner_path: Path.join(candidate_runner_dir, runner_script),
+      candidate_result_dir_path: candidate_result_dir,
+      candidate_result_path: Path.join(candidate_result_dir, result_name),
       base_runtime_path: base_runtime,
       base_home_path: Path.join(base_runtime, "home"),
       base_tmp_path: Path.join(base_runtime, "tmp"),
@@ -1387,12 +1401,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       base_deps_path: nil,
       base_worktree_path: Path.join(root_path, "base"),
       base_cleanup_identity: nil,
-      base_runner_path: Path.join(base_runtime, "runner.exs"),
-      base_result_path: Path.join(base_runtime, "result.etf"),
+      base_runner_dir_path: base_runner_dir,
+      base_runner_path: Path.join(base_runner_dir, runner_script),
+      base_result_dir_path: base_result_dir,
+      base_result_path: Path.join(base_result_dir, result_name),
       # Candidate-leg aliases for existing callers.
       home_path: Path.join(candidate_runtime, "home"),
       tmp_path: Path.join(candidate_runtime, "tmp"),
-      runner_path: Path.join(candidate_runtime, "runner.exs"),
+      runner_path: Path.join(candidate_runner_dir, runner_script),
       dependency_lease: nil,
       dependency_root_path: nil,
       dependency_receipt: nil,
@@ -1500,10 +1516,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       resource.candidate_home_path,
       resource.candidate_tmp_path,
       resource.candidate_build_path,
+      resource.candidate_runner_dir_path,
+      resource.candidate_result_dir_path,
       resource.base_runtime_path,
       resource.base_home_path,
       resource.base_tmp_path,
-      resource.base_build_path
+      resource.base_build_path,
+      resource.base_runner_dir_path,
+      resource.base_result_dir_path
     ]
 
     Enum.reduce_while(private_dirs, :ok, fn path, :ok ->
@@ -1523,10 +1543,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         resource.candidate_home_path,
         resource.candidate_tmp_path,
         resource.candidate_build_path,
+        resource.candidate_runner_dir_path,
+        resource.candidate_result_dir_path,
         resource.base_runtime_path,
         resource.base_home_path,
         resource.base_tmp_path,
-        resource.base_build_path
+        resource.base_build_path,
+        resource.base_runner_dir_path,
+        resource.base_result_dir_path
       ],
       :ok,
       fn path, :ok ->
@@ -2112,6 +2136,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     candidate_runner =
       Map.get(resource, :candidate_runner_path) || Map.get(resource, :runner_path)
 
+    candidate_runner_dir = Map.get(resource, :candidate_runner_dir_path)
+    candidate_result_dir = Map.get(resource, :candidate_result_dir_path)
+
     # JSON-clean only. Never include dependency_lease, token, worker, owner,
     # private Shell root, or any other rich term from the opaque lease.
     %{
@@ -2129,7 +2156,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       candidate_tmp_path: candidate_tmp,
       candidate_build_path: resource.candidate_build_path,
       candidate_deps_path: resource.candidate_deps_path,
+      candidate_runner_dir_path: candidate_runner_dir,
       candidate_runner_path: candidate_runner,
+      candidate_result_dir_path: candidate_result_dir,
       candidate_result_path: resource.candidate_result_path,
       base_runtime_path: Map.get(resource, :base_runtime_path),
       base_home_path: Map.get(resource, :base_home_path),
@@ -2137,7 +2166,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       base_build_path: resource.base_build_path,
       base_deps_path: resource.base_deps_path,
       base_worktree_path: resource.base_worktree_path,
+      base_runner_dir_path: Map.get(resource, :base_runner_dir_path),
       base_runner_path: Map.get(resource, :base_runner_path),
+      base_result_dir_path: Map.get(resource, :base_result_dir_path),
       base_result_path: resource.base_result_path,
       home_path: candidate_home,
       tmp_path: candidate_tmp,

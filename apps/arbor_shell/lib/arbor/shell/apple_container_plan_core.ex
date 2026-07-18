@@ -26,8 +26,10 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   canonical parent of the separately reviewed Mix wrapper file and is mounted
   read-only at fixed guest `/arbor/bin`, while the fixed entrypoint remains
   `/arbor/bin/mix`. Host Erlang/Elixir roots are provenance-only and are
-  intentionally absent. Revision runtime parents (owner of home/tmp/build +
-  runner/result) are cleanup ownership only — never a guest mount purpose.
+  intentionally absent. Revision runtime parents (owner of home/tmp/build and
+  the sibling validation runner/result directories) are cleanup ownership only —
+  never a guest mount purpose. The runner directory mounts read-only and the
+  result directory mounts read-write at fixed guest validation paths.
 
   **Guest temporary directory is never a host bind.** Apple virtiofs does not
   provide stable inode identity for host bind mounts, so binding a host tmp
@@ -91,6 +93,21 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @workload_execution_alias_prefix "127.0.0.1:0/arbor/workload@sha256:"
   @init_execution_alias_prefix "127.0.0.1:0/arbor/vminit@sha256:"
 
+  # Fixed validation runner/result guest mounts (sibling dirs under /arbor/validation).
+  # Host revision runtime parents remain unprojected; only these typed children mount.
+  @guest_validation_runner_dir "/arbor/validation/runner"
+  @guest_validation_result_dir "/arbor/validation/result"
+  @validation_runner_script_basename "runner.exs"
+  @validation_result_basename "reviewed_regression_evidence"
+  @guest_validation_runner_script Path.join(
+                                    @guest_validation_runner_dir,
+                                    @validation_runner_script_basename
+                                  )
+  @guest_validation_result_file Path.join(
+                                  @guest_validation_result_dir,
+                                  @validation_result_basename
+                                )
+
   # Required host bind projections and their fixed guest targets / modes.
   # Deliberately excludes host :tmp — guest /tmp is a private tmpfs
   # (see guest_tmpfs/0 and build_argv/8), not a plan projection.
@@ -99,6 +116,8 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
     {:home, "/arbor/home", :read_write},
     {:build, "/arbor/build", :read_write},
     {:deps, "/arbor/deps", :read_write},
+    {:validation_runner, @guest_validation_runner_dir, :read_only},
+    {:validation_result, @guest_validation_result_dir, :read_write},
     {:mix_wrapper_dir, @guest_mix_wrapper_dir, :read_only}
   ]
 
@@ -166,6 +185,8 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
           home: host_directory_path(),
           build: host_directory_path(),
           deps: host_directory_path(),
+          validation_runner: host_directory_path(),
+          validation_result: host_directory_path(),
           mix_wrapper_dir: host_directory_path()
         }
 
@@ -409,6 +430,30 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
   @doc "Fixed guest runtime roots attested by the reviewed image."
   @spec guest_runtime_roots() :: %{erlang: String.t(), elixir: String.t()}
   def guest_runtime_roots, do: %{erlang: @guest_erlang_root, elixir: @guest_elixir_root}
+
+  @doc "Fixed guest directory for the security-regression ExUnit runner (read-only bind)."
+  @spec guest_validation_runner_dir() :: String.t()
+  def guest_validation_runner_dir, do: @guest_validation_runner_dir
+
+  @doc "Fixed guest directory for the security-regression result artifact (read-write bind)."
+  @spec guest_validation_result_dir() :: String.t()
+  def guest_validation_result_dir, do: @guest_validation_result_dir
+
+  @doc "Closed basename for the owner-issued security-regression runner script."
+  @spec validation_runner_script_basename() :: String.t()
+  def validation_runner_script_basename, do: @validation_runner_script_basename
+
+  @doc "Closed basename for the owner-issued security-regression evidence file."
+  @spec validation_result_basename() :: String.t()
+  def validation_result_basename, do: @validation_result_basename
+
+  @doc "Fixed guest path of the security-regression runner script inside the runner mount."
+  @spec guest_validation_runner_script() :: String.t()
+  def guest_validation_runner_script, do: @guest_validation_runner_script
+
+  @doc "Fixed guest path of the security-regression evidence file inside the result mount."
+  @spec guest_validation_result_file() :: String.t()
+  def guest_validation_result_file, do: @guest_validation_result_file
 
   @doc """
   Default closed resource-profile atom (`:standard`).

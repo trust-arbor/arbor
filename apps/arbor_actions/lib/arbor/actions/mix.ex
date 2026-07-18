@@ -539,8 +539,9 @@ defmodule Arbor.Actions.Mix do
 
   The revision runtime parent (`candidate_runtime_path` / `base_runtime_path`)
   remains lifecycle/cleanup ownership only: it is never projected. Guest mounts
-  receive the typed children (home, tmp, build) plus worktree and deps, so
-  Actions-owned runner/result artifacts under the runtime parent stay unmounted.
+  receive typed children (home, tmp, build, validation_runner, validation_result)
+  plus worktree and deps. The runner directory is read-only; the result directory
+  is the only writable projection for harness evidence.
   """
   @spec projections_for_resource(map()) ::
           {:ok, %{read_only: [map()], read_write: [map()], revision: String.t()}}
@@ -562,19 +563,21 @@ defmodule Arbor.Actions.Mix do
       read_only = [
         projection(roots.erlang_root, :read_only, :runtime_erlang),
         projection(roots.elixir_root, :read_only, :runtime_elixir),
-        projection(wrapper, :read_only, :mix_wrapper)
+        projection(wrapper, :read_only, :mix_wrapper),
+        projection(paths.runner_dir_path, :read_only, :validation_runner)
       ]
 
-      # Never project the runtime parent: it owns runner/result plus home/tmp/build.
-      # Mount only the typed children and worktree/deps so guest code cannot reach
-      # Actions-owned artifacts or create ancestor/descendant mount overlap.
+      # Never project the runtime parent: it owns the sibling typed children.
+      # Mount only those children and worktree/deps so guest code cannot reach
+      # unprojected control artifacts or create ancestor/descendant mount overlap.
       read_write =
         [
           {paths.worktree_path, :worktree},
           {paths.home_path, :home},
           {paths.tmp_path, :tmp},
           {paths.build_path, :build},
-          {paths.deps_path, :deps}
+          {paths.deps_path, :deps},
+          {paths.result_dir_path, :validation_result}
         ]
         |> Enum.reject(fn {path, _} -> is_nil(path) or path == "" end)
         |> Enum.map(fn {path, purpose} -> projection(path, :read_write, purpose) end)
@@ -2204,6 +2207,14 @@ defmodule Arbor.Actions.Mix do
       resource_field(resource, :candidate_runtime_path) ||
         if(is_binary(build), do: Path.dirname(build), else: nil)
 
+    runner_dir =
+      resource_field(resource, :candidate_runner_dir_path) ||
+        if(is_binary(runtime), do: Path.join(runtime, "runner"), else: nil)
+
+    result_dir =
+      resource_field(resource, :candidate_result_dir_path) ||
+        if(is_binary(runtime), do: Path.join(runtime, "result"), else: nil)
+
     paths = %{
       worktree_path: resource_field(resource, :candidate_path),
       runtime_path: runtime,
@@ -2212,7 +2223,9 @@ defmodule Arbor.Actions.Mix do
       tmp_path:
         resource_field(resource, :candidate_tmp_path) || resource_field(resource, :tmp_path),
       build_path: build,
-      deps_path: resource_field(resource, :candidate_deps_path)
+      deps_path: resource_field(resource, :candidate_deps_path),
+      runner_dir_path: runner_dir,
+      result_dir_path: result_dir
     }
 
     if Enum.all?(Map.values(paths), &(is_binary(&1) and &1 != "")) do
@@ -2223,13 +2236,25 @@ defmodule Arbor.Actions.Mix do
   end
 
   defp revision_private_paths(resource, :base) when is_map(resource) do
+    runtime = resource_field(resource, :base_runtime_path)
+
+    runner_dir =
+      resource_field(resource, :base_runner_dir_path) ||
+        if(is_binary(runtime), do: Path.join(runtime, "runner"), else: nil)
+
+    result_dir =
+      resource_field(resource, :base_result_dir_path) ||
+        if(is_binary(runtime), do: Path.join(runtime, "result"), else: nil)
+
     paths = %{
       worktree_path: resource_field(resource, :base_worktree_path),
-      runtime_path: resource_field(resource, :base_runtime_path),
+      runtime_path: runtime,
       home_path: resource_field(resource, :base_home_path),
       tmp_path: resource_field(resource, :base_tmp_path),
       build_path: resource_field(resource, :base_build_path),
-      deps_path: resource_field(resource, :base_deps_path)
+      deps_path: resource_field(resource, :base_deps_path),
+      runner_dir_path: runner_dir,
+      result_dir_path: result_dir
     }
 
     if Enum.all?(Map.values(paths), &(is_binary(&1) and &1 != "")) do

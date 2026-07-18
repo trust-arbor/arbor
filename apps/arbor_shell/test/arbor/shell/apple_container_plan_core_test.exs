@@ -30,6 +30,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     home: "/private/tmp/arbor-val/home",
     build: "/private/tmp/arbor-val/build",
     deps: "/private/tmp/arbor-val/deps",
+    validation_runner: "/private/tmp/arbor-val/runner",
+    validation_result: "/private/tmp/arbor-val/result",
     mix_wrapper_dir: "/private/tmp/arbor-val/bin"
   }
 
@@ -131,6 +133,10 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  "type=bind,source=/private/tmp/arbor-val/build,target=/arbor/build",
                  "--mount",
                  "type=bind,source=/private/tmp/arbor-val/deps,target=/arbor/deps",
+                 "--mount",
+                 "type=bind,source=/private/tmp/arbor-val/runner,target=/arbor/validation/runner,readonly",
+                 "--mount",
+                 "type=bind,source=/private/tmp/arbor-val/result,target=/arbor/validation/result",
                  "--mount",
                  "type=bind,source=/private/tmp/arbor-val/bin,target=/arbor/bin,readonly",
                  "--tmpfs",
@@ -245,6 +251,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                "/arbor/home",
                "/arbor/build",
                "/arbor/deps",
+               "/arbor/validation/runner",
+               "/arbor/validation/result",
                "/arbor/bin"
              ]
 
@@ -252,6 +260,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                :read_write,
                :read_write,
                :read_write,
+               :read_write,
+               :read_only,
                :read_write,
                :read_only
              ]
@@ -714,6 +724,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                :home,
                :build,
                :deps,
+               :validation_runner,
+               :validation_result,
                :mix_wrapper_dir
              ]
 
@@ -875,7 +887,15 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       assert MapSet.new([g, h]) == MapSet.new([:deps, :build])
 
       # Every host bind projection pair remains subject to overlap rejection.
-      projection_purposes = [:worktree, :home, :build, :deps, :mix_wrapper_dir]
+      projection_purposes = [
+        :worktree,
+        :home,
+        :build,
+        :deps,
+        :validation_runner,
+        :validation_result,
+        :mix_wrapper_dir
+      ]
 
       for parent <- projection_purposes, child <- projection_purposes, parent != child do
         nested =
@@ -1386,8 +1406,21 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                {:home, "/arbor/home", :read_write},
                {:build, "/arbor/build", :read_write},
                {:deps, "/arbor/deps", :read_write},
+               {:validation_runner, "/arbor/validation/runner", :read_only},
+               {:validation_result, "/arbor/validation/result", :read_write},
                {:mix_wrapper_dir, "/arbor/bin", :read_only}
              ]
+
+      assert AppleContainerPlanCore.guest_validation_runner_script() ==
+               "/arbor/validation/runner/runner.exs"
+
+      assert AppleContainerPlanCore.guest_validation_result_file() ==
+               "/arbor/validation/result/reviewed_regression_evidence"
+
+      assert Shell.guest_validation_runner_script() ==
+               AppleContainerPlanCore.guest_validation_runner_script()
+
+      assert Shell.validation_result_basename() == "reviewed_regression_evidence"
 
       assert AppleContainerPlanCore.guest_tmpfs() == %{
                guest_path: "/tmp",

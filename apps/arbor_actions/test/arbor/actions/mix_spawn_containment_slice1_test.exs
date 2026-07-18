@@ -216,10 +216,14 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
             resource.candidate_home_path,
             resource.candidate_tmp_path,
             resource.candidate_build_path,
+            resource.candidate_runner_dir_path,
+            resource.candidate_result_dir_path,
             resource.base_runtime_path,
             resource.base_home_path,
             resource.base_tmp_path,
-            resource.base_build_path
+            resource.base_build_path,
+            resource.base_runner_dir_path,
+            resource.base_result_dir_path
           ] do
         assert File.dir?(path), "missing private dir #{path}"
         assert private_dir?(path), "expected 0700 for #{path}"
@@ -361,30 +365,40 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
              )
 
     try do
-      # Runtime parents remain lifecycle-owned directories with Actions artifacts.
+      # Runtime parents remain lifecycle-owned directories with sibling typed children.
       assert File.dir?(resource.candidate_runtime_path)
       assert File.dir?(resource.base_runtime_path)
+      assert File.dir?(resource.candidate_runner_dir_path)
+      assert File.dir?(resource.candidate_result_dir_path)
+      assert File.dir?(resource.base_runner_dir_path)
+      assert File.dir?(resource.base_result_dir_path)
+
+      runner_name = Arbor.Shell.validation_runner_script_basename()
+      result_name = Arbor.Shell.validation_result_basename()
 
       assert resource.candidate_runner_path ==
-               Path.join(resource.candidate_runtime_path, "runner.exs")
+               Path.join(resource.candidate_runner_dir_path, runner_name)
 
       assert resource.candidate_result_path ==
-               Path.join(resource.candidate_runtime_path, "result.etf")
+               Path.join(resource.candidate_result_dir_path, result_name)
 
-      assert resource.base_runner_path == Path.join(resource.base_runtime_path, "runner.exs")
-      assert resource.base_result_path == Path.join(resource.base_runtime_path, "result.etf")
+      assert resource.base_runner_path == Path.join(resource.base_runner_dir_path, runner_name)
+      assert resource.base_result_path == Path.join(resource.base_result_dir_path, result_name)
 
       assert {:ok, candidate} = MixAction.projections_for_resource(resource, :candidate)
       assert {:ok, base} = MixAction.projections_for_resource(resource, :base)
 
-      for {projections, revision, runtime, home, tmp, build, deps, worktree, runner, result} <- [
+      for {projections, revision, runtime, home, tmp, build, deps, worktree, runner_dir,
+           result_dir, runner, result} <- [
             {candidate, "candidate", resource.candidate_runtime_path,
              resource.candidate_home_path, resource.candidate_tmp_path,
              resource.candidate_build_path, resource.candidate_deps_path, resource.candidate_path,
+             resource.candidate_runner_dir_path, resource.candidate_result_dir_path,
              resource.candidate_runner_path, resource.candidate_result_path},
             {base, "base", resource.base_runtime_path, resource.base_home_path,
              resource.base_tmp_path, resource.base_build_path, resource.base_deps_path,
-             resource.base_worktree_path, resource.base_runner_path, resource.base_result_path}
+             resource.base_worktree_path, resource.base_runner_dir_path,
+             resource.base_result_dir_path, resource.base_runner_path, resource.base_result_path}
           ] do
         assert projections.revision == revision
 
@@ -396,69 +410,128 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
         refute Enum.any?(projections.read_write, &(&1["purpose"] == "runtime"))
         refute Enum.any?(projections.read_only, &(&1["purpose"] == "runtime"))
 
-        by_purpose =
+        by_rw =
           Map.new(projections.read_write, fn entry ->
             {entry["purpose"], entry}
           end)
 
-        assert by_purpose["worktree"] == %{
+        by_ro =
+          Map.new(projections.read_only, fn entry ->
+            {entry["purpose"], entry}
+          end)
+
+        assert by_rw["worktree"] == %{
                  "path" => worktree,
                  "mode" => "read_write",
                  "purpose" => "worktree"
                }
 
-        assert by_purpose["home"] == %{
+        assert by_rw["home"] == %{
                  "path" => home,
                  "mode" => "read_write",
                  "purpose" => "home"
                }
 
-        assert by_purpose["tmp"] == %{
+        assert by_rw["tmp"] == %{
                  "path" => tmp,
                  "mode" => "read_write",
                  "purpose" => "tmp"
                }
 
-        assert by_purpose["build"] == %{
+        assert by_rw["build"] == %{
                  "path" => build,
                  "mode" => "read_write",
                  "purpose" => "build"
                }
 
-        assert by_purpose["deps"] == %{
+        assert by_rw["deps"] == %{
                  "path" => deps,
                  "mode" => "read_write",
                  "purpose" => "deps"
+               }
+
+        assert by_rw["validation_result"] == %{
+                 "path" => result_dir,
+                 "mode" => "read_write",
+                 "purpose" => "validation_result"
+               }
+
+        assert by_ro["validation_runner"] == %{
+                 "path" => runner_dir,
+                 "mode" => "read_only",
+                 "purpose" => "validation_runner"
                }
 
         # Typed children live under the runtime parent; parent itself is not projected.
         assert String.starts_with?(home, runtime <> "/")
         assert String.starts_with?(tmp, runtime <> "/")
         assert String.starts_with?(build, runtime <> "/")
-        assert String.starts_with?(runner, runtime <> "/")
-        assert String.starts_with?(result, runtime <> "/")
+        assert String.starts_with?(runner_dir, runtime <> "/")
+        assert String.starts_with?(result_dir, runtime <> "/")
+        assert String.starts_with?(runner, runner_dir <> "/")
+        assert String.starts_with?(result, result_dir <> "/")
 
-        # No projected RW ancestor may cover runner/result (would expose Actions artifacts).
+        # Only the dedicated result directory is writable among runner/result.
+        # No unrelated projected ancestor may cover runner/result files.
         for entry <- projections.read_write do
           path = entry["path"]
+          purpose = entry["purpose"]
           refute path == runtime
-          refute path_equals_or_contains?(path, runner)
-          refute path_equals_or_contains?(path, result)
+
+          if purpose == "validation_result" do
+            assert path == result_dir
+            assert path_equals_or_contains?(path, result)
+          else
+            refute path_equals_or_contains?(path, runner)
+            refute path_equals_or_contains?(path, result)
+            refute path_equals_or_contains?(path, runner_dir)
+            refute path_equals_or_contains?(path, result_dir)
+          end
         end
 
-        # Only the five intended RW purposes.
-        assert MapSet.new(Map.keys(by_purpose)) ==
-                 MapSet.new(["worktree", "home", "tmp", "build", "deps"])
+        for entry <- projections.read_only do
+          path = entry["path"]
+          purpose = entry["purpose"]
+
+          if purpose == "validation_runner" do
+            assert path == runner_dir
+            assert path_equals_or_contains?(path, runner)
+          else
+            refute path_equals_or_contains?(path, runner)
+            refute path_equals_or_contains?(path, result)
+          end
+        end
+
+        # RW purposes include validation_result; RO includes validation_runner.
+        assert MapSet.new(Map.keys(by_rw)) ==
+                 MapSet.new([
+                   "worktree",
+                   "home",
+                   "tmp",
+                   "build",
+                   "deps",
+                   "validation_result"
+                 ])
+
+        assert MapSet.member?(MapSet.new(Map.keys(by_ro)), "validation_runner")
       end
 
       # Candidate/base isolation: no RW path grants both revisions.
       cand_rw = Enum.map(candidate.read_write, & &1["path"])
       base_rw = Enum.map(base.read_write, & &1["path"])
+      cand_ro = Enum.map(candidate.read_only, & &1["path"])
+      base_ro = Enum.map(base.read_only, & &1["path"])
 
       for c <- cand_rw, b <- base_rw do
         refute path_equals_or_contains?(c, b)
         refute path_equals_or_contains?(b, c)
       end
+
+      # No projection covers the opposite revision's runner/result dirs.
+      refute resource.candidate_runner_dir_path in base_ro
+      refute resource.candidate_result_dir_path in base_rw
+      refute resource.base_runner_dir_path in cand_ro
+      refute resource.base_result_dir_path in cand_rw
 
       refute resource.candidate_runtime_path in cand_rw
       refute resource.base_runtime_path in base_rw

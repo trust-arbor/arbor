@@ -96,8 +96,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
                              Enum.map(@envelope_logical_keys, &Atom.to_string/1)
                          )
 
-  @read_only_purposes [:runtime_erlang, :runtime_elixir, :mix_wrapper]
-  @read_write_purposes [:worktree, :home, :tmp, :build, :deps]
+  @read_only_purposes [:runtime_erlang, :runtime_elixir, :mix_wrapper, :validation_runner]
+  @read_write_purposes [:worktree, :home, :tmp, :build, :deps, :validation_result]
   @projection_specs Enum.map(@read_only_purposes, &{&1, :read_only}) ++
                       Enum.map(@read_write_purposes, &{&1, :read_write})
 
@@ -113,7 +113,16 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   # Host bind sources only for Apple PlanCore. `:tmp` remains mandatory on the
   # owner filesystem_projections envelope for broader validation lifecycle, but
   # is omitted here — guest /tmp is a fixed private tmpfs, not a host bind.
-  @plan_directory_projection_keys [:worktree, :home, :build, :deps]
+  # `:validation_runner` / `:validation_result` are revision-private sibling dirs
+  # under the unprojected runtime parent (never the parent itself).
+  @plan_directory_projection_keys [
+    :worktree,
+    :home,
+    :build,
+    :deps,
+    :validation_runner,
+    :validation_result
+  ]
 
   @entry_logical_keys [:path, :mode, :purpose]
   @allowed_entry_keys MapSet.new(
@@ -238,7 +247,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
          {:ok, projections} <- parse_filesystem_projections(settings.filesystem_projections),
          :ok <- match_tool_and_cwd(tool_name, settings.cwd, projections),
          {:ok, mix_wrapper_dir} <- derive_mix_wrapper_dir(projections),
-         {:ok, command_args} <- validate_mix_argv(args),
+         {:ok, command_args} <- validate_mix_argv(args, projections),
          {:ok, mix_env} <- select_mix_env(settings.env, command_args) do
       {:ok,
        %{
@@ -892,7 +901,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   # ── Mix argv ───────────────────────────────────────────────────────────
 
-  defp validate_mix_argv(args) when is_list(args) do
+  defp validate_mix_argv(args, projections) when is_list(args) and is_map(projections) do
     cond do
       length(args) > @max_command_args ->
         {:error, :too_many_command_args}
@@ -905,7 +914,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
       true ->
         with :ok <- validate_arg_binaries(args),
-             {:ok, validated} <- match_reviewed_mix_shape(args) do
+             {:ok, matched} <- match_reviewed_mix_shape(args),
+             {:ok, validated} <- finalize_mix_argv(matched, projections) do
           {:ok, validated}
         end
     end
@@ -935,6 +945,63 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
+  # Ordinary reviewed shapes return a concrete argv list. The security-regression
+  # form returns a tagged tuple so host runner/result paths can be verified
+  # against typed projections and rewritten to fixed guest paths.
+  defp finalize_mix_argv(args, _projections) when is_list(args), do: {:ok, args}
+
+  defp finalize_mix_argv({:security_regression_run, host_runner, host_result, tests}, projections)
+       when is_binary(host_runner) and is_binary(host_result) and is_list(tests) do
+    with :ok <- verify_security_regression_host_paths(host_runner, host_result, projections) do
+      {:ok,
+       [
+         "run",
+         "--no-start",
+         AppleContainerPlanCore.guest_validation_runner_script(),
+         "--",
+         AppleContainerPlanCore.guest_validation_result_file()
+         | tests
+       ]}
+    end
+  end
+
+  defp finalize_mix_argv(_matched, _projections), do: {:error, :unsupported_mix_command}
+
+  defp verify_security_regression_host_paths(host_runner, host_result, projections) do
+    runner_dir = Map.fetch!(projections, :validation_runner).path
+    result_dir = Map.fetch!(projections, :validation_result).path
+
+    expected_runner =
+      Path.join(runner_dir, AppleContainerPlanCore.validation_runner_script_basename())
+
+    expected_result =
+      Path.join(result_dir, AppleContainerPlanCore.validation_result_basename())
+
+    with {:ok, host_runner} <- validate_absolute_canonical_path(host_runner),
+         {:ok, host_result} <- validate_absolute_canonical_path(host_result),
+         :ok <- require_exact_path(host_runner, expected_runner, :validation_runner_path_mismatch),
+         :ok <- require_exact_path(host_result, expected_result, :validation_result_path_mismatch) do
+      :ok
+    else
+      {:error, :validation_runner_path_mismatch} = err ->
+        err
+
+      {:error, :validation_result_path_mismatch} = err ->
+        err
+
+      {:error, _reason} ->
+        {:error, :invalid_security_regression_path}
+    end
+  end
+
+  defp require_exact_path(actual, expected, error_tag) do
+    if actual == expected do
+      :ok
+    else
+      {:error, error_tag}
+    end
+  end
+
   defp match_reviewed_mix_shape(["compile"]), do: {:ok, ["compile"]}
 
   defp match_reviewed_mix_shape(["compile", "--warnings-as-errors"]),
@@ -953,6 +1020,20 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     end
   end
 
+  # Exact security-regression harness form only:
+  #   run --no-start <host-runner.exs> -- <host-result> <relative-test-paths...>
+  # Reject run -e, missing sentinels, empty tests, option-shaped paths, etc.
+  defp match_reviewed_mix_shape(["run", "--no-start", runner, "--", result | tests])
+       when is_binary(runner) and is_binary(result) do
+    with :ok <- validate_security_regression_path_token(runner, :runner),
+         :ok <- validate_security_regression_path_token(result, :result),
+         {:ok, tests} <- validate_test_paths(tests) do
+      {:ok, {:security_regression_run, runner, result, tests}}
+    end
+  end
+
+  defp match_reviewed_mix_shape(["run" | _rest]), do: {:error, :unsupported_mix_command}
+
   defp match_reviewed_mix_shape(["test" | rest]) do
     parse_test_args(rest, [])
   end
@@ -962,6 +1043,27 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   end
 
   defp match_reviewed_mix_shape(_args), do: {:error, :unsupported_mix_command}
+
+  defp validate_security_regression_path_token(path, role) when is_binary(path) do
+    with :ok <- require_valid_utf8(path) do
+      cond do
+        path == "" ->
+          {:error, invalid_security_regression_path_error(role)}
+
+        Path.type(path) != :absolute and not String.starts_with?(path, "/") ->
+          {:error, invalid_security_regression_path_error(role)}
+
+        String.starts_with?(path, "-") ->
+          {:error, :option_shaped_security_regression_path}
+
+        true ->
+          :ok
+      end
+    end
+  end
+
+  defp invalid_security_regression_path_error(:runner), do: :invalid_security_regression_runner
+  defp invalid_security_regression_path_error(:result), do: :invalid_security_regression_result
 
   defp parse_test_args(rest, acc) do
     case rest do
