@@ -267,6 +267,86 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
       refute pid_opt.startup_fingerprint == pid_opt2.startup_fingerprint
     end
 
+    test "security regression: startup fingerprint gates lists/tuples/structs/integers before work" do
+      # Improper list must not raise via length/1 — non-reusable unique digests.
+      improper = [:ok | :tail]
+
+      assert {:ok, imp1} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: improper])
+
+      assert {:ok, imp2} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: improper])
+
+      refute imp1.startup_fingerprint == imp2.startup_fingerprint
+
+      # Overlong list: reject without walking via length/1 past the ceiling.
+      over_list = Enum.to_list(1..200)
+
+      assert {:ok, list1} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: over_list])
+
+      assert {:ok, list2} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: over_list])
+
+      refute list1.startup_fingerprint == list2.startup_fingerprint
+
+      # Huge tuple: gate on tuple_size/1 before Tuple.to_list/1.
+      huge_tuple = List.to_tuple(Enum.to_list(1..200))
+
+      assert {:ok, tup1} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: huge_tuple])
+
+      assert {:ok, tup2} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: huge_tuple])
+
+      refute tup1.startup_fingerprint == tup2.startup_fingerprint
+
+      # Bounded tuple remains stable / reusable.
+      small_tuple = {:a, 1, "x"}
+
+      assert {:ok, st1} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: small_tuple])
+
+      assert {:ok, st2} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: small_tuple])
+
+      assert st1.startup_fingerprint == st2.startup_fingerprint
+
+      # Huge integer: magnitude gated before Integer.to_string/1.
+      huge_int = 10 ** 80
+
+      assert {:ok, int1} =
+               SessionProfile.from_opts(:claude, client_opts: [n: huge_int])
+
+      assert {:ok, int2} =
+               SessionProfile.from_opts(:claude, client_opts: [n: huge_int])
+
+      refute int1.startup_fingerprint == int2.startup_fingerprint
+
+      # In-bound integer is stable.
+      assert {:ok, small_int1} =
+               SessionProfile.from_opts(:claude, client_opts: [n: 42])
+
+      assert {:ok, small_int2} =
+               SessionProfile.from_opts(:claude, client_opts: [n: 42])
+
+      assert small_int1.startup_fingerprint == small_int2.startup_fingerprint
+
+      # Oversized struct: map_size gate before Map.from_struct/1.
+      huge_struct =
+        Enum.reduce(1..200, %{__struct__: FakeStartupStruct}, fn i, acc ->
+          Map.put(acc, i, i)
+        end)
+
+      assert {:ok, struct1} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: huge_struct])
+
+      assert {:ok, struct2} =
+               SessionProfile.from_opts(:claude, client_opts: [payload: huge_struct])
+
+      refute struct1.startup_fingerprint == struct2.startup_fingerprint
+    end
+
     test "security regression: malformed nonnil cwd/task/tools are rejected not coerced to nil" do
       assert {:ok, unscoped} = SessionProfile.from_opts(:claude, [])
 
@@ -299,6 +379,16 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
 
       assert {:error, {:invalid, :tool_modules, :bad_entry}} =
                SessionProfile.from_opts(:claude, tool_modules: [ModA, %{bad: true}])
+
+      # Binary module names are not modules — reject before ToolServer conversion.
+      assert {:error, {:invalid, :tool_modules, :bad_entry}} =
+               SessionProfile.from_opts(:claude, tool_modules: ["Elixir.ModA"])
+
+      assert {:error, {:invalid, :tool_modules, :bad_entry}} =
+               SessionProfile.from_opts(:claude, tool_modules: [ModA, "ModB"])
+
+      assert {:error, {:invalid, :tool_modules, :bad_type}} =
+               SessionProfile.from_opts(:claude, tool_modules: [ModA | :not_a_list])
 
       # Unscoped profile must not equal any rejected attempt (no silent nil match)
       assert unscoped.task_id == nil

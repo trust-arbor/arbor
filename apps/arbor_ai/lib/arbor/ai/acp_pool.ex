@@ -42,7 +42,10 @@ defmodule Arbor.AI.AcpPool do
      immutable); the next checkout mints a fresh `AcpSession` + ToolServer
   5. Explicit cross-task provider continuity is only via managed
      `resume_provider` + `resume_session_id` (fresh local process + load)
-  6. No match → spawn new session if below capacity
+  6. No match → spawn new session if below capacity. At capacity, idle sessions
+     are an LRU-evictable cache: an incompatible miss reclaims the least-recently
+     active idle entry (indexes + process fully cleaned) and mints. Busy
+     (checked-out) sessions are never evicted and still return `:pool_exhausted`.
 
   ## Configuration
 
@@ -501,27 +504,85 @@ defmodule Arbor.AI.AcpPool do
     max = max_for_provider(state.config, provider)
     current = count_for_provider(state, provider)
 
-    if current < max do
-      case spawn_session(provider, opts) do
-        {:ok, pid, tool_server} ->
-          case Arbor.AI.Timeout.ensure_active(opts) do
-            :ok ->
-              {state, _ref} = register_session(state, pid, profile, caller_pid, tool_server)
+    cond do
+      current < max ->
+        do_mint_session(provider, opts, caller_pid, state, profile)
 
-              Logger.debug("AcpPool: minted #{profile.name} (#{SessionProfile.urn(profile)})")
+      true ->
+        # Idle pool entries are a capacity cache, not a permanent reservation.
+        # On an incompatible miss at max, reclaim the LRU idle entry so a new
+        # task/profile can progress. Checked-out sessions stay busy.
+        case evict_lru_idle_for_capacity(state, provider) do
+          {:ok, state} ->
+            do_mint_session(provider, opts, caller_pid, state, profile)
 
-              {:reply, {:ok, pid}, state}
+          :none ->
+            {:reply, {:error, :pool_exhausted}, state}
+        end
+    end
+  end
 
-            {:error, reason} ->
-              cleanup_expired_spawn(pid, tool_server)
-              {:reply, {:error, reason}, state}
-          end
+  defp do_mint_session(provider, opts, caller_pid, state, profile) do
+    case spawn_session(provider, opts) do
+      {:ok, pid, tool_server} ->
+        case Arbor.AI.Timeout.ensure_active(opts) do
+          :ok ->
+            {state, _ref} = register_session(state, pid, profile, caller_pid, tool_server)
 
-        {:error, reason} ->
-          {:reply, {:error, {:spawn_failed, reason}}, state}
-      end
-    else
-      {:reply, {:error, :pool_exhausted}, state}
+            Logger.debug("AcpPool: minted #{profile.name} (#{SessionProfile.urn(profile)})")
+
+            {:reply, {:ok, pid}, state}
+
+          {:error, reason} ->
+            cleanup_expired_spawn(pid, tool_server)
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, {:spawn_failed, reason}}, state}
+    end
+  end
+
+  # Reclaim one idle session for `provider` using least-recently-active order.
+  # Fully removes indexes/monitors and closes the process. Busy sessions are
+  # never candidates — their presence at capacity remains `:pool_exhausted`.
+  defp evict_lru_idle_for_capacity(state, provider) do
+    idle =
+      state.by_provider
+      |> Map.get(provider, MapSet.new())
+      |> Enum.reduce([], fn ref, acc ->
+        case Map.get(state.sessions, ref) do
+          %Entry{status: :idle} = entry ->
+            [{ref, entry} | acc]
+
+          _ ->
+            acc
+        end
+      end)
+
+    case idle do
+      [] ->
+        :none
+
+      candidates ->
+        {ref, entry} =
+          Enum.min_by(candidates, fn {_ref, e} ->
+            e.last_active || 0
+          end)
+
+        name = (entry.profile && entry.profile.name) || inspect(entry.pid)
+
+        Logger.debug("AcpPool: evicting idle session #{name} for capacity (provider=#{provider})")
+
+        # Index cleanup first (monitors, by_provider/hash/affinity, tool server),
+        # then hard-stop the process so capacity reclaim is immediate and complete.
+        state = remove_session(state, ref)
+
+        if is_pid(entry.pid) and Process.alive?(entry.pid) do
+          Process.exit(entry.pid, :kill)
+        end
+
+        {:ok, state}
     end
   end
 

@@ -69,10 +69,14 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
 
   # Hard ceilings on startup fingerprint material. Oversized or unsupported
   # input is marked non-reusable (unique digest) rather than truncated.
+  # All limits are enforced *before* unbounded traversal/allocation
+  # (`length/1`, `Tuple.to_list/1`, `Map.from_struct/1`, huge integers).
   @max_startup_depth 12
   @max_startup_entries 128
   @max_startup_binary_bytes 8_192
   @max_startup_encoded_bytes 65_536
+  # First integer with more than 64 decimal digits; reject without to_string.
+  @max_integer_exclusive 10 ** 64
   @max_id_bytes 512
   @max_cwd_bytes 4_096
   @max_model_bytes 256
@@ -363,47 +367,37 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   defp validate_tool_modules(nil), do: {:ok, []}
 
   defp validate_tool_modules(tools) when is_list(tools) do
-    if length(tools) > @max_tool_modules do
-      {:error, {:invalid, :tool_modules, :too_many}}
-    else
-      validate_tool_module_entries(tools, [])
-    end
+    # Walk with a counter so improper/overlong lists fail closed without
+    # `length/1` (which raises on improper lists and walks the full spine first).
+    validate_tool_module_entries(tools, [], 0)
   end
 
   defp validate_tool_modules(_), do: {:error, {:invalid, :tool_modules, :bad_type}}
 
-  defp validate_tool_module_entries([], acc) do
+  defp validate_tool_module_entries([], acc, _count) do
     {:ok, acc |> Enum.uniq() |> Enum.sort_by(&to_string/1)}
   end
 
-  defp validate_tool_module_entries([mod | rest], acc) when is_atom(mod) and not is_nil(mod) do
-    if is_boolean(mod) do
-      {:error, {:invalid, :tool_modules, :bad_entry}}
-    else
-      validate_tool_module_entries(rest, [mod | acc])
-    end
+  defp validate_tool_module_entries(_tools, _acc, count) when count >= @max_tool_modules do
+    {:error, {:invalid, :tool_modules, :too_many}}
   end
 
-  defp validate_tool_module_entries([mod | rest], acc) when is_binary(mod) do
-    trimmed = String.trim(mod)
-
-    cond do
-      trimmed == "" ->
-        {:error, {:invalid, :tool_modules, :blank_entry}}
-
-      byte_size(trimmed) > @max_id_bytes ->
-        {:error, {:invalid, :tool_modules, :entry_too_long}}
-
-      not String.valid?(trimmed) ->
-        {:error, {:invalid, :tool_modules, :invalid_utf8}}
-
-      true ->
-        validate_tool_module_entries(rest, [trimmed | acc])
-    end
+  defp validate_tool_module_entries([mod | rest], acc, count)
+       when is_atom(mod) and not is_nil(mod) and not is_boolean(mod) do
+    validate_tool_module_entries(rest, [mod | acc], count + 1)
   end
 
-  defp validate_tool_module_entries([_ | _], _acc),
+  # Typed as modules only — binary names are accepted by neither ToolServer
+  # conversion nor Jido action loading; reject at the profile boundary.
+  defp validate_tool_module_entries([mod | _rest], _acc, _count) when is_binary(mod) do
+    {:error, {:invalid, :tool_modules, :bad_entry}}
+  end
+
+  defp validate_tool_module_entries([_bad | _rest], _acc, _count),
     do: {:error, {:invalid, :tool_modules, :bad_entry}}
+
+  defp validate_tool_module_entries(_improper, _acc, _count),
+    do: {:error, {:invalid, :tool_modules, :bad_type}}
 
   defp validate_trust_domain(nil), do: {:ok, nil}
 
@@ -475,11 +469,11 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   end
 
   defp bound_canonicalize(value, _depth, size) when is_integer(value) do
-    digits = value |> Integer.to_string() |> byte_size()
-
-    if digits > 64 do
+    # Gate magnitude before Integer.to_string/1 so huge integers never allocate.
+    if value <= -@max_integer_exclusive or value >= @max_integer_exclusive do
       :non_reusable
     else
+      digits = value |> Integer.to_string() |> byte_size()
       check_size(value, size + digits + 1)
     end
   end
@@ -497,21 +491,25 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   end
 
   defp bound_canonicalize(list, depth, size) when is_list(list) do
-    if length(list) > @max_startup_entries do
-      :non_reusable
-    else
-      if keyword_list?(list) do
-        bound_keyword(list, depth, size)
-      else
-        bound_list(list, depth, size)
-      end
+    # Never call length/1 first: it walks the full spine and raises on improper lists.
+    case classify_bounded_list(list, 0) do
+      {:ok, :keyword} -> bound_keyword(list, depth, size, 0)
+      {:ok, :list} -> bound_list(list, depth, size, 0)
+      :non_reusable -> :non_reusable
     end
   end
 
   defp bound_canonicalize(%{__struct__: mod} = struct, depth, size) do
-    case bound_canonicalize(Map.from_struct(struct), depth + 1, size + 8) do
-      {:ok, map_form, new_size} -> {:ok, {:struct, mod, map_form}, new_size}
-      :non_reusable -> :non_reusable
+    # map_size/1 is O(1). Gate field count before Map.from_struct/1 allocates.
+    field_count = map_size(struct) - 1
+
+    if field_count > @max_startup_entries do
+      :non_reusable
+    else
+      case bound_canonicalize(Map.from_struct(struct), depth + 1, size + 8) do
+        {:ok, map_form, new_size} -> {:ok, {:struct, mod, map_form}, new_size}
+        :non_reusable -> :non_reusable
+      end
     end
   end
 
@@ -524,23 +522,71 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   end
 
   defp bound_canonicalize(tuple, depth, size) when is_tuple(tuple) do
-    list = Tuple.to_list(tuple)
+    # tuple_size/1 is O(1). Never Tuple.to_list/1 before the entry ceiling.
+    n = tuple_size(tuple)
 
-    if length(list) > @max_startup_entries do
+    if n > @max_startup_entries do
       :non_reusable
     else
-      case bound_list(list, depth, size) do
-        {:ok, {:list, items}, new_size} -> {:ok, {:tuple, items}, new_size}
-        other -> other
-      end
+      bound_tuple_elems(tuple, 0, n, depth, size, [])
     end
   end
 
   # PIDs, refs, ports, funs, and any other opaque term: never reusable.
   defp bound_canonicalize(_other, _depth, _size), do: :non_reusable
 
-  defp bound_keyword(list, depth, size) do
-    case bound_kv_pairs(list, depth, size, []) do
+  # Classify a list while counting entries. Stops at the first oversize/improper
+  # observation without materializing a full length or walking past the ceiling.
+  defp classify_bounded_list([], _count), do: {:ok, :keyword}
+
+  defp classify_bounded_list(_list, count) when count >= @max_startup_entries,
+    do: :non_reusable
+
+  defp classify_bounded_list([{key, _value} | rest], count) when is_atom(key) do
+    case classify_bounded_list(rest, count + 1) do
+      {:ok, :keyword} -> {:ok, :keyword}
+      {:ok, :list} -> {:ok, :list}
+      :non_reusable -> :non_reusable
+    end
+  end
+
+  defp classify_bounded_list([_item | rest], count) do
+    case rest do
+      [] ->
+        {:ok, :list}
+
+      [_ | _] ->
+        count_remaining_list(rest, count + 1)
+
+      _improper ->
+        :non_reusable
+    end
+  end
+
+  defp classify_bounded_list(_improper, _count), do: :non_reusable
+
+  defp count_remaining_list([], _count), do: {:ok, :list}
+
+  defp count_remaining_list(_list, count) when count >= @max_startup_entries,
+    do: :non_reusable
+
+  defp count_remaining_list([_item | rest], count) do
+    case rest do
+      [] ->
+        {:ok, :list}
+
+      [_ | _] ->
+        count_remaining_list(rest, count + 1)
+
+      _improper ->
+        :non_reusable
+    end
+  end
+
+  defp count_remaining_list(_improper, _count), do: :non_reusable
+
+  defp bound_keyword(list, depth, size, count) do
+    case bound_kv_pairs(list, depth, size, count, []) do
       {:ok, entries, new_size} ->
         sorted = Enum.sort_by(entries, fn {k, _} -> sort_key(k) end)
         {:ok, {:kw, sorted}, new_size}
@@ -550,18 +596,50 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     end
   end
 
-  defp bound_list(list, depth, size) do
-    bound_list_items(list, depth, size, [])
+  defp bound_list(list, depth, size, count) do
+    bound_list_items(list, depth, size, count, [])
   end
 
-  defp bound_list_items([], _depth, size, acc) do
+  defp bound_list_items([], _depth, size, _count, acc) do
     {:ok, {:list, Enum.reverse(acc)}, size}
   end
 
-  defp bound_list_items([item | rest], depth, size, acc) do
+  defp bound_list_items(_list, _depth, _size, count, _acc)
+       when count >= @max_startup_entries,
+       do: :non_reusable
+
+  defp bound_list_items([item | rest], depth, size, count, acc) do
     case bound_canonicalize(item, depth + 1, size) do
-      {:ok, canon, new_size} -> bound_list_items(rest, depth, new_size, [canon | acc])
-      :non_reusable -> :non_reusable
+      {:ok, canon, new_size} ->
+        case rest do
+          [] ->
+            {:ok, {:list, Enum.reverse([canon | acc])}, new_size}
+
+          [_ | _] ->
+            bound_list_items(rest, depth, new_size, count + 1, [canon | acc])
+
+          _improper ->
+            :non_reusable
+        end
+
+      :non_reusable ->
+        :non_reusable
+    end
+  end
+
+  defp bound_list_items(_improper, _depth, _size, _count, _acc), do: :non_reusable
+
+  defp bound_tuple_elems(_tuple, i, n, _depth, size, acc) when i == n do
+    {:ok, {:tuple, Enum.reverse(acc)}, size}
+  end
+
+  defp bound_tuple_elems(tuple, i, n, depth, size, acc) do
+    case bound_canonicalize(elem(tuple, i), depth + 1, size) do
+      {:ok, canon, new_size} ->
+        bound_tuple_elems(tuple, i + 1, n, depth, new_size, [canon | acc])
+
+      :non_reusable ->
+        :non_reusable
     end
   end
 
@@ -577,16 +655,32 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     end
   end
 
-  defp bound_kv_pairs([], _depth, size, acc), do: {:ok, acc, size}
+  defp bound_kv_pairs([], _depth, size, _count, acc), do: {:ok, acc, size}
 
-  defp bound_kv_pairs([{k, v} | rest], depth, size, acc) do
+  defp bound_kv_pairs(_list, _depth, _size, count, _acc)
+       when count >= @max_startup_entries,
+       do: :non_reusable
+
+  defp bound_kv_pairs([{k, v} | rest], depth, size, count, acc) do
     case bound_kv_pair(k, v, depth, size) do
-      {:ok, pair, new_size} -> bound_kv_pairs(rest, depth, new_size, [pair | acc])
-      :non_reusable -> :non_reusable
+      {:ok, pair, new_size} ->
+        case rest do
+          [] ->
+            {:ok, [pair | acc], new_size}
+
+          [_ | _] ->
+            bound_kv_pairs(rest, depth, new_size, count + 1, [pair | acc])
+
+          _improper ->
+            :non_reusable
+        end
+
+      :non_reusable ->
+        :non_reusable
     end
   end
 
-  defp bound_kv_pairs(_other, _depth, _size, _acc), do: :non_reusable
+  defp bound_kv_pairs(_other, _depth, _size, _count, _acc), do: :non_reusable
 
   defp bound_kv_pair(k, v, depth, size) do
     case bound_key(k, size) do
@@ -615,11 +709,10 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   end
 
   defp bound_key(key, size) when is_integer(key) do
-    digits = key |> Integer.to_string() |> byte_size()
-
-    if digits > 64 do
+    if key <= -@max_integer_exclusive or key >= @max_integer_exclusive do
       :non_reusable
     else
+      digits = key |> Integer.to_string() |> byte_size()
       check_size_pair({:i, key}, size + digits + 1)
     end
   end
@@ -644,10 +737,6 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   defp sort_key({:b, s}), do: {1, s}
   defp sort_key({:i, i}), do: {2, i}
 
-  defp keyword_list?([]), do: true
-  defp keyword_list?([{key, _value} | rest]) when is_atom(key), do: keyword_list?(rest)
-  defp keyword_list?(_), do: false
-
   defp generate_name(provider, opts) do
     agent_id = Keyword.get(opts, :agent_id)
     tools = Keyword.get(opts, :tool_modules, [])
@@ -660,11 +749,11 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
         [single] when is_atom(single) ->
           single |> Module.split() |> List.last() |> Macro.underscore()
 
-        [single] when is_binary(single) ->
-          single
+        multiple when is_list(multiple) ->
+          "#{Enum.count(multiple)}-tools"
 
-        multiple ->
-          "#{length(multiple)}-tools"
+        _ ->
+          "general"
       end
 
     parts = [to_string(provider), tool_hint]

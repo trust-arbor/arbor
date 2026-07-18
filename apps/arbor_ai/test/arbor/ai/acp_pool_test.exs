@@ -387,6 +387,12 @@ defmodule Arbor.AI.AcpPoolTest do
                  tool_modules: [ModA, 42]
                )
 
+      assert {:error, {:invalid, :tool_modules, :bad_entry}} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 tool_modules: ["Elixir.ModA"]
+               )
+
       # Pool remains empty — no session minted for malformed scope
       assert AcpPool.sessions() == []
     end
@@ -432,6 +438,109 @@ defmodule Arbor.AI.AcpPoolTest do
       assert task_a_info.task_id == "task_a"
       assert task_a_info.cwd == Path.expand(cwd_a)
     end
+
+    test "security regression: max=2 three exact-task profiles progress via idle LRU eviction" do
+      # Default production max is 2 with a long idle timeout. Exact task profiles
+      # are never compatible across tasks, so without idle eviction a third task
+      # would pool_exhausted while two idle sessions still occupy capacity.
+      restart_pool!(default_max: 2, default_idle_timeout_ms: 300_000)
+
+      agent = "coding_agent_max2_#{System.unique_integer([:positive])}"
+      base = [client_opts: @test_client_opts, agent_id: agent, model: "coder"]
+
+      {:ok, s1} =
+        AcpPool.checkout(
+          :test,
+          base ++ [task_id: "task_1", cwd: "/tmp/t1_#{System.unique_integer([:positive])}"]
+        )
+
+      :ok = AcpPool.checkin(s1)
+
+      # Ensure distinct last_active ordering for LRU
+      Process.sleep(5)
+
+      {:ok, s2} =
+        AcpPool.checkout(
+          :test,
+          base ++ [task_id: "task_2", cwd: "/tmp/t2_#{System.unique_integer([:positive])}"]
+        )
+
+      :ok = AcpPool.checkin(s2)
+      refute s1 == s2
+
+      assert AcpPool.status()[:test].total == 2
+      assert AcpPool.status()[:test].idle == 2
+      assert AcpPool.status()[:test].max == 2
+
+      # Third independent task must progress by evicting the LRU idle session
+      {:ok, s3} =
+        AcpPool.checkout(
+          :test,
+          base ++ [task_id: "task_3", cwd: "/tmp/t3_#{System.unique_integer([:positive])}"]
+        )
+
+      assert Process.alive?(s3)
+      refute s3 == s1
+      refute s3 == s2
+
+      # Pool remains bounded at max=2 after eviction + mint
+      status = AcpPool.status()[:test]
+      assert status.total <= 2
+      assert status.max == 2
+      assert length(AcpPool.sessions()) <= 2
+
+      # Evicted LRU (s1) must be fully cleaned from indexes and process tree
+      refute Enum.any?(AcpPool.sessions(), &(&1.pid == s1))
+      refute Process.alive?(s1)
+
+      :ok = AcpPool.checkin(s3)
+    end
+
+    test "security regression: busy sessions at max still exhaust; idle only is evictable" do
+      restart_pool!(default_max: 2, default_idle_timeout_ms: 300_000)
+
+      agent = "coding_agent_busy_#{System.unique_integer([:positive])}"
+      base = [client_opts: @test_client_opts, agent_id: agent, model: "coder"]
+
+      {:ok, busy1} =
+        AcpPool.checkout(
+          :test,
+          base ++ [task_id: "busy_1", cwd: "/tmp/b1_#{System.unique_integer([:positive])}"]
+        )
+
+      {:ok, busy2} =
+        AcpPool.checkout(
+          :test,
+          base ++ [task_id: "busy_2", cwd: "/tmp/b2_#{System.unique_integer([:positive])}"]
+        )
+
+      assert {:error, :pool_exhausted} =
+               AcpPool.checkout(
+                 :test,
+                 base ++ [task_id: "busy_3", cwd: "/tmp/b3_#{System.unique_integer([:positive])}"]
+               )
+
+      assert AcpPool.status()[:test].total == 2
+      assert AcpPool.status()[:test].checked_out == 2
+      assert Process.alive?(busy1)
+      assert Process.alive?(busy2)
+    end
+  end
+
+  defp restart_pool!(opts) do
+    _ = stop_supervised(AcpPool)
+
+    start_supervised!(
+      {AcpPool,
+       Keyword.merge(
+         [
+           default_max: 3,
+           default_idle_timeout_ms: 500,
+           cleanup_interval_ms: 100_000
+         ],
+         opts
+       )}
+    )
   end
 
   describe "affinity" do
