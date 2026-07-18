@@ -617,7 +617,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              "hoist_commit_hash",
              "route_after_commit",
              "route_security_after_commit"
-           ) do
+           ),
+         # Commit runs before validation on this profile, so bind the tree from
+         # the inspected worktree rather than validation.validated_tree_oid.
+         {:ok, graph} <-
+           update_node(graph, "hoist_expected_tree_oid", fn attrs ->
+             {:ok, Map.put(attrs, "source_key", "inspect.committable_tree_oid")}
+           end) do
       # adopt_head_commit was removed: clean self-commit adoption is performed
       # inside coding_reviewed_commit so rework cannot bypass a fresh gate.
       remove_replaced_status_node(graph, "prep_validation_path", "validate")

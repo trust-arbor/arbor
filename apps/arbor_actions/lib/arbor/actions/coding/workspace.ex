@@ -20,6 +20,7 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   alias Arbor.Actions.Git
   alias Arbor.Actions.Coding.Workspace.DeltaRanges
+  alias Arbor.Actions.Mix, as: MixAction
   alias Arbor.Common.SafePath
 
   @detached_identity_capture_attempts 5
@@ -617,6 +618,18 @@ defmodule Arbor.Actions.Coding.Workspace do
           {:error, reason} -> {nil, false, fingerprint_error(reason)}
         end
 
+      {committable_tree_oid, tree_binding_valid, tree_binding_error} =
+        case MixAction.committable_tree_binding(worktree_path) do
+          {:ok, %{tree_oid: oid}} when is_binary(oid) and oid != "" ->
+            {oid, true, nil}
+
+          {:ok, _} ->
+            {nil, false, "committable_tree_binding_missing_oid"}
+
+          {:error, reason} ->
+            {nil, false, inspect(reason)}
+        end
+
       changed_from_base =
         dirty or
           (is_binary(head_commit) and is_binary(base_commit) and base_commit != "" and
@@ -630,6 +643,9 @@ defmodule Arbor.Actions.Coding.Workspace do
         fingerprint: fingerprint,
         fingerprint_valid: fingerprint_valid,
         fingerprint_error: fingerprint_error,
+        committable_tree_oid: committable_tree_oid,
+        tree_binding_valid: tree_binding_valid,
+        tree_binding_error: tree_binding_error,
         turn_progressed: turn_progressed?(fingerprint, baseline)
       }
     else
@@ -643,6 +659,9 @@ defmodule Arbor.Actions.Coding.Workspace do
         fingerprint: fingerprint,
         fingerprint_valid: true,
         fingerprint_error: nil,
+        committable_tree_oid: nil,
+        tree_binding_valid: false,
+        tree_binding_error: "missing_worktree",
         turn_progressed: turn_progressed?(fingerprint, baseline)
       }
     end
@@ -1758,12 +1777,18 @@ defmodule Arbor.Actions.Coding.Workspace do
                 )
               )
 
-            if view.exists == true and view.fingerprint_valid != true do
-              Actions.emit_failed(__MODULE__, :workspace_fingerprint_failed)
-              {:error, :workspace_fingerprint_failed}
-            else
-              Actions.emit_completed(__MODULE__, %{workspace_id: workspace_id})
-              {:ok, view}
+            cond do
+              view.exists == true and view.fingerprint_valid != true ->
+                Actions.emit_failed(__MODULE__, :workspace_fingerprint_failed)
+                {:error, :workspace_fingerprint_failed}
+
+              view.exists == true and view.tree_binding_valid != true ->
+                Actions.emit_failed(__MODULE__, :committable_tree_binding_failed)
+                {:error, :committable_tree_binding_failed}
+
+              true ->
+                Actions.emit_completed(__MODULE__, %{workspace_id: workspace_id})
+                {:ok, view}
             end
 
           {:error, reason} ->

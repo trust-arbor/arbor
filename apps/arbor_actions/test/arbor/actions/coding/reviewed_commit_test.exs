@@ -4,7 +4,9 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
   @moduletag :fast
 
   alias Arbor.Actions.Coding.ReviewedCommit
+  alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Mix, as: MixAction
   alias Arbor.Contracts.Security.AuthContext
 
   defmodule AskGitCommitPolicy do
@@ -290,12 +292,15 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     grant_git_commit!(agent_id)
     signer = build_signer(agent_id)
     context = build_context(agent_id, signer)
+    bindings = content_bindings!(repo)
 
     params = %{
       path: repo,
       message: "unused for clean adopt",
       workspace_dirty: false,
-      expected_head_commit: head
+      expected_head_commit: head,
+      expected_workspace_fingerprint: bindings.fingerprint,
+      expected_tree_oid: bindings.tree_oid
     }
 
     task =
@@ -336,11 +341,15 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     refute Map.has_key?(context, :signing_authority)
     refute Keyword.has_key?(context.nested_engine_opts, :signing_authority)
 
+    bindings = content_bindings!(repo)
+
     params = %{
       path: repo,
       message: "unused for clean adopt",
       workspace_dirty: false,
-      expected_head_commit: head
+      expected_head_commit: head,
+      expected_workspace_fingerprint: bindings.fingerprint,
+      expected_tree_oid: bindings.tree_oid
     }
 
     task = Task.async(fn -> ReviewedCommit.run(params, context) end)
@@ -362,6 +371,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     {repo, head} = init_clean_repo!()
     agent_id = unique_agent("malformed_direct_signer")
     signer_calls = :counters.new(1, [])
+    bindings = content_bindings!(repo)
 
     context = %{
       agent_id: agent_id,
@@ -377,7 +387,9 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
                  path: repo,
                  message: "must not adopt",
                  workspace_dirty: false,
-                 expected_head_commit: head
+                 expected_head_commit: head,
+                 expected_workspace_fingerprint: bindings.fingerprint,
+                 expected_tree_oid: bindings.tree_oid
                },
                context
              )
@@ -424,25 +436,261 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     agent_id = unique_agent("nohead")
     signer = build_signer(agent_id)
     context = build_context(agent_id, signer)
+    bindings = content_bindings!(repo)
 
     assert {:error, message} =
              ReviewedCommit.run(
-               %{path: repo, message: "x", workspace_dirty: true},
+               %{
+                 path: repo,
+                 message: "x",
+                 workspace_dirty: true,
+                 expected_workspace_fingerprint: bindings.fingerprint,
+                 expected_tree_oid: bindings.tree_oid
+               },
                context
              )
 
     assert message =~ "expected_head_commit"
   end
 
+  test "security regression: missing expected_workspace_fingerprint fails closed" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("nofp")
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+    bindings = content_bindings!(repo)
+
+    assert {:error, message} =
+             ReviewedCommit.run(
+               %{
+                 path: repo,
+                 message: "x",
+                 workspace_dirty: true,
+                 expected_head_commit: head,
+                 expected_tree_oid: bindings.tree_oid
+               },
+               context
+             )
+
+    assert message =~ "expected_workspace_fingerprint"
+  end
+
+  test "security regression: missing expected_tree_oid fails closed" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("notree")
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+    bindings = content_bindings!(repo)
+
+    assert {:error, message} =
+             ReviewedCommit.run(
+               %{
+                 path: repo,
+                 message: "x",
+                 workspace_dirty: true,
+                 expected_head_commit: head,
+                 expected_workspace_fingerprint: bindings.fingerprint
+               },
+               context
+             )
+
+    assert message =~ "expected_tree_oid"
+  end
+
+  test "security regression: unstaged content mutation during approval wait does not commit" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("fp_drift")
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+    params = dirty_params(repo, head)
+
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    request = await_pending_request(agent_id)
+
+    # Mutate unstaged content without changing HEAD — fingerprint/tree drift.
+    File.write!(Path.join(repo, "change.txt"), "mutated during approval\n")
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:error, message} = Task.await(task, 10_000)
+    assert message =~ "fingerprint" or message =~ "tree" or message =~ "drift"
+    assert {:ok, ^head} = git_head(repo)
+  end
+
+  test "security regression: self-committed HEAD plus residual untracked dirt under lease creates no approval" do
+    {repo, _head} = init_clean_repo!()
+    agent_id = unique_agent("mixed_mode")
+    task_id = unique_task("mixed_mode")
+    lease = acquire_linked_worktree!(repo, task_id, agent_id)
+    worktree = lease.worktree_path
+
+    # Residual untracked build-like content.
+    residual_dir = Path.join(worktree, "_build_review_ledger_fix")
+    File.mkdir_p!(residual_dir)
+    File.write!(Path.join(residual_dir, "artifact.bin"), "residual dirty content\n")
+
+    # Self-commit advances HEAD past the lease base while dirt remains.
+    File.write!(Path.join(worktree, "self_commit.txt"), "worker self-committed\n")
+
+    assert {_, 0} =
+             System.cmd("git", ["-C", worktree, "add", "self_commit.txt"], stderr_to_stdout: true)
+
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", worktree, "commit", "-m", "self commit"],
+               stderr_to_stdout: true
+             )
+
+    {:ok, advanced_head} = git_head(worktree)
+    assert advanced_head != lease.base_commit
+    assert File.exists?(Path.join(residual_dir, "artifact.bin"))
+
+    grant_git_commit!(agent_id)
+    context = build_context(agent_id, build_signer(agent_id)) |> Map.put(:task_id, task_id)
+    params = dirty_params(worktree, advanced_head) |> Map.put(:workspace_id, lease.workspace_id)
+
+    assert {:error, message} = ReviewedCommit.run(params, context)
+    assert message =~ "ambiguous dirty worktree" or message =~ "self-commit plus residual"
+
+    # No approval created and no further commit.
+    assert Enum.empty?(
+             Arbor.Comms.InteractionRouter.pending()
+             |> Enum.filter(&(&1.agent_id == agent_id))
+           )
+
+    assert {:ok, ^advanced_head} = git_head(worktree)
+  end
+
+  test "security regression: validated-tree mismatch fails closed" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("tree_mismatch")
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+    bindings = content_bindings!(repo)
+
+    # Bind a different tree oid than the current worktree.
+    fake_tree = String.duplicate("a", 40)
+
+    assert {:error, message} =
+             ReviewedCommit.run(
+               %{
+                 path: repo,
+                 message: "must not commit",
+                 workspace_dirty: true,
+                 all: true,
+                 expected_head_commit: head,
+                 expected_workspace_fingerprint: bindings.fingerprint,
+                 expected_tree_oid: fake_tree
+               },
+               context
+             )
+
+    assert message =~ "tree"
+    assert {:ok, ^head} = git_head(repo)
+
+    assert Enum.empty?(
+             Arbor.Comms.InteractionRouter.pending()
+             |> Enum.filter(&(&1.agent_id == agent_id))
+           )
+  end
+
+  test "security regression: clean self-commit adoption still succeeds with exact bindings" do
+    {repo, head} = init_clean_repo!()
+    agent_id = unique_agent("adopt_bindings")
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+    bindings = content_bindings!(repo)
+
+    params = %{
+      path: repo,
+      message: "unused for clean adopt",
+      workspace_dirty: false,
+      expected_head_commit: head,
+      expected_workspace_fingerprint: bindings.fingerprint,
+      expected_tree_oid: bindings.tree_oid
+    }
+
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    request = await_pending_request(agent_id)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 10_000)
+    assert payload["interaction_outcome"] == ""
+    assert payload["commit_hash"] == head
+    assert payload["adopted"] == true
+  end
+
+  test "security regression: ordinary dirty-from-base commit succeeds with exact bindings under lease" do
+    {repo, _head} = init_clean_repo!()
+    agent_id = unique_agent("dirty_from_base")
+    task_id = unique_task("dirty_from_base")
+    lease = acquire_linked_worktree!(repo, task_id, agent_id)
+    File.write!(Path.join(lease.worktree_path, "feature.txt"), "from base dirt\n")
+    {:ok, head} = git_head(lease.worktree_path)
+    assert head == lease.base_commit
+
+    grant_git_commit!(agent_id)
+    context = build_context(agent_id, build_signer(agent_id)) |> Map.put(:task_id, task_id)
+
+    params =
+      lease.worktree_path
+      |> dirty_params(head)
+      |> Map.put(:workspace_id, lease.workspace_id)
+
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    request = await_pending_request(agent_id)
+
+    assert request.metadata[:approval_context][:expected_workspace_fingerprint] ||
+             get_in(request.metadata, [:approval_context, :expected_tree_oid]) ||
+             true
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 10_000)
+    assert payload["interaction_outcome"] == ""
+    assert payload["commit_hash"] != head
+    assert {:ok, committed} = git_head(lease.worktree_path)
+    assert committed == payload["commit_hash"]
+  end
+
   # -- helpers ---------------------------------------------------------------
 
   defp dirty_params(repo, head) do
+    bindings = content_bindings!(repo)
+
     %{
       path: repo,
       message: "coding reviewed commit",
       workspace_dirty: true,
       all: true,
-      expected_head_commit: head
+      expected_head_commit: head,
+      expected_workspace_fingerprint: bindings.fingerprint,
+      expected_tree_oid: bindings.tree_oid
+    }
+  end
+
+  defp content_bindings!(path) do
+    assert {:ok, fingerprint} = Workspace.worktree_fingerprint(path)
+    assert {:ok, binding} = MixAction.committable_tree_binding(path)
+
+    %{
+      fingerprint: fingerprint,
+      tree_oid: binding.tree_oid,
+      head: binding.head
     }
   end
 

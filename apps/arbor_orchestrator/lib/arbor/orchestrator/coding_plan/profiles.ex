@@ -76,6 +76,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_recovery_worker_session_id
                     hoist_turn_progressed
                     hoist_workspace_fingerprint
+                    hoist_committable_tree_oid
+                    hoist_expected_workspace_fingerprint
+                    hoist_expected_tree_oid
                     hoist_worker_provider_session_id
                     hoist_worker_provider_session_id_from_message
                     hoist_worker_provider_session_id_from_status

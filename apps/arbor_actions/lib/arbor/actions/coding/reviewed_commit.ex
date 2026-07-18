@@ -16,8 +16,22 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   action context. The outer coding action's signed request/nonce is never
   reused for `arbor://action/git/commit`.
 
-  Approval is bound to the inspected candidate revision via
-  `expected_head_commit` (verified before and after the wait).
+  Approval is bound to the exact inspected candidate content via:
+
+    * `expected_head_commit` — HEAD the operator inspected
+    * `expected_workspace_fingerprint` — bounded worktree digest (HEAD + index +
+      unstaged/untracked content) from `Workspace.worktree_fingerprint/2`
+    * `expected_tree_oid` — exact `add -A` committable tree from
+      `Mix.committable_tree_binding/1` (typically `validation.validated_tree_oid`)
+
+  All three are verified before authorization, after an approval wait, and
+  immediately before nested commit/adoption. After mutation, the resulting
+  commit tree must equal `expected_tree_oid`.
+
+  Ambiguous mixed mode is rejected when a workspace lease is present:
+  `workspace_dirty=true` while HEAD has already advanced past the lease base
+  (self-commit plus residual dirt). Clean self-commit adoption and dirty
+  uncommitted changes from the lease base remain allowed.
 
   This action is pipeline-internal: registered for Engine pinned execution but
   not enumerated or runnable as an ordinary MCP/agent tool.
@@ -55,6 +69,26 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
         required: false,
         doc: "Alias for expected_head_commit when passed via context_keys"
       ],
+      expected_workspace_fingerprint: [
+        type: :string,
+        required: false,
+        doc: "Inspected worktree fingerprint digest; required for content-bound approval"
+      ],
+      workspace_fingerprint: [
+        type: :string,
+        required: false,
+        doc: "Alias for expected_workspace_fingerprint when passed via context_keys"
+      ],
+      expected_tree_oid: [
+        type: :string,
+        required: false,
+        doc: "Validated committable tree OID; required for content-bound approval"
+      ],
+      validated_tree_oid: [
+        type: :string,
+        required: false,
+        doc: "Alias for expected_tree_oid when passed via context_keys"
+      ],
       workspace_id: [
         type: :string,
         required: false,
@@ -76,11 +110,14 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Git
+  alias Arbor.Actions.Mix, as: MixAction
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
 
   @default_approval_timeout 60_000
+  @git_oid_re ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
+  @fingerprint_re ~r/\Asha256:[0-9a-f]{64}\z/
 
   def taint_roles do
     %{
@@ -89,6 +126,10 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
       workspace_dirty: :control,
       expected_head_commit: :control,
       head_commit: :control,
+      expected_workspace_fingerprint: :control,
+      workspace_fingerprint: :control,
+      expected_tree_oid: :control,
+      validated_tree_oid: :control,
       workspace_id: :control,
       all: :control,
       allow_empty: :control
@@ -110,15 +151,16 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
     agent_id = context_agent_id(context)
     dirty? = truthy?(Map.get(params, :workspace_dirty, true))
-    expected_head = expected_head_commit(params)
+    bindings = candidate_bindings(params)
     workspace_id = workspace_id(params)
-    git_params = git_commit_params(path, message, params)
+    git_params = git_commit_params(path, message, params, bindings)
     resource = Actions.canonical_uri_for(Git.Commit, git_params)
 
     result =
-      with :ok <- require_expected_head(expected_head),
+      with :ok <- require_candidate_bindings(bindings),
            :ok <- verify_workspace_binding(path, workspace_id, context),
-           :ok <- verify_head_matches(path, expected_head, dirty?),
+           :ok <- reject_ambiguous_dirty_advanced_head(path, dirty?, workspace_id, context),
+           :ok <- verify_candidate_content(path, bindings),
            {:ok, signed_request} <- fresh_signed_request(resource, context),
            auth_context = put_signed_request(context, signed_request) do
         case authorize_commit(agent_id, resource, git_params, auth_context) do
@@ -130,7 +172,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
               dirty?,
               path,
               workspace_id,
-              expected_head,
+              bindings,
               nil,
               ""
             )
@@ -144,7 +186,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
               dirty?,
               path,
               workspace_id,
-              expected_head
+              bindings
             )
 
           {:error, reason} ->
@@ -207,7 +249,9 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
         path: params[:path],
         message: params[:message],
         agent_id: agent_id,
-        expected_head_commit: params[:expected_head_commit]
+        expected_head_commit: params[:expected_head_commit],
+        expected_workspace_fingerprint: params[:expected_workspace_fingerprint],
+        expected_tree_oid: params[:expected_tree_oid]
       }
     )
   end
@@ -222,13 +266,14 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
          dirty?,
          path,
          workspace_id,
-         expected_head
+         bindings
        ) do
     with {:ok, request_id} <- ApprovalAnswer.validate_request_id(request_id),
          {:ok, decision} <- await_decision(agent_id, request_id, context),
          :ok <- verify_workspace_binding(path, workspace_id, context),
-         # Re-verify candidate revision after the wait — fail closed on drift.
-         :ok <- verify_head_matches(path, expected_head, dirty?) do
+         :ok <- reject_ambiguous_dirty_advanced_head(path, dirty?, workspace_id, context),
+         # Re-verify exact candidate content after the wait — fail closed on drift.
+         :ok <- verify_candidate_content(path, bindings) do
       case decision do
         :approve ->
           perform_after_approve(
@@ -238,7 +283,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
             dirty?,
             path,
             workspace_id,
-            expected_head,
+            bindings,
             request_id,
             ""
           )
@@ -322,12 +367,13 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
          dirty?,
          path,
          workspace_id,
-         expected_head,
+         bindings,
          request_id,
          note
        ) do
     with :ok <- verify_workspace_binding(path, workspace_id, context),
-         :ok <- verify_head_matches(path, expected_head, dirty?) do
+         :ok <- reject_ambiguous_dirty_advanced_head(path, dirty?, workspace_id, context),
+         :ok <- verify_candidate_content(path, bindings) do
       if dirty? do
         execute_commit_once(
           agent_id,
@@ -336,10 +382,10 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
           workspace_id,
           request_id,
           note,
-          expected_head
+          bindings
         )
       else
-        adopt_head(path, expected_head, request_id, note)
+        adopt_head(path, bindings, request_id, note)
       end
     end
   end
@@ -351,7 +397,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
          workspace_id,
          request_id,
          note,
-         expected_head
+         bindings
        ) do
     resource = Actions.canonical_uri_for(Git.Commit, git_params)
 
@@ -376,7 +422,8 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
         end)
         # Nested git commit is a pipeline-internal owner retry, not MCP exposure.
         |> Map.put(:allow_pipeline_internal, true)
-        |> Map.put(:expected_head_commit, expected_head)
+        |> Map.put(:expected_head_commit, bindings.head)
+        |> Map.put(:expected_tree_oid, bindings.tree_oid)
 
       execute_result =
         with_workspace_storage_authority(workspace_id, git_params.path, context, fn ->
@@ -385,20 +432,26 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
       case execute_result do
         {:ok, result} when is_map(result) ->
-          {:ok,
-           %{
-             "interaction_outcome" => "",
-             "request_id" => request_id || "",
-             "note" => note || "",
-             "commit_hash" =>
-               stringify(Map.get(result, :commit_hash) || Map.get(result, "commit_hash")),
-             "path" =>
-               stringify(Map.get(result, :path) || Map.get(result, "path") || git_params[:path]),
-             "message" =>
-               stringify(
-                 Map.get(result, :message) || Map.get(result, "message") || git_params[:message]
-               )
-           }}
+          commit_hash =
+            stringify(Map.get(result, :commit_hash) || Map.get(result, "commit_hash"))
+
+          with :ok <-
+                 verify_resulting_commit_tree(git_params.path, commit_hash, bindings.tree_oid) do
+            {:ok,
+             %{
+               "interaction_outcome" => "",
+               "request_id" => request_id || "",
+               "note" => note || "",
+               "commit_hash" => commit_hash,
+               "path" =>
+                 stringify(Map.get(result, :path) || Map.get(result, "path") || git_params[:path]),
+               "message" =>
+                 stringify(
+                   Map.get(result, :message) || Map.get(result, "message") ||
+                     git_params[:message]
+                 )
+             }}
+          end
 
         {:ok, :pending_approval, retry_id} ->
           {:error, "still requires approval after grant: #{retry_id}"}
@@ -412,36 +465,44 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     end
   end
 
-  defp adopt_head(path, expected_head, request_id, note) do
-    case read_head(path) do
-      {:ok, hash} ->
-        if is_binary(expected_head) and expected_head != "" and hash != expected_head do
-          {:error, {:head_drift, expected_head, hash}}
-        else
-          {:ok,
-           %{
-             "interaction_outcome" => "",
-             "request_id" => request_id || "",
-             "note" => note || "",
-             "commit_hash" => hash,
-             "path" => path,
-             "adopted" => true
-           }}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+  defp adopt_head(path, bindings, request_id, note) do
+    with :ok <- verify_candidate_content(path, bindings),
+         {:ok, hash} <- read_head(path),
+         :ok <- verify_resulting_commit_tree(path, hash, bindings.tree_oid) do
+      if hash != bindings.head do
+        {:error, {:head_drift, bindings.head, hash}}
+      else
+        {:ok,
+         %{
+           "interaction_outcome" => "",
+           "request_id" => request_id || "",
+           "note" => note || "",
+           "commit_hash" => hash,
+           "path" => path,
+           "adopted" => true
+         }}
+      end
     end
   end
 
-  # -- head binding ----------------------------------------------------------
+  # -- candidate content binding ---------------------------------------------
 
-  defp expected_head_commit(params) do
-    case Map.get(params, :expected_head_commit) || Map.get(params, :head_commit) ||
-           Map.get(params, "expected_head_commit") || Map.get(params, "head_commit") do
-      h when is_binary(h) and h != "" -> h
-      _ -> nil
-    end
+  defp candidate_bindings(params) do
+    %{
+      head: param_string(params, [:expected_head_commit, :head_commit]),
+      fingerprint:
+        param_string(params, [:expected_workspace_fingerprint, :workspace_fingerprint]),
+      tree_oid: param_string(params, [:expected_tree_oid, :validated_tree_oid])
+    }
+  end
+
+  defp param_string(params, keys) when is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(params, key) || Map.get(params, Atom.to_string(key)) do
+        value when is_binary(value) and value != "" -> value
+        _ -> nil
+      end
+    end)
   end
 
   defp workspace_id(params) do
@@ -452,12 +513,45 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     end
   end
 
-  defp require_expected_head(head) when is_binary(head) and head != "", do: :ok
-  defp require_expected_head(_), do: {:error, :missing_expected_head_commit}
+  defp require_candidate_bindings(%{head: head, fingerprint: fingerprint, tree_oid: tree_oid}) do
+    with :ok <-
+           require_git_oid(head, :missing_expected_head_commit, :invalid_expected_head_commit),
+         :ok <- require_fingerprint(fingerprint),
+         :ok <-
+           require_git_oid(
+             tree_oid,
+             :missing_expected_tree_oid,
+             :invalid_expected_tree_oid
+           ) do
+      :ok
+    end
+  end
 
-  # Dirty: expected must equal current HEAD (parent of the about-to-be commit).
-  # Clean: expected must equal current HEAD (adoption identity).
-  defp verify_head_matches(path, expected, _dirty?) when is_binary(expected) and expected != "" do
+  defp require_git_oid(value, missing, invalid) do
+    cond do
+      not is_binary(value) or value == "" -> {:error, missing}
+      Regex.match?(@git_oid_re, value) -> :ok
+      true -> {:error, invalid}
+    end
+  end
+
+  defp require_fingerprint(value) when is_binary(value) and value != "" do
+    if Regex.match?(@fingerprint_re, value),
+      do: :ok,
+      else: {:error, :invalid_expected_workspace_fingerprint}
+  end
+
+  defp require_fingerprint(_), do: {:error, :missing_expected_workspace_fingerprint}
+
+  defp verify_candidate_content(path, bindings) do
+    with :ok <- verify_head_matches(path, bindings.head),
+         :ok <- verify_fingerprint_matches(path, bindings.head, bindings.fingerprint),
+         :ok <- verify_tree_matches(path, bindings.tree_oid) do
+      :ok
+    end
+  end
+
+  defp verify_head_matches(path, expected) when is_binary(expected) and expected != "" do
     case read_head(path) do
       {:ok, actual} when actual == expected ->
         :ok
@@ -470,7 +564,96 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     end
   end
 
-  defp verify_head_matches(_path, _expected, _dirty?), do: {:error, :missing_expected_head_commit}
+  defp verify_head_matches(_path, _expected), do: {:error, :missing_expected_head_commit}
+
+  defp verify_fingerprint_matches(path, head, expected)
+       when is_binary(expected) and expected != "" do
+    case Workspace.worktree_fingerprint(path, head) do
+      {:ok, ^expected} ->
+        :ok
+
+      {:ok, actual} ->
+        {:error, {:workspace_fingerprint_drift, expected, actual}}
+
+      {:error, reason} ->
+        {:error, {:workspace_fingerprint_failed, reason}}
+    end
+  end
+
+  defp verify_fingerprint_matches(_path, _head, _expected),
+    do: {:error, :missing_expected_workspace_fingerprint}
+
+  defp verify_tree_matches(path, expected) when is_binary(expected) and expected != "" do
+    case MixAction.committable_tree_binding(path) do
+      {:ok, %{tree_oid: ^expected}} ->
+        :ok
+
+      {:ok, %{tree_oid: actual}} ->
+        {:error, {:validated_tree_drift, expected, actual}}
+
+      {:error, reason} ->
+        {:error, {:validated_tree_binding_failed, reason}}
+    end
+  end
+
+  defp verify_tree_matches(_path, _expected), do: {:error, :missing_expected_tree_oid}
+
+  defp verify_resulting_commit_tree(path, commit_hash, expected_tree)
+       when is_binary(path) and is_binary(commit_hash) and commit_hash != "" and
+              is_binary(expected_tree) and expected_tree != "" do
+    case MixAction.commit_tree_oid(path, commit_hash) do
+      {:ok, ^expected_tree} ->
+        :ok
+
+      {:ok, actual} ->
+        {:error, {:resulting_tree_mismatch, expected_tree, actual}}
+
+      {:error, reason} ->
+        {:error, {:resulting_tree_lookup_failed, reason}}
+    end
+  end
+
+  defp verify_resulting_commit_tree(_path, _commit_hash, _expected_tree),
+    do: {:error, :missing_commit_hash}
+
+  # Reject dirty worktrees whose HEAD has already advanced past the lease base.
+  # That mixed mode is a self-commit plus residual dirt and cannot safely map to
+  # either clean adoption or a dirty-from-base commit.
+  defp reject_ambiguous_dirty_advanced_head(_path, false, _workspace_id, _context), do: :ok
+  defp reject_ambiguous_dirty_advanced_head(_path, _dirty?, nil, _context), do: :ok
+
+  defp reject_ambiguous_dirty_advanced_head(path, true, workspace_id, context)
+       when is_binary(workspace_id) and workspace_id != "" do
+    with {:ok, lease} <- resolve_workspace_lease(workspace_id, context),
+         {:ok, base_commit} <- lease_base_commit(lease),
+         {:ok, head} <- read_head(path) do
+      if head == base_commit do
+        :ok
+      else
+        {:error, {:ambiguous_dirty_advanced_head, base_commit, head}}
+      end
+    end
+  end
+
+  defp reject_ambiguous_dirty_advanced_head(_path, _dirty?, _workspace_id, _context),
+    do: {:error, :invalid_workspace_binding}
+
+  defp resolve_workspace_lease(workspace_id, context)
+       when is_binary(workspace_id) and workspace_id != "" do
+    caller = %{
+      task_id: Workspace.context_task_id(context),
+      principal_id: Workspace.context_principal_id(context)
+    }
+
+    WorkspaceLeaseRegistry.inspect_lease(workspace_id, caller)
+  end
+
+  defp lease_base_commit(lease) when is_map(lease) do
+    case Map.get(lease, :base_commit) || Map.get(lease, "base_commit") do
+      base when is_binary(base) and base != "" -> {:ok, base}
+      _ -> {:error, {:invalid_workspace_lease, :base_commit}}
+    end
+  end
 
   # Schema-bounded workspace inspect — not unbounded System.cmd.
   defp read_head(path) when is_binary(path) do
@@ -688,13 +871,15 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     }
   end
 
-  defp git_commit_params(path, message, params) do
+  defp git_commit_params(path, message, params, bindings) do
     %{
       path: path,
       message: message,
       all: truthy?(Map.get(params, :all, true)),
       allow_empty: truthy?(Map.get(params, :allow_empty, false)),
-      expected_head_commit: expected_head_commit(params)
+      expected_head_commit: bindings.head,
+      expected_workspace_fingerprint: bindings.fingerprint,
+      expected_tree_oid: bindings.tree_oid
     }
   end
 
@@ -745,11 +930,45 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   defp format_error(:timeout), do: "approval timed out"
   defp format_error(:missing_agent_id), do: "approval wait requires agent_id"
   defp format_error(:missing_expected_head_commit), do: "expected_head_commit is required"
+  defp format_error(:invalid_expected_head_commit), do: "expected_head_commit is invalid"
+
+  defp format_error(:missing_expected_workspace_fingerprint),
+    do: "expected_workspace_fingerprint is required"
+
+  defp format_error(:invalid_expected_workspace_fingerprint),
+    do: "expected_workspace_fingerprint is invalid"
+
+  defp format_error(:missing_expected_tree_oid), do: "expected_tree_oid is required"
+  defp format_error(:invalid_expected_tree_oid), do: "expected_tree_oid is invalid"
+  defp format_error(:missing_commit_hash), do: "commit hash missing after nested git commit"
   defp format_error(:missing_signing_authority), do: "signing authority required for git commit"
   defp format_error(:unauthorized), do: "unauthorized"
 
   defp format_error({:head_drift, expected, actual}),
     do: "head drifted during approval: expected=#{expected} actual=#{actual}"
+
+  defp format_error({:workspace_fingerprint_drift, expected, actual}),
+    do: "workspace fingerprint drifted during approval: expected=#{expected} actual=#{actual}"
+
+  defp format_error({:workspace_fingerprint_failed, reason}),
+    do: "workspace fingerprint verification failed: #{inspect(reason)}"
+
+  defp format_error({:validated_tree_drift, expected, actual}),
+    do: "validated tree drifted during approval: expected=#{expected} actual=#{actual}"
+
+  defp format_error({:validated_tree_binding_failed, reason}),
+    do: "validated tree binding failed: #{inspect(reason)}"
+
+  defp format_error({:resulting_tree_mismatch, expected, actual}),
+    do: "resulting commit tree mismatch: expected=#{expected} actual=#{actual}"
+
+  defp format_error({:resulting_tree_lookup_failed, reason}),
+    do: "resulting commit tree lookup failed: #{inspect(reason)}"
+
+  defp format_error({:ambiguous_dirty_advanced_head, base, head}),
+    do:
+      "ambiguous dirty worktree with advanced HEAD: lease_base=#{base} head=#{head} " <>
+        "(self-commit plus residual dirt is not a safe commit candidate)"
 
   defp format_error({:signing_failed, reason}), do: "signing failed: #{inspect(reason)}"
 

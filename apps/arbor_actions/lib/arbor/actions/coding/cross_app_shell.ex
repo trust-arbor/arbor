@@ -150,8 +150,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
           base_commit: base_commit
         })
 
-      feedback_json = Jason.encode!(evidence)
-      {:ok, Map.put(evidence, :feedback_json, feedback_json)}
+      with {:ok, binding} <- MixAction.committable_tree_binding(worktree_path) do
+        evidence =
+          evidence
+          |> Map.put(:validated_tree_oid, binding.tree_oid)
+          |> Map.put(:validated_head, binding.head)
+
+        feedback_json = Jason.encode!(evidence)
+        {:ok, Map.put(evidence, :feedback_json, feedback_json)}
+      end
     end
   end
 

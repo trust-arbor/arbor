@@ -1249,6 +1249,12 @@ defmodule Arbor.Actions.Git do
     | `files` | list | no | Files to stage before commit |
     | `all` | boolean | no | Stage all modified files (default: false) |
     | `allow_empty` | boolean | no | Allow empty commits (default: false) |
+    | `expected_head_commit` | string | no | When set, require HEAD match before mutate |
+    | `expected_tree_oid` | string | no | When set, require exact committable tree before mutate and resulting commit tree after |
+
+    Ordinary callers omit the expected-* bindings. Pipeline owners that need an
+    exact content-bound commit pass them; missing optional bindings preserve the
+    generic commit behavior.
 
     ## Returns
 
@@ -1287,11 +1293,30 @@ defmodule Arbor.Actions.Git do
           type: :boolean,
           default: false,
           doc: "Allow creating empty commits"
+        ],
+        expected_head_commit: [
+          type: :string,
+          required: false,
+          doc: "Optional exact HEAD binding enforced at the mutating boundary"
+        ],
+        expected_tree_oid: [
+          type: :string,
+          required: false,
+          doc: "Optional exact committable-tree binding enforced at the mutating boundary"
+        ],
+        # Accepted and ignored by ordinary schema validation when nested owners
+        # forward the full reviewed-commit binding map; tree enforcement uses
+        # expected_tree_oid only.
+        expected_workspace_fingerprint: [
+          type: :string,
+          required: false,
+          doc: "Optional passthrough fingerprint identity from nested owners"
         ]
       ]
 
     alias Arbor.Actions
     alias Arbor.Actions.Git
+    alias Arbor.Actions.Mix, as: MixAction
 
     def taint_roles do
       %{
@@ -1299,7 +1324,10 @@ defmodule Arbor.Actions.Git do
         message: {:control, requires: [:command_injection]},
         files: {:control, requires: [:path_traversal]},
         all: :control,
-        allow_empty: :control
+        allow_empty: :control,
+        expected_head_commit: :control,
+        expected_tree_oid: :control,
+        expected_workspace_fingerprint: :control
       }
     end
 
@@ -1313,9 +1341,11 @@ defmodule Arbor.Actions.Git do
 
       # Stage files if specified
       with {:ok, message} <- normalize_message(message),
+           :ok <- verify_optional_pre_commit_bindings(path, params),
            :ok <- maybe_stage_files(path, params),
            {:ok, commit_result} <- create_commit(path, message, params),
-           {:ok, hash} <- get_commit_hash(path) do
+           {:ok, hash} <- get_commit_hash(path),
+           :ok <- verify_optional_post_commit_tree(path, hash, params) do
         result = %{
           path: path,
           commit_hash: hash,
@@ -1329,6 +1359,73 @@ defmodule Arbor.Actions.Git do
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, "Failed to create commit: #{reason}"}
+      end
+    end
+
+    defp verify_optional_pre_commit_bindings(path, params) do
+      with :ok <- verify_optional_head(path, optional_binding(params, :expected_head_commit)),
+           :ok <- verify_optional_tree(path, optional_binding(params, :expected_tree_oid)) do
+        :ok
+      end
+    end
+
+    defp verify_optional_head(_path, nil), do: :ok
+
+    defp verify_optional_head(path, expected) when is_binary(expected) and expected != "" do
+      case get_commit_hash(path) do
+        {:ok, ^expected} -> :ok
+        {:ok, actual} -> {:error, "head mismatch: expected=#{expected} actual=#{actual}"}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    defp verify_optional_head(_path, _), do: {:error, "expected_head_commit is invalid"}
+
+    defp verify_optional_tree(_path, nil), do: :ok
+
+    defp verify_optional_tree(path, expected) when is_binary(expected) and expected != "" do
+      case MixAction.committable_tree_binding(path) do
+        {:ok, %{tree_oid: ^expected}} ->
+          :ok
+
+        {:ok, %{tree_oid: actual}} ->
+          {:error, "tree mismatch: expected=#{expected} actual=#{actual}"}
+
+        {:error, reason} ->
+          {:error, "tree binding failed: #{inspect(reason)}"}
+      end
+    end
+
+    defp verify_optional_tree(_path, _), do: {:error, "expected_tree_oid is invalid"}
+
+    # Post-commit: compare the new commit object's tree to the expected binding.
+    defp verify_optional_post_commit_tree(path, hash, params)
+         when is_binary(path) and is_binary(hash) do
+      case optional_binding(params, :expected_tree_oid) do
+        nil ->
+          :ok
+
+        expected when is_binary(expected) and expected != "" ->
+          case MixAction.commit_tree_oid(path, hash) do
+            {:ok, ^expected} ->
+              :ok
+
+            {:ok, actual} ->
+              {:error, "resulting tree mismatch: expected=#{expected} actual=#{actual}"}
+
+            {:error, reason} ->
+              {:error, "resulting tree lookup failed: #{inspect(reason)}"}
+          end
+
+        _ ->
+          {:error, "expected_tree_oid is invalid"}
+      end
+    end
+
+    defp optional_binding(params, key) when is_atom(key) do
+      case Map.get(params, key) || Map.get(params, Atom.to_string(key)) do
+        value when is_binary(value) and value != "" -> value
+        _ -> nil
       end
     end
 

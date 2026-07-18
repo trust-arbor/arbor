@@ -113,6 +113,68 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     end
   end
 
+  test "security regression: compiled production graph passes fingerprint and validated tree into coding_reviewed_commit",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = parse!(compilation.dot_source)
+
+    commit = node_attrs(graph, "commit_change")
+    assert commit["action"] == "coding_reviewed_commit"
+
+    assert commit["context_keys"] ==
+             "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid"
+
+    assert node_attrs(graph, "hoist_workspace_fingerprint")["source_key"] == "inspect.fingerprint"
+
+    assert node_attrs(graph, "hoist_workspace_fingerprint")["output_key"] ==
+             "workspace_fingerprint"
+
+    assert node_attrs(graph, "hoist_committable_tree_oid")["source_key"] ==
+             "inspect.committable_tree_oid"
+
+    assert node_attrs(graph, "hoist_committable_tree_oid")["output_key"] == "expected_tree_oid"
+
+    assert node_attrs(graph, "hoist_expected_workspace_fingerprint")["source_key"] ==
+             "workspace_fingerprint"
+
+    assert node_attrs(graph, "hoist_expected_workspace_fingerprint")["output_key"] ==
+             "expected_workspace_fingerprint"
+
+    assert node_attrs(graph, "hoist_expected_tree_oid")["source_key"] ==
+             "validation.validated_tree_oid"
+
+    assert node_attrs(graph, "hoist_expected_tree_oid")["output_key"] == "expected_tree_oid"
+
+    assert edge_target(graph, "prep_commit_message", nil) ==
+             "hoist_expected_workspace_fingerprint"
+
+    assert edge_target(graph, "hoist_expected_workspace_fingerprint", nil) ==
+             "hoist_expected_tree_oid"
+
+    assert edge_target(graph, "hoist_expected_tree_oid", nil) == "commit_change"
+    assert edge_target(graph, "hoist_workspace_fingerprint", nil) == "hoist_committable_tree_oid"
+  end
+
+  test "security regression: security profile binds commit tree from inspect not validation",
+       ctx do
+    plan =
+      plan!(%{
+        "validation_profile" => "security_regression",
+        "requested_paths" => ["apps/arbor_shell/test/shell_security_test.exs"]
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    assert node_attrs(graph, "hoist_expected_tree_oid")["source_key"] ==
+             "inspect.committable_tree_oid"
+
+    assert node_attrs(graph, "commit_change")["context_keys"] =~
+             "expected_workspace_fingerprint"
+
+    assert node_attrs(graph, "commit_change")["context_keys"] =~ "expected_tree_oid"
+  end
+
   test "default profile retains mandatory validation and binding review", ctx do
     plan =
       plan!(%{

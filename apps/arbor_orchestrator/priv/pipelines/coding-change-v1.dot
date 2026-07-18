@@ -523,6 +523,30 @@ digraph CodingChangeV1 {
     output_key="workspace_fingerprint"
   ]
 
+  // Pre-validation committable tree for profiles (e.g. security_regression)
+  // where commit_change runs before validate. Validate-before-commit profiles
+  // overwrite expected_tree_oid from validation.validated_tree_oid below.
+  hoist_committable_tree_oid [
+    type="transform",
+    transform="identity",
+    source_key="inspect.committable_tree_oid",
+    output_key="expected_tree_oid"
+  ]
+
+  hoist_expected_workspace_fingerprint [
+    type="transform",
+    transform="identity",
+    source_key="workspace_fingerprint",
+    output_key="expected_workspace_fingerprint"
+  ]
+
+  hoist_expected_tree_oid [
+    type="transform",
+    transform="identity",
+    source_key="validation.validated_tree_oid",
+    output_key="expected_tree_oid"
+  ]
+
   route_turn_progress [
     type="branch",
     shape=diamond,
@@ -646,12 +670,13 @@ digraph CodingChangeV1 {
 
   // Reviewed top-level Jido action (syscall): approval decision lives here,
   // graph owns branching. Not git_commit + ExecHandler control projection.
-  // head_commit binds approval to the inspected candidate revision.
+  // head_commit + expected_workspace_fingerprint + expected_tree_oid bind
+  // approval to the exact inspected/validated candidate content (not just HEAD).
   commit_change [
     type="exec",
     target="action",
     action="coding_reviewed_commit",
-    context_keys="path,message,workspace_dirty,head_commit,workspace_id",
+    context_keys="path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid",
     param.all="true",
     output_prefix="commit",
     max_retries="0"
@@ -1538,7 +1563,8 @@ digraph CodingChangeV1 {
   check_workspace_exists -> hoist_dirty [condition="context.inspect.exists=true"]
   hoist_dirty -> hoist_changed -> hoist_head_commit
   hoist_head_commit -> hoist_turn_progressed -> hoist_workspace_fingerprint
-  hoist_workspace_fingerprint -> route_turn_progress
+  hoist_workspace_fingerprint -> hoist_committable_tree_oid
+  hoist_committable_tree_oid -> route_turn_progress
 
   // Per-turn progress: initial no-op => no_changes; rework no-op => pipeline_error
   // so a prior candidate is never re-presented as fresh work.
@@ -1573,9 +1599,15 @@ digraph CodingChangeV1 {
   check_validation_passed -> prep_commit_path [condition="outcome=success"]
   prep_commit_path -> prep_commit_message
 
+  // Bind exact content identity: inspected fingerprint + validated committable
+  // tree. Security profile rewrites the post-validation path away from commit;
+  // commit-before-validate keeps inspect-time expected_tree_oid.
+  prep_commit_message -> hoist_expected_workspace_fingerprint
+  hoist_expected_workspace_fingerprint -> hoist_expected_tree_oid
+  hoist_expected_tree_oid -> commit_change
+
   // Always route through the reviewed commit/adoption gate so a self-commit
   // after operator rework (clean worktree) cannot bypass fresh approval.
-  prep_commit_message -> commit_change
   commit_change -> status_pipeline_error_then_close [condition="outcome=fail"]
   commit_change -> route_commit_interaction [condition="outcome=success"]
 
