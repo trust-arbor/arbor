@@ -124,8 +124,8 @@ The `cross_app` validation profile compiles two distinct budgets into
   bounded by `budgets.wall_clock_ms`
 
 Exact `*_test.exs` inventory is preserved (including slow and integration-tagged
-files). Paths are partitioned into sequential batches of exactly one file per
-child under the existing argv-count and argv-byte ceilings; tags are never
+files). Paths are partitioned into sequential batches of at most 20 exact files
+per child under the existing argv-count and argv-byte ceilings; tags are never
 excluded to fit a budget.
 
 The optional top-level MCP dispatch `timeout` is an outer cancellation ceiling.
