@@ -523,14 +523,15 @@ digraph CodingChangeV1 {
     output_key="workspace_fingerprint"
   ]
 
-  // Pre-validation committable tree for profiles (e.g. security_regression)
-  // where commit_change runs before validate. Validate-before-commit profiles
-  // overwrite expected_tree_oid from validation.validated_tree_oid below.
+  // Inspect-time committable tree is observability only. Commit binding uses
+  // validation.validated_tree_oid when validate-before-commit (default/cross_app).
+  // security_regression commits before its validator, so expected_tree_oid is
+  // omitted there and coding_reviewed_commit computes+freezes the tree itself.
   hoist_committable_tree_oid [
     type="transform",
     transform="identity",
     source_key="inspect.committable_tree_oid",
-    output_key="expected_tree_oid"
+    output_key="committable_tree_oid"
   ]
 
   hoist_expected_workspace_fingerprint [

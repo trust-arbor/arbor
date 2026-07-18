@@ -618,11 +618,21 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              "route_after_commit",
              "route_security_after_commit"
            ),
-         # Commit runs before validation on this profile, so bind the tree from
-         # the inspected worktree rather than validation.validated_tree_oid.
+         # Commit runs before the two-revision validator, so there is no
+         # validation.validated_tree_oid yet. Keep hoist_expected_tree_oid on
+         # the path for reachability, but omit expected_tree_oid from
+         # commit_change context_keys so coding_reviewed_commit computes and
+         # freezes the exact committable tree before authorization.
          {:ok, graph} <-
-           update_node(graph, "hoist_expected_tree_oid", fn attrs ->
-             {:ok, Map.put(attrs, "source_key", "inspect.committable_tree_oid")}
+           update_node(graph, "commit_change", fn attrs ->
+             with :ok <- require_action_attrs(attrs, "coding_reviewed_commit") do
+               {:ok,
+                Map.put(
+                  attrs,
+                  "context_keys",
+                  "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint"
+                )}
+             end
            end) do
       # adopt_head_commit was removed: clean self-commit adoption is performed
       # inside coding_reviewed_commit so rework cannot bypass a fresh gate.

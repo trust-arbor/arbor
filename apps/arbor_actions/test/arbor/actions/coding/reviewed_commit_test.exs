@@ -475,26 +475,51 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     assert message =~ "expected_workspace_fingerprint"
   end
 
-  test "security regression: missing expected_tree_oid fails closed" do
+  test "security regression: missing expected_tree_oid freezes computed tree before authorization" do
     {repo, head} = init_dirty_repo!()
-    agent_id = unique_agent("notree")
+    agent_id = unique_agent("compute_tree")
+    grant_git_commit!(agent_id)
     signer = build_signer(agent_id)
     context = build_context(agent_id, signer)
     bindings = content_bindings!(repo)
 
-    assert {:error, message} =
-             ReviewedCommit.run(
-               %{
-                 path: repo,
-                 message: "x",
-                 workspace_dirty: true,
-                 expected_head_commit: head,
-                 expected_workspace_fingerprint: bindings.fingerprint
-               },
-               context
-             )
+    # Commit-before-validate profiles omit expected_tree_oid; the action must
+    # compute and freeze the exact committable tree itself.
+    params = %{
+      path: repo,
+      message: "coding reviewed commit",
+      workspace_dirty: true,
+      all: true,
+      expected_head_commit: head,
+      expected_workspace_fingerprint: bindings.fingerprint
+    }
 
-    assert message =~ "expected_tree_oid"
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    request = await_pending_request(agent_id)
+
+    approval_ctx =
+      request.metadata[:approval_context] || request.metadata["approval_context"] || %{}
+
+    frozen_tree =
+      approval_ctx[:expected_tree_oid] || approval_ctx["expected_tree_oid"]
+
+    assert is_binary(frozen_tree) and frozen_tree != ""
+    assert frozen_tree == bindings.tree_oid
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 10_000)
+    assert payload["interaction_outcome"] == ""
+    assert is_binary(payload["commit_hash"]) and payload["commit_hash"] != ""
+    assert payload["commit_hash"] != head
+
+    assert {:ok, actual_tree} =
+             MixAction.commit_tree_oid(repo, payload["commit_hash"])
+
+    assert actual_tree == frozen_tree
   end
 
   test "security regression: unstaged content mutation during approval wait does not commit" do

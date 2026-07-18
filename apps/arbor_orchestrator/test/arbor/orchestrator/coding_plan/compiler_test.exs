@@ -113,7 +113,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     end
   end
 
-  test "security regression: compiled production graph passes fingerprint and validated tree into coding_reviewed_commit",
+  test "security regression: validate-before-commit graph passes fingerprint and validated tree into coding_reviewed_commit",
        ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = parse!(compilation.dot_source)
@@ -132,7 +132,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "hoist_committable_tree_oid")["source_key"] ==
              "inspect.committable_tree_oid"
 
-    assert node_attrs(graph, "hoist_committable_tree_oid")["output_key"] == "expected_tree_oid"
+    # Inspect-time tree is observability only; commit binding uses validation.
+    assert node_attrs(graph, "hoist_committable_tree_oid")["output_key"] == "committable_tree_oid"
 
     assert node_attrs(graph, "hoist_expected_workspace_fingerprint")["source_key"] ==
              "workspace_fingerprint"
@@ -155,7 +156,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert edge_target(graph, "hoist_workspace_fingerprint", nil) == "hoist_committable_tree_oid"
   end
 
-  test "security regression: security profile binds commit tree from inspect not validation",
+  test "security regression: commit-before-validate profile omits upstream tree; fingerprint still required",
        ctx do
     plan =
       plan!(%{
@@ -166,13 +167,28 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:ok, compilation} = compile(plan, ctx)
     graph = parse!(compilation.dot_source)
 
+    commit = node_attrs(graph, "commit_change")
+    assert commit["action"] == "coding_reviewed_commit"
+
+    # Fingerprint remains graph-bound; tree is computed inside the action
+    # because commit precedes the two-revision validator.
+    assert commit["context_keys"] ==
+             "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint"
+
+    refute commit["context_keys"] =~ "expected_tree_oid"
+    assert commit["context_keys"] =~ "expected_workspace_fingerprint"
+
+    # Reachability keeps the hoist on the path; it is not fed into commit params.
     assert node_attrs(graph, "hoist_expected_tree_oid")["source_key"] ==
-             "inspect.committable_tree_oid"
+             "validation.validated_tree_oid"
 
-    assert node_attrs(graph, "commit_change")["context_keys"] =~
-             "expected_workspace_fingerprint"
+    assert edge_target(graph, "hoist_expected_workspace_fingerprint", nil) ==
+             "hoist_expected_tree_oid"
 
-    assert node_attrs(graph, "commit_change")["context_keys"] =~ "expected_tree_oid"
+    assert edge_target(graph, "hoist_expected_tree_oid", nil) == "commit_change"
+
+    assert edge_target(graph, "route_turn_progress", "context.turn_progressed=true") ==
+             "prep_commit_path"
   end
 
   test "default profile retains mandatory validation and binding review", ctx do

@@ -21,12 +21,16 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     * `expected_head_commit` — HEAD the operator inspected
     * `expected_workspace_fingerprint` — bounded worktree digest (HEAD + index +
       unstaged/untracked content) from `Workspace.worktree_fingerprint/2`
-    * `expected_tree_oid` — exact `add -A` committable tree from
-      `Mix.committable_tree_binding/1` (typically `validation.validated_tree_oid`)
+    * `expected_tree_oid` — exact `add -A` committable tree when a prior
+      validator produced one (default/cross_app: `validation.validated_tree_oid`)
 
-  All three are verified before authorization, after an approval wait, and
-  immediately before nested commit/adoption. After mutation, the resulting
-  commit tree must equal `expected_tree_oid`.
+  HEAD and fingerprint are always required from the graph. When a prior
+  validated tree is present it is compared fail-closed. When no prior
+  validator tree can exist (security_regression commits before its
+  two-revision validator), this action computes the exact committable tree
+  via `Mix.committable_tree_binding/1` before authorization, freezes it in
+  the approval context, and re-verifies it after the wait, immediately
+  before mutation, and against the resulting commit tree.
 
   Ambiguous mixed mode is rejected when a workspace lease is present:
   `workspace_dirty=true` while HEAD has already advanced past the lease base
@@ -82,7 +86,8 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
       expected_tree_oid: [
         type: :string,
         required: false,
-        doc: "Validated committable tree OID; required for content-bound approval"
+        doc:
+          "Upstream validated committable tree OID when a prior validator ran; when absent, computed and frozen here before authorization"
       ],
       validated_tree_oid: [
         type: :string,
@@ -151,13 +156,12 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
     agent_id = context_agent_id(context)
     dirty? = truthy?(Map.get(params, :workspace_dirty, true))
-    bindings = candidate_bindings(params)
     workspace_id = workspace_id(params)
-    git_params = git_commit_params(path, message, params, bindings)
-    resource = Actions.canonical_uri_for(Git.Commit, git_params)
 
     result =
-      with :ok <- require_candidate_bindings(bindings),
+      with {:ok, bindings} <- resolve_candidate_bindings(path, params),
+           git_params = git_commit_params(path, message, params, bindings),
+           resource = Actions.canonical_uri_for(Git.Commit, git_params),
            :ok <- verify_workspace_binding(path, workspace_id, context),
            :ok <- reject_ambiguous_dirty_advanced_head(path, dirty?, workspace_id, context),
            :ok <- verify_candidate_content(path, bindings),
@@ -487,14 +491,55 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
 
   # -- candidate content binding ---------------------------------------------
 
-  defp candidate_bindings(params) do
-    %{
-      head: param_string(params, [:expected_head_commit, :head_commit]),
-      fingerprint:
-        param_string(params, [:expected_workspace_fingerprint, :workspace_fingerprint]),
-      tree_oid: param_string(params, [:expected_tree_oid, :validated_tree_oid])
-    }
+  # Resolve HEAD + fingerprint (always required from the graph) and the
+  # committable tree: prefer an upstream validated tree when present; otherwise
+  # compute and freeze it here so commit-before-validate profiles stay bound.
+  defp resolve_candidate_bindings(path, params) do
+    head = param_string(params, [:expected_head_commit, :head_commit])
+
+    fingerprint =
+      param_string(params, [:expected_workspace_fingerprint, :workspace_fingerprint])
+
+    upstream_tree = param_string(params, [:expected_tree_oid, :validated_tree_oid])
+
+    with :ok <-
+           require_git_oid(head, :missing_expected_head_commit, :invalid_expected_head_commit),
+         :ok <- require_fingerprint(fingerprint),
+         {:ok, tree_oid, tree_source} <- resolve_tree_oid(path, upstream_tree) do
+      {:ok,
+       %{
+         head: head,
+         fingerprint: fingerprint,
+         tree_oid: tree_oid,
+         tree_source: tree_source
+       }}
+    end
   end
+
+  defp resolve_tree_oid(_path, tree_oid) when is_binary(tree_oid) and tree_oid != "" do
+    case require_git_oid(tree_oid, :missing_expected_tree_oid, :invalid_expected_tree_oid) do
+      :ok -> {:ok, tree_oid, :upstream}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp resolve_tree_oid(path, _absent) when is_binary(path) do
+    case MixAction.committable_tree_binding(path) do
+      {:ok, %{tree_oid: tree_oid}} when is_binary(tree_oid) and tree_oid != "" ->
+        case require_git_oid(tree_oid, :missing_expected_tree_oid, :invalid_expected_tree_oid) do
+          :ok -> {:ok, tree_oid, :computed}
+          {:error, _} = error -> error
+        end
+
+      {:ok, _} ->
+        {:error, :missing_expected_tree_oid}
+
+      {:error, reason} ->
+        {:error, {:validated_tree_binding_failed, reason}}
+    end
+  end
+
+  defp resolve_tree_oid(_path, _absent), do: {:error, :missing_expected_tree_oid}
 
   defp param_string(params, keys) when is_list(keys) do
     Enum.find_value(keys, fn key ->
@@ -510,20 +555,6 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
       id when is_binary(id) and id != "" -> id
       nil -> nil
       _ -> :invalid
-    end
-  end
-
-  defp require_candidate_bindings(%{head: head, fingerprint: fingerprint, tree_oid: tree_oid}) do
-    with :ok <-
-           require_git_oid(head, :missing_expected_head_commit, :invalid_expected_head_commit),
-         :ok <- require_fingerprint(fingerprint),
-         :ok <-
-           require_git_oid(
-             tree_oid,
-             :missing_expected_tree_oid,
-             :invalid_expected_tree_oid
-           ) do
-      :ok
     end
   end
 
