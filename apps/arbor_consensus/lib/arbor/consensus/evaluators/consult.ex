@@ -519,19 +519,44 @@ defmodule Arbor.Consensus.Evaluators.Consult do
 
   defp fetch_outcome_field(_outcome, _key), do: nil
 
+  # JSON-clean boundary: only forward valid UTF-8, never mid-codepoint cuts.
+  # Already-invalid binaries fail closed to a known-good default string.
   defp bound_failure_reason(reason) when is_binary(reason) do
-    if byte_size(reason) <= @max_council_failure_reason_bytes do
-      reason
-    else
-      binary_part(reason, 0, @max_council_failure_reason_bytes)
+    cond do
+      not String.valid?(reason) ->
+        "pipeline failed"
+
+      byte_size(reason) <= @max_council_failure_reason_bytes ->
+        reason
+
+      true ->
+        truncate_utf8_prefix(reason, @max_council_failure_reason_bytes)
     end
   end
 
   defp bound_failure_reason(reason) when is_atom(reason) and not is_nil(reason) do
-    Atom.to_string(reason)
+    bound_failure_reason(Atom.to_string(reason))
   end
 
   defp bound_failure_reason(_), do: "pipeline failed"
+
+  defp truncate_utf8_prefix(bin, max_bytes)
+       when is_binary(bin) and is_integer(max_bytes) and max_bytes >= 0 do
+    size = min(byte_size(bin), max_bytes)
+    do_truncate_utf8_prefix(bin, size)
+  end
+
+  defp do_truncate_utf8_prefix(_bin, size) when size <= 0, do: ""
+
+  defp do_truncate_utf8_prefix(bin, size) do
+    part = binary_part(bin, 0, size)
+
+    if String.valid?(part) do
+      part
+    else
+      do_truncate_utf8_prefix(bin, size - 1)
+    end
+  end
 
   # Presence-aware projection: only copy allowlisted review fields that the
   # engine context actually carries under `exec.decide.*` (preferred) or

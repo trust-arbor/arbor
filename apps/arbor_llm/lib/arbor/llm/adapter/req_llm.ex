@@ -850,10 +850,16 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def translate_tool_choice(_), do: nil
 
+  # Mirror ToolLoop terminal tool-name contract (nonblank, valid UTF-8, no NUL,
+  # bounded, action-identifier grammar). Keep normalization closed here rather
+  # than importing ToolLoop internals.
+  @max_tool_choice_name_bytes 128
+  @tool_choice_name_re ~r/^[A-Za-z][A-Za-z0-9_.\/-]*$/
+
   # ReqLLM canonical specific-tool choice: atom-keyed %{type: "tool", name: binary}.
   defp normalize_specific_tool_choice(map) when is_map(map) do
     with {:ok, name} <- extract_tool_choice_name(map),
-         true <- is_binary(name) and name != "" do
+         {:ok, name} <- validate_tool_choice_name(name) do
       {:ok, %{type: "tool", name: name}}
     else
       _ -> :error
@@ -880,6 +886,32 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp extract_nested_function_name(%{name: name}), do: {:ok, name}
   defp extract_nested_function_name(%{"name" => name}), do: {:ok, name}
   defp extract_nested_function_name(_), do: :error
+
+  defp validate_tool_choice_name(name) when is_binary(name) do
+    trimmed = String.trim(name)
+
+    cond do
+      trimmed == "" ->
+        :error
+
+      not String.valid?(trimmed) ->
+        :error
+
+      String.contains?(trimmed, <<0>>) ->
+        :error
+
+      byte_size(trimmed) > @max_tool_choice_name_bytes ->
+        :error
+
+      Regex.match?(@tool_choice_name_re, trimmed) ->
+        {:ok, trimmed}
+
+      true ->
+        :error
+    end
+  end
+
+  defp validate_tool_choice_name(_), do: :error
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)

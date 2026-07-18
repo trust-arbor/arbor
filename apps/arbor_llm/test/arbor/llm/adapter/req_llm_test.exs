@@ -746,6 +746,27 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert Adapter.translate_tool_choice(123) == nil
       assert Adapter.translate_tool_choice([]) == nil
     end
+
+    test "malformed tool names are dropped (ToolLoop name contract)" do
+      # Whitespace-only / nonblank after trim
+      assert Adapter.translate_tool_choice(%{type: "tool", name: "   "}) == nil
+      # NUL
+      assert Adapter.translate_tool_choice(%{type: "tool", name: "tool\0name"}) == nil
+      # Invalid UTF-8
+      assert Adapter.translate_tool_choice(%{type: "tool", name: <<0xFF, 0xFE, "x">>}) == nil
+      # Unbounded (>128 bytes)
+      long = "a" <> String.duplicate("b", 128)
+
+      assert Adapter.translate_tool_choice(%{
+               "type" => "function",
+               "function" => %{"name" => long}
+             }) == nil
+
+      # Grammar: must start with a letter; no spaces/specials
+      assert Adapter.translate_tool_choice(%{type: "tool", name: "1bad"}) == nil
+      assert Adapter.translate_tool_choice(%{type: "tool", name: "bad name"}) == nil
+      assert Adapter.translate_tool_choice(%{type: "tool", name: "bad$name"}) == nil
+    end
   end
 
   describe "build_req_opts/2 — tools wiring" do

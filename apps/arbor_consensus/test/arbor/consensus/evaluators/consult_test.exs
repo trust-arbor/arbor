@@ -744,6 +744,58 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
                  engine_runner: engine_runner
                )
     end
+
+    test "failure_reason over byte limit truncates on a UTF-8 codepoint boundary" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      # 511 ASCII bytes + 2-byte "é" = 513; a raw 512-byte cut would split "é".
+      prefix = String.duplicate("a", 511)
+      reason = prefix <> "é" <> "tail"
+      assert byte_size(reason) > 512
+      assert String.valid?(reason)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{},
+           final_outcome: %{status: :fail, failure_reason: reason}
+         }}
+      end
+
+      assert {:error, {:council_pipeline_failed, bounded}} =
+               Consult.decide(TestAdvisoryEvaluator, "UTF-8 safe failure_reason bound",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert String.valid?(bounded)
+      assert byte_size(bounded) <= 512
+      assert bounded == prefix
+      refute String.contains?(bounded, "é")
+    end
+
+    test "invalid UTF-8 failure_reason fails closed to a known-good default" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      invalid = <<0xFF, 0xFE, "not-utf8">>
+      refute String.valid?(invalid)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{"council.decision" => "approved"},
+           final_outcome: %{status: :fail, failure_reason: invalid}
+         }}
+      end
+
+      assert {:error, {:council_pipeline_failed, "pipeline failed"}} =
+               Consult.decide(TestAdvisoryEvaluator, "Invalid UTF-8 failure_reason",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+    end
   end
 
   defp write_decision_graph! do
