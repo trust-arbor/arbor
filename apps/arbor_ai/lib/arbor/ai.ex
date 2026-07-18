@@ -898,10 +898,17 @@ defmodule Arbor.AI do
   Returns `{:ok, session_pid}` on success. The session must be returned
   via `acp_checkin/1` when done.
 
+  Reuse is fail-closed over the full `SessionProfile` (agent, task scope,
+  cwd/workspace, model, tools, trust domain, and immutable startup fingerprint).
+  Different coding tasks never inherit another task's provider conversation or
+  cwd implicitly; cross-task continuity is only via explicit managed resume.
+
   ## Options
 
-  - `:model` — model override
-  - `:cwd` — working directory
+  - `:model` — model override (immutable reuse boundary)
+  - `:cwd` / `:workspace` — working directory (canonicalized; immutable)
+  - `:task_id` — coding task scope for pool matching
+  - `:agent_id` — owning agent (`nil` matches only `nil`)
   - `:timeout` — checkout timeout (default: 30_000)
   """
   @spec acp_checkout(atom(), keyword()) :: {:ok, pid()} | {:error, term()}
@@ -916,7 +923,11 @@ defmodule Arbor.AI do
   end
 
   @doc """
-  Return a session to the ACP pool for reuse.
+  Return a session to the ACP pool.
+
+  Compatible non-tool sessions become idle for same-profile reuse.
+  Tool-enabled sessions are closed on checkin because provider MCP registration
+  is immutable; the next checkout mints a fresh process and ToolServer.
   """
   @spec acp_checkin(pid()) :: :ok | {:error, term()}
   def acp_checkin(session) do
@@ -955,7 +966,9 @@ defmodule Arbor.AI do
   ## Options
 
   - `:use_pool` / `:pooled` - checkout from `AcpPool` instead of starting a
-    temporary managed child (default: false)
+    temporary managed child (default: false). Pooled coding checkouts are
+    task-scoped: `:task_id` is included in pool profile matching so another
+    task cannot reuse this process's provider conversation or cwd.
   - `:return_to_pool` - on owner death / close of a pooled session, check in
     rather than hard-close (default: true when pooled). Explicit close may
     override this stored default via `acp_managed_close_session/2`.
@@ -964,10 +977,13 @@ defmodule Arbor.AI do
   - `:task_id` / `:principal_id` / `:agent_id` - cross-process resume authority
     (both non-empty `task_id` and principal required for non-owner access).
     `:agent_id` is also forwarded to the session/pool so ACP file/exec callbacks
-    authorize as the owning agent.
-  - `:session_id` - resume an existing provider session after start
+    authorize as the owning agent. `:task_id` is also forwarded to the pool for
+    SessionProfile scoping and is stripped before `AcpSession` start.
+  - `:session_id` - resume an existing provider session after start on a fresh
+    or same-task-compatible local process (explicit cross-task continuity only;
+    never inferred from an idle pool entry of another task)
   - `:model`, `:cwd`, `:timeout`, `:client_opts`, `:agent_id` - forwarded to the
-    session / pool
+    session / pool as immutable reuse boundaries where applicable
   - `:session_module`, `:pool_module`, `:supervisor`, `:server` - injectable for
     tests (defaults: `AcpSession`, `AcpPool`, managed supervisor/registry)
 

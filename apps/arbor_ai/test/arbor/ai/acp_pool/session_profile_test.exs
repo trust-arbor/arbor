@@ -10,6 +10,7 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
       profile = SessionProfile.new(provider: :claude, tool_modules: [MyApp.Trust.List])
       assert is_binary(profile.profile_hash)
       assert String.length(profile.profile_hash) == 16
+      assert is_binary(profile.startup_fingerprint)
     end
 
     test "same provider and tools produce same hash" do
@@ -35,6 +36,19 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
       p2 = SessionProfile.new(provider: :claude, tool_modules: [])
       assert p1.profile_hash == p2.profile_hash
     end
+
+    test "security regression: different cwd/model/task change the hash" do
+      base = [provider: :claude, tool_modules: [ModA], agent_id: "a1"]
+
+      p1 = SessionProfile.new(base ++ [cwd: "/tmp/a", model: "m1", task_id: "t1"])
+      p2 = SessionProfile.new(base ++ [cwd: "/tmp/b", model: "m1", task_id: "t1"])
+      p3 = SessionProfile.new(base ++ [cwd: "/tmp/a", model: "m2", task_id: "t1"])
+      p4 = SessionProfile.new(base ++ [cwd: "/tmp/a", model: "m1", task_id: "t2"])
+
+      refute p1.profile_hash == p2.profile_hash
+      refute p1.profile_hash == p3.profile_hash
+      refute p1.profile_hash == p4.profile_hash
+    end
   end
 
   describe "from_opts/2" do
@@ -43,15 +57,22 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
         SessionProfile.from_opts(:claude,
           agent_id: "agent_123",
           tool_modules: [ModA],
-          trust_domain: :internal
+          trust_domain: :internal,
+          task_id: "task_abc",
+          cwd: "/tmp/work",
+          model: "opus"
         )
 
       assert profile.provider == :claude
       assert profile.agent_id == "agent_123"
       assert profile.tool_modules == [ModA]
       assert profile.trust_domain == :internal
+      assert profile.task_id == "task_abc"
+      assert profile.cwd == Path.expand("/tmp/work")
+      assert profile.model == "opus"
       assert is_binary(profile.name)
       assert is_binary(profile.profile_hash)
+      assert is_binary(profile.startup_fingerprint)
     end
 
     test "generates human-readable name" do
@@ -68,6 +89,46 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
       profile = SessionProfile.from_opts(:claude, [])
       assert profile.tool_modules == []
     end
+
+    test "security regression: workspace alias populates canonical cwd" do
+      profile = SessionProfile.from_opts(:claude, workspace: "/tmp/ws")
+      assert profile.cwd == Path.expand("/tmp/ws")
+    end
+
+    test "security regression: immutable startup opts are fingerprinted not stored" do
+      p1 =
+        SessionProfile.from_opts(:claude,
+          client_opts: [command: ["echo", "a"], token: "secret-a"],
+          adapter_opts: [foo: 1]
+        )
+
+      p2 =
+        SessionProfile.from_opts(:claude,
+          client_opts: [command: ["echo", "b"], token: "secret-b"],
+          adapter_opts: [foo: 1]
+        )
+
+      p3 =
+        SessionProfile.from_opts(:claude,
+          client_opts: [command: ["echo", "a"], token: "secret-a"],
+          adapter_opts: [foo: 1]
+        )
+
+      refute p1.startup_fingerprint == p2.startup_fingerprint
+      assert p1.startup_fingerprint == p3.startup_fingerprint
+      refute p1.profile_hash == p2.profile_hash
+
+      # Profile must remain log/JSON safe — no raw secret values
+      refute inspect(p1) =~ "secret-a"
+
+      assert {:ok, _} =
+               Jason.encode(%{
+                 hash: p1.profile_hash,
+                 fp: p1.startup_fingerprint,
+                 agent: p1.agent_id,
+                 task: p1.task_id
+               })
+    end
   end
 
   describe "compatible?/2" do
@@ -83,10 +144,15 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
       refute SessionProfile.compatible?(p1, p2)
     end
 
-    test "nil agent_id is compatible with any" do
+    test "security regression: nil agent_id is not a wildcard for non-nil identity" do
       p1 = SessionProfile.new(provider: :claude, tool_modules: [ModA], agent_id: nil)
       p2 = SessionProfile.new(provider: :claude, tool_modules: [ModA], agent_id: "a1")
-      assert SessionProfile.compatible?(p1, p2)
+      refute SessionProfile.compatible?(p1, p2)
+      refute SessionProfile.compatible?(p2, p1)
+
+      # nil matches only nil
+      p3 = SessionProfile.new(provider: :claude, tool_modules: [ModA], agent_id: nil)
+      assert SessionProfile.compatible?(p1, p3)
     end
 
     test "different trust domains are not compatible" do
@@ -99,6 +165,50 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
       p1 = SessionProfile.new(provider: :claude, tool_modules: [ModA])
       p2 = SessionProfile.new(provider: :claude, tool_modules: [ModB])
       refute SessionProfile.compatible?(p1, p2)
+    end
+
+    test "security regression: different task/cwd/model/startup are not compatible" do
+      base = [provider: :claude, tool_modules: [ModA], agent_id: "a1"]
+
+      a = SessionProfile.new(base ++ [task_id: "t1", cwd: "/tmp/a", model: "m1"])
+      b = SessionProfile.new(base ++ [task_id: "t2", cwd: "/tmp/a", model: "m1"])
+      c = SessionProfile.new(base ++ [task_id: "t1", cwd: "/tmp/b", model: "m1"])
+      d = SessionProfile.new(base ++ [task_id: "t1", cwd: "/tmp/a", model: "m2"])
+
+      e =
+        SessionProfile.from_opts(:claude,
+          tool_modules: [ModA],
+          agent_id: "a1",
+          task_id: "t1",
+          cwd: "/tmp/a",
+          model: "m1",
+          client_opts: [command: ["echo", "x"]]
+        )
+
+      f =
+        SessionProfile.from_opts(:claude,
+          tool_modules: [ModA],
+          agent_id: "a1",
+          task_id: "t1",
+          cwd: "/tmp/a",
+          model: "m1",
+          client_opts: [command: ["echo", "y"]]
+        )
+
+      refute SessionProfile.compatible?(a, b)
+      refute SessionProfile.compatible?(a, c)
+      refute SessionProfile.compatible?(a, d)
+      refute SessionProfile.compatible?(e, f)
+    end
+  end
+
+  describe "tool_enabled?/1" do
+    test "true when tool modules present" do
+      assert SessionProfile.tool_enabled?(
+               SessionProfile.new(provider: :claude, tool_modules: [ModA])
+             )
+
+      refute SessionProfile.tool_enabled?(SessionProfile.new(provider: :claude, tool_modules: []))
     end
   end
 

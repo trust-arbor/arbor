@@ -274,7 +274,8 @@ defmodule Arbor.AI.AcpPoolTest do
 
   describe "profile-based matching" do
     test "sessions with same profile are reused" do
-      opts = [client_opts: @test_client_opts, agent_id: "agent_1", tool_modules: [ModA]]
+      # No tools: tool-enabled sessions are closed on checkin (not reused).
+      opts = [client_opts: @test_client_opts, agent_id: "agent_1", task_id: "task_same"]
       {:ok, s1} = AcpPool.checkout(:test, opts)
       :ok = AcpPool.checkin(s1)
 
@@ -307,6 +308,103 @@ defmodule Arbor.AI.AcpPoolTest do
       {:ok, s2} = AcpPool.checkout(:test, client_opts: @test_client_opts, trust_domain: :external)
       refute s1 == s2
     end
+
+    test "security regression: different task/cwd/model/immutable config cannot reuse" do
+      base = [client_opts: @test_client_opts, agent_id: "agent_x"]
+
+      {:ok, s1} =
+        AcpPool.checkout(:test, base ++ [task_id: "task_a", cwd: "/tmp/wt_a", model: "m1"])
+
+      :ok = AcpPool.checkin(s1)
+
+      {:ok, s_task} =
+        AcpPool.checkout(:test, base ++ [task_id: "task_b", cwd: "/tmp/wt_a", model: "m1"])
+
+      refute s_task == s1
+      :ok = AcpPool.close_session(s_task)
+
+      {:ok, s_cwd} =
+        AcpPool.checkout(:test, base ++ [task_id: "task_a", cwd: "/tmp/wt_b", model: "m1"])
+
+      refute s_cwd == s1
+      :ok = AcpPool.close_session(s_cwd)
+
+      {:ok, s_model} =
+        AcpPool.checkout(:test, base ++ [task_id: "task_a", cwd: "/tmp/wt_a", model: "m2"])
+
+      refute s_model == s1
+      :ok = AcpPool.close_session(s_model)
+
+      {:ok, s_cfg} =
+        AcpPool.checkout(:test,
+          agent_id: "agent_x",
+          task_id: "task_a",
+          cwd: "/tmp/wt_a",
+          model: "m1",
+          client_opts: Keyword.put(@test_client_opts, :extra, :different)
+        )
+
+      refute s_cfg == s1
+      :ok = AcpPool.close_session(s_cfg)
+
+      # Same complete profile still reuses the original idle session
+      {:ok, s_same} =
+        AcpPool.checkout(:test, base ++ [task_id: "task_a", cwd: "/tmp/wt_a", model: "m1"])
+
+      assert s_same == s1
+    end
+
+    test "security regression: nil agent_id is not a wildcard for non-nil identity" do
+      {:ok, s_nil} = AcpPool.checkout(:test, client_opts: @test_client_opts, agent_id: nil)
+      :ok = AcpPool.checkin(s_nil)
+
+      {:ok, s_named} =
+        AcpPool.checkout(:test, client_opts: @test_client_opts, agent_id: "agent_named")
+
+      refute s_named == s_nil
+    end
+
+    test "security regression: two tasks cannot inherit prior provider cwd/session process" do
+      agent = "coding_agent_#{System.unique_integer([:positive])}"
+      cwd_a = "/tmp/task_a_#{System.unique_integer([:positive])}"
+      cwd_b = "/tmp/task_b_#{System.unique_integer([:positive])}"
+
+      {:ok, task_a_session} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          agent_id: agent,
+          task_id: "task_a",
+          cwd: cwd_a,
+          model: "coder"
+        )
+
+      :ok = AcpPool.checkin(task_a_session)
+      assert Process.alive?(task_a_session)
+
+      {:ok, task_b_session} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          agent_id: agent,
+          task_id: "task_b",
+          cwd: cwd_b,
+          model: "coder"
+        )
+
+      # Different task must mint a fresh local process — never the prior task's idle session
+      refute task_b_session == task_a_session
+      assert Process.alive?(task_b_session)
+
+      sessions = AcpPool.sessions()
+      task_b_info = Enum.find(sessions, &(&1.pid == task_b_session))
+      assert task_b_info.task_id == "task_b"
+      assert task_b_info.cwd == Path.expand(cwd_b)
+
+      # Prior task session remains idle under its own profile and is not adopted
+      task_a_info = Enum.find(sessions, &(&1.pid == task_a_session))
+      assert task_a_info.status == :idle
+      assert task_a_info.task_id == "task_a"
+      assert task_a_info.cwd == Path.expand(cwd_a)
+    end
   end
 
   describe "affinity" do
@@ -338,6 +436,85 @@ defmodule Arbor.AI.AcpPoolTest do
 
       refute replacement == session
       assert length(AcpPool.sessions()) == 1
+    end
+
+    test "security regression: affinity cannot cross agent/trust/cwd/task" do
+      {:ok, s1} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          affinity_key: "shared",
+          agent_id: "agent_a",
+          trust_domain: :internal,
+          task_id: "task_1",
+          cwd: "/tmp/a"
+        )
+
+      :ok = AcpPool.checkin(s1)
+
+      assert {:error, :affinity_conflict} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 affinity_key: "shared",
+                 agent_id: "agent_b",
+                 trust_domain: :internal,
+                 task_id: "task_1",
+                 cwd: "/tmp/a"
+               )
+
+      assert {:error, :affinity_conflict} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 affinity_key: "shared",
+                 agent_id: "agent_a",
+                 trust_domain: :external,
+                 task_id: "task_1",
+                 cwd: "/tmp/a"
+               )
+
+      assert {:error, :affinity_conflict} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 affinity_key: "shared",
+                 agent_id: "agent_a",
+                 trust_domain: :internal,
+                 task_id: "task_2",
+                 cwd: "/tmp/a"
+               )
+
+      assert {:error, :affinity_conflict} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 affinity_key: "shared",
+                 agent_id: "agent_a",
+                 trust_domain: :internal,
+                 task_id: "task_1",
+                 cwd: "/tmp/b"
+               )
+
+      # Original affinity session remains the sole entry
+      sessions = AcpPool.sessions()
+      assert length(sessions) == 1
+      assert hd(sessions).pid == s1
+      assert hd(sessions).status == :idle
+    end
+
+    test "security regression: busy affinity does not duplicate or overwrite" do
+      opts = [
+        client_opts: @test_client_opts,
+        affinity_key: "busy_key",
+        agent_id: "agent_busy",
+        task_id: "task_busy"
+      ]
+
+      {:ok, s1} = AcpPool.checkout(:test, opts)
+
+      assert {:error, :affinity_busy} = AcpPool.checkout(:test, opts)
+
+      sessions = AcpPool.sessions()
+      assert length(sessions) == 1
+      assert hd(sessions).pid == s1
+      assert hd(sessions).status == :checked_out
+      assert hd(sessions).checkout_count == 1
     end
   end
 
@@ -461,7 +638,7 @@ defmodule Arbor.AI.AcpPoolTest do
       assert info.taint == :tainted
     end
 
-    test "checkin tears down ToolServer" do
+    test "checkin tears down ToolServer and closes tool-enabled session" do
       {:ok, session} =
         AcpPool.checkout(:test,
           client_opts: @test_client_opts,
@@ -477,18 +654,19 @@ defmodule Arbor.AI.AcpPoolTest do
       :ok = AcpPool.checkin(session)
       Process.sleep(50)
 
-      # ToolServer should be stopped
-      sessions = AcpPool.sessions()
-      [info] = sessions
-      assert info.tool_server_port == nil
+      # Tool-enabled sessions must not remain idle after ToolServer teardown
+      assert AcpPool.sessions() == []
       assert {:error, _} = tool_server_ping(port)
+      refute Process.alive?(session)
     end
 
-    test "reused session gets a fresh ToolServer on checkout" do
+    test "security regression: tool-enabled checkin closes session; later checkout is new pid/endpoint" do
       {:ok, session} =
         AcpPool.checkout(:test,
           client_opts: @test_client_opts,
-          tool_modules: [TestToolAction]
+          tool_modules: [TestToolAction],
+          agent_id: "tool_agent",
+          task_id: "task_tools"
         )
 
       sessions = AcpPool.sessions()
@@ -497,27 +675,34 @@ defmodule Arbor.AI.AcpPoolTest do
       assert port1 != nil
 
       :ok = AcpPool.checkin(session)
+      Process.sleep(50)
 
-      # Checkout again with same profile (will reuse session)
-      {:ok, reused} =
+      assert AcpPool.sessions() == []
+      refute Process.alive?(session)
+      assert {:error, _} = tool_server_ping(port1)
+
+      # Next checkout must mint a fresh AcpSession + ToolServer endpoint
+      {:ok, next} =
         AcpPool.checkout(:test,
           client_opts: @test_client_opts,
-          tool_modules: [TestToolAction]
+          tool_modules: [TestToolAction],
+          agent_id: "tool_agent",
+          task_id: "task_tools"
         )
 
-      assert reused == session
+      refute next == session
+      assert Process.alive?(next)
 
       sessions = AcpPool.sessions()
-      [info] = sessions
-      port2 = info.tool_server_port
-      # New ToolServer on a (likely) different port
+      [info2] = sessions
+      port2 = info2.tool_server_port
       assert port2 != nil
       assert {:ok, _} = tool_server_ping(port2)
 
-      :ok = AcpPool.close_session(session)
+      :ok = AcpPool.close_session(next)
     end
 
-    test "auto-checkin on caller crash also tears down ToolServer" do
+    test "auto-checkin on caller crash closes tool-enabled session" do
       test_pid = self()
 
       caller =
@@ -532,7 +717,7 @@ defmodule Arbor.AI.AcpPoolTest do
           Process.sleep(:infinity)
         end)
 
-      _session =
+      session =
         receive do
           {:session, s} -> s
         end
@@ -546,12 +731,10 @@ defmodule Arbor.AI.AcpPoolTest do
       Process.exit(caller, :kill)
       Process.sleep(100)
 
-      # Session should be auto-checked-in with ToolServer stopped
-      sessions = AcpPool.sessions()
-      [info] = sessions
-      assert info.status == :idle
-      assert info.taint == :tainted
-      assert info.tool_server_port == nil
+      # Tool-enabled auto-checkin must close/remove, not return idle
+      assert AcpPool.sessions() == []
+      assert {:error, _} = tool_server_ping(port)
+      refute Process.alive?(session)
     end
   end
 

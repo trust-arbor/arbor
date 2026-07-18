@@ -3,9 +3,10 @@ defmodule Arbor.AI.AcpPool do
   Session pool for ACP agent connections.
 
   Manages a pool of `AcpSession` processes across multiple providers (Claude,
-  Gemini, Codex, etc.). Uses `SessionProfile` for capability-based matching:
-  sessions are matched by profile hash (provider + tool set), trust domain,
-  and agent identity.
+  Gemini, Codex, etc.). Uses `SessionProfile` for fail-closed matching over
+  every immutable reuse boundary: provider, tools, agent identity, trust
+  domain, model, canonical cwd/workspace, task scope, and a deterministic
+  fingerprint of immutable startup configuration.
 
   ## Usage
 
@@ -18,20 +19,30 @@ defmodule Arbor.AI.AcpPool do
       {:ok, session} = AcpPool.checkout(:claude,
         agent_id: "interviewer",
         tool_modules: [Arbor.Actions.Trust.ListPresets],
-        trust_domain: :internal
+        trust_domain: :internal,
+        task_id: "task_123",
+        cwd: "/path/to/worktree"
       )
 
-      # Sticky affinity (always same session for this key)
+      # Sticky affinity (same key → same session only when profile matches)
       {:ok, session} = AcpPool.checkout(:claude,
         affinity_key: "interviewer_main"
       )
 
   ## Matching Rules
 
-  1. If `affinity_key` matches an existing session → return that exact session
-  2. Same `profile_hash` + same `trust_domain` + same `agent_id` → reuse
-  3. Different `agent_id` → never reuse (mint fresh)
-  4. No match → spawn new session if below capacity
+  1. If `affinity_key` matches an existing session and the full profile is
+     compatible → return that exact session. Incompatible affinity returns
+     `{:error, :affinity_conflict}`; a busy affinity session returns
+     `{:error, :affinity_busy}` (never mint a duplicate or overwrite affinity).
+  2. Same complete `SessionProfile` (including task scope and cwd) → reuse a
+     compatible idle local process
+  3. Different task/cwd/model/agent/trust/startup config → never reuse
+  4. Tool-enabled sessions are closed on checkin (provider MCP registration is
+     immutable); the next checkout mints a fresh `AcpSession` + ToolServer
+  5. Explicit cross-task provider continuity is only via managed
+     `resume_provider` + `resume_session_id` (fresh local process + load)
+  6. No match → spawn new session if below capacity
 
   ## Configuration
 
@@ -107,15 +118,22 @@ defmodule Arbor.AI.AcpPool do
 
   ## Options
 
-  - `:model` — model override for the session
-  - `:cwd` — working directory for the session
+  - `:model` — model override for the session (immutable reuse boundary)
+  - `:cwd` / `:workspace` — working directory (canonicalized; immutable)
   - `:timeout` — checkout timeout (default: 30_000)
-  - `:agent_id` — owning Arbor agent ID
+  - `:agent_id` — owning Arbor agent ID (`nil` matches only `nil`)
+  - `:task_id` — coding task scope; same task may reuse a compatible process,
+    different tasks never inherit provider conversation or cwd implicitly
   - `:tool_modules` — list of Jido action modules for this session
   - `:trust_domain` — security boundary (sessions never cross domains)
-  - `:affinity_key` — sticky routing key (same key → same session)
+  - `:adapter_opts` / `:client_opts` / `:capabilities` — immutable startup
+    configuration (fingerprinted; secrets never stored on the profile)
+  - `:affinity_key` — sticky routing key (never bypasses profile compatibility)
   - `:name` — human-readable session name
   - `:tags` — arbitrary metadata map
+
+  Pool-only options such as `:task_id`, `:tool_modules`, `:trust_domain`,
+  `:affinity_key`, `:name`, and `:tags` are not forwarded to `AcpSession.start`.
   """
   @spec checkout(atom(), keyword()) :: {:ok, pid()} | {:error, term()}
   def checkout(provider, opts \\ []) do
@@ -342,19 +360,31 @@ defmodule Arbor.AI.AcpPool do
   def handle_call({:checkin, session_pid}, _from, state) do
     case find_session_by_pid(state, session_pid) do
       {:ok, ref, entry} ->
-        case validate_session(entry.pid) do
-          :ok ->
-            state = checkin_session(state, ref, entry)
-            {:reply, :ok, state}
-
-          {:error, reason} ->
-            Logger.debug(
-              "AcpPool: removing non-ready session #{inspect(entry.pid)} on checkin (#{inspect(reason)})"
-            )
+        cond do
+          tool_bound_session?(entry) ->
+            # Provider MCP registration is immutable at create time. After the
+            # per-session ToolServer is torn down the process must not be reused.
+            Logger.debug("AcpPool: closing tool-enabled session #{inspect(entry.pid)} on checkin")
 
             state = remove_session(state, ref)
             safe_close(entry.pid)
             {:reply, :ok, state}
+
+          true ->
+            case validate_session(entry.pid) do
+              :ok ->
+                state = checkin_session(state, ref, entry)
+                {:reply, :ok, state}
+
+              {:error, reason} ->
+                Logger.debug(
+                  "AcpPool: removing non-ready session #{inspect(entry.pid)} on checkin (#{inspect(reason)})"
+                )
+
+                state = remove_session(state, ref)
+                safe_close(entry.pid)
+                {:reply, :ok, state}
+            end
         end
 
       :not_found ->
@@ -399,7 +429,10 @@ defmodule Arbor.AI.AcpPool do
           name: entry.profile && entry.profile.name,
           urn: entry.profile && SessionProfile.urn(entry.profile),
           agent_id: entry.profile && entry.profile.agent_id,
-          tool_count: entry.profile && length(entry.profile.tool_modules),
+          task_id: entry.profile && entry.profile.task_id,
+          cwd: entry.profile && entry.profile.cwd,
+          model: entry.profile && entry.profile.model,
+          tool_count: entry.profile && length(entry.profile.tool_modules || []),
           trust_domain: entry.profile && entry.profile.trust_domain,
           tool_server_port: entry.tool_server && entry.tool_server.port,
           taint: entry.taint,
@@ -416,20 +449,27 @@ defmodule Arbor.AI.AcpPool do
     profile = SessionProfile.from_opts(provider, opts)
     tool_modules = Keyword.get(opts, :tool_modules, [])
     agent_id = Keyword.get(opts, :agent_id)
+    # ToolServer workspace scope is the structured :workspace plan, not bare cwd.
     workspace = Keyword.get(opts, :workspace)
 
     case find_by_affinity(state, profile) do
       {:ok, entry, state} ->
         state =
-          reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id, workspace)
+          checkout_compatible_session(state, entry, caller_pid, tool_modules, agent_id, workspace)
 
         finalize_existing_checkout(state, entry, opts)
+
+      {:conflict, state} ->
+        {:reply, {:error, :affinity_conflict}, state}
+
+      {:busy, state} ->
+        {:reply, {:error, :affinity_busy}, state}
 
       {:no_affinity, state} ->
         case find_compatible_session(state, profile) do
           {:ok, entry, state} ->
             state =
-              reattach_tools_and_checkout(
+              checkout_compatible_session(
                 state,
                 entry,
                 caller_pid,
@@ -568,37 +608,50 @@ defmodule Arbor.AI.AcpPool do
 
   # -- Private: Matching --
 
-  # Hard affinity: if the request has an affinity_key, find the exact session
+  # Hard affinity: if the request has an affinity_key, find the exact session.
+  # Affinity never bypasses SessionProfile.compatible?/2.
   defp find_by_affinity(state, %SessionProfile{affinity_key: nil}), do: {:no_affinity, state}
 
-  defp find_by_affinity(state, %SessionProfile{affinity_key: key}) do
+  defp find_by_affinity(state, %SessionProfile{affinity_key: key} = requested) do
     case Map.get(state.by_affinity, key) do
       nil ->
         {:no_affinity, state}
 
       ref ->
         case Map.get(state.sessions, ref) do
-          %Entry{status: :idle, pid: pid} = entry ->
-            case validate_session(pid) do
-              :ok ->
-                {:ok, entry, state}
+          %Entry{status: :idle, pid: pid, profile: profile} = entry ->
+            if SessionProfile.compatible?(requested, profile) do
+              case validate_session(pid) do
+                :ok ->
+                  {:ok, entry, state}
 
-              {:error, _} ->
-                safe_close(pid)
-                {:no_affinity, remove_session(state, ref)}
+                {:error, _} ->
+                  safe_close(pid)
+                  {:no_affinity, remove_session(state, ref)}
+              end
+            else
+              {:conflict, state}
+            end
+
+          %Entry{status: :checked_out, profile: profile} ->
+            if SessionProfile.compatible?(requested, profile) do
+              # Busy same-affinity checkout must not mint a duplicate or overwrite.
+              {:busy, state}
+            else
+              {:conflict, state}
             end
 
           %Entry{status: :checked_out} ->
-            # Session exists but is busy — don't mint a duplicate, wait
-            {:no_affinity, state}
+            {:busy, state}
 
           nil ->
-            {:no_affinity, state}
+            # Stale affinity index — drop it and treat as no affinity.
+            {:no_affinity, %{state | by_affinity: Map.delete(state.by_affinity, key)}}
         end
     end
   end
 
-  # Profile-compatible matching: same hash + trust domain + agent_id
+  # Profile-compatible matching: full immutable SessionProfile must match.
   defp find_compatible_session(state, %SessionProfile{} = requested) do
     refs =
       Map.get(state.by_profile_hash, requested.profile_hash, MapSet.new())
@@ -670,6 +723,7 @@ defmodule Arbor.AI.AcpPool do
   defp spawn_session(provider, opts) do
     tool_modules = Keyword.get(opts, :tool_modules, [])
     agent_id = Keyword.get(opts, :agent_id)
+    # Structured workspace plan for ToolServer; bare :cwd stays a session opt only.
     workspace = Keyword.get(opts, :workspace)
 
     # Start a ToolServer if the session needs action tools
@@ -680,7 +734,6 @@ defmodule Arbor.AI.AcpPool do
       |> Keyword.put(:provider, provider)
       |> Keyword.put_new(:owner, self())
       |> Keyword.put_new(:client_opts, Keyword.get(opts, :client_opts))
-      |> Keyword.put_new(:workspace, Keyword.get(opts, :workspace))
       |> Keyword.put_new(:agent_id, agent_id)
 
     # Pass mcp_servers so AcpSession can include them in create_session
@@ -691,8 +744,26 @@ defmodule Arbor.AI.AcpPool do
         session_opts
       end
 
-    # Remove pool-specific opts before passing to AcpSession
-    pool_keys = [:tool_modules, :trust_domain, :affinity_key, :name, :tags]
+    # Remove pool-only / unsupported child opts before passing to AcpSession.
+    # task_id scopes pool reuse but is not an AcpSession start option.
+    pool_keys = [
+      :tool_modules,
+      :trust_domain,
+      :affinity_key,
+      :name,
+      :tags,
+      :task_id,
+      :principal_id,
+      :use_pool,
+      :pooled,
+      :return_to_pool,
+      :pool_module,
+      :session_module,
+      :create_session,
+      :session_id,
+      :server
+    ]
+
     session_opts = Keyword.drop(session_opts, pool_keys)
 
     deadline = Keyword.fetch!(opts, :deadline_ms)
@@ -783,10 +854,18 @@ defmodule Arbor.AI.AcpPool do
     {state, ref}
   end
 
-  # Start a fresh ToolServer for a reused session if it needs tools
-  defp reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id, workspace) do
-    {tool_server, _mcp_servers} = maybe_start_tool_server(tool_modules, agent_id, workspace)
-    checkout_session(state, entry.ref, caller_pid, tool_server)
+  # Compatible idle reuse only applies to sessions that are not tool-bound
+  # after ToolServer teardown (tool-enabled entries are closed on checkin).
+  defp checkout_compatible_session(state, entry, caller_pid, tool_modules, agent_id, workspace) do
+    if tool_bound_session?(entry) or tool_modules != [] do
+      # Defensive: never reattach a replacement ToolServer the provider does not know about.
+      # Mint path should have been taken; if we somehow reach here, check out without reattach
+      # and leave tools as-is only when the original endpoint is still live.
+      checkout_session(state, entry.ref, caller_pid, entry.tool_server)
+    else
+      {_tool_server, _mcp} = maybe_start_tool_server(tool_modules, agent_id, workspace)
+      checkout_session(state, entry.ref, caller_pid, nil)
+    end
   end
 
   defp checkout_session(state, ref, caller_pid, tool_server) do
@@ -801,7 +880,7 @@ defmodule Arbor.AI.AcpPool do
               entry
               | status: :checked_out,
                 checked_out_by: caller_pid,
-                tool_server: tool_server || entry.tool_server,
+                tool_server: tool_server,
                 last_active: now,
                 checkout_count: entry.checkout_count + 1
             }
@@ -812,22 +891,12 @@ defmodule Arbor.AI.AcpPool do
 
   defp checkin_session(state, ref, _entry) do
     now = System.monotonic_time(:millisecond)
-
-    {_caller_mon, monitors} =
-      Enum.reduce(state.monitors, {nil, state.monitors}, fn
-        {mon_ref, {:caller, ^ref}}, {_found, acc} ->
-          Process.demonitor(mon_ref, [:flush])
-          {mon_ref, Map.delete(acc, mon_ref)}
-
-        _, acc ->
-          acc
-      end)
+    monitors = demonitor_callers(state.monitors, ref)
 
     %{
       state
       | sessions:
           Map.update!(state.sessions, ref, fn entry ->
-            # Tear down ToolServer on checkin to prevent tool leakage
             if entry.tool_server do
               ToolServer.stop(entry.tool_server.ref)
             end
@@ -850,30 +919,59 @@ defmodule Arbor.AI.AcpPool do
 
     case Map.get(state.sessions, session_ref) do
       %Entry{status: :checked_out} = entry ->
-        now = System.monotonic_time(:millisecond)
+        if tool_bound_session?(entry) do
+          Logger.debug(
+            "AcpPool: closing tool-enabled session #{inspect(entry.pid)} on auto-checkin"
+          )
 
-        # Tear down ToolServer on auto-checkin too
-        if entry.tool_server do
-          ToolServer.stop(entry.tool_server.ref)
+          state = %{state | monitors: monitors}
+          state = remove_session(state, session_ref)
+          safe_close(entry.pid)
+          state
+        else
+          now = System.monotonic_time(:millisecond)
+
+          if entry.tool_server do
+            ToolServer.stop(entry.tool_server.ref)
+          end
+
+          sessions =
+            Map.update!(state.sessions, session_ref, fn e ->
+              %{
+                e
+                | status: :idle,
+                  checked_out_by: nil,
+                  tool_server: nil,
+                  taint: :tainted,
+                  last_active: now
+              }
+            end)
+
+          %{state | sessions: sessions, monitors: monitors}
         end
-
-        sessions =
-          Map.update!(state.sessions, session_ref, fn e ->
-            %{
-              e
-              | status: :idle,
-                checked_out_by: nil,
-                tool_server: nil,
-                taint: :tainted,
-                last_active: now
-            }
-          end)
-
-        %{state | sessions: sessions, monitors: monitors}
 
       _ ->
         %{state | monitors: monitors}
     end
+  end
+
+  defp tool_bound_session?(%Entry{tool_server: tool_server}) when not is_nil(tool_server),
+    do: true
+
+  defp tool_bound_session?(%Entry{profile: %SessionProfile{} = profile}),
+    do: SessionProfile.tool_enabled?(profile)
+
+  defp tool_bound_session?(_), do: false
+
+  defp demonitor_callers(monitors, ref) do
+    Enum.reduce(monitors, monitors, fn
+      {mon_ref, {:caller, ^ref}}, acc ->
+        Process.demonitor(mon_ref, [:flush])
+        Map.delete(acc, mon_ref)
+
+      _, acc ->
+        acc
+    end)
   end
 
   defp remove_session(state, ref) do

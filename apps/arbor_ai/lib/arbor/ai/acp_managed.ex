@@ -268,6 +268,10 @@ defmodule Arbor.AI.AcpManaged do
     return_to_pool = Keyword.get(opts, :return_to_pool, true)
 
     with {:ok, phase_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      # Pass task_id into the pool so SessionProfile scopes local reuse by task.
+      # Drop only managed/registry opts and child-unsupported keys that the pool
+      # must not treat as AcpSession start options (session_id/create_session are
+      # applied after checkout on a fresh or compatible local process).
       checkout_opts =
         phase_opts
         |> Keyword.drop([
@@ -278,7 +282,6 @@ defmodule Arbor.AI.AcpManaged do
           :pool_module,
           :supervisor,
           :server,
-          :task_id,
           :principal_id,
           :session_id,
           :create_session

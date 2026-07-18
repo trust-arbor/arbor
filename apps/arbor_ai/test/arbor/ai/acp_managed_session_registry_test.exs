@@ -352,9 +352,31 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
        }}
     end
 
+    # Mirror real AcpPool: pool-only opts scope checkout but must not reach AcpSession.
+    @pool_only_opts [
+      :tool_modules,
+      :trust_domain,
+      :affinity_key,
+      :name,
+      :tags,
+      :task_id,
+      :principal_id,
+      :use_pool,
+      :pooled,
+      :return_to_pool,
+      :pool_module,
+      :session_module,
+      :create_session,
+      :session_id,
+      :server,
+      :pool_server
+    ]
+
     @impl true
     def handle_call({:checkout, provider, opts}, {caller, _}, state) do
       session_mod = state.session_module
+
+      if state.test_pid, do: send(state.test_pid, {:pool_checkout_opts, provider, opts, caller})
 
       session_opts =
         state.session_opts
@@ -362,6 +384,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
         |> Keyword.put(:provider, provider)
         |> Keyword.put_new(:owner, caller)
         |> Keyword.put_new(:test_pid, state.test_pid)
+        |> Keyword.drop(@pool_only_opts)
 
       case session_mod.start_link(session_opts) do
         {:ok, pid} ->
@@ -379,7 +402,8 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
                 Map.put(state.sessions, pid, %{
                   owner: caller,
                   owner_ref: owner_ref,
-                  session_ref: session_ref
+                  session_ref: session_ref,
+                  checkout_opts: opts
                 }),
               checked_out: MapSet.put(state.checked_out, pid)
           }
@@ -912,6 +936,56 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
 
       assert result["agent_id"] == agent_id
       assert_receive {:fake_send, _from, "pool-who", ^session_pid, _opts, ^agent_id}, 1_000
+    end
+
+    test "security regression: managed pool checkout gets task scope and strips child-unsupported opts",
+         ctx do
+      start_fake_pool()
+      task_id = "task_scope_#{System.unique_integer([:positive])}"
+      agent_id = "agent_scope_#{System.unique_integer([:positive])}"
+      cwd = "/tmp/managed_scope_#{System.unique_integer([:positive])}"
+
+      assert {:ok, meta} =
+               AI.acp_managed_start_session(
+                 :test,
+                 Keyword.merge(ctx.base_opts,
+                   use_pool: true,
+                   pool_module: FakePool,
+                   agent_id: agent_id,
+                   task_id: task_id,
+                   principal_id: agent_id,
+                   cwd: cwd,
+                   model: "scope-model",
+                   session_id: "provider_resume_should_not_reach_pool",
+                   create_session: true,
+                   test_pid: self()
+                 )
+               )
+
+      assert meta.pooled == true
+
+      assert_receive {:pool_checkout_opts, :test, checkout_opts, _caller}, 1_000
+      # Task scope must reach the pool for SessionProfile matching
+      assert Keyword.get(checkout_opts, :task_id) == task_id
+      assert Keyword.get(checkout_opts, :agent_id) == agent_id
+      assert Keyword.get(checkout_opts, :cwd) == cwd
+      assert Keyword.get(checkout_opts, :model) == "scope-model"
+      # Child-unsupported / post-checkout opts must not be pool start payload
+      refute Keyword.has_key?(checkout_opts, :session_id)
+      refute Keyword.has_key?(checkout_opts, :create_session)
+      refute Keyword.has_key?(checkout_opts, :principal_id)
+      refute Keyword.has_key?(checkout_opts, :use_pool)
+
+      assert_receive {:fake_init, session_pid, ^agent_id, init_opts}, 1_000
+      # Pool strips task_id before starting the child session process
+      refute Keyword.has_key?(init_opts, :task_id)
+      refute Keyword.has_key?(init_opts, :principal_id)
+      assert Keyword.get(init_opts, :agent_id) == agent_id
+      assert Keyword.get(init_opts, :cwd) == cwd
+      assert Process.alive?(session_pid)
+
+      assert {:ok, _} =
+               AI.acp_managed_close_session(meta.worker_session_id, server: ctx.registry)
     end
   end
 

@@ -38,6 +38,23 @@ Plan version is **1**. Minimally required plan fields:
 Reviewed coding plans use the ACP pool by default (`worker.use_pool: true`).
 The workflow returns a pooled process after use while invalidating its
 per-run managed handle.
+
+**Pool reuse is task-scoped and fail-closed.** Managed checkout includes the
+coding `task_id` in the pool `SessionProfile` together with agent identity,
+canonical cwd/workspace, model, tool modules, trust domain, and a fingerprint
+of immutable startup configuration. The same coding task may reuse a compatible
+local `AcpSession` process. A different task must never inherit a prior task's
+provider conversation, terminal cwd, or ToolServer/MCP endpoint merely because
+an idle pooled process exists. One-shot steering such as `cd NEW_WORKTREE` is
+not a workspace rebind.
+
+**Cross-task provider continuity is explicit only.** To continue a prior
+provider conversation, set both `resume_provider` and `resume_session_id`. That
+path mints a fresh local session/process for the new task, then loads the named
+provider conversation; it is never satisfied by silently reusing another task's
+idle pool entry. Omitting resume fields always starts a new provider conversation
+for the new task.
+
 The worker object also accepts:
 
 - `model` - explicit provider model override
@@ -69,7 +86,9 @@ session ID text.
 
 The compiler maps `resume_session_id` only to `acp_start_session.session_id`.
 It does not replace the Engine session, task principal, signer, or verified run
-authorization.
+authorization. Pool affinity never bypasses profile compatibility: an
+incompatible affinity key returns a conflict, and a busy same-affinity checkout
+returns busy rather than minting a duplicate session.
 
 Optional reviewed selectors on the plan:
 
