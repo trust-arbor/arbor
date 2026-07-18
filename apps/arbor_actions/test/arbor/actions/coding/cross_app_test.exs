@@ -21,11 +21,36 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     previous_shell = Application.get_env(:arbor_actions, :mix_shell_module)
     Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Actions.TestMixShell)
 
+    # CrossAppShell defaults to MixAction.run_mix/3, which resolves the reviewed
+    # host wrapper from loaded BEAM ancestry. Contained validation under an
+    # external MIX_BUILD_PATH correctly fails closed with :mix_wrapper_unavailable.
+    # Install a suite-default hermetic runner that uses TestMixShell and never
+    # calls production resolve_mix_wrapper/0. Per-test runner overrides still
+    # save/restore whatever is installed here.
+    previous_runner = Application.get_env(:arbor_actions, :cross_app_mix_runner)
+
+    Application.put_env(
+      :arbor_actions,
+      :cross_app_mix_runner,
+      fn path, args, opts ->
+        Arbor.Actions.TestMixShell.execute_spawn_capable("mix", args,
+          cwd: path,
+          env: Keyword.get(opts, :env, %{})
+        )
+      end
+    )
+
     on_exit(fn ->
       if is_nil(previous_shell) do
         Application.delete_env(:arbor_actions, :mix_shell_module)
       else
         Application.put_env(:arbor_actions, :mix_shell_module, previous_shell)
+      end
+
+      if is_nil(previous_runner) do
+        Application.delete_env(:arbor_actions, :cross_app_mix_runner)
+      else
+        Application.put_env(:arbor_actions, :cross_app_mix_runner, previous_runner)
       end
     end)
 
