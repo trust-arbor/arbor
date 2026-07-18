@@ -327,34 +327,25 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
 
   test "independent majors from distinct owners rework even with different titles and lines" do
     # Live shape: same real defect, distinct titles and nearby-but-different anchors.
-    four_owners = [
-      "correctness",
-      "security",
-      "maintainability",
-      "edge_cases_error_handling"
-    ]
-
-    {:ok, empty} = ReviewLedgerCore.new(%{"perspectives" => four_owners})
-
+    # Use only this module's @perspectives owners (do not invent extra owner names).
     {:ok, ledger} =
-      apply_cycle(empty, 1, %{
+      apply_cycle(new_ledger(), 1, %{
         "correctness" => report(new_findings: [finding("Missing blank rejection", "major", 12)]),
         "security" =>
           report(new_findings: [finding("Whitespace-only returns ok empty", "major", 14)]),
         "maintainability" =>
-          report(new_findings: [finding("Blank binary not treated as error", "major", 11)]),
-        "edge_cases_error_handling" =>
-          report(new_findings: [finding("normalize_label blank path", "major", 15)])
+          report(new_findings: [finding("Blank binary not treated as error", "major", 11)])
       })
 
     findings = Map.values(ledger["findings"])
-    assert length(findings) == 4
+    assert length(findings) == 3
     assert Enum.all?(findings, &(&1["blocks_merge"] == true))
-    assert MapSet.size(MapSet.new(Enum.map(findings, & &1["issue_key"]))) == 4
+    assert MapSet.size(MapSet.new(Enum.map(findings, & &1["issue_key"]))) == 3
+    assert MapSet.new(Enum.map(findings, & &1["owner"])) == MapSet.new(@perspectives)
 
     decision = ReviewLedgerCore.decision(ledger)
     assert decision["disposition"] == "rework"
-    assert length(decision["blocking_ids"]) == 4
+    assert length(decision["blocking_ids"]) == 3
 
     assert Enum.all?(
              decision["blocking_reasons"],
