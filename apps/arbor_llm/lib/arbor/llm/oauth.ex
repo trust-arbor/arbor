@@ -3,20 +3,24 @@ defmodule Arbor.LLM.OAuth do
   Subscription OAuth token access for LLM providers that authenticate against their SUBSCRIPTION
   backends (ChatGPT/Codex, xAI/Grok) rather than metered API keys.
 
-  Tokens are held in an Arbor-owned store (`~/.arbor/oauth/<provider>.json`, 0600), imported once
-  from the provider CLIs' files (`~/.codex`, `~/.grok`) on first use. There is NO OAuth LOGIN flow
-  here yet (that's the OIDC-reuse follow-up — see the roadmap); acquisition piggybacks the CLIs.
-  Refresh IS implemented: when the cached access_token is expiring (or grok, which stores only a
-  refresh_token), we mint a new one (openai: POST auth.openai.com; xai: OIDC-discovered endpoint)
-  and WRITE the rotated tokens BACK to the Arbor store — never the CLI file, so the CLI credential
-  is never consumed. The access_token is used as `Authorization: Bearer` against the
-  subscription-backend endpoints via `Arbor.LLM.OAuth.Responses` (reverse-engineered from
-  ~/code/hermes-agent). Verified live 2026-07-03: agents run on ChatGPT (gpt-5.4-mini) AND SuperGrok
-  (grok-4) subscriptions.
+  Tokens are held in an Arbor store (`~/.arbor/oauth/<provider>.json`, 0600), currently imported
+  from the provider CLIs' files (`~/.codex`, `~/.grok`) on first use. There is no independent Arbor
+  OAuth login flow yet; acquisition piggybacks the CLIs. Refresh is implemented: when the cached
+  access token is expiring (or Grok stores only a refresh token), Arbor refreshes against the
+  provider endpoint and atomically writes the rotated set back to its own store.
 
-  Concurrent refresh is single-flighted per provider via a `:global` transaction so rotating
-  refresh tokens are not consumed twice. Successful rotating refreshes and CLI imports fail closed
-  unless the full token set is durably published with atomic same-directory rename.
+  **Important:** importing a rotating CLI refresh token does not create an independent credential
+  family. Arbor's copy and the external CLI can invalidate each other when either process rotates
+  first. The local store and single-flight lock protect Arbor callers only; they do not coordinate
+  Codex, Grok, or another process. Treat this import mode as transitional and avoid concurrent
+  external refresh until the roadmap's explicit Arbor-owned login or source-owned access-token
+  read-through modes replace it. The access token is used as `Authorization: Bearer` against
+  `Arbor.LLM.OAuth.Responses` subscription endpoints. Verified live 2026-07-03 with ChatGPT and
+  SuperGrok subscriptions; the xAI default advanced to grok-4.5 on 2026-07-18.
+
+  Concurrent in-process refresh is single-flighted per provider via a `:global` transaction.
+  Successful rotating refreshes and CLI imports fail closed unless the full token set is durably
+  published with atomic same-directory rename.
 
   ## SECURITY — Anthropic is HARD-REFUSED
 
