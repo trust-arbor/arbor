@@ -18,11 +18,31 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     previous_shell_module = Application.get_env(:arbor_actions, :mix_shell_module)
     Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Actions.TestMixShell)
 
+    # SecurityRegression.Shell defaults to MixAction.run_mix/3, which resolves
+    # the reviewed host wrapper from loaded BEAM ancestry. Contained validation
+    # under an external MIX_BUILD_PATH correctly fails closed with
+    # :mix_wrapper_unavailable before TestMixShell is reached. Install a
+    # suite-default hermetic runner that still derives revision-private Mix env
+    # and binds the committable tree, without calling resolve_mix_wrapper/0.
+    previous_runner = Application.get_env(:arbor_actions, :security_regression_mix_runner)
+
+    Application.put_env(
+      :arbor_actions,
+      :security_regression_mix_runner,
+      &Arbor.Actions.SecurityRegressionTestMixRunner.run/3
+    )
+
     on_exit(fn ->
       if is_nil(previous_shell_module) do
         Application.delete_env(:arbor_actions, :mix_shell_module)
       else
         Application.put_env(:arbor_actions, :mix_shell_module, previous_shell_module)
+      end
+
+      if is_nil(previous_runner) do
+        Application.delete_env(:arbor_actions, :security_regression_mix_runner)
+      else
+        Application.put_env(:arbor_actions, :security_regression_mix_runner, previous_runner)
       end
     end)
 
@@ -32,6 +52,91 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   setup do
     Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
     :ok
+  end
+
+  test "security regression shell consumes configured mix runner; production default is Mix.run_mix/3",
+       %{tmp_dir: tmp_dir} do
+    # Production default is unchanged when the seam is unset.
+    previous_runner = Application.get_env(:arbor_actions, :security_regression_mix_runner)
+
+    try do
+      Application.delete_env(:arbor_actions, :security_regression_mix_runner)
+
+      default =
+        Application.get_env(
+          :arbor_actions,
+          :security_regression_mix_runner,
+          &Arbor.Actions.Mix.run_mix/3
+        )
+
+      assert default == (&Arbor.Actions.Mix.run_mix/3)
+      assert is_function(default, 3)
+    after
+      if is_nil(previous_runner) do
+        Application.delete_env(:arbor_actions, :security_regression_mix_runner)
+      else
+        Application.put_env(:arbor_actions, :security_regression_mix_runner, previous_runner)
+      end
+    end
+
+    # Configured runner is the subprocess boundary SecurityRegression.Shell uses.
+    parent = self()
+    suite_runner = Application.get_env(:arbor_actions, :security_regression_mix_runner)
+
+    Application.put_env(:arbor_actions, :security_regression_mix_runner, fn path, args, opts ->
+      send(
+        parent,
+        {:security_regression_mix_runner,
+         %{
+           path: path,
+           args: args,
+           revision: Keyword.get(opts, :validation_revision),
+           has_resource: is_map(Keyword.get(opts, :validation_resource)),
+           mix_env: get_in(Keyword.get(opts, :env, %{}), ["MIX_ENV"])
+         }}
+      )
+
+      {:error, :test_runner_invoked}
+    end)
+
+    try do
+      fixture =
+        leased_project(tmp_dir, "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n")
+
+      write_candidate_module(
+        fixture,
+        "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
+      )
+
+      test_path = "test/runner_seam_test.exs"
+
+      write_candidate_test(fixture, test_path, """
+      defmodule Tiny.RunnerSeamTest do
+        use ExUnit.Case
+        test "guest remains denied", do: refute(Tiny.Security.allow_guest?())
+      end
+      """)
+
+      assert {:ok, result} = Validate.run(attested_params(fixture, [test_path]), fixture.context)
+      refute result.passed
+      assert result.reason == "candidate_execution_failed"
+
+      assert_receive {:security_regression_mix_runner, invocation}, 5_000
+      assert invocation.has_resource
+      assert invocation.revision == :candidate
+      assert invocation.mix_env == "test"
+      # Detached candidate snapshot under the validation resource, not the lease.
+      assert is_binary(invocation.path)
+      assert Path.type(invocation.path) == :absolute
+      refute invocation.path == fixture.lease.worktree_path
+      assert ["run", "--no-start" | _rest] = invocation.args
+    after
+      if is_nil(suite_runner) do
+        Application.delete_env(:arbor_actions, :security_regression_mix_runner)
+      else
+        Application.put_env(:arbor_actions, :security_regression_mix_runner, suite_runner)
+      end
+    end
   end
 
   test "reviewed candidate-pass/base-fail evidence is detached, one-shot, and cleaned", %{

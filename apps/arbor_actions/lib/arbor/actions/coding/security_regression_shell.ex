@@ -268,7 +268,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     # accept the local variables as caller env authority.
     _ = {build_path, dependency_path_for(root, resource)}
 
-    case MixAction.run_mix(root, args, opts) do
+    case run_mix(root, args, opts) do
       {:ok, result} ->
         diagnostic = diagnostic(result, resource)
 
@@ -296,6 +296,20 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
       {:error, reason} ->
         Core.incomplete_leg(:execution_failed, diagnostic_for_error(reason, resource))
     end
+  end
+
+  # Production default is MixAction.run_mix/3. Tests may install a hermetic
+  # :security_regression_mix_runner that still enforces contained env + tree
+  # binding without resolving the host Mix wrapper from BEAM ancestry.
+  defp run_mix(path, args, opts) do
+    runner =
+      Application.get_env(
+        :arbor_actions,
+        :security_regression_mix_runner,
+        &MixAction.run_mix/3
+      )
+
+    runner.(path, args, opts)
   end
 
   # Candidate and base receive independent pre-candidate dependency snapshots.
