@@ -856,43 +856,67 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     lease = acquire_linked_worktree!(repo, task_id, agent_id)
     worktree = lease.worktree_path
 
-    # Build an unrelated history in a second clone so the OID exists only if we
-    # never fetch it — instead create an orphan commit via a temporary branch
-    # then delete the branch, keeping the object reachable for rev-parse.
-    # Simpler: commit on main, then reset worktree to base while keeping the
-    # orphaned commit as "prior" is wrong. Use a commit from repo main that is
-    # NOT an ancestor of the worktree HEAD after we rewrite history.
-    #
-    # Concrete: advance worktree, then set prior to a commit that is a
-    # sibling/unrelated object by committing on a detached orphan.
+    # Prove the leased worktree stays on its base lineage: never checkout/detach it.
+    {:ok, leased_head_before} = git_head(worktree)
+    assert leased_head_before == lease.base_commit
+    leased_branch_before = git_symbolic_ref!(worktree)
+
+    # Create a non-ancestor prior on a sibling worktree of the same repo so the
+    # OID is reachable, without mutating the leased worktree's HEAD/branch.
+    sibling =
+      Path.join(
+        System.tmp_dir!(),
+        "prior_non_ancestor_sibling_#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      _ =
+        System.cmd("git", ["-C", repo, "worktree", "remove", "--force", sibling],
+          stderr_to_stdout: true
+        )
+
+      File.rm_rf(sibling)
+    end)
+
     assert {_, 0} =
              System.cmd(
                "git",
-               ["-C", worktree, "checkout", "--orphan", "orphan-side"],
+               ["-C", repo, "worktree", "add", "--detach", sibling, lease.base_commit],
                stderr_to_stdout: true
              )
-
-    File.write!(Path.join(worktree, "orphan.txt"), "unrelated lineage\n")
-
-    assert {_, 0} =
-             System.cmd("git", ["-C", worktree, "add", "orphan.txt"], stderr_to_stdout: true)
 
     assert {_, 0} =
              System.cmd(
                "git",
-               ["-C", worktree, "commit", "-m", "orphan"],
+               ["-C", sibling, "checkout", "--orphan", "orphan-side"],
                stderr_to_stdout: true
              )
 
-    {:ok, orphan} = git_head(worktree)
+    # Orphan checkout retains tracked files as staged; reset so the orphan root
+    # is a distinct tree unrelated to the lease base.
+    assert {_, 0} =
+             System.cmd("git", ["-C", sibling, "rm", "-rf", "--cached", "."],
+               stderr_to_stdout: true
+             )
 
-    # Return to lease base lineage and make ordinary dirt there.
+    File.write!(Path.join(sibling, "orphan.txt"), "unrelated lineage\n")
+
+    assert {_, 0} =
+             System.cmd("git", ["-C", sibling, "add", "orphan.txt"], stderr_to_stdout: true)
+
     assert {_, 0} =
              System.cmd(
                "git",
-               ["-C", worktree, "checkout", "-f", lease.base_commit],
+               ["-C", sibling, "commit", "-m", "orphan"],
                stderr_to_stdout: true
              )
+
+    {:ok, orphan} = git_head(sibling)
+    assert orphan != lease.base_commit
+
+    # Leased worktree identity unchanged after sibling work.
+    assert {:ok, ^leased_head_before} = git_head(worktree)
+    assert git_symbolic_ref!(worktree) == leased_branch_before
 
     File.write!(Path.join(worktree, "feature.txt"), "dirt on base\n")
     {:ok, head} = git_head(worktree)
@@ -909,7 +933,14 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
       |> Map.put(:prior_commit, orphan)
 
     assert {:error, message} = ReviewedCommit.run(params, context)
-    assert message =~ "prior_commit" or message =~ "ancestor"
+
+    assert message ==
+             "prior_commit is not on the lease-base to HEAD ancestry chain"
+
+    # Lease path still on base; dirt uncommitted; no approval published.
+    assert {:ok, ^head} = git_head(worktree)
+    assert git_symbolic_ref!(worktree) == leased_branch_before
+    assert File.exists?(Path.join(worktree, "feature.txt"))
 
     assert Enum.empty?(
              Arbor.Comms.InteractionRouter.pending()
@@ -1088,6 +1119,17 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     case System.cmd("git", ["-C", path, "rev-parse", "HEAD"], stderr_to_stdout: true) do
       {out, 0} -> {:ok, String.trim(out)}
       {out, _} -> {:error, out}
+    end
+  end
+
+  defp git_symbolic_ref!(path) do
+    case System.cmd(
+           "git",
+           ["-C", path, "symbolic-ref", "-q", "HEAD"],
+           stderr_to_stdout: true
+         ) do
+      {out, 0} -> String.trim(out)
+      {out, code} -> flunk("expected symbolic HEAD for #{path}, got #{code}: #{out}")
     end
   end
 

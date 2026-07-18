@@ -590,8 +590,7 @@ defmodule Arbor.Actions.GitTest do
       repo_path: repo_path
     } do
       create_file(repo_path, "head-mismatch.txt", "content")
-      {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
-      head = String.trim(head)
+      snapshot = git_pre_mutation_snapshot!(repo_path)
       fake_head = String.duplicate("a", 40)
 
       assert {:ok, binding} = Arbor.Actions.Mix.committable_tree_binding(repo_path)
@@ -609,16 +608,14 @@ defmodule Arbor.Actions.GitTest do
                )
 
       assert message =~ "head mismatch"
-      {still, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
-      assert String.trim(still) == head
+      assert_git_unmutated!(repo_path, snapshot)
     end
 
     test "security regression: expected_tree mismatch fails before mutation", %{
       repo_path: repo_path
     } do
       create_file(repo_path, "tree-mismatch.txt", "content")
-      {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
-      head = String.trim(head)
+      snapshot = git_pre_mutation_snapshot!(repo_path)
       fake_tree = String.duplicate("b", 40)
 
       assert {:error, message} =
@@ -627,23 +624,21 @@ defmodule Arbor.Actions.GitTest do
                    path: repo_path,
                    message: "must not commit",
                    all: true,
-                   expected_head_commit: head,
+                   expected_head_commit: snapshot.head,
                    expected_tree_oid: fake_tree
                  },
                  %{}
                )
 
       assert message =~ "tree mismatch"
-      {still, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
-      assert String.trim(still) == head
+      assert_git_unmutated!(repo_path, snapshot)
     end
 
     test "security regression: empty expected bindings are invalid not absent", %{
       repo_path: repo_path
     } do
       create_file(repo_path, "empty-bind.txt", "content")
-      {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
-      head = String.trim(head)
+      snapshot = git_pre_mutation_snapshot!(repo_path)
 
       assert {:error, message} =
                Git.Commit.run(
@@ -657,8 +652,7 @@ defmodule Arbor.Actions.GitTest do
                )
 
       assert message =~ "expected_head_commit is invalid"
-      {still, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
-      assert String.trim(still) == head
+      assert_git_unmutated!(repo_path, snapshot)
 
       assert {:error, tree_message} =
                Git.Commit.run(
@@ -672,8 +666,7 @@ defmodule Arbor.Actions.GitTest do
                )
 
       assert tree_message =~ "expected_tree_oid is invalid"
-      {still2, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
-      assert String.trim(still2) == head
+      assert_git_unmutated!(repo_path, snapshot)
     end
 
     test "security regression: absent expected bindings keep ordinary commit behavior", %{
@@ -824,5 +817,28 @@ defmodule Arbor.Actions.GitTest do
     |> File.lstat!()
     |> Map.from_struct()
     |> Map.take([:type, :major_device, :minor_device, :inode])
+  end
+
+  # Boundary promised by expected_* bindings is before staging, not only before
+  # commit. Snapshot HEAD, staged index, and porcelain status (incl. untracked).
+  defp git_pre_mutation_snapshot!(repo_path) do
+    {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+    {index, 0} = System.cmd("git", ["ls-files", "--stage", "-z"], cd: repo_path)
+
+    {status, 0} =
+      System.cmd("git", ["status", "--porcelain", "--untracked-files=all", "-z"], cd: repo_path)
+
+    %{
+      head: String.trim(head),
+      index: index,
+      status: status
+    }
+  end
+
+  defp assert_git_unmutated!(repo_path, snapshot) do
+    after_snap = git_pre_mutation_snapshot!(repo_path)
+    assert after_snap.head == snapshot.head
+    assert after_snap.index == snapshot.index
+    assert after_snap.status == snapshot.status
   end
 end
