@@ -169,7 +169,8 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
       assert profile.cwd == Path.expand("/tmp/ws")
       assert profile.tool_workspace == Path.expand("/tmp/ws")
       assert profile.workspace_plan == nil
-      assert SessionProfile.session_binding(profile) == [cwd: Path.expand("/tmp/ws")]
+      assert Keyword.get(SessionProfile.session_binding(profile), :cwd) == Path.expand("/tmp/ws")
+      refute Keyword.has_key?(SessionProfile.session_binding(profile), :workspace)
     end
 
     test "security regression: cwd nil + binary workspace binds alias cwd" do
@@ -214,7 +215,7 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
 
       assert profile.cwd == expected
       assert profile.workspace_plan == {:directory, expected}
-      assert profile.tool_workspace == nil
+      assert profile.tool_workspace == expected
 
       binding = SessionProfile.session_binding(profile)
       assert Keyword.get(binding, :cwd) == expected
@@ -235,6 +236,34 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
                )
 
       refute SessionProfile.compatible?(profile, other_plan)
+    end
+
+    test "security regression: directory workspace scopes tools; worktree+tools fail closed" do
+      path = "/tmp/dir_tools_#{System.unique_integer([:positive])}"
+      expected = Path.expand(path)
+
+      assert {:ok, with_tools} =
+               SessionProfile.from_opts(:claude,
+                 workspace: {:directory, path},
+                 tool_modules: [ModA]
+               )
+
+      assert with_tools.tool_workspace == expected
+      assert with_tools.workspace_plan == {:directory, expected}
+
+      assert {:error, {:invalid, :workspace, :worktree_tools_unscoped}} =
+               SessionProfile.from_opts(:claude,
+                 workspace: {:worktree, [branch: "feature"]},
+                 tool_modules: [ModA]
+               )
+
+      assert {:ok, worktree_no_tools} =
+               SessionProfile.from_opts(:claude,
+                 workspace: {:worktree, [branch: "feature"]}
+               )
+
+      assert worktree_no_tools.tool_workspace == nil
+      assert worktree_no_tools.tool_modules == []
     end
 
     test "security regression: distinct structured worktree plans are incompatible" do
@@ -273,14 +302,33 @@ defmodule Arbor.AI.AcpPool.SessionProfileTest do
                  workspace: {:worktree, [branch: "ok", extra: true]}
                )
 
+      assert {:error, {:invalid, :workspace, :duplicate_worktree_key}} =
+               SessionProfile.from_opts(:claude,
+                 workspace: {:worktree, [branch: "a", branch: "b"]}
+               )
+
+      assert {:error, {:invalid, :workspace, :too_many_worktree_opts}} =
+               SessionProfile.from_opts(:claude,
+                 workspace: {:worktree, [branch: "a", base_dir: "/tmp/x", branch: "c"]}
+               )
+
       assert {:error, {:invalid, :workspace, :bad_worktree_opts}} =
                SessionProfile.from_opts(:claude, workspace: {:worktree, "not-a-keyword"})
+
+      assert {:error, {:invalid, :workspace, :bad_worktree_opts}} =
+               SessionProfile.from_opts(:claude, workspace: {:worktree, [{:branch, "x"} | :tail]})
 
       assert {:error, {:invalid, :workspace, :blank}} =
                SessionProfile.from_opts(:claude, workspace: {:directory, "   "})
 
       assert {:error, {:invalid, :workspace, :bad_type}} =
                SessionProfile.from_opts(:claude, workspace: {:directory, 123})
+    end
+
+    test "security regression: model is trimmed into session_binding" do
+      assert {:ok, profile} = SessionProfile.from_opts(:claude, model: "  opus-4  ")
+      assert profile.model == "opus-4"
+      assert Keyword.get(SessionProfile.session_binding(profile), :model) == "opus-4"
     end
 
     test "security regression: immutable startup opts are fingerprinted not stored" do

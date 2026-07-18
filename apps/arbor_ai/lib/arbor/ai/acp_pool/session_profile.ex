@@ -109,6 +109,8 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   @max_cwd_bytes 4_096
   @max_model_bytes 256
   @max_tool_modules 64
+  # Only :branch and :base_dir are admitted; reject before walking past this.
+  @max_worktree_opts 2
 
   @doc """
   Build a SessionProfile from options, computing the profile hash.
@@ -163,6 +165,8 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
          {:ok, model} <- validate_model(Keyword.get(opts, :model)),
          {:ok, cwd, workspace_plan, tool_workspace} <- resolve_workspace_scope(opts),
          {:ok, tool_modules} <- validate_tool_modules(Keyword.get(opts, :tool_modules, [])),
+         :ok <-
+           reject_tools_without_bound_workspace(tool_modules, tool_workspace, workspace_plan),
          {:ok, trust_domain} <- validate_trust_domain(Keyword.get(opts, :trust_domain)),
          {:ok, tags} <- validate_tags(Keyword.get(opts, :tags, %{})),
          {:ok, name} <- validate_name(Keyword.get(opts, :name), provider, opts, tool_modules) do
@@ -195,12 +199,13 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   Exact session-start binding derived from a validated profile.
 
   Used by `AcpPool` so spawn never independently re-normalizes raw checkout
-  opts for `:cwd` / structured `:workspace`.
+  opts for `:cwd`, `:model`, or structured `:workspace`.
   """
   @spec session_binding(t()) :: keyword()
   def session_binding(%__MODULE__{} = profile) do
     []
     |> maybe_put_binding(:cwd, profile.cwd)
+    |> maybe_put_binding(:model, profile.model)
     |> maybe_put_binding(:workspace, profile.workspace_plan)
   end
 
@@ -421,13 +426,16 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     end
   end
 
+  # Directory path is known before spawn — bind it as ToolServer FS scope too.
   defp normalize_workspace({:directory, path}) do
     case validate_path_field(path, :workspace) do
-      {:ok, expanded} -> {:ok, {:directory, expanded}, nil, expanded}
+      {:ok, expanded} -> {:ok, {:directory, expanded}, expanded, expanded}
       {:error, reason} -> {:error, reason}
     end
   end
 
+  # Worktree path is materialized later inside AcpSession; tool scope cannot
+  # be bound at profile construction without widening ownership.
   defp normalize_workspace({:worktree, wt_opts}) when is_list(wt_opts) do
     case validate_worktree_opts(wt_opts) do
       {:ok, normalized} -> {:ok, {:worktree, normalized}, nil, nil}
@@ -441,37 +449,75 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
 
   defp normalize_workspace(_), do: {:error, {:invalid, :workspace, :bad_type}}
 
+  # Tool-enabled sessions require a bound ToolServer workspace path. Structured
+  # worktrees only know that path after AcpSession materialization, so tools +
+  # worktree fail closed at the profile boundary.
+  defp reject_tools_without_bound_workspace([], _tool_workspace, _plan), do: :ok
+
+  defp reject_tools_without_bound_workspace(_tools, tool_workspace, _plan)
+       when is_binary(tool_workspace) and tool_workspace != "",
+       do: :ok
+
+  defp reject_tools_without_bound_workspace(_tools, _tool_workspace, {:worktree, _opts}),
+    do: {:error, {:invalid, :workspace, :worktree_tools_unscoped}}
+
+  defp reject_tools_without_bound_workspace(_tools, _tool_workspace, _plan), do: :ok
+
+  # Bounded recursive walk: stop before the option ceiling, admit each allowed
+  # key at most once, and never call Keyword.keys/length on unbounded input.
   defp validate_worktree_opts(opts) when is_list(opts) do
-    if keyword_list?(opts) do
-      allowed = [:branch, :base_dir]
-      keys = Keyword.keys(opts)
+    case walk_worktree_opts(opts, 0, %{}) do
+      {:ok, acc} ->
+        with {:ok, branch} <- validate_worktree_branch(Map.get(acc, :branch)),
+             {:ok, base_dir} <- validate_worktree_base_dir(Map.get(acc, :base_dir)) do
+          normalized =
+            []
+            |> maybe_put_binding(:base_dir, base_dir)
+            |> maybe_put_binding(:branch, branch)
+            |> Enum.sort_by(fn {k, _} -> k end)
 
-      cond do
-        length(keys) > 16 ->
-          {:error, {:invalid, :workspace, :too_many_worktree_opts}}
+          {:ok, normalized}
+        end
 
-        Enum.any?(keys, &(&1 not in allowed)) ->
-          {:error, {:invalid, :workspace, :unknown_worktree_keys}}
-
-        true ->
-          with {:ok, branch} <- validate_worktree_branch(Keyword.get(opts, :branch)),
-               {:ok, base_dir} <- validate_worktree_base_dir(Keyword.get(opts, :base_dir)) do
-            normalized =
-              []
-              |> maybe_put_binding(:branch, branch)
-              |> maybe_put_binding(:base_dir, base_dir)
-              # Stable identity independent of input key order.
-              |> Enum.sort_by(fn {k, _} -> k end)
-
-            {:ok, normalized}
-          end
-      end
-    else
-      {:error, {:invalid, :workspace, :bad_worktree_opts}}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   defp validate_worktree_opts(_), do: {:error, {:invalid, :workspace, :bad_worktree_opts}}
+
+  defp walk_worktree_opts([], _count, acc), do: {:ok, acc}
+
+  defp walk_worktree_opts(_rest, count, _acc) when count >= @max_worktree_opts,
+    do: {:error, {:invalid, :workspace, :too_many_worktree_opts}}
+
+  defp walk_worktree_opts([{key, value} | rest], count, acc) when is_atom(key) do
+    cond do
+      key not in [:branch, :base_dir] ->
+        {:error, {:invalid, :workspace, :unknown_worktree_keys}}
+
+      Map.has_key?(acc, key) ->
+        {:error, {:invalid, :workspace, :duplicate_worktree_key}}
+
+      true ->
+        case rest do
+          [] ->
+            {:ok, Map.put(acc, key, value)}
+
+          [_ | _] ->
+            walk_worktree_opts(rest, count + 1, Map.put(acc, key, value))
+
+          _improper ->
+            {:error, {:invalid, :workspace, :bad_worktree_opts}}
+        end
+    end
+  end
+
+  defp walk_worktree_opts([_bad | _rest], _count, _acc),
+    do: {:error, {:invalid, :workspace, :bad_worktree_opts}}
+
+  defp walk_worktree_opts(_improper, _count, _acc),
+    do: {:error, {:invalid, :workspace, :bad_worktree_opts}}
 
   defp validate_worktree_branch(nil), do: {:ok, nil}
 
@@ -541,10 +587,6 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
         {:ok, trimmed}
     end
   end
-
-  defp keyword_list?([]), do: true
-  defp keyword_list?([{key, _} | rest]) when is_atom(key), do: keyword_list?(rest)
-  defp keyword_list?(_), do: false
 
   defp maybe_put_binding(kw, _key, nil), do: kw
   defp maybe_put_binding(kw, key, value), do: Keyword.put(kw, key, value)

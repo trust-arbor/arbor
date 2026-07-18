@@ -32,27 +32,6 @@ defmodule Arbor.AI.AcpPoolTest do
     @moduledoc false
 
     def start_link(opts) do
-      cond do
-        opts[:gate] ->
-          # Deterministic post-spawn expiry: block client adoption until the
-          # checkout deadline fails await_ready, then proceed so close can run.
-          if is_pid(opts[:test_pid]) do
-            send(opts[:test_pid], {:client_start_gated, self()})
-          end
-
-          receive do
-            :proceed -> :ok
-          after
-            2_000 -> :ok
-          end
-
-        is_integer(opts[:start_delay_ms]) and opts[:start_delay_ms] > 0 ->
-          Process.sleep(opts[:start_delay_ms])
-
-        true ->
-          :ok
-      end
-
       Agent.start_link(fn -> opts end)
     end
 
@@ -65,6 +44,19 @@ defmodule Arbor.AI.AcpPoolTest do
 
       Agent.stop(client, :normal)
     end
+  end
+
+  defmodule ScopeToolAction do
+    @moduledoc false
+    def to_tool do
+      %{
+        name: "scope_tool",
+        description: "workspace scope probe",
+        parameters_schema: %{"type" => "object", "properties" => %{}}
+      }
+    end
+
+    def run(_params, _context), do: {:ok, %{ok: true}}
   end
 
   setup do
@@ -784,12 +776,11 @@ defmodule Arbor.AI.AcpPoolTest do
     end
 
     test "security regression: post-spawn deadline expiry uses graceful close" do
-      # Distinguishes cleanup_expired_spawn's safe_close path from Process.exit
-      # :kill: graceful close stops the session with :normal after await_ready
-      # fails on the post-spawn deadline; kill exits with :killed and skips
-      # terminate/2 client disconnect / workspace cleanup.
+      # Hits cleanup_expired_spawn after await_ready fails on a post-spawn
+      # startup deadline. Process.exit(:kill) yields DOWN :killed; safe_close
+      # yields AcpSession.close stop reason :normal (proven fail on fe189128).
       original = Application.get_env(:arbor_ai, :acp_client_module)
-      Application.put_env(:arbor_ai, :acp_client_module, DisconnectClient)
+      Application.put_env(:arbor_ai, :acp_client_module, StartupClient)
 
       on_exit(fn ->
         if original,
@@ -802,17 +793,16 @@ defmodule Arbor.AI.AcpPoolTest do
       checkout_task =
         Task.async(fn ->
           AcpPool.checkout(:test,
-            timeout: 60,
-            client_opts: [test_pid: test_pid, gate: true]
+            timeout: 40,
+            client_opts: [start_mode: :stall, test_pid: test_pid]
           )
         end)
 
-      assert_receive {:client_start_gated, starter}, 500
+      assert_receive {:pool_start_stalled, startup_worker}, 500
 
-      # Client start worker is linked to the AcpSession that owns initialize_client.
       session_pid =
-        case Process.info(starter, :links) do
-          {:links, links} -> Enum.find(links, &is_pid/1)
+        case Process.info(startup_worker, :links) do
+          {:links, links} -> Enum.find(links, &(is_pid(&1) and &1 != startup_worker))
           _ -> nil
         end
 
@@ -820,13 +810,76 @@ defmodule Arbor.AI.AcpPoolTest do
       ref = Process.monitor(session_pid)
 
       assert {:error, _reason} = Task.await(checkout_task, 1_000)
-      # Best-effort release if the start worker survived the deadline path.
-      send(starter, :proceed)
 
       assert_receive {:DOWN, ^ref, :process, ^session_pid, reason}, 1_000
-      # AcpSession.close stops with :normal; Process.exit(pid, :kill) is :killed.
       assert reason == :normal
       assert AcpPool.sessions() == []
+    end
+
+    test "security regression: structured directory + tools binds ToolServer workspace" do
+      dir =
+        Path.join(System.tmp_dir!(), "acp_pool_dir_tools_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+      expected = Path.expand(dir)
+
+      assert {:ok, session} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 workspace: {:directory, dir},
+                 tool_modules: [ScopeToolAction],
+                 agent_id: "dir_tools_agent",
+                 task_id: "dir_tools_task"
+               )
+
+      [info] = AcpPool.sessions()
+      assert info.cwd == expected
+      assert is_integer(info.tool_server_port)
+
+      session_state = :sys.get_state(session)
+      assert Keyword.get(session_state.opts, :cwd) == expected
+      assert Keyword.get(session_state.opts, :workspace) == {:directory, expected}
+
+      :ok = AcpPool.close_session(session)
+    end
+
+    test "security regression: structured worktree + tools is rejected fail-closed" do
+      assert {:error, {:invalid, :workspace, :worktree_tools_unscoped}} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 workspace: {:worktree, [branch: "tools-blocked"]},
+                 tool_modules: [ScopeToolAction],
+                 agent_id: "wt_tools_agent",
+                 task_id: "wt_tools_task"
+               )
+
+      assert AcpPool.sessions() == []
+    end
+
+    test "security regression: canonical model is bound; caller owner is ignored" do
+      caller = self()
+      pool_pid = Process.whereis(AcpPool)
+
+      assert {:ok, session} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 model: "  spaced-model  ",
+                 owner: caller,
+                 agent_id: "owner_model_agent",
+                 task_id: "owner_model_task"
+               )
+
+      session_state = :sys.get_state(session)
+      assert Keyword.get(session_state.opts, :model) == "spaced-model"
+      # Pool process owns lifecycle; caller-supplied owner must not win.
+      assert session_state.owner == pool_pid
+      refute session_state.owner == caller
+
+      [info] = AcpPool.sessions()
+      assert info.model == "spaced-model"
+
+      :ok = AcpPool.close_session(session)
     end
 
     test "security regression: busy sessions at max still exhaust; idle only is evictable" do

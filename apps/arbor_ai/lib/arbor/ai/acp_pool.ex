@@ -824,9 +824,9 @@ defmodule Arbor.AI.AcpPool do
     |> MapSet.size()
   end
 
-  # Spawn using validated SessionProfile bindings for cwd/workspace so the
+  # Spawn using validated SessionProfile bindings for cwd/model/workspace so the
   # session process identity matches profile_hash (no independent re-expand of
-  # raw opts). Binary tool scope comes from profile.tool_workspace only.
+  # raw opts). ToolServer FS scope comes from profile.tool_workspace only.
   defp spawn_session(provider, opts, %SessionProfile{} = profile) do
     tool_modules = profile.tool_modules || []
     agent_id = profile.agent_id
@@ -835,10 +835,11 @@ defmodule Arbor.AI.AcpPool do
     # Start a ToolServer if the session needs action tools
     {tool_server, mcp_servers} = maybe_start_tool_server(tool_modules, agent_id, tool_workspace)
 
+    # Pool always owns pooled session lifecycle — never adopt caller-supplied owner.
     session_opts =
       opts
       |> Keyword.put(:provider, provider)
-      |> Keyword.put_new(:owner, self())
+      |> Keyword.put(:owner, self())
       |> Keyword.put_new(:client_opts, Keyword.get(opts, :client_opts))
       |> Keyword.put(:agent_id, agent_id)
 
@@ -850,10 +851,10 @@ defmodule Arbor.AI.AcpPool do
         session_opts
       end
 
-    # Drop pool/matching keys and raw cwd/workspace — re-bind from the profile
-    # so AcpSession receives the exact canonical values used for reuse identity.
-    # Managed-only keys (server, session_id, create_session) are stripped by
-    # AcpManaged before checkout — not silently dropped here.
+    # Drop pool/matching keys and raw cwd/model/workspace — re-bind from the
+    # profile so AcpSession receives the exact canonical values used for reuse
+    # identity. Managed-only keys (server, session_id, create_session) are
+    # stripped by AcpManaged before checkout — not silently dropped here.
     pool_only_keys = [
       :tool_modules,
       :trust_domain,
@@ -863,13 +864,16 @@ defmodule Arbor.AI.AcpPool do
       :task_id,
       :principal_id,
       :cwd,
-      :workspace
+      :model,
+      :workspace,
+      :owner
     ]
 
     session_opts =
       session_opts
       |> Keyword.drop(pool_only_keys)
       |> Keyword.merge(SessionProfile.session_binding(profile))
+      |> Keyword.put(:owner, self())
 
     deadline = Keyword.fetch!(opts, :deadline_ms)
 
