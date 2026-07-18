@@ -21,6 +21,18 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
 
   The artifact path is **not** embedded: the owner passes the host (or guest)
   path as the first argument after `--`, followed by selected relative tests.
+
+  ## `mix run` argv contract
+
+  Owner argv is always:
+
+      mix run --no-start <runner.exs> -- <result.etf> <tests...>
+
+  `Mix.Tasks.Run` places everything after the script file into `System.argv/0`,
+  which **includes the leading `--` separator**. Consumers must strip that
+  separator before treating the next token as the owner result path; treating
+  `"--"` as the artifact path writes into the worktree and falsely trips
+  source-identity / workspace-fingerprint checks.
   """
   @spec runner_source(String.t()) :: {:ok, String.t()} | {:error, atom()}
   def runner_source(module_name) when is_binary(module_name) do
@@ -37,6 +49,43 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
   end
 
   def runner_source(_module_name), do: {:error, :invalid_formatter_configuration}
+
+  @doc """
+  Normalize `mix run` script argv into `{artifact_path, test_paths}`.
+
+  Accepts the exact owner form (leading `"--"` then absolute result path then
+  nonempty relative tests) and the already-stripped form for unit fixtures.
+  """
+  @spec normalize_runner_argv([String.t()]) ::
+          {:ok, String.t(), [String.t()]} | {:error, atom()}
+  def normalize_runner_argv(argv) when is_list(argv) do
+    case strip_leading_separator(argv) do
+      [artifact_path | test_paths]
+      when is_binary(artifact_path) and artifact_path != "" and test_paths != [] ->
+        cond do
+          artifact_path == "--" ->
+            {:error, :invalid_artifact_path}
+
+          String.starts_with?(artifact_path, "-") ->
+            {:error, :option_shaped_artifact_path}
+
+          true ->
+            {:ok, artifact_path, test_paths}
+        end
+
+      [artifact_path]
+      when is_binary(artifact_path) and artifact_path != "" ->
+        {:error, :empty_test_paths}
+
+      _other ->
+        {:error, :missing_artifact_path}
+    end
+  end
+
+  def normalize_runner_argv(_), do: {:error, :missing_artifact_path}
+
+  defp strip_leading_separator(["--" | rest]), do: rest
+  defp strip_leading_separator(argv) when is_list(argv), do: argv
 
   defp validate_module_name(module_name) do
     if Regex.match?(~r/\AArborSecurityRegressionFormatter\.M[A-F0-9]{32}\z/, module_name) do
@@ -142,9 +191,18 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
         artifact = {@artifact_tag, @artifact_version, completed}
         bytes = :erlang.term_to_binary(artifact, [:deterministic])
 
-        [artifact_path | _tests] = System.argv()
+        # Mix.Tasks.Run leaves the owner `--` separator in System.argv/0.
+        # Strip it so the next token is the owner result path, not a worktree write.
+        argv =
+          case System.argv() do
+            ["--" | rest] -> rest
+            rest -> rest
+          end
 
-        if not is_binary(artifact_path) or artifact_path == "" do
+        [artifact_path | _tests] = argv
+
+        if not is_binary(artifact_path) or artifact_path == "" or artifact_path == "--" or
+             String.starts_with?(artifact_path, "-") do
           raise "security-regression runner missing artifact path argument"
         end
 
@@ -178,10 +236,23 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       defp failure_from_test?(_failure, _test), do: false
     end
 
-    [artifact_path | test_paths] = System.argv()
+    # Same mix-run argv contract as suite_finished: strip the leading `--`
+    # that Mix.Tasks.Run retains after `mix run --no-start runner.exs -- ...`.
+    argv =
+      case System.argv() do
+        ["--" | rest] -> rest
+        rest -> rest
+      end
 
-    if not is_binary(artifact_path) or artifact_path == "" do
+    [artifact_path | test_paths] = argv
+
+    if not is_binary(artifact_path) or artifact_path == "" or artifact_path == "--" or
+         String.starts_with?(artifact_path, "-") do
       raise "security-regression runner missing artifact path argument"
+    end
+
+    if test_paths == [] do
+      raise "security-regression runner missing reviewed test paths"
     end
 
     Mix.Task.run("test", [

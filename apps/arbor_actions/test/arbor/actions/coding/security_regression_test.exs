@@ -69,6 +69,78 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
              )
   end
 
+  test "security regression: unchanged reviewed source stays stable under run --no-start argv form; mutation remains fail-closed",
+       %{tmp_dir: tmp_dir} do
+    # Proves the new owner argv (`run --no-start runner.exs -- result.etf tests...`)
+    # does not rewrite reviewed source via a mis-parsed System.argv head (`--`),
+    # while a deliberate mid-run worktree mutation still fails closed.
+    fixture =
+      leased_project(tmp_dir, "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n")
+
+    write_candidate_module(
+      fixture,
+      "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
+    )
+
+    test_path = "test/argv_stability_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.ArgvStabilityTest do
+      use ExUnit.Case
+      test "guest remains denied", do: refute(Tiny.Security.allow_guest?())
+    end
+    """)
+
+    original_bytes = File.read!(Path.join(fixture.lease.worktree_path, test_path))
+    params = attested_params(fixture, [test_path])
+
+    assert {:ok, stable} = Validate.run(params, fixture.context)
+    assert stable.passed
+    assert stable.reason == "security_regression_validated"
+    assert stable.base.test_failures == 1
+    assert File.read!(Path.join(fixture.lease.worktree_path, test_path)) == original_bytes
+
+    # Fresh attestation for the deliberate mutation leg.
+    fixture2 =
+      leased_project(tmp_dir, "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n")
+
+    write_candidate_module(
+      fixture2,
+      "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
+    )
+
+    test_path2 = "test/argv_mutation_test.exs"
+
+    write_candidate_test(fixture2, test_path2, """
+    defmodule Tiny.ArgvMutationTest do
+      use ExUnit.Case
+      test "guest remains denied", do: refute(Tiny.Security.allow_guest?())
+    end
+    """)
+
+    Arbor.Actions.TestMixShell.force_worktree_mutation(
+      test_path2,
+      "defmodule Tiny.ArgvMutationTest do\n  use ExUnit.Case\n  test \"mutated\", do: assert(true)\nend\n"
+    )
+
+    try do
+      assert {:ok, mutated} =
+               Validate.run(attested_params(fixture2, [test_path2]), fixture2.context)
+
+      # Mid-run rewrite fails tree binding before suite completion; the public
+      # verdict must stay fail-closed (never security_regression_validated).
+      refute mutated.passed
+
+      assert mutated.reason in [
+               "candidate_execution_failed",
+               "candidate_source_changed",
+               "candidate_suite_incomplete"
+             ]
+    after
+      Arbor.Actions.TestMixShell.clear_worktree_mutation()
+    end
+  end
+
   test "baseline deps are Shell-owned, distinct, private, and ignore host deps markers", %{
     tmp_dir: tmp_dir
   } do

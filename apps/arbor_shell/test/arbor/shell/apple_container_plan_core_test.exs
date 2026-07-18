@@ -331,6 +331,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
           "home" => @projections.home,
           "build" => @projections.build,
           "deps" => @projections.deps,
+          "validation_runner" => @projections.validation_runner,
+          "validation_result" => @projections.validation_result,
           "mix_wrapper_dir" => @projections.mix_wrapper_dir
         },
         "host_runtime_roots" => %{
