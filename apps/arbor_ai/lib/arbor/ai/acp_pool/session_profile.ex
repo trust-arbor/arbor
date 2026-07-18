@@ -438,7 +438,7 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   defp bound_startup_material(opts) do
     with {:ok, adapter, s1} <- bound_canonicalize(get_opt(opts, :adapter_opts), 0, 0),
          {:ok, client, s2} <- bound_canonicalize(get_opt(opts, :client_opts), 0, s1),
-         {:ok, caps, s3} <- bound_canonicalize(get_opt(opts, :capabilities), 0, s2) do
+         {:ok, caps, _s3} <- bound_canonicalize(get_opt(opts, :capabilities), 0, s2) do
       material = {:acp_startup_v1, adapter, client, caps}
       encoded = :erlang.term_to_binary(material, [:deterministic])
 
