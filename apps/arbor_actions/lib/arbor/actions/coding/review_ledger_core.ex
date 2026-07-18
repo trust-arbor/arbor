@@ -773,8 +773,8 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
     Map.put(ledger, "findings", findings)
   end
 
-  # Active majors grouped by exact issue_key → distinct owner count.
-  # Same path/side/line/title from ≥2 owners is corroborated_major.
+  # Active majors grouped by exact issue_key to distinct owner count.
+  # Same path/side/line/title from 2 or more owners is corroborated_major.
   defp major_issue_owner_counts(ledger) do
     ledger
     |> active_major_findings()
