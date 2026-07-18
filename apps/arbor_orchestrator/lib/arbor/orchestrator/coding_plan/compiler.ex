@@ -630,7 +630,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
                 Map.put(
                   attrs,
                   "context_keys",
-                  "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint"
+                  "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,prior_commit"
                 )}
              end
            end) do

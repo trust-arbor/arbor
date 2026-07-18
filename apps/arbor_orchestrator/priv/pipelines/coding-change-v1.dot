@@ -673,11 +673,12 @@ digraph CodingChangeV1 {
   // graph owns branching. Not git_commit + ExecHandler control projection.
   // head_commit + expected_workspace_fingerprint + expected_tree_oid bind
   // approval to the exact inspected/validated candidate content (not just HEAD).
+  // prior_commit allows dirty rework on a trusted previous pipeline commit.
   commit_change [
     type="exec",
     target="action",
     action="coding_reviewed_commit",
-    context_keys="path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid",
+    context_keys="path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid,prior_commit",
     param.all="true",
     output_prefix="commit",
     max_retries="0"

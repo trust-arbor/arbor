@@ -577,7 +577,14 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
 
     grant_git_commit!(agent_id)
     context = build_context(agent_id, build_signer(agent_id)) |> Map.put(:task_id, task_id)
-    params = dirty_params(worktree, advanced_head) |> Map.put(:workspace_id, lease.workspace_id)
+
+    # Even with prior_commit set to the lease base (or absent), arbitrary
+    # advanced HEAD + residual dirt must fail before approval.
+    params =
+      worktree
+      |> dirty_params(advanced_head)
+      |> Map.put(:workspace_id, lease.workspace_id)
+      |> Map.put(:prior_commit, lease.base_commit)
 
     assert {:error, message} = ReviewedCommit.run(params, context)
     assert message =~ "ambiguous dirty worktree" or message =~ "self-commit plus residual"
@@ -589,6 +596,86 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
            )
 
     assert {:ok, ^advanced_head} = git_head(worktree)
+  end
+
+  test "security regression: dirty rework on trusted prior pipeline commit succeeds under lease" do
+    {repo, _head} = init_clean_repo!()
+    agent_id = unique_agent("prior_rework")
+    task_id = unique_task("prior_rework")
+    lease = acquire_linked_worktree!(repo, task_id, agent_id)
+    worktree = lease.worktree_path
+
+    # Simulate a prior reviewed pipeline commit (HEAD advanced from lease base).
+    File.write!(Path.join(worktree, "cycle1.txt"), "first cycle change\n")
+
+    assert {_, 0} =
+             System.cmd("git", ["-C", worktree, "add", "cycle1.txt"], stderr_to_stdout: true)
+
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", worktree, "commit", "-m", "pipeline cycle 1"],
+               stderr_to_stdout: true
+             )
+
+    {:ok, prior} = git_head(worktree)
+    assert prior != lease.base_commit
+
+    # Dirty rework on top of that trusted prior commit.
+    File.write!(Path.join(worktree, "cycle2.txt"), "rework dirt on prior\n")
+
+    grant_git_commit!(agent_id)
+    context = build_context(agent_id, build_signer(agent_id)) |> Map.put(:task_id, task_id)
+
+    params =
+      worktree
+      |> dirty_params(prior)
+      |> Map.put(:workspace_id, lease.workspace_id)
+      |> Map.put(:prior_commit, prior)
+
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    # Linked-worktree tree/fingerprint re-verification can exceed the default 1s.
+    request = await_pending_request(agent_id, 250)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 10_000)
+    assert payload["interaction_outcome"] == ""
+    assert payload["commit_hash"] != prior
+    assert {:ok, new_head} = git_head(worktree)
+    assert new_head == payload["commit_hash"]
+  end
+
+  test "security regression: arbitrary prior_commit text is rejected" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("bad_prior")
+    task_id = unique_task("bad_prior")
+    lease = acquire_linked_worktree!(repo, task_id, agent_id)
+    File.write!(Path.join(lease.worktree_path, "change.txt"), "dirt\n")
+    {:ok, lease_head} = git_head(lease.worktree_path)
+
+    grant_git_commit!(agent_id)
+    context = build_context(agent_id, build_signer(agent_id)) |> Map.put(:task_id, task_id)
+
+    params =
+      lease.worktree_path
+      |> dirty_params(lease_head)
+      |> Map.put(:workspace_id, lease.workspace_id)
+      |> Map.put(:prior_commit, "main")
+
+    assert {:error, message} = ReviewedCommit.run(params, context)
+    assert message =~ "prior_commit"
+
+    assert Enum.empty?(
+             Arbor.Comms.InteractionRouter.pending()
+             |> Enum.filter(&(&1.agent_id == agent_id))
+           )
+
+    # Unused binding silence
+    _ = {repo, head}
   end
 
   test "security regression: validated-tree mismatch fails closed" do
@@ -769,7 +856,8 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     cap
   end
 
-  defp await_pending_request(agent_id, attempts \\ 50)
+  # Tree/fingerprint re-verification before authorize can exceed 1s under suite load.
+  defp await_pending_request(agent_id, attempts \\ 250)
 
   defp await_pending_request(agent_id, 0) do
     flunk("timed out waiting for pending approval for #{agent_id}")

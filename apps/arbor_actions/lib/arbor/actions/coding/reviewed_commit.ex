@@ -32,10 +32,13 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   the approval context, and re-verifies it after the wait, immediately
   before mutation, and against the resulting commit tree.
 
-  Ambiguous mixed mode is rejected when a workspace lease is present:
-  `workspace_dirty=true` while HEAD has already advanced past the lease base
-  (self-commit plus residual dirt). Clean self-commit adoption and dirty
-  uncommitted changes from the lease base remain allowed.
+  Dirty candidates under a workspace lease are allowed only when HEAD equals
+  the lease base (initial cycle) or a trusted pipeline `prior_commit`
+  snapshotted from a previous reviewed cycle. Dirty worktrees whose HEAD is
+  any other worker-advanced commit (self-commit plus residual dirt) fail
+  closed before approval. Clean self-commit adoption remains allowed.
+  `prior_commit` is validated as an exact existing commit object — arbitrary
+  ref text is rejected.
 
   This action is pipeline-internal: registered for Engine pinned execution but
   not enumerated or runnable as an ordinary MCP/agent tool.
@@ -99,6 +102,12 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
         required: false,
         doc: "Active workspace lease that binds linked-worktree Git storage authority"
       ],
+      prior_commit: [
+        type: :string,
+        required: false,
+        doc:
+          "Trusted prior pipeline commit for rework cycles; when dirty, HEAD may equal this or the lease base"
+      ],
       all: [
         type: :boolean,
         default: true,
@@ -136,6 +145,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
       expected_tree_oid: :control,
       validated_tree_oid: :control,
       workspace_id: :control,
+      prior_commit: :control,
       all: :control,
       allow_empty: :control
     }
@@ -157,17 +167,27 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     agent_id = context_agent_id(context)
     dirty? = truthy?(Map.get(params, :workspace_dirty, true))
     workspace_id = workspace_id(params)
+    prior_commit = prior_commit(params)
 
     result =
       with {:ok, bindings} <- resolve_candidate_bindings(path, params),
            git_params = git_commit_params(path, message, params, bindings),
+           # prior_commit is approval control identity only — never a nested Git param.
+           auth_params = Map.put(git_params, :prior_commit, prior_commit),
            resource = Actions.canonical_uri_for(Git.Commit, git_params),
            :ok <- verify_workspace_binding(path, workspace_id, context),
-           :ok <- reject_ambiguous_dirty_advanced_head(path, dirty?, workspace_id, context),
+           :ok <-
+             reject_ambiguous_dirty_advanced_head(
+               path,
+               dirty?,
+               workspace_id,
+               prior_commit,
+               context
+             ),
            :ok <- verify_candidate_content(path, bindings),
            {:ok, signed_request} <- fresh_signed_request(resource, context),
            auth_context = put_signed_request(context, signed_request) do
-        case authorize_commit(agent_id, resource, git_params, auth_context) do
+        case authorize_commit(agent_id, resource, auth_params, auth_context) do
           :authorized ->
             perform_after_approve(
               agent_id,
@@ -176,6 +196,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
               dirty?,
               path,
               workspace_id,
+              prior_commit,
               bindings,
               nil,
               ""
@@ -190,6 +211,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
               dirty?,
               path,
               workspace_id,
+              prior_commit,
               bindings
             )
 
@@ -255,7 +277,8 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
         agent_id: agent_id,
         expected_head_commit: params[:expected_head_commit],
         expected_workspace_fingerprint: params[:expected_workspace_fingerprint],
-        expected_tree_oid: params[:expected_tree_oid]
+        expected_tree_oid: params[:expected_tree_oid],
+        prior_commit: params[:prior_commit]
       }
     )
   end
@@ -270,12 +293,20 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
          dirty?,
          path,
          workspace_id,
+         prior_commit,
          bindings
        ) do
     with {:ok, request_id} <- ApprovalAnswer.validate_request_id(request_id),
          {:ok, decision} <- await_decision(agent_id, request_id, context),
          :ok <- verify_workspace_binding(path, workspace_id, context),
-         :ok <- reject_ambiguous_dirty_advanced_head(path, dirty?, workspace_id, context),
+         :ok <-
+           reject_ambiguous_dirty_advanced_head(
+             path,
+             dirty?,
+             workspace_id,
+             prior_commit,
+             context
+           ),
          # Re-verify exact candidate content after the wait — fail closed on drift.
          :ok <- verify_candidate_content(path, bindings) do
       case decision do
@@ -287,6 +318,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
             dirty?,
             path,
             workspace_id,
+            prior_commit,
             bindings,
             request_id,
             ""
@@ -371,12 +403,20 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
          dirty?,
          path,
          workspace_id,
+         prior_commit,
          bindings,
          request_id,
          note
        ) do
     with :ok <- verify_workspace_binding(path, workspace_id, context),
-         :ok <- reject_ambiguous_dirty_advanced_head(path, dirty?, workspace_id, context),
+         :ok <-
+           reject_ambiguous_dirty_advanced_head(
+             path,
+             dirty?,
+             workspace_id,
+             prior_commit,
+             context
+           ),
          :ok <- verify_candidate_content(path, bindings) do
       if dirty? do
         execute_commit_once(
@@ -647,27 +687,70 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   defp verify_resulting_commit_tree(_path, _commit_hash, _expected_tree),
     do: {:error, :missing_commit_hash}
 
-  # Reject dirty worktrees whose HEAD has already advanced past the lease base.
-  # That mixed mode is a self-commit plus residual dirt and cannot safely map to
-  # either clean adoption or a dirty-from-base commit.
-  defp reject_ambiguous_dirty_advanced_head(_path, false, _workspace_id, _context), do: :ok
-  defp reject_ambiguous_dirty_advanced_head(_path, _dirty?, nil, _context), do: :ok
+  # Dirty worktrees under a lease may only sit on the lease base (initial
+  # cycle) or a trusted prior pipeline commit (rework). Any other advanced
+  # HEAD with residual dirt is the self-commit-plus-dirt failure mode.
+  defp reject_ambiguous_dirty_advanced_head(_path, false, _workspace_id, _prior, _context),
+    do: :ok
 
-  defp reject_ambiguous_dirty_advanced_head(path, true, workspace_id, context)
+  defp reject_ambiguous_dirty_advanced_head(_path, _dirty?, nil, _prior, _context), do: :ok
+
+  defp reject_ambiguous_dirty_advanced_head(path, true, workspace_id, prior_commit, context)
        when is_binary(workspace_id) and workspace_id != "" do
     with {:ok, lease} <- resolve_workspace_lease(workspace_id, context),
          {:ok, base_commit} <- lease_base_commit(lease),
-         {:ok, head} <- read_head(path) do
-      if head == base_commit do
-        :ok
-      else
-        {:error, {:ambiguous_dirty_advanced_head, base_commit, head}}
+         {:ok, head} <- read_head(path),
+         {:ok, trusted_prior} <- validate_optional_prior_commit(path, prior_commit) do
+      cond do
+        head == base_commit ->
+          :ok
+
+        is_binary(trusted_prior) and trusted_prior != "" and head == trusted_prior ->
+          :ok
+
+        true ->
+          {:error, {:ambiguous_dirty_advanced_head, base_commit, head, trusted_prior}}
       end
     end
   end
 
-  defp reject_ambiguous_dirty_advanced_head(_path, _dirty?, _workspace_id, _context),
+  defp reject_ambiguous_dirty_advanced_head(_path, _dirty?, _workspace_id, _prior, _context),
     do: {:error, :invalid_workspace_binding}
+
+  defp prior_commit(params) do
+    param_string(params, [:prior_commit])
+  end
+
+  # Absent prior is fine (initial cycle). Present prior must be an exact full
+  # commit OID that resolves in this repository — never ref names or text.
+  defp validate_optional_prior_commit(_path, nil), do: {:ok, nil}
+
+  defp validate_optional_prior_commit(path, prior)
+       when is_binary(path) and is_binary(prior) and prior != "" do
+    with :ok <- require_git_oid(prior, :missing_prior_commit, :invalid_prior_commit),
+         :ok <- require_prior_commit_object(path, prior) do
+      {:ok, prior}
+    end
+  end
+
+  defp validate_optional_prior_commit(_path, _prior), do: {:error, :invalid_prior_commit}
+
+  defp require_prior_commit_object(path, prior) when is_binary(path) and is_binary(prior) do
+    # Bounded identity check only: exact OID already validated; resolve the
+    # commit object without going through the full Git facade storage audit
+    # (which is not required for a pure object-existence probe).
+    case System.cmd(
+           "git",
+           ["-C", path, "rev-parse", "--verify", "#{prior}^{commit}"],
+           stderr_to_stdout: true
+         ) do
+      {output, 0} ->
+        if String.trim(output) == prior, do: :ok, else: {:error, :prior_commit_missing}
+
+      _other ->
+        {:error, :prior_commit_missing}
+    end
+  end
 
   defp resolve_workspace_lease(workspace_id, context)
        when is_binary(workspace_id) and workspace_id != "" do
@@ -996,10 +1079,24 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   defp format_error({:resulting_tree_lookup_failed, reason}),
     do: "resulting commit tree lookup failed: #{inspect(reason)}"
 
+  defp format_error(:invalid_prior_commit), do: "prior_commit is invalid"
+  defp format_error(:missing_prior_commit), do: "prior_commit is required"
+  defp format_error(:prior_commit_missing), do: "prior_commit is not a commit in this repository"
+
+  defp format_error({:ambiguous_dirty_advanced_head, base, head, prior}) do
+    prior_text = if is_binary(prior) and prior != "", do: prior, else: ""
+
+    "ambiguous dirty worktree with advanced HEAD: lease_base=#{base} head=#{head} " <>
+      "prior_commit=#{prior_text} " <>
+      "(dirty HEAD must equal lease base or trusted prior_commit; " <>
+      "self-commit plus residual dirt is not a safe commit candidate)"
+  end
+
   defp format_error({:ambiguous_dirty_advanced_head, base, head}),
     do:
       "ambiguous dirty worktree with advanced HEAD: lease_base=#{base} head=#{head} " <>
-        "(self-commit plus residual dirt is not a safe commit candidate)"
+        "(dirty HEAD must equal lease base or trusted prior_commit; " <>
+        "self-commit plus residual dirt is not a safe commit candidate)"
 
   defp format_error({:signing_failed, reason}), do: "signing failed: #{inspect(reason)}"
 

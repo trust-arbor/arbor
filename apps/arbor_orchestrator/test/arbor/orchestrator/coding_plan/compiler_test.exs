@@ -122,7 +122,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert commit["action"] == "coding_reviewed_commit"
 
     assert commit["context_keys"] ==
-             "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid"
+             "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid,prior_commit"
 
     assert node_attrs(graph, "hoist_workspace_fingerprint")["source_key"] == "inspect.fingerprint"
 
@@ -170,13 +170,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     commit = node_attrs(graph, "commit_change")
     assert commit["action"] == "coding_reviewed_commit"
 
-    # Fingerprint remains graph-bound; tree is computed inside the action
-    # because commit precedes the two-revision validator.
+    # Fingerprint + prior_commit remain graph-bound; tree is computed inside
+    # the action because commit precedes the two-revision validator.
     assert commit["context_keys"] ==
-             "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint"
+             "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,prior_commit"
 
     refute commit["context_keys"] =~ "expected_tree_oid"
     assert commit["context_keys"] =~ "expected_workspace_fingerprint"
+    assert commit["context_keys"] =~ "prior_commit"
 
     # Reachability keeps the hoist on the path; it is not fed into commit params.
     assert node_attrs(graph, "hoist_expected_tree_oid")["source_key"] ==
