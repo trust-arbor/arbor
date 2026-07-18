@@ -484,6 +484,28 @@ defmodule Arbor.Actions.AcpTest do
               "data" => %{"code" => "AUTH_FAILED"},
               "message" => "unauthorized"
             },
+            # Conjunction fail-closed: FS_NOT_FOUND without top-level -32603.
+            %{
+              "code" => -32_601,
+              "data" => %{"code" => "FS_NOT_FOUND"},
+              "message" => "Path not found."
+            },
+            %{
+              "code" => -32_000,
+              "data" => %{"code" => "FS_NOT_FOUND"}
+            },
+            %{
+              "data" => %{"code" => "FS_NOT_FOUND"},
+              "message" => "Path not found."
+            },
+            # Nested error-envelope lookalike must not classify.
+            %{
+              "error" => %{
+                "code" => -32_603,
+                "data" => %{"code" => "FS_NOT_FOUND"},
+                "message" => "Path not found."
+              }
+            },
             # Atom-keyed lookalike must not classify.
             %{code: -32_603, data: %{code: "FS_NOT_FOUND"}}
           ] do

@@ -91,6 +91,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
             :recovery_reopen_failed when n == 1 ->
               {:error, "recovery reopen failed"}
 
+            # Initial explicit resume: fake the StartSession FS_NOT_FOUND envelope
+            # at the action boundary. With fallback, return the post-retry success
+            # shape (continuity=fresh_recovery + replacement provider id). Without
+            # fallback, surface the wire error so open_worker terminalizes.
+            scenario
+            when scenario in [
+                   :initial_resume_fs_not_found_recovery,
+                   :initial_resume_fs_not_found_no_fallback
+                 ] and n == 0 ->
+              initial_resume_start_response(scenario, args)
+
             _ ->
               replacement? = n > 0
 
@@ -239,6 +250,52 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
         other ->
           {:error, "unexpected action in fixture: #{other}"}
+      end
+    end
+
+    # Live Grok resume-against-new-worktree shape (task_187330). Used only when
+    # the fixture deliberately surfaces the failure without StartSession fallback.
+    @fs_not_found_wire_error %{
+      "code" => -32_603,
+      "data" => %{
+        "code" => "FS_NOT_FOUND",
+        "detail" => "No such file or directory (os error 2)"
+      },
+      "message" => "Path not found."
+    }
+
+    defp initial_resume_start_response(scenario, args) do
+      session_id = Map.get(args, "session_id") || Map.get(args, :session_id)
+      fallback = Map.get(args, "fallback_to_fresh_on_resume_unavailable")
+      fallback = fallback || Map.get(args, :fallback_to_fresh_on_resume_unavailable)
+      resume? = is_binary(session_id) and session_id != ""
+      fallback? = fallback in [true, "true"]
+
+      cond do
+        # Mirrors StartSession after classify_resume_unavailability(FS_NOT_FOUND)
+        # + one create_session retry: graph sees success, not the wire error.
+        scenario == :initial_resume_fs_not_found_recovery and resume? and fallback? ->
+          {:ok,
+           %{
+             worker_session_id: "acp_worker_fixture_fresh",
+             session_id: "provider_sess_fresh_after_fs_not_found",
+             provider: Map.get(args, "provider") || Map.get(args, :provider) || "codex",
+             model: "default",
+             status: "ready",
+             continuity: "fresh_recovery",
+             pooled:
+               (Map.get(args, "use_pool") || Map.get(args, :use_pool) || false) in [
+                 true,
+                 "true"
+               ]
+           }}
+
+        # Without the reviewed fallback flag the action fails closed at open_worker.
+        resume? ->
+          {:error, @fs_not_found_wire_error}
+
+        true ->
+          {:error, "initial resume fixture requires param.session_id"}
       end
     end
 
@@ -394,21 +451,29 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
             end
 
           response_session_id =
-            if scenario in [
-                 :recovery_resumed_success,
-                 :recovery_fresh_success,
-                 :recovery_status_failure_with_id,
-                 :recovery_status_failed_without_id,
-                 :recovery_status_empty_preserves_id,
-                 :recovery_status_empty_no_id,
-                 :recovery_close_failed,
-                 :recovery_reopen_failed,
-                 :recovery_second_send_failed,
-                 :recovery_continuity_new,
-                 :recovery_continuity_unknown
-               ] and n > 0,
-               do: "sess_2",
-               else: "sess_1"
+            cond do
+              scenario == :initial_resume_fs_not_found_recovery ->
+                # Keep the replacement provider conversation id from open_worker.
+                "provider_sess_fresh_after_fs_not_found"
+
+              scenario in [
+                :recovery_resumed_success,
+                :recovery_fresh_success,
+                :recovery_status_failure_with_id,
+                :recovery_status_failed_without_id,
+                :recovery_status_empty_preserves_id,
+                :recovery_status_empty_no_id,
+                :recovery_close_failed,
+                :recovery_reopen_failed,
+                :recovery_second_send_failed,
+                :recovery_continuity_new,
+                :recovery_continuity_unknown
+              ] and n > 0 ->
+                "sess_2"
+
+              true ->
+                "sess_1"
+            end
 
           stop_reason =
             case scenario do
@@ -1105,6 +1170,30 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   end
 
   defp called?(calls, action_name), do: Enum.any?(calls, fn {n, _} -> n == action_name end)
+
+  # Mirror CodingPlan.Compiler rewrite_worker_open for explicit resume plans:
+  # static session_id plus optional fallback flag on open_worker only.
+  defp explicit_resume_open_worker_dot(opts) do
+    fallback? = Keyword.get(opts, :fallback, true)
+
+    insert =
+      if fallback? do
+        ~s(param.use_pool="true",\n    param.session_id="provider-session-from-prior-task",\n    param.fallback_to_fresh_on_resume_unavailable=true,)
+      else
+        ~s(param.use_pool="true",\n    param.session_id="provider-session-from-prior-task",)
+      end
+
+    # Target only open_worker (not open_recovery_worker): the next attrs after
+    # param.use_pool are unique to the initial open node in the packaged graph.
+    original = load_dot()
+
+    needle =
+      ~s(param.use_pool="true",\n    output_prefix="worker",\n    max_retries="0"\n  ])
+
+    replacement = insert <> ~s(\n    output_prefix="worker",\n    max_retries="0"\n  ])
+    assert String.contains?(original, needle)
+    String.replace(original, needle, replacement, global: false)
+  end
 
   defp called_with_prompt?(calls, fragment) do
     Enum.any?(action_prompts(calls), fn prompt ->
@@ -1896,6 +1985,69 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert dot =~ "acp_session_status"
       assert dot =~ "retry_recovered_send"
       assert dot =~ "worker_provider_session_id"
+    end
+
+    test "initial open_worker FS_NOT_FOUND with fallback proceeds as fresh_recovery" do
+      # Narrow DOT patch mirrors CodingPlan.Compiler rewrite for explicit resume:
+      # static param.session_id + param.fallback_to_fresh_on_resume_unavailable=true.
+      # Fake acp_start_session returns the StartSession post-fallback envelope
+      # (real classify/retry is covered by arbor_actions StartSession tests).
+      # Continuity is not an open_worker router key; load-bearing proof is that
+      # open_worker succeeds (does not terminalize) and the replacement managed
+      # handle + post-open continuity reach the implement path.
+      dot = explicit_resume_open_worker_dot(fallback: true)
+
+      assert {{:ok, result}, calls} =
+               run_fixture(:initial_resume_fs_not_found_recovery, %{}, dot)
+
+      assert result.context["status"] == "change_committed"
+      # Managed handle + provider conversation from the fresh-recovery open.
+      assert result.context["worker_session_id"] == "acp_worker_fixture_fresh"
+
+      assert result.context["worker_provider_session_id"] ==
+               "provider_sess_fresh_after_fs_not_found"
+
+      continuity =
+        result.context["worker.continuity"] ||
+          get_in(result.context, ["worker", "continuity"])
+
+      assert continuity == "fresh_recovery"
+
+      starts = Enum.filter(calls, fn {name, _} -> name == "acp_start_session" end)
+      assert length(starts) == 1
+      {_name, start_args} = hd(starts)
+      assert start_args["session_id"] == "provider-session-from-prior-task"
+      assert start_args["fallback_to_fresh_on_resume_unavailable"] in [true, "true"]
+
+      # Implement must run on the replacement worker — proof open_worker did not
+      # terminalize and the replacement handle was hoisted.
+      sends = Enum.filter(calls, fn {name, _} -> name == "acp_send_message" end)
+      assert length(sends) >= 1
+
+      assert Enum.at(sends, 0) |> elem(1) |> Map.fetch!("worker_session_id") ==
+               "acp_worker_fixture_fresh"
+
+      refute called?(calls, "coding_workspace_recovery_summary")
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
+    end
+
+    test "initial open_worker FS_NOT_FOUND without fallback terminalizes at open_worker" do
+      dot = explicit_resume_open_worker_dot(fallback: false)
+
+      assert {{:ok, result}, calls} =
+               run_fixture(:initial_resume_fs_not_found_no_fallback, %{}, dot)
+
+      assert result.context["status"] == "pipeline_error"
+      starts = Enum.filter(calls, fn {name, _} -> name == "acp_start_session" end)
+      assert length(starts) == 1
+      {_name, start_args} = hd(starts)
+      assert start_args["session_id"] == "provider-session-from-prior-task"
+      refute Map.get(start_args, "fallback_to_fresh_on_resume_unavailable") in [true, "true"]
+      refute called?(calls, "acp_send_message")
+      # open_worker failed before a managed handle existed; release still runs.
+      assert called?(calls, "coding_workspace_release")
+      refute called?(calls, "acp_close_session")
     end
 
     test "send failure resumes the current prompt once on a replacement worker" do

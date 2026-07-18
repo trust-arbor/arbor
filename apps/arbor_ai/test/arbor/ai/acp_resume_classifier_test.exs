@@ -45,6 +45,34 @@ defmodule Arbor.AI.AcpResumeClassifierTest do
           %{"code" => -32_603, "message" => "Path not found."},
           %{"code" => -32_603, "data" => %{"code" => "OTHER"}},
           %{"code" => -32_603, "data" => "FS_NOT_FOUND"},
+          # Conjunction: nested FS_NOT_FOUND requires top-level -32603 exactly.
+          # Other top-level codes (including -32002, which has its own rule without
+          # data) must not be admitted via the FS_NOT_FOUND clause alone.
+          %{
+            "code" => -32_601,
+            "data" => %{"code" => "FS_NOT_FOUND"},
+            "message" => "Path not found."
+          },
+          %{
+            "code" => -32_000,
+            "data" => %{"code" => "FS_NOT_FOUND"}
+          },
+          %{
+            "data" => %{"code" => "FS_NOT_FOUND"},
+            "message" => "Path not found."
+          },
+          # Nested error-envelope lookalikes stay non-classified.
+          %{
+            "error" => %{
+              "code" => -32_603,
+              "data" => %{"code" => "FS_NOT_FOUND"},
+              "message" => "Path not found."
+            }
+          },
+          %{
+            "code" => -32_603,
+            "error" => %{"data" => %{"code" => "FS_NOT_FOUND"}}
+          },
           # Message/detail text must never classify.
           %{
             "code" => -32_603,
