@@ -796,6 +796,74 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
                  engine_runner: engine_runner
                )
     end
+
+    test "retry terminal outcome fails closed and rejects stale decision keys" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{"exec.decide.decision" => "approved", "council.decision" => "approved"},
+           final_outcome: %{status: :retry, failure_reason: nil}
+         }}
+      end
+
+      assert {:error, {:council_pipeline_failed, "terminal outcome status: retry"}} =
+               Consult.decide(TestAdvisoryEvaluator, "Retry is not decision-admissible",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+    end
+
+    test "skipped terminal outcome fails closed" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{"council.decision" => "approved"},
+           final_outcome: %{"status" => "skipped"}
+         }}
+      end
+
+      assert {:error, {:council_pipeline_failed, "terminal outcome status: skipped"}} =
+               Consult.decide(TestAdvisoryEvaluator, "Skipped is not decision-admissible",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+    end
+
+    test "unknown or malformed present final_outcome fails closed" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      for final_outcome <- [
+            %{status: :unknown},
+            %{},
+            "not-an-outcome",
+            42
+          ] do
+        engine_runner = fn _graph, _engine_opts ->
+          {:ok,
+           %{
+             context: %{"exec.decide.decision" => "approved"},
+             final_outcome: final_outcome
+           }}
+        end
+
+        assert {:error, {:council_pipeline_failed, reason}} =
+                 Consult.decide(TestAdvisoryEvaluator, "Malformed/unknown final_outcome",
+                   graph: graph_path,
+                   engine_runner: engine_runner
+                 )
+
+        assert is_binary(reason)
+        assert String.valid?(reason)
+        assert reason != ""
+      end
+    end
   end
 
   defp write_decision_graph! do

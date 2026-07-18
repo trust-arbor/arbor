@@ -459,28 +459,62 @@ defmodule Arbor.Consensus.Evaluators.Consult do
 
   # Duck-type Engine run_result.final_outcome without importing orchestrator
   # internals. Absent/nil final_outcome keeps the legacy extraction path for
-  # injected runners. :success and :partial_success continue extraction.
+  # injected runners. When final_outcome is present, only :success and
+  # :partial_success may extract decision context — retry, skipped, fail,
+  # unknown, or malformed present outcomes fail closed with a causal reason.
   defp terminal_pipeline_failure(result) when is_map(result) do
     case fetch_result_field(result, :final_outcome) do
-      {:ok, outcome} when not is_nil(outcome) ->
-        if failed_terminal_status?(fetch_outcome_field(outcome, :status)) do
-          {:failed, bound_failure_reason(fetch_outcome_field(outcome, :failure_reason))}
-        else
-          :ok
-        end
+      {:ok, nil} ->
+        :ok
 
-      _ ->
+      {:ok, outcome} ->
+        classify_terminal_outcome(outcome)
+
+      :error ->
         :ok
     end
   end
 
   defp terminal_pipeline_failure(_result), do: :ok
 
-  defp failed_terminal_status?(:fail), do: true
-  defp failed_terminal_status?("fail"), do: true
-  defp failed_terminal_status?(:failed), do: true
-  defp failed_terminal_status?("failed"), do: true
-  defp failed_terminal_status?(_), do: false
+  defp classify_terminal_outcome(outcome) when is_map(outcome) do
+    status = fetch_outcome_field(outcome, :status)
+
+    if decision_admissible_status?(status) do
+      :ok
+    else
+      {:failed, causal_terminal_failure_reason(outcome, status)}
+    end
+  end
+
+  defp classify_terminal_outcome(_malformed), do: {:failed, "malformed final_outcome"}
+
+  defp decision_admissible_status?(:success), do: true
+  defp decision_admissible_status?("success"), do: true
+  defp decision_admissible_status?(:partial_success), do: true
+  defp decision_admissible_status?("partial_success"), do: true
+  defp decision_admissible_status?(_), do: false
+
+  defp causal_terminal_failure_reason(outcome, status) do
+    explicit = fetch_outcome_field(outcome, :failure_reason)
+
+    cond do
+      is_binary(explicit) and explicit != "" ->
+        bound_failure_reason(explicit)
+
+      is_atom(explicit) and not is_nil(explicit) ->
+        bound_failure_reason(Atom.to_string(explicit))
+
+      is_atom(status) and not is_nil(status) ->
+        bound_failure_reason("terminal outcome status: #{status}")
+
+      is_binary(status) and status != "" ->
+        bound_failure_reason("terminal outcome status: #{status}")
+
+      true ->
+        "malformed final_outcome"
+    end
+  end
 
   defp fetch_result_field(result, key) when is_map(result) and is_atom(key) do
     cond do
