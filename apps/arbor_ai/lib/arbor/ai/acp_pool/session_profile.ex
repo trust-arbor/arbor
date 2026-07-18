@@ -67,86 +67,96 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     tags: %{}
   ]
 
-  # Keys accepted by struct!/2. Startup config keys are consumed before construct.
-  @struct_keys [
-    :provider,
-    :tool_modules,
-    :agent_id,
-    :trust_domain,
-    :model,
-    :cwd,
-    :task_id,
-    :startup_fingerprint,
-    :name,
-    :tags,
-    :affinity_key,
-    :profile_hash
-  ]
+  # Hard ceilings on startup fingerprint material. Oversized or unsupported
+  # input is marked non-reusable (unique digest) rather than truncated.
+  @max_startup_depth 12
+  @max_startup_entries 128
+  @max_startup_binary_bytes 8_192
+  @max_startup_encoded_bytes 65_536
+  @max_id_bytes 512
+  @max_cwd_bytes 4_096
+  @max_model_bytes 256
+  @max_tool_modules 64
 
   @doc """
   Build a SessionProfile from options, computing the profile hash.
 
   ## Options
 
-  Accepts all struct fields as keyword opts plus startup config keys
+  Accepts struct fields as keyword opts plus startup config keys
   `:adapter_opts`, `:client_opts`, and `:capabilities` (fingerprinted only;
-  never stored). `profile_hash` is computed automatically.
+  never stored). Unknown keys are rejected by `struct!/2`.
+
+  `startup_fingerprint` and `profile_hash` cannot be caller-overridden: the
+  fingerprint is always derived from the actual adapter/client/capability
+  inputs, and `profile_hash` is always recomputed.
 
       SessionProfile.new(provider: :claude, tool_modules: [Trust.ListPresets])
   """
   @spec new(keyword()) :: t()
   def new(opts) when is_list(opts) do
-    {explicit_fp, opts} = Keyword.pop(opts, :startup_fingerprint)
-
+    # Consume only startup config keys (not struct fields). Explicit
+    # fingerprint/hash overrides are discarded so they cannot mask config.
     {adapter_opts, opts} = Keyword.pop(opts, :adapter_opts)
     {client_opts, opts} = Keyword.pop(opts, :client_opts)
     {capabilities, opts} = Keyword.pop(opts, :capabilities)
+    {_ignored_fp, opts} = Keyword.pop(opts, :startup_fingerprint)
+    {_ignored_hash, opts} = Keyword.pop(opts, :profile_hash)
 
     startup_fp =
-      case explicit_fp do
-        fp when is_binary(fp) and fp != "" ->
-          fp
+      compute_startup_fingerprint(
+        adapter_opts: adapter_opts,
+        client_opts: client_opts,
+        capabilities: capabilities
+      )
 
-        _ ->
-          compute_startup_fingerprint(
-            adapter_opts: adapter_opts,
-            client_opts: client_opts,
-            capabilities: capabilities
-          )
-      end
-
-    profile_opts =
-      opts
-      |> Keyword.take(@struct_keys)
-      |> Keyword.put(:startup_fingerprint, startup_fp)
-
-    profile = struct!(__MODULE__, profile_opts)
+    # Remaining opts go to struct! unchanged — unknown keys raise (closed).
+    profile = struct!(__MODULE__, Keyword.put(opts, :startup_fingerprint, startup_fp))
     %{profile | profile_hash: compute_hash(profile)}
   end
 
   @doc """
   Build a SessionProfile from a pool checkout provider and keyword opts.
-  """
-  @spec from_opts(atom(), keyword()) :: t()
-  def from_opts(provider, opts) when is_atom(provider) and is_list(opts) do
-    cwd = canonical_cwd(Keyword.get(opts, :cwd) || Keyword.get(opts, :workspace))
 
-    new(
-      provider: provider,
-      tool_modules: normalize_tool_modules(Keyword.get(opts, :tool_modules, [])),
-      agent_id: normalize_optional_id(Keyword.get(opts, :agent_id)),
-      trust_domain: Keyword.get(opts, :trust_domain),
-      model: normalize_model(Keyword.get(opts, :model)),
-      cwd: cwd,
-      task_id: normalize_optional_id(Keyword.get(opts, :task_id)),
-      name: Keyword.get(opts, :name) || generate_name(provider, opts),
-      tags: normalize_tags(Keyword.get(opts, :tags, %{})),
-      affinity_key: normalize_optional_id(Keyword.get(opts, :affinity_key)),
-      adapter_opts: Keyword.get(opts, :adapter_opts),
-      client_opts: Keyword.get(opts, :client_opts),
-      capabilities: Keyword.get(opts, :capabilities)
-    )
+  Returns `{:ok, profile}` or `{:error, reason}` when a non-nil field is
+  malformed (never silently normalizes malformed values to nil/empty so they
+  would match an unscoped session).
+  """
+  @spec from_opts(atom(), keyword()) :: {:ok, t()} | {:error, term()}
+  def from_opts(provider, opts) when is_atom(provider) and is_list(opts) do
+    with {:ok, agent_id} <- validate_optional_id(Keyword.get(opts, :agent_id), :agent_id),
+         {:ok, task_id} <- validate_optional_id(Keyword.get(opts, :task_id), :task_id),
+         {:ok, affinity_key} <-
+           validate_optional_id(Keyword.get(opts, :affinity_key), :affinity_key),
+         {:ok, model} <- validate_model(Keyword.get(opts, :model)),
+         {:ok, cwd} <-
+           validate_cwd(Keyword.get(opts, :cwd) || Keyword.get(opts, :workspace)),
+         {:ok, tool_modules} <- validate_tool_modules(Keyword.get(opts, :tool_modules, [])),
+         {:ok, trust_domain} <- validate_trust_domain(Keyword.get(opts, :trust_domain)),
+         {:ok, tags} <- validate_tags(Keyword.get(opts, :tags, %{})),
+         {:ok, name} <- validate_name(Keyword.get(opts, :name), provider, opts, tool_modules) do
+      profile =
+        new(
+          provider: provider,
+          tool_modules: tool_modules,
+          agent_id: agent_id,
+          trust_domain: trust_domain,
+          model: model,
+          cwd: cwd,
+          task_id: task_id,
+          name: name,
+          tags: tags,
+          affinity_key: affinity_key,
+          adapter_opts: Keyword.get(opts, :adapter_opts),
+          client_opts: Keyword.get(opts, :client_opts),
+          capabilities: Keyword.get(opts, :capabilities)
+        )
+
+      {:ok, profile}
+    end
   end
+
+  def from_opts(_provider, _opts), do: {:error, :invalid_checkout_opts}
 
   @doc """
   Check if two profiles are compatible for session reuse.
@@ -164,7 +174,7 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
       a.cwd == b.cwd and
       a.task_id == b.task_id and
       a.startup_fingerprint == b.startup_fingerprint and
-      normalize_tool_modules(a.tool_modules) == normalize_tool_modules(b.tool_modules)
+      a.tool_modules == b.tool_modules
   end
 
   @doc """
@@ -192,37 +202,35 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   @doc """
   Full SHA-256 hex digest of immutable caller-controlled startup configuration.
 
-  Canonicalizes `adapter_opts`, `client_opts`, and `capabilities` completely
-  (including secret-bearing values) then hashes the deterministic term encoding.
-  Only the digest is retained — never the raw material.
+  Bound-canonicalizes `adapter_opts`, `client_opts`, and `capabilities`
+  (including secret-bearing values), then hashes the deterministic term
+  encoding. Only the digest is retained.
 
-  Terms that cannot be safely/completely canonicalized yield a unique
-  non-reusable fingerprint so distinct or unsupported configs never collide.
+  Oversized or unsupported terms produce a unique non-reusable fingerprint so
+  they never match another profile (and never match each other by collision).
   """
   @spec compute_startup_fingerprint(keyword() | map()) :: String.t()
   def compute_startup_fingerprint(opts) when is_list(opts) or is_map(opts) do
-    material = {
-      :acp_startup_v1,
-      canonicalize(get_opt(opts, :adapter_opts)),
-      canonicalize(get_opt(opts, :client_opts)),
-      canonicalize(get_opt(opts, :capabilities))
-    }
+    case bound_startup_material(opts) do
+      {:ok, material} ->
+        sha256_hex(:erlang.term_to_binary(material, [:deterministic]))
 
-    sha256_hex(:erlang.term_to_binary(material, [:deterministic]))
+      :non_reusable ->
+        non_reusable_fingerprint()
+    end
   rescue
     _ ->
-      # Fail closed: non-encodable startup material is never reusable.
       non_reusable_fingerprint()
   end
 
-  def compute_startup_fingerprint(_), do: compute_startup_fingerprint([])
+  def compute_startup_fingerprint(_), do: non_reusable_fingerprint()
 
-  # -- Private --
+  # -- Private: hash --
 
   defp compute_hash(%__MODULE__{} = profile) do
     tools =
       profile.tool_modules
-      |> normalize_tool_modules()
+      |> List.wrap()
       |> Enum.map(&to_string/1)
       |> Enum.sort()
 
@@ -254,76 +262,370 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     )
   end
 
-  defp normalize_tool_modules(nil), do: []
+  # -- Private: field validation (fail closed; never coerce malformed → nil) --
 
-  defp normalize_tool_modules(tools) when is_list(tools) do
-    tools
-    |> Enum.filter(&(is_atom(&1) or is_binary(&1)))
-    |> Enum.map(fn
-      mod when is_atom(mod) -> mod
-      mod when is_binary(mod) -> mod
-    end)
-    |> Enum.uniq()
-    |> Enum.sort_by(&to_string/1)
-  end
+  defp validate_optional_id(nil, _field), do: {:ok, nil}
 
-  defp normalize_tool_modules(_), do: []
+  defp validate_optional_id(id, field) when is_binary(id) do
+    trimmed = String.trim(id)
 
-  defp normalize_optional_id(nil), do: nil
+    cond do
+      trimmed == "" ->
+        {:error, {:invalid, field, :blank}}
 
-  defp normalize_optional_id(id) when is_binary(id) do
-    case String.trim(id) do
-      "" -> nil
-      trimmed -> trimmed
+      byte_size(trimmed) > @max_id_bytes ->
+        {:error, {:invalid, field, :too_long}}
+
+      String.contains?(trimmed, <<0>>) ->
+        {:error, {:invalid, field, :nul_byte}}
+
+      not String.valid?(trimmed) ->
+        {:error, {:invalid, field, :invalid_utf8}}
+
+      true ->
+        {:ok, trimmed}
     end
   end
 
-  defp normalize_optional_id(id) when is_atom(id) and not is_boolean(id) and id != nil do
-    Atom.to_string(id)
+  defp validate_optional_id(id, field)
+       when is_atom(id) and not is_boolean(id) and not is_nil(id) do
+    validate_optional_id(Atom.to_string(id), field)
   end
 
-  defp normalize_optional_id(_), do: nil
+  defp validate_optional_id(_id, field), do: {:error, {:invalid, field, :bad_type}}
 
-  defp normalize_model(nil), do: nil
+  defp validate_model(nil), do: {:ok, nil}
 
-  defp normalize_model(model) when is_binary(model) do
-    case String.trim(model) do
-      "" -> nil
-      trimmed -> trimmed
+  defp validate_model(model) when is_binary(model) do
+    trimmed = String.trim(model)
+
+    cond do
+      trimmed == "" ->
+        {:error, {:invalid, :model, :blank}}
+
+      byte_size(trimmed) > @max_model_bytes ->
+        {:error, {:invalid, :model, :too_long}}
+
+      String.contains?(trimmed, <<0>>) ->
+        {:error, {:invalid, :model, :nul_byte}}
+
+      not String.valid?(trimmed) ->
+        {:error, {:invalid, :model, :invalid_utf8}}
+
+      true ->
+        {:ok, trimmed}
     end
   end
 
-  defp normalize_model(model) when is_atom(model) and not is_boolean(model) and model != nil do
-    Atom.to_string(model)
+  defp validate_model(model)
+       when is_atom(model) and not is_boolean(model) and not is_nil(model) do
+    validate_model(Atom.to_string(model))
   end
 
-  defp normalize_model(_), do: nil
+  defp validate_model(_), do: {:error, {:invalid, :model, :bad_type}}
 
-  defp normalize_tags(tags) when is_map(tags), do: tags
-  defp normalize_tags(_), do: %{}
+  defp validate_cwd(nil), do: {:ok, nil}
 
-  defp canonical_cwd(nil), do: nil
-
-  defp canonical_cwd(path) when is_binary(path) do
+  defp validate_cwd(path) when is_binary(path) do
     trimmed = String.trim(path)
 
     cond do
       trimmed == "" ->
-        nil
+        {:error, {:invalid, :cwd, :blank}}
+
+      byte_size(trimmed) > @max_cwd_bytes ->
+        {:error, {:invalid, :cwd, :too_long}}
 
       String.contains?(trimmed, <<0>>) ->
-        nil
+        {:error, {:invalid, :cwd, :nul_byte}}
+
+      not String.valid?(trimmed) ->
+        {:error, {:invalid, :cwd, :invalid_utf8}}
 
       true ->
         try do
-          Path.expand(trimmed)
+          {:ok, Path.expand(trimmed)}
         rescue
-          _ -> trimmed
+          _ -> {:error, {:invalid, :cwd, :expand_failed}}
         end
     end
   end
 
-  defp canonical_cwd(_), do: nil
+  defp validate_cwd(_), do: {:error, {:invalid, :cwd, :bad_type}}
+
+  defp validate_tool_modules(nil), do: {:ok, []}
+
+  defp validate_tool_modules(tools) when is_list(tools) do
+    if length(tools) > @max_tool_modules do
+      {:error, {:invalid, :tool_modules, :too_many}}
+    else
+      validate_tool_module_entries(tools, [])
+    end
+  end
+
+  defp validate_tool_modules(_), do: {:error, {:invalid, :tool_modules, :bad_type}}
+
+  defp validate_tool_module_entries([], acc) do
+    {:ok, acc |> Enum.uniq() |> Enum.sort_by(&to_string/1)}
+  end
+
+  defp validate_tool_module_entries([mod | rest], acc) when is_atom(mod) and not is_nil(mod) do
+    if is_boolean(mod) do
+      {:error, {:invalid, :tool_modules, :bad_entry}}
+    else
+      validate_tool_module_entries(rest, [mod | acc])
+    end
+  end
+
+  defp validate_tool_module_entries([mod | rest], acc) when is_binary(mod) do
+    trimmed = String.trim(mod)
+
+    cond do
+      trimmed == "" ->
+        {:error, {:invalid, :tool_modules, :blank_entry}}
+
+      byte_size(trimmed) > @max_id_bytes ->
+        {:error, {:invalid, :tool_modules, :entry_too_long}}
+
+      not String.valid?(trimmed) ->
+        {:error, {:invalid, :tool_modules, :invalid_utf8}}
+
+      true ->
+        validate_tool_module_entries(rest, [trimmed | acc])
+    end
+  end
+
+  defp validate_tool_module_entries([_ | _], _acc),
+    do: {:error, {:invalid, :tool_modules, :bad_entry}}
+
+  defp validate_trust_domain(nil), do: {:ok, nil}
+
+  defp validate_trust_domain(domain) when is_atom(domain) and not is_boolean(domain),
+    do: {:ok, domain}
+
+  defp validate_trust_domain(_), do: {:error, {:invalid, :trust_domain, :bad_type}}
+
+  defp validate_tags(nil), do: {:ok, %{}}
+  defp validate_tags(tags) when is_map(tags), do: {:ok, tags}
+  defp validate_tags(_), do: {:error, {:invalid, :tags, :bad_type}}
+
+  defp validate_name(nil, provider, opts, tool_modules) do
+    {:ok, generate_name(provider, Keyword.put(opts, :tool_modules, tool_modules))}
+  end
+
+  defp validate_name(name, _provider, _opts, _tool_modules) when is_binary(name) do
+    trimmed = String.trim(name)
+
+    cond do
+      trimmed == "" ->
+        {:error, {:invalid, :name, :blank}}
+
+      byte_size(trimmed) > @max_id_bytes ->
+        {:error, {:invalid, :name, :too_long}}
+
+      not String.valid?(trimmed) ->
+        {:error, {:invalid, :name, :invalid_utf8}}
+
+      true ->
+        {:ok, trimmed}
+    end
+  end
+
+  defp validate_name(_, _, _, _), do: {:error, {:invalid, :name, :bad_type}}
+
+  # -- Private: bounded startup fingerprint --
+
+  defp bound_startup_material(opts) do
+    with {:ok, adapter, s1} <- bound_canonicalize(get_opt(opts, :adapter_opts), 0, 0),
+         {:ok, client, s2} <- bound_canonicalize(get_opt(opts, :client_opts), 0, s1),
+         {:ok, caps, s3} <- bound_canonicalize(get_opt(opts, :capabilities), 0, s2) do
+      material = {:acp_startup_v1, adapter, client, caps}
+      encoded = :erlang.term_to_binary(material, [:deterministic])
+
+      if byte_size(encoded) > @max_startup_encoded_bytes do
+        :non_reusable
+      else
+        {:ok, material}
+      end
+    else
+      :non_reusable -> :non_reusable
+    end
+  end
+
+  defp bound_canonicalize(_term, depth, _size) when depth > @max_startup_depth,
+    do: :non_reusable
+
+  defp bound_canonicalize(_term, _depth, size) when size > @max_startup_encoded_bytes,
+    do: :non_reusable
+
+  defp bound_canonicalize(nil, _depth, size), do: {:ok, nil, size + 1}
+  defp bound_canonicalize(true, _depth, size), do: {:ok, true, size + 1}
+  defp bound_canonicalize(false, _depth, size), do: {:ok, false, size + 1}
+
+  defp bound_canonicalize(value, _depth, size) when is_atom(value) do
+    bytes = byte_size(Atom.to_string(value)) + 2
+    check_size(value, size + bytes)
+  end
+
+  defp bound_canonicalize(value, _depth, size) when is_integer(value) do
+    digits = value |> Integer.to_string() |> byte_size()
+
+    if digits > 64 do
+      :non_reusable
+    else
+      check_size(value, size + digits + 1)
+    end
+  end
+
+  defp bound_canonicalize(value, _depth, size) when is_float(value) do
+    check_size(value, size + 8)
+  end
+
+  defp bound_canonicalize(value, _depth, size) when is_binary(value) do
+    if byte_size(value) > @max_startup_binary_bytes do
+      :non_reusable
+    else
+      check_size(value, size + byte_size(value) + 2)
+    end
+  end
+
+  defp bound_canonicalize(list, depth, size) when is_list(list) do
+    if length(list) > @max_startup_entries do
+      :non_reusable
+    else
+      if keyword_list?(list) do
+        bound_keyword(list, depth, size)
+      else
+        bound_list(list, depth, size)
+      end
+    end
+  end
+
+  defp bound_canonicalize(%{__struct__: mod} = struct, depth, size) do
+    case bound_canonicalize(Map.from_struct(struct), depth + 1, size + 8) do
+      {:ok, map_form, new_size} -> {:ok, {:struct, mod, map_form}, new_size}
+      :non_reusable -> :non_reusable
+    end
+  end
+
+  defp bound_canonicalize(map, depth, size) when is_map(map) do
+    if map_size(map) > @max_startup_entries do
+      :non_reusable
+    else
+      bound_map_entries(Enum.to_list(map), depth, size, [])
+    end
+  end
+
+  defp bound_canonicalize(tuple, depth, size) when is_tuple(tuple) do
+    list = Tuple.to_list(tuple)
+
+    if length(list) > @max_startup_entries do
+      :non_reusable
+    else
+      case bound_list(list, depth, size) do
+        {:ok, {:list, items}, new_size} -> {:ok, {:tuple, items}, new_size}
+        other -> other
+      end
+    end
+  end
+
+  # PIDs, refs, ports, funs, and any other opaque term: never reusable.
+  defp bound_canonicalize(_other, _depth, _size), do: :non_reusable
+
+  defp bound_keyword(list, depth, size) do
+    case bound_kv_pairs(list, depth, size, []) do
+      {:ok, entries, new_size} ->
+        sorted = Enum.sort_by(entries, fn {k, _} -> sort_key(k) end)
+        {:ok, {:kw, sorted}, new_size}
+
+      :non_reusable ->
+        :non_reusable
+    end
+  end
+
+  defp bound_list(list, depth, size) do
+    bound_list_items(list, depth, size, [])
+  end
+
+  defp bound_list_items([], _depth, size, acc) do
+    {:ok, {:list, Enum.reverse(acc)}, size}
+  end
+
+  defp bound_list_items([item | rest], depth, size, acc) do
+    case bound_canonicalize(item, depth + 1, size) do
+      {:ok, canon, new_size} -> bound_list_items(rest, depth, new_size, [canon | acc])
+      :non_reusable -> :non_reusable
+    end
+  end
+
+  defp bound_map_entries([], _depth, size, acc) do
+    sorted = acc |> Enum.sort_by(fn {k, _} -> sort_key(k) end)
+    {:ok, {:map, sorted}, size}
+  end
+
+  defp bound_map_entries([{k, v} | rest], depth, size, acc) do
+    case bound_kv_pair(k, v, depth, size) do
+      {:ok, pair, new_size} -> bound_map_entries(rest, depth, new_size, [pair | acc])
+      :non_reusable -> :non_reusable
+    end
+  end
+
+  defp bound_kv_pairs([], _depth, size, acc), do: {:ok, acc, size}
+
+  defp bound_kv_pairs([{k, v} | rest], depth, size, acc) do
+    case bound_kv_pair(k, v, depth, size) do
+      {:ok, pair, new_size} -> bound_kv_pairs(rest, depth, new_size, [pair | acc])
+      :non_reusable -> :non_reusable
+    end
+  end
+
+  defp bound_kv_pairs(_other, _depth, _size, _acc), do: :non_reusable
+
+  defp bound_kv_pair(k, v, depth, size) do
+    case bound_key(k, size) do
+      {:ok, key, size_after_key} ->
+        case bound_canonicalize(v, depth + 1, size_after_key) do
+          {:ok, val, new_size} -> {:ok, {key, val}, new_size}
+          :non_reusable -> :non_reusable
+        end
+
+      :non_reusable ->
+        :non_reusable
+    end
+  end
+
+  defp bound_key(key, size) when is_atom(key) do
+    s = Atom.to_string(key)
+    check_size_pair({:a, s}, size + byte_size(s) + 2)
+  end
+
+  defp bound_key(key, size) when is_binary(key) do
+    if byte_size(key) > @max_startup_binary_bytes do
+      :non_reusable
+    else
+      check_size_pair({:b, key}, size + byte_size(key) + 2)
+    end
+  end
+
+  defp bound_key(key, size) when is_integer(key) do
+    digits = key |> Integer.to_string() |> byte_size()
+
+    if digits > 64 do
+      :non_reusable
+    else
+      check_size_pair({:i, key}, size + digits + 1)
+    end
+  end
+
+  defp bound_key(_key, _size), do: :non_reusable
+
+  defp check_size(value, new_size) do
+    if new_size > @max_startup_encoded_bytes, do: :non_reusable, else: {:ok, value, new_size}
+  end
+
+  defp check_size_pair(value, new_size) do
+    if new_size > @max_startup_encoded_bytes, do: :non_reusable, else: {:ok, value, new_size}
+  end
 
   defp get_opt(opts, key) when is_list(opts), do: Keyword.get(opts, key)
 
@@ -331,61 +633,9 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     Map.get(opts, key) || Map.get(opts, Atom.to_string(key))
   end
 
-  # Complete deterministic encoding — no truncation, no secret redaction, no
-  # phash2/inspect lossy fallbacks. Keyword lists and maps become sorted
-  # key/value tuples so equal logical configs hash identically.
-  defp canonicalize(nil), do: nil
-  defp canonicalize(true), do: true
-  defp canonicalize(false), do: false
-  defp canonicalize(value) when is_atom(value), do: value
-  defp canonicalize(value) when is_integer(value), do: value
-  defp canonicalize(value) when is_float(value), do: value
-  defp canonicalize(value) when is_binary(value), do: value
-
-  defp canonicalize(list) when is_list(list) do
-    if keyword_list?(list) do
-      entries =
-        list
-        |> Enum.map(fn {k, v} -> {canonicalize_key(k), canonicalize(v)} end)
-        |> Enum.sort_by(fn {k, _} -> sort_key(k) end)
-
-      {:kw, entries}
-    else
-      {:list, Enum.map(list, &canonicalize/1)}
-    end
-  end
-
-  defp canonicalize(%{__struct__: mod} = struct) do
-    {:struct, mod, canonicalize(Map.from_struct(struct))}
-  end
-
-  defp canonicalize(map) when is_map(map) do
-    entries =
-      map
-      |> Enum.map(fn {k, v} -> {canonicalize_key(k), canonicalize(v)} end)
-      |> Enum.sort_by(fn {k, _} -> sort_key(k) end)
-
-    {:map, entries}
-  end
-
-  defp canonicalize(tuple) when is_tuple(tuple) do
-    {:tuple, tuple |> Tuple.to_list() |> Enum.map(&canonicalize/1)}
-  end
-
-  defp canonicalize(other) do
-    # PIDs, refs, ports, funs: full term encoding so distinct values never collide.
-    {:opaque, :erlang.term_to_binary(other, [:deterministic])}
-  end
-
-  defp canonicalize_key(key) when is_atom(key), do: {:a, Atom.to_string(key)}
-  defp canonicalize_key(key) when is_binary(key), do: {:b, key}
-  defp canonicalize_key(key) when is_integer(key), do: {:i, key}
-  defp canonicalize_key(key), do: {:t, :erlang.term_to_binary(key, [:deterministic])}
-
   defp sort_key({:a, s}), do: {0, s}
   defp sort_key({:b, s}), do: {1, s}
   defp sort_key({:i, i}), do: {2, i}
-  defp sort_key({:t, bin}), do: {3, bin}
 
   defp keyword_list?([]), do: true
   defp keyword_list?([{key, _value} | rest]) when is_atom(key), do: keyword_list?(rest)

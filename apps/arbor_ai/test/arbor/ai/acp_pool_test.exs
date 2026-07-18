@@ -364,6 +364,26 @@ defmodule Arbor.AI.AcpPoolTest do
       refute s_named == s_nil
     end
 
+    test "security regression: malformed cwd/task/tools rejected before pool reuse" do
+      assert {:error, {:invalid, :cwd, :blank}} =
+               AcpPool.checkout(:test, client_opts: @test_client_opts, cwd: "  ")
+
+      assert {:error, {:invalid, :task_id, :blank}} =
+               AcpPool.checkout(:test, client_opts: @test_client_opts, task_id: "")
+
+      assert {:error, {:invalid, :task_id, :bad_type}} =
+               AcpPool.checkout(:test, client_opts: @test_client_opts, task_id: %{id: 1})
+
+      assert {:error, {:invalid, :tool_modules, :bad_entry}} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 tool_modules: [ModA, 42]
+               )
+
+      # Pool remains empty — no session minted for malformed scope
+      assert AcpPool.sessions() == []
+    end
+
     test "security regression: two tasks cannot inherit prior provider cwd/session process" do
       agent = "coding_agent_#{System.unique_integer([:positive])}"
       cwd_a = "/tmp/task_a_#{System.unique_integer([:positive])}"

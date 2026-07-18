@@ -138,8 +138,11 @@ defmodule Arbor.AI.AcpPool do
   @spec checkout(atom(), keyword()) :: {:ok, pid()} | {:error, term()}
   def checkout(provider, opts \\ []) do
     with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 30_000),
-         {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
-      safe_pool_call({:checkout, provider, opts}, remaining)
+         {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts),
+         # Fail closed on malformed identity/scope before the pool GenServer so
+         # blank/non-binary values never normalize into an unscoped match.
+         {:ok, profile} <- SessionProfile.from_opts(provider, opts) do
+      safe_pool_call({:checkout, provider, opts, profile}, remaining)
     end
   end
 
@@ -350,10 +353,24 @@ defmodule Arbor.AI.AcpPool do
   end
 
   @impl true
+  def handle_call({:checkout, provider, opts, profile}, {caller_pid, _tag}, state) do
+    case Arbor.AI.Timeout.ensure_active(opts) do
+      :ok -> do_checkout(provider, opts, profile, caller_pid, state)
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Backward-compatible clause if an older node still sends 3-tuples.
   def handle_call({:checkout, provider, opts}, {caller_pid, _tag}, state) do
     case Arbor.AI.Timeout.ensure_active(opts) do
-      :ok -> do_checkout(provider, opts, caller_pid, state)
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      :ok ->
+        case SessionProfile.from_opts(provider, opts) do
+          {:ok, profile} -> do_checkout(provider, opts, profile, caller_pid, state)
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -445,9 +462,7 @@ defmodule Arbor.AI.AcpPool do
     {:reply, session_list, state}
   end
 
-  defp do_checkout(provider, opts, caller_pid, state) do
-    profile = SessionProfile.from_opts(provider, opts)
-
+  defp do_checkout(provider, opts, %SessionProfile{} = profile, caller_pid, state) do
     case find_by_affinity(state, profile) do
       {:ok, entry, state} ->
         case checkout_compatible_session(state, entry, caller_pid) do
