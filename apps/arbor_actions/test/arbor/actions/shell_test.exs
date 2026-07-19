@@ -250,6 +250,87 @@ defmodule Arbor.Actions.ShellTest do
       assert result.output_limit_exceeded == false
       assert result.output_truncated == false
     end
+
+    test "security regression: retains original command through prepared revalidation", %{
+      agent_context: context
+    } do
+      # execute_prepared_authorized/3 re-prepares the command string and demands
+      # exact equality with the caller-supplied prepared map. Reconstructing argv
+      # via inspect/1 is not a faithful inverse of prepare_agent_command/2.
+      # A backslash-bearing printf operand is the behavioral proof: inspect doubles
+      # the backslash, re-prepare yields different args, and the old Actions.Shell
+      # path failed closed with :invalid_prepared_shell_command after a successful
+      # first prepare. Retaining the original command keeps the binding (same
+      # contract as ShellHandler / ToolHandler).
+      command = "printf %s a\\b"
+
+      assert {:ok, prepared} = Arbor.Shell.prepare_agent_command(command, sandbox: :basic)
+      assert prepared.command_name == "printf"
+      assert prepared.args == ["%s", "a\\b"]
+      assert prepared.command_name == prepared.executable_identity.name
+
+      inspect_rebuilt =
+        Enum.map_join([prepared.command_name | prepared.args], " ", &inspect/1)
+
+      # inspect/1 is not a faithful inverse — re-prepare diverges on the backslash.
+      assert inspect_rebuilt != command
+
+      assert {:ok, inspect_prepared} =
+               Arbor.Shell.prepare_agent_command(inspect_rebuilt, sandbox: :basic)
+
+      assert inspect_prepared.args != prepared.args
+
+      # Old Actions.Shell path: pass inspect-rebuilt command with the original
+      # prepared map → exact reprepare equality fails closed.
+      assert {:error, :invalid_prepared_shell_command} =
+               Arbor.Shell.execute_prepared_authorized(
+                 inspect_rebuilt,
+                 prepared,
+                 sandbox: :basic
+               )
+
+      # Wrong command string is rejected even with a valid prepared map.
+      assert {:error, :invalid_prepared_shell_command} =
+               Arbor.Shell.execute_prepared_authorized(
+                 "printf %s other",
+                 prepared,
+                 sandbox: :basic
+               )
+
+      # Caller-forged prepared map for a different binding fails closed.
+      assert {:ok, other_prepared} =
+               Arbor.Shell.prepare_agent_command("printf %s other-binding", sandbox: :basic)
+
+      assert {:error, :invalid_prepared_shell_command} =
+               Arbor.Shell.execute_prepared_authorized(
+                 command,
+                 other_prepared,
+                 sandbox: :basic
+               )
+
+      # Pin name must match command_name (multi-call hosts: basename(path) may differ).
+      forged = %{
+        prepared
+        | executable_identity: %{prepared.executable_identity | name: "not-printf"}
+      }
+
+      assert {:error, :invalid_prepared_shell_command} =
+               Arbor.Shell.execute_prepared_authorized(command, forged, sandbox: :basic)
+
+      # Original command + its prepared map remains the authorized execution path.
+      assert {:ok, result} =
+               Arbor.Shell.execute_prepared_authorized(command, prepared, sandbox: :basic)
+
+      assert result.exit_code == 0
+      assert result.stdout == "a\\b"
+
+      # Full action surface (including sandbox: :none) keeps original-command retention.
+      assert {:ok, action_result} =
+               run_execute(%{command: command, sandbox: :none}, context)
+
+      assert action_result.exit_code == 0
+      assert action_result.stdout == "a\\b"
+    end
   end
 
   describe "authorize_command/3" do

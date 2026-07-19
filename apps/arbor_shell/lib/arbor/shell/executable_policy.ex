@@ -190,16 +190,7 @@ defmodule Arbor.Shell.ExecutablePolicy do
   end
 
   def handle_call({:verify_pinned, %Executable{} = executable}, _from, state) do
-    result =
-      case Map.get(state.executables_by_path, executable.path) do
-        %Executable{} = pinned ->
-          if same_identity?(pinned, executable), do: :ok, else: {:error, :executable_not_pinned}
-
-        nil ->
-          {:error, :executable_not_pinned}
-      end
-
-    {:reply, result, state}
+    {:reply, do_verify_pinned(executable, state), state}
   end
 
   def handle_call(_request, _from, state) do
@@ -233,6 +224,54 @@ defmodule Arbor.Shell.ExecutablePolicy do
         end
     end
   end
+
+  # Name is behavior-selecting argv0 for multi-call binaries (busybox). Identity
+  # alone via by-path is insufficient: a forged name with a stolen busybox
+  # device/inode/hash would otherwise select a different applet. Require an
+  # exact registry binding:
+  #   * by-name[name] matches path + identity + name (PATH-discovered applets)
+  #   * else by-path[path] matches path + identity + name (fixed absolute pins
+  #     that are intentionally absent from by-name)
+  defp do_verify_pinned(%Executable{} = executable, state) do
+    if registry_name_shape_ok?(executable.name) do
+      case Map.get(state.executables_by_name, executable.name) do
+        %Executable{} = pinned ->
+          if registry_entry_match?(pinned, executable) do
+            :ok
+          else
+            {:error, :executable_not_pinned}
+          end
+
+        nil ->
+          case Map.get(state.executables_by_path, executable.path) do
+            %Executable{} = pinned ->
+              if registry_entry_match?(pinned, executable) do
+                :ok
+              else
+                {:error, :executable_not_pinned}
+              end
+
+            nil ->
+              {:error, :executable_not_pinned}
+          end
+      end
+    else
+      {:error, :executable_not_pinned}
+    end
+  end
+
+  defp registry_entry_match?(%Executable{} = pinned, %Executable{} = executable) do
+    pinned.name == executable.name and
+      pinned.path == executable.path and
+      same_identity?(pinned, executable)
+  end
+
+  defp registry_name_shape_ok?(name)
+       when is_binary(name) and byte_size(name) > 0 and byte_size(name) <= 64 do
+    not String.contains?(name, ["/", "\\", <<0>>]) and name == Path.basename(name)
+  end
+
+  defp registry_name_shape_ok?(_name), do: false
 
   defp resolve_absolute(command, state) do
     with {:ok, canonical} <- TrustedPath.canonicalize_absolute(command) do

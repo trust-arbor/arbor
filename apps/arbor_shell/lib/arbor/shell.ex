@@ -448,16 +448,20 @@ defmodule Arbor.Shell do
         command,
         %{
           executable: path,
-          executable_identity: %ExecutablePolicy.Executable{path: path},
+          executable_identity: %ExecutablePolicy.Executable{path: path, name: command_name},
           args: args,
           command_name: command_name
         } = prepared,
         opts
       )
       when is_binary(command) and is_binary(command_name) and is_list(args) and is_list(opts) do
+    # Bind authorized command_name to the pin's name field — NOT Path.basename(path).
+    # On multi-call systems (busybox), TrustedPath resolves /bin/echo → /bin/busybox so
+    # basename(path) is "busybox" while the authorized applet name remains "echo".
+    # Pattern-match requires identity.name == command_name; re-prepare revalidates.
     with true <- Keyword.keyword?(opts),
          true <- Enum.all?(args, &(is_binary(&1) and not String.contains?(&1, <<0>>))),
-         true <- Path.basename(path) == command_name,
+         true <- multi_call_safe_argv0?(command_name),
          {:ok, ^prepared} <- prepare_agent_command(command, opts) do
       execute_prepared_agent_command(command, prepared, opts)
     else
@@ -467,6 +471,15 @@ defmodule Arbor.Shell do
 
   def execute_prepared_authorized(_command, _prepared, _opts),
     do: {:error, :invalid_prepared_shell_command}
+
+  # argv0 for multi-call binaries (busybox) must be a single path component so the
+  # applet selector cannot smuggle a path. Matches ExecutablePolicy pin names.
+  defp multi_call_safe_argv0?(name)
+       when is_binary(name) and byte_size(name) > 0 and byte_size(name) <= 64 do
+    not String.contains?(name, ["/", "\\", <<0>>]) and name == Path.basename(name)
+  end
+
+  defp multi_call_safe_argv0?(_name), do: false
 
   @doc """
   Execute a descendant-spawning Mix tool via the internal Apple Container unit.

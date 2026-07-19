@@ -76,8 +76,12 @@ defmodule Arbor.Actions.Shell do
     with :ok <- validate_agent_principal(agent_id),
          {:ok, ^agent_id} <-
            Arbor.Actions.authorized_principal(context, Arbor.Actions.Shell.Execute),
+         # First prepare uses caller opts so non-empty :env / gate mismatches fail
+         # closed before execution. Revalidation must use the exact same original
+         # command string that produced `prepared` — never inspect/1 reconstruction
+         # of argv (ShellHandler / ToolHandler already keep that original).
          {:ok, prepared} <- Shell.prepare_agent_command(command, opts) do
-      execute_prepared(prepared, opts)
+      execute_prepared(command, prepared, opts)
     end
   end
 
@@ -113,7 +117,11 @@ defmodule Arbor.Actions.Shell do
     end
   end
 
-  defp execute_prepared(prepared, opts) do
+  defp execute_prepared(command, prepared, opts) when is_binary(command) and is_list(opts) do
+    # Drop ambient authority/env projection options and force the closed
+    # direct-executable sandbox marker so sandbox:none cannot widen after prepare.
+    # Revalidation in execute_prepared_authorized/3 ignores sandbox for binding;
+    # prepared map identity is command + pinned executable only.
     execution_opts =
       opts
       |> Keyword.drop([
@@ -129,7 +137,6 @@ defmodule Arbor.Actions.Shell do
       ])
       |> Keyword.put(:sandbox, :basic)
 
-    command = Enum.map_join([prepared.command_name | prepared.args], " ", &inspect/1)
     Shell.execute_prepared_authorized(command, prepared, execution_opts)
   end
 

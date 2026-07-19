@@ -209,6 +209,39 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
     end
 
     @tag :security_regression
+    test "security regression: mutating a resolved executable name fails verify_pinned" do
+      # ProcessGroup uses Executable.name as multi-call argv0. verify_pinned must
+      # bind that name to a real by-name or exact by-path registry entry — not only
+      # device/inode/hash via by-path — or a forged applet name reuses a stolen
+      # busybox identity and selects different behavior.
+      replace_policy_with_startup_path!(System.get_env("PATH", "/bin:/usr/bin"))
+
+      assert {:ok, %Executable{} = exe} = ExecutablePolicy.resolve("echo")
+      assert :ok = ExecutablePolicy.verify_pinned(exe)
+
+      mutated_name = %{exe | name: exe.name <> "-mutated"}
+      assert mutated_name.name != exe.name
+      assert same_device_inode?(mutated_name, exe)
+
+      assert {:error, :executable_not_pinned} =
+               ExecutablePolicy.verify_pinned(mutated_name)
+
+      # Freeform multi-call argv0 with stolen identity must fail even when the
+      # name is a plausible single path component.
+      freeform_applet = %{exe | name: "not-a-registered-applet"}
+
+      assert {:error, :executable_not_pinned} =
+               ExecutablePolicy.verify_pinned(freeform_applet)
+
+      # Path-like names are rejected before registry lookup.
+      path_like = %{exe | name: "evil/echo"}
+      assert {:error, :executable_not_pinned} = ExecutablePolicy.verify_pinned(path_like)
+
+      # Unmutated resolve result remains pinned (by-name binding).
+      assert :ok = ExecutablePolicy.verify_pinned(exe)
+    end
+
+    @tag :security_regression
     test "security regression: fixed absolute pin does not grant basename authority when PATH excludes parent" do
       # With a trusted search PATH that excludes /usr/bin, /usr/bin/id must still
       # resolve and verify as pinned, while basename "id" must not gain the fixed
@@ -332,6 +365,10 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
       {:ok, canonical} -> canonical
       _ -> path
     end
+  end
+
+  defp same_device_inode?(%Executable{} = left, %Executable{} = right) do
+    left.device == right.device and left.inode == right.inode and left.sha256 == right.sha256
   end
 
   defp canonicalize_if_possible(path) do

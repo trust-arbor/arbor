@@ -929,9 +929,26 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   const char *sha256 = argv[10];
   const char *path = argv[11];
   const char *cwd_path = argv[14];
-  if (strlen(sha256) != 64 || strcmp(argv[16], path) != 0 || cwd_path[0] != '/') {
+  const char *argv0 = argv[16];
+  /* Identity is bound to `path` (opened + verified below). argv0 may equal
+   * `path` or be a single path component (busybox multi-call applet name).
+   * Reject path-like argv0 other than an exact path match so a multi-call
+   * binary cannot be redirected by smuggling a different path in argv0.
+   *
+   * Which single-component names are legitimate is enforced in BEAM by
+   * ExecutablePolicy.verify_pinned/1 (name must match a by-name or exact
+   * by-path registry entry) before ProcessGroup builds launcher argv. The
+   * native boundary only rejects structurally unsafe argv0 shapes. */
+  if (strlen(sha256) != 64 || cwd_path[0] != '/' || argv0 == NULL || argv0[0] == '\0') {
     send_error("invalid launcher executable binding");
     return 2;
+  }
+  if (strcmp(argv0, path) != 0) {
+    /* Single-component applet name only — no slash, no NUL already implied. */
+    if (strchr(argv0, '/') != NULL || strchr(argv0, '\\') != NULL) {
+      send_error("invalid launcher executable binding");
+      return 2;
+    }
   }
 
   if (execution_mode == EXECUTION_APPLE_CONTAINER_PROBE &&

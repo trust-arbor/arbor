@@ -407,6 +407,12 @@ defmodule Arbor.Shell.ProcessGroup do
          timeout,
          max_output_bytes
        ) do
+    # Identity is bound to executable.path (opened by the native launcher).
+    # argv0 uses executable.name so multi-call binaries (busybox applets such as
+    # /bin/echo → /bin/busybox) select the authorized applet. Using the resolved
+    # path as argv0 makes basename "busybox" and breaks every applet.
+    argv0 = multi_call_argv0(executable)
+
     launcher_args = [
       launcher_command,
       Integer.to_string(timeout),
@@ -423,7 +429,7 @@ defmodule Arbor.Shell.ProcessGroup do
       Integer.to_string(cwd.inode),
       cwd.path,
       "--",
-      executable.path
+      argv0
       | args
     ]
 
@@ -447,6 +453,27 @@ defmodule Arbor.Shell.ProcessGroup do
       :error, reason -> {:error, {:port_open_failed, reason}}
     end
   end
+
+  # When TrustedPath resolves a multi-call symlink (/bin/echo → /bin/busybox),
+  # basename(path) differs from the pin name. Use the pin name as argv0 so the
+  # applet is selected. Otherwise keep the full path as argv0 (macOS coreutils,
+  # Apple control-plane fixed paths that require argv0 == absolute path).
+  defp multi_call_argv0(%Executable{name: name, path: path})
+       when is_binary(name) and is_binary(path) and byte_size(name) > 0 and
+              byte_size(name) <= 64 do
+    cond do
+      String.contains?(name, ["/", "\\", <<0>>]) or name != Path.basename(name) ->
+        path
+
+      Path.basename(path) == name ->
+        path
+
+      true ->
+        name
+    end
+  end
+
+  defp multi_call_argv0(%Executable{path: path}), do: path
 
   # Port.env merges into the BEAM process environment by default. When
   # `clear_env` is true, every ambient key not in the intentional map is
