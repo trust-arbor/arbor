@@ -22,6 +22,8 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
   @kernel "/usr/local/share/container/kernels/default.kernel"
   @mix_wrapper "/private/tmp/arbor-val/bin/mix"
   @worktree "/private/tmp/arbor-val/worktree"
+  @validation_runner "/private/tmp/arbor-val/runner"
+  @validation_result "/private/tmp/arbor-val/result"
   @unit_name_re ~r/\Aarbor-v1-[0-9a-f]{32}\z/
 
   @valid_admission %{
@@ -96,14 +98,16 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
           :runtime_erlang
         ),
         actions_entry("/opt/homebrew/Cellar/elixir/1.19.5", :read_only, :runtime_elixir),
-        actions_entry(@mix_wrapper, :read_only, :mix_wrapper)
+        actions_entry(@mix_wrapper, :read_only, :mix_wrapper),
+        actions_entry(@validation_runner, :read_only, :validation_runner)
       ],
       read_write: [
         actions_entry(@worktree, :read_write, :worktree),
         actions_entry("/private/tmp/arbor-val/home", :read_write, :home),
         actions_entry("/private/tmp/arbor-val/tmp", :read_write, :tmp),
         actions_entry("/private/tmp/arbor-val/build", :read_write, :build),
-        actions_entry("/private/tmp/arbor-val/deps", :read_write, :deps)
+        actions_entry("/private/tmp/arbor-val/deps", :read_write, :deps),
+        actions_entry(@validation_result, :read_write, :validation_result)
       ],
       revision: "candidate"
     }

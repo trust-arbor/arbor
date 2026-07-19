@@ -23,6 +23,14 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
   @fixed_container "/usr/local/bin/container"
   @fixed_shlock "/usr/bin/shlock"
 
+  @multi_call_alias_candidates [
+    {"tar", "/usr/bin/tar"},
+    {"echo", "/bin/echo"},
+    {"sh", "/bin/sh"},
+    {"tar", "/bin/tar"},
+    {"echo", "/usr/bin/echo"}
+  ]
+
   describe "compiled fixed path set" do
     test "exposes the exact Apple control/runtime fixed paths" do
       assert ExecutablePolicy.apple_fixed_executable_paths() == [
@@ -242,6 +250,19 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
     end
 
     @tag :security_regression
+    test "security regression: absolute multi-call alias preserves its registered name" do
+      replace_policy_with_startup_path!(System.get_env("PATH", "/bin:/usr/bin"))
+
+      assert {name, lexical_path, canonical_path} = first_multi_call_alias()
+      assert Path.basename(canonical_path) != name
+
+      assert {:ok, %Executable{} = executable} = ExecutablePolicy.resolve(lexical_path)
+      assert executable.name == name
+      assert executable.path == canonical_path
+      assert :ok = ExecutablePolicy.verify_pinned(executable)
+    end
+
+    @tag :security_regression
     test "security regression: fixed absolute pin does not grant basename authority when PATH excludes parent" do
       # With a trusted search PATH that excludes /usr/bin, /usr/bin/id must still
       # resolve and verify as pinned, while basename "id" must not gain the fixed
@@ -369,6 +390,27 @@ defmodule Arbor.Shell.ExecutablePolicyTest do
 
   defp same_device_inode?(%Executable{} = left, %Executable{} = right) do
     left.device == right.device and left.inode == right.inode and left.sha256 == right.sha256
+  end
+
+  defp first_multi_call_alias do
+    Enum.find_value(@multi_call_alias_candidates, fn {name, lexical_path} ->
+      with {:ok, canonical_path} <- TrustedPath.canonicalize_absolute(lexical_path),
+           true <- Path.basename(canonical_path) != name,
+           # The canonical target's own basename sorts before this alias in the
+           # same trusted directory, so the pre-fix by-path-first lookup returns
+           # a different invocation name on macOS, BusyBox, and dash hosts.
+           true <- Path.basename(canonical_path) < name,
+           {:ok, %Executable{name: ^name, path: ^canonical_path}} <-
+             ExecutablePolicy.resolve(name) do
+        {name, lexical_path, canonical_path}
+      else
+        _other -> nil
+      end
+    end)
+    |> case do
+      nil -> flunk("host has no trusted multi-call executable alias")
+      alias_entry -> alias_entry
+    end
   end
 
   defp canonicalize_if_possible(path) do

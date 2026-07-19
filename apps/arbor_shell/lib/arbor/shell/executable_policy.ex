@@ -275,20 +275,34 @@ defmodule Arbor.Shell.ExecutablePolicy do
 
   defp resolve_absolute(command, state) do
     with {:ok, canonical} <- TrustedPath.canonicalize_absolute(command) do
-      case Map.get(state.executables_by_path, canonical) do
-        %Executable{} = executable ->
+      requested_name = Path.basename(command)
+
+      case Map.get(state.executables_by_name, requested_name) do
+        %Executable{path: ^canonical} = executable ->
           {:ok, executable}
 
-        nil ->
-          basename = Path.basename(canonical)
-
-          case Map.get(state.executables_by_name, basename) do
-            %Executable{path: ^canonical} = executable -> {:ok, executable}
-            _other -> {:error, :executable_not_found}
-          end
+        _other ->
+          resolve_exact_absolute_path(command, canonical, requested_name, state)
       end
     else
       _ -> {:error, :executable_not_found}
+    end
+  end
+
+  # A canonical executable path can have many behavior-selecting aliases (for
+  # example tar -> bsdtar or echo -> busybox). Prefer the trusted by-name entry
+  # above. Fall back to by-path only for the canonical spelling or a compiled
+  # fixed path, and only when that entry preserves the requested invocation
+  # name. This prevents an untrusted symlink from nominating a new argv0.
+  defp resolve_exact_absolute_path(command, canonical, requested_name, state) do
+    exact_path? = command == canonical or command in @apple_fixed_executable_paths
+
+    case {exact_path?, Map.get(state.executables_by_path, canonical)} do
+      {true, %Executable{name: ^requested_name} = executable} ->
+        {:ok, executable}
+
+      _other ->
+        {:error, :executable_not_found}
     end
   end
 
