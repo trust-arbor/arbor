@@ -13,7 +13,7 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
   """
 
   use ExUnit.Case, async: false
-  @moduletag :fast
+  @moduletag :integration
 
   alias Arbor.Agent.{BranchSupervisor, Lifecycle}
   alias Arbor.Persistence.BufferedStore
