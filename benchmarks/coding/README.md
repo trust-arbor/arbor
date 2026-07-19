@@ -3,9 +3,10 @@
 This directory holds a **tracked, data-only** catalog of pinned Arbor-history
 coding tasks for the Phase 6 legacy-vs-pipeline conformance harness.
 
-It does **not** run that benchmark. Real paired execution still depends on an
-externally provisioned Apple/Linux validation baseline and trusted adapter
-runtime configuration.
+It does **not** run that benchmark. The Apple Container/Linux validation
+baseline was provisioned and passed its live adversarial matrix on 2026-07-16;
+real paired execution still requires trusted adapter/runtime configuration and
+an operator-started benchmark run.
 
 ## Files
 
@@ -131,11 +132,11 @@ When editing the catalog:
 The `exact_target_tree` selector measures reproduction of the reviewed
 canonical patch, not equivalence of every behaviorally valid implementation.
 
-## Current external execution blocker
+## Current run status
 
-The production coding-benchmark path still requires host Apple/Linux
-containment and validation baselines that may be unprovisioned. This catalog,
+The host containment and dependency-baseline gate is cleared. The catalog,
 materializer, and built-in objective verifier make curated inputs
-**reproducible, reviewable, and objectively scorable** once those trusted
-adapters are available; they do not by themselves complete a live paired
-scoreboard run.
+**reproducible, reviewable, and objectively scorable**. The remaining work is
+to install the trusted benchmark roots, adapters, principal, and timeouts in the
+running node, execute the prepared legacy/pipeline pairs, and retain the report;
+these files do not by themselves constitute a completed scoreboard run.
