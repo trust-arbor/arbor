@@ -57,6 +57,112 @@ defmodule Arbor.Commands.CodingBenchmark.GitObjectReaderTest do
       assert {:error, "git_batch_check_malformed"} =
                Git.parse_batch_check_output("not a header\n#{@oid_b} tree 34\n", requests)
     end
+
+    test "rejects missing final newline and empty internal lines" do
+      requests = [%{oid: @oid_a, type: "blob"}]
+
+      assert {:error, "git_batch_check_missing_final_newline"} =
+               Git.parse_batch_check_output("#{@oid_a} blob 12", requests)
+
+      assert {:error, "git_batch_check_missing_final_newline"} =
+               Git.parse_batch_check_output(
+                 "#{@oid_a} blob 12\n#{@oid_b} tree 1",
+                 [%{oid: @oid_a, type: "blob"}, %{oid: @oid_b, type: "tree"}]
+               )
+
+      assert {:error, "git_batch_check_malformed"} =
+               Git.parse_batch_check_output("#{@oid_a} blob 12\n\n", requests)
+
+      assert {:error, "git_batch_check_count_mismatch"} =
+               Git.parse_batch_check_output("", requests)
+    end
+  end
+
+  describe "bounded_diagnostic_output/1" do
+    test "is total for invalid UTF-8 and binary batch bytes" do
+      invalid = <<0xFF, 0xFE, "blob", 0, 1, 2, "\n">>
+      assert is_binary(Git.bounded_diagnostic_output(invalid))
+      assert byte_size(Git.bounded_diagnostic_output(invalid)) <= 500
+      refute String.contains?(Git.bounded_diagnostic_output(invalid), <<0>>)
+
+      huge = :binary.copy(<<0x80>>, 2_000)
+      assert byte_size(Git.bounded_diagnostic_output(huge)) <= 500
+
+      assert Git.bounded_diagnostic_output("  printable text  ") == "printable text"
+      assert is_binary(Git.bounded_diagnostic_output({:error, :not_a_binary}))
+    end
+  end
+
+  describe "read_objects/4 request cardinality" do
+    test "rejects empty and oversized request lists before shell execution" do
+      assert {:error, "git_empty_object_request"} =
+               Git.read_objects("/tmp", [], 1_000)
+
+      assert {:error, "git_empty_object_request"} =
+               Git.normalize_object_requests([])
+
+      max = Git.max_object_requests()
+      assert max == 10_002
+
+      oversized =
+        for index <- 1..(max + 1) do
+          oid =
+            index
+            |> Integer.to_string(16)
+            |> String.downcase()
+            |> String.pad_leading(40, "0")
+
+          %{oid: oid, type: "blob"}
+        end
+
+      assert length(oversized) == max + 1
+
+      assert {:error, "git_object_request_limit"} =
+               Git.normalize_object_requests(oversized)
+
+      assert {:error, "git_object_request_limit"} =
+               Git.read_objects("/tmp", oversized, 1_000)
+
+      # Zero-byte objects still consume request cardinality.
+      zero_byte_like =
+        for index <- 1..(max + 1) do
+          oid =
+            index
+            |> Integer.to_string(16)
+            |> String.downcase()
+            |> String.pad_leading(40, "0")
+
+          %{oid: oid, type: "blob"}
+        end
+
+      assert {:error, "git_object_request_limit"} =
+               Git.normalize_object_requests(zero_byte_like)
+    end
+
+    test "accepts the fixture ceiling plus commit and root-tree requests" do
+      max = Git.max_object_requests()
+
+      at_limit =
+        for index <- 1..max do
+          oid =
+            index
+            |> Integer.to_string(16)
+            |> String.downcase()
+            |> String.pad_leading(40, "0")
+
+          type =
+            case rem(index, 3) do
+              0 -> "commit"
+              1 -> "tree"
+              _other -> "blob"
+            end
+
+          %{oid: oid, type: type}
+        end
+
+      assert {:ok, normalized} = Git.normalize_object_requests(at_limit)
+      assert length(normalized) == max
+    end
   end
 
   describe "parse_batch_objects_output/2" do

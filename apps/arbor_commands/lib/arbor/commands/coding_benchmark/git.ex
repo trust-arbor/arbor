@@ -4,6 +4,10 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   @max_output_bytes 65_536
   @max_configured_output_bytes 268_435_456
   @shell_output_ceiling 16_777_216
+  # Fixture trees are capped at 10_000 entries; allow commit + root-tree additions.
+  @max_fixture_entries 10_000
+  @max_object_requests @max_fixture_entries + 2
+  @max_diagnostic_bytes 500
   @oid_pattern ~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/
   @allowed_object_types MapSet.new(["blob", "tree", "commit"])
   @batch_check_line_overhead 96
@@ -91,7 +95,9 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
     max_total_bytes = Keyword.get(opts, :max_total_bytes, @max_configured_output_bytes)
     shell_ceiling = shell_output_ceiling()
 
-    with {:ok, normalized} <- normalize_object_requests(requests),
+    with :ok <- validate_object_request_count(requests),
+         {:ok, normalized} <- normalize_object_requests(requests),
+         :ok <- validate_object_request_count(normalized),
          true <-
            is_integer(max_object_bytes) and max_object_bytes > 0 and
              max_object_bytes <= @shell_output_ceiling and is_integer(max_total_bytes) and
@@ -119,36 +125,49 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
     do: {:error, "git_invalid_object_request"}
 
   @doc false
+  @spec max_object_requests() :: pos_integer()
+  def max_object_requests, do: @max_object_requests
+
+  @doc false
   @spec normalize_object_requests(term()) ::
           {:ok, [object_request()]} | {:error, String.t()}
   def normalize_object_requests(requests) when is_list(requests) do
-    requests
-    |> Enum.reduce_while({:ok, [], MapSet.new()}, fn request, {:ok, acc, seen} ->
-      case normalize_object_request(request) do
-        {:ok, %{oid: oid, type: type} = normalized} ->
-          key = oid
+    with :ok <- validate_object_request_count(requests) do
+      requests
+      |> Enum.reduce_while({:ok, [], MapSet.new()}, fn request, {:ok, acc, seen} ->
+        case normalize_object_request(request) do
+          {:ok, %{oid: oid, type: type} = normalized} ->
+            key = oid
 
-          cond do
-            MapSet.member?(seen, key) ->
-              prior = Enum.find(acc, &(&1.oid == oid))
+            cond do
+              MapSet.member?(seen, key) ->
+                prior = Enum.find(acc, &(&1.oid == oid))
 
-              if prior.type == type do
-                {:cont, {:ok, acc, seen}}
-              else
-                {:halt, {:error, "git_object_type_conflict"}}
-              end
+                if prior.type == type do
+                  {:cont, {:ok, acc, seen}}
+                else
+                  {:halt, {:error, "git_object_type_conflict"}}
+                end
 
-            true ->
-              {:cont, {:ok, [normalized | acc], MapSet.put(seen, key)}}
+              true ->
+                {:cont, {:ok, [normalized | acc], MapSet.put(seen, key)}}
+            end
+
+          {:error, _reason} = error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, acc, _seen} ->
+          normalized = Enum.reverse(acc)
+
+          with :ok <- validate_object_request_count(normalized) do
+            {:ok, normalized}
           end
 
         {:error, _reason} = error ->
-          {:halt, error}
+          error
       end
-    end)
-    |> case do
-      {:ok, acc, _seen} -> {:ok, Enum.reverse(acc)}
-      {:error, _reason} = error -> error
     end
   end
 
@@ -159,27 +178,31 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
           {:ok, [object_spec()]} | {:error, String.t()}
   def parse_batch_check_output(output, requests)
       when is_binary(output) and is_list(requests) do
-    lines = split_exact_lines(output)
-
-    if length(lines) != length(requests) do
-      {:error, "git_batch_check_count_mismatch"}
-    else
-      requests
-      |> Enum.zip(lines)
-      |> Enum.reduce_while({:ok, []}, fn {request, line}, {:ok, acc} ->
-        case parse_batch_check_line(line, request) do
-          {:ok, spec} -> {:cont, {:ok, [spec | acc]}}
-          {:error, _reason} = error -> {:halt, error}
+    with {:ok, lines} <- split_exact_lines(output) do
+      if length(lines) != length(requests) do
+        {:error, "git_batch_check_count_mismatch"}
+      else
+        requests
+        |> Enum.zip(lines)
+        |> Enum.reduce_while({:ok, []}, fn {request, line}, {:ok, acc} ->
+          case parse_batch_check_line(line, request) do
+            {:ok, spec} -> {:cont, {:ok, [spec | acc]}}
+            {:error, _reason} = error -> {:halt, error}
+          end
+        end)
+        |> case do
+          {:ok, specs} -> {:ok, Enum.reverse(specs)}
+          error -> error
         end
-      end)
-      |> case do
-        {:ok, specs} -> {:ok, Enum.reverse(specs)}
-        error -> error
       end
     end
   end
 
   def parse_batch_check_output(_output, _requests), do: {:error, "git_batch_check_malformed"}
+
+  @doc false
+  @spec bounded_diagnostic_output(term()) :: String.t()
+  def bounded_diagnostic_output(output), do: bounded_output(output)
 
   @doc false
   @spec parse_batch_objects_output(binary(), [object_spec()]) ::
@@ -520,18 +543,23 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
     end
   end
 
-  defp split_exact_lines(output) do
-    case output do
-      <<>> ->
-        []
+  defp split_exact_lines(<<>>), do: {:ok, []}
 
-      _other ->
-        case :binary.split(output, "\n", [:global]) do
-          parts ->
-            case List.last(parts) do
-              "" -> Enum.drop(parts, -1)
-              _trailing_without_newline -> parts
+  defp split_exact_lines(output) when is_binary(output) do
+    case :binary.split(output, "\n", [:global]) do
+      parts ->
+        case List.last(parts) do
+          "" ->
+            lines = Enum.drop(parts, -1)
+
+            if Enum.any?(lines, &(&1 == "")) do
+              {:error, "git_batch_check_malformed"}
+            else
+              {:ok, lines}
             end
+
+          _trailing_without_newline ->
+            {:error, "git_batch_check_missing_final_newline"}
         end
     end
   end
@@ -545,6 +573,29 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   end
 
   defp valid_object_spec?(_spec), do: false
+
+  defp validate_object_request_count([]), do: {:error, "git_empty_object_request"}
+
+  defp validate_object_request_count(requests) when is_list(requests) do
+    # length/1 is O(n); bound early so empty zero-byte objects cannot skip cardinality.
+    case bounded_list_length(requests, @max_object_requests) do
+      {:ok, _count} -> :ok
+      :overflow -> {:error, "git_object_request_limit"}
+    end
+  end
+
+  defp validate_object_request_count(_requests), do: {:error, "git_invalid_object_request"}
+
+  defp bounded_list_length(list, max) when is_list(list) and is_integer(max) and max >= 0 do
+    bounded_list_length(list, max, 0)
+  end
+
+  defp bounded_list_length([], _max, count), do: {:ok, count}
+
+  defp bounded_list_length(_list, max, count) when count >= max, do: :overflow
+
+  defp bounded_list_length([_head | tail], max, count),
+    do: bounded_list_length(tail, max, count + 1)
 
   defp oid_stdin(oids) when is_list(oids) do
     Enum.map_join(oids, "", fn oid -> oid <> "\n" end)
@@ -633,13 +684,52 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   defp maybe_put_stdin(opts, nil), do: opts
   defp maybe_put_stdin(opts, stdin) when is_binary(stdin), do: Keyword.put(opts, :stdin, stdin)
 
+  # Total over arbitrary binaries (including invalid UTF-8 batch payloads).
+  # Never raise and never turn untrusted bytes into atoms.
   defp bounded_output(output) when is_binary(output) do
-    output
-    |> String.replace(~r/\s+/u, " ")
-    |> String.trim()
-    |> String.slice(0, 500)
+    take = min(byte_size(output), @max_diagnostic_bytes)
+    head = binary_part(output, 0, take)
+    sanitize_diagnostic_bytes(head)
   end
 
-  defp bounded_output(output),
-    do: output |> inspect(limit: 20, printable_limit: 500) |> String.slice(0, 500)
+  defp bounded_output(output) do
+    output
+    |> inspect(limit: 20, printable_limit: @max_diagnostic_bytes, safe: true)
+    |> then(fn text when is_binary(text) ->
+      binary_part(text, 0, min(byte_size(text), @max_diagnostic_bytes))
+    end)
+  end
+
+  defp sanitize_diagnostic_bytes(bin) when is_binary(bin) do
+    sanitized =
+      for <<byte <- bin>>, into: <<>> do
+        cond do
+          byte in ?\s..?~ -> <<byte>>
+          byte in [?\t, ?\n, ?\r] -> <<" ">>
+          true -> <<"?">>
+        end
+      end
+
+    trim_ascii_spaces(sanitized)
+  end
+
+  defp trim_ascii_spaces(bin) when is_binary(bin) do
+    bin
+    |> trim_leading_ascii_spaces()
+    |> trim_trailing_ascii_spaces()
+  end
+
+  defp trim_leading_ascii_spaces(<<" ", rest::binary>>), do: trim_leading_ascii_spaces(rest)
+  defp trim_leading_ascii_spaces(bin), do: bin
+
+  defp trim_trailing_ascii_spaces(<<>>), do: <<>>
+
+  defp trim_trailing_ascii_spaces(bin) do
+    size = byte_size(bin)
+
+    case binary_part(bin, size - 1, 1) do
+      <<" ">> -> trim_trailing_ascii_spaces(binary_part(bin, 0, size - 1))
+      _other -> bin
+    end
+  end
 end
