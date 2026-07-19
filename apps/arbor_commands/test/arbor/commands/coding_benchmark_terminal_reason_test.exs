@@ -124,4 +124,46 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReasonTest do
     assert validation_reason =~ "exit_code=1"
     assert byte_size(validation_reason) <= 1_000
   end
+
+  test "UTF-8-safe byte ceilings hold for multibyte explicit errors and stderr" do
+    # Each "é" is 2 bytes; grapheme-bounded slice would undercount bytes.
+    multibyte = String.duplicate("é", 800)
+
+    explicit = %{"payload" => %{"error" => multibyte}}
+    explicit_reason = TerminalReason.from_result(explicit, "pipeline_error")
+    assert is_binary(explicit_reason)
+    assert String.valid?(explicit_reason)
+    assert byte_size(explicit_reason) <= 1_000
+
+    validation = %{
+      "payload" => %{
+        "validation" => [
+          %{
+            "command" => "mix test",
+            "passed" => false,
+            "exit_code" => 1,
+            "stderr" => multibyte
+          }
+        ]
+      }
+    }
+
+    validation_reason = TerminalReason.from_result(validation, "validation_failed")
+    assert is_binary(validation_reason)
+    assert String.valid?(validation_reason)
+    assert byte_size(validation_reason) <= 1_000
+    # stderr excerpt itself is also byte-bounded before joining.
+    assert validation_reason =~ "stderr="
+  end
+
+  test "invalid UTF-8 sources stay byte-bounded in the encoded representation" do
+    # 600 invalid bytes would hex-encode to 1200 chars without a source bound.
+    invalid = :binary.copy(<<0xFF>>, 600)
+    reason = TerminalReason.from_result(%{"payload" => %{"error" => invalid}}, "pipeline_error")
+    assert is_binary(reason)
+    assert String.starts_with?(reason, "invalid_utf8:")
+    assert byte_size(reason) <= 1_000
+    # Source was capped at 500 bytes before hex (1000 hex chars + prefix).
+    assert byte_size(reason) <= byte_size("invalid_utf8:") + 1_000
+  end
 end

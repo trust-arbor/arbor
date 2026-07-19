@@ -21,18 +21,24 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservationsTest do
     }
   }
 
-  test "projects the exact Grok turn_completed usage shape with neutral names" do
+  test "projects the exact Grok turn_completed usage shape with TokenUsage spelling" do
     assert UsageObservations.from_usage(@grok_turn_completed_usage) == %{
              "input_tokens" => 1_200,
              "output_tokens" => 340,
              "total_tokens" => 1_540,
-             "cached_read_tokens" => 88,
+             "cache_read_tokens" => 88,
              "reasoning_tokens" => 55,
              "model_calls" => 3,
              "api_duration_ms" => 4_200,
              "cost_ticks" => 17,
              "num_turns" => 2
            }
+
+    # Canonical output matches Arbor.Contracts.LLM.TokenUsage, not a competing spelling.
+    refute Map.has_key?(
+             UsageObservations.from_usage(@grok_turn_completed_usage),
+             "cached_read_tokens"
+           )
   end
 
   test "excludes nested modelUsage and never labels cost as USD" do
@@ -65,7 +71,7 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservationsTest do
              "input_tokens" => 12,
              "output_tokens" => 3,
              "total_tokens" => 15,
-             "cached_read_tokens" => 2,
+             "cache_read_tokens" => 2,
              "cost_ticks" => 7
            }
   end
@@ -141,7 +147,7 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservationsTest do
              "input_tokens" => 1_200,
              "output_tokens" => 340,
              "total_tokens" => 1_540,
-             "cached_read_tokens" => 88,
+             "cache_read_tokens" => 88,
              "reasoning_tokens" => 55,
              "model_calls" => 3,
              "api_duration_ms" => 4_200,

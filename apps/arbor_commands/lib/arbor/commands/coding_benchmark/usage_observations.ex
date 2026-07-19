@@ -38,11 +38,15 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservations do
        "completionTokens"
      ]},
     {"total_tokens", ["total_tokens", :total_tokens, "totalTokens"]},
-    {"cached_read_tokens",
+    # Canonical output matches Arbor.Contracts.LLM.TokenUsage.cache_read_tokens.
+    # Accept Grok cachedReadTokens plus established input aliases as inputs only.
+    {"cache_read_tokens",
      [
+       "cache_read_tokens",
+       :cache_read_tokens,
+       "cachedReadTokens",
        "cached_read_tokens",
        :cached_read_tokens,
-       "cachedReadTokens",
        "cache_read_input_tokens",
        :cache_read_input_tokens,
        "cacheReadInputTokens"

@@ -10,6 +10,8 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
 
   @max_reason_bytes 1_000
   @max_stderr_bytes 400
+  @max_invalid_utf8_source_bytes 500
+  @redacted_marker "[REDACTED]"
 
   @spec from_result(term(), term()) :: String.t() | nil
   def from_result(_result, status) when status in ~w(change_committed no_changes pr_created),
@@ -113,7 +115,7 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
       # Redact before the stderr excerpt bound so secrets near the cut are not kept.
       stderr
       |> redact_text()
-      |> String.slice(0, @max_stderr_bytes)
+      |> truncate_utf8_bytes(@max_stderr_bytes)
     else
       nil
     end
@@ -129,8 +131,12 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
       if String.valid?(text) do
         text
       else
-        bytes = binary_part(text, 0, min(byte_size(text), 500))
-        "invalid_utf8:#{Base.encode16(bytes, case: :lower)}"
+        # Bound the raw source by bytes before hex-encoding so the label cannot grow
+        # unboundedly from a large invalid binary.
+        source =
+          binary_part(text, 0, min(byte_size(text), @max_invalid_utf8_source_bytes))
+
+        "invalid_utf8:#{Base.encode16(source, case: :lower)}"
       end
     end)
     |> finalize_reason_text()
@@ -149,17 +155,43 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
   end
 
   # Apply the existing SensitiveData redaction boundary, then enforce the
-  # final 1000-byte ceiling on the redacted text.
+  # final 1000-byte ceiling on the redacted text with UTF-8-safe truncation.
   defp finalize_reason_text(text) when is_binary(text) do
     text
     |> redact_text()
-    |> String.slice(0, @max_reason_bytes)
+    |> truncate_utf8_bytes(@max_reason_bytes)
   end
 
   defp redact_text(text) when is_binary(text) do
     SensitiveData.redact(text)
   rescue
-    _ -> text
+    # Fail closed: never return the unredacted secret if redaction crashes.
+    _ -> @redacted_marker
+  end
+
+  # UTF-8-safe byte ceiling: reduce until the prefix is valid UTF-8 and
+  # within max_bytes. Unlike String.slice/3, this bounds byte_size/1.
+  defp truncate_utf8_bytes(bin, max_bytes)
+       when is_binary(bin) and is_integer(max_bytes) and max_bytes >= 0 do
+    if byte_size(bin) <= max_bytes and String.valid?(bin) do
+      bin
+    else
+      do_truncate_utf8_bytes(bin, min(byte_size(bin), max_bytes))
+    end
+  end
+
+  defp truncate_utf8_bytes(_bin, _max_bytes), do: ""
+
+  defp do_truncate_utf8_bytes(_bin, size) when size <= 0, do: ""
+
+  defp do_truncate_utf8_bytes(bin, size) do
+    prefix = binary_part(bin, 0, size)
+
+    if String.valid?(prefix) do
+      prefix
+    else
+      do_truncate_utf8_bytes(bin, size - 1)
+    end
   end
 
   defp map_value(map, string_key, atom_key) when is_map(map) do
