@@ -446,7 +446,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     update_node(graph, "open_worker", fn attrs ->
       with :ok <- require_action_attrs(attrs, "acp_start_session") do
         context_keys =
-          if is_nil(worker["model"]), do: "provider,cwd", else: "provider,cwd,model"
+          if is_nil(worker["model"]),
+            do: "provider,cwd,workspace_id",
+            else: "provider,cwd,workspace_id,model"
 
         attrs =
           attrs
@@ -477,8 +479,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       with :ok <- require_action_attrs(attrs, "acp_start_session") do
         context_keys =
           if is_nil(worker["model"]),
-            do: "provider,cwd,session_id",
-            else: "provider,cwd,session_id,model"
+            do: "provider,cwd,workspace_id,session_id",
+            else: "provider,cwd,workspace_id,session_id,model"
 
         {:ok,
          attrs

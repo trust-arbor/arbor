@@ -66,10 +66,11 @@ defmodule Arbor.AI.AcpPool do
 
   require Logger
 
-  alias Arbor.AI.AcpSession
   alias Arbor.AI.AcpManaged.Supervisor, as: ManagedSupervisor
   alias Arbor.AI.AcpPool.SessionProfile
   alias Arbor.AI.AcpPool.ToolServer
+  alias Arbor.AI.AcpSession
+  alias Arbor.AI.AcpSession.GrokSandbox
 
   @default_max 2
   @default_idle_timeout_ms 300_000
@@ -543,7 +544,7 @@ defmodule Arbor.AI.AcpPool do
   end
 
   defp do_mint_session(provider, opts, caller_pid, state, profile) do
-    case spawn_session(provider, opts, profile) do
+    case spawn_session(provider, opts, caller_pid, profile) do
       {:ok, pid, tool_server} ->
         case Arbor.AI.Timeout.ensure_active(opts) do
           :ok ->
@@ -827,7 +828,13 @@ defmodule Arbor.AI.AcpPool do
   # Spawn using validated SessionProfile bindings for cwd/model/workspace so the
   # session process identity matches profile_hash (no independent re-expand of
   # raw opts). ToolServer FS scope comes from profile.tool_workspace only.
-  defp spawn_session(provider, opts, %SessionProfile{} = profile) do
+  defp spawn_session(provider, opts, caller_pid, %SessionProfile{} = profile) do
+    with {:ok, opts} <- adopt_grok_sandbox_authority(provider, caller_pid, opts) do
+      do_spawn_session(provider, opts, profile)
+    end
+  end
+
+  defp do_spawn_session(provider, opts, %SessionProfile{} = profile) do
     tool_modules = profile.tool_modules || []
     agent_id = profile.agent_id
     tool_workspace = profile.tool_workspace
@@ -897,6 +904,20 @@ defmodule Arbor.AI.AcpPool do
         {:error, reason}
     end
   end
+
+  defp adopt_grok_sandbox_authority(:grok, caller_pid, opts) do
+    case Keyword.get(opts, :grok_sandbox_authority) do
+      nil ->
+        {:ok, opts}
+
+      authority ->
+        with {:ok, authority} <- GrokSandbox.adopt_authority(caller_pid, authority) do
+          {:ok, Keyword.put(opts, :grok_sandbox_authority, authority)}
+        end
+    end
+  end
+
+  defp adopt_grok_sandbox_authority(_provider, _caller_pid, opts), do: {:ok, opts}
 
   defp maybe_start_tool_server([], _agent_id, _workspace), do: {nil, nil}
 

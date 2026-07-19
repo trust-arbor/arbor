@@ -2,12 +2,25 @@ defmodule Arbor.AI.AcpPoolTest do
   use ExUnit.Case, async: false
 
   alias Arbor.AI.AcpPool
+  alias Arbor.AI.AcpSession
+  alias Arbor.AI.AcpSession.GrokSandbox
+  alias Arbor.Common.SafePath
 
   @moduletag :fast
 
   # We test the pool using _skip_connect: true so no real agent processes spawn.
   # AcpSession.start_link with _skip_connect returns {:ok, pid} immediately.
   @test_client_opts [command: ["echo", "test"], _skip_connect: true]
+  @grok_expected_command [
+    "grok",
+    "--sandbox",
+    "strict",
+    "--no-memory",
+    "agent",
+    "--model",
+    "grok-4.5",
+    "stdio"
+  ]
 
   defmodule StartupClient do
     @moduledoc false
@@ -59,6 +72,29 @@ defmodule Arbor.AI.AcpPoolTest do
     def run(_params, _context), do: {:ok, %{ok: true}}
   end
 
+  defmodule GrokPoolProbeClient do
+    @moduledoc false
+
+    def start_link(opts), do: Agent.start_link(fn -> opts end)
+
+    def new_session(_client, _cwd, _opts) do
+      {:ok, %{"sessionId" => "grok-pool-session"}}
+    end
+
+    def load_session(_client, session_id, _cwd, _opts) do
+      {:ok, %{"sessionId" => session_id}}
+    end
+
+    def set_config_option(_client, _session_id, _key, _value), do: :ok
+    def cancel(_client, _session_id), do: :ok
+    def prompt(_client, _session_id, _content, _opts), do: {:ok, %{"text" => "ok"}}
+
+    def disconnect(client) do
+      Agent.stop(client, :normal)
+      :ok
+    end
+  end
+
   setup do
     # Start the DynamicSupervisor and Pool for each test
     start_supervised!(Arbor.AI.AcpPool.Supervisor)
@@ -74,6 +110,88 @@ defmodule Arbor.AI.AcpPoolTest do
       )
 
     {:ok, pool: pool}
+  end
+
+  defp temp_path(prefix) do
+    path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(path)
+    path
+  end
+
+  defp create_git_repo! do
+    repository = temp_path("arbor-ai-grok-repo")
+
+    run_git!(["init", "-b", "main"], repository)
+    run_git!(["config", "user.name", "Acp Test"], repository)
+    run_git!(["config", "user.email", "acp-test@example.com"], repository)
+
+    File.write!(Path.join(repository, "README.md"), "grok fixture\n")
+    run_git!(["add", "README.md"], repository)
+    run_git!(["commit", "-q", "-m", "fixture", "--no-gpg-sign"], repository)
+
+    repository
+  end
+
+  defp run_git!(args, repository) do
+    case System.cmd("git", args, cd: repository, stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+
+      {output, status} ->
+        flunk("git #{Enum.join(args, " ")} failed in #{repository} (#{status}): #{output}")
+    end
+  end
+
+  defp create_linked_fixture! do
+    repository = create_git_repo!()
+    branch = "grok-test-#{System.unique_integer([:positive])}"
+
+    worktree =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-ai-grok-worktree-#{System.unique_integer([:positive])}"
+      )
+
+    run_git!(["worktree", "add", "-b", branch, worktree], repository)
+
+    on_exit(fn ->
+      File.rm_rf!(repository)
+      File.rm_rf!(worktree)
+    end)
+
+    {canonical_path(repository), canonical_path(worktree)}
+  end
+
+  defp canonical_path(path) do
+    case SafePath.resolve_real(path) do
+      {:ok, canonical_path} ->
+        canonical_path
+
+      {:error, reason} ->
+        flunk("failed to canonicalize path #{path}: #{inspect(reason)}")
+    end
+  end
+
+  defp probe_client_opts(overrides) do
+    Keyword.merge([command: @grok_expected_command], overrides)
+  end
+
+  defp create_temporary_workspace_isolation! do
+    home = temp_path("arbor-ai-grok-home")
+    grok_home = Path.join(home, ".grok")
+    previous_grok_home = System.get_env("GROK_HOME")
+
+    System.put_env("GROK_HOME", grok_home)
+
+    on_exit(fn ->
+      if previous_grok_home do
+        System.put_env("GROK_HOME", previous_grok_home)
+      else
+        System.delete_env("GROK_HOME")
+      end
+
+      File.rm_rf!(home)
+    end)
   end
 
   describe "checkout/2" do
@@ -136,6 +254,19 @@ defmodule Arbor.AI.AcpPoolTest do
       assert Process.alive?(session)
     end
 
+    test "security regression: non-grok checkouts ignore grok authority and keep caller-owned authority fields" do
+      assert {:ok, session} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 grok_sandbox_authority: :literal
+               )
+
+      session_state = :sys.get_state(session)
+      assert Keyword.get(session_state.opts, :grok_sandbox_authority) == :literal
+
+      :ok = AcpPool.close_session(session)
+    end
+
     test "returns different sessions for sequential checkouts" do
       assert {:ok, s1} = AcpPool.checkout(:test, client_opts: @test_client_opts)
       assert {:ok, s2} = AcpPool.checkout(:test, client_opts: @test_client_opts)
@@ -158,6 +289,47 @@ defmodule Arbor.AI.AcpPoolTest do
 
       # test_b still has capacity
       assert {:ok, _} = AcpPool.checkout(:test_b, client_opts: @test_client_opts)
+    end
+
+    test "security regression: grok checkout adopts authority to the pool process" do
+      create_temporary_workspace_isolation!()
+
+      original_client_module = Application.get_env(:arbor_ai, :acp_client_module)
+      Application.put_env(:arbor_ai, :acp_client_module, GrokPoolProbeClient)
+
+      on_exit(fn ->
+        if original_client_module do
+          Application.put_env(:arbor_ai, :acp_client_module, original_client_module)
+        else
+          Application.delete_env(:arbor_ai, :acp_client_module)
+        end
+      end)
+
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+      pool_pid = Process.whereis(AcpPool)
+
+      assert {:ok, session} =
+               AcpPool.checkout(
+                 :grok,
+                 workspace: {:directory, worktree_root},
+                 client_opts: probe_client_opts(test_pid: self(), _skip_connect: false),
+                 grok_sandbox_authority: authority
+               )
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      session_state = :sys.get_state(session)
+      transferred_authority = Keyword.get(session_state.opts, :grok_sandbox_authority)
+
+      assert session_state.owner == pool_pid
+      assert is_map(transferred_authority)
+      assert transferred_authority.owner == pool_pid
+      assert transferred_authority.reference != authority.reference
+      assert transferred_authority.owner != self()
+
+      :ok = AcpPool.checkin(session)
+      :ok = AcpPool.close_session(session)
     end
   end
 

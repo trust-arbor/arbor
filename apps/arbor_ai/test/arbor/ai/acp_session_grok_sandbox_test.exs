@@ -351,6 +351,79 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                )
     end
 
+    test "grok_sandbox_authority can be adopted by the receiving process" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+
+      assert {:ok, adopted} = GrokSandbox.adopt_authority(self(), authority)
+
+      assert adopted.owner == self()
+      assert adopted.reference != authority.reference
+      assert adopted.repository_root == authority.repository_root
+      assert adopted.worktree_root == authority.worktree_root
+      assert adopted.common_dir == authority.common_dir
+      assert adopted.gitdir == authority.gitdir
+      assert adopted.snapshot == authority.snapshot
+    end
+
+    test "grok_sandbox_authority adoption rejects wrong live owner" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+
+      other_owner =
+        spawn(fn ->
+          receive do
+            :other_owner_stop -> :ok
+          end
+        end)
+
+      on_exit(fn -> send(other_owner, :other_owner_stop) end)
+
+      assert {:error, :grok_linked_worktree_authority_required} =
+               GrokSandbox.adopt_authority(other_owner, authority)
+    end
+
+    test "grok_sandbox_authority adoption rejects dead owner" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      parent = self()
+
+      {owner, monitor} =
+        spawn_monitor(fn ->
+          result = GrokSandbox.bind(repository_root, worktree_root)
+          send(parent, {:bound_by_owner, self(), result})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:bound_by_owner, ^owner, {:ok, authority}}
+      send(owner, :stop)
+      assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}
+
+      assert {:error, :grok_worktree_authority_changed} =
+               GrokSandbox.adopt_authority(owner, authority)
+    end
+
+    test "grok_sandbox_authority adoption rejects malformed authority input" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, _authority} = GrokSandbox.bind(repository_root, worktree_root)
+
+      assert {:error, :invalid_grok_worktree_authority} =
+               GrokSandbox.adopt_authority(self(), %{owner: self()})
+    end
+
+    test "grok_sandbox_authority adoption rejects metadata mutation after bind" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+
+      commondir = Path.join(worktree_gitdir(worktree_root), "commondir")
+      File.write!(commondir, "/definitely/not/the/original")
+
+      assert {:error, :grok_worktree_authority_changed} =
+               GrokSandbox.adopt_authority(self(), authority)
+    end
+
     test "metadata mutation after bind makes launch fail" do
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)

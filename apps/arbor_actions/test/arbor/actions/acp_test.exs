@@ -3,6 +3,15 @@ defmodule Arbor.Actions.AcpTest.FakeAI do
 
   def acp_providers, do: Arbor.AI.acp_providers()
 
+  def bind_grok_worktree(repo_path, worktree_path) do
+    notify({:grok_worktree_bound, repo_path, worktree_path})
+
+    :persistent_term.get(
+      {__MODULE__, :bind_result},
+      {:ok, :lease_derived_grok_authority}
+    )
+  end
+
   def acp_managed_start_session(provider, opts) when is_atom(provider) and is_list(opts) do
     notify({:managed_start, provider, opts})
 
@@ -120,6 +129,7 @@ defmodule Arbor.Actions.AcpTest do
 
   alias Arbor.Actions.Acp
   alias Arbor.Actions.AcpTest.FakeAI
+  alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Config
   alias Arbor.Contracts.Security.AuthContext
 
@@ -138,6 +148,7 @@ defmodule Arbor.Actions.AcpTest do
       :persistent_term.erase({FakeAI, :parent})
       :persistent_term.erase({FakeAI, :start_result})
       :persistent_term.erase({FakeAI, :start_results})
+      :persistent_term.erase({FakeAI, :bind_result})
       :persistent_term.erase({FakeAI, :send_result})
       :persistent_term.erase({FakeAI, :status_result})
     end)
@@ -169,6 +180,7 @@ defmodule Arbor.Actions.AcpTest do
                  provider: "claude",
                  model: "opus",
                  cwd: "/tmp",
+                 workspace_id: "ws_test",
                  session_id: "sess_123",
                  use_pool: true,
                  fallback_to_fresh_on_resume_unavailable: true,
@@ -228,6 +240,7 @@ defmodule Arbor.Actions.AcpTest do
       roles = Acp.StartSession.taint_roles()
       assert roles[:provider] == :control
       assert roles[:model] == :control
+      assert roles[:workspace_id] == :control
       assert roles[:timeout] == :data
       assert roles[:use_pool] == :data
     end
@@ -287,13 +300,13 @@ defmodule Arbor.Actions.AcpTest do
       refute Keyword.has_key?(opts, :agent_id)
     end
 
-    test "security regression: start opts include only atom-keyed grok sandbox authority from context" do
+    test "managed start opts include explicit Grok authority only for Grok" do
       assert Keyword.get(
                Acp.StartSession.build_managed_opts(
                  %{provider: "grok", cwd: "/repo", model: "sonnet"},
                  "agent_owner",
                  "task_owner",
-                 %{acp_grok_sandbox_authority: :opaque_authority}
+                 :opaque_authority
                ),
                :grok_sandbox_authority
              ) ==
@@ -301,10 +314,10 @@ defmodule Arbor.Actions.AcpTest do
 
       refute Keyword.has_key?(
                Acp.StartSession.build_managed_opts(
-                 %{provider: "grok", cwd: "/repo", model: "sonnet"},
+                 %{provider: "claude", cwd: "/repo", model: "sonnet"},
                  "agent_owner",
                  "task_owner",
-                 %{"acp_grok_sandbox_authority" => :string_key_authority}
+                 :opaque_authority
                ),
                :grok_sandbox_authority
              )
@@ -475,8 +488,85 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(second_opts, :adapter_opts) == Keyword.get(first_opts, :adapter_opts)
     end
 
-    test "Grok resume fallback preserves the same opaque sandbox authority" do
+    test "security regression: caller context cannot inject Grok sandbox authority" do
       install_fake_ai()
+
+      assert {:ok, _result} =
+               Acp.StartSession.run(
+                 %{provider: "grok", cwd: "/repo"},
+                 %{
+                   agent_id: "agent_grok_context",
+                   task_id: "task_grok_context",
+                   acp_grok_sandbox_authority: :caller_injected_authority
+                 }
+               )
+
+      assert_receive {:managed_start, :grok, opts}
+      refute Keyword.has_key?(opts, :grok_sandbox_authority)
+    end
+
+    test "security regression: Grok workspace lease must match the requested cwd", %{
+      tmp_dir: tmp_dir
+    } do
+      install_fake_ai()
+
+      context = %{agent_id: "agent_grok_cwd", task_id: "task_grok_cwd"}
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, workspace} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/grok-start-session-cwd",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   task: "reject a mismatched Grok cwd"
+                 },
+                 context
+               )
+
+      assert {:error, error} =
+               Acp.StartSession.run(
+                 %{
+                   provider: "grok",
+                   cwd: repo,
+                   workspace_id: workspace.workspace_id
+                 },
+                 context
+               )
+
+      assert error =~ "grok_workspace_cwd_mismatch"
+      refute_receive {:grok_worktree_bound, _, _}
+      refute_receive {:managed_start, _, _}
+
+      assert {:ok, _released} =
+               Workspace.Release.run(
+                 %{workspace_id: workspace.workspace_id, mode: "remove"},
+                 context
+               )
+    end
+
+    test "Grok resume fallback preserves the same lease-derived sandbox authority", %{
+      tmp_dir: tmp_dir
+    } do
+      install_fake_ai()
+
+      context = %{
+        agent_id: "agent_grok_recovery",
+        task_id: "task_grok_recovery"
+      }
+
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, workspace} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/grok-start-session-recovery",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   task: "exercise Grok resume fallback"
+                 },
+                 context
+               )
 
       :persistent_term.put(
         {FakeAI, :start_results},
@@ -498,22 +588,30 @@ defmodule Arbor.Actions.AcpTest do
                Acp.StartSession.run(
                  %{
                    provider: "grok",
-                   cwd: "/repo",
+                   cwd: workspace.worktree_path,
+                   workspace_id: workspace.workspace_id,
                    session_id: "provider_sess_grok_old",
                    fallback_to_fresh_on_resume_unavailable: true
                  },
-                 %{
-                   agent_id: "agent_grok_recovery",
-                   task_id: "task_grok_recovery",
-                   acp_grok_sandbox_authority: :opaque_grok_authority
-                 }
+                 context
                )
 
       assert_receive {:managed_start, :grok, first_opts}
       assert_receive {:managed_start, :grok, second_opts}
 
-      assert Keyword.get(first_opts, :grok_sandbox_authority) == :opaque_grok_authority
-      assert Keyword.get(second_opts, :grok_sandbox_authority) == :opaque_grok_authority
+      assert Keyword.get(first_opts, :grok_sandbox_authority) == :lease_derived_grok_authority
+      assert Keyword.get(second_opts, :grok_sandbox_authority) == :lease_derived_grok_authority
+
+      assert_receive {:grok_worktree_bound, bound_repo, bound_worktree}
+      assert bound_repo == workspace.repo_path
+      assert bound_worktree == workspace.worktree_path
+      refute_receive {:grok_worktree_bound, _, _}
+
+      assert {:ok, _released} =
+               Workspace.Release.run(
+                 %{workspace_id: workspace.workspace_id, mode: "remove"},
+                 context
+               )
     end
 
     test "non-Grok StartSession ignores atom-keyed grok authority opt input by design" do

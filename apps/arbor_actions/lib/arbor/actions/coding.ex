@@ -123,7 +123,7 @@ defmodule Arbor.Actions.Coding do
       ]
 
     alias Arbor.Actions
-    alias Arbor.Actions.{Acp, Config, Council, Git, Shell}
+    alias Arbor.Actions.{Acp, Council, Git, Shell}
     alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Mix, as: MixActions
 
@@ -178,7 +178,13 @@ defmodule Arbor.Actions.Coding do
 
         try do
           with {:ok, session} <-
-                 start_acp_session(repo_root, worktree_path, params, context),
+                 start_acp_session(
+                   repo_root,
+                   worktree_path,
+                   workspace_id,
+                   params,
+                   context
+                 ),
                {:ok, response} <- prompt_acp_agent(session, worktree_path, params, context) do
             maybe_close_session(session, context)
 
@@ -418,47 +424,23 @@ defmodule Arbor.Actions.Coding do
       {:error, "ACP self-commit advanced HEAD but commit hash is unavailable"}
     end
 
-    defp start_acp_session(repo_root, worktree_path, params, context) do
+    defp start_acp_session(_repo_root, worktree_path, workspace_id, params, context) do
       provider = selected_acp_agent(params)
 
-      with {:ok, start_context} <-
-             maybe_bind_grok_sandbox(provider, repo_root, worktree_path, context) do
-        start_params =
-          %{
-            provider: provider,
-            cwd: worktree_path,
-            permission_mode: "default",
-            timeout: positive_timeout(get_param(params, :timeout), @default_timeout)
-          }
-          |> put_if_present(:model, get_param(params, :model))
-          |> put_if_present(:allowed_tools, get_param(params, :allowed_tools))
-          |> put_if_present(:disallowed_tools, get_param(params, :disallowed_tools))
+      start_params =
+        %{
+          provider: provider,
+          cwd: worktree_path,
+          workspace_id: workspace_id,
+          permission_mode: "default",
+          timeout: positive_timeout(get_param(params, :timeout), @default_timeout)
+        }
+        |> put_if_present(:model, get_param(params, :model))
+        |> put_if_present(:allowed_tools, get_param(params, :allowed_tools))
+        |> put_if_present(:disallowed_tools, get_param(params, :disallowed_tools))
 
-        call_action(Acp.StartSession, start_params, start_context)
-      end
+      call_action(Acp.StartSession, start_params, context)
     end
-
-    defp maybe_bind_grok_sandbox("grok", repo_root, worktree_path, context)
-         when is_binary(repo_root) and repo_root != "" and
-                is_binary(worktree_path) and worktree_path != "" do
-      ai_module = Config.ai_module()
-
-      if Code.ensure_loaded?(ai_module) and
-           function_exported?(ai_module, :bind_grok_worktree, 2) do
-        case apply(ai_module, :bind_grok_worktree, [repo_root, worktree_path]) do
-          {:ok, authority} ->
-            {:ok, Map.put(context, :acp_grok_sandbox_authority, authority)}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-      else
-        {:error, :grok_sandbox_binding_unsupported}
-      end
-    end
-
-    defp maybe_bind_grok_sandbox(_provider, _repo_root, _worktree_path, context),
-      do: {:ok, context}
 
     defp prompt_acp_agent(session, worktree_path, params, context) do
       prompt_params =

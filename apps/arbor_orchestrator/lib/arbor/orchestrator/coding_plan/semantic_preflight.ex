@@ -2260,12 +2260,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
         expected_context_keys =
           case {recovery?, expected_model} do
-            {false, nil} -> "provider,cwd"
+            {false, nil} -> "provider,cwd,workspace_id"
             {false, :unknown} -> attrs["context_keys"]
-            {false, _model} -> "provider,cwd,model"
-            {true, nil} -> "provider,cwd,session_id"
+            {false, _model} -> "provider,cwd,workspace_id,model"
+            {true, nil} -> "provider,cwd,workspace_id,session_id"
             {true, :unknown} -> attrs["context_keys"]
-            {true, _model} -> "provider,cwd,session_id,model"
+            {true, _model} -> "provider,cwd,workspace_id,session_id,model"
           end
 
         expected_static =
@@ -2377,8 +2377,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         errors
         |> require_worker_open_value(
           "context_keys",
-          context_keys in ["provider,cwd", "provider,cwd,model"],
-          "provider,cwd or provider,cwd,model",
+          context_keys in [
+            "provider,cwd,workspace_id",
+            "provider,cwd,workspace_id,model"
+          ],
+          "provider,cwd,workspace_id or provider,cwd,workspace_id,model",
           context_keys
         )
         |> check_worker_pool_binding(attrs, continuity)

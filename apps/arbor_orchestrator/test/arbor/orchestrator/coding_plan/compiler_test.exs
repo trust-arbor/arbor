@@ -278,7 +278,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
            )
 
     refute Map.has_key?(node_attrs(graph, "open_worker"), "param.session_id")
-    assert node_attrs(graph, "open_worker")["context_keys"] == "provider,cwd,model"
+
+    assert node_attrs(graph, "open_worker")["context_keys"] ==
+             "provider,cwd,workspace_id,model"
+
     assert node_attrs(graph, "open_recovery_worker")["param.permission_mode"] == "deny"
     assert node_attrs(graph, "open_recovery_worker")["param.use_pool"] == "true"
 
@@ -287,7 +290,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
            ] == true
 
     assert node_attrs(graph, "open_recovery_worker")["context_keys"] ==
-             "provider,cwd,session_id,model"
+             "provider,cwd,workspace_id,session_id,model"
 
     refute Map.has_key?(node_attrs(graph, "open_recovery_worker"), "param.session_id")
     assert node_attrs(graph, "close_worker")["param.return_to_pool"] == true
@@ -404,11 +407,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     # Explicit resume enables one fresh-conversation recovery when the provider
     # session path is structurally unavailable (e.g. FS_NOT_FOUND).
     assert open_worker["param.fallback_to_fresh_on_resume_unavailable"] == true
-    assert open_worker["context_keys"] == "provider,cwd,model"
+    assert open_worker["context_keys"] == "provider,cwd,workspace_id,model"
     recovery_open = node_attrs(graph, "open_recovery_worker")
     assert recovery_open["param.use_pool"] == "false"
     assert recovery_open["param.fallback_to_fresh_on_resume_unavailable"] == true
-    assert recovery_open["context_keys"] == "provider,cwd,session_id,model"
+    assert recovery_open["context_keys"] == "provider,cwd,workspace_id,session_id,model"
     refute Map.has_key?(recovery_open, "param.session_id")
     assert node_attrs(graph, "close_worker")["param.return_to_pool"] == false
 

@@ -299,6 +299,7 @@ defmodule Arbor.Actions.Acp do
     | `provider` | string | yes | Provider: claude, codex, gemini, opencode, goose, cursor |
     | `model` | string | no | Model override |
     | `cwd` | string | no | Working directory for the session |
+    | `workspace_id` | string | no | Authorized coding workspace lease used to bind linked-worktree Grok sessions |
     | `session_id` | string | no | Provider conversation ID to resume |
     | `use_pool` | boolean | no | Checkout from pool instead of starting fresh (default: false); DOT may serialize this as `"true"` or `"false"` |
     | `fallback_to_fresh_on_resume_unavailable` | boolean | no | Start a fresh conversation when resume is structurally unsupported (default: false); DOT may serialize this as `"true"` or `"false"` |
@@ -326,6 +327,10 @@ defmodule Arbor.Actions.Acp do
         cwd: [
           type: :string,
           doc: "Working directory for the session"
+        ],
+        workspace_id: [
+          type: :string,
+          doc: "Authorized coding workspace lease for linked-worktree Grok sessions"
         ],
         session_id: [
           type: :string,
@@ -361,6 +366,7 @@ defmodule Arbor.Actions.Acp do
       ]
 
     alias Arbor.Actions.Acp
+    alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
     alias Arbor.Common.SafeAtom
 
     def taint_roles do
@@ -368,6 +374,7 @@ defmodule Arbor.Actions.Acp do
         provider: :control,
         model: :control,
         cwd: {:control, requires: [:path_traversal]},
+        workspace_id: :control,
         session_id: :control,
         prompt: {:control, requires: [:prompt_injection]},
         permission_mode: :control,
@@ -413,8 +420,16 @@ defmodule Arbor.Actions.Acp do
            {:ok, params} <- normalize_fallback_to_fresh_on_resume_unavailable_param(params),
            :ok <- Acp.require_acp!(),
            {:ok, provider} <- normalize_provider(Acp.param(params, :provider)),
+           {:ok, grok_sandbox_authority} <-
+             bind_authorized_grok_workspace(provider, params, agent_id, task_id, context),
            {:ok, meta, continuity} <-
-             managed_start_with_resume_fallback(provider, params, agent_id, task_id, context),
+             managed_start_with_resume_fallback(
+               provider,
+               params,
+               agent_id,
+               task_id,
+               grok_sandbox_authority
+             ),
            {:ok, result} <- public_start_result(meta, params, provider, continuity) do
         {:ok, result}
       else
@@ -426,8 +441,14 @@ defmodule Arbor.Actions.Acp do
       :exit, reason -> {:error, Acp.format_error(reason)}
     end
 
-    defp managed_start_with_resume_fallback(provider, params, agent_id, task_id, context) do
-      opts = build_managed_opts(params, agent_id, task_id, context)
+    defp managed_start_with_resume_fallback(
+           provider,
+           params,
+           agent_id,
+           task_id,
+           grok_sandbox_authority
+         ) do
+      opts = build_managed_opts(params, agent_id, task_id, grok_sandbox_authority)
       resume_requested? = non_empty_string(params[:session_id]) != nil
 
       case managed_start(provider, opts) do
@@ -441,7 +462,7 @@ defmodule Arbor.Actions.Acp do
                 fallback_opts =
                   params
                   |> Map.delete(:session_id)
-                  |> build_managed_opts(agent_id, task_id, context)
+                  |> build_managed_opts(agent_id, task_id, grok_sandbox_authority)
                   |> Keyword.put(:create_session, true)
 
                 case managed_start(provider, fallback_opts) do
@@ -527,29 +548,75 @@ defmodule Arbor.Actions.Acp do
     end
 
     @doc false
-    def build_managed_opts(params, agent_id, task_id, context) do
+    def build_managed_opts(params, agent_id, task_id, grok_sandbox_authority) do
       params
       |> build_opts(agent_id)
       |> maybe_add(:principal_id, agent_id)
       |> maybe_add(:task_id, task_id)
       |> maybe_add(:use_pool, params[:use_pool] == true)
       |> maybe_add(:session_id, non_empty_string(params[:session_id]))
-      |> maybe_add_grok_sandbox_authority(params, context)
+      |> maybe_add_grok_sandbox_authority(params, grok_sandbox_authority)
       |> maybe_add(:timeout, positive_timeout_or_nil(params[:timeout]))
     end
 
     def build_managed_opts(params, agent_id, task_id),
-      do: build_managed_opts(params, agent_id, task_id, %{})
+      do: build_managed_opts(params, agent_id, task_id, nil)
 
-    defp grok_sandbox_authority(context) do
-      Map.get(context, :acp_grok_sandbox_authority)
-    end
-
-    defp maybe_add_grok_sandbox_authority(opts, params, context) do
+    defp maybe_add_grok_sandbox_authority(opts, params, authority) do
       if Acp.param(params, :provider) in [:grok, "grok"] do
-        maybe_add(opts, :grok_sandbox_authority, grok_sandbox_authority(context))
+        maybe_add(opts, :grok_sandbox_authority, authority)
       else
         opts
+      end
+    end
+
+    defp bind_authorized_grok_workspace(:grok, params, agent_id, task_id, context) do
+      case non_empty_string(Acp.param(params, :workspace_id)) do
+        nil ->
+          {:ok, nil}
+
+        workspace_id ->
+          with cwd when is_binary(cwd) and cwd != "" <- Acp.param(params, :cwd),
+               {:ok, lease} <-
+                 WorkspaceLeaseRegistry.inspect_lease(
+                   workspace_id,
+                   workspace_registry_caller(agent_id, task_id, context)
+                 ),
+               lease_cwd when is_binary(lease_cwd) and lease_cwd != "" <-
+                 map_get(lease, :worktree_path),
+               true <- cwd == lease_cwd,
+               repo_path when is_binary(repo_path) and repo_path != "" <-
+                 map_get(lease, :repo_path),
+               {:ok, authority} <- bind_grok_worktree(repo_path, lease_cwd) do
+            {:ok, authority}
+          else
+            false -> {:error, :grok_workspace_cwd_mismatch}
+            nil -> {:error, :invalid_grok_workspace_lease}
+            {:error, _reason} = error -> error
+            _other -> {:error, :invalid_grok_workspace_lease}
+          end
+      end
+    end
+
+    defp bind_authorized_grok_workspace(_provider, _params, _agent_id, _task_id, _context),
+      do: {:ok, nil}
+
+    defp workspace_registry_caller(agent_id, task_id, context) do
+      %{
+        principal_id: agent_id,
+        task_id: task_id,
+        server: Map.get(context, :workspace_registry) || Map.get(context, "workspace_registry")
+      }
+    end
+
+    defp bind_grok_worktree(repo_path, worktree_path) do
+      ai_module = Acp.ai_module()
+
+      if function_exported?(ai_module, :bind_grok_worktree, 2) do
+        # credo:disable-for-next-line Credo.Check.Refactor.Apply
+        apply(ai_module, :bind_grok_worktree, [repo_path, worktree_path])
+      else
+        {:error, :grok_sandbox_binding_unsupported}
       end
     end
 

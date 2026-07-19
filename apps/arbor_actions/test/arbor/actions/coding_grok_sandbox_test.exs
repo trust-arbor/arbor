@@ -2,9 +2,25 @@ defmodule Arbor.Actions.CodingGrokSandboxTest do
   use Arbor.Actions.ActionCase, async: false
 
   defmodule FakeAI do
+    def acp_providers, do: [:codex, :grok]
+
     def bind_grok_worktree(repo_root, worktree_path) do
       notify({:grok_worktree_bound, repo_root, worktree_path})
       :persistent_term.get({__MODULE__, :bind_result}, {:ok, :opaque_grok_sandbox_authority})
+    end
+
+    def acp_managed_start_session(provider, opts) do
+      notify({:managed_start, provider, opts})
+
+      {:ok,
+       %{
+         worker_session_id: "acp_worker_grok_test",
+         session_id: "acp-session",
+         provider: to_string(provider),
+         model: Keyword.get(opts, :model) || "default",
+         status: "ready",
+         pooled: false
+       }}
     end
 
     defp notify(msg) do
@@ -41,7 +57,7 @@ defmodule Arbor.Actions.CodingGrokSandboxTest do
   end
 
   describe "ProduceReviewableChange.run/2 Grok worktree binding" do
-    test "security regression: binds Grok worktrees before starting ACP and threads opaque authority through internal context only",
+    test "security regression: StartSession derives Grok authority from the acquired workspace lease",
          %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       parent = self()
@@ -54,8 +70,16 @@ defmodule Arbor.Actions.CodingGrokSandboxTest do
              Map.get(context, "acp_grok_sandbox_authority")}
           )
 
-          Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+          case Acp.StartSession.run(params, Map.delete(context, :action_runner)) do
+            {:ok, result} = ok ->
+              Process.put(:coding_test_worktree, params.cwd)
+              assert is_binary(params.workspace_id)
+              assert result.worker_session_id == "acp_worker_grok_test"
+              ok
+
+            error ->
+              error
+          end
 
         Acp.SendMessage, _params, _context ->
           worktree = Process.get(:coding_test_worktree)
@@ -93,9 +117,13 @@ defmodule Arbor.Actions.CodingGrokSandboxTest do
 
       assert result.status == "change_committed"
 
-      assert_receive {:start_session, _start_params, atom_authority, string_authority}
-      assert atom_authority == :opaque_grok_authority
+      assert_receive {:start_session, start_params, atom_authority, string_authority}
+      assert start_params.workspace_id != ""
+      assert atom_authority == nil
       assert string_authority == nil
+
+      assert_receive {:managed_start, :grok, managed_opts}
+      assert Keyword.get(managed_opts, :grok_sandbox_authority) == :opaque_grok_authority
 
       assert_receive {:grok_worktree_bound, bound_repo_root, bound_worktree}
       assert {:ok, canonical_repo} = Arbor.Common.SafePath.resolve_real(repo)
@@ -113,16 +141,15 @@ defmodule Arbor.Actions.CodingGrokSandboxTest do
       parent = self()
 
       runner = fn
-        Acp.StartSession, _params, _context ->
-          send(parent, :unexpected_start_session)
-          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+        Acp.StartSession, params, context ->
+          Acp.StartSession.run(params, Map.delete(context, :action_runner))
 
         module, params, context ->
           module.run(params, Map.delete(context, :action_runner))
       end
 
       with_fake_ai(parent, {:error, :binding_blocked}, fn ->
-        assert {:error, :binding_blocked} ==
+        assert {:error, "ACP error: :binding_blocked"} ==
                  Coding.ProduceReviewableChange.run(
                    %{
                      task: "Add feature file",
@@ -137,7 +164,7 @@ defmodule Arbor.Actions.CodingGrokSandboxTest do
                  )
       end)
 
-      refute_receive {:start_session, _}
+      refute_receive {:managed_start, _, _}
       assert_receive {:grok_worktree_bound, bound_repo_root, _bound_worktree}
       assert {:ok, canonical_repo} = Arbor.Common.SafePath.resolve_real(repo)
       assert bound_repo_root == canonical_repo
@@ -157,8 +184,16 @@ defmodule Arbor.Actions.CodingGrokSandboxTest do
              Map.get(context, "acp_grok_sandbox_authority")}
           )
 
-          Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+          case Acp.StartSession.run(params, Map.delete(context, :action_runner)) do
+            {:ok, result} = ok ->
+              Process.put(:coding_test_worktree, params.cwd)
+              assert is_binary(params.workspace_id)
+              assert result.worker_session_id == "acp_worker_grok_test"
+              ok
+
+            error ->
+              error
+          end
 
         Acp.SendMessage, _params, _context ->
           worktree = Process.get(:coding_test_worktree)
@@ -199,6 +234,9 @@ defmodule Arbor.Actions.CodingGrokSandboxTest do
       assert_receive {:start_session, _start_params, atom_authority, string_authority}
       assert atom_authority == nil
       assert string_authority == nil
+
+      assert_receive {:managed_start, :codex, managed_opts}
+      refute Keyword.has_key?(managed_opts, :grok_sandbox_authority)
 
       refute_receive {:grok_worktree_bound, _, _}
     end

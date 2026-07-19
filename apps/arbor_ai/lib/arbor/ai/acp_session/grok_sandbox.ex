@@ -56,6 +56,25 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   @opaque authority :: %Authority{}
 
   @doc false
+  @spec adopt_authority(pid(), term()) ::
+          {:ok, authority()} | {:error, term()}
+  def adopt_authority(prior_owner, authority) when is_pid(prior_owner) do
+    with {:ok, %Authority{} = authority} <- normalize_authority(authority),
+         :ok <- verify_authority(authority, prior_owner, authority.worktree_root) do
+      {:ok,
+       %Authority{
+         authority
+         | owner: self(),
+           reference: make_ref()
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def adopt_authority(_prior_owner, _authority), do: {:error, :invalid_grok_worktree_authority}
+
+  @doc false
   @spec bind(String.t(), String.t()) :: {:ok, authority()} | {:error, term()}
   def bind(repository_root, worktree_root)
       when is_binary(repository_root) and is_binary(worktree_root) do
@@ -231,6 +250,9 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
 
   defp verify_authority(_authority, _expected_owner, _worktree_root, _metadata),
     do: {:error, :grok_linked_worktree_authority_required}
+
+  defp normalize_authority(%Authority{} = authority), do: {:ok, authority}
+  defp normalize_authority(_authority), do: {:error, :invalid_grok_worktree_authority}
 
   defp current_metadata(nil, worktree_root), do: linked_worktree_metadata(worktree_root)
   defp current_metadata(metadata, _worktree_root), do: {:ok, metadata}

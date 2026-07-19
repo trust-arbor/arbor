@@ -1240,6 +1240,38 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "security regression: worker starts cannot drop workspace lease authority", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      {"open_worker", "provider,cwd"},
+      {"open_recovery_worker", "provider,cwd,session_id"}
+    ]
+
+    for {node_id, forged_context_keys} <- mutations do
+      forged =
+        update_in(graph.nodes[node_id].attrs, fn attrs ->
+          Map.put(attrs, "context_keys", forged_context_keys)
+        end)
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(forged, profile["semantic_policy"],
+                 review_profile: "binding",
+                 worker_use_pool: true,
+                 worker_resume_session_id: nil,
+                 worker_permission_mode: "default",
+                 worker_model: nil
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["node_id"] == node_id and
+                 error["detail"]["attribute"] == "context_keys"
+             end)
+    end
+  end
+
   test "provider session capture must dominate owner-observed workspace inspect", ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)
