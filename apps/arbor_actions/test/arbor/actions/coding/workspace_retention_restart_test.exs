@@ -660,6 +660,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
                  task_id: task_id,
                  principal_id: principal_id
                )
+
+      assert {:error, :retention_journal_unavailable} =
+               WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id,
+                 server: server_poisoned
+               )
     end
 
     test "security regression: a journal that becomes unreadable blocks fresh allocation", %{
@@ -1362,7 +1367,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
         {:ok, key} = Core.record_key(workspace_id)
 
         :ok =
-          ControllableRetentionStore.seed(store_name, key, full_fixture_record(i, workspace_id))
+          ControllableRetentionStore.seed(
+            store_name,
+            key,
+            full_fixture_record(i, workspace_id, repo)
+          )
       end
 
       server = start_registry(120_000, retention_journal: {store_name, backend})
@@ -1387,7 +1396,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       for i <- 1..Core.max_records() do
         workspace_id = "ws_full_#{i}"
         {:ok, key} = Core.record_key(workspace_id)
-        :ok = ControllableRetentionStore.seed(store_name, key, full_fixture_record(i))
+
+        :ok =
+          ControllableRetentionStore.seed(store_name, key, full_fixture_record(i, nil, repo))
       end
 
       server = start_registry(120_000, retention_journal: {store_name, backend})
@@ -1430,7 +1441,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
         {:ok, key} = Core.record_key(workspace_id)
 
         :ok =
-          ControllableRetentionStore.seed(store_name, key, full_fixture_record(i, workspace_id))
+          ControllableRetentionStore.seed(
+            store_name,
+            key,
+            full_fixture_record(i, workspace_id, repo)
+          )
       end
 
       server = start_registry(120_000, retention_journal: {store_name, backend})
@@ -1472,6 +1487,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           full_fixture_record(900, "ws_post_start_extra")
         )
 
+      assert {:error, :retention_journal_unavailable} =
+               WorkspaceLeaseRegistry.settle_task_workspaces("task-extra", "agent-extra",
+                 server: extra_server
+               )
+
       assert_allocation_denied_before_create(
         extra_server,
         repo,
@@ -1494,6 +1514,15 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       {:ok, missing_key} = Core.record_key(active.workspace_id)
       :ok = Persistence.delete(missing_store, missing_backend, missing_key)
 
+      assert {:error, :retention_journal_unavailable} =
+               WorkspaceLeaseRegistry.settle_task_workspaces(
+                 "task-missing-owner",
+                 "agent-missing-owner",
+                 server: missing_server
+               )
+
+      assert active_count(missing_server) == 1
+
       assert_allocation_denied_before_create(
         missing_server,
         repo,
@@ -1512,6 +1541,15 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
                )
 
       :ok = ControllableRetentionStore.set_mode(get_store, :fail_get)
+
+      assert {:error, :retention_journal_unavailable} =
+               WorkspaceLeaseRegistry.settle_task_workspaces(
+                 "task-get-owner",
+                 "agent-get-owner",
+                 server: get_server
+               )
+
+      assert active_count(get_server) == 1
 
       assert_allocation_denied_before_create(
         get_server,
@@ -2627,6 +2665,177 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       refute durable_marker?(store_name, backend, lease.workspace_id)
     end
 
+    test "retained marker settles on hydration when both repo and worktree paths are absent", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/both-absent-hydration"
+      base = Path.join(tmp_dir, "worktrees")
+      task_id = "task_both_absent_hydration"
+      principal_id = "agent_both_absent_hydration"
+      runtime_id = "rt_both_absent_#{System.unique_integer([:positive])}"
+      {store_name, backend} = start_controllable_store()
+
+      server =
+        start_registry(60_000,
+          retention_journal: {store_name, backend},
+          retention_runtime_id: runtime_id
+        )
+
+      assert {:ok, lease} =
+               acquire(server, repo, branch, tmp_dir, base,
+                 task_id: task_id,
+                 principal_id: principal_id
+               )
+
+      # Live owner process may retain without task/principal opts.
+      assert {:ok, _} = release(server, lease.workspace_id, :retain)
+
+      assert durable_marker?(store_name, backend, lease.workspace_id)
+      stop_registry(server)
+
+      # Benchmark-style parent deletion: both recorded parents are gone.
+      File.rm_rf!(lease.worktree_path)
+      File.rm_rf!(repo)
+      assert {:error, :enoent} = File.lstat(lease.worktree_path)
+      assert {:error, :enoent} = File.lstat(repo)
+
+      server2 =
+        start_registry(60_000,
+          retention_journal: {store_name, backend},
+          retention_runtime_id: runtime_id
+        )
+
+      assert retained_count(server2) == 0
+      refute journal_poisoned?(server2)
+      refute durable_marker?(store_name, backend, lease.workspace_id)
+    end
+
+    test "security regression: retained marker delete failure preserves expiry cleanup",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/settle-marker-delete-fail"
+      base = Path.join(tmp_dir, "worktrees")
+      task_id = "task_settle_marker_delete_fail"
+      principal_id = "agent_settle_marker_delete_fail"
+      runtime_id = "rt_settle_marker_fail_#{System.unique_integer([:positive])}"
+      {store_name, backend} = start_controllable_store()
+
+      server =
+        start_registry(60_000,
+          retention_journal: {store_name, backend},
+          retention_runtime_id: runtime_id
+        )
+
+      assert {:ok, lease} =
+               acquire(server, repo, branch, tmp_dir, base,
+                 task_id: task_id,
+                 principal_id: principal_id
+               )
+
+      assert {:ok, _} = release(server, lease.workspace_id, :retain)
+      assert durable_marker?(store_name, backend, lease.workspace_id)
+      assert retained_count(server) == 1
+
+      File.rm_rf!(lease.worktree_path)
+      File.rm_rf!(repo)
+      assert {:error, :enoent} = File.lstat(lease.worktree_path)
+      assert {:error, :enoent} = File.lstat(repo)
+
+      # Marker-delete failure is not settlement: residue remains fail-closed.
+      :ok = ControllableRetentionStore.set_mode(store_name, :fail_delete)
+
+      assert {:error, {:workspace_settlement_unconfirmed, failures}} =
+               WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id,
+                 server: server
+               )
+
+      assert Enum.any?(failures, fn {id, reason} ->
+               id == lease.workspace_id and
+                 (reason == :settlement_residue or
+                    match?({:marker_delete_failed, _}, reason))
+             end)
+
+      assert retained_count(server) == 1 or active_count(server) == 1
+      assert durable_marker?(store_name, backend, lease.workspace_id)
+
+      retained = retained_from_state(server)
+      assert is_reference(retained.expiry_ref)
+      assert is_integer(Process.read_timer(retained.expiry_ref))
+
+      # Recover for test hygiene: allow marker delete and settle both-absent.
+      :ok = ControllableRetentionStore.set_mode(store_name, :ok)
+
+      assert {:ok, cleaned} =
+               WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id,
+                 server: server
+               )
+
+      assert cleaned["settled_count"] >= 1
+      assert retained_count(server) == 0
+      assert active_count(server) == 0
+      refute durable_marker?(store_name, backend, lease.workspace_id)
+    end
+
+    test "security regression: active marker delete failure preserves owner monitor", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/active-marker-delete-fail"
+      base = Path.join(tmp_dir, "worktrees")
+      task_id = "task_active_marker_delete_fail"
+      principal_id = "agent_active_marker_delete_fail"
+      runtime_id = "rt_active_marker_fail_#{System.unique_integer([:positive])}"
+      {store_name, backend} = start_controllable_store()
+
+      server =
+        start_registry(60_000,
+          retention_journal: {store_name, backend},
+          retention_runtime_id: runtime_id
+        )
+
+      owner_pid = self()
+
+      assert {:ok, lease} =
+               acquire(server, repo, branch, tmp_dir, base,
+                 task_id: task_id,
+                 principal_id: principal_id
+               )
+
+      assert durable_marker?(store_name, backend, lease.workspace_id)
+      assert active_count(server) == 1
+
+      File.rm_rf!(lease.worktree_path)
+      File.rm_rf!(repo)
+      assert {:error, :enoent} = File.lstat(lease.worktree_path)
+      assert {:error, :enoent} = File.lstat(repo)
+
+      :ok = ControllableRetentionStore.set_mode(store_name, :fail_delete)
+
+      assert {:error, {:workspace_settlement_unconfirmed, _failures}} =
+               WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id,
+                 server: server
+               )
+
+      assert active_count(server) == 1
+      assert durable_marker?(store_name, backend, lease.workspace_id)
+      assert {:monitors, monitors} = Process.info(server_pid(server), :monitors)
+      assert Enum.any?(monitors, &match?({:process, ^owner_pid}, &1))
+
+      # Recover for test hygiene and confirm monitor removal follows marker deletion.
+      :ok = ControllableRetentionStore.set_mode(store_name, :ok)
+
+      assert {:ok, %{"settled_count" => 1}} =
+               WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id,
+                 server: server
+               )
+
+      assert active_count(server) == 0
+      refute durable_marker?(store_name, backend, lease.workspace_id)
+      assert {:monitors, monitors_after} = Process.info(server_pid(server), :monitors)
+      refute Enum.any?(monitors_after, &match?({:process, ^owner_pid}, &1))
+    end
+
     test "security regression: detached Git registration prevents retained absence proof", %{
       tmp_dir: tmp_dir
     } do
@@ -3481,9 +3690,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
              )
   end
 
-  defp full_fixture_record(index, workspace_id \\ nil) do
+  defp full_fixture_record(index, workspace_id), do: full_fixture_record(index, workspace_id, nil)
+
+  defp full_fixture_record(index, workspace_id, live_repo_path) do
     workspace_id = workspace_id || "ws_full_#{index}"
-    repo_path = "/tmp/arbor-retention-full/repo-#{index}"
+    repo_path = live_repo_path || "/tmp/arbor-retention-full/repo-#{index}"
     worktree_path = "/tmp/arbor-retention-full/worktree-#{index}"
     branch = "full-#{index}"
 

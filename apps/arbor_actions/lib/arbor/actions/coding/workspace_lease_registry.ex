@@ -305,6 +305,36 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  @doc """
+  Settle every workspace lease retained or active for an exact task+principal.
+
+  Authority is the nonblank exact `task_id` **and** `principal_id` pair only —
+  opaque workspace ids are never accepted as authority. For each matching
+  active, retained, or orphaned-active lease the registry attempts remove-mode
+  settlement (including both-path-absent marker drop without destructive work).
+
+  Returns:
+  * `{:ok, receipt}` when every matching record is positively settled or none
+    match (idempotent empty settle)
+  * `{:error, reason}` when any matching record cannot be positively confirmed
+    settled — parent callers must fail closed and retain their roots
+  """
+  @spec settle_task_workspaces(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def settle_task_workspaces(task_id, principal_id, opts \\ [])
+
+  def settle_task_workspaces(task_id, principal_id, opts)
+      when is_binary(task_id) and is_binary(principal_id) and is_list(opts) do
+    if non_empty_id?(task_id) and non_empty_id?(principal_id) do
+      call({:settle_task_workspaces, task_id, principal_id}, opts)
+    else
+      {:error, :invalid_task_principal}
+    end
+  end
+
+  def settle_task_workspaces(_task_id, _principal_id, _opts),
+    do: {:error, :invalid_task_principal}
+
   @doc false
   @spec acquire_validation_resource(String.t(), map() | keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -682,6 +712,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                   {:reply, {:error, :not_authorized}, state}
                 end
 
+              {:ok, retained} when mode == :remove ->
+                # Exact task+principal may force-settle retained leases (TTL
+                # evidence) without waiting for expiry. Retain mode remains
+                # idempotent success for non-orphaned retained entries.
+                release_retained_for_authorized_caller(state, retained, caller)
+
               _ ->
                 {:reply, {:ok, already_released_view(workspace_id)}, state}
             end
@@ -707,6 +743,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         else
           {:reply, {:error, :not_authorized}, state}
         end
+    end
+  end
+
+  def handle_call({:settle_task_workspaces, task_id, principal_id}, {_from_pid, _tag}, state) do
+    case ensure_journal_inventory_known(state) do
+      :ok ->
+        settle_task_workspaces_reply(state, task_id, principal_id)
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -988,6 +1034,45 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # -- Internals ------------------------------------------------------
+
+  defp release_retained_for_authorized_caller(state, retained, caller) do
+    if principal_task_match?(retained, caller) do
+      case release_retained_for_settle(state, retained) do
+        {:ok, result, state} -> {:reply, {:ok, result}, state}
+        {:error, reason, state} -> {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :not_authorized}, state}
+    end
+  end
+
+  defp settle_task_workspaces_reply(state, task_id, principal_id) do
+    caller = %{task_id: task_id, principal_id: principal_id, owner_pid: nil}
+    {settled, failures, state} = settle_matching_task_workspaces(state, caller)
+
+    # Settlement is confirmed only when every matching live/retained/blocker
+    # record is gone. Marker-delete retries and other residues fail closed.
+    residues = remaining_task_workspace_ids(state, caller)
+
+    if failures == [] and residues == [] do
+      receipt = %{
+        "principal_id" => principal_id,
+        "settled_count" => length(settled),
+        "status" => "settled",
+        "task_id" => task_id,
+        "workspace_ids" => settled
+      }
+
+      {:reply, {:ok, receipt}, state}
+    else
+      residue_failures =
+        Enum.map(residues, fn workspace_id ->
+          {workspace_id, :settlement_residue}
+        end)
+
+      {:reply, {:error, {:workspace_settlement_unconfirmed, failures ++ residue_failures}}, state}
+    end
+  end
 
   defp handle_validation_resource_owner_down(state, resource_id, ref) do
     state =
@@ -2958,6 +3043,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp ensure_journal_admits_allocation(_state, _prepared, _capacity_mode),
     do: {:error, :retention_journal_unavailable}
 
+  # Bulk settlement cannot trust hot indexes unless the durable inventory is
+  # readable and exactly mirrored. Otherwise an "empty" settle could conceal a
+  # marker that failed hydration or appeared after startup.
+  defp ensure_journal_inventory_known(%{retention_journal: %{status: :disabled}}), do: :ok
+
+  defp ensure_journal_inventory_known(%{retention_journal: %{status: :ready} = journal} = state) do
+    with {:ok, records} <- load_durable_retained_records(journal),
+         :ok <- require_matching_durable_hot_ids(state, records) do
+      :ok
+    else
+      {:error, _reason} -> {:error, :retention_journal_unavailable}
+    end
+  end
+
+  defp ensure_journal_inventory_known(_state), do: {:error, :retention_journal_unavailable}
+
   defp require_matching_durable_hot_ids(state, records) do
     durable_ids = records |> Enum.map(& &1.workspace_id) |> MapSet.new()
 
@@ -3997,7 +4098,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       lease.principal_id == caller.principal_id
   end
 
-  defp non_empty_id?(id), do: is_binary(id) and id != ""
+  defp non_empty_id?(id) when is_binary(id), do: String.trim(id) != ""
+  defp non_empty_id?(_id), do: false
 
   defp validate_task_principal_pair(nil, nil), do: :ok
 
@@ -4075,24 +4177,207 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     case persist_retained_marker(state, retained_for_remove) do
       :ok ->
         state = put_retained(state, Map.put(retained_for_remove, :durable_lifecycle, nil))
-
-        case remove_retained_now(state, retained_for_remove) do
-          {:ok, state} ->
-            result =
-              retained
-              |> Map.put(:active, false)
-              |> public_view()
-              |> Map.put(:active, false)
-              |> Map.put(:status, "removed")
-
-            {:ok, result, state}
-
-          {:error, reason, state} ->
-            {:error, reason, state}
-        end
+        release_retained_for_settle(state, Map.put(retained_for_remove, :durable_lifecycle, nil))
 
       {:error, reason} ->
         {:error, {:retention_journal_write_failed, reason}, state}
+    end
+  end
+
+  # Force-settle a hot retained/orphaned lease after exact task+principal auth.
+  defp release_retained_for_settle(state, retained) do
+    if both_paths_positively_absent?(retained.repo_path, retained.worktree_path) do
+      settle_both_absent_retained(state, retained)
+    else
+      case remove_retained_now(state, retained) do
+        {:ok, state} ->
+          result =
+            retained
+            |> Map.put(:active, false)
+            |> public_view()
+            |> Map.put(:active, false)
+            |> Map.put(:status, "removed")
+
+          {:ok, result, state}
+
+        {:error, reason, state} ->
+          {:error, reason, state}
+      end
+    end
+  end
+
+  # Both recorded parents are gone — drop the marker without destructive work
+  # and without consuming cleanup-attempt budget.
+  defp settle_both_absent_retained(state, retained) do
+    case delete_retained_marker(state, retained) do
+      :ok ->
+        cancel_expiry(Map.get(retained, :expiry_ref))
+
+        result =
+          retained
+          |> Map.put(:active, false)
+          |> public_view()
+          |> Map.put(:active, false)
+          |> Map.put(:status, "removed")
+
+        {:ok, result, drop_retained(state, retained)}
+
+      {:error, reason} ->
+        {:error, {:marker_delete_failed, reason}, state}
+    end
+  end
+
+  defp settle_matching_task_workspaces(state, caller) do
+    active =
+      state.leases
+      |> Map.values()
+      |> Enum.filter(&principal_task_match?(&1, caller))
+
+    retained =
+      state.retained_by_id
+      |> Map.values()
+      |> Enum.filter(&principal_task_match?(&1, caller))
+
+    blockers =
+      state.retention_blockers
+      |> Map.values()
+      |> Enum.filter(&principal_task_match?(&1, caller))
+
+    {settled_a, failures_a, state} =
+      Enum.reduce(active, {[], [], state}, fn lease, {settled, failures, st} ->
+        case settle_active_lease_for_task(st, lease) do
+          {:ok, st2} -> {[lease.workspace_id | settled], failures, st2}
+          {:error, reason, st2} -> {settled, [{lease.workspace_id, reason} | failures], st2}
+        end
+      end)
+
+    {settled_r, failures_r, state} =
+      Enum.reduce(retained, {settled_a, failures_a, state}, &settle_retained_snapshot/2)
+
+    {settled_b, failures_b, state} =
+      Enum.reduce(blockers, {settled_r, failures_r, state}, fn blocker, {settled, failures, st} ->
+        case settle_creation_blocker_for_task(st, blocker) do
+          {:ok, st2} -> {[blocker.workspace_id | settled], failures, st2}
+          {:error, reason, st2} -> {settled, [{blocker.workspace_id, reason} | failures], st2}
+        end
+      end)
+
+    {Enum.reverse(settled_b), Enum.reverse(failures_b), state}
+  end
+
+  defp settle_retained_snapshot(retained, {settled, failures, state}) do
+    # Re-fetch after prior mutations; skip if already dropped.
+    case Map.fetch(state.retained_by_id, retained.workspace_id) do
+      :error ->
+        {[retained.workspace_id | settled], failures, state}
+
+      {:ok, current} ->
+        settle_current_retained(current, settled, failures, state)
+    end
+  end
+
+  defp settle_current_retained(retained, settled, failures, state) do
+    case release_retained_for_settle(state, retained) do
+      {:ok, _result, state} ->
+        # Only count as settled when the hot retained entry is gone.
+        # Marker-delete retry paths leave residue and must not look settled.
+        if Map.has_key?(state.retained_by_id, retained.workspace_id) do
+          {settled, [{retained.workspace_id, :settlement_residue} | failures], state}
+        else
+          {[retained.workspace_id | settled], failures, state}
+        end
+
+      {:error, reason, state} ->
+        {settled, [{retained.workspace_id, reason} | failures], state}
+    end
+  end
+
+  defp remaining_task_workspace_ids(state, caller) do
+    active_ids =
+      state.leases
+      |> Map.values()
+      |> Enum.filter(&principal_task_match?(&1, caller))
+      |> Enum.map(& &1.workspace_id)
+
+    retained_ids =
+      state.retained_by_id
+      |> Map.values()
+      |> Enum.filter(&principal_task_match?(&1, caller))
+      |> Enum.map(& &1.workspace_id)
+
+    blocker_ids =
+      state.retention_blockers
+      |> Map.values()
+      |> Enum.filter(&principal_task_match?(&1, caller))
+      |> Enum.map(& &1.workspace_id)
+
+    Enum.uniq(active_ids ++ retained_ids ++ blocker_ids)
+  end
+
+  defp settle_active_lease_for_task(state, lease) do
+    # When both recorded parents are already gone (benchmark deleted pair_root
+    # under a still-active lease), drop without destructive work after proving
+    # absence and confirming durable marker delete.
+    if both_paths_positively_absent?(lease.repo_path, lease.worktree_path) do
+      settle_both_absent_active(state, lease)
+    else
+      case cleanup_workspace_validation_resources(state, lease.workspace_id) do
+        {:ok, state} ->
+          state =
+            state
+            |> cleanup_workspace_attestations(lease.workspace_id)
+            |> cleanup_workspace_review_snapshots(lease.workspace_id)
+
+          case do_release(state, lease, :remove) do
+            {:ok, _result, state} -> {:ok, state}
+            {:error, reason, state} -> {:error, reason, state}
+          end
+
+        {:error, state} ->
+          {:error, :validation_resource_cleanup_failed, state}
+      end
+    end
+  end
+
+  defp settle_both_absent_active(state, lease) do
+    case cleanup_workspace_validation_resources(state, lease.workspace_id) do
+      {:ok, state} ->
+        state =
+          state
+          |> cleanup_workspace_attestations(lease.workspace_id)
+          |> cleanup_workspace_review_snapshots(lease.workspace_id)
+
+        case delete_retained_marker(state, lease) do
+          :ok ->
+            if is_reference(Map.get(lease, :owner_ref)) do
+              Process.demonitor(lease.owner_ref, [:flush])
+            end
+
+            {:ok, drop_lease(state, lease)}
+
+          {:error, reason} ->
+            # Marker remains — leave the live lease so residue checks fail closed.
+            {:error, {:marker_delete_failed, reason}, state}
+        end
+
+      {:error, state} ->
+        {:error, :validation_resource_cleanup_failed, state}
+    end
+  end
+
+  defp settle_creation_blocker_for_task(state, blocker) do
+    case both_paths_positively_absent?(blocker.repo_path, blocker.worktree_path) do
+      true ->
+        case delete_retained_marker(state, %{workspace_id: blocker.workspace_id}) do
+          :ok ->
+            {:ok, drop_creation_blocker(state, blocker)}
+
+          {:error, reason} ->
+            {:error, {:marker_delete_failed, reason}, state}
+        end
+
+      false ->
+        {:error, :retention_creation_blocked, state}
     end
   end
 
@@ -4523,17 +4808,34 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  # Positive absence (path + registration already gone) settles the durable
-  # marker without granting deletion authority for a still-present path.
+  # Positive absence settles without destructive work:
+  # * both recorded repo_path and worktree_path positively absent (enoent), or
+  # * worktree path gone and Git registration positively absent while repo lives
+  # Never treats one missing path, identity mismatch on a present path, or an
+  # unreadable state as absence.
   defp settle_or_cleanup_retained(state, retained) do
-    case verify_retained_removed(retained) do
-      :ok ->
-        :ok
+    if both_paths_positively_absent?(retained.repo_path, retained.worktree_path) do
+      :ok
+    else
+      case verify_retained_removed(retained) do
+        :ok ->
+          :ok
 
-      {:error, _} ->
-        cleanup_retained_worktree(state, retained)
+        {:error, _} ->
+          cleanup_retained_worktree(state, retained)
+      end
     end
   end
+
+  defp both_paths_positively_absent?(repo_path, worktree_path)
+       when is_binary(repo_path) and is_binary(worktree_path) do
+    case {File.lstat(repo_path), File.lstat(worktree_path)} do
+      {{:error, :enoent}, {:error, :enoent}} -> true
+      _other -> false
+    end
+  end
+
+  defp both_paths_positively_absent?(_repo_path, _worktree_path), do: false
 
   defp active_target?(state, target) do
     Enum.any?(state.leases, fn {_id, lease} ->
@@ -4876,7 +5178,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     if RetentionJournal.creating_record?(record) do
       materialize_creation_blocker(record, state)
     else
-      case settle_absent_same_runtime_active_marker(record, state) do
+      case settle_absent_orphaned_marker(record, state) do
         {:ok, :settled, state2} ->
           {:ok, :settled, state2}
 
@@ -4940,6 +5242,28 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:ok, :present} -> {:error, :creation_path_or_registration_present}
       {:error, reason} -> {:error, {:creation_absence_uncertain, reason}}
       {:ok, _stat} -> {:error, :creation_path_present}
+    end
+  end
+
+  # Hydration reconciliation for durable markers whose recorded parents are
+  # already gone (e.g. a benchmark deleted pair_root under retained leases).
+  # Both paths must independently be :enoent; one missing or unreadable path
+  # is not absence. Same-runtime active markers may still settle when the
+  # worktree is gone and Git registration is positively absent.
+  defp settle_absent_orphaned_marker(record, state) do
+    repo_path = canonical_path_or_expanded(record.repo_path)
+    worktree_path = canonical_path_or_expanded(record.worktree_path)
+
+    if both_paths_positively_absent?(repo_path, worktree_path) do
+      case delete_retained_marker(state, %{workspace_id: record.workspace_id}) do
+        :ok ->
+          {:ok, :settled, state}
+
+        {:error, reason} ->
+          {:error, {:absent_marker_delete_failed, record.workspace_id, reason}}
+      end
+    else
+      settle_absent_same_runtime_active_marker(record, state)
     end
   end
 

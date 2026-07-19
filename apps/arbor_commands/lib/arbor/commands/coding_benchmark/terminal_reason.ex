@@ -38,6 +38,16 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
     _kind, _reason -> @redacted_marker
   end
 
+  @doc false
+  @spec append(term(), term()) :: String.t()
+  def append(existing, suffix) when existing in [nil, ""], do: sanitize(suffix)
+
+  def append(existing, suffix) when is_binary(existing) do
+    sanitize(existing <> ";" <> sanitize(suffix))
+  end
+
+  def append(_existing, suffix), do: sanitize(suffix)
+
   @spec from_result(term(), term()) :: String.t() | nil
   def from_result(_result, status) when status in ~w(change_committed no_changes pr_created),
     do: nil

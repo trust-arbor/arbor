@@ -92,6 +92,19 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     end
   end
 
+  @doc """
+  Settle every coding workspace lease for a deterministic benchmark task id
+  under the configured principal through the public `Arbor.Actions` facade.
+  """
+  @spec settle_task_workspaces(String.t()) :: {:ok, map()} | {:error, term()}
+  def settle_task_workspaces(task_id) when is_binary(task_id) and task_id != "" do
+    with {:ok, principal_id} <- configured_principal_id() do
+      Arbor.Actions.settle_coding_workspaces(task_id, principal_id)
+    end
+  end
+
+  def settle_task_workspaces(_task_id), do: {:error, :invalid_benchmark_task_id}
+
   @spec cancel(map(), String.t(), function(), atom(), :unsupported | function()) ::
           :ok | {:ok, term()} | {:error, term()}
   def cancel(request, executor_path, default_runner, executor_config_key, default_cancel)

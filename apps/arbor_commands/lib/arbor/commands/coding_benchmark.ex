@@ -27,6 +27,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.{TranscriptDescriptor, WorkspaceReleaseDescriptor}
   alias Arbor.Orchestrator
+  alias Arbor.Shell
 
   @manifest_schema "arbor.coding_benchmark.manifest.v1"
   @report_schema "arbor.coding_benchmark.report.v1"
@@ -729,19 +730,28 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp execute_report(manifest, runtime) do
     case create_run_root(runtime.workspace_root) do
-      {:ok, run_root} ->
-        try do
-          pairs = pair_specs(manifest, runtime)
+      {:ok, run_root, run_identity} ->
+        pairs = pair_specs(manifest, runtime)
 
-          {rows, pair_reports} =
-            Enum.reduce(pairs, {[], []}, fn pair, {rows, pair_reports} ->
-              {pair_rows, pair_report} = execute_pair(pair, run_root, runtime)
-              {rows ++ pair_rows, pair_reports ++ [pair_report]}
-            end)
+        {rows, pair_reports, pairs_settled?} =
+          Enum.reduce(pairs, {[], [], true}, fn pair, {rows, pair_reports, settled?} ->
+            {pair_rows, pair_report, pair_settled?} = execute_pair(pair, run_root, runtime)
+            {rows ++ pair_rows, pair_reports ++ [pair_report], settled? and pair_settled?}
+          end)
 
-          {:ok, report(manifest, runtime, rows, pair_reports)}
-        after
-          File.rm_rf(run_root)
+        report = report(manifest, runtime, rows, pair_reports)
+
+        if pairs_settled? do
+          case remove_owned_benchmark_root(run_identity) do
+            :ok ->
+              {:ok, report}
+
+            {:error, reason} ->
+              {:ok, annotate_run_cleanup_failure(report, reason)}
+          end
+        else
+          # A pair retained its root; keep the parent run root fail-closed.
+          {:ok, report}
         end
 
       {:error, reason} ->
@@ -753,9 +763,10 @@ defmodule Arbor.Commands.CodingBenchmark do
     suffix = System.unique_integer([:positive, :monotonic])
     path = Path.join(workspace_root, "arbor-coding-benchmark-#{suffix}")
 
-    case File.mkdir(path) do
-      :ok -> {:ok, path}
-      {:error, reason} -> {:error, "create_failed:#{reason}"}
+    case Shell.create_private_owned_tree(path) do
+      {:ok, identity} -> {:ok, path, identity}
+      {:error, :root_exists} -> {:error, "create_failed:eexist"}
+      {:error, reason} -> {:error, "create_failed:#{reason_string(reason)}"}
     end
   end
 
@@ -775,24 +786,38 @@ defmodule Arbor.Commands.CodingBenchmark do
     pair_root =
       Path.join(run_root, "#{pair.fixture["fixture_id"]}-#{pair.repetition}")
 
-    try do
-      case prepare_pair(pair.fixture, pair_root, runtime.fixture_root, runtime.benchmark) do
-        {:ok, prepared} ->
-          executed =
-            Enum.map(pair.order, fn executor ->
-              execute_adapter(executor, pair, prepared, runtime)
-            end)
+    case prepare_pair(pair.fixture, pair_root, runtime.fixture_root, runtime.benchmark) do
+      {:ok, prepared} ->
+        executed =
+          Enum.map(pair.order, fn executor ->
+            execute_adapter(executor, pair, prepared, runtime)
+          end)
 
-          rows = Enum.map(executed, & &1.row)
-          projections = Map.new(executed, &{&1.executor, &1.projection})
-          {rows, pair_report(pair, projections)}
+        rows = Enum.map(executed, & &1.row)
+        projections = Map.new(executed, &{&1.executor, &1.projection})
+        settled? = Enum.all?(executed, & &1.workspace_settled?)
 
-        {:error, reason} ->
-          rows = Enum.map(pair.order, &failure_row(&1, pair, "fixture_setup_failed", reason))
-          {rows, pair_report(pair, %{})}
-      end
-    after
-      File.rm_rf(pair_root)
+        if settled? do
+          case remove_owned_benchmark_root(prepared.pair_identity) do
+            :ok ->
+              {rows, pair_report(pair, projections), true}
+
+            {:error, reason} ->
+              rows = Enum.map(rows, &annotate_row_cleanup_failure(&1, reason))
+              {rows, pair_report(pair, %{}), false}
+          end
+        else
+          # Settlement unconfirmed: never raw-delete a root that may still hold
+          # an active/retained WorkspaceLeaseRegistry lease.
+          {rows, pair_report(pair, projections), false}
+        end
+
+      {:error, reason} ->
+        rows = Enum.map(pair.order, &failure_row(&1, pair, "fixture_setup_failed", reason))
+        # Best-effort remove only when prepare never published a lease-bearing
+        # topology (no coding workspace can exist yet). Fail closed on unowned.
+        _ = best_effort_remove_unleased_pair_root(pair_root)
+        {rows, pair_report(pair, %{}), true}
     end
   end
 
@@ -805,13 +830,58 @@ defmodule Arbor.Commands.CodingBenchmark do
          {:ok, source_tree_oid} <-
            git_output(source, ["rev-parse", "--verify", "HEAD^{tree}"], timeout_ms),
          :ok <- matching_tree(source_tree_oid, fixture["base_tree_oid"]),
-         :ok <- mkdir(pair_root),
+         {:ok, pair_identity} <- create_pair_root(pair_root),
          {:ok, pair_root} <- Runtime.canonical_pair_root(pair_root, benchmark),
+         {:ok, pair_identity} <- rebind_pair_identity(pair_identity, pair_root),
          {:ok, workdirs} <-
            clone_pair(source, commit_oid, fixture["base_tree_oid"], pair_root, timeout_ms) do
-      {:ok, %{commit_oid: commit_oid, pair_root: pair_root, workdirs: workdirs}}
+      {:ok,
+       %{
+         commit_oid: commit_oid,
+         pair_identity: pair_identity,
+         pair_root: pair_root,
+         workdirs: workdirs
+       }}
     end
   end
+
+  defp create_pair_root(pair_root) do
+    case Shell.create_private_owned_tree(pair_root) do
+      {:ok, identity} -> {:ok, identity}
+      {:error, :root_exists} -> {:error, "mkdir_failed:eexist"}
+      {:error, reason} -> {:error, "mkdir_failed:#{reason_string(reason)}"}
+    end
+  end
+
+  # Canonicalization may rewrite /var → /private/var; keep identity path aligned
+  # with the verified canonical pair root before later owned-tree removal.
+  defp rebind_pair_identity(%{path: path} = identity, pair_root)
+       when is_binary(path) and is_binary(pair_root) do
+    if path == pair_root do
+      {:ok, identity}
+    else
+      case File.lstat(pair_root) do
+        {:ok,
+         %File.Stat{
+           type: :directory,
+           major_device: device,
+           minor_device: minor_device,
+           inode: inode
+         }} ->
+          if identity.device == device and identity.minor_device == minor_device and
+               identity.inode == inode do
+            {:ok, %{identity | path: pair_root}}
+          else
+            {:error, "pair_root_identity_mismatch"}
+          end
+
+        _other ->
+          {:error, "pair_root_identity_unavailable"}
+      end
+    end
+  end
+
+  defp rebind_pair_identity(_identity, _pair_root), do: {:error, "pair_root_identity_unavailable"}
 
   defp fixture_source(fixture_root, fixture_path) do
     with {:ok, lexical} <- SafePath.safe_join(fixture_root, fixture_path),
@@ -1130,10 +1200,19 @@ defmodule Arbor.Commands.CodingBenchmark do
             verification
           )
 
-        finalize_artifact_lease(execution, measurement, verification, runtime.benchmark)
+        execution =
+          finalize_artifact_lease(execution, measurement, verification, runtime.benchmark)
+
+        finalize_workspace_settlement(execution, verification)
 
       {:error, {:benchmark_setup_error, reason}} ->
-        execution_failure(executor, pair, "benchmark_setup_failed", reason)
+        # No trusted task_id topology — nothing to settle beyond the unleased
+        # pair root handled by execute_pair.
+        Map.put(
+          execution_failure(executor, pair, "benchmark_setup_failed", reason),
+          :workspace_settled?,
+          true
+        )
     end
   end
 
@@ -1148,8 +1227,10 @@ defmodule Arbor.Commands.CodingBenchmark do
            git_timeout_ms: runtime.benchmark.execution_timeout_ms,
            require_returned_worktree?: true,
            strict_provenance?: request["executor_path"] == "pipeline",
+           task_id: scope.task_id,
            trusted_artifact_root: scope.artifact_root,
-           trusted_worktree_root: scope.worktree_root
+           trusted_worktree_root: scope.worktree_root,
+           workspace_settlement_required?: true
          }}
       else
         {:ok,
@@ -1160,8 +1241,10 @@ defmodule Arbor.Commands.CodingBenchmark do
            git_timeout_ms: runtime.benchmark.execution_timeout_ms,
            require_returned_worktree?: false,
            strict_provenance?: false,
+           task_id: scope.task_id,
            trusted_artifact_root: scope.workdir,
-           trusted_worktree_root: scope.workdir
+           trusted_worktree_root: scope.workdir,
+           workspace_settlement_required?: false
          }}
       end
     end
@@ -1291,6 +1374,121 @@ defmodule Arbor.Commands.CodingBenchmark do
 
     %{execution | projection: nil, row: row}
   end
+
+  # After trusted objective/worktree/provenance observations and artifact lease
+  # finalization, settle every task-owned coding workspace through the public
+  # Actions facade. Covers success, executor errors, validation failures,
+  # timeouts, and cancellations — does not depend on a result workspace_id.
+  defp finalize_workspace_settlement(execution, %{workspace_settlement_required?: false}) do
+    Map.put(execution, :workspace_settled?, true)
+  end
+
+  defp finalize_workspace_settlement(
+         execution,
+         %{workspace_settlement_required?: true, task_id: task_id}
+       )
+       when is_binary(task_id) and task_id != "" do
+    case Adapter.settle_task_workspaces(task_id) do
+      {:ok, _receipt} ->
+        Map.put(execution, :workspace_settled?, true)
+
+      {:error, reason} ->
+        workspace_settlement_failure(execution, reason)
+    end
+  end
+
+  defp finalize_workspace_settlement(execution, _verification) do
+    workspace_settlement_failure(execution, :missing_task_id)
+  end
+
+  defp workspace_settlement_failure(%{row: row} = execution, reason) do
+    row =
+      row
+      |> Map.put(
+        "terminal_reason",
+        append_terminal_reason(
+          row["terminal_reason"],
+          "workspace_settlement_unconfirmed:#{reason_string(reason)}"
+        )
+      )
+      |> Map.put("terminal_status", settlement_terminal_status(row["terminal_status"]))
+
+    execution
+    |> Map.put(:projection, nil)
+    |> Map.put(:row, row)
+    |> Map.put(:workspace_settled?, false)
+  end
+
+  # Settlement failure is always visible as a terminal status. Preserve more
+  # specific verification failures only when they already encode cleanup in
+  # the reason chain; otherwise promote to workspace_cleanup_failed.
+  defp settlement_terminal_status(status)
+       when status in [
+              nil,
+              "success",
+              "objective_failed",
+              "executor_error",
+              "executor_failed",
+              "worktree_verification_failed",
+              "artifact_cleanup_failed"
+            ],
+       do: "workspace_cleanup_failed"
+
+  defp settlement_terminal_status(status) when is_binary(status), do: status
+  defp settlement_terminal_status(_status), do: "workspace_cleanup_failed"
+
+  defp append_terminal_reason(existing, suffix), do: TerminalReason.append(existing, suffix)
+
+  defp annotate_row_cleanup_failure(row, reason) when is_map(row) do
+    row
+    |> Map.put(
+      "terminal_reason",
+      append_terminal_reason(
+        row["terminal_reason"],
+        "benchmark_root_cleanup_failed:#{reason_string(reason)}"
+      )
+    )
+    |> Map.put("terminal_status", settlement_terminal_status(row["terminal_status"]))
+  end
+
+  defp annotate_run_cleanup_failure(report, reason) when is_map(report) do
+    rows =
+      report
+      |> Map.get("rows", [])
+      |> Enum.map(&annotate_row_cleanup_failure(&1, reason))
+
+    Map.put(report, "rows", rows)
+  end
+
+  defp remove_owned_benchmark_root(identity) when is_map(identity) do
+    case Shell.remove_owned_tree(identity, max_entries: 1_000_000, timeout_ms: 10_000) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp remove_owned_benchmark_root(_identity), do: {:error, :invalid_owned_root_identity}
+
+  # Fixture-setup failures never acquired coding leases. A bare empty pair root
+  # may be removed only when it is an empty directory we just created; never
+  # recurse into an unowned tree that might contain foreign leases.
+  defp best_effort_remove_unleased_pair_root(path) when is_binary(path) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, %File.Stat{type: :directory}} ->
+        case File.ls(path) do
+          {:ok, []} -> File.rmdir(path)
+          _other -> {:error, :pair_root_not_empty}
+        end
+
+      _other ->
+        {:error, :pair_root_not_directory}
+    end
+  end
+
+  defp best_effort_remove_unleased_pair_root(_path), do: :ok
 
   defp measure(fun) do
     {microseconds, result} = :timer.tc(fun)

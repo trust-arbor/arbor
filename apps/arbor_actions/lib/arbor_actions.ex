@@ -73,7 +73,7 @@ defmodule Arbor.Actions do
   See individual action modules for detailed documentation.
   """
 
-  alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.{Workspace, WorkspaceLeaseRegistry}
   alias Arbor.Actions.Egress
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
@@ -168,6 +168,31 @@ defmodule Arbor.Actions do
 
   def coding_worktree_path(_base_dir, _branch_name),
     do: {:error, :invalid_coding_worktree_input}
+
+  @doc """
+  Settle every coding workspace lease owned by an exact task+principal pair.
+
+  Thin public facade over `WorkspaceLeaseRegistry.settle_task_workspaces/3`.
+  Callers such as the coding benchmark must use this boundary rather than
+  importing the registry. Authority is the nonblank exact `task_id` and
+  `principal_id` pair; opaque workspace ids are never accepted as authority.
+
+  Returns `{:ok, receipt}` when every matching lease/retained marker is
+  positively settled (or none match). Returns `{:error, reason}` when
+  settlement cannot be confirmed — callers must fail closed and retain any
+  parent root that may still hold an active/retained lease.
+  """
+  @spec settle_coding_workspaces(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def settle_coding_workspaces(task_id, principal_id, opts \\ [])
+
+  def settle_coding_workspaces(task_id, principal_id, opts)
+      when is_binary(task_id) and is_binary(principal_id) and is_list(opts) do
+    WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id, opts)
+  end
+
+  def settle_coding_workspaces(_task_id, _principal_id, _opts),
+    do: {:error, :invalid_task_principal}
 
   @doc """
   Reviewed hard maximum for the cross-app aggregate sequential test-stage

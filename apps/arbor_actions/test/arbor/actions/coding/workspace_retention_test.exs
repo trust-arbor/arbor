@@ -428,6 +428,199 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     refute File.dir?(path)
   end
 
+  test "both-absent retained marker settles without destructive work via settle_task_workspaces",
+       %{tmp_dir: tmp_dir} do
+    repo = create_git_repo(Path.join(tmp_dir, "repo"))
+    branch = "test/both-absent-settle"
+    base = Path.join(tmp_dir, "worktrees")
+    task_id = "task_both_absent_#{System.unique_integer([:positive])}"
+    principal_id = "agent_both_absent"
+    server = start_registry(60_000)
+
+    assert {:ok, lease} =
+             acquire(server, repo, branch, tmp_dir, base,
+               task_id: task_id,
+               principal_id: principal_id
+             )
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{
+               server: server,
+               task_id: task_id,
+               principal_id: principal_id
+             })
+
+    assert retained_count(server) == 1
+
+    # Simulate the benchmark bug: parent pair_root deleted under retained leases
+    # so both the recorded repo clone and worktree path are positively absent.
+    File.rm_rf!(lease.worktree_path)
+    File.rm_rf!(repo)
+    assert {:error, :enoent} = File.lstat(lease.worktree_path)
+    assert {:error, :enoent} = File.lstat(repo)
+
+    assert {:ok, receipt} =
+             WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id, server: server)
+
+    assert receipt["status"] == "settled"
+    assert receipt["settled_count"] == 1
+    assert lease.workspace_id in receipt["workspace_ids"]
+    assert retained_count(server) == 0
+
+    # Idempotent: second settle finds nothing and succeeds.
+    assert {:ok, empty} =
+             WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id, server: server)
+
+    assert empty["settled_count"] == 0
+  end
+
+  test "security regression: present path with identity mismatch remains fail-closed on settle",
+       %{tmp_dir: tmp_dir} do
+    repo = create_git_repo(Path.join(tmp_dir, "repo"))
+    branch = "test/settle-identity-mismatch"
+    base = Path.join(tmp_dir, "worktrees")
+    task_id = "task_settle_mismatch_#{System.unique_integer([:positive])}"
+    principal_id = "agent_settle_mismatch"
+    server = start_registry(60_000)
+
+    assert {:ok, lease} =
+             acquire(server, repo, branch, tmp_dir, base,
+               task_id: task_id,
+               principal_id: principal_id
+             )
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{
+               server: server,
+               task_id: task_id,
+               principal_id: principal_id
+             })
+
+    # Replace worktree contents so the path is present but identity mismatches.
+    File.rm_rf!(lease.worktree_path)
+    File.mkdir_p!(lease.worktree_path)
+    File.write!(Path.join(lease.worktree_path, "forged.txt"), "forged\n")
+
+    assert {:error, {:workspace_settlement_unconfirmed, failures}} =
+             WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id, server: server)
+
+    assert Enum.any?(failures, fn {id, _reason} -> id == lease.workspace_id end)
+    assert retained_count(server) == 1
+    assert File.dir?(lease.worktree_path)
+
+    # Clean the retained record via both-absent settle so ActionCase on_exit
+    # does not raw-delete under a live retained marker.
+    File.rm_rf!(lease.worktree_path)
+    File.rm_rf!(repo)
+
+    assert {:ok, cleaned} =
+             WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id, server: server)
+
+    assert cleaned["settled_count"] == 1
+    assert retained_count(server) == 0
+  end
+
+  test "active lease with both paths absent settles non-destructively via settle_task_workspaces",
+       %{tmp_dir: tmp_dir} do
+    repo = create_git_repo(Path.join(tmp_dir, "repo"))
+    branch = "test/active-both-absent"
+    base = Path.join(tmp_dir, "worktrees")
+    task_id = "task_active_both_absent_#{System.unique_integer([:positive])}"
+    principal_id = "agent_active_both_absent"
+    server = start_registry(60_000)
+
+    assert {:ok, lease} =
+             acquire(server, repo, branch, tmp_dir, base,
+               task_id: task_id,
+               principal_id: principal_id
+             )
+
+    assert active_count(server) == 1
+
+    # Parent deleted while the lease is still active (owner process may be gone
+    # or still alive — settle must drop without destructive work).
+    File.rm_rf!(lease.worktree_path)
+    File.rm_rf!(repo)
+    assert {:error, :enoent} = File.lstat(lease.worktree_path)
+    assert {:error, :enoent} = File.lstat(repo)
+
+    assert {:ok, receipt} =
+             WorkspaceLeaseRegistry.settle_task_workspaces(task_id, principal_id, server: server)
+
+    assert receipt["status"] == "settled"
+    assert receipt["settled_count"] == 1
+    assert lease.workspace_id in receipt["workspace_ids"]
+    assert active_count(server) == 0
+    assert retained_count(server) == 0
+  end
+
+  test "public Actions facade settles task-scoped workspaces", %{tmp_dir: tmp_dir} do
+    repo = create_git_repo(Path.join(tmp_dir, "repo"))
+    branch = "test/facade-settle"
+    base = Path.join(tmp_dir, "worktrees")
+    task_id = "task_facade_settle_#{System.unique_integer([:positive])}"
+    principal_id = "agent_facade_settle"
+    server = start_registry(5_000)
+
+    assert {:ok, lease} =
+             acquire(server, repo, branch, tmp_dir, base,
+               task_id: task_id,
+               principal_id: principal_id
+             )
+
+    assert {:ok, receipt} =
+             Actions.settle_coding_workspaces(task_id, principal_id, server: server)
+
+    assert receipt["status"] == "settled"
+    assert receipt["settled_count"] == 1
+    assert lease.workspace_id in receipt["workspace_ids"]
+    refute File.dir?(lease.worktree_path)
+    assert active_count(server) == 0
+    assert retained_count(server) == 0
+  end
+
+  test "security regression: settle requires exact task and principal", %{tmp_dir: tmp_dir} do
+    repo = create_git_repo(Path.join(tmp_dir, "repo"))
+    branch = "test/settle-auth"
+    base = Path.join(tmp_dir, "worktrees")
+    task_id = "task_settle_auth_#{System.unique_integer([:positive])}"
+    principal_id = "agent_settle_auth"
+    server = start_registry(60_000)
+
+    assert {:error, :invalid_task_principal} =
+             WorkspaceLeaseRegistry.settle_task_workspaces(" \t", principal_id, server: server)
+
+    assert {:ok, lease} =
+             acquire(server, repo, branch, tmp_dir, base,
+               task_id: task_id,
+               principal_id: principal_id
+             )
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{
+               server: server,
+               task_id: task_id,
+               principal_id: principal_id
+             })
+
+    assert {:ok, empty} =
+             WorkspaceLeaseRegistry.settle_task_workspaces("other_task", principal_id,
+               server: server
+             )
+
+    assert empty["settled_count"] == 0
+    assert retained_count(server) == 1
+
+    assert {:ok, empty2} =
+             WorkspaceLeaseRegistry.settle_task_workspaces(task_id, "other_principal",
+               server: server
+             )
+
+    assert empty2["settled_count"] == 0
+    assert retained_count(server) == 1
+    assert File.dir?(lease.worktree_path)
+  end
+
   defp start_registry(ttl_ms, opts \\ []) do
     name = String.to_atom("workspace_retention_#{System.unique_integer([:positive])}")
 

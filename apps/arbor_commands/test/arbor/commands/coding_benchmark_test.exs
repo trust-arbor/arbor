@@ -6,6 +6,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
 
   alias Arbor.Commands.CodingBenchmark
   alias Arbor.Commands.CodingBenchmark.Catalog
+  alias Arbor.Commands.CodingBenchmark.TerminalReason
   alias Arbor.Commands.CodingBenchmarkHostileInspect
   alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
   alias Arbor.Commands.CodingBenchmarkTempRoot
@@ -207,6 +208,18 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
     assert String.starts_with?(invalid_row["terminal_reason"], "invalid_utf8:")
     assert String.valid?(invalid_row["terminal_reason"])
     assert byte_size(invalid_row["terminal_reason"]) <= 1_000
+  end
+
+  test "appended terminal_reason preserves redaction and the UTF-8 byte ceiling" do
+    secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+    existing = String.duplicate("é", 499)
+    suffix = " workspace cleanup failed token=#{secret} " <> String.duplicate("é", 200)
+
+    reason = TerminalReason.append(existing, suffix)
+
+    assert String.valid?(reason)
+    assert byte_size(reason) <= 1_000
+    refute reason =~ secret
   end
 
   test "cancellation distinguishes owned cleanup from reused worker preservation" do
