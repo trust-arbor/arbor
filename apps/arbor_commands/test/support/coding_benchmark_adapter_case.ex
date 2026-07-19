@@ -593,6 +593,9 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
 
     case request["executor_path"] do
       "legacy" ->
+        expected_validation_timeout =
+          min(outer_timeout, Arbor.Shell.spawn_capable_max_timeout_ms())
+
         assert task == %{
                  "acp_agent" => "codex",
                  "base_ref" => request["base_commit_oid"],
@@ -602,11 +605,14 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
                  "repo_path" => request["workdir"],
                  "submit_review" => true,
                  "task" => task_text,
+                 "validation_timeout" => expected_validation_timeout,
                  "worktree_base_dir" => worktree_base_dir
                }
 
         refute Map.has_key?(task, "plan")
         refute Map.has_key?(task, "budgets")
+        assert task["validation_timeout"] <= Arbor.Shell.spawn_capable_max_timeout_ms()
+        assert task["validation_timeout"] <= outer_timeout
 
       "pipeline" ->
         assert Map.keys(task) |> Enum.sort() == ["kind", "plan"]

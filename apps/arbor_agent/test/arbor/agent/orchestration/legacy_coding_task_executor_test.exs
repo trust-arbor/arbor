@@ -10,6 +10,7 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.LegacyCodingTaskExecutor
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
+  alias Arbor.Shell
 
   @produce_resource "arbor://action/coding/produce_reviewable_change"
 
@@ -288,6 +289,7 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
     assert params.timeout == 12_000
     assert params.open_pr == false
     assert params.submit_review == true
+    refute Map.has_key?(params, :validation_timeout)
 
     assert action_ctx.agent_id == "agent_abc"
     assert action_ctx.task_id == "task_legacy_1"
@@ -457,6 +459,80 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
                Map.put(valid_task(), "acp_agent", ["codex"]),
                valid_context()
              )
+  end
+
+  test "forwards accepted validation_timeout to ProduceReviewableChange" do
+    ceiling = Shell.spawn_capable_max_timeout_ms()
+    timeout = min(ceiling, 450_000)
+
+    assert {:ok, _result} =
+             LegacyCodingTaskExecutor.run(
+               "agent_1",
+               valid_task(%{"validation_timeout" => timeout}),
+               valid_context()
+             )
+
+    assert_received {:authorize_and_execute, "agent_1", ProduceReviewableChange, params, _ctx}
+    assert params.validation_timeout == timeout
+  end
+
+  test "omits validation_timeout when not supplied so action default remains" do
+    assert {:ok, _result} =
+             LegacyCodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+    assert_received {:authorize_and_execute, "agent_1", ProduceReviewableChange, params, _ctx}
+    refute Map.has_key?(params, :validation_timeout)
+  end
+
+  test "rejects malformed and over-ceiling validation_timeout fail closed" do
+    ceiling = Shell.spawn_capable_max_timeout_ms()
+
+    assert {:error, {:validation_timeout_exceeds_ceiling, over, ^ceiling}} =
+             LegacyCodingTaskExecutor.run(
+               "agent_1",
+               valid_task(%{"validation_timeout" => ceiling + 1}),
+               valid_context()
+             )
+
+    assert over == ceiling + 1
+    refute_received {:authorize_and_execute, _, _, _, _}
+
+    assert {:error, {:invalid_field_type, "validation_timeout"}} =
+             LegacyCodingTaskExecutor.run(
+               "agent_1",
+               valid_task(%{"validation_timeout" => 0}),
+               valid_context()
+             )
+
+    assert {:error, {:invalid_field_type, "validation_timeout"}} =
+             LegacyCodingTaskExecutor.run(
+               "agent_1",
+               valid_task(%{"validation_timeout" => -1}),
+               valid_context()
+             )
+
+    assert {:error, {:invalid_field_type, "validation_timeout"}} =
+             LegacyCodingTaskExecutor.run(
+               "agent_1",
+               valid_task(%{"validation_timeout" => 300_000.0}),
+               valid_context()
+             )
+
+    assert {:error, {:invalid_field_type, "validation_timeout"}} =
+             LegacyCodingTaskExecutor.run(
+               "agent_1",
+               valid_task(%{"validation_timeout" => "600000"}),
+               valid_context()
+             )
+
+    assert {:error, {:invalid_field_type, "validation_timeout"}} =
+             LegacyCodingTaskExecutor.run(
+               "agent_1",
+               valid_task(%{"validation_timeout" => true}),
+               valid_context()
+             )
+
+    refute_received {:authorize_and_execute, _, _, _, _}
   end
 
   test "rejects unknown and non-JSON task fields" do

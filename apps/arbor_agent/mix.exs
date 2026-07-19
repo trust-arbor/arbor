@@ -45,6 +45,8 @@ defmodule ArborAgent.MixProject do
       {:arbor_consensus, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},
       {:arbor_actions, in_umbrella: true},
+      # L3 — public spawn-capable timeout ceiling for legacy coding envelope bounds.
+      {:arbor_shell, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
       {:yaml_elixir, "~> 2.0"},

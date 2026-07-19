@@ -33,6 +33,45 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterExecutionTest do
     refute legacy_fields["branch_name"] == pipeline_fields["branch_name"]
   end
 
+  test "legacy projects per-validation timeout bounded by harness budget and Shell ceiling" do
+    shell_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
+
+    # Harness budget above the Shell ceiling → project the reviewed standard ceiling.
+    over_ceiling = shell_ceiling + 120_000
+    requests_over = benchmark_requests!(over_ceiling)
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_test_reply,
+      {:error, :captured_legacy}
+    )
+
+    assert {:error, :captured_legacy, _envelope} = LegacyAdapter.run(requests_over.legacy)
+    assert_receive {:executor_call, :legacy, "agent_benchmark", task_over, context_over}
+
+    assert context_over["timeout"] == over_ceiling
+    assert task_over["validation_timeout"] == shell_ceiling
+    assert task_over["validation_timeout"] < over_ceiling
+    refute Map.has_key?(task_over, "plan")
+
+    # Harness budget below the Shell ceiling → project the full outer budget.
+    under_ceiling = max(shell_ceiling - 120_000, 60_000)
+    requests_under = benchmark_requests!(under_ceiling)
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_test_reply,
+      {:error, :captured_legacy}
+    )
+
+    assert {:error, :captured_legacy, _envelope} = LegacyAdapter.run(requests_under.legacy)
+    assert_receive {:executor_call, :legacy, "agent_benchmark", task_under, context_under}
+
+    assert context_under["timeout"] == under_ceiling
+    assert task_under["validation_timeout"] == under_ceiling
+    assert task_under["validation_timeout"] <= shell_ceiling
+  end
+
   test "pipeline binds graph wall budget from trusted timeout minus module reserve" do
     outer = min_pipeline_execution_timeout_ms() + 45_000
     requests = benchmark_requests!(outer)

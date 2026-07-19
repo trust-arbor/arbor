@@ -3,6 +3,7 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
 
   alias Arbor.Commands.CodingBenchmark.{Git, Runtime}
   alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Shell
 
   @app :arbor_commands
   @principal_key :coding_benchmark_principal_id
@@ -259,7 +260,10 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
 
     case request["executor_path"] do
       "legacy" ->
-        {:ok, legacy_flat_task(request, scope), context}
+        with {:ok, validation_timeout_ms} <-
+               legacy_validation_timeout_ms(execution_timeout_ms) do
+          {:ok, legacy_flat_task(request, scope, validation_timeout_ms), context}
+        end
 
       "pipeline" ->
         with {:ok, wall_clock_ms} <- pipeline_wall_clock_ms(execution_timeout_ms),
@@ -269,7 +273,21 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     end
   end
 
-  defp legacy_flat_task(request, scope) do
+  # Per-validation budget for the legacy ProduceReviewableChange path. Bounded by
+  # the trusted harness execution timeout and the reviewed standard spawn-capable
+  # Shell ceiling so cold compile cannot sit at the action's 300s default while
+  # the pipeline path correctly uses the Shell-derived 600s profile ceiling.
+  # Data only — never control authority.
+  defp legacy_validation_timeout_ms(execution_timeout_ms)
+       when is_integer(execution_timeout_ms) and execution_timeout_ms > 0 do
+    ceiling = Shell.spawn_capable_max_timeout_ms()
+    {:ok, min(execution_timeout_ms, ceiling)}
+  end
+
+  defp legacy_validation_timeout_ms(_execution_timeout_ms),
+    do: setup_error(:invalid_legacy_validation_timeout_budget)
+
+  defp legacy_flat_task(request, scope, validation_timeout_ms) do
     %{
       "acp_agent" => request["acp_agent"],
       "base_ref" => request["base_commit_oid"],
@@ -279,6 +297,7 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
       "repo_path" => request["workdir"],
       "submit_review" => true,
       "task" => task_text(request["normalized_input"]),
+      "validation_timeout" => validation_timeout_ms,
       "worktree_base_dir" => scope.worktree_root
     }
   end

@@ -22,13 +22,14 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
   alias Arbor.Actions.Coding.ProduceReviewableChange
   alias Arbor.Agent.Orchestration.TaskArtifacts
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
+  alias Arbor.Shell
 
   @kind "coding_change"
   @produce_reviewable_change_resource "arbor://action/coding/produce_reviewable_change"
   @signing_purpose :legacy_coding_task_executor
 
   @required_keys ~w(task repo_path acp_agent)
-  @optional_keys ~w(base_ref branch_name worktree_base_dir open_pr submit_review)
+  @optional_keys ~w(base_ref branch_name worktree_base_dir open_pr submit_review validation_timeout)
   @allowed_task_keys MapSet.new(["kind" | @required_keys ++ @optional_keys])
 
   @allowed_context_keys MapSet.new(~w(task_id timeout caller_id metadata))
@@ -161,7 +162,8 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
          {:ok, branch_name} <- optional_trimmed_string(task, "branch_name"),
          {:ok, worktree_base_dir} <- optional_trimmed_string(task, "worktree_base_dir"),
          {:ok, open_pr} <- optional_boolean(task, "open_pr", false),
-         {:ok, submit_review} <- optional_boolean(task, "submit_review", true) do
+         {:ok, submit_review} <- optional_boolean(task, "submit_review", true),
+         {:ok, validation_timeout} <- optional_validation_timeout(task) do
       params =
         %{
           task: task_text,
@@ -173,6 +175,7 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
         |> put_optional(:base_ref, base_ref)
         |> put_optional(:branch_name, branch_name)
         |> put_optional(:worktree_base_dir, worktree_base_dir)
+        |> put_optional(:validation_timeout, validation_timeout)
 
       {:ok, params}
     end
@@ -266,6 +269,32 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
   end
 
   defp normalize_boolean(_value, field), do: {:error, {:invalid_field_type, field}}
+
+  # Optional per-validation-command budget (data only). Positive integer bounded
+  # by the public standard spawn-capable Shell ceiling; omitted keeps the action
+  # default. Never clamps — over-ceiling and malformed values fail closed.
+  defp optional_validation_timeout(task) do
+    case Map.fetch(task, "validation_timeout") do
+      :error ->
+        {:ok, nil}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, value}
+      when is_integer(value) and value > 0 and not is_boolean(value) ->
+        ceiling = Shell.spawn_capable_max_timeout_ms()
+
+        if value <= ceiling do
+          {:ok, value}
+        else
+          {:error, {:validation_timeout_exceeds_ceiling, value, ceiling}}
+        end
+
+      {:ok, _value} ->
+        {:error, {:invalid_field_type, "validation_timeout"}}
+    end
+  end
 
   defp put_optional(map, _key, nil), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)
