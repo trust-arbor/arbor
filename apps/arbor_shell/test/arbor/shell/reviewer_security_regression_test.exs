@@ -235,6 +235,171 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
     refute Enum.any?(os_processes(), &String.contains?(&1.command, "sleep #{duration}"))
   end
 
+  test "security regression: public execute_direct survives abnormal port epipe from fast descendant-spawning command" do
+    # On Linux, git daemon is a real /usr/bin/git executable that can close the
+    # control pipe while still having spawned work. Base ProcessGroup linked the
+    # native port to the arbitrary one-shot caller, so an asynchronous :epipe EXIT
+    # killed the caller. The public facade must return a bounded fail-closed
+    # result and leave the caller alive.
+    parent = self()
+
+    base_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor_shell_git_daemon_base_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(base_dir)
+    base_flag = "--base-path=#{base_dir}"
+    on_exit(fn -> File.rm_rf(base_dir) end)
+
+    {caller, ref} =
+      spawn_monitor(fn ->
+        assert Process.info(self(), :trap_exit) == {:trap_exit, false}
+
+        result =
+          Shell.execute_direct(
+            "git",
+            [
+              "daemon",
+              "--reuseaddr",
+              "--listen=127.0.0.1",
+              "--port=0",
+              base_flag,
+              base_dir
+            ],
+            sandbox: :none,
+            timeout: 50,
+            clear_env: true,
+            cwd: base_dir
+          )
+
+        send(parent, {:shell_result, self(), result})
+        # Stay alive until the parent observes survival after the shell return.
+        receive do
+          :release -> :ok
+        after
+          5_000 -> :ok
+        end
+      end)
+
+    receive do
+      {:shell_result, ^caller, result} ->
+        assert Process.alive?(caller)
+        send(caller, :release)
+        assert_receive {:DOWN, ^ref, :process, ^caller, :normal}, 2_000
+
+        # Must reach shell execution and fail closed — not pass on setup misses
+        # such as {:executable_not_found, _} or policy unavailability.
+        assert {:ok, map} = result
+        assert is_map(map)
+        assert is_integer(map.exit_code)
+
+        assert map.exit_code != 0 or map.timed_out or Map.get(map, :killed) == true or
+                 Map.get(map, :containment_failure) == true
+
+        # Match only a real git target with this unique base-path; never count
+        # arbor_shell_launcher whose argv embeds the same flag during teardown.
+        assert eventually?(fn ->
+                 not Enum.any?(os_processes(), &leftover_target_git_daemon?(&1, base_flag))
+               end)
+
+      {:DOWN, ^ref, :process, ^caller, reason} ->
+        flunk(
+          "one-shot shell caller exited with #{inspect(reason)} instead of a controlled public result"
+        )
+    after
+      10_000 ->
+        flunk("timed out waiting for public execute_direct result or caller exit")
+    end
+  end
+
+  test "security regression: public execute_direct does not return until process-group kill is proven" do
+    # Force abnormal launcher death by SIGKILL, then inject two kill-helper
+    # failures before the real kill. exit_status and {:EXIT, port, _} may arrive
+    # in either order; both must prove exhaustion then return containment_failure.
+    parent = self()
+    duration = "31.#{100 + rem(System.unique_integer([:positive]), 900)}"
+    attempts = :atomics.new(1, signed: false)
+    :atomics.put(attempts, 1, 0)
+    previous = Application.get_env(:arbor_shell, :process_group_kill_group_interceptor)
+
+    Application.put_env(
+      :arbor_shell,
+      :process_group_kill_group_interceptor,
+      fn group_id, real_kill ->
+        n = :atomics.add_get(attempts, 1, 1)
+        send(parent, {:kill_attempt, n, group_id})
+
+        if n < 3 do
+          {:error, {:kill_helper_failed, 1, "injected-containment-failure"}}
+        else
+          real_kill.(group_id)
+        end
+      end
+    )
+
+    try do
+      task =
+        Task.async(fn ->
+          Shell.execute_direct("sleep", [duration], sandbox: :none, timeout: 15_000)
+        end)
+
+      launcher =
+        eventually_value(fn ->
+          Enum.find(os_processes(), fn process ->
+            String.contains?(process.command, "arbor_shell_launcher exec") and
+              String.contains?(process.command, duration)
+          end)
+        end)
+
+      assert launcher
+      assert {_out, 0} = System.cmd("/bin/kill", ["-KILL", Integer.to_string(launcher.pid)])
+
+      started_wait = System.monotonic_time(:millisecond)
+      assert {:ok, result} = Task.await(task, 15_000)
+      elapsed = System.monotonic_time(:millisecond) - started_wait
+
+      # Fail-closed containment terminal after proven kill — not a raw launcher error.
+      assert result.exit_code == 137
+      assert result.killed == true
+      assert Map.get(result, :containment_failure) == true
+      assert elapsed >= 150
+
+      assert_receive {:kill_attempt, 1, group_id}, 2_000
+      assert is_integer(group_id) and group_id > 0
+      assert_receive {:kill_attempt, 2, ^group_id}, 2_000
+      assert_receive {:kill_attempt, 3, ^group_id}, 2_000
+
+      refute Enum.any?(os_processes(), &String.contains?(&1.command, "sleep #{duration}"))
+    after
+      restore(:arbor_shell, :process_group_kill_group_interceptor, previous)
+    end
+  end
+
+  test "security regression: public execute_direct preserves caller trap_exit flag" do
+    previous = Process.flag(:trap_exit, false)
+
+    try do
+      assert Process.info(self(), :trap_exit) == {:trap_exit, false}
+
+      assert {:ok, _result} =
+               Shell.execute_direct("echo", ["trap-exit-false"], sandbox: :none, timeout: 2_000)
+
+      assert Process.info(self(), :trap_exit) == {:trap_exit, false}
+
+      Process.flag(:trap_exit, true)
+
+      assert {:ok, _result} =
+               Shell.execute_direct("echo", ["trap-exit-true"], sandbox: :none, timeout: 2_000)
+
+      assert Process.info(self(), :trap_exit) == {:trap_exit, true}
+    after
+      flush_exit_messages()
+      Process.flag(:trap_exit, previous)
+    end
+  end
+
   test "security regression: raw legacy status mutation cannot forge terminal success" do
     assert {:ok, execution_id} =
              Shell.execute_async("sleep 2", sandbox: :none, timeout: 3_000)
@@ -362,4 +527,31 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)
+
+  defp flush_exit_messages do
+    receive do
+      {:EXIT, _from, _reason} -> flush_exit_messages()
+    after
+      0 -> :ok
+    end
+  end
+
+  # Live *target* git only: lead executable is git and argv contains this test's
+  # unique absolute --base-path=... flag. Never treat arbor_shell_launcher as a
+  # leaked target (its argv embeds the same flag during teardown).
+  defp leftover_target_git_daemon?(%{command: command}, base_flag)
+       when is_binary(command) and is_binary(base_flag) and base_flag != "" do
+    not String.contains?(command, "arbor_shell_launcher") and
+      Path.basename(lead_executable(command) || "") == "git" and
+      String.contains?(command, base_flag)
+  end
+
+  defp leftover_target_git_daemon?(_other, _base_flag), do: false
+
+  defp lead_executable(command) when is_binary(command) do
+    command
+    |> String.trim_leading()
+    |> String.split(~r/\s+/, parts: 2)
+    |> List.first()
+  end
 end

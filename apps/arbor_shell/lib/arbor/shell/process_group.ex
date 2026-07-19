@@ -117,7 +117,58 @@ defmodule Arbor.Shell.ProcessGroup do
          timeout,
          max_output_bytes
        ) do
-    with {:ok, handle} <-
+    # Port.open always links the native port to its owner. A fast target/launcher
+    # close can deliver an asynchronous abnormal EXIT (:epipe) that would kill an
+    # arbitrary one-shot caller. Own the port on a dedicated process that traps
+    # exits, forwards cancel, and still tears down on caller death.
+    caller = self()
+    reply_ref = make_ref()
+    cancel_id = Keyword.get(opts, :cancel_id)
+
+    owner =
+      spawn(fn ->
+        Process.flag(:trap_exit, true)
+        caller_mon = Process.monitor(caller)
+
+        result =
+          try do
+            run_owned_one_shot(
+              launcher_command,
+              executable,
+              args,
+              opts,
+              start_time,
+              timeout,
+              max_output_bytes,
+              caller_mon,
+              caller
+            )
+          catch
+            kind, reason -> {:error, {:port_owner_exception, {kind, reason}}}
+          end
+
+        # Always publish before exit so a concurrent :DOWN cannot race away a
+        # successful terminal. The waiter drains a late reply after :DOWN.
+        send(caller, {:"$arbor_shell_port_owner_reply", reply_ref, result})
+      end)
+
+    owner_mon = Process.monitor(owner)
+    await_owned_one_shot_result(owner, owner_mon, reply_ref, cancel_id)
+  end
+
+  defp run_owned_one_shot(
+         launcher_command,
+         executable,
+         args,
+         opts,
+         start_time,
+         timeout,
+         max_output_bytes,
+         caller_mon,
+         caller
+       ) do
+    with :ok <- ensure_caller_alive(caller_mon, caller),
+         {:ok, handle} <-
            open_with_launcher(
              launcher_command,
              executable,
@@ -127,12 +178,62 @@ defmodule Arbor.Shell.ProcessGroup do
              timeout,
              max_output_bytes
            ),
+         :ok <- ensure_caller_alive(caller_mon, caller, handle),
          :ok <- start(handle, Keyword.get(opts, :stdin)),
+         :ok <- ensure_caller_alive(caller_mon, caller, handle),
          # One-shot path always closes child stdin after optional initial bytes so
          # EOF-reading programs (e.g. cat) exit. Interactive PortSession leaves
          # stdin open for later send_input/2.
          {:ok, handle} <- close_stdin(handle) do
-      collect(handle, Keyword.get(opts, :cancel_id), [], 0)
+      collect(handle, Keyword.get(opts, :cancel_id), [], 0, caller_mon, caller)
+    else
+      {:error, :caller_dead} = error ->
+        error
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp await_owned_one_shot_result(owner, owner_mon, reply_ref, cancel_id) do
+    receive do
+      {:"$arbor_shell_port_owner_reply", ^reply_ref, result} ->
+        Process.demonitor(owner_mon, [:flush])
+        result
+
+      {:DOWN, ^owner_mon, :process, ^owner, reason} ->
+        # Owner exit can be delivered before the reply already in this mailbox.
+        # Prefer a published result over a false port_owner_failed under load.
+        receive do
+          {:"$arbor_shell_port_owner_reply", ^reply_ref, result} ->
+            result
+        after
+          0 ->
+            {:error, {:port_owner_failed, reason}}
+        end
+
+      {:cancel_shell_execution, ^cancel_id} when not is_nil(cancel_id) ->
+        send(owner, {:cancel_shell_execution, cancel_id})
+        await_owned_one_shot_result(owner, owner_mon, reply_ref, cancel_id)
+    end
+  end
+
+  defp ensure_caller_alive(caller_mon, caller) do
+    receive do
+      {:DOWN, ^caller_mon, :process, ^caller, _reason} -> {:error, :caller_dead}
+    after
+      0 -> :ok
+    end
+  end
+
+  defp ensure_caller_alive(caller_mon, caller, handle) do
+    case ensure_caller_alive(caller_mon, caller) do
+      :ok ->
+        :ok
+
+      {:error, :caller_dead} ->
+        {:ok, _terminal_reason} = terminate_until_exhausted(handle, :cancelled)
+        {:error, :caller_dead}
     end
   end
 
@@ -296,9 +397,18 @@ defmodule Arbor.Shell.ProcessGroup do
   def decode_message(%__MODULE__{port: port}, {port, {:exit_status, status}}),
     do: {:error, {:launcher_exited_without_terminal, status}}
 
+  # Abnormal native-port EXIT (e.g. :epipe) must fail closed without crashing a
+  # trap_exit port owner such as PortSession.
+  def decode_message(%__MODULE__{port: port}, {:EXIT, port, reason})
+      when reason != :normal do
+    {:error, {:port_exited, reason}}
+  end
+
+  def decode_message(%__MODULE__{port: port}, {:EXIT, port, :normal}), do: :ignore
+
   def decode_message(_handle, _message), do: :ignore
 
-  defp collect(%__MODULE__{} = handle, cancel_id, acc, bytes) do
+  defp collect(%__MODULE__{} = handle, cancel_id, acc, bytes, caller_mon, caller) do
     remaining = remaining_ms(handle.deadline)
 
     if remaining <= 0 do
@@ -306,10 +416,13 @@ defmodule Arbor.Shell.ProcessGroup do
     else
       receive do
         {port, {:data, <<@output, data::binary>>}} when port == handle.port ->
-          collect(handle, cancel_id, [data | acc], bytes + byte_size(data))
+          collect(handle, cancel_id, [data | acc], bytes + byte_size(data), caller_mon, caller)
 
         {port, {:data, <<@terminal, reason, exit_code::signed-big-32>>}}
         when port == handle.port ->
+          # Terminal frame is the launcher's containment proof (terminate/2).
+          # Do not re-kill the process group on normal terminals — PGID may be
+          # reused and substring ps matches on launcher argv are false positives.
           settle_terminal_port(port)
 
           {:ok,
@@ -322,8 +435,20 @@ defmodule Arbor.Shell.ProcessGroup do
         {port, {:data, <<@error, message::binary>>}} when port == handle.port ->
           cleanup_error(handle, {:launcher_error, message})
 
+        # Abnormal launcher death without a terminal frame. exit_status and
+        # {:EXIT, port, reason} can arrive in either order (e.g. SIGKILL); both
+        # must prove process-group exhaustion then publish containment_failure.
         {port, {:exit_status, status}} when port == handle.port ->
-          cleanup_error(handle, {:launcher_exited_without_terminal, status})
+          finish_abnormal_launcher_exit(handle, acc, {:exit_status, status})
+
+        {:EXIT, port, reason} when port == handle.port and reason != :normal ->
+          finish_abnormal_launcher_exit(handle, acc, {:port_exit, reason})
+
+        {:EXIT, port, :normal} when port == handle.port ->
+          collect(handle, cancel_id, acc, bytes, caller_mon, caller)
+
+        {:DOWN, ^caller_mon, :process, ^caller, _reason} ->
+          finish_forced(handle, :cancelled, acc)
 
         {:cancel_shell_execution, ^cancel_id} when not is_nil(cancel_id) ->
           finish_forced(handle, :cancelled, acc)
@@ -334,6 +459,9 @@ defmodule Arbor.Shell.ProcessGroup do
   end
 
   defp finish_forced(handle, reason, acc) do
+    # terminate/2 treats a terminal frame as launcher containment proof; only
+    # its no-terminal path invokes kill_group. Do not add a second kill on every
+    # forced stop.
     {:ok, terminal_reason} = terminate_until_exhausted(handle, reason)
     {:ok, %{reason: terminal_reason, exit_code: 137, output: acc_to_binary(acc)}}
   end
@@ -341,6 +469,50 @@ defmodule Arbor.Shell.ProcessGroup do
   defp cleanup_error(handle, original_reason) do
     {:ok, _terminal_reason} = terminate_until_exhausted(handle, :cancelled)
     {:error, original_reason}
+  end
+
+  # Shared path for abnormal launcher death observed as exit_status and/or port
+  # EXIT (ordering is racy under SIGKILL). The launcher cannot provide a terminal
+  # proof here — exhaust the process group, then publish containment_failure.
+  defp finish_abnormal_launcher_exit(
+         %__MODULE__{port: port, group_id: group_id} = _handle,
+         acc,
+         _detail
+       ) do
+    close_port(port)
+    drain_port_mailbox(port)
+
+    case kill_group_until_exhausted(group_id) do
+      :ok ->
+        {:ok,
+         %{
+           reason: :containment_failure,
+           exit_code: 137,
+           output: acc_to_binary(acc)
+         }}
+    end
+  end
+
+  defp drain_port_mailbox(port) do
+    receive do
+      {^port, _message} -> drain_port_mailbox(port)
+      {:EXIT, ^port, _reason} -> drain_port_mailbox(port)
+    after
+      0 -> :ok
+    end
+  end
+
+  # Fail-closed retry for abnormal paths only: only :ok from kill_group/1 proves
+  # the group is gone when the launcher did not emit a terminal frame.
+  defp kill_group_until_exhausted(group_id) do
+    case kill_group(group_id) do
+      :ok ->
+        :ok
+
+      {:error, _reason} ->
+        Process.sleep(@cleanup_retry_ms)
+        kill_group_until_exhausted(group_id)
+    end
   end
 
   defp await_ready(port, deadline) do
@@ -360,6 +532,13 @@ defmodule Arbor.Shell.ProcessGroup do
 
         {^port, {:exit_status, status}} ->
           {:error, {:launcher_exited_before_ready, status}}
+
+        {:EXIT, ^port, reason} when reason != :normal ->
+          close_port(port)
+          {:error, {:port_exited, reason}}
+
+        {:EXIT, ^port, :normal} ->
+          {:error, {:port_exited, :normal}}
 
         {:cancel_shell_execution, _cancel_id} ->
           close_port(port)
@@ -390,6 +569,12 @@ defmodule Arbor.Shell.ProcessGroup do
 
         {^port, {:exit_status, status}} ->
           {:error, {:launcher_exited_during_teardown, status}}
+
+        {:EXIT, ^port, reason} when reason != :normal ->
+          {:error, {:port_exited, reason}}
+
+        {:EXIT, ^port, :normal} ->
+          {:error, {:port_exited, :normal}}
       after
         remaining -> {:error, :teardown_timeout}
       end
@@ -521,7 +706,19 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
+  # Optional test interceptor: fun.(group_id, &native_kill_group/1).
+  # Production never sets this; public execute paths still require a real :ok
+  # kill proof before returning a terminal.
+  @kill_group_interceptor_env :process_group_kill_group_interceptor
+
   defp kill_group(group_id) when is_integer(group_id) and group_id > 0 do
+    case Application.get_env(:arbor_shell, @kill_group_interceptor_env) do
+      fun when is_function(fun, 2) -> fun.(group_id, &native_kill_group/1)
+      _other -> native_kill_group(group_id)
+    end
+  end
+
+  defp native_kill_group(group_id) when is_integer(group_id) and group_id > 0 do
     with {:ok, launcher} <- launcher_path() do
       try do
         case System.cmd(

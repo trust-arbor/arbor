@@ -54,6 +54,11 @@ defmodule Arbor.Shell.Executor do
       {:error, :cancelled_during_setup} ->
         {:ok, terminal_result(:cancelled, 137, "", start_time)}
 
+      {:error, {:port_exited, _reason}} ->
+        # Abnormal native-port close (e.g. :epipe) after ownership isolation:
+        # return a bounded fail-closed terminal rather than crashing the caller.
+        {:ok, terminal_result(:containment_failure, 137, "", start_time)}
+
       {:error, reason} ->
         {:error, reason}
     end
@@ -92,6 +97,9 @@ defmodule Arbor.Shell.Executor do
 
       {:error, :cancelled_during_setup} ->
         {:ok, terminal_result(:cancelled, 137, "", start_time)}
+
+      {:error, {:port_exited, _reason}} ->
+        {:ok, terminal_result(:containment_failure, 137, "", start_time)}
 
       {:error, reason} ->
         {:error, reason}

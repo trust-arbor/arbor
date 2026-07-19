@@ -463,6 +463,11 @@ defmodule Arbor.Shell.PortSession do
   defp build_session(executable, args, display_command, opts, owner_pid, timeout) do
     with :ok <- validate_subscribers(Keyword.get(opts, :stream_to)),
          true <- is_pid(owner_pid) and Process.alive?(owner_pid) do
+      # Port.open links the native port to this GenServer. Trap exits so an
+      # abnormal port close (:epipe) is handled in handle_info via decode_message
+      # instead of crashing the session owner mid-stream.
+      Process.flag(:trap_exit, true)
+
       start_time = Keyword.get(opts, :started_at, System.monotonic_time(:millisecond))
       deferred = Keyword.get(opts, :deferred)
       subscribers = subscriber_set(opts)
