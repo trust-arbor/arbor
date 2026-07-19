@@ -5,6 +5,11 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
   # reason/error when present; otherwise derives from the first failed legacy
   # validation entry without exposing stdout or unbounded command output.
   # Text fragments pass through Arbor.Common.SensitiveData before the final bound.
+  #
+  # `sanitize/1` is the reusable total boundary for arbitrary harness/adapter
+  # failure reasons (including failure_row terminal_reason). It redacts first,
+  # enforces a UTF-8-safe 1000-byte ceiling, and never invokes custom struct
+  # Inspect callbacks.
 
   alias Arbor.Common.SensitiveData
 
@@ -12,6 +17,26 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
   @max_stderr_bytes 400
   @max_invalid_utf8_source_bytes 500
   @redacted_marker "[REDACTED]"
+
+  @doc """
+  Total, fail-closed sanitizer for arbitrary harness/adapter failure reasons.
+
+  Always returns a UTF-8 binary at most 1000 bytes. Sensitive patterns are
+  redacted before truncation. Struct-tagged terms are represented without
+  invoking custom `Inspect` implementations.
+  """
+  @spec sanitize(term()) :: String.t()
+  def sanitize(value) do
+    value
+    |> represent()
+    |> finalize_reason_text()
+  rescue
+    # Fail closed: never surface partial unredacted or unbounded text.
+    _ -> @redacted_marker
+  catch
+    # Also catch throw/exit from hostile Inspect or redaction callbacks.
+    _kind, _reason -> @redacted_marker
+  end
 
   @spec from_result(term(), term()) :: String.t() | nil
   def from_result(_result, status) when status in ~w(change_committed no_changes pr_created),
@@ -25,7 +50,7 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
         value =
           map_value(source, "reason", :reason) || map_value(source, "error", :error)
 
-        if is_nil(value), do: nil, else: reason_string(value)
+        if is_nil(value), do: nil, else: sanitize(value)
       end)
 
     explicit || validation_failure_reason(sources)
@@ -94,14 +119,14 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
   defp maybe_reason_part(parts, label, value) when is_binary(value) do
     if String.valid?(value) and String.trim(value) != "" do
       # Command/stderr/status text can carry credentials; redact before join.
-      parts ++ ["#{label}=#{reason_string(value)}"]
+      parts ++ ["#{label}=#{sanitize(value)}"]
     else
       parts
     end
   end
 
   defp maybe_reason_part(parts, label, value) when is_integer(value) or is_atom(value) do
-    parts ++ ["#{label}=#{reason_string(value)}"]
+    parts ++ ["#{label}=#{sanitize(value)}"]
   end
 
   defp maybe_reason_part(parts, _label, _value), do: parts
@@ -123,35 +148,34 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
 
   defp bounded_validation_stderr(_stderr), do: nil
 
-  defp reason_string(nil), do: "unspecified"
+  # Represent arbitrary terms as text before redaction/byte ceiling. Binary and
+  # atom paths avoid Inspect entirely. Struct-tagged and other terms use
+  # inspect with structs: false so custom Inspect callbacks cannot raise or
+  # leak fields.
+  defp represent(nil), do: "unspecified"
 
-  defp reason_string(value) when is_binary(value) do
-    value
-    |> then(fn text ->
-      if String.valid?(text) do
-        text
-      else
-        # Bound the raw source by bytes before hex-encoding so the label cannot grow
-        # unboundedly from a large invalid binary.
-        source =
-          binary_part(text, 0, min(byte_size(text), @max_invalid_utf8_source_bytes))
+  defp represent(value) when is_binary(value) do
+    if String.valid?(value) do
+      value
+    else
+      # Bound the raw source by bytes before hex-encoding so the label cannot grow
+      # unboundedly from a large invalid binary.
+      source =
+        binary_part(value, 0, min(byte_size(value), @max_invalid_utf8_source_bytes))
 
-        "invalid_utf8:#{Base.encode16(source, case: :lower)}"
-      end
-    end)
-    |> finalize_reason_text()
+      "invalid_utf8:#{Base.encode16(source, case: :lower)}"
+    end
   end
 
-  defp reason_string(value) when is_atom(value) do
-    value
-    |> Atom.to_string()
-    |> finalize_reason_text()
-  end
+  defp represent(value) when is_atom(value), do: Atom.to_string(value)
 
-  defp reason_string(value) do
-    value
-    |> inspect(limit: 30, printable_limit: @max_reason_bytes, width: 120)
-    |> finalize_reason_text()
+  defp represent(value) do
+    inspect(value,
+      limit: 30,
+      printable_limit: @max_reason_bytes,
+      structs: false,
+      width: 120
+    )
   end
 
   # Apply the existing SensitiveData redaction boundary, then enforce the
@@ -162,11 +186,15 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
     |> truncate_utf8_bytes(@max_reason_bytes)
   end
 
+  defp finalize_reason_text(_other), do: @redacted_marker
+
   defp redact_text(text) when is_binary(text) do
     SensitiveData.redact(text)
   rescue
     # Fail closed: never return the unredacted secret if redaction crashes.
     _ -> @redacted_marker
+  catch
+    _kind, _reason -> @redacted_marker
   end
 
   # UTF-8-safe byte ceiling: reduce until the prefix is valid UTF-8 and

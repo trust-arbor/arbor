@@ -2560,7 +2560,7 @@ defmodule Arbor.Commands.CodingBenchmark do
       "objective_verifier" => objective_verification,
       "repetition" => pair.repetition,
       "review_outcome" => review_outcome(%{}),
-      "terminal_reason" => reason_string(reason),
+      "terminal_reason" => TerminalReason.sanitize(reason),
       "terminal_status" => status,
       "usage_observations" => UsageObservations.from_result(result),
       "wall_clock_ms" => valid_wall_clock(Keyword.get(opts, :wall_clock_ms, 0))
@@ -2689,22 +2689,10 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp fetch_value(_map, _string, _atom, default), do: default
 
-  defp reason_string(nil), do: "unspecified"
-
-  defp reason_string(value) when is_binary(value) do
-    if String.valid?(value) do
-      String.slice(value, 0, 1_000)
-    else
-      bytes = binary_part(value, 0, min(byte_size(value), 500))
-      "invalid_utf8:#{Base.encode16(bytes, case: :lower)}"
-    end
-  end
-
-  defp reason_string(value) when is_atom(value), do: Atom.to_string(value)
-
-  defp reason_string(value) do
-    inspect(value, limit: 30, printable_limit: 1_000, width: 120)
-  end
+  # Local adapter/setup diagnostics share the same total sanitizer used for
+  # failure_row terminal_reason: redact, UTF-8-safe 1000-byte ceiling, and
+  # no custom struct Inspect callbacks.
+  defp reason_string(value), do: TerminalReason.sanitize(value)
 
   defp closed_map(map, allowed, required, field) do
     keys = Map.keys(map)

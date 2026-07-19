@@ -6,6 +6,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
 
   alias Arbor.Commands.CodingBenchmark
   alias Arbor.Commands.CodingBenchmark.Catalog
+  alias Arbor.Commands.CodingBenchmarkHostileInspect
   alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
   alias Arbor.Commands.CodingBenchmarkTempRoot
   alias Arbor.Common.SafePath
@@ -148,6 +149,64 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
 
     failed_pair = Enum.find(report["pairs"], &(&1["fixture_id"] == "executor-failure"))
     assert failed_pair["comparison"]["status"] == "unavailable"
+  end
+
+  test "failure_row terminal_reason sanitizes secrets, multibyte ceilings, and hostile Inspect" do
+    scenario = scenario!(~w(happy))
+    api_key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+    multibyte = String.duplicate("é", 800)
+
+    secret_adapters = %{
+      "legacy" => fn _request ->
+        {:error, "adapter failed key=#{api_key} during dispatch"}
+      end,
+      "pipeline" => fn _request ->
+        {:error, %CodingBenchmarkHostileInspect{secret: api_key}}
+      end
+    }
+
+    assert {:ok, secret_report} =
+             run_scenario(scenario, adapters: secret_adapters, verifiers: Scenario.verifiers())
+
+    legacy = row(secret_report, "happy", "legacy")
+    pipeline = row(secret_report, "happy", "pipeline")
+
+    assert legacy["terminal_status"] == "executor_failed"
+    assert is_binary(legacy["terminal_reason"])
+    refute legacy["terminal_reason"] =~ api_key
+    assert legacy["terminal_reason"] =~ "[REDACTED]"
+    assert byte_size(legacy["terminal_reason"]) <= 1_000
+
+    assert pipeline["terminal_status"] == "executor_failed"
+    assert is_binary(pipeline["terminal_reason"])
+    refute pipeline["terminal_reason"] =~ api_key
+    refute pipeline["terminal_reason"] =~ "hostile inspect"
+    refute pipeline["terminal_reason"] =~ "Inspect.Error"
+    assert byte_size(pipeline["terminal_reason"]) <= 1_000
+
+    multibyte_adapters = %{
+      "legacy" => fn _request -> {:error, multibyte} end,
+      "pipeline" => fn _request -> {:error, :binary.copy(<<0xFF>>, 600)} end
+    }
+
+    assert {:ok, bound_report} =
+             run_scenario(scenario,
+               adapters: multibyte_adapters,
+               verifiers: Scenario.verifiers()
+             )
+
+    multibyte_row = row(bound_report, "happy", "legacy")
+    invalid_row = row(bound_report, "happy", "pipeline")
+
+    assert multibyte_row["terminal_status"] == "executor_failed"
+    assert String.valid?(multibyte_row["terminal_reason"])
+    assert byte_size(multibyte_row["terminal_reason"]) <= 1_000
+    assert byte_size(multibyte_row["terminal_reason"]) < byte_size(multibyte)
+
+    assert invalid_row["terminal_status"] == "executor_failed"
+    assert String.starts_with?(invalid_row["terminal_reason"], "invalid_utf8:")
+    assert String.valid?(invalid_row["terminal_reason"])
+    assert byte_size(invalid_row["terminal_reason"]) <= 1_000
   end
 
   test "cancellation distinguishes owned cleanup from reused worker preservation" do

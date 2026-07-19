@@ -2,6 +2,7 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReasonTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Commands.CodingBenchmark.TerminalReason
+  alias Arbor.Commands.CodingBenchmarkHostileInspect
 
   @moduletag :fast
 
@@ -165,5 +166,55 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReasonTest do
     assert byte_size(reason) <= 1_000
     # Source was capped at 500 bytes before hex (1000 hex chars + prefix).
     assert byte_size(reason) <= byte_size("invalid_utf8:") + 1_000
+  end
+
+  test "sanitize redacts secrets, bounds multibyte UTF-8, and encodes invalid UTF-8" do
+    api_key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+    secret_reason = TerminalReason.sanitize("adapter failed key=#{api_key}")
+    assert is_binary(secret_reason)
+    refute secret_reason =~ api_key
+    assert secret_reason =~ "[REDACTED]"
+    assert byte_size(secret_reason) <= 1_000
+
+    multibyte = String.duplicate("é", 800)
+    multibyte_reason = TerminalReason.sanitize(multibyte)
+    assert String.valid?(multibyte_reason)
+    assert byte_size(multibyte_reason) <= 1_000
+    # Grapheme slice of 1000 would keep 1600 bytes of "é"; byte ceiling must win.
+    assert byte_size(multibyte_reason) < byte_size(multibyte)
+
+    invalid = :binary.copy(<<0xFF>>, 600)
+    invalid_reason = TerminalReason.sanitize(invalid)
+    assert String.starts_with?(invalid_reason, "invalid_utf8:")
+    assert String.valid?(invalid_reason)
+    assert byte_size(invalid_reason) <= 1_000
+  end
+
+  test "sanitize never invokes a raising custom Inspect implementation" do
+    api_key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+    hostile = %CodingBenchmarkHostileInspect{secret: api_key}
+
+    # Default inspect dispatches the hostile protocol. On Elixir 1.19 that becomes
+    # an Inspect.Error string rather than a process crash — and still embeds the
+    # secret in the fallback map dump.
+    plain = inspect(hostile)
+    assert plain =~ "hostile inspect leaked" or plain =~ "Inspect.Error"
+    assert plain =~ api_key
+
+    reason = TerminalReason.sanitize(hostile)
+    assert is_binary(reason)
+    assert String.valid?(reason)
+    assert byte_size(reason) <= 1_000
+    refute reason =~ api_key
+    refute reason =~ "hostile inspect"
+    refute reason =~ "Inspect.Error"
+    # structs: false represents as a plain map-like form; redaction then strips secrets.
+    assert reason =~ "secret"
+    assert reason =~ "[REDACTED]"
+  end
+
+  test "sanitize fails closed on nil and non-text atoms" do
+    assert TerminalReason.sanitize(nil) == "unspecified"
+    assert TerminalReason.sanitize(:scripted_pipeline_failure) == "scripted_pipeline_failure"
   end
 end
