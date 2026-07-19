@@ -74,23 +74,46 @@ defmodule Arbor.Actions.TestMixShell do
         deps_snapshot: deps_snapshot
       })
 
-      case System.cmd(wrapper, args,
-             cd: cwd,
-             env: env,
-             stderr_to_stdout: true
-           ) do
-        {output, exit_code} ->
-          {:ok,
-           %{
-             exit_code: exit_code,
-             stdout: output,
-             stderr: "",
-             duration_ms: System.monotonic_time(:millisecond) - started_at,
-             timed_out: false,
-             killed: false,
-             output_truncated: false,
-             output_limit_exceeded: false
-           }}
+      # Optional test-only: sleep for the full allocated child timeout then
+      # return success without running Mix. Proves postflight budget reserve
+      # when a child consumes its entire timeout. Not production behavior.
+      if Process.get({__MODULE__, :consume_full_timeout}) == true do
+        timeout = Keyword.get(opts, :timeout, 0)
+
+        if is_integer(timeout) and timeout > 0 do
+          Process.sleep(timeout)
+        end
+
+        {:ok,
+         %{
+           exit_code: 0,
+           stdout: "test-mix-shell: consumed full child timeout\n",
+           stderr: "",
+           duration_ms: System.monotonic_time(:millisecond) - started_at,
+           timed_out: false,
+           killed: false,
+           output_truncated: false,
+           output_limit_exceeded: false
+         }}
+      else
+        case System.cmd(wrapper, args,
+               cd: cwd,
+               env: env,
+               stderr_to_stdout: true
+             ) do
+          {output, exit_code} ->
+            {:ok,
+             %{
+               exit_code: exit_code,
+               stdout: output,
+               stderr: "",
+               duration_ms: System.monotonic_time(:millisecond) - started_at,
+               timed_out: false,
+               killed: false,
+               output_truncated: false,
+               output_limit_exceeded: false
+             }}
+        end
       end
     end
   end
@@ -113,6 +136,15 @@ defmodule Arbor.Actions.TestMixShell do
 
   @doc false
   def clear_worktree_mutation, do: Process.delete({__MODULE__, :mutate_worktree})
+
+  @doc false
+  def set_consume_full_timeout(enabled) when is_boolean(enabled) do
+    Process.put({__MODULE__, :consume_full_timeout}, enabled)
+    :ok
+  end
+
+  @doc false
+  def clear_consume_full_timeout, do: Process.delete({__MODULE__, :consume_full_timeout})
 
   defp maybe_mutate_worktree(cwd) when is_binary(cwd) do
     case Process.get({__MODULE__, :mutate_worktree}) do

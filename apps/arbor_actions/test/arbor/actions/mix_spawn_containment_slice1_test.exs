@@ -1005,6 +1005,160 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     end)
   end
 
+  describe "postflight tree-binding deadline reserve" do
+    test "allocate_spawn_child_timeout reserves only when bind_committable_tree is true" do
+      reserve = MixAction.postflight_tree_binding_reserve_ms()
+      assert is_integer(reserve) and reserve > 0
+
+      remaining = reserve + 12_345
+      assert {:ok, child} = MixAction.allocate_spawn_child_timeout(remaining, true)
+      assert child == remaining - reserve
+      assert child > 0
+
+      assert {:ok, ^remaining} = MixAction.allocate_spawn_child_timeout(remaining, false)
+
+      assert {:error, :operation_deadline_exceeded} =
+               MixAction.allocate_spawn_child_timeout(reserve, true)
+
+      assert {:error, :operation_deadline_exceeded} =
+               MixAction.allocate_spawn_child_timeout(reserve - 1, true)
+
+      assert {:ok, 1} = MixAction.allocate_spawn_child_timeout(reserve + 1, true)
+      assert {:ok, ^reserve} = MixAction.allocate_spawn_child_timeout(reserve, false)
+    end
+
+    test "run_mix with bind_tree reduces child timeout and completes postflight after full child budget",
+         %{tmp_dir: tmp_dir} do
+      fixture = leased_fixture(tmp_dir)
+      create_tiny_project(fixture.lease.worktree_path)
+      git!(fixture.lease.worktree_path, ["add", "-A"])
+      git!(fixture.lease.worktree_path, ["commit", "-m", "base project"])
+
+      reserve = MixAction.postflight_tree_binding_reserve_ms()
+      # Outer budget: reserve + short child slice + headroom for prepare/preflight.
+      # Child sleeps its full allocated timeout via TestMixShell; without the
+      # reserve that sleep would exhaust the outer deadline and postflight
+      # would fail with :operation_deadline_exceeded.
+      child_slice_ms = 1_500
+      prep_headroom_ms = 15_000
+      timeout = reserve + child_slice_ms + prep_headroom_ms
+
+      MixAction.with_validation_resource(
+        fixture.lease.workspace_id,
+        fixture.context,
+        fn resource ->
+          Arbor.Actions.TestMixShell.clear_last_invocation()
+          Arbor.Actions.TestMixShell.set_consume_full_timeout(true)
+
+          try do
+            assert {:ok, result} =
+                     MixAction.run_mix(resource.candidate_path, ["compile"],
+                       validation_resource: resource,
+                       bind_committable_tree: true,
+                       timeout: timeout
+                     )
+
+            assert is_binary(result.validated_tree_oid)
+            assert is_binary(result.validated_head)
+
+            invocation = Arbor.Actions.TestMixShell.last_invocation()
+            assert is_map(invocation)
+            child_timeout = Keyword.fetch!(invocation.opts, :timeout)
+            assert is_integer(child_timeout) and child_timeout > 0
+            # Child must not receive the full outer budget: reserve is held back.
+            assert child_timeout <= timeout - reserve
+            # Child budget is remaining_after_preflight - reserve, so it cannot
+            # exceed the intended slice plus unused prepare/preflight headroom.
+            assert child_timeout <= child_slice_ms + prep_headroom_ms
+            {:ok, :ok}
+          after
+            Arbor.Actions.TestMixShell.clear_consume_full_timeout()
+            Arbor.Actions.TestMixShell.clear_last_invocation()
+          end
+        end
+      )
+    end
+
+    test "run_mix fails closed before child launch when remaining cannot honor postflight reserve",
+         %{tmp_dir: tmp_dir} do
+      fixture = leased_fixture(tmp_dir)
+      create_tiny_project(fixture.lease.worktree_path)
+      git!(fixture.lease.worktree_path, ["add", "-A"])
+      git!(fixture.lease.worktree_path, ["commit", "-m", "base project"])
+
+      reserve = MixAction.postflight_tree_binding_reserve_ms()
+
+      MixAction.with_validation_resource(
+        fixture.lease.workspace_id,
+        fixture.context,
+        fn resource ->
+          Arbor.Actions.TestMixShell.clear_last_invocation()
+          Arbor.Actions.TestMixShell.set_consume_full_timeout(true)
+
+          try do
+            # Exactly the reserve: prepare + preflight binding consume some budget,
+            # so remaining after preflight cannot cover reserve + positive child.
+            assert {:error, reason} =
+                     MixAction.run_mix(resource.candidate_path, ["compile"],
+                       validation_resource: resource,
+                       bind_committable_tree: true,
+                       timeout: reserve
+                     )
+
+            assert reason == ":operation_deadline_exceeded" or
+                     reason =~ "operation_deadline_exceeded"
+
+            assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+            {:ok, :ok}
+          after
+            Arbor.Actions.TestMixShell.clear_consume_full_timeout()
+            Arbor.Actions.TestMixShell.clear_last_invocation()
+          end
+        end
+      )
+    end
+
+    test "run_mix with bind_tree=false does not reserve postflight budget", %{tmp_dir: tmp_dir} do
+      fixture = leased_fixture(tmp_dir)
+      create_tiny_project(fixture.lease.worktree_path)
+      git!(fixture.lease.worktree_path, ["add", "-A"])
+      git!(fixture.lease.worktree_path, ["commit", "-m", "base project"])
+
+      reserve = MixAction.postflight_tree_binding_reserve_ms()
+      # Budget equal to the reserve: with binding enabled this fails closed
+      # before launch; without binding the child still receives a positive
+      # nearly-full remaining budget (no postflight reserve).
+      timeout = reserve
+
+      MixAction.with_validation_resource(
+        fixture.lease.workspace_id,
+        fixture.context,
+        fn resource ->
+          Arbor.Actions.TestMixShell.clear_last_invocation()
+
+          assert {:ok, result} =
+                   MixAction.run_mix(resource.candidate_path, ["compile"],
+                     validation_resource: resource,
+                     bind_committable_tree: false,
+                     timeout: timeout
+                   )
+
+          refute Map.has_key?(result, :validated_tree_oid)
+
+          invocation = Arbor.Actions.TestMixShell.last_invocation()
+          assert is_map(invocation)
+          child_timeout = Keyword.fetch!(invocation.opts, :timeout)
+          assert is_integer(child_timeout) and child_timeout > 0
+          # No reserve subtraction: child timeout is the remaining outer budget
+          # after prepare only, so it stays close to the full timeout.
+          assert child_timeout > timeout - reserve
+          assert child_timeout > div(timeout, 2)
+          {:ok, :ok}
+        end
+      )
+    end
+  end
+
   test "security regression: clean filter never runs during tree binding", %{tmp_dir: tmp_dir} do
     fixture = leased_fixture(tmp_dir)
     wt = fixture.lease.worktree_path

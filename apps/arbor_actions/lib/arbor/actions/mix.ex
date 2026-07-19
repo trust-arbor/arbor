@@ -52,6 +52,22 @@ defmodule Arbor.Actions.Mix do
   @snapshot_max_bytes 512 * 1024 * 1024
   @snapshot_max_depth 48
 
+  # When `bind_committable_tree` is true, reserve this many milliseconds of the
+  # remaining outer deadline for the mandatory *postflight* tree binding and
+  # stability check before launching the spawn-capable child. Module-owned
+  # only — never caller/task/config-overridable.
+  #
+  # Policy (conservative, in sympathy with existing ceilings):
+  # - Tree binding walks up to snapshot_bounds (50k entries / 512 MiB) via
+  #   bounded private-index git hash-object / write-tree work.
+  # - Default mix_timeout is 300_000 ms; spawn-capable standard max is
+  #   600_000 ms. Reserving 60_000 ms leaves most of a healthy validation
+  #   budget for the child while covering a second full binding after a
+  #   child that nearly exhausts its own timeout.
+  # - Fail closed before launch when remaining cannot cover this reserve
+  #   plus a positive child timeout; never extend the outer deadline.
+  @postflight_tree_binding_reserve_ms 60_000
+
   # Path-bearing / code-loading Mix variables are module-owned under contained
   # execution. Caller opts and ambient Application env never become wrapper or
   # root authority; they are scrubbed after resource/runtime env is built.
@@ -93,6 +109,33 @@ defmodule Arbor.Actions.Mix do
 
   @doc false
   def cleanup_diagnostic_byte_limit, do: @cleanup_diagnostic_byte_limit
+
+  @doc false
+  def postflight_tree_binding_reserve_ms, do: @postflight_tree_binding_reserve_ms
+
+  @doc false
+  @spec allocate_spawn_child_timeout(term(), boolean()) ::
+          {:ok, pos_integer()} | {:error, :operation_deadline_exceeded}
+  def allocate_spawn_child_timeout(remaining_ms, bind_committable_tree?)
+
+  def allocate_spawn_child_timeout(remaining_ms, true)
+      when is_integer(remaining_ms) and remaining_ms > 0 do
+    reserve = @postflight_tree_binding_reserve_ms
+
+    if remaining_ms > reserve do
+      {:ok, remaining_ms - reserve}
+    else
+      {:error, :operation_deadline_exceeded}
+    end
+  end
+
+  def allocate_spawn_child_timeout(remaining_ms, false)
+      when is_integer(remaining_ms) and remaining_ms > 0 do
+    {:ok, remaining_ms}
+  end
+
+  def allocate_spawn_child_timeout(_remaining_ms, _bind_committable_tree?),
+    do: {:error, :operation_deadline_exceeded}
 
   @doc false
   def snapshot_bounds do
@@ -736,10 +779,10 @@ defmodule Arbor.Actions.Mix do
       {:error, reason} ->
         {:error, reason}
 
-      {:ok, remaining} ->
+      {:ok, _remaining} ->
         case prepare_mix_invocation(path, opts) do
           {:ok, prepared} ->
-            execute_prepared_mix(prepared, args, remaining, deadline_ms, bind_tree?, opts)
+            execute_prepared_mix(prepared, args, deadline_ms, bind_tree?, opts)
 
           {:error, reason, ephemeral_root} ->
             settle_ephemeral_cleanup({:error, reason}, ephemeral_root)
@@ -750,14 +793,19 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
-  defp execute_prepared_mix(prepared, args, remaining, deadline_ms, bind_tree?, opts) do
+  # One absolute outer deadline for the whole invocation. When tree binding is
+  # enabled, reserve a module-owned slice of the *current* remaining budget for
+  # postflight binding before the child is launched so a child that uses its
+  # full timeout cannot starve the mandatory after-execution binding.
+  defp execute_prepared_mix(prepared, args, deadline_ms, bind_tree?, opts) do
     try do
       with {:ok, _} <- remaining_timeout(deadline_ms),
            {:ok, before_binding} <-
              maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms),
            {:ok, rem_after_bind} <- remaining_timeout(deadline_ms),
+           {:ok, child_timeout} <- allocate_spawn_child_timeout(rem_after_bind, bind_tree?),
            {:ok, result} <-
-             invoke_spawn_capable(prepared, args, min(remaining, rem_after_bind), opts),
+             invoke_spawn_capable(prepared, args, child_timeout, opts),
            {:ok, after_binding} <-
              maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms),
            :ok <- assert_tree_stable(before_binding, after_binding) do
