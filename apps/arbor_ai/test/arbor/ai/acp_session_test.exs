@@ -193,6 +193,58 @@ defmodule Arbor.AI.AcpSessionTest do
     AcpSession.start_link(provider: :test, client_opts: [test_pid: self()])
   end
 
+  test "security regression: ACP subprocesses cannot inherit the live Arbor home" do
+    install_fake_progress_client(100)
+    live_arbor_home = Path.join(System.tmp_dir!(), "must-not-reach-live-arbor-home")
+
+    launch_cases = [
+      native: [
+        command: ["fake", "stdio"],
+        env: [{"KEEP_ME", "native"}, {"ARBOR_HOME", live_arbor_home}],
+        test_pid: self()
+      ],
+      adapted: [
+        adapter: __MODULE__,
+        adapter_opts: [
+          env: [{"KEEP_ME", "adapted"}, {"ARBOR_HOME", live_arbor_home}]
+        ],
+        test_pid: self()
+      ]
+    ]
+
+    Enum.each(launch_cases, fn {kind, client_opts} ->
+      assert {:ok, session} =
+               AcpSession.start_link(provider: :test, client_opts: client_opts, timeout: 1_000)
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      started_opts = Agent.get(state.client, & &1.opts)
+
+      env =
+        case kind do
+          :native -> Keyword.fetch!(started_opts, :env)
+          :adapted -> started_opts |> Keyword.fetch!(:adapter_opts) |> Keyword.fetch!(:env)
+        end
+
+      env = Map.new(env, fn {key, value} -> {to_string(key), value} end)
+      runtime_home = Map.fetch!(env, "ARBOR_HOME")
+
+      assert env["KEEP_ME"] == Atom.to_string(kind)
+      refute runtime_home == live_arbor_home
+      assert Path.type(runtime_home) == :absolute
+      assert state.runtime_home_cleanup.path == runtime_home
+      assert {:ok, stat} = File.lstat(runtime_home)
+      assert stat.type == :directory
+      assert Bitwise.band(stat.mode, 0o777) == 0o700
+
+      monitor = Process.monitor(session)
+      assert :ok = AcpSession.close(session)
+      assert_receive {:DOWN, ^monitor, :process, ^session, :normal}, 1_000
+      refute File.exists?(runtime_home)
+    end)
+  end
+
   test "security regression: lifecycle aliases cannot widen the caller deadline" do
     server = start_supervised!(SlowCallServer)
     started_at = System.monotonic_time(:millisecond)

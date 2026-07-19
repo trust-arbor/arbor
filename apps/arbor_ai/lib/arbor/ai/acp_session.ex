@@ -42,6 +42,7 @@ defmodule Arbor.AI.AcpSession do
   require Logger
 
   alias Arbor.AI.AcpSession.Config
+  alias Arbor.AI.AcpSession.RuntimeHome
   alias Arbor.AI.AcpTranscript
   alias Arbor.AI.OwnedOperation
 
@@ -80,6 +81,7 @@ defmodule Arbor.AI.AcpSession do
     :stream_callback,
     :opts,
     :workspace,
+    :runtime_home_cleanup,
     :mcp_servers,
     :startup_error,
     status: :starting,
@@ -294,7 +296,7 @@ defmodule Arbor.AI.AcpSession do
     result = start_client_owned(state)
 
     case result do
-      {:ok, client, client_monitor, workspace} ->
+      {:ok, client, client_monitor, workspace, runtime_home_cleanup} ->
         with :ok <- Arbor.AI.Timeout.ensure_active(state.opts),
              true <- owner_alive?(state.owner) or {:error, :owner_dead} do
           new_state = %{
@@ -302,6 +304,7 @@ defmodule Arbor.AI.AcpSession do
             | client: client,
               client_monitor: client_monitor,
               workspace: workspace,
+              runtime_home_cleanup: runtime_home_cleanup,
               status: :ready,
               startup_error: nil
           }
@@ -309,8 +312,21 @@ defmodule Arbor.AI.AcpSession do
           emit_signal(:acp_session_started, new_state)
           {:noreply, new_state}
         else
-          {:error, reason} -> startup_failed(state, client, workspace, reason)
-          false -> startup_failed(state, client, workspace, :owner_dead)
+          {:error, reason} ->
+            startup_failed(
+              %{state | runtime_home_cleanup: runtime_home_cleanup},
+              client,
+              workspace,
+              reason
+            )
+
+          false ->
+            startup_failed(
+              %{state | runtime_home_cleanup: runtime_home_cleanup},
+              client,
+              workspace,
+              :owner_dead
+            )
         end
 
       {:error, reason} ->
@@ -686,6 +702,7 @@ defmodule Arbor.AI.AcpSession do
     demonitor_owner(state.client_monitor)
     terminate_client(state.client)
     cleanup_workspace_owned(state.workspace)
+    cleanup_runtime_home(state.runtime_home_cleanup)
     :ok
   end
 
@@ -699,7 +716,7 @@ defmodule Arbor.AI.AcpSession do
     Code.ensure_loaded?(acp_client_module())
   end
 
-  defp initialize_client(session_pid, provider, opts, workspace_plan) do
+  defp initialize_client(session_pid, provider, opts, workspace_plan, runtime_home_cleanup) do
     if acp_available?() do
       workspace = materialize_workspace(workspace_plan)
       cwd = workspace_cwd(workspace, opts)
@@ -711,6 +728,7 @@ defmodule Arbor.AI.AcpSession do
         end
 
       with {:ok, client_opts} <- resolved,
+           {:ok, client_opts} <- RuntimeHome.inject(client_opts, runtime_home_cleanup),
            client_opts =
              client_opts
              |> Keyword.put(:event_listener, session_pid)
@@ -735,6 +753,19 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp start_client_owned(state) do
+    with {:ok, runtime_home_cleanup} <- RuntimeHome.create() do
+      case do_start_client_owned(state, runtime_home_cleanup) do
+        {:ok, client, client_monitor, workspace} ->
+          {:ok, client, client_monitor, workspace, runtime_home_cleanup}
+
+        error ->
+          cleanup_runtime_home(runtime_home_cleanup)
+          error
+      end
+    end
+  end
+
+  defp do_start_client_owned(state, runtime_home_cleanup) do
     with {:ok, _opts, requested_remaining} <- Arbor.AI.Timeout.remaining(state.opts),
          {:ok, requested_deadline} <- Arbor.AI.Timeout.deadline(state.opts) do
       {remaining, deadline} = finite_start_deadline(requested_remaining, requested_deadline)
@@ -745,7 +776,15 @@ defmodule Arbor.AI.AcpSession do
       {worker, monitor} =
         :erlang.spawn_opt(
           fn ->
-            result = initialize_client(caller, state.provider, state.opts, state.workspace)
+            result =
+              initialize_client(
+                caller,
+                state.provider,
+                state.opts,
+                state.workspace,
+                runtime_home_cleanup
+              )
+
             completed_at = System.monotonic_time(:millisecond)
             send(reply_alias, {operation_ref, result, completed_at, self()})
 
@@ -883,6 +922,7 @@ defmodule Arbor.AI.AcpSession do
     reason = Arbor.LLM.sanitize_external_reason(reason)
     terminate_client(client)
     cleanup_workspace_owned(workspace)
+    cleanup_runtime_home(state.runtime_home_cleanup)
 
     Logger.error(
       "Failed to start ACP client for #{state.provider}: " <>
@@ -894,6 +934,7 @@ defmodule Arbor.AI.AcpSession do
       | client: nil,
         client_monitor: nil,
         workspace: nil,
+        runtime_home_cleanup: nil,
         status: :error,
         startup_error: reason
     }
@@ -3108,4 +3149,23 @@ defmodule Arbor.AI.AcpSession do
       _result -> :ok
     end
   end
+
+  defp cleanup_runtime_home(nil), do: :ok
+
+  defp cleanup_runtime_home(cleanup_identity) when is_map(cleanup_identity) do
+    case RuntimeHome.cleanup(cleanup_identity) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "AcpSession private runtime-home cleanup failed: " <>
+            Arbor.LLM.inspect_external_reason(reason)
+        )
+
+        :ok
+    end
+  end
+
+  defp cleanup_runtime_home(_invalid), do: :ok
 end
