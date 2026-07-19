@@ -306,6 +306,49 @@ defmodule Arbor.Commands.CodingBenchmark.MaterializerTest do
              )
   end
 
+  test "multi-file reconstruction uses bounded git object batches", %{root: root} do
+    source = Path.join(root, "source-multi")
+    file_count = 48
+    {base, _target} = build_history!(source, file_count: file_count)
+    dest = Path.join(root, "reconstructed-multi")
+
+    parent = self()
+    handler_id = "coding-benchmark-git-object-batch-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:arbor, :commands, :coding_benchmark, :git_object_batch],
+      fn _event, measurements, _metadata, _config ->
+        send(parent, {:git_object_batch, measurements})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert :ok =
+             CodingBenchmark.reconstruct_fixture_repository(
+               source,
+               dest,
+               base.commit,
+               base.tree
+             )
+
+    assert_receive {:git_object_batch, measurements}, 5_000
+
+    # Unique objects: commit + trees + blobs. Far more than one process/object.
+    assert measurements.object_count >= file_count
+    assert measurements.process_count >= 1
+    assert measurements.process_count < measurements.object_count
+    assert measurements.batch_count <= measurements.process_count
+    assert measurements.process_count <= div(measurements.object_count, 4) + 2
+
+    assert git!(dest, ["rev-parse", "HEAD^{commit}"]) == base.commit
+    assert git!(dest, ["rev-parse", "HEAD^{tree}"]) == base.tree
+    assert git!(dest, ["status", "--porcelain=v1"]) == ""
+    assert File.read!(Path.join(dest, "files/file-0001.txt")) == "content-1\n"
+  end
+
   defp build_history!(repo, opts \\ []) do
     File.mkdir_p!(repo)
     git!(repo, ["init", "--quiet", "--initial-branch=main"])
@@ -316,6 +359,21 @@ defmodule Arbor.Commands.CodingBenchmark.MaterializerTest do
     File.write!(Path.join(repo, "README.md"), "base\n")
     File.ln_s!(Keyword.get(opts, :symlink_target, "README.md"), Path.join(repo, "README.link"))
     git!(repo, ["add", "--", "README.md", "README.link"])
+
+    file_count = Keyword.get(opts, :file_count, 0)
+
+    if file_count > 0 do
+      files_dir = Path.join(repo, "files")
+      File.mkdir_p!(files_dir)
+
+      for index <- 1..file_count do
+        name = "file-" <> String.pad_leading(Integer.to_string(index), 4, "0") <> ".txt"
+        File.write!(Path.join(files_dir, name), "content-#{index}\n")
+      end
+
+      git!(repo, ["add", "--", "files"])
+    end
+
     git!(repo, ["commit", "--quiet", "-m", "base"])
     base_commit = git!(repo, ["rev-parse", "HEAD"])
     base_tree = git!(repo, ["rev-parse", "HEAD^{tree}"])

@@ -849,16 +849,10 @@ defmodule Arbor.Commands.CodingBenchmark do
 
     with {:ok, entries} <- fixture_tree_entries(source, commit_oid, expected_tree, deadline),
          :ok <- initialize_fixture_repository(destination, commit_oid, deadline),
-         :ok <-
-           import_fixture_objects(
-             source,
-             destination,
-             commit_oid,
-             expected_tree,
-             entries,
-             deadline
-           ),
-         :ok <- materialize_fixture_tree(source, destination, entries, deadline),
+         {:ok, objects} <-
+           load_fixture_objects(source, commit_oid, expected_tree, entries, deadline),
+         :ok <- import_fixture_objects(destination, objects),
+         :ok <- materialize_fixture_tree(destination, entries, objects),
          :ok <- attach_fixture_commit(destination, commit_oid, deadline),
          {:ok, ^commit_oid} <-
            git_output(destination, ["rev-parse", "--verify", "HEAD^{commit}"], deadline),
@@ -975,39 +969,24 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp import_fixture_objects(source, destination, commit_oid, root_tree_oid, entries, timeout_ms) do
-    objects =
+  defp load_fixture_objects(source, commit_oid, root_tree_oid, entries, timeout_ms) do
+    requests =
       [%{oid: commit_oid, type: "commit"}, %{oid: root_tree_oid, type: "tree"}] ++
         Enum.map(entries, &Map.take(&1, [:oid, :type]))
 
-    objects
-    |> Enum.uniq_by(&{&1.type, &1.oid})
-    |> Enum.reduce_while({:ok, 0}, fn object, {:ok, total} ->
-      case import_fixture_object(source, destination, object, total, timeout_ms) do
-        {:ok, next_total} -> {:cont, {:ok, next_total}}
+    Git.read_objects(source, requests, timeout_ms,
+      max_object_bytes: @max_fixture_object_bytes,
+      max_total_bytes: @max_fixture_total_bytes
+    )
+  end
+
+  defp import_fixture_objects(destination, objects) when is_map(objects) do
+    Enum.reduce_while(objects, :ok, fn {oid, %{type: type, content: content}}, :ok ->
+      case write_loose_object(destination, type, content, oid) do
+        :ok -> {:cont, :ok}
         {:error, _reason} = error -> {:halt, error}
       end
     end)
-    |> case do
-      {:ok, _total} -> :ok
-      error -> error
-    end
-  end
-
-  defp import_fixture_object(source, destination, %{oid: oid, type: type}, total, timeout_ms) do
-    with {:ok, content} <-
-           Git.run(source, ["cat-file", type, oid], timeout_ms,
-             max_output_bytes: @max_fixture_object_bytes
-           ),
-         size = byte_size(content),
-         true <- size <= @max_fixture_object_bytes and total + size <= @max_fixture_total_bytes,
-         :ok <- write_loose_object(destination, type, content, oid) do
-      {:ok, total + size}
-    else
-      false -> {:error, "fixture_object_attestation_failed"}
-      {:error, reason} -> {:error, reason}
-      _other -> {:error, "fixture_object_import_failed"}
-    end
   end
 
   defp write_loose_object(destination, type, content, expected_oid) do
@@ -1036,20 +1015,18 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp materialize_fixture_tree(source, destination, entries, timeout_ms) do
+  defp materialize_fixture_tree(destination, entries, objects) when is_map(objects) do
     entries
     |> Enum.filter(&(&1.type == "blob"))
     |> Enum.reduce_while(:ok, fn entry, :ok ->
       with {:ok, path} <- SafePath.safe_join(destination, entry.path),
            {:ok, ^path} <- SafePath.resolve_within(path, destination),
            :ok <- ensure_fixture_parent(Path.dirname(path), destination),
-           {:ok, content} <-
-             Git.run(source, ["cat-file", "blob", entry.oid], timeout_ms,
-               max_output_bytes: @max_fixture_object_bytes
-             ),
+           {:ok, %{type: "blob", content: content}} <- Map.fetch(objects, entry.oid),
            :ok <- materialize_fixture_entry(path, content, entry.mode, destination) do
         {:cont, :ok}
       else
+        :error -> {:halt, {:error, "fixture_object_missing_for_materialization"}}
         {:error, reason} when is_binary(reason) -> {:halt, {:error, reason}}
         _other -> {:halt, {:error, "fixture_materialization_failed"}}
       end
