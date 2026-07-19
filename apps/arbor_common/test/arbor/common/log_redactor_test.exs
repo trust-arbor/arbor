@@ -226,6 +226,64 @@ defmodule Arbor.Common.LogRedactorTest do
       # Original secret-bearing key must not survive as a map key.
       refute Map.has_key?(redacted, key)
     end
+
+    test "multi-cons improper list tails with secrets are walked or fail closed" do
+      secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+      secret_bin = "API_KEY=#{secret}"
+
+      # True improper spines (non-list final tails). Multi-cons form must not
+      # leave an unwalked improper tail attached after a partial walk.
+      multi_cons = [:ok | [:more | secret_bin]]
+      shallow_improper = [:head | secret_bin]
+      nested_improper = [1 | [2 | [3 | secret_bin]]]
+      # [a, b | secret] sugar → [a | [b | secret]]
+      sugar_improper = [1, 2 | secret_bin]
+
+      report = %{
+        multi: multi_cons,
+        shallow: shallow_improper,
+        nested: nested_improper,
+        sugar: sugar_improper,
+        adjacent: "prefix #{secret}"
+      }
+
+      event = %{level: :error, meta: %{}, msg: {:report, report}}
+      assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
+
+      refute_sensitive(redacted, secret)
+      assert_has_redacted_marker(redacted)
+    end
+
+    test "large tuple does not leak a secret past the node budget" do
+      secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+      # Many small elements then a secret-bearing binary at the end. The walk
+      # must stop by budget without Tuple.to_list/1 of the full container, and
+      # must not emit the secret from an unwalked suffix.
+      huge = List.to_tuple(Enum.to_list(1..300) ++ ["token=#{secret}"])
+
+      event = %{level: :error, meta: %{}, msg: {:report, %{t: huge}}}
+      assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
+      refute_sensitive(redacted, secret)
+    end
+
+    test "large map does not leak a secret past the node budget" do
+      secret = "AKIA" <> "IOSFODNN7EXAMPLE"
+
+      # First entries are inert; secret lives only in later keys/values so a
+      # budget-capped iterator walk must omit or redact it — never return raw.
+      wide =
+        1..400
+        |> Enum.reduce(%{}, fn i, acc ->
+          Map.put(acc, :"k#{i}", i)
+        end)
+        |> Map.put(:secret_tail, "key=#{secret}")
+        |> Map.put("API_KEY=#{secret}", :present)
+
+      event = %{level: :error, meta: %{}, msg: {:report, wide}}
+      assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
+      refute_sensitive(redacted, secret)
+      refute_struct_tagged_redaction_markers(redacted)
+    end
   end
 
   defp refute_sensitive(term, secret) when is_binary(secret) do
@@ -234,10 +292,13 @@ defmodule Arbor.Common.LogRedactorTest do
         refute_binary_contains(bin, secret)
 
       list when is_list(list) ->
-        Enum.each(list, &refute_sensitive(&1, secret))
+        # Cons-walk so improper tails are checked without Enum.each.
+        refute_sensitive_list(list, secret)
 
       tuple when is_tuple(tuple) ->
-        tuple |> Tuple.to_list() |> Enum.each(&refute_sensitive(&1, secret))
+        for i <- 0..(tuple_size(tuple) - 1) do
+          refute_sensitive(elem(tuple, i), secret)
+        end
 
       %{__struct__: _} = struct ->
         struct
@@ -258,6 +319,18 @@ defmodule Arbor.Common.LogRedactorTest do
     end
   end
 
+  defp refute_sensitive_list([], _secret), do: :ok
+
+  defp refute_sensitive_list([head | tail], secret) do
+    refute_sensitive(head, secret)
+
+    if is_list(tail) do
+      refute_sensitive_list(tail, secret)
+    else
+      refute_sensitive(tail, secret)
+    end
+  end
+
   defp refute_binary_contains(bin, secret) when is_binary(bin) and is_binary(secret) do
     refute :binary.match(bin, secret) != :nomatch,
            "secret leaked in binary: #{inspect(bin, limit: 80)}"
@@ -269,10 +342,11 @@ defmodule Arbor.Common.LogRedactorTest do
   end
 
   defp contains_redacted?(bin) when is_binary(bin), do: String.contains?(bin, "[REDACTED]")
-  defp contains_redacted?(list) when is_list(list), do: Enum.any?(list, &contains_redacted?/1)
+
+  defp contains_redacted?(list) when is_list(list), do: contains_redacted_list?(list)
 
   defp contains_redacted?(tuple) when is_tuple(tuple) do
-    tuple |> Tuple.to_list() |> Enum.any?(&contains_redacted?/1)
+    Enum.any?(0..(tuple_size(tuple) - 1), fn i -> contains_redacted?(elem(tuple, i)) end)
   end
 
   defp contains_redacted?(%{__struct__: _} = struct) do
@@ -284,6 +358,13 @@ defmodule Arbor.Common.LogRedactorTest do
   end
 
   defp contains_redacted?(_), do: false
+
+  defp contains_redacted_list?([]), do: false
+
+  defp contains_redacted_list?([head | tail]) do
+    contains_redacted?(head) or
+      if(is_list(tail), do: contains_redacted_list?(tail), else: contains_redacted?(tail))
+  end
 
   defp refute_struct_tagged_redaction_markers(term) do
     case term do
@@ -304,13 +385,27 @@ defmodule Arbor.Common.LogRedactorTest do
         end
 
       list when is_list(list) ->
-        Enum.each(list, &refute_struct_tagged_redaction_markers/1)
+        refute_struct_tagged_list(list)
 
       tuple when is_tuple(tuple) ->
-        tuple |> Tuple.to_list() |> Enum.each(&refute_struct_tagged_redaction_markers/1)
+        for i <- 0..(tuple_size(tuple) - 1) do
+          refute_struct_tagged_redaction_markers(elem(tuple, i))
+        end
 
       _ ->
         :ok
+    end
+  end
+
+  defp refute_struct_tagged_list([]), do: :ok
+
+  defp refute_struct_tagged_list([head | tail]) do
+    refute_struct_tagged_redaction_markers(head)
+
+    if is_list(tail) do
+      refute_struct_tagged_list(tail)
+    else
+      refute_struct_tagged_redaction_markers(tail)
     end
   end
 end

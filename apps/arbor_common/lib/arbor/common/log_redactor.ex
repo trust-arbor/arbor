@@ -5,12 +5,13 @@ defmodule Arbor.Common.LogRedactor do
   Delegates to `Arbor.Common.SensitiveData.redact/1` for pattern matching,
   which covers both PII and secret patterns.
 
-  Traversal is total and globally bounded: nested maps, lists, and tuples are
-  walked without requiring Enumerable and without invoking struct module
-  callbacks (Logger crash reports often embed non-Enumerable or forged
-  struct-tagged maps). Both map keys and values are walked under one remaining
-  node budget. Binary redaction fails closed to `"[REDACTED]"` on any exception
-  or throw so the primary Logger filter is never removed by a bad term.
+  Traversal is total and globally bounded:
+  - Lists are walked one cons cell at a time (including multi-cons improper tails)
+  - Maps use `:maps.iterator` / `:maps.next` (no full `Map.to_list/1`)
+  - Tuples use `elem/2` indexing (no full `Tuple.to_list/1`)
+  - Struct-tagged maps never invoke Enumerable or `struct/2` callbacks
+  - Both map keys and values share one remaining-node budget
+  - Binary redaction fails closed to `"[REDACTED]"` on any exception/throw
   """
 
   alias Arbor.Common.SensitiveData
@@ -73,6 +74,7 @@ defmodule Arbor.Common.LogRedactor do
     if depth <= 0 do
       {@redacted_marker, budget - 1}
     else
+      # One node for the list spine root; walk cons cells without materializing.
       walk_list(list, depth - 1, budget - 1, [])
     end
   end
@@ -81,8 +83,9 @@ defmodule Arbor.Common.LogRedactor do
     if depth <= 0 do
       {@redacted_marker, budget - 1}
     else
-      {elems, budget_left} = walk_list(Tuple.to_list(tuple), depth - 1, budget - 1, [])
-      {List.to_tuple(elems), budget_left}
+      # Index elements; never Tuple.to_list/1 (would allocate the full attacker
+      # controlled container before the node budget can stop us).
+      walk_tuple(tuple, 0, tuple_size(tuple), depth - 1, budget - 1, [])
     end
   end
 
@@ -92,14 +95,13 @@ defmodule Arbor.Common.LogRedactor do
     if depth <= 0 do
       {@redacted_marker, budget - 1}
     else
-      # Map.delete yields a plain map; never Enum over the struct-tagged term.
+      # Drop __struct__ then iterate the plain field map with a bounded iterator.
       fields = Map.delete(map, :__struct__)
 
-      case walk_pairs(Map.to_list(fields), depth - 1, budget - 1, []) do
+      case walk_map_iterator(:maps.next(:maps.iterator(fields)), depth - 1, budget - 1, []) do
         {:complete, pairs, budget_left} ->
           case assemble_pairs(pairs) do
             {:ok, assembled} ->
-              # Restore the original __struct__ key only after a complete field walk.
               {Map.put(assembled, :__struct__, mod), budget_left}
 
             :collision ->
@@ -117,7 +119,7 @@ defmodule Arbor.Common.LogRedactor do
     if depth <= 0 do
       {@redacted_marker, budget - 1}
     else
-      case walk_pairs(Map.to_list(map), depth - 1, budget - 1, []) do
+      case walk_map_iterator(:maps.next(:maps.iterator(map)), depth - 1, budget - 1, []) do
         {:complete, pairs, budget_left} ->
           case assemble_pairs(pairs) do
             {:ok, assembled} -> {assembled, budget_left}
@@ -125,7 +127,6 @@ defmodule Arbor.Common.LogRedactor do
           end
 
         {:incomplete, pairs, budget_left} ->
-          # Unvisited keys omitted (not emitted); mark exhaustion plainly.
           case assemble_pairs(pairs) do
             {:ok, assembled} -> {Map.put(assembled, :redacted, true), budget_left}
             :collision -> {@redacted_marker, budget_left}
@@ -136,39 +137,73 @@ defmodule Arbor.Common.LogRedactor do
 
   defp walk(other, _depth, budget), do: {other, budget - 1}
 
-  defp walk_list([], _depth, budget, acc), do: {Enum.reverse(acc), budget}
+  # --- List: recursive cons traversal ---------------------------------------
+  # Walks proper and improper (multi-cons) lists one cell at a time. When the
+  # budget is exhausted, the unvisited remainder — including any improper tail —
+  # is replaced with a plain marker and never returned.
 
   defp walk_list(_rest, _depth, budget, acc) when budget <= 0 do
     {Enum.reverse([@redacted_marker | acc]), 0}
   end
 
-  defp walk_list([head | tail], depth, budget, acc) when is_list(tail) do
-    {head_redacted, budget_left} = walk(head, depth, budget)
-    walk_list(tail, depth, budget_left, [head_redacted | acc])
-  end
+  defp walk_list([], _depth, budget, acc), do: {Enum.reverse(acc), budget}
 
-  # Improper list: walk head and non-list tail without Enumerable.
   defp walk_list([head | tail], depth, budget, acc) do
-    {head_redacted, budget_after_head} = walk(head, depth, budget)
-    {tail_redacted, budget_left} = walk(tail, depth, budget_after_head)
-    {finish_improper(acc, head_redacted, tail_redacted), budget_left}
+    {head_redacted, budget_left} = walk(head, depth, budget)
+
+    # is_list/1 is true for improper lists too, so multi-cons improper spines
+    # (e.g. [a | [b | secret]]) continue recursively until a non-list tail.
+    if is_list(tail) do
+      walk_list(tail, depth, budget_left, [head_redacted | acc])
+    else
+      # True improper non-list tail: must walk (or fail closed) — never leave
+      # the original tail attached after a partial walk.
+      {tail_redacted, budget_final} = walk(tail, depth, budget_left)
+      {finish_improper(acc, head_redacted, tail_redacted), budget_final}
+    end
   end
 
   defp finish_improper(acc, head, tail) do
     Enum.reduce(acc, [head | tail], fn item, rest -> [item | rest] end)
   end
 
-  defp walk_pairs([], _depth, budget, acc), do: {:complete, Enum.reverse(acc), budget}
+  # --- Tuple: bounded elem/2 indexing ---------------------------------------
 
-  defp walk_pairs(rest, _depth, budget, acc) when budget <= 0 and rest != [] do
+  defp walk_tuple(_tuple, index, size, _depth, budget, acc) when index >= size do
+    {List.to_tuple(Enum.reverse(acc)), budget}
+  end
+
+  defp walk_tuple(_tuple, _index, _size, _depth, budget, _acc) when budget <= 0 do
+    # Cannot emit a partial tuple while later elements remain unwalked.
+    {@redacted_marker, 0}
+  end
+
+  defp walk_tuple(tuple, index, size, depth, budget, acc) do
+    {elem_redacted, budget_left} = walk(elem(tuple, index), depth, budget)
+    walk_tuple(tuple, index + 1, size, depth, budget_left, [elem_redacted | acc])
+  end
+
+  # --- Map: bounded iterator (no Map.to_list/1) -----------------------------
+
+  defp walk_map_iterator(:none, _depth, budget, acc) do
+    {:complete, Enum.reverse(acc), budget}
+  end
+
+  defp walk_map_iterator(_next, _depth, budget, acc) when budget <= 0 do
+    # Stop iterating; unvisited pairs never enter the output.
     {:incomplete, Enum.reverse(acc), 0}
   end
 
-  # Keys and values both participate in the report surface and the node budget.
-  defp walk_pairs([{key, value} | rest], depth, budget, acc) do
+  defp walk_map_iterator({key, value, rest_iterator}, depth, budget, acc) do
     {key_redacted, budget_after_key} = walk(key, depth, budget)
     {value_redacted, budget_left} = walk(value, depth, budget_after_key)
-    walk_pairs(rest, depth, budget_left, [{key_redacted, value_redacted} | acc])
+
+    walk_map_iterator(
+      :maps.next(rest_iterator),
+      depth,
+      budget_left,
+      [{key_redacted, value_redacted} | acc]
+    )
   end
 
   # After key redaction, colliding keys must not silently merge secret values.
