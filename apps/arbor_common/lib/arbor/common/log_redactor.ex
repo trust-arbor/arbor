@@ -8,9 +8,9 @@ defmodule Arbor.Common.LogRedactor do
   Traversal is total and globally bounded: nested maps, lists, and tuples are
   walked without requiring Enumerable and without invoking struct module
   callbacks (Logger crash reports often embed non-Enumerable or forged
-  struct-tagged maps). A single remaining-node budget bounds the walk; once
-  exhausted, unvisited branches are replaced with a plain fail-closed marker
-  that cannot trigger struct protocol dispatch.
+  struct-tagged maps). Both map keys and values are walked under one remaining
+  node budget. Binary redaction fails closed to `"[REDACTED]"` on any exception
+  or throw so the primary Logger filter is never removed by a bad term.
   """
 
   alias Arbor.Common.SensitiveData
@@ -21,25 +21,44 @@ defmodule Arbor.Common.LogRedactor do
 
   # Plain map — never include :__struct__, so Inspect/protocol cannot dispatch.
   @redacted_marker %{redacted: true}
+  @redacted_binary "[REDACTED]"
 
   @doc false
   def filter(%{msg: msg} = log_event, _extra) do
-    case msg do
-      {:string, str} when is_binary(str) ->
-        %{log_event | msg: {:string, redact_binary(str)}}
+    try do
+      case msg do
+        {:string, str} when is_binary(str) ->
+          %{log_event | msg: {:string, redact_binary(str)}}
 
-      {:report, report} ->
-        {redacted, _budget} = walk(report, @max_depth, @max_nodes)
-        %{log_event | msg: {:report, redacted}}
+        {:report, report} ->
+          {redacted, _budget} = walk(report, @max_depth, @max_nodes)
+          %{log_event | msg: {:report, redacted}}
 
+        _ ->
+          log_event
+      end
+    rescue
       _ ->
-        log_event
+        %{log_event | msg: {:string, @redacted_binary}}
+    catch
+      _, _ ->
+        %{log_event | msg: {:string, @redacted_binary}}
     end
   end
 
   def filter(log_event, _extra), do: log_event
 
-  defp redact_binary(str) when is_binary(str), do: SensitiveData.redact(str)
+  # SensitiveData.redact/1 uses Regex/String operations that can raise on
+  # invalid UTF-8. Never let that kill the Logger primary filter.
+  defp redact_binary(str) when is_binary(str) do
+    try do
+      SensitiveData.redact(str)
+    rescue
+      _ -> @redacted_binary
+    catch
+      _, _ -> @redacted_binary
+    end
+  end
 
   # --- Globally bounded term walk -------------------------------------------
   # Each visited term consumes one node from `budget`. Returns {term, budget_left}.
@@ -78,8 +97,14 @@ defmodule Arbor.Common.LogRedactor do
 
       case walk_pairs(Map.to_list(fields), depth - 1, budget - 1, []) do
         {:complete, pairs, budget_left} ->
-          # Restore the original __struct__ key only after a complete field walk.
-          {Map.put(Map.new(pairs), :__struct__, mod), budget_left}
+          case assemble_pairs(pairs) do
+            {:ok, assembled} ->
+              # Restore the original __struct__ key only after a complete field walk.
+              {Map.put(assembled, :__struct__, mod), budget_left}
+
+            :collision ->
+              {@redacted_marker, budget_left}
+          end
 
         {:incomplete, _pairs, budget_left} ->
           # Partial struct-shaped maps are unsafe for Inspect/protocol dispatch.
@@ -94,11 +119,17 @@ defmodule Arbor.Common.LogRedactor do
     else
       case walk_pairs(Map.to_list(map), depth - 1, budget - 1, []) do
         {:complete, pairs, budget_left} ->
-          {Map.new(pairs), budget_left}
+          case assemble_pairs(pairs) do
+            {:ok, assembled} -> {assembled, budget_left}
+            :collision -> {@redacted_marker, budget_left}
+          end
 
         {:incomplete, pairs, budget_left} ->
           # Unvisited keys omitted (not emitted); mark exhaustion plainly.
-          {Map.put(Map.new(pairs), :redacted, true), budget_left}
+          case assemble_pairs(pairs) do
+            {:ok, assembled} -> {Map.put(assembled, :redacted, true), budget_left}
+            :collision -> {@redacted_marker, budget_left}
+          end
       end
     end
   end
@@ -133,8 +164,22 @@ defmodule Arbor.Common.LogRedactor do
     {:incomplete, Enum.reverse(acc), 0}
   end
 
+  # Keys and values both participate in the report surface and the node budget.
   defp walk_pairs([{key, value} | rest], depth, budget, acc) do
-    {value_redacted, budget_left} = walk(value, depth, budget)
-    walk_pairs(rest, depth, budget_left, [{key, value_redacted} | acc])
+    {key_redacted, budget_after_key} = walk(key, depth, budget)
+    {value_redacted, budget_left} = walk(value, depth, budget_after_key)
+    walk_pairs(rest, depth, budget_left, [{key_redacted, value_redacted} | acc])
+  end
+
+  # After key redaction, colliding keys must not silently merge secret values.
+  # Fail closed with a plain marker rather than emit an ambiguous map.
+  defp assemble_pairs(pairs) do
+    keys = Enum.map(pairs, fn {key, _value} -> key end)
+
+    if length(keys) == MapSet.size(MapSet.new(keys)) do
+      {:ok, Map.new(pairs)}
+    else
+      :collision
+    end
   end
 end

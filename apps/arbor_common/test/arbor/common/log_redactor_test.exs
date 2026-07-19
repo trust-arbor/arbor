@@ -180,13 +180,58 @@ defmodule Arbor.Common.LogRedactorTest do
       refute_sensitive(redacted, secret)
       refute_struct_tagged_redaction_markers(redacted)
     end
+
+    test "invalid UTF-8 in {:string, binary} never raises and fails closed" do
+      secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+      # Invalid leading bytes can make Regex/String redaction raise on some
+      # paths; filter/2 must stay total and never emit the raw secret.
+      invalid = <<0xFF, 0xFE, 0xC3>> <> secret
+      event = %{level: :error, meta: %{}, msg: {:string, invalid}}
+
+      assert %{msg: {:string, out}} = LogRedactor.filter(event, [])
+      assert is_binary(out)
+      refute_binary_contains(out, secret)
+    end
+
+    test "invalid UTF-8 nested report value never raises and fails closed" do
+      secret = "AKIA" <> "IOSFODNN7EXAMPLE"
+      invalid = <<0xFF, 0xFE>> <> "key=#{secret}"
+
+      report = %{
+        label: "crash",
+        detail: invalid,
+        nest: [invalid, %{inner: invalid}]
+      }
+
+      event = %{level: :error, meta: %{}, msg: {:report, report}}
+      assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
+      refute_sensitive(redacted, secret)
+    end
+
+    test "binary map keys with secrets are redacted under the same walk" do
+      secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+      key = "ANTHROPIC_API_KEY=#{secret}"
+
+      report = %{
+        key => "present",
+        "safe" => "ok",
+        nested: %{("token=" <> secret) => true}
+      }
+
+      event = %{level: :info, meta: %{}, msg: {:report, report}}
+      assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
+
+      refute_sensitive(redacted, secret)
+      assert redacted["safe"] == "ok"
+      # Original secret-bearing key must not survive as a map key.
+      refute Map.has_key?(redacted, key)
+    end
   end
 
   defp refute_sensitive(term, secret) when is_binary(secret) do
     case term do
       bin when is_binary(bin) ->
-        refute String.contains?(bin, secret),
-               "secret leaked in binary: #{inspect(bin, limit: 80)}"
+        refute_binary_contains(bin, secret)
 
       list when is_list(list) ->
         Enum.each(list, &refute_sensitive(&1, secret))
@@ -197,14 +242,25 @@ defmodule Arbor.Common.LogRedactorTest do
       %{__struct__: _} = struct ->
         struct
         |> Map.delete(:__struct__)
-        |> Enum.each(fn {_k, v} -> refute_sensitive(v, secret) end)
+        |> Enum.each(fn {k, v} ->
+          refute_sensitive(k, secret)
+          refute_sensitive(v, secret)
+        end)
 
       map when is_map(map) ->
-        Enum.each(map, fn {_k, v} -> refute_sensitive(v, secret) end)
+        Enum.each(map, fn {k, v} ->
+          refute_sensitive(k, secret)
+          refute_sensitive(v, secret)
+        end)
 
       _other ->
         :ok
     end
+  end
+
+  defp refute_binary_contains(bin, secret) when is_binary(bin) and is_binary(secret) do
+    refute :binary.match(bin, secret) != :nomatch,
+           "secret leaked in binary: #{inspect(bin, limit: 80)}"
   end
 
   defp assert_has_redacted_marker(term) do
