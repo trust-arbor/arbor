@@ -63,6 +63,20 @@ defmodule Arbor.Commands.CodingBenchmarkExactTargetTreeTest do
     end
   end
 
+  test "outer benchmark timeout above the verifier cap remains scorable", %{root: root} do
+    Application.put_env(:arbor_commands, :coding_benchmark_execution_timeout_ms, 7_200_000)
+    scenario = exact_target_scenario!(root, mode: :match)
+
+    assert {:ok, report} = run_exact(scenario)
+
+    for executor <- ~w(legacy pipeline) do
+      assert row(report, "sample-task", executor)["objective_verifier"] == %{
+               "reason" => nil,
+               "status" => "passed"
+             }
+    end
+  end
+
   test "target tree binding is exact to fixture_id and never enters adapter requests", %{
     root: root
   } do

@@ -25,12 +25,12 @@ defmodule Arbor.Commands.CodingBenchmark.ExactTargetTreeVerifier do
   """
   @spec build(%{optional(String.t()) => String.t()}, pos_integer()) :: (map() -> term())
   def build(targets, timeout_ms)
-      when is_map(targets) and is_integer(timeout_ms) and timeout_ms > 0 and
-             timeout_ms <= @max_timeout_ms do
+      when is_map(targets) and is_integer(timeout_ms) and timeout_ms > 0 do
     frozen = freeze_targets(targets)
+    verifier_timeout_ms = min(timeout_ms, @max_timeout_ms)
 
     fn request when is_map(request) and not is_struct(request) ->
-      verify(request, frozen, timeout_ms)
+      verify(request, frozen, verifier_timeout_ms)
     end
   end
 
