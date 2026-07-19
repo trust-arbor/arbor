@@ -1356,3 +1356,10 @@ environment, so a test can overwrite real CLI configuration or credentials. Inje
 tool-specific home explicitly (for example `GROK_HOME`) and build fixture paths from that
 absolute value; restore the environment in `on_exit` (found 2026-07-19 when a Grok sandbox
 collision test wrote its temporary profile into the real `~/.grok`).
+
+**Async generated ExUnit tests must compile shared helper modules in `setup_all`.** A
+generated S3 detector test compiled the same detector module in per-test `setup`; its
+positive and false-positive tests could run concurrently, redefining the module and
+intermittently failing an otherwise unrelated validation shard. Compile immutable shared
+modules once per generated test module, and leave only per-test resources in `setup`
+(found 2026-07-19 during cross-app validation of the legacy council authority fix).

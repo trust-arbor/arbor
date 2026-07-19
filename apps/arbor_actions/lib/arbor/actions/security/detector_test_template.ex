@@ -198,16 +198,20 @@ defmodule Arbor.Actions.Security.DetectorTestTemplate do
       @detector_source #{safe_literal(detector_source)}
       @detector_module #{safe_literal(detector_name)}
 
-      setup do
+      setup_all do
         [{mod, _bin} | _] =
           Code.compile_string(
             String.replace(@detector_source, #{safe_literal(module_name)}, @detector_module)
           )
 
+        {:ok, detector: mod}
+      end
+
+      setup do
         dir = Path.join(System.tmp_dir!(), "synth_g4_\#{System.unique_integer([:positive])}")
         File.mkdir_p!(dir)
         on_exit(fn -> File.rm_rf(dir) end)
-        {:ok, detector: mod, dir: dir}
+        {:ok, dir: dir}
       end
 
       # `src` is an inert string literal; written (not interpolated) to disk.

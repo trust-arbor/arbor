@@ -201,6 +201,13 @@ defmodule Arbor.Actions.Security.DetectorTestTemplateTest do
         )
 
       assert is_binary(source)
+      assert source =~ "setup_all do"
+      assert source =~ "setup do"
+
+      assert source
+             |> String.split("Code.compile_string")
+             |> length() == 2
+
       _mod = compile_generated(source)
     end
   end
