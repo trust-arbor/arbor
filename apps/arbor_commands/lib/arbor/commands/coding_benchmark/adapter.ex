@@ -1,7 +1,7 @@
 defmodule Arbor.Commands.CodingBenchmark.Adapter do
   @moduledoc false
 
-  alias Arbor.Commands.CodingBenchmark.{Git, Runtime}
+  alias Arbor.Commands.CodingBenchmark.{ApprovalObservations, Git, Runtime}
   alias Arbor.Contracts.Coding.Plan
   alias Arbor.Shell
 
@@ -44,7 +44,7 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
          {:ok, executor} <- configured_executor(executor_config_key, default_runner),
          {:ok, task, context} <- execution_inputs(request, scope, runtime.execution_timeout_ms),
          returned <- invoke_executor(executor, default_runner, principal_id, task, context) do
-      normalize_return(returned)
+      normalize_return(returned, scope.task_id)
     end
   end
 
@@ -411,45 +411,55 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     end
   end
 
-  defp normalize_return({:ok, :pending_approval, approval_id}) when is_binary(approval_id) do
-    pending_approval(approval_id)
-  end
-
-  defp normalize_return({:error, {:pending_approval, approval_id}})
+  defp normalize_return({:ok, :pending_approval, approval_id}, task_id)
        when is_binary(approval_id) do
-    pending_approval(approval_id)
+    pending_approval(approval_id, task_id)
   end
 
-  defp normalize_return({:ok, result}) when is_map(result) and not is_struct(result) do
+  defp normalize_return({:error, {:pending_approval, approval_id}}, task_id)
+       when is_binary(approval_id) do
+    pending_approval(approval_id, task_id)
+  end
+
+  defp normalize_return({:ok, result}, task_id) when is_map(result) and not is_struct(result) do
     result = normalize_success_result(result)
 
     {:ok,
      %{
        "counters" => result_counters(result),
-       "observations" => result_observations(result),
+       "observations" => result_observations(result, task_id),
        "result" => result,
        "worker_ownership" => result_worker_ownership(result)
      }}
   end
 
-  defp normalize_return({:error, reason}) do
+  defp normalize_return({:error, reason}, _task_id) do
     {:error, reason, empty_envelope()}
   end
 
-  defp normalize_return(other) do
+  defp normalize_return(other, _task_id) do
     {:error, {:unexpected_benchmark_executor_return, other}, empty_envelope()}
   end
 
-  defp pending_approval(approval_id) do
-    envelope =
-      empty_envelope()
-      |> put_in(["observations", "approval"], %{
-        "count" => 1,
-        "requested" => true,
-        "required" => true,
-        "resumed" => false,
-        "status" => "pending"
-      })
+  defp pending_approval(approval_id, task_id) do
+    approval =
+      case correlated_approval_observations(task_id) do
+        {:ok, observations} ->
+          observations
+          |> Map.put("status", "pending")
+          |> Map.put("resumed", false)
+
+        :unavailable ->
+          %{
+            "count" => 1,
+            "requested" => true,
+            "required" => true,
+            "resumed" => false,
+            "status" => "pending"
+          }
+      end
+
+    envelope = put_in(empty_envelope(), ["observations", "approval"], approval)
 
     {:error, {:pending_approval, approval_id}, envelope}
   end
@@ -483,39 +493,14 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   defp bounded_counter(value) when is_integer(value) and value in 0..@max_counter, do: value
   defp bounded_counter(_value), do: 0
 
-  defp result_observations(result) do
+  defp result_observations(result, task_id) do
     status = result_status(result)
     metrics = result_metrics(result)
-    approval_id = first_value(result_sources(result), "approval_request_id", :approval_request_id)
 
     approval =
-      cond do
-        status == "approval_denied" ->
-          %{
-            "count" => 1,
-            "requested" => true,
-            "required" => true,
-            "resumed" => false,
-            "status" => "denied"
-          }
-
-        is_binary(approval_id) and approval_id != "" ->
-          %{
-            "count" => 1,
-            "requested" => true,
-            "required" => true,
-            "resumed" => true,
-            "status" => "approved"
-          }
-
-        true ->
-          %{
-            "count" => 0,
-            "requested" => false,
-            "required" => false,
-            "resumed" => false,
-            "status" => "not_required"
-          }
+      case correlated_approval_observations(task_id) do
+        {:ok, observations} -> observations
+        :unavailable -> terminal_approval_inference(result, status)
       end
 
     cancellation =
@@ -535,6 +520,69 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
       "cancellation" => cancellation,
       "cleanup" => %{"status" => cleanup_status}
     }
+  end
+
+  # Prefer interaction audit signals correlated to this exact task_id. Fallback
+  # to terminal approval_request_id inference when history is unavailable.
+  defp correlated_approval_observations(task_id)
+       when is_binary(task_id) and task_id != "" do
+    if Arbor.Signals.healthy?() do
+      case Arbor.Signals.query(
+             category: :interaction,
+             correlation_id: task_id,
+             limit: 1_000
+           ) do
+        {:ok, signals} when is_list(signals) ->
+          case ApprovalObservations.from_signals(signals) do
+            :empty -> :unavailable
+            observations when is_map(observations) -> {:ok, observations}
+          end
+
+        _other ->
+          :unavailable
+      end
+    else
+      :unavailable
+    end
+  rescue
+    _ -> :unavailable
+  catch
+    :exit, _ -> :unavailable
+  end
+
+  defp correlated_approval_observations(_task_id), do: :unavailable
+
+  defp terminal_approval_inference(result, status) do
+    approval_id = first_value(result_sources(result), "approval_request_id", :approval_request_id)
+
+    cond do
+      status == "approval_denied" ->
+        %{
+          "count" => 1,
+          "requested" => true,
+          "required" => true,
+          "resumed" => false,
+          "status" => "denied"
+        }
+
+      is_binary(approval_id) and approval_id != "" ->
+        %{
+          "count" => 1,
+          "requested" => true,
+          "required" => true,
+          "resumed" => true,
+          "status" => "approved"
+        }
+
+      true ->
+        %{
+          "count" => 0,
+          "requested" => false,
+          "required" => false,
+          "resumed" => false,
+          "status" => "not_required"
+        }
+    end
   end
 
   defp result_worker_ownership(result) do
@@ -580,6 +628,9 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   end
 
   defp map_value(_map, _string_key, _atom_key), do: nil
+
+  # nil is an atom in Elixir; project the supplied default rather than "nil".
+  defp normalized_token(nil, default), do: default
 
   defp normalized_token(value, _default) when is_atom(value), do: Atom.to_string(value)
 

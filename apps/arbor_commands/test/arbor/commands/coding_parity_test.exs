@@ -126,6 +126,68 @@ defmodule Arbor.Commands.CodingParityTest do
     assert projection["semantic"]["approval_note"] == "please no"
   end
 
+  test "opaque approval_request_id and approval_note differences do not break parity" do
+    left_result =
+      legacy_result()
+      |> put_in([:payload, :report, :approval_request_id], "irq_leftaaaaaaaaaaaa")
+      |> put_in([:payload, :report, :approval_note], "left note")
+
+    right_result =
+      pipeline_result()
+      |> put_in(["payload", "report", "approval_request_id"], "irq_rightbbbbbbbbbbb")
+      |> put_in(["payload", "report", "approval_note"], "right note")
+
+    left_obs =
+      Map.put(legacy_observations(), :approval, %{
+        status: :approved,
+        requested: true,
+        required: true,
+        resumed: true,
+        count: 1
+      })
+
+    right_obs = %{
+      "tree_oid" => @tree_a,
+      "approval" => %{
+        "status" => "approved",
+        "requested" => true,
+        "required" => true,
+        "resumed" => true,
+        "count" => 1
+      },
+      "cancellation" => %{
+        "cancelled" => false,
+        "cleanup_completed" => true,
+        "requested" => false,
+        "status" => "not_requested",
+        "worker_terminated" => false
+      },
+      "cleanup" => %{
+        "completed" => true,
+        "status" => "retained",
+        "resources_cleaned" => true,
+        "workspace_removed" => false,
+        "workspace_retained" => true
+      }
+    }
+
+    assert {:ok, left} = CodingParity.project(left_result, left_obs)
+    assert {:ok, right} = CodingParity.project(right_result, right_obs)
+
+    assert left["semantic"]["approval_request_id"] != right["semantic"]["approval_request_id"]
+    assert left["semantic"]["approval_note"] != right["semantic"]["approval_note"]
+    assert left["semantic"]["approval"] == right["semantic"]["approval"]
+
+    assert {:ok, comparison} = CodingParity.compare(left, right)
+    assert comparison["equivalent?"] == true
+    assert comparison["differences"] == []
+
+    refute Enum.any?(
+             comparison["differences"],
+             &(&1["field"] in ~w(approval_request_id approval_note))
+           )
+  end
+
   test "atom and string fixtures project identically and remain JSON clean" do
     unknown_key = "parity_fixture_key_#{System.unique_integer([:positive])}"
 

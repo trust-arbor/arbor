@@ -67,7 +67,8 @@ defmodule Arbor.Signals do
   - `:cause_id` - ID of the signal that caused this one
   - `:correlation_id` - ID for correlating related signals
   - `:metadata` - Additional metadata map
-  - `:async` - Don't wait for storage/delivery (default: true)
+  - `:async` - When false, wait until the signal is stored before returning
+    (default: true). Subscriber delivery remains bus-scheduled.
 
   ## Examples
 
@@ -234,11 +235,14 @@ defmodule Arbor.Signals do
     signal = Signal.new(category, type, data, opts)
     # Set emitter_pid and origin_node server-side so they can't be spoofed
     signal = %{signal | emitter_pid: self(), origin_node: node()}
-    emit_preconstructed_signal(signal)
+    emit_preconstructed_signal(signal, Keyword.get(opts, :async, true))
   end
 
   @impl true
-  def emit_preconstructed_signal(%Signal{} = signal) do
+  def emit_preconstructed_signal(%Signal{} = signal),
+    do: emit_preconstructed_signal(signal, true)
+
+  defp emit_preconstructed_signal(%Signal{} = signal, async?) do
     # Stamp emitter_pid and origin_node if not already set
     signal = if signal.emitter_pid, do: signal, else: %{signal | emitter_pid: self()}
     signal = if signal.origin_node, do: signal, else: %{signal | origin_node: node()}
@@ -248,7 +252,7 @@ defmodule Arbor.Signals do
       # plaintext sensitive data in the Store. Bus.publish will skip
       # re-encryption if already encrypted (__encrypted__: true marker).
       protected = protect_restricted_signal(signal)
-      Store.put(protected)
+      store_signal(protected, async?)
       Bus.publish(protected)
 
       :telemetry.execute(
@@ -262,6 +266,9 @@ defmodule Arbor.Signals do
       {:error, :signal_system_not_ready}
     end
   end
+
+  defp store_signal(signal, false), do: Store.put_sync(signal)
+  defp store_signal(signal, _async), do: Store.put(signal)
 
   # Encrypt signal data for restricted topics before storage.
   # This prevents plaintext sensitive payloads from sitting in the Store.

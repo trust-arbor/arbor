@@ -47,6 +47,17 @@ defmodule Arbor.Signals.Store do
   end
 
   @doc """
+  Store a signal before returning.
+
+  Use this when a caller must query the signal immediately after emission.
+  Normal fire-and-forget emission should continue to use `put/1`.
+  """
+  @spec put_sync(Signal.t()) :: :ok
+  def put_sync(%Signal{} = signal) do
+    GenServer.call(__MODULE__, {:put, signal})
+  end
+
+  @doc """
   Get a signal by ID.
   """
   @spec get(String.t()) :: {:ok, Signal.t()} | {:error, :not_found}
@@ -218,12 +229,12 @@ defmodule Arbor.Signals.Store do
 
   @impl true
   def handle_cast({:put, signal}, state) do
-    state =
-      state
-      |> add_signal(signal)
-      |> maybe_evict()
+    {:noreply, store_signal(state, signal)}
+  end
 
-    {:noreply, state}
+  @impl true
+  def handle_call({:put, signal}, _from, state) do
+    {:reply, :ok, store_signal(state, signal)}
   end
 
   @impl true
@@ -331,6 +342,12 @@ defmodule Arbor.Signals.Store do
   end
 
   # Private functions
+
+  defp store_signal(state, signal) do
+    state
+    |> add_signal(signal)
+    |> maybe_evict()
+  end
 
   defp add_signal(state, signal) do
     stats = Map.update!(state.stats, :total_stored, &(&1 + 1))

@@ -40,6 +40,9 @@ defmodule ArborCommands.MixProject do
       {:arbor_agent, in_umbrella: true},
       {:arbor_orchestrator, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
+      # L1 signals facade — coding-benchmark approval accounting queries
+      # interaction audit events by task correlation_id.
+      {:arbor_signals, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

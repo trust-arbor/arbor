@@ -189,6 +189,149 @@ defmodule Arbor.Comms.InteractionRouterTest do
     end
   end
 
+  describe "audit signals" do
+    setup do
+      ensure_signals!()
+      :ok
+    end
+
+    test "correlates requested/queued/resolved to exact task_id without sensitive metadata" do
+      task_id = "coding-benchmark-legacy-#{System.unique_integer([:positive])}"
+      secret_note = "operator secret note #{System.unique_integer([:positive])}"
+      secret_cmd = "rm -rf /tmp/sensitive-#{System.unique_integer([:positive])}"
+
+      {:ok, request_id} =
+        InteractionRouter.request(
+          %{
+            kind: :approval,
+            agent_id: "test_agent",
+            user_id: "no_presence_user",
+            description: "Approve shell?",
+            metadata: %{
+              "task_id" => "ignored_top_level_when_provenance_present",
+              "approval_context" => %{
+                "target" => secret_cmd,
+                "params" => %{"command" => secret_cmd},
+                "payload_preview" => secret_cmd,
+                "provenance" => %{"task_id" => task_id}
+              },
+              "provenance" => %{"task_id" => task_id},
+              "target" => secret_cmd,
+              "payload_preview" => secret_cmd
+            }
+          },
+          adapter_map: %{}
+        )
+
+      assert :ok =
+               InteractionRouter.respond(request_id, :approved, %{
+                 channel: :dashboard,
+                 note: secret_note,
+                 decision: :approved
+               })
+
+      assert {:ok, signals} =
+               Arbor.Signals.query(category: :interaction, correlation_id: task_id, limit: 20)
+
+      assert length(signals) >= 2
+      types = signals |> Enum.map(& &1.type) |> Enum.sort()
+      assert :queued in types or :requested in types
+      assert :resolved in types
+
+      for signal <- signals do
+        assert signal.correlation_id == task_id
+        assert signal.data.request_id == request_id
+        assert signal.data.kind == :approval
+        refute Map.has_key?(signal.data, :approval_context)
+        refute Map.has_key?(signal.data, "approval_context")
+        refute Map.has_key?(signal.data, :target)
+        refute Map.has_key?(signal.data, :params)
+        refute Map.has_key?(signal.data, :payload_preview)
+        refute Map.has_key?(signal.data, :metadata)
+        refute Map.has_key?(signal.data, :note)
+        refute inspect(signal.data) =~ secret_note
+        refute inspect(signal.data) =~ secret_cmd
+      end
+
+      assert {:ok, other} =
+               Arbor.Signals.query(
+                 category: :interaction,
+                 correlation_id: "other-task-#{System.unique_integer([:positive])}",
+                 limit: 20
+               )
+
+      assert other == []
+    end
+
+    test "accepts atom provenance.task_id and string-key metadata forms" do
+      task_id = "task_atom_#{System.unique_integer([:positive])}"
+
+      {:ok, request_id} =
+        InteractionRouter.request(
+          %{
+            kind: :approval,
+            agent_id: "test_agent",
+            user_id: "no_presence_user",
+            description: "x",
+            metadata: %{
+              provenance: %{task_id: task_id}
+            }
+          },
+          adapter_map: %{}
+        )
+
+      assert {:ok, signals} =
+               Arbor.Signals.query(category: :interaction, correlation_id: task_id, limit: 10)
+
+      assert Enum.any?(signals, &(&1.data.request_id == request_id))
+    end
+
+    test "does not copy free-form interaction responses into audit signals" do
+      task_id = "task_text_#{System.unique_integer([:positive])}"
+      secret = "private response #{System.unique_integer([:positive])}"
+
+      {:ok, request_id} =
+        InteractionRouter.request(
+          %{
+            kind: :clarification,
+            agent_id: "test_agent",
+            user_id: "no_presence_user",
+            description: "x",
+            metadata: %{provenance: %{task_id: task_id}}
+          },
+          adapter_map: %{}
+        )
+
+      assert :ok = InteractionRouter.respond(request_id, {:text, secret})
+
+      assert {:ok, signals} =
+               Arbor.Signals.query(category: :interaction, correlation_id: task_id, limit: 10)
+
+      assert Enum.any?(signals, &(&1.type == :resolved))
+      refute Enum.any?(signals, &(inspect(&1.data) =~ secret))
+      refute Enum.any?(signals, &Map.has_key?(&1.data, :response))
+    end
+
+    test "does not normalize malformed provenance into another task's correlation id" do
+      task_id = "task_exact_#{System.unique_integer([:positive])}"
+
+      assert {:ok, _request_id} =
+               InteractionRouter.request(
+                 %{
+                   kind: :approval,
+                   agent_id: "test_agent",
+                   user_id: "no_presence_user",
+                   description: "x",
+                   metadata: %{provenance: %{task_id: " #{task_id} "}}
+                 },
+                 adapter_map: %{}
+               )
+
+      assert {:ok, []} =
+               Arbor.Signals.query(category: :interaction, correlation_id: task_id, limit: 10)
+    end
+  end
+
   describe "respond/3" do
     test "broadcasts the response on the per-agent PubSub topic" do
       {:ok, request_id} =
@@ -295,5 +438,36 @@ defmodule Arbor.Comms.InteractionRouterTest do
         do_assert_eventually(fun, deadline)
       end
     end
+  end
+
+  defp ensure_signals! do
+    Application.ensure_all_started(:arbor_signals)
+
+    for child <- [
+          {Arbor.Signals.Store, []},
+          {Arbor.Signals.TopicKeys, []},
+          {Arbor.Signals.Channels, []},
+          {Arbor.Signals.Bus, []},
+          {Arbor.Signals.Relay, []}
+        ] do
+      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, {:already_started, _pid}} ->
+          :ok
+
+        {:error, :already_present} ->
+          {mod, _} = child
+          _ = Supervisor.delete_child(Arbor.Signals.Supervisor, mod)
+          _ = Supervisor.start_child(Arbor.Signals.Supervisor, child)
+          :ok
+
+        {:error, _reason} ->
+          :ok
+      end
+    end
+
+    true = Arbor.Signals.healthy?()
   end
 end

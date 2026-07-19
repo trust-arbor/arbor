@@ -14,10 +14,10 @@ defmodule Arbor.Commands.CodingParity do
     review_requires_rework rework_exhausted validation_failed
   )
   @no_validation_statuses ~w(cancelled declined no_changes)
+  # Opaque approval IDs/notes remain projected as artifacts when present but are
+  # excluded from deterministic comparison (moduledoc: opaque IDs excluded).
   @comparison_paths [
     {"approval", ["approval"]},
-    {"approval_note", ["approval_note"]},
-    {"approval_request_id", ["approval_request_id"]},
     {"cancellation", ["cancellation"]},
     {"changed_files", ["changed_files"]},
     {"cleanup", ["cleanup"]},

@@ -19,8 +19,11 @@ defmodule Arbor.Comms.InteractionRouter do
   - **Presence** uses `Phoenix.Tracker` for cluster-wide channel
     availability per user.
 
-  - **Audit** emits Arbor signals for every request/response with the
-    request_id as correlation key.
+  - **Audit** emits Arbor signals for every request/response. When the
+    interaction carries a nonblank `task_id` in metadata/provenance,
+    that value is the signal `correlation_id` so task-scoped consumers
+    (e.g. coding-benchmark approval accounting) can aggregate history.
+    Signal data stays bounded lifecycle observability — never execution control.
 
   ## Phase 1 scope
 
@@ -94,8 +97,8 @@ defmodule Arbor.Comms.InteractionRouter do
 
     case InteractionRegistry.resolve(request_id, response: response, metadata: metadata) do
       {:ok, interaction} ->
-        broadcast_response(interaction, response, metadata)
         emit_signal(:resolved, interaction, %{response: response, metadata: metadata})
+        broadcast_response(interaction, response, metadata)
         :ok
 
       :not_found ->
@@ -301,32 +304,105 @@ defmodule Arbor.Comms.InteractionRouter do
 
   ## Signal emission for audit
 
-  defp emit_signal(event, %Interaction{} = interaction, extra) do
-    signals = Module.concat([:Arbor, :Signals])
+  # Observability only — never gates execution. Payload is bounded lifecycle
+  # data; do not project approval_context, target, params, previews, or notes.
+  @max_task_id_bytes 256
 
-    if Code.ensure_loaded?(signals) and function_exported?(signals, :emit, 3) do
-      try do
-        apply(signals, :emit, [
-          :interaction,
-          event,
-          Map.merge(
-            %{
-              request_id: interaction.request_id,
-              kind: interaction.kind,
-              agent_id: interaction.agent_id,
-              user_id: interaction.user_id,
-              urgency: interaction.urgency
-            },
-            extra
-          )
-        ])
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
+  defp emit_signal(event, %Interaction{} = interaction, extra) do
+    data =
+      %{
+        request_id: interaction.request_id,
+        kind: interaction.kind,
+        agent_id: interaction.agent_id,
+        user_id: interaction.user_id,
+        urgency: interaction.urgency,
+        event_sequence: System.unique_integer([:monotonic, :positive])
+      }
+      |> Map.merge(safe_signal_extra(interaction.kind, extra))
+
+    opts =
+      case interaction_task_id(interaction) do
+        nil -> []
+        task_id -> [correlation_id: task_id]
       end
+
+    try do
+      # Approval accounting queries these events as soon as the owner action
+      # returns. Store synchronously so request/response wake-up cannot race the
+      # audit observation; subscriber delivery remains asynchronous.
+      Arbor.Signals.emit(:interaction, event, data, Keyword.put(opts, :async, false))
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
     end
 
     :ok
   end
+
+  defp safe_signal_extra(:approval, %{response: response} = extra) when is_map(extra) do
+    base =
+      case response do
+        value when value in [:approved, "approved"] -> %{response: :approved}
+        value when value in [:rejected, "rejected"] -> %{response: :rejected}
+        _other -> %{}
+      end
+
+    case rework_flag(Map.get(extra, :metadata) || Map.get(extra, "metadata")) do
+      nil -> base
+      rework? -> Map.put(base, :rework, rework?)
+    end
+  end
+
+  defp safe_signal_extra(_kind, _extra), do: %{}
+
+  defp rework_flag(metadata) when is_map(metadata) do
+    case map_get(metadata, :rework) || map_get(metadata, :decision) do
+      true -> true
+      :rework -> true
+      "rework" -> true
+      _other -> nil
+    end
+  end
+
+  defp rework_flag(_), do: nil
+
+  defp interaction_task_id(%Interaction{metadata: metadata}) when is_map(metadata) do
+    # Prefer provenance (bounded approval provenance), then approval_context,
+    # then a top-level task_id if present. Atom and string keys accepted.
+    candidates = [
+      nested_task_id(map_get(metadata, :provenance)),
+      nested_task_id(map_get(metadata, :approval_context)),
+      map_get(metadata, :task_id)
+    ]
+
+    Enum.find_value(candidates, &bounded_task_id/1)
+  end
+
+  defp interaction_task_id(_), do: nil
+
+  defp nested_task_id(map), do: nested_task_id(map, 0)
+
+  defp nested_task_id(map, depth) when is_map(map) and depth < 2,
+    do: map_get(map, :task_id) || nested_task_id(map_get(map, :provenance), depth + 1)
+
+  defp nested_task_id(_map, _depth), do: nil
+
+  defp bounded_task_id(value) when is_binary(value) do
+    if value != "" and byte_size(value) <= @max_task_id_bytes and String.valid?(value) and
+         value == String.trim(value) and not String.contains?(value, <<0>>),
+       do: value,
+       else: nil
+  end
+
+  defp bounded_task_id(_), do: nil
+
+  defp map_get(map, key) when is_map(map) and is_atom(key) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> value
+      :error -> Map.get(map, Atom.to_string(key))
+    end
+  end
+
+  defp map_get(_map, _key), do: nil
 end
