@@ -15,7 +15,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
     approval_observations artifact_hash_verification base_tree_oid
     cancellation_observations changed_paths counters executor_path fixture_id
     normalized_input_hash objective_verifier repetition review_outcome terminal_reason
-    terminal_status wall_clock_ms
+    terminal_status usage_observations wall_clock_ms
   )
 
   @runtime_env [

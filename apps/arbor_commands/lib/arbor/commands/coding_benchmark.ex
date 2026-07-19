@@ -18,7 +18,9 @@ defmodule Arbor.Commands.CodingBenchmark do
     Git,
     LegacyAdapter,
     PipelineAdapter,
-    Runtime
+    Runtime,
+    TerminalReason,
+    UsageObservations
   }
 
   alias Arbor.Commands.CodingParity
@@ -1385,6 +1387,7 @@ defmodule Arbor.Commands.CodingBenchmark do
             counters: envelope.counters,
             observations: envelope.observations,
             prepared: true,
+            result: envelope.result,
             wall_clock_ms: wall_clock_ms,
             worker_ownership: envelope.worker_ownership
           )
@@ -1701,6 +1704,7 @@ defmodule Arbor.Commands.CodingBenchmark do
             objective_failure: reason,
             observations: envelope.observations,
             prepared: true,
+            result: envelope.result,
             wall_clock_ms: wall_clock_ms,
             worker_ownership: envelope.worker_ownership
           )
@@ -1768,6 +1772,7 @@ defmodule Arbor.Commands.CodingBenchmark do
               "review_outcome" => review_outcome(semantic["review"] || %{}),
               "terminal_reason" => result_reason(envelope.result, status),
               "terminal_status" => status,
+              "usage_observations" => UsageObservations.from_result(envelope.result),
               "wall_clock_ms" => valid_wall_clock(wall_clock_ms)
             }
 
@@ -1781,6 +1786,7 @@ defmodule Arbor.Commands.CodingBenchmark do
                 objective_failure: reason,
                 observations: envelope.observations,
                 prepared: true,
+                result: envelope.result,
                 wall_clock_ms: wall_clock_ms,
                 worker_ownership: envelope.worker_ownership
               )
@@ -1794,6 +1800,7 @@ defmodule Arbor.Commands.CodingBenchmark do
             counters: envelope.counters,
             observations: envelope.observations,
             prepared: true,
+            result: envelope.result,
             wall_clock_ms: wall_clock_ms,
             worker_ownership: envelope.worker_ownership
           )
@@ -2517,27 +2524,7 @@ defmodule Arbor.Commands.CodingBenchmark do
     Map.new(fields, &{&1, Map.get(map, &1, default)})
   end
 
-  defp result_reason(_result, status)
-       when status in ~w(change_committed no_changes pr_created),
-       do: nil
-
-  defp result_reason(result, _status) do
-    payload = fetch_value(result, "payload", :payload, %{})
-
-    sources = [
-      fetch_value(payload, "report", :report, %{}),
-      payload,
-      fetch_value(result, "raw", :raw, %{}),
-      result
-    ]
-
-    Enum.find_value(sources, fn source ->
-      value =
-        fetch_value(source, "reason", :reason, nil) || fetch_value(source, "error", :error, nil)
-
-      if is_nil(value), do: nil, else: reason_string(value)
-    end)
-  end
+  defp result_reason(result, status), do: TerminalReason.from_result(result, status)
 
   defp failure_row(executor, pair, status, reason, opts \\ []) do
     ownership = Keyword.get(opts, :worker_ownership, "unknown")
@@ -2545,6 +2532,7 @@ defmodule Arbor.Commands.CodingBenchmark do
     approval = fetch_value(observations, "approval", :approval, %{})
     cancellation = fetch_value(observations, "cancellation", :cancellation, %{})
     cleanup = fetch_value(observations, "cleanup", :cleanup, %{})
+    result = Keyword.get(opts, :result)
 
     artifact_verification =
       opts
@@ -2574,6 +2562,7 @@ defmodule Arbor.Commands.CodingBenchmark do
       "review_outcome" => review_outcome(%{}),
       "terminal_reason" => reason_string(reason),
       "terminal_status" => status,
+      "usage_observations" => UsageObservations.from_result(result),
       "wall_clock_ms" => valid_wall_clock(Keyword.get(opts, :wall_clock_ms, 0))
     }
   end

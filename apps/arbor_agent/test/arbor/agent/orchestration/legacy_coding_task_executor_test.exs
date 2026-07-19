@@ -398,6 +398,36 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
     assert {:ok, _encoded} = Jason.encode(result)
   end
 
+  test "preserves action-returned ACP usage under metrics for benchmark observations" do
+    Application.put_env(:arbor_agent, :legacy_coding_action_reply, {
+      :ok,
+      %{
+        status: "change_committed",
+        branch: "feat/usage",
+        commit: "deadbeef",
+        worktree_path: "/tmp/ws",
+        validation: [%{"command" => "mix compile", "passed" => true}],
+        metrics: %{
+          usage: %{
+            "input_tokens" => 321,
+            "outputTokens" => 45,
+            "cost" => 2
+          }
+        }
+      }
+    })
+
+    assert {:ok, result} =
+             LegacyCodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+    metrics = result.payload.metrics
+    assert metrics["execution_path"] == "legacy"
+    assert metrics["usage"]["input_tokens"] == 321
+    assert metrics["usage"]["outputTokens"] == 45
+    assert metrics["usage"]["cost"] == 2
+    assert result.raw["metrics"]["usage"]["input_tokens"] == 321
+  end
+
   test "reports zero attempts when validation and review evidence are absent" do
     assert {:ok, result} =
              LegacyCodingTaskExecutor.run("agent_1", valid_task(), valid_context())

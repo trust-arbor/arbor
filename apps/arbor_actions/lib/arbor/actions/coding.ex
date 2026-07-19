@@ -181,15 +181,21 @@ defmodule Arbor.Actions.Coding do
                {:ok, response} <- prompt_acp_agent(session, worktree_path, params, context) do
             maybe_close_session(session, context)
 
-            finish_change(
-              repo_root,
-              worktree_path,
-              branch_name,
-              response,
-              params,
-              context,
-              workspace
-            )
+            case finish_change(
+                   repo_root,
+                   worktree_path,
+                   branch_name,
+                   response,
+                   params,
+                   context,
+                   workspace
+                 ) do
+              {:ok, result} when is_map(result) ->
+                {:ok, attach_response_usage_metrics(result, response)}
+
+              other ->
+                other
+            end
           else
             {:error, reason} ->
               Actions.emit_failed(__MODULE__, reason)
@@ -520,6 +526,38 @@ defmodule Arbor.Actions.Coding do
     end
 
     defp response_text(response), do: to_string(response[:text] || response["text"] || "")
+
+    # Preserve already-returned ACP usage on the action result so the legacy
+    # executor can surface it under metrics without a second provider call.
+    defp attach_response_usage_metrics(result, response)
+         when is_map(result) and is_map(response) do
+      case response_usage(response) do
+        usage when is_map(usage) and map_size(usage) > 0 ->
+          metrics =
+            result
+            |> map_value(:metrics)
+            |> case do
+              existing when is_map(existing) and not is_struct(existing) -> existing
+              _ -> %{}
+            end
+
+          Map.put(result, :metrics, Map.put(metrics, :usage, usage))
+
+        _ ->
+          result
+      end
+    end
+
+    defp attach_response_usage_metrics(result, _response), do: result
+
+    defp response_usage(response) when is_map(response) do
+      case map_value(response, :usage) do
+        usage when is_map(usage) and not is_struct(usage) and map_size(usage) > 0 -> usage
+        _ -> nil
+      end
+    end
+
+    defp response_usage(_response), do: nil
 
     defp run_validations(worktree_path, params, context) do
       commands = validation_commands(params)

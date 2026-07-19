@@ -39,6 +39,70 @@ defmodule Arbor.Actions.CodingTest do
   end
 
   describe "ProduceReviewableChange.run/2" do
+    test "preserves ACP SendMessage usage in result metrics without a second provider call",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          send(parent, {:start_session, params})
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          send(parent, {:send_message, params})
+
+          {:ok,
+           %{
+             text: "STATUS: implemented\nCreated feature.txt",
+             usage: %{
+               "input_tokens" => 120,
+               "outputTokens" => 40,
+               "cost" => 3
+             }
+           }}
+
+        Acp.CloseSession, params, _context ->
+          send(parent, {:close_session, params})
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   base_ref: base_branch,
+                   branch_name: "test/coding-usage",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["true"],
+                   pr_title: "",
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "change_committed"
+      assert result.metrics.usage["input_tokens"] == 120
+      assert result.metrics.usage["outputTokens"] == 40
+      assert result.metrics.usage["cost"] == 3
+
+      assert_receive {:send_message, _}
+      assert_receive {:close_session, _}
+      # Exactly one close; no extra provider usage probe after SendMessage.
+      refute_received {:close_session, _}
+    end
+
     test "delegates to default ACP agent with default permissions, validates, commits, and skips PR by default",
          %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
