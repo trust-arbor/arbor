@@ -113,11 +113,40 @@ defmodule Arbor.Common.LogRedactorTest do
       refute_sensitive(redacted, aws_key)
       assert_has_redacted_marker(redacted)
 
-      # Struct shape preserved when reconstruction succeeds.
+      # Struct shape preserved via map rebuild + restored __struct__ key
+      # (never via struct/2 callbacks).
       assert %OpaqueHandler{} = redacted.state
       assert redacted.state.id == "handler-1"
       refute String.contains?(redacted.state.token, secret)
       refute String.contains?(redacted.state.nested.note, aws_key)
+    end
+
+    test "forged struct-tagged map never raises and redacts its secret fields" do
+      secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+      aws_key = "AKIA" <> "IOSFODNN7EXAMPLE"
+
+      # Forged tag: atom that is not a real struct module. Calling struct/2
+      # here would raise UndefinedFunctionError; the filter must not do that.
+      forged = %{__struct__: :not_a_struct, token: "bearer #{secret}", note: "x"}
+
+      report = %{
+        forged: forged,
+        adjacent: "key=#{aws_key}",
+        nest: [forged, {:pair, forged}]
+      }
+
+      event = %{level: :error, meta: %{}, msg: {:report, report}}
+
+      assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
+
+      refute_sensitive(redacted, secret)
+      refute_sensitive(redacted, aws_key)
+      assert_has_redacted_marker(redacted)
+
+      # Completely walked forged map restores __struct__ without callbacks.
+      assert is_map(redacted.forged)
+      assert redacted.forged.__struct__ == :not_a_struct
+      refute Map.has_key?(redacted.forged, :__redacted__)
     end
 
     test "plain map nesting with lists and tuples still redacts binaries" do
@@ -134,6 +163,23 @@ defmodule Arbor.Common.LogRedactorTest do
       refute_sensitive(redacted, secret)
       assert redacted.ok == true
     end
+
+    test "exhaustion markers are plain maps without __struct__" do
+      # Wide shallow tree: more than the global node budget. Unvisited branches
+      # must become plain markers, never %{__struct__: mod, __redacted__: true}.
+      secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+
+      wide =
+        for i <- 1..400, into: %{} do
+          {:"k#{i}", "token=#{secret}-#{i}"}
+        end
+
+      event = %{level: :error, meta: %{}, msg: {:report, wide}}
+      assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
+
+      refute_sensitive(redacted, secret)
+      refute_struct_tagged_redaction_markers(redacted)
+    end
   end
 
   defp refute_sensitive(term, secret) when is_binary(secret) do
@@ -149,7 +195,9 @@ defmodule Arbor.Common.LogRedactorTest do
         tuple |> Tuple.to_list() |> Enum.each(&refute_sensitive(&1, secret))
 
       %{__struct__: _} = struct ->
-        struct |> Map.from_struct() |> Enum.each(fn {_k, v} -> refute_sensitive(v, secret) end)
+        struct
+        |> Map.delete(:__struct__)
+        |> Enum.each(fn {_k, v} -> refute_sensitive(v, secret) end)
 
       map when is_map(map) ->
         Enum.each(map, fn {_k, v} -> refute_sensitive(v, secret) end)
@@ -172,7 +220,7 @@ defmodule Arbor.Common.LogRedactorTest do
   end
 
   defp contains_redacted?(%{__struct__: _} = struct) do
-    struct |> Map.from_struct() |> Map.values() |> Enum.any?(&contains_redacted?/1)
+    struct |> Map.delete(:__struct__) |> Map.values() |> Enum.any?(&contains_redacted?/1)
   end
 
   defp contains_redacted?(map) when is_map(map) do
@@ -180,4 +228,33 @@ defmodule Arbor.Common.LogRedactorTest do
   end
 
   defp contains_redacted?(_), do: false
+
+  defp refute_struct_tagged_redaction_markers(term) do
+    case term do
+      %{__struct__: _, __redacted__: true} ->
+        flunk("malformed struct-tagged redaction marker: #{inspect(term)}")
+
+      %{__struct__: _} = struct ->
+        struct
+        |> Map.delete(:__struct__)
+        |> Enum.each(fn {_k, v} -> refute_struct_tagged_redaction_markers(v) end)
+
+      map when is_map(map) ->
+        # Plain markers are allowed; struct-tagged ones are not.
+        if map_size(map) == 1 and Map.get(map, :redacted) == true do
+          :ok
+        else
+          Enum.each(map, fn {_k, v} -> refute_struct_tagged_redaction_markers(v) end)
+        end
+
+      list when is_list(list) ->
+        Enum.each(list, &refute_struct_tagged_redaction_markers/1)
+
+      tuple when is_tuple(tuple) ->
+        tuple |> Tuple.to_list() |> Enum.each(&refute_struct_tagged_redaction_markers/1)
+
+      _ ->
+        :ok
+    end
+  end
 end

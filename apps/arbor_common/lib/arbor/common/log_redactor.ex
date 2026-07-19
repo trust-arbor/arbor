@@ -5,17 +5,22 @@ defmodule Arbor.Common.LogRedactor do
   Delegates to `Arbor.Common.SensitiveData.redact/1` for pattern matching,
   which covers both PII and secret patterns.
 
-  Traversal is total and bounded: nested maps, lists, and tuples are walked
-  without requiring Enumerable on opaque structs (Logger crash reports often
-  embed non-Enumerable struct terms). Depth/entry limits fail closed rather
-  than leaving potentially sensitive nested binaries intact.
+  Traversal is total and globally bounded: nested maps, lists, and tuples are
+  walked without requiring Enumerable and without invoking struct module
+  callbacks (Logger crash reports often embed non-Enumerable or forged
+  struct-tagged maps). A single remaining-node budget bounds the walk; once
+  exhausted, unvisited branches are replaced with a plain fail-closed marker
+  that cannot trigger struct protocol dispatch.
   """
 
   alias Arbor.Common.SensitiveData
 
-  # Logger filters must stay cheap. Bound walk cost; fail closed beyond budget.
+  # Logger filters must stay cheap. Global walk budget + depth ceiling.
   @max_depth 12
-  @max_entries 256
+  @max_nodes 256
+
+  # Plain map — never include :__struct__, so Inspect/protocol cannot dispatch.
+  @redacted_marker %{redacted: true}
 
   @doc false
   def filter(%{msg: msg} = log_event, _extra) do
@@ -24,7 +29,8 @@ defmodule Arbor.Common.LogRedactor do
         %{log_event | msg: {:string, redact_binary(str)}}
 
       {:report, report} ->
-        %{log_event | msg: {:report, redact_term(report, @max_depth)}}
+        {redacted, _budget} = walk(report, @max_depth, @max_nodes)
+        %{log_event | msg: {:report, redacted}}
 
       _ ->
         log_event
@@ -35,86 +41,100 @@ defmodule Arbor.Common.LogRedactor do
 
   defp redact_binary(str) when is_binary(str), do: SensitiveData.redact(str)
 
-  # --- Bounded term walk ----------------------------------------------------
+  # --- Globally bounded term walk -------------------------------------------
+  # Each visited term consumes one node from `budget`. Returns {term, budget_left}.
 
-  defp redact_term(bin, _depth) when is_binary(bin), do: redact_binary(bin)
+  defp walk(_term, _depth, budget) when budget <= 0, do: {@redacted_marker, 0}
 
-  defp redact_term(term, depth) when depth <= 0, do: fail_closed(term)
-
-  defp redact_term(list, depth) when is_list(list) do
-    redact_list(list, depth, @max_entries)
+  defp walk(bin, _depth, budget) when is_binary(bin) do
+    {redact_binary(bin), budget - 1}
   end
 
-  defp redact_term(tuple, depth) when is_tuple(tuple) do
-    size = tuple_size(tuple)
-
-    if size > @max_entries do
-      fail_closed(tuple)
+  defp walk(list, depth, budget) when is_list(list) do
+    if depth <= 0 do
+      {@redacted_marker, budget - 1}
     else
-      tuple
-      |> Tuple.to_list()
-      |> Enum.map(&redact_term(&1, depth - 1))
-      |> List.to_tuple()
+      walk_list(list, depth - 1, budget - 1, [])
     end
   end
 
-  # Structs are maps (`is_map/1`) but often do not implement Enumerable.
-  # Never call Map.new/2 or Enum over a struct — use Map.from_struct/1.
-  defp redact_term(%{__struct__: mod} = struct, depth) do
-    redact_struct(struct, mod, depth)
-  end
-
-  defp redact_term(map, depth) when is_map(map) do
-    if map_size(map) > @max_entries do
-      fail_closed(map)
+  defp walk(tuple, depth, budget) when is_tuple(tuple) do
+    if depth <= 0 do
+      {@redacted_marker, budget - 1}
     else
-      # Plain maps implement Enumerable; rebuild without mutating identity.
-      Map.new(map, fn {k, v} -> {k, redact_term(v, depth - 1)} end)
+      {elems, budget_left} = walk_list(Tuple.to_list(tuple), depth - 1, budget - 1, [])
+      {List.to_tuple(elems), budget_left}
     end
   end
 
-  defp redact_term(other, _depth), do: other
-
-  defp redact_struct(struct, mod, depth) do
-    fields = Map.from_struct(struct)
-
-    if map_size(fields) > @max_entries do
-      fail_closed(struct)
+  # Struct-tagged maps (real modules or forged atoms). Never call struct/2 or
+  # mod.__struct__/1 — those can raise or run arbitrary code in a Logger filter.
+  defp walk(%{__struct__: mod} = map, depth, budget) when is_atom(mod) do
+    if depth <= 0 do
+      {@redacted_marker, budget - 1}
     else
-      redacted_fields =
-        Map.new(fields, fn {k, v} -> {k, redact_term(v, depth - 1)} end)
+      # Map.delete yields a plain map; never Enum over the struct-tagged term.
+      fields = Map.delete(map, :__struct__)
 
-      # Prefer preserving struct shape when the module can rebuild safely.
-      try do
-        struct(mod, redacted_fields)
-      rescue
-        ArgumentError ->
-          Map.put(redacted_fields, :__struct__, mod)
+      case walk_pairs(Map.to_list(fields), depth - 1, budget - 1, []) do
+        {:complete, pairs, budget_left} ->
+          # Restore the original __struct__ key only after a complete field walk.
+          {Map.put(Map.new(pairs), :__struct__, mod), budget_left}
+
+        {:incomplete, _pairs, budget_left} ->
+          # Partial struct-shaped maps are unsafe for Inspect/protocol dispatch.
+          {@redacted_marker, budget_left}
       end
     end
   end
 
-  defp redact_list(_rest, _depth, 0), do: [:redacted]
-  defp redact_list([], _depth, _remaining), do: []
+  defp walk(map, depth, budget) when is_map(map) do
+    if depth <= 0 do
+      {@redacted_marker, budget - 1}
+    else
+      case walk_pairs(Map.to_list(map), depth - 1, budget - 1, []) do
+        {:complete, pairs, budget_left} ->
+          {Map.new(pairs), budget_left}
 
-  defp redact_list([head | tail], depth, remaining) when is_list(tail) do
-    [redact_term(head, depth - 1) | redact_list(tail, depth, remaining - 1)]
+        {:incomplete, pairs, budget_left} ->
+          # Unvisited keys omitted (not emitted); mark exhaustion plainly.
+          {Map.put(Map.new(pairs), :redacted, true), budget_left}
+      end
+    end
   end
 
-  # Improper list: redact the non-list tail as a term, not via Enumerable.
-  defp redact_list([head | tail], depth, _remaining) do
-    [redact_term(head, depth - 1) | redact_term(tail, depth - 1)]
+  defp walk(other, _depth, budget), do: {other, budget - 1}
+
+  defp walk_list([], _depth, budget, acc), do: {Enum.reverse(acc), budget}
+
+  defp walk_list(_rest, _depth, budget, acc) when budget <= 0 do
+    {Enum.reverse([@redacted_marker | acc]), 0}
   end
 
-  # Fail closed: replace containers that may still hold secrets; leave scalars.
-  defp fail_closed(bin) when is_binary(bin), do: redact_binary(bin)
-  defp fail_closed(list) when is_list(list), do: [:redacted]
-  defp fail_closed(tuple) when is_tuple(tuple), do: {:redacted}
-
-  defp fail_closed(%{__struct__: mod}) do
-    %{__struct__: mod, __redacted__: true}
+  defp walk_list([head | tail], depth, budget, acc) when is_list(tail) do
+    {head_redacted, budget_left} = walk(head, depth, budget)
+    walk_list(tail, depth, budget_left, [head_redacted | acc])
   end
 
-  defp fail_closed(map) when is_map(map), do: %{__redacted__: true}
-  defp fail_closed(other), do: other
+  # Improper list: walk head and non-list tail without Enumerable.
+  defp walk_list([head | tail], depth, budget, acc) do
+    {head_redacted, budget_after_head} = walk(head, depth, budget)
+    {tail_redacted, budget_left} = walk(tail, depth, budget_after_head)
+    {finish_improper(acc, head_redacted, tail_redacted), budget_left}
+  end
+
+  defp finish_improper(acc, head, tail) do
+    Enum.reduce(acc, [head | tail], fn item, rest -> [item | rest] end)
+  end
+
+  defp walk_pairs([], _depth, budget, acc), do: {:complete, Enum.reverse(acc), budget}
+
+  defp walk_pairs(rest, _depth, budget, acc) when budget <= 0 and rest != [] do
+    {:incomplete, Enum.reverse(acc), 0}
+  end
+
+  defp walk_pairs([{key, value} | rest], depth, budget, acc) do
+    {value_redacted, budget_left} = walk(value, depth, budget)
+    walk_pairs(rest, depth, budget_left, [{key, value_redacted} | acc])
+  end
 end
