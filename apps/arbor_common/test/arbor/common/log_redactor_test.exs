@@ -306,6 +306,26 @@ defmodule Arbor.Common.LogRedactorTest do
       assert map_size(redacted) < n
       assert map_size(redacted) <= 256
     end
+
+    test "exact global list budget does not append a false redaction marker" do
+      # Global @max_nodes is 256. Entering a list costs 1 node; each atom head
+      # costs 1. A proper list of exactly 255 atoms therefore spends the full
+      # budget on real terms. The [] completion clause must win when budget is
+      # already 0 — no false %{redacted: true} tail marker.
+      exact = List.duplicate(:ok, 255)
+      event = %{level: :info, meta: %{}, msg: {:report, exact}}
+
+      assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
+      assert redacted == exact
+      refute Enum.any?(redacted, &(&1 == %{redacted: true}))
+
+      # One more element leaves an unvisited tail — marker must still appear.
+      over = List.duplicate(:ok, 256)
+      over_event = %{level: :info, meta: %{}, msg: {:report, over}}
+      assert %{msg: {:report, over_redacted}} = LogRedactor.filter(over_event, [])
+      assert Enum.any?(over_redacted, &(&1 == %{redacted: true}))
+      assert Enum.take(over_redacted, 255) == List.duplicate(:ok, 255)
+    end
   end
 
   defp refute_sensitive(term, secret) when is_binary(secret) do

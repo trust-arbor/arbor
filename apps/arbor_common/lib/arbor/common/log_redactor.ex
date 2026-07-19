@@ -41,14 +41,25 @@ defmodule Arbor.Common.LogRedactor do
       end
     rescue
       _ ->
-        %{log_event | msg: {:string, @redacted_binary}}
+        # Preserve the outer Logger message shape: report stays report, string
+        # stays string. Unsupported forms are left unchanged.
+        fail_closed(log_event, msg)
     catch
       _, _ ->
-        %{log_event | msg: {:string, @redacted_binary}}
+        fail_closed(log_event, msg)
     end
   end
 
   def filter(log_event, _extra), do: log_event
+
+  # Top-level fail-closed: never rewrite {:report, _} into {:string, _}.
+  defp fail_closed(log_event, {:string, _}),
+    do: %{log_event | msg: {:string, @redacted_binary}}
+
+  defp fail_closed(log_event, {:report, _}),
+    do: %{log_event | msg: {:report, @redacted_marker}}
+
+  defp fail_closed(log_event, _), do: log_event
 
   # SensitiveData.redact/1 uses Regex/String operations that can raise on
   # invalid UTF-8. Never let that kill the Logger primary filter.
@@ -159,12 +170,15 @@ defmodule Arbor.Common.LogRedactor do
   # Never pass a multi-cell improper remainder wholesale to walk/3's generic
   # `other` clause — that would preserve secret-bearing list spines unredacted.
 
+  # Empty completion must win before budget exhaustion: when the final element
+  # spends the exact remaining budget, [] must reverse without a false marker.
+  # Only a non-empty unvisited remainder appends the redaction marker.
+  defp walk_list([], _depth, budget, acc), do: {Enum.reverse(acc), budget}
+
   defp walk_list(_rest, _depth, budget, acc) when budget <= 0 do
     # Drop unvisited remainder (including any improper secret tail).
     {Enum.reverse([@redacted_marker | acc]), 0}
   end
-
-  defp walk_list([], _depth, budget, acc), do: {Enum.reverse(acc), budget}
 
   defp walk_list([head | tail], depth, budget, acc) do
     {head_redacted, budget_left} = walk(head, depth, budget)
