@@ -21,8 +21,11 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
 
   alias Arbor.Actions.Coding.ProduceReviewableChange
   alias Arbor.Agent.Orchestration.TaskArtifacts
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
 
   @kind "coding_change"
+  @produce_reviewable_change_resource "arbor://action/coding/produce_reviewable_change"
+  @signing_purpose :legacy_coding_task_executor
 
   @required_keys ~w(task repo_path acp_agent)
   @optional_keys ~w(base_ref branch_name worktree_base_dir open_pr submit_review)
@@ -476,6 +479,22 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
   end
 
   defp invoke_action(agent_id, params, action_context, started_at) do
+    with {:ok, security} <- security_facade(),
+         {:ok, authority} <- acquire_signing_authority(security, agent_id) do
+      try do
+        with {:ok, signed_context} <-
+               sign_action_context(security, agent_id, authority, action_context) do
+          do_invoke_action(agent_id, params, signed_context, started_at)
+        end
+      after
+        # Broker monitors this process, but normal terminal outcomes must
+        # release the authority before returning to TaskStore.
+        _ = close_signing_authority(security, authority)
+      end
+    end
+  end
+
+  defp do_invoke_action(agent_id, params, action_context, started_at) do
     actions = actions_module()
 
     case actions.authorize_and_execute(
@@ -504,6 +523,123 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
   catch
     :exit, reason -> {:error, {:legacy_coding_action_exit, reason}}
     kind, reason -> {:error, {:legacy_coding_action_throw, {kind, reason}}}
+  end
+
+  # -------------------------------------------------------------------------
+  # Signing authority (reload-stable, owner-bound, closed after the action)
+  # -------------------------------------------------------------------------
+
+  defp security_facade do
+    security = security_module()
+
+    if is_atom(security) and Code.ensure_loaded?(security) and
+         function_exported?(security, :load_signing_key, 1) and
+         function_exported?(security, :build_signing_authority_acquisition_proof, 3) and
+         function_exported?(security, :open_signing_authority, 1) and
+         function_exported?(security, :sign_with_authority, 2) and
+         function_exported?(security, :verify_request, 1) and
+         function_exported?(security, :close_signing_authority, 1) do
+      {:ok, security}
+    else
+      {:error, :security_unavailable}
+    end
+  end
+
+  # The decrypted key exists only while the owner-bound possession proof is
+  # constructed. The broker retains the reload-stable authority, never this
+  # key or a closure over it.
+  defp acquire_signing_authority(security, agent_id) do
+    with {:ok, private_key} <- security.load_signing_key(agent_id),
+         true <- is_binary(private_key) and private_key != "",
+         {:ok, proof} <-
+           security.build_signing_authority_acquisition_proof(
+             agent_id,
+             private_key,
+             purpose: @signing_purpose,
+             owner: self()
+           ),
+         {:ok, opened_authority} <- security.open_signing_authority(proof) do
+      case SigningAuthority.canonicalize(opened_authority) do
+        {:ok, authority} ->
+          {:ok, authority}
+
+        {:error, reason} ->
+          _ = close_signing_authority(security, opened_authority)
+          {:error, {:signing_authority_acquisition_failed, reason}}
+      end
+    else
+      false -> {:error, :invalid_signing_key}
+      {:error, :no_signing_key} -> {:error, :no_signing_key}
+      {:error, reason} -> {:error, {:signing_authority_acquisition_failed, reason}}
+      other -> {:error, {:signing_authority_acquisition_failed, other}}
+    end
+  rescue
+    exception ->
+      {:error, {:signing_authority_acquisition_failed, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:signing_authority_acquisition_failed, {kind, reason}}}
+  end
+
+  defp close_signing_authority(security, authority) do
+    case security.close_signing_authority(authority) do
+      :ok -> :ok
+      {:error, _reason} = error -> error
+      other -> {:error, {:unexpected_close_result, other}}
+    end
+  rescue
+    exception -> {:error, {:authority_close_failed, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:authority_close_failed, {kind, reason}}}
+  end
+
+  defp sign_action_context(security, agent_id, %SigningAuthority{} = authority, action_context) do
+    resource = produce_reviewable_change_resource()
+
+    with {:ok, %SignedRequest{} = signed_request} <-
+           security.sign_with_authority(authority, resource),
+         :ok <- validate_signed_request_binding(signed_request, agent_id, resource),
+         {:ok, ^agent_id} <- security.verify_request(signed_request) do
+      auth_context =
+        AuthContext.new(agent_id, signed_request: signed_request)
+        |> AuthContext.mark_verified()
+
+      {:ok,
+       action_context
+       |> Map.put(:signed_request, signed_request)
+       |> Map.put(:auth_context, auth_context)
+       |> Map.put(:signing_authority, authority)}
+    else
+      {:error, reason} -> {:error, {:legacy_coding_authority_signing_failed, reason}}
+      _other -> {:error, {:legacy_coding_authority_signing_failed, :invalid_signed_request}}
+    end
+  rescue
+    exception ->
+      {:error, {:legacy_coding_authority_signing_failed, Exception.message(exception)}}
+  catch
+    kind, reason ->
+      {:error, {:legacy_coding_authority_signing_failed, {kind, reason}}}
+  end
+
+  defp validate_signed_request_binding(
+         %SignedRequest{agent_id: agent_id, payload: payload},
+         agent_id,
+         payload
+       ),
+       do: :ok
+
+  defp validate_signed_request_binding(_signed_request, _agent_id, _payload),
+    do: {:error, :signed_request_binding_mismatch}
+
+  defp produce_reviewable_change_resource do
+    if function_exported?(Arbor.Actions, :canonical_uri_for, 2) do
+      case Arbor.Actions.canonical_uri_for(ProduceReviewableChange, %{}) do
+        @produce_reviewable_change_resource = resource -> resource
+        resource when is_binary(resource) and resource != "" -> resource
+        _other -> @produce_reviewable_change_resource
+      end
+    else
+      @produce_reviewable_change_resource
+    end
   end
 
   defp normalize_success(result, started_at)
@@ -652,5 +788,9 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
 
   defp actions_module do
     Application.get_env(:arbor_agent, :legacy_coding_actions_module, Arbor.Actions)
+  end
+
+  defp security_module do
+    Application.get_env(:arbor_agent, :legacy_coding_security_module, Arbor.Security)
   end
 end

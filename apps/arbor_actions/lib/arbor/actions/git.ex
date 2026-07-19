@@ -544,6 +544,12 @@ defmodule Arbor.Actions.Git do
     end
   end
 
+  # Local/worktree helper config is audited fail-closed. The only intentional
+  # exception is `core.hooksPath=/dev/null` (exact value), which disables hooks
+  # rather than redirecting them. Every other matched helper key/value, any
+  # hooksPath other than exact `/dev/null`, duplicate hooksPath rows, and
+  # malformed config output are rejected. Audit uses argv + `--no-includes`
+  # and Git's NUL-delimited output so values are compared byte-for-byte.
   defp reject_configured_helpers(path) do
     with :ok <- audit_config_scope(path, "--local"),
          {:ok, worktree_config?} <- worktree_config_enabled?(path) do
@@ -556,17 +562,134 @@ defmodule Arbor.Actions.Git do
       "config",
       scope,
       "--no-includes",
-      "--name-only",
+      "--null",
       "--get-regexp",
       @unsafe_config_pattern
     ]
 
     case execute_without_audit(path, args) do
-      {:ok, %{exit_code: 1}} -> :ok
-      {:ok, %{exit_code: 0, stdout: output}} -> {:error, {:unsafe_git_configuration, output}}
-      {:ok, result} -> {:error, {:git_config_audit_failed, result.exit_code, result.stdout}}
-      {:error, reason} -> {:error, reason}
+      {:ok, %{exit_code: 1}} ->
+        :ok
+
+      {:ok, %{exit_code: 0, stdout: output}} ->
+        evaluate_unsafe_config_matches(output)
+
+      {:ok, result} ->
+        {:error, {:git_config_audit_failed, result.exit_code, result.stdout}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
+  end
+
+  defp evaluate_unsafe_config_matches(output) when is_binary(output) do
+    with {:ok, entries} <- parse_config_regexp_output(output) do
+      classify_unsafe_config_entries(entries)
+    end
+  end
+
+  defp evaluate_unsafe_config_matches(_output),
+    do: {:error, {:git_config_audit_failed, :invalid_config_output}}
+
+  defp parse_config_regexp_output("") do
+    {:error, {:git_config_audit_failed, :empty_match_output}}
+  end
+
+  defp parse_config_regexp_output(output) when is_binary(output) do
+    if :binary.last(output) != 0 do
+      {:error, {:git_config_audit_failed, :malformed_config_output}}
+    else
+      {terminator, records} =
+        output
+        |> :binary.split(<<0>>, [:global])
+        |> List.pop_at(-1)
+
+      parse_config_regexp_records(records, terminator)
+    end
+  end
+
+  defp parse_config_regexp_output(_output),
+    do: {:error, {:git_config_audit_failed, :invalid_config_output}}
+
+  defp parse_config_regexp_records([], "") do
+    {:error, {:git_config_audit_failed, :empty_match_output}}
+  end
+
+  defp parse_config_regexp_records(records, "") when is_list(records) do
+    if Enum.any?(records, &(&1 == "")) do
+      {:error, {:git_config_audit_failed, :malformed_config_output}}
+    else
+      Enum.reduce_while(records, {:ok, []}, fn record, {:ok, acc} ->
+        case parse_config_regexp_record(record) do
+          {:ok, entry} -> {:cont, {:ok, [entry | acc]}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  defp parse_config_regexp_records(_records, _terminator) do
+    {:error, {:git_config_audit_failed, :malformed_config_output}}
+  end
+
+  defp parse_config_regexp_record(record) when is_binary(record) do
+    case :binary.split(record, "\n") do
+      [key, value] when key != "" ->
+        if String.valid?(key) do
+          {:ok, {String.downcase(key), value}}
+        else
+          {:error, {:git_config_audit_failed, :malformed_config_record}}
+        end
+
+      _other ->
+        {:error, {:git_config_audit_failed, :malformed_config_record}}
+    end
+  end
+
+  defp parse_config_regexp_record(_record),
+    do: {:error, {:git_config_audit_failed, :malformed_config_record}}
+
+  defp classify_unsafe_config_entries(entries) when is_list(entries) do
+    if entries == [] do
+      {:error, {:git_config_audit_failed, :empty_match_output}}
+    else
+      do_classify_unsafe_config_entries(entries)
+    end
+  end
+
+  defp classify_unsafe_config_entries(_entries),
+    do: {:error, {:git_config_audit_failed, :invalid_config_entries}}
+
+  defp do_classify_unsafe_config_entries(entries) do
+    hooks_entries = Enum.filter(entries, fn {key, _value} -> key == "core.hookspath" end)
+    other_entries = Enum.reject(entries, fn {key, _value} -> key == "core.hookspath" end)
+
+    cond do
+      other_entries != [] ->
+        {:error, {:unsafe_git_configuration, format_config_entries(entries)}}
+
+      length(hooks_entries) > 1 ->
+        {:error, {:unsafe_git_configuration, format_config_entries(hooks_entries)}}
+
+      hooks_entries == [{"core.hookspath", "/dev/null"}] ->
+        :ok
+
+      hooks_entries == [] ->
+        {:error, {:git_config_audit_failed, :empty_match_output}}
+
+      true ->
+        {:error, {:unsafe_git_configuration, format_config_entries(hooks_entries)}}
+    end
+  end
+
+  defp format_config_entries(entries) do
+    entries
+    |> Enum.map(fn {key, value} -> key <> " " <> value end)
+    |> Enum.join("\n")
   end
 
   defp worktree_config_enabled?(path) do

@@ -386,6 +386,69 @@ defmodule Arbor.Actions.GitTest do
       refute File.exists?(marker)
     end
 
+    @tag :security_regression
+    test "security regression: exact core.hooksPath=/dev/null is allowed; other helpers fail",
+         %{repo_path: repo_path} do
+      {_out, 0} =
+        System.cmd("git", ["-C", repo_path, "config", "--local", "core.hooksPath", "/dev/null"])
+
+      assert {:ok, _result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, _result} = Git.Diff.run(%{path: repo_path, ref: "HEAD"}, %{})
+
+      {_out, 0} =
+        System.cmd("git", ["-C", repo_path, "config", "--local", "core.hooksPath", "/tmp/hooks"])
+
+      assert {:error, hooks_reason} = Git.Status.run(%{path: repo_path}, %{})
+      assert hooks_reason =~ "unsafe_git_configuration"
+      assert hooks_reason =~ "core.hookspath"
+
+      {_out, 0} =
+        System.cmd("git", ["-C", repo_path, "config", "--local", "core.hooksPath", "/dev/null"])
+
+      helper = Path.join(repo_path, "credential-helper")
+      File.write!(helper, "#!/bin/sh\nexit 0\n")
+      File.chmod!(helper, 0o755)
+
+      {_out, 0} =
+        System.cmd("git", ["-C", repo_path, "config", "--local", "credential.helper", helper])
+
+      assert {:error, credential_reason} = Git.Status.run(%{path: repo_path}, %{})
+      assert credential_reason =~ "unsafe_git_configuration"
+    end
+
+    @tag :security_regression
+    test "security regression: duplicate core.hooksPath entries fail closed even for /dev/null",
+         %{repo_path: repo_path} do
+      {_out, 0} =
+        System.cmd("git", ["-C", repo_path, "config", "--local", "core.hooksPath", "/dev/null"])
+
+      {_out, 0} =
+        System.cmd("git", [
+          "-C",
+          repo_path,
+          "config",
+          "--local",
+          "--add",
+          "core.hooksPath",
+          "/dev/null"
+        ])
+
+      assert {:error, reason} = Git.Status.run(%{path: repo_path}, %{})
+      assert reason =~ "unsafe_git_configuration"
+    end
+
+    @tag :security_regression
+    test "security regression: core.hooksPath allowlist compares exact value bytes", %{
+      repo_path: repo_path
+    } do
+      {_out, 0} =
+        System.cmd("git", ["-C", repo_path, "config", "--local", "core.hooksPath", "/dev/null\r"])
+
+      assert {:error, reason} = Git.Status.run(%{path: repo_path}, %{})
+      assert reason =~ "unsafe_git_configuration"
+      assert reason =~ "core.hookspath"
+    end
+
     test "validates action metadata" do
       assert Git.Diff.name() == "git_diff"
       assert "diff" in Git.Diff.tags()

@@ -9,6 +9,9 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
   alias Arbor.Actions.Coding.ProduceReviewableChange
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.LegacyCodingTaskExecutor
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
+
+  @produce_resource "arbor://action/coding/produce_reviewable_change"
 
   defmodule CapturingActions do
     @moduledoc false
@@ -47,6 +50,107 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
     end
   end
 
+  defmodule FakeSecurity do
+    @moduledoc false
+
+    alias Arbor.Contracts.Security.{SignedRequest, SigningAuthority}
+
+    def load_signing_key(agent_id) do
+      case Process.get(:legacy_coding_signing_key) do
+        nil ->
+          {_public, private} = :crypto.generate_key(:eddsa, :ed25519)
+          Process.put({:legacy_coding_fake_key, agent_id}, private)
+          {:ok, private}
+
+        :missing ->
+          {:error, :no_signing_key}
+
+        {:error, _} = err ->
+          err
+
+        key when is_binary(key) ->
+          Process.put({:legacy_coding_fake_key, agent_id}, key)
+          {:ok, key}
+      end
+    end
+
+    def build_signing_authority_acquisition_proof(agent_id, private_key, opts)
+        when is_binary(agent_id) and is_binary(private_key) and is_list(opts) do
+      {:ok, {:legacy_coding_proof, agent_id, Keyword.fetch!(opts, :owner)}}
+    end
+
+    def open_signing_authority({:legacy_coding_proof, agent_id, owner}) when owner == self() do
+      case Process.get(:legacy_coding_authority_open_reply) do
+        nil ->
+          token = :crypto.strong_rand_bytes(32)
+
+          {:ok,
+           %SigningAuthority{
+             token: token,
+             principal_id: agent_id,
+             purpose: :legacy_coding_task_executor
+           }}
+
+        reply ->
+          reply
+      end
+    end
+
+    def open_signing_authority(_proof), do: {:error, :owner_mismatch}
+
+    def sign_with_authority(%SigningAuthority{principal_id: agent_id} = authority, resource)
+        when is_binary(resource) do
+      case Process.get(:legacy_coding_authority_sign_reply) do
+        nil ->
+          private =
+            Process.get({:legacy_coding_fake_key, agent_id}) ||
+              :crypto.strong_rand_bytes(32)
+
+          case SignedRequest.sign(resource, agent_id, private) do
+            {:ok, signed} = ok ->
+              maybe_observe({:legacy_coding_signed, authority, signed})
+              ok
+
+            other ->
+              other
+          end
+
+        reply ->
+          reply
+      end
+    end
+
+    def verify_request(%SignedRequest{agent_id: agent_id} = signed_request) do
+      case Process.get(:legacy_coding_verify_reply) do
+        nil ->
+          maybe_observe({:legacy_coding_verified, signed_request})
+          {:ok, agent_id}
+
+        fun when is_function(fun, 1) ->
+          fun.(signed_request)
+
+        reply ->
+          reply
+      end
+    end
+
+    def close_signing_authority(%SigningAuthority{} = authority) do
+      closed = Process.get(:legacy_coding_closed_authorities, [])
+      Process.put(:legacy_coding_closed_authorities, [authority | closed])
+      maybe_observe({:legacy_coding_authority_closed, authority})
+      :ok
+    end
+
+    def close_signing_authority(_other), do: {:error, :invalid_signing_authority}
+
+    defp maybe_observe(message) do
+      case Application.get_env(:arbor_agent, :legacy_coding_action_observer) do
+        pid when is_pid(pid) -> send(pid, message)
+        _ -> :ok
+      end
+    end
+  end
+
   defmodule PipelineExecutor do
     @behaviour Arbor.Contracts.Agent.TaskExecutor
 
@@ -56,17 +160,26 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
 
   setup do
     prev_module = Application.get_env(:arbor_agent, :legacy_coding_actions_module)
+    prev_security = Application.get_env(:arbor_agent, :legacy_coding_security_module)
     prev_reply = Application.get_env(:arbor_agent, :legacy_coding_action_reply)
     prev_observer = Application.get_env(:arbor_agent, :legacy_coding_action_observer)
     prev_executors = Application.get_env(:arbor_agent, :task_executors)
     prev_mode = Application.get_env(:arbor_agent, :coding_executor_mode)
 
+    Process.delete(:legacy_coding_signing_key)
+    Process.delete(:legacy_coding_authority_open_reply)
+    Process.delete(:legacy_coding_authority_sign_reply)
+    Process.delete(:legacy_coding_verify_reply)
+    Process.delete(:legacy_coding_closed_authorities)
+
     Application.put_env(:arbor_agent, :legacy_coding_actions_module, CapturingActions)
+    Application.put_env(:arbor_agent, :legacy_coding_security_module, FakeSecurity)
     Application.put_env(:arbor_agent, :legacy_coding_action_observer, self())
     Application.delete_env(:arbor_agent, :legacy_coding_action_reply)
 
     on_exit(fn ->
       restore_env(:legacy_coding_actions_module, prev_module)
+      restore_env(:legacy_coding_security_module, prev_security)
       restore_env(:legacy_coding_action_reply, prev_reply)
       restore_env(:legacy_coding_action_observer, prev_observer)
       restore_env(:task_executors, prev_executors)
@@ -183,6 +296,25 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
     assert action_ctx.timeout == 12_000
     refute Map.has_key?(action_ctx, :authorization)
     refute Map.has_key?(action_ctx, :signer)
+
+    assert %SignedRequest{
+             agent_id: "agent_abc",
+             payload: @produce_resource
+           } = action_ctx.signed_request
+
+    assert %AuthContext{
+             principal_id: "agent_abc",
+             identity_verified: true,
+             signed_request: %SignedRequest{payload: @produce_resource}
+           } = action_ctx.auth_context
+
+    assert %SigningAuthority{
+             principal_id: "agent_abc",
+             purpose: :legacy_coding_task_executor
+           } = action_ctx.signing_authority
+
+    assert_received {:legacy_coding_authority_closed,
+                     %SigningAuthority{principal_id: "agent_abc"}}
 
     assert result.result_type == :coding_change
     assert result.payload.branch == "arbor/legacy-test"
@@ -494,5 +626,196 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
 
     assert {:error, :invalid_agent_id} =
              LegacyCodingTaskExecutor.run(nil, valid_task(), valid_context())
+  end
+
+  test "closes signing authority after action errors" do
+    Application.put_env(:arbor_agent, :legacy_coding_action_reply, {:error, :unauthorized})
+
+    assert {:error, :unauthorized} =
+             LegacyCodingTaskExecutor.run("agent_abc", valid_task(), valid_context())
+
+    assert_received {:authorize_and_execute, "agent_abc", ProduceReviewableChange, _params,
+                     action_ctx}
+
+    assert %SigningAuthority{principal_id: "agent_abc"} = action_ctx.signing_authority
+
+    assert_received {:legacy_coding_authority_closed,
+                     %SigningAuthority{principal_id: "agent_abc"}}
+  end
+
+  test "fails closed when signing key is missing" do
+    Process.put(:legacy_coding_signing_key, :missing)
+
+    assert {:error, :no_signing_key} =
+             LegacyCodingTaskExecutor.run("agent_abc", valid_task(), valid_context())
+
+    refute_received {:authorize_and_execute, _, _, _, _}
+  end
+
+  test "fails closed when signed request resource binding mismatches" do
+    Process.put(:legacy_coding_authority_sign_reply, {
+      :ok,
+      %SignedRequest{
+        payload: "arbor://action/forged",
+        agent_id: "agent_abc",
+        timestamp: DateTime.utc_now(),
+        nonce: :crypto.strong_rand_bytes(16),
+        signature: :crypto.strong_rand_bytes(64)
+      }
+    })
+
+    assert {:error, {:legacy_coding_authority_signing_failed, :signed_request_binding_mismatch}} =
+             LegacyCodingTaskExecutor.run("agent_abc", valid_task(), valid_context())
+
+    refute_received {:authorize_and_execute, _, _, _, _}
+
+    assert_received {:legacy_coding_authority_closed,
+                     %SigningAuthority{principal_id: "agent_abc"}}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Real security boundary (resource binding + authority cleanup)
+  # ---------------------------------------------------------------------------
+
+  describe "security regression: production signing boundary" do
+    @describetag :security_regression
+
+    setup do
+      ensure_security_runtime!()
+      previous_security = Application.get_env(:arbor_agent, :legacy_coding_security_module)
+      Application.put_env(:arbor_agent, :legacy_coding_security_module, Arbor.Security)
+
+      {:ok, identity} = Arbor.Security.generate_identity(name: "legacy-coding-auth")
+      :ok = Arbor.Security.register_identity(identity)
+      :ok = Arbor.Security.store_signing_key(identity.agent_id, identity.private_key)
+
+      on_exit(fn ->
+        restore_env(:legacy_coding_security_module, previous_security)
+
+        if Process.whereis(Arbor.Security.CapabilityStore) do
+          Arbor.Security.CapabilityStore.revoke_all(identity.agent_id)
+        end
+
+        if Process.whereis(Arbor.Security.Identity.Registry) do
+          Arbor.Security.deregister_identity(identity.agent_id)
+        end
+
+        _ = Arbor.Security.delete_signing_key(identity.agent_id)
+      end)
+
+      {:ok, identity: identity}
+    end
+
+    test "security regression: signs exact ProduceReviewableChange resource and closes authority",
+         %{identity: identity} do
+      agent_id = identity.agent_id
+
+      assert {:ok, _result} =
+               LegacyCodingTaskExecutor.run(agent_id, valid_task(), valid_context())
+
+      assert_received {:authorize_and_execute, ^agent_id, ProduceReviewableChange, _params,
+                       action_ctx}
+
+      assert %SignedRequest{
+               agent_id: ^agent_id,
+               payload: @produce_resource
+             } = signed = action_ctx.signed_request
+
+      # Resource binding is re-checked through the public verifier (nonce consumed).
+      # A second verification of the same request must fail closed as replay.
+      assert {:error, :replayed_nonce} = Arbor.Security.verify_request(signed)
+
+      assert %AuthContext{
+               principal_id: ^agent_id,
+               identity_verified: true,
+               signed_request: %SignedRequest{payload: @produce_resource}
+             } = action_ctx.auth_context
+
+      assert %SigningAuthority{
+               principal_id: ^agent_id,
+               purpose: :legacy_coding_task_executor
+             } = authority = action_ctx.signing_authority
+
+      # Authority must be closed after the delegated action lifetime.
+      assert {:error, _reason} =
+               Arbor.Security.sign_with_authority(authority, @produce_resource)
+    end
+
+    test "security regression: wrong-principal signing key cannot authorize the action", %{
+      identity: identity
+    } do
+      {:ok, other} = Arbor.Security.generate_identity(name: "legacy-coding-other")
+      :ok = Arbor.Security.register_identity(other)
+      :ok = Arbor.Security.store_signing_key(other.agent_id, other.private_key)
+
+      on_exit(fn ->
+        if Process.whereis(Arbor.Security.Identity.Registry) do
+          Arbor.Security.deregister_identity(other.agent_id)
+        end
+
+        _ = Arbor.Security.delete_signing_key(other.agent_id)
+      end)
+
+      # Run as identity.agent_id but the stored key for that id is still identity's.
+      # Forge: overwrite identity key with other's private key so possession proof
+      # fails principal binding inside Security.
+      :ok = Arbor.Security.store_signing_key(identity.agent_id, other.private_key)
+
+      assert {:error, {:signing_authority_acquisition_failed, _reason}} =
+               LegacyCodingTaskExecutor.run(identity.agent_id, valid_task(), valid_context())
+
+      refute_received {:authorize_and_execute, _, _, _, _}
+    end
+  end
+
+  defp ensure_security_runtime! do
+    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_contracts)
+
+    security_backend =
+      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+
+    for {name, collection} <- [
+          {:arbor_security_capabilities, "capabilities"},
+          {:arbor_security_identities, "identities"},
+          {:arbor_security_signing_keys, "signing_keys"}
+        ] do
+      child =
+        Supervisor.child_spec(
+          {Arbor.Persistence.BufferedStore,
+           name: name, backend: security_backend, write_mode: :sync, collection: collection},
+          id: name
+        )
+
+      case Supervisor.start_child(Arbor.Security.Supervisor, child) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+        {:error, {:already_present, _id}} -> :ok
+        {:error, reason} -> raise "failed to start #{inspect(name)}: #{inspect(reason)}"
+      end
+    end
+
+    signing_authority_owner_token = make_ref()
+
+    security_children = [
+      {Arbor.Security.Identity.Registry, []},
+      {Arbor.Security.Identity.NonceCache, []},
+      {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.SigningAuthorityStateOwner, broker_token: signing_authority_owner_token},
+      {Arbor.Security.SigningAuthorityBroker, state_owner_token: signing_authority_owner_token},
+      {Arbor.Security.CapabilityStore, []}
+    ]
+
+    for {module, opts} <- security_children do
+      unless Process.whereis(module) do
+        case Supervisor.start_child(Arbor.Security.Supervisor, {module, opts}) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, reason} -> raise "failed to start #{inspect(module)}: #{inspect(reason)}"
+        end
+      end
+    end
+
+    :ok
   end
 end
