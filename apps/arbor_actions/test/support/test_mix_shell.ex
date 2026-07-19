@@ -6,9 +6,37 @@ defmodule Arbor.Actions.TestMixShell do
   path Mix resolves) so positive schema tests can exercise action result
   handling. It is not a Shell backend, does not claim descendant containment,
   and must never be configured outside the test environment.
+
+  Optional `resolve_mix_wrapper/0` is the hermetic execution seam used by
+  `Arbor.Actions.Mix` projections and `run_mix/3` when this module is installed
+  as `:mix_shell_module`. Production `Arbor.Shell` does not export that
+  callback and continues to use code-root wrapper authority.
   """
 
   @fallback_wrapper Path.expand("../../../../bin/mix", __DIR__)
+
+  @doc """
+  Absolute repository Mix wrapper accepted by this test shell.
+
+  Authority is this source-relative path only — never cwd, Application env,
+  candidate worktrees, or caller opts. Production Mix keeps a separate
+  code-root resolver. Output must be an absolute regular executable so
+  `Arbor.Actions.Mix` validation accepts it.
+  """
+  @spec resolve_mix_wrapper() :: {:ok, String.t()} | {:error, term()}
+  def resolve_mix_wrapper do
+    wrapper = @fallback_wrapper
+
+    with true <- is_binary(wrapper),
+         true <- Path.type(wrapper) == :absolute,
+         true <- File.regular?(wrapper),
+         {:ok, %File.Stat{type: :regular, mode: mode}} <- File.stat(wrapper),
+         true <- Bitwise.band(mode, 0o111) != 0 do
+      {:ok, wrapper}
+    else
+      _ -> {:error, :mix_wrapper_unavailable}
+    end
+  end
 
   @spec execute_spawn_capable(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -102,15 +130,32 @@ defmodule Arbor.Actions.TestMixShell do
 
   defp maybe_mutate_worktree(_), do: :ok
 
-  defp accepted_wrapper("mix"), do: {:ok, @fallback_wrapper}
+  defp accepted_wrapper("mix"), do: resolve_mix_wrapper()
 
   defp accepted_wrapper(path) when is_binary(path) do
-    basename = Path.basename(path)
+    with {:ok, accepted} <- resolve_mix_wrapper() do
+      cond do
+        path == accepted ->
+          {:ok, accepted}
 
-    if basename == "mix" and File.regular?(path) do
-      {:ok, path}
-    else
-      {:error, :unsupported_test_mix_execution}
+        Path.basename(path) == "mix" and File.regular?(path) ->
+          # Allow absolute path form when it is the same reviewed wrapper after
+          # realpath (symlink aliases). Other mix binaries are rejected.
+          case {realpath(path), realpath(accepted)} do
+            {{:ok, same}, {:ok, same}} -> {:ok, accepted}
+            _ -> {:error, :unsupported_test_mix_execution}
+          end
+
+        true ->
+          {:error, :unsupported_test_mix_execution}
+      end
+    end
+  end
+
+  defp realpath(path) do
+    case Arbor.Common.SafePath.resolve_real(path) do
+      {:ok, canonical} -> {:ok, canonical}
+      _ -> {:error, :unresolvable}
     end
   end
 

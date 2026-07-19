@@ -17,6 +17,27 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
   alias Arbor.Actions.Mix, as: MixAction
   alias Arbor.Common.SafePath
 
+  defmodule MalformedWrapperShell do
+    def execute_spawn_capable(_tool, _args, _opts), do: {:error, :not_used}
+    def resolve_mix_wrapper, do: :not_a_result_tuple
+  end
+
+  defmodule RelativeWrapperShell do
+    def execute_spawn_capable(_tool, _args, _opts), do: {:error, :not_used}
+    def resolve_mix_wrapper, do: {:ok, "bin/mix"}
+  end
+
+  defmodule CallbackErrorWrapperShell do
+    def execute_spawn_capable(_tool, _args, _opts), do: {:error, :not_used}
+    # Custom callback error must not leak; execution fails closed.
+    def resolve_mix_wrapper, do: {:error, :custom_callback_reason}
+  end
+
+  defmodule RaisingWrapperShell do
+    def execute_spawn_capable(_tool, _args, _opts), do: {:error, :not_used}
+    def resolve_mix_wrapper, do: raise("hostile wrapper callback")
+  end
+
   @moduletag :fast
 
   setup_all do
@@ -42,21 +63,35 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
 
   # ── Metadata construction (test-double shell; no platform claims) ──
 
-  test "resolve_mix_wrapper returns exact executable identity from code roots" do
-    assert {:ok, wrapper} = MixAction.resolve_mix_wrapper()
-    assert Path.type(wrapper) == :absolute
-    assert Path.basename(wrapper) == "mix"
-    assert File.regular?(wrapper)
-    assert executable?(wrapper)
-
+  test "resolve_mix_wrapper matches loaded-code anchors and ignores poison env" do
+    # Same loaded-code anchors production resolve_mix_wrapper/0 uses.
+    anchors = loaded_code_root_anchors()
+    expected = MixAction.resolve_mix_wrapper_from_anchors(anchors)
     previous = Application.get_env(:arbor_actions, :mix_wrapper_path)
 
     try do
       Application.put_env(:arbor_actions, :mix_wrapper_path, "/usr/bin/mix")
-      assert {:ok, ^wrapper} = MixAction.resolve_mix_wrapper()
+      # Public result equals explicit-anchor resolve; env is never authority.
+      assert MixAction.resolve_mix_wrapper() == expected
+
+      assert MixAction.resolve_mix_wrapper() ==
+               MixAction.resolve_mix_wrapper_from_anchors(anchors)
     after
       restore_env(:arbor_actions, :mix_wrapper_path, previous)
     end
+  end
+
+  test "resolve_mix_wrapper_from_anchors succeeds for TestMixShell source root" do
+    assert {:ok, shell_wrapper} = Arbor.Actions.TestMixShell.resolve_mix_wrapper()
+    # bin/mix -> repository umbrella root that hosts the reviewed wrapper.
+    source_root = shell_wrapper |> Path.dirname() |> Path.dirname()
+
+    assert {:ok, wrapper} = MixAction.resolve_mix_wrapper_from_anchors([source_root])
+    assert Path.type(wrapper) == :absolute
+    assert Path.basename(wrapper) == "mix"
+    assert File.regular?(wrapper)
+    assert executable?(wrapper)
+    assert same_realpath?(wrapper, shell_wrapper)
   end
 
   test "resolve_mix_wrapper fails closed for umbrella root without executable wrapper" do
@@ -112,39 +147,55 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
   } do
     fixture = leased_fixture(tmp_dir)
 
-    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
-      assert {:ok, env} =
-               MixAction.contained_mix_env(
-                 validation_resource: resource,
-                 validation_revision: :candidate,
-                 env: %{
-                   "MIX_ENV" => "test",
-                   "MIX_BUILD_PATH" => "/evil/build",
-                   "MIX_DEPS_PATH" => "/evil/deps",
-                   "HOME" => "/evil/home",
-                   "TMPDIR" => "/evil/tmp",
-                   "HEX_HOME" => "/evil/hex",
-                   "ERL_LIBS" => "/evil/libs",
-                   "ARBOR_ELIXIR_ROOT" => "/evil/elixir",
-                   "PATH" => "/evil/bin"
-                 }
-               )
+    assert {:ok, :ok} =
+             MixAction.with_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context,
+               fn resource ->
+                 assert {:ok, env} =
+                          MixAction.contained_mix_env(
+                            validation_resource: resource,
+                            validation_revision: :candidate,
+                            env: %{
+                              "MIX_ENV" => "test",
+                              "MIX_BUILD_PATH" => "/evil/build",
+                              "MIX_DEPS_PATH" => "/evil/deps",
+                              "HOME" => "/evil/home",
+                              "TMPDIR" => "/evil/tmp",
+                              "HEX_HOME" => "/evil/hex",
+                              "ERL_LIBS" => "/evil/libs",
+                              "ARBOR_ELIXIR_ROOT" => "/evil/elixir",
+                              "PATH" => "/evil/bin"
+                            }
+                          )
 
-      assert env["MIX_ENV"] == "test"
-      assert env["ARBOR_MIX_CONTAINED"] == "1"
-      assert env["HOME"] == resource.candidate_home_path
-      assert env["TMPDIR"] == resource.candidate_tmp_path
-      assert env["MIX_BUILD_PATH"] == resource.candidate_build_path
-      assert env["MIX_DEPS_PATH"] == resource.candidate_deps_path
-      assert env["MIX_ARCHIVES"] == Path.join(env["ARBOR_ELIXIR_ROOT"], ".mix/archives")
-      refute String.starts_with?(env["MIX_ARCHIVES"], env["HOME"])
-      assert File.dir?(env["HOME"])
-      assert File.dir?(env["MIX_BUILD_PATH"])
-      assert File.dir?(env["MIX_ARCHIVES"])
-      assert env["ERL_LIBS"] == false
-      assert String.starts_with?(env["PATH"], env["ARBOR_ERLANG_ROOT"] <> "/bin")
-      {:ok, :ok}
-    end)
+                 assert env["MIX_ENV"] == "test"
+                 assert env["ARBOR_MIX_CONTAINED"] == "1"
+                 assert env["HOME"] == resource.candidate_home_path
+                 assert env["TMPDIR"] == resource.candidate_tmp_path
+                 assert env["MIX_BUILD_PATH"] == resource.candidate_build_path
+                 assert env["MIX_DEPS_PATH"] == resource.candidate_deps_path
+                 # Scrubbing property: archives are under the projected elixir root,
+                 # never caller HOME. Directory presence is packaging-dependent
+                 # (some Linux images omit empty .mix/archives until Hex runs).
+                 assert env["MIX_ARCHIVES"] ==
+                          Path.join(env["ARBOR_ELIXIR_ROOT"], ".mix/archives")
+
+                 refute String.starts_with?(env["MIX_ARCHIVES"], env["HOME"])
+                 assert File.dir?(env["HOME"])
+                 assert File.dir?(env["MIX_BUILD_PATH"])
+                 assert File.dir?(env["ARBOR_ELIXIR_ROOT"])
+                 assert File.dir?(env["ARBOR_ERLANG_ROOT"])
+
+                 if File.exists?(env["MIX_ARCHIVES"]) do
+                   assert File.dir?(env["MIX_ARCHIVES"])
+                 end
+
+                 assert env["ERL_LIBS"] == false
+                 assert String.starts_with?(env["PATH"], env["ARBOR_ERLANG_ROOT"] <> "/bin")
+                 {:ok, :ok}
+               end
+             )
   end
 
   test "resolve_mix_wrapper fails closed when anchors lack a reviewed wrapper" do
@@ -159,6 +210,89 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
                Path.join(release_like, "lib/arbor_actions-0.1.0"),
                Path.join(release_like, "lib/arbor_actions-0.1.0/ebin")
              ])
+  end
+
+  test "configured mix_shell_module wrapper is both projected and executed identically", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+    git!(fixture.lease.worktree_path, ["add", "-A"])
+    git!(fixture.lease.worktree_path, ["commit", "-m", "project"])
+
+    assert {:ok, shell_wrapper} = Arbor.Actions.TestMixShell.resolve_mix_wrapper()
+    assert Path.type(shell_wrapper) == :absolute
+    assert Path.basename(shell_wrapper) == "mix"
+    assert File.regular?(shell_wrapper)
+
+    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
+      # Public API still resolves via the configured shell callback.
+      assert {:ok, candidate} = MixAction.projections_for_resource(resource, :candidate)
+      public_mix = Enum.find(candidate.read_only, &(&1["purpose"] == "mix_wrapper"))
+      assert same_realpath?(public_mix["path"], shell_wrapper)
+
+      assert {:ok, _} =
+               MixAction.run_mix(resource.candidate_path, ["compile"],
+                 validation_resource: resource,
+                 validation_revision: :candidate
+               )
+
+      invocation = Arbor.Actions.TestMixShell.last_invocation()
+      projections = Keyword.fetch!(invocation.opts, :filesystem_projections)
+      projected_mix = Enum.find(projections.read_only, &(&1["purpose"] == "mix_wrapper"))
+
+      # Single prepare path: projected wrapper identity equals the executable tool.
+      assert is_binary(projected_mix["path"])
+      assert projected_mix["path"] == invocation.tool
+      assert same_realpath?(projected_mix["path"], shell_wrapper)
+      assert same_realpath?(invocation.wrapper, shell_wrapper)
+      assert Path.basename(invocation.tool) == "mix"
+      assert File.regular?(invocation.tool)
+      assert executable?(invocation.tool)
+
+      {:ok, :ok}
+    end)
+  end
+
+  test "security regression: malformed mix_shell_module wrapper resolver fails closed", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    previous = Application.get_env(:arbor_actions, :mix_shell_module)
+
+    try do
+      for shell <- [
+            MalformedWrapperShell,
+            RelativeWrapperShell,
+            CallbackErrorWrapperShell,
+            RaisingWrapperShell
+          ] do
+        Application.put_env(:arbor_actions, :mix_shell_module, shell)
+
+        MixAction.with_validation_resource(
+          fixture.lease.workspace_id,
+          fixture.context,
+          fn resource ->
+            # Direct projection API keeps the closed atom error.
+            assert {:error, :mix_wrapper_unavailable} =
+                     MixAction.projections_for_resource(resource, :candidate)
+
+            # run_mix retains inspected-string prepare-error contract.
+            assert {:error, reason} =
+                     MixAction.run_mix(resource.candidate_path, ["compile"],
+                       validation_resource: resource
+                     )
+
+            assert reason == inspect(:mix_wrapper_unavailable)
+            refute reason == inspect(:custom_callback_reason)
+
+            {:ok, :ok}
+          end
+        )
+      end
+    after
+      restore_env(:arbor_actions, :mix_shell_module, previous)
+    end
   end
 
   test "scrub_caller_env only keeps MIX_ENV" do
@@ -720,8 +854,9 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
                )
 
       invocation = Arbor.Actions.TestMixShell.last_invocation()
-      assert {:ok, wrapper} = MixAction.resolve_mix_wrapper()
-      assert invocation.tool == wrapper
+      assert {:ok, wrapper} = Arbor.Actions.TestMixShell.resolve_mix_wrapper()
+      assert invocation.tool == wrapper or same_realpath?(invocation.tool, wrapper)
+      assert invocation.wrapper == wrapper or same_realpath?(invocation.wrapper, wrapper)
       projections = Keyword.get(invocation.opts, :filesystem_projections)
       assert projections.revision == "candidate"
       rw = Enum.map(projections.read_write, & &1["path"])
@@ -1439,6 +1574,47 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
   end
 
   defp path_equals_or_contains?(_, _), do: false
+
+  defp same_realpath?(a, b) when is_binary(a) and is_binary(b) do
+    case {SafePath.resolve_real(a), SafePath.resolve_real(b)} do
+      {{:ok, same}, {:ok, same}} -> true
+      _ -> false
+    end
+  end
+
+  defp same_realpath?(_, _), do: false
+
+  # Mirror Arbor.Actions.Mix code_root_anchors/0 without calling private functions.
+  defp loaded_code_root_anchors do
+    [
+      safe_app_dir(:arbor_actions),
+      safe_lib_dir(:arbor_actions),
+      safe_module_dir(Arbor.Actions.Mix),
+      safe_app_dir(:arbor_common),
+      safe_lib_dir(:arbor_common)
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp safe_app_dir(app) do
+    Application.app_dir(app)
+  rescue
+    _ -> nil
+  end
+
+  defp safe_lib_dir(app) do
+    case :code.lib_dir(app) do
+      path when is_list(path) -> List.to_string(path)
+      _ -> nil
+    end
+  end
+
+  defp safe_module_dir(module) do
+    case :code.which(module) do
+      path when is_list(path) -> Path.dirname(List.to_string(path))
+      _ -> nil
+    end
+  end
 
   defp assert_eventually(fun, attempts \\ 100)
   defp assert_eventually(fun, 0), do: assert(fun.())

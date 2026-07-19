@@ -255,20 +255,22 @@ defmodule Arbor.Actions.MixTest do
       project_path: project_path,
       fixture: fixture
     } do
-      assert {:ok, wrapper} = MixAction.resolve_mix_wrapper()
-      assert Path.basename(wrapper) == "mix"
-      assert String.ends_with?(wrapper, "/bin/mix")
-      assert File.regular?(wrapper)
-
-      # Application env cannot become wrapper authority.
+      # Public production resolver remains code-root only (not shell-callback).
+      anchors = loaded_code_root_anchors()
+      expected = MixAction.resolve_mix_wrapper_from_anchors(anchors)
       previous = Application.get_env(:arbor_actions, :mix_wrapper_path)
 
       try do
         Application.put_env(:arbor_actions, :mix_wrapper_path, "/tmp/evil-mix")
-        assert {:ok, ^wrapper} = MixAction.resolve_mix_wrapper()
+        assert MixAction.resolve_mix_wrapper() == expected
       after
         restore_env(:arbor_actions, :mix_wrapper_path, previous)
       end
+
+      # Hermetic run_mix uses the configured shell's wrapper resolver.
+      assert {:ok, wrapper} = Arbor.Actions.TestMixShell.resolve_mix_wrapper()
+      assert Path.basename(wrapper) == "mix"
+      assert File.regular?(wrapper)
 
       # Public helper never returns paths without a live validation resource.
       assert {:error, :validation_resource_required} =
@@ -300,8 +302,11 @@ defmodule Arbor.Actions.MixTest do
                    )
 
           invocation = Arbor.Actions.TestMixShell.last_invocation()
-          assert invocation.wrapper == wrapper
-          assert invocation.tool == wrapper
+          assert Path.basename(invocation.wrapper) == "mix"
+          assert Path.basename(invocation.tool) == "mix"
+          # Configured shell wrapper (not production code-root resolve).
+          assert same_mix_wrapper?(invocation.wrapper, wrapper)
+          assert same_mix_wrapper?(invocation.tool, wrapper)
           env_map = Map.new(invocation.env)
           assert env_map["ARBOR_MIX_CONTAINED"] == "1"
           assert env_map["MIX_ENV"] == "test"
@@ -613,6 +618,47 @@ defmodule Arbor.Actions.MixTest do
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  defp same_mix_wrapper?(a, b) when is_binary(a) and is_binary(b) do
+    a == b or
+      case {Arbor.Common.SafePath.resolve_real(a), Arbor.Common.SafePath.resolve_real(b)} do
+        {{:ok, same}, {:ok, same}} -> true
+        _ -> false
+      end
+  end
+
+  defp same_mix_wrapper?(_, _), do: false
+
+  defp loaded_code_root_anchors do
+    [
+      safe_app_dir(:arbor_actions),
+      safe_lib_dir(:arbor_actions),
+      safe_module_dir(Arbor.Actions.Mix),
+      safe_app_dir(:arbor_common),
+      safe_lib_dir(:arbor_common)
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp safe_app_dir(app) do
+    Application.app_dir(app)
+  rescue
+    _ -> nil
+  end
+
+  defp safe_lib_dir(app) do
+    case :code.lib_dir(app) do
+      path when is_list(path) -> List.to_string(path)
+      _ -> nil
+    end
+  end
+
+  defp safe_module_dir(module) do
+    case :code.which(module) do
+      path when is_list(path) -> Path.dirname(List.to_string(path))
+      _ -> nil
+    end
+  end
 
   defp assert_structured_feedback(result) do
     feedback = result.feedback

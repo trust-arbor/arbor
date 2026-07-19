@@ -175,6 +175,54 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
+  # Execution wrapper for projections/run_mix. Production `Arbor.Shell` and any
+  # shell without an optional zero-arity `resolve_mix_wrapper/0` still use the
+  # code-root public resolver. Configured test shells may expose that callback
+  # for the exact absolute wrapper they accept under hermetic builds where
+  # loaded BEAM ancestry is severed from the source umbrella.
+  defp resolve_execution_mix_wrapper do
+    with {:ok, shell_module} <- Config.mix_shell_module() do
+      resolve_execution_mix_wrapper(shell_module)
+    end
+  end
+
+  defp resolve_execution_mix_wrapper(Arbor.Shell), do: resolve_mix_wrapper()
+
+  defp resolve_execution_mix_wrapper(shell_module) when is_atom(shell_module) do
+    if function_exported?(shell_module, :resolve_mix_wrapper, 0) do
+      try do
+        shell_module
+        |> apply(:resolve_mix_wrapper, [])
+        |> validate_shell_mix_wrapper()
+      rescue
+        _ -> {:error, :mix_wrapper_unavailable}
+      catch
+        _, _ -> {:error, :mix_wrapper_unavailable}
+      end
+    else
+      resolve_mix_wrapper()
+    end
+  end
+
+  defp validate_shell_mix_wrapper({:ok, path}) when is_binary(path) do
+    with true <- Path.type(path) == :absolute,
+         true <- Path.basename(path) == "mix",
+         true <- File.regular?(path),
+         true <- executable_file?(path),
+         {:ok, canonical} <- SafePath.resolve_real(path),
+         true <- Path.basename(canonical) == "mix",
+         true <- File.regular?(canonical),
+         true <- executable_file?(canonical) do
+      {:ok, canonical}
+    else
+      _ -> {:error, :mix_wrapper_unavailable}
+    end
+  end
+
+  # Never surface arbitrary callback reasons: malformed tuples, custom errors,
+  # and exceptions all fail closed to one closed sentinel.
+  defp validate_shell_mix_wrapper(_), do: {:error, :mix_wrapper_unavailable}
+
   @doc """
   Canonical Erlang and Elixir installation roots derived from the already-loaded
   BEAM runtime. Never caller-controlled.
@@ -557,8 +605,19 @@ defmodule Arbor.Actions.Mix do
           | {:error, term()}
   def projections_for_resource(resource, revision)
       when is_map(resource) and revision in [:candidate, :base] do
-    with {:ok, wrapper} <- resolve_mix_wrapper(),
-         {:ok, roots} <- runtime_roots(),
+    with {:ok, wrapper} <- resolve_execution_mix_wrapper() do
+      build_projections_for_resource(resource, revision, wrapper)
+    end
+  end
+
+  def projections_for_resource(_, _), do: {:error, :invalid_validation_resource}
+
+  # Internal projection builder: uses a caller-supplied, already-validated
+  # absolute Mix wrapper so run_mix can resolve shell+wrapper once and project
+  # that exact identity. Public projections_for_resource/2 resolves normally.
+  defp build_projections_for_resource(resource, revision, wrapper)
+       when is_map(resource) and revision in [:candidate, :base] and is_binary(wrapper) do
+    with {:ok, roots} <- runtime_roots(),
          {:ok, paths} <- revision_private_paths(resource, revision) do
       read_only = [
         projection(roots.erlang_root, :read_only, :runtime_erlang),
@@ -586,7 +645,7 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
-  def projections_for_resource(_, _), do: {:error, :invalid_validation_resource}
+  defp build_projections_for_resource(_, _, _), do: {:error, :invalid_validation_resource}
 
   @doc """
   Build the module-owned contained Mix environment from a live validation
@@ -769,13 +828,22 @@ defmodule Arbor.Actions.Mix do
          {:ok, canonical_path} <- SafePath.resolve_real(path),
          true <- File.dir?(canonical_path) || {:error, :invalid_mix_worktree},
          :ok <- bind_cwd_to_revision(resource, revision, canonical_path),
-         {:ok, wrapper} <- resolve_mix_wrapper(),
+         {:ok, shell_module} <- Config.mix_shell_module(),
+         {:ok, wrapper} <- resolve_execution_mix_wrapper(shell_module),
          {:ok, _} <- remaining_timeout(deadline_ms) do
       case build_contained_env(canonical_path, opts) do
         {:ok, env, ephemeral_root} ->
           case remaining_timeout(deadline_ms) do
             {:ok, _} ->
-              finish_prepare(canonical_path, wrapper, env, ephemeral_root, resource, revision)
+              finish_prepare(
+                canonical_path,
+                wrapper,
+                env,
+                ephemeral_root,
+                resource,
+                revision,
+                shell_module
+              )
 
             {:error, reason} ->
               {:error, reason, ephemeral_root}
@@ -791,19 +859,22 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
-  defp finish_prepare(cwd, wrapper, env, ephemeral_root, resource, revision) do
-    with {:ok, projections} <- require_projections(resource, revision),
-         {:ok, shell_module} <- Config.mix_shell_module() do
-      {:ok,
-       %{
-         cwd: cwd,
-         wrapper: wrapper,
-         env: env,
-         projections: projections,
-         shell_module: shell_module,
-         ephemeral_root: ephemeral_root
-       }}
-    else
+  defp finish_prepare(cwd, wrapper, env, ephemeral_root, resource, revision, shell_module) do
+    # Reuse the already-validated wrapper from prepare so the projected
+    # mix_wrapper path is identical to the executable passed to the shell.
+    # Do not re-resolve Config.mix_shell_module/0 or the wrapper here.
+    case require_projections(resource, revision, wrapper) do
+      {:ok, projections} ->
+        {:ok,
+         %{
+           cwd: cwd,
+           wrapper: wrapper,
+           env: env,
+           projections: projections,
+           shell_module: shell_module,
+           ephemeral_root: ephemeral_root
+         }}
+
       {:error, reason} ->
         {:error, reason, ephemeral_root}
 
@@ -2176,10 +2247,13 @@ defmodule Arbor.Actions.Mix do
 
   def scrub_caller_env(_), do: %{}
 
-  defp require_projections(nil, _revision), do: {:error, :validation_resource_required}
+  defp require_projections(nil, _revision, _wrapper), do: {:error, :validation_resource_required}
 
-  defp require_projections(resource, revision),
-    do: projections_for_resource(resource, revision)
+  defp require_projections(resource, revision, wrapper)
+       when is_map(resource) and is_binary(wrapper),
+       do: build_projections_for_resource(resource, revision, wrapper)
+
+  defp require_projections(_, _, _), do: {:error, :invalid_validation_resource}
 
   # No production ephemeral execution roots: only owner-scoped validation
   # resources may supply path-bearing Mix env.

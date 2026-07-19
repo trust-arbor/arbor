@@ -168,10 +168,13 @@ defmodule Arbor.Actions.Config do
 
   Production defaults to `Arbor.Shell`. Tests may configure a trusted named
   module with `:mix_shell_module` so action behavior can be exercised without
-  claiming production process containment. This seam is operator/test
-  configuration only; actions never resolve it from params or context, and
-  function values are not accepted. Misconfigured modules fail closed before
-  dispatch.
+  claiming production process containment. A configured module must export
+  `execute_spawn_capable/3`. Optionally it may export zero-arity
+  `resolve_mix_wrapper/0` for the exact absolute Mix wrapper it accepts;
+  `Arbor.Shell` does not and continues to use Mix's production code-root
+  resolver. This seam is operator/test configuration only; actions never
+  resolve it from params or context, and function values are not accepted.
+  Misconfigured modules fail closed before dispatch.
   """
   @type mix_shell_module_error ::
           {:invalid_mix_shell_module,
