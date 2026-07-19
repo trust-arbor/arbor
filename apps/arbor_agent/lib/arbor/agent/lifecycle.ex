@@ -317,17 +317,31 @@ defmodule Arbor.Agent.Lifecycle do
       host_opts = build_host_opts(agent_id, profile, opts)
       executor_opts = build_executor_opts(agent_id, profile, opts)
 
+      # One authoritative session/heartbeat decision drives both authority
+      # bootstrap issuance (above) and branch child opts. start_session: false
+      # must suppress Session *and* HeartbeatService even when start_heartbeat
+      # is omitted or true — session_opts/heartbeat_opts must both be nil so
+      # BranchSupervisor does not start a session-dependent heartbeat without
+      # a heartbeat signing-authority restart slot.
       session_opts =
-        build_branch_session_opts(agent_id, profile, opts, Map.get(bootstraps, :session))
+        if session_enabled do
+          build_branch_session_opts(agent_id, profile, opts, Map.get(bootstraps, :session))
+        else
+          nil
+        end
 
       heartbeat_opts =
-        build_heartbeat_opts(
-          agent_id,
-          profile,
-          opts,
-          session_opts,
-          Map.get(bootstraps, :heartbeat)
-        )
+        if heartbeat_enabled do
+          build_heartbeat_opts(
+            agent_id,
+            profile,
+            opts,
+            session_opts,
+            Map.get(bootstraps, :heartbeat)
+          )
+        else
+          nil
+        end
 
       branch_opts = [
         agent_id: agent_id,
@@ -336,7 +350,7 @@ defmodule Arbor.Agent.Lifecycle do
         session_opts: session_opts,
         heartbeat_opts: heartbeat_opts,
         authority_bootstraps: bootstraps,
-        start_session: start_session
+        start_session: session_enabled
       ]
 
       # Start the branch supervisor under the global DynamicSupervisor
