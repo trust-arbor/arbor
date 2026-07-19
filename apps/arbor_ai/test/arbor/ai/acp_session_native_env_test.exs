@@ -77,22 +77,50 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
     end
   end
 
-  describe "configured Grok provider" do
-    test "pins grok-4.5 before the stdio subcommand" do
+  # Exact launch argv + static Git env required after the r5 coding-benchmark
+  # isolation failure (native Grok read the live Arbor repo outside its lease).
+  @grok_strict_command [
+    "grok",
+    "--sandbox",
+    "strict",
+    "--no-memory",
+    "agent",
+    "--model",
+    "grok-4.5",
+    "stdio"
+  ]
+
+  @grok_strict_git_env [
+    {"GIT_CONFIG_GLOBAL", "/dev/null"},
+    {"GIT_CONFIG_SYSTEM", "/dev/null"},
+    {"GIT_CONFIG_COUNT", "1"},
+    {"GIT_CONFIG_KEY_0", "core.excludesFile"},
+    {"GIT_CONFIG_VALUE_0", "/dev/null"}
+  ]
+
+  describe "security regression: Grok strict sandbox launch" do
+    test "configured production override uses strict sandbox, no-memory, and minimal Git env" do
       assert {:ok, opts} = Config.resolve(:grok, [])
 
-      assert Keyword.get(opts, :command) ==
-               ["grok", "agent", "--model", "grok-4.5", "stdio"]
+      assert Keyword.get(opts, :command) == @grok_strict_command
+      assert Keyword.get(opts, :env) == @grok_strict_git_env
+      # Static-config-only: per-launch env injection must remain blocked.
+      assert {:ok, launch_opts} =
+               Config.resolve(:grok, env: [{"HOSTILE", "1"}], args: ["--escape"])
+
+      assert Keyword.get(launch_opts, :command) == @grok_strict_command
+      assert Keyword.get(launch_opts, :env) == @grok_strict_git_env
+      refute Enum.any?(Keyword.get(launch_opts, :env), fn {k, _} -> k == "HOSTILE" end)
     end
 
-    test "built-in fallback also pins grok-4.5" do
+    test "built-in fallback uses the same strict sandbox command and Git env" do
       providers = Application.get_env(:arbor_ai, :acp_providers, %{})
       Application.put_env(:arbor_ai, :acp_providers, Map.delete(providers, :grok))
 
       assert {:ok, opts} = Config.resolve(:grok, [])
 
-      assert Keyword.get(opts, :command) ==
-               ["grok", "agent", "--model", "grok-4.5", "stdio"]
+      assert Keyword.get(opts, :command) == @grok_strict_command
+      assert Keyword.get(opts, :env) == @grok_strict_git_env
     end
   end
 end

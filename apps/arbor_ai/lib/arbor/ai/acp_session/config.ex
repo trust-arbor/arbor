@@ -57,11 +57,36 @@ defmodule Arbor.AI.AcpSession.Config do
 
   require Logger
 
+  # Minimal static Git env for Grok's kernel-enforced strict sandbox: global/system
+  # config is denied, so inject only the overrides worktree Git commands need.
+  @grok_strict_git_env [
+    {"GIT_CONFIG_GLOBAL", "/dev/null"},
+    {"GIT_CONFIG_SYSTEM", "/dev/null"},
+    {"GIT_CONFIG_COUNT", "1"},
+    {"GIT_CONFIG_KEY_0", "core.excludesFile"},
+    {"GIT_CONFIG_VALUE_0", "/dev/null"}
+  ]
+
   @native_providers %{
     gemini: %{command: ["gemini", "--experimental-acp"]},
-    # `--model` belongs to the `agent` command and must precede the `stdio` subcommand.
+    # Global flags (`--sandbox` / `--no-memory`) must precede the `agent` subcommand;
+    # `--model` belongs to `agent` and must precede the `stdio` subcommand.
     # Auth remains out-of-band via `grok login`.
-    grok: %{command: ["grok", "agent", "--model", "grok-4.5", "stdio"]},
+    # Strict sandbox is kernel-enforced cwd isolation; --no-memory disables
+    # cross-session memory so a leased coding worktree cannot leak prior context.
+    grok: %{
+      command: [
+        "grok",
+        "--sandbox",
+        "strict",
+        "--no-memory",
+        "agent",
+        "--model",
+        "grok-4.5",
+        "stdio"
+      ],
+      env: @grok_strict_git_env
+    },
     opencode: %{command: ["opencode", "acp"]},
     goose: %{command: ["goose", "--acp"]},
     copilot: %{command: ["github-copilot", "--acp"]},

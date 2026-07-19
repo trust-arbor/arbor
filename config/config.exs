@@ -153,11 +153,33 @@ config :arbor_ai, :acp_providers, %{
   },
 
   # grok (Grok 4.5) — VERIFIED native ACP via `mix arbor.acp.probe grok`.
-  # `--model` is an `agent` option and must precede the `stdio` subcommand.
+  # Global flags (`--sandbox` / `--no-memory`) precede `agent`; `--model` is an
+  # `agent` option and must precede the `stdio` subcommand.
+  # Strict sandbox is kernel-enforced cwd isolation (closes the r5 FS-isolation
+  # gap); `--no-memory` disables cross-session memory. Strict denies the user's
+  # Git config, so inject only the minimal static Git env worktree Git needs.
   # Re-verified on Grok CLI 0.2.103 on 2026-07-18; ACP telemetry reports
   # modelId "grok-4.5" (usage model "grok-4.5-build").
   # Install: curl -fsSL https://x.ai/cli/install.sh | bash
-  grok: %{command: ["grok", "agent", "--model", "grok-4.5", "stdio"]}
+  grok: %{
+    command: [
+      "grok",
+      "--sandbox",
+      "strict",
+      "--no-memory",
+      "agent",
+      "--model",
+      "grok-4.5",
+      "stdio"
+    ],
+    env: [
+      {"GIT_CONFIG_GLOBAL", "/dev/null"},
+      {"GIT_CONFIG_SYSTEM", "/dev/null"},
+      {"GIT_CONFIG_COUNT", "1"},
+      {"GIT_CONFIG_KEY_0", "core.excludesFile"},
+      {"GIT_CONFIG_VALUE_0", "/dev/null"}
+    ]
+  }
 
   # agy (Antigravity CLI, intended for Gemini 3.5 Flash) — NO native ACP. Verified via
   # `mix arbor.acp.probe agy` + manual probing: agy exposes only --print / --prompt-interactive
