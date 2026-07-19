@@ -281,5 +281,79 @@ defmodule Arbor.Commands.CodingBenchmark.GitObjectReaderTest do
       assert {:ok, [{:batch, [^first]}, {:batch, [^second]}]} =
                Git.partition_objects_for_batch([first, second], ceiling)
     end
+
+    test "caps content batches at 64 objects even when wire budget allows more" do
+      max = Git.max_cat_file_batch_objects()
+      assert max == 64
+
+      # Zero-byte objects so only the cardinality ceiling can force a split.
+      at_limit = zero_byte_specs(max)
+      over_limit = zero_byte_specs(max + 1)
+
+      assert {:ok, [{:batch, group}]} =
+               Git.partition_objects_for_batch(at_limit, 16_777_216)
+
+      assert length(group) == max
+      assert Enum.map(group, & &1.oid) == Enum.map(at_limit, & &1.oid)
+
+      assert {:ok, [{:batch, first}, {:batch, second}]} =
+               Git.partition_objects_for_batch(over_limit, 16_777_216)
+
+      assert length(first) == max
+      assert length(second) == 1
+      assert Enum.map(first ++ second, & &1.oid) == Enum.map(over_limit, & &1.oid)
+    end
+  end
+
+  describe "partition_requests_for_check/2" do
+    test "caps batch-check requests at 64 even when output budget allows more" do
+      max = Git.max_cat_file_batch_objects()
+      assert max == 64
+
+      # Generous ceiling so byte-derived capacity exceeds the cardinality bound.
+      shell_ceiling = 16_777_216
+      at_limit = zero_byte_requests(max)
+      over_limit = zero_byte_requests(max + 1)
+
+      assert {:ok, [group]} = Git.partition_requests_for_check(at_limit, shell_ceiling)
+      assert length(group) == max
+      assert Enum.map(group, & &1.oid) == Enum.map(at_limit, & &1.oid)
+
+      assert {:ok, [first, second]} =
+               Git.partition_requests_for_check(over_limit, shell_ceiling)
+
+      assert length(first) == max
+      assert length(second) == 1
+      assert Enum.map(first ++ second, & &1.oid) == Enum.map(over_limit, & &1.oid)
+    end
+
+    test "still respects byte-derived line capacity when it is tighter than 64" do
+      # One line overhead is 96 bytes; a 200-byte ceiling admits only 2 lines.
+      requests = zero_byte_requests(5)
+
+      assert {:ok, batches} = Git.partition_requests_for_check(requests, 200)
+      assert length(batches) == 3
+      assert Enum.map(batches, &length/1) == [2, 2, 1]
+      assert List.flatten(batches) == requests
+    end
+  end
+
+  defp zero_byte_specs(count) when is_integer(count) and count > 0 do
+    for index <- 1..count do
+      %{oid: synthetic_oid(index), type: "blob", size: 0}
+    end
+  end
+
+  defp zero_byte_requests(count) when is_integer(count) and count > 0 do
+    for index <- 1..count do
+      %{oid: synthetic_oid(index), type: "blob"}
+    end
+  end
+
+  defp synthetic_oid(index) when is_integer(index) and index > 0 do
+    index
+    |> Integer.to_string(16)
+    |> String.downcase()
+    |> String.pad_leading(40, "0")
   end
 end

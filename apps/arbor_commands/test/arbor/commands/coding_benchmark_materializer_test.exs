@@ -308,7 +308,8 @@ defmodule Arbor.Commands.CodingBenchmark.MaterializerTest do
 
   test "multi-file reconstruction uses bounded git object batches", %{root: root} do
     source = Path.join(root, "source-multi")
-    file_count = 48
+    # More than the 64-object cat-file ceiling so reconstruction is multi-process.
+    file_count = 80
     {base, _target} = build_history!(source, file_count: file_count)
     dest = Path.join(root, "reconstructed-multi")
 
@@ -336,12 +337,23 @@ defmodule Arbor.Commands.CodingBenchmark.MaterializerTest do
 
     assert_receive {:git_object_batch, measurements}, 5_000
 
+    max_batch = Git.max_cat_file_batch_objects()
+    assert max_batch == 64
+
     # Unique objects: commit + trees + blobs. Far more than one process/object.
     assert measurements.object_count >= file_count
-    assert measurements.process_count >= 1
+    assert measurements.object_count > max_batch
+
+    # Check + content each chunk at most 64 objects, so process count is bounded
+    # multi-process (not 1-per-object) once cardinality forces more than one batch.
+    expected_chunks = div(measurements.object_count + max_batch - 1, max_batch)
+    assert expected_chunks >= 2
+    assert measurements.process_count >= expected_chunks
+    assert measurements.process_count <= 2 * expected_chunks + 2
     assert measurements.process_count < measurements.object_count
     assert measurements.batch_count <= measurements.process_count
-    assert measurements.process_count <= div(measurements.object_count, 4) + 2
+    # Still a large reduction versus one process per object.
+    assert measurements.process_count * 4 <= measurements.object_count
 
     assert git!(dest, ["rev-parse", "HEAD^{commit}"]) == base.commit
     assert git!(dest, ["rev-parse", "HEAD^{tree}"]) == base.tree

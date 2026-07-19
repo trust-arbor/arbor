@@ -7,6 +7,9 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   # Fixture trees are capped at 10_000 entries; allow commit + root-tree additions.
   @max_fixture_entries 10_000
   @max_object_requests @max_fixture_entries + 2
+  # Defense-in-depth: every cat-file process stays cardinality-bounded even when
+  # wire/output budgets would otherwise admit unbounded zero-byte batches.
+  @max_cat_file_batch_objects 64
   @max_diagnostic_bytes 500
   @oid_pattern ~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/
   @allowed_object_types MapSet.new(["blob", "tree", "commit"])
@@ -82,8 +85,10 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   Accepts only 40/64-hex object IDs and closed types (`blob`, `tree`, `commit`).
   Sizes are discovered with `--batch-check`, then content is fetched in
   output-budgeted `--batch` groups (or single-object reads for oversized
-  members). Each unique OID is returned once with independently owned content
-  bytes.
+  members). Each cat-file process is also capped at
+  `max_cat_file_batch_objects/0` requests so stdin/metadata bursts stay bounded
+  even for zero-byte objects. Each unique OID is returned once with
+  independently owned content bytes.
   """
   @spec read_objects(String.t(), [object_request()], timeout_spec(), keyword()) ::
           {:ok, %{optional(String.t()) => object_payload()}} | {:error, String.t()}
@@ -127,6 +132,10 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   @doc false
   @spec max_object_requests() :: pos_integer()
   def max_object_requests, do: @max_object_requests
+
+  @doc false
+  @spec max_cat_file_batch_objects() :: pos_integer()
+  def max_cat_file_batch_objects, do: @max_cat_file_batch_objects
 
   @doc false
   @spec normalize_object_requests(term()) ::
@@ -233,13 +242,14 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
         true ->
           case current do
             nil ->
-              {:cont, {:ok, batches, {[spec], cost}}}
+              {:cont, {:ok, batches, {[spec], cost, 1}}}
 
-            {group, used} when used + cost <= max_output_bytes ->
-              {:cont, {:ok, batches, {[spec | group], used + cost}}}
+            {group, used, count}
+            when used + cost <= max_output_bytes and count < @max_cat_file_batch_objects ->
+              {:cont, {:ok, batches, {[spec | group], used + cost, count + 1}}}
 
-            {group, _used} ->
-              {:cont, {:ok, [{:batch, Enum.reverse(group)} | batches], {[spec], cost}}}
+            {group, _used, _count} ->
+              {:cont, {:ok, [{:batch, Enum.reverse(group)} | batches], {[spec], cost, 1}}}
           end
       end
     end)
@@ -253,6 +263,23 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   end
 
   def partition_objects_for_batch(_specs, _max_output_bytes),
+    do: {:error, "git_invalid_object_request"}
+
+  @doc false
+  @spec partition_requests_for_check([object_request()], pos_integer()) ::
+          {:ok, [[object_request()]]} | {:error, String.t()}
+  def partition_requests_for_check(requests, shell_ceiling)
+      when is_list(requests) and is_integer(shell_ceiling) and shell_ceiling > 0 do
+    max_lines =
+      shell_ceiling
+      |> div(@batch_check_line_overhead)
+      |> max(1)
+      |> min(@max_cat_file_batch_objects)
+
+    {:ok, Enum.chunk_every(requests, max_lines)}
+  end
+
+  def partition_requests_for_check(_requests, _shell_ceiling),
     do: {:error, "git_invalid_object_request"}
 
   @doc false
@@ -299,12 +326,6 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
          :ok <- validate_object_budget(specs, max_object_bytes, max_total_bytes) do
       {:ok, specs, process_count}
     end
-  end
-
-  defp partition_requests_for_check(requests, shell_ceiling) do
-    max_lines = max(div(shell_ceiling, @batch_check_line_overhead), 1)
-
-    {:ok, Enum.chunk_every(requests, max_lines)}
   end
 
   defp run_batch_check(workdir, requests, timeout, shell_ceiling) do
@@ -565,7 +586,7 @@ defmodule Arbor.Commands.CodingBenchmark.Git do
   end
 
   defp flush_batch(batches, nil), do: batches
-  defp flush_batch(batches, {group, _used}), do: [{:batch, Enum.reverse(group)} | batches]
+  defp flush_batch(batches, {group, _used, _count}), do: [{:batch, Enum.reverse(group)} | batches]
 
   defp valid_object_spec?(%{oid: oid, type: type, size: size})
        when is_binary(oid) and is_binary(type) and is_integer(size) and size >= 0 do
