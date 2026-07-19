@@ -1,5 +1,5 @@
 defmodule Arbor.Comms.ResponseRouterTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Comms.ResponseRouter
   alias Arbor.Contracts.Comms.Message
