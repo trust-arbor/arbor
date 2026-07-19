@@ -186,8 +186,18 @@ defmodule Arbor.Shell.PortSession do
   @spec subscribe(GenServer.server(), pid()) :: :ok | {:error, :subscriber_not_alive}
   def subscribe(session, pid), do: GenServer.call(session, {:subscribe, pid})
 
+  @doc """
+  Sends input using bounded frames and waits for acceptance until the session's
+  absolute deadline, cancellation, or owner loss; it has no earlier client timeout.
+  """
   @spec send_input(GenServer.server(), iodata()) :: :ok | {:error, :not_running | term()}
-  def send_input(session, data), do: GenServer.call(session, {:send_input, data})
+  def send_input(session, data) do
+    # Profile-backed intensive sessions may use a deadline beyond the generic
+    # stream ceiling. Do not invent an earlier client timeout: ProcessGroup
+    # framing already bounds liveness by the session absolute deadline and
+    # observes owner DOWN / both cancel forms between nosuspend slots.
+    GenServer.call(session, {:send_input, data}, :infinity)
+  end
 
   @spec stop(GenServer.server(), timeout()) :: :ok | {:error, term()}
   def stop(session, timeout \\ 5_000) do
@@ -318,7 +328,35 @@ defmodule Arbor.Shell.PortSession do
   end
 
   def handle_call({:send_input, data}, _from, %{status: :running, handle: handle} = state) do
-    {:reply, ProcessGroup.send_input(handle, data), state}
+    framing_opts = [
+      deadline: state.deadline,
+      caller_mon: state.owner_ref,
+      # Both accepted forms: {:cancel_shell_execution, nil} and the exact session id.
+      cancel_id: state.id,
+      accept_nil_cancel: true
+    ]
+
+    case ProcessGroup.send_input(handle, data, framing_opts) do
+      :ok ->
+        {:reply, :ok, state}
+
+      # Stable validation errors: leave a still-usable interactive session alive.
+      {:error, reason}
+      when reason in [:invalid_shell_input, :stdin_input_too_large, :stdin_closed] ->
+        {:reply, {:error, reason}, state}
+
+      # Framing observed timeout, cancel, owner loss, or uncertain partial
+      # delivery under backpressure. Perform exactly one cleanup/state transition
+      # here — the matching mailbox message was already consumed by framing.
+      {:error, reason} ->
+        cleaned = framing_input_cleanup(state, reason)
+
+        if cleaned.status == :cleanup_pending do
+          {:reply, {:error, reason}, cleaned}
+        else
+          {:stop, :normal, {:error, reason}, cleaned}
+        end
+    end
   end
 
   def handle_call({:send_input, _data}, _from, state) do
@@ -520,6 +558,16 @@ defmodule Arbor.Shell.PortSession do
     opts = opts || state.opts || []
     remaining = state.deadline - System.monotonic_time(:millisecond)
 
+    # Initial stdin uses the same bounded nosuspend framing contract as
+    # interactive send_input: session absolute deadline, owner monitor, and both
+    # accepted cancel forms (kill nil + exact session id).
+    start_framing_opts = [
+      deadline: state.deadline,
+      caller_mon: state.owner_ref,
+      cancel_id: state.id,
+      accept_nil_cancel: true
+    ]
+
     with true <- remaining > 0,
          {:ok, executable} <- resolve_executable(state.executable),
          {:ok, handle} <-
@@ -531,12 +579,13 @@ defmodule Arbor.Shell.PortSession do
              state.timeout,
              state.max_output_bytes
            ),
-         :ok <- ProcessGroup.start(handle, Keyword.get(opts, :stdin)) do
+         :ok <- ProcessGroup.start(handle, Keyword.get(opts, :stdin), start_framing_opts) do
       running = %{state | handle: handle, status: :running}
       emit_signal(:session_started, running)
       {:ok, running}
     else
       false -> {:error, :stream_setup_timeout, state}
+      # start/3 already contained framing timeout/cancel/owner-loss; do not re-kill.
       {:error, reason} -> {:error, reason, state}
     end
   end
@@ -599,6 +648,17 @@ defmodule Arbor.Shell.PortSession do
   end
 
   defp cancel_running(state), do: state
+
+  # Framing already consumed the cancel/DOWN message or hit the absolute
+  # deadline. Other Port.command errors (for example a closed port) leave
+  # delivery uncertain. One cleanup only: never leave a possibly partial
+  # interactive delivery running under backpressure.
+  defp framing_input_cleanup(state, :timeout), do: cleanup_or_defer(state, :timeout, nil)
+  defp framing_input_cleanup(state, :cancelled), do: cleanup_or_defer(state, :cancelled, nil)
+  defp framing_input_cleanup(state, :caller_dead), do: cleanup_or_defer(state, :cancelled, nil)
+
+  defp framing_input_cleanup(state, _port_command_error),
+    do: cleanup_or_defer(state, :cancelled, nil)
 
   defp cleanup_or_defer(%{handle: %ProcessGroup{} = handle} = state, requested_reason, failure) do
     case ProcessGroup.terminate(handle, requested_reason) do

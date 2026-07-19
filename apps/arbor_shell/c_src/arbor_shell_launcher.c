@@ -239,6 +239,39 @@ static int write_all(int fd, const void *data, size_t length) {
   return 0;
 }
 
+static int set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL);
+  if (flags < 0) return -1;
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
+  return 0;
+}
+
+/* Nonblocking write of at most one pending CMD_INPUT frame. Returns:
+ *   0  — complete or still pending (EAGAIN); pending cleared when done
+ *  -1  — hard write error (EPIPE / other); caller must free pending and cancel */
+static int try_write_pending(int input_write_fd, uint8_t **pending, uint32_t *pending_len,
+                             uint32_t *pending_off) {
+  if (*pending == NULL || input_write_fd < 0) return 0;
+
+  while (*pending_off < *pending_len) {
+    ssize_t written =
+        write(input_write_fd, *pending + *pending_off, *pending_len - *pending_off);
+    if (written < 0) {
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+      return -1;
+    }
+    if (written == 0) return 0;
+    *pending_off += (uint32_t)written;
+  }
+
+  free(*pending);
+  *pending = NULL;
+  *pending_len = 0;
+  *pending_off = 0;
+  return 0;
+}
+
 static int read_all(int fd, void *data, size_t length) {
   uint8_t *cursor = data;
   while (length > 0) {
@@ -1122,8 +1155,23 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   uint8_t reason = REASON_NORMAL;
   uint8_t output[IO_CHUNK];
   /* Parent write end of child stdin. Closed only via CMD_CLOSE_STDIN or teardown.
-   * Tracking -1 after close keeps close idempotent and blocks writes to a closed fd. */
+   * Tracking -1 after close keeps close idempotent and blocks writes to a closed fd.
+   * Nonblocking + at most one pending IO_CHUNK frame keep duplex I/O live under
+   * pipe backpressure (blocking write_all deadlocks when child stdout is full). */
   int input_write_fd = input_pipe[1];
+  if (set_nonblocking(input_write_fd) != 0) {
+    int cleanup_status = 0;
+    if (contain_group(child, child, &cleanup_status, &tracker) == 0) {
+      send_error("failed to configure nonblocking child stdin");
+    } else {
+      send_error("contained process stdin setup cleanup failed");
+    }
+    return 126;
+  }
+
+  uint8_t *pending_input = NULL;
+  uint32_t pending_len = 0;
+  uint32_t pending_off = 0;
 
   while (!child_done) {
     if (monotonic_ms() >= deadline) {
@@ -1136,23 +1184,45 @@ static int run_exec(int argc, char **argv, int execution_mode) {
       break;
     }
 
-    struct pollfd fds[2] = {
-        {.fd = output_pipe[0], .events = POLLIN | POLLHUP, .revents = 0},
-        {.fd = STDIN_FILENO, .events = POLLIN | POLLHUP, .revents = 0}};
+    /* Always drain child output and observe controller HUP/ERR. Poll child
+     * stdin for POLLOUT only while a partial write remains. Do not read the
+     * next controller frame while one CMD_INPUT payload is still pending so
+     * frame order and deferred CLOSE stay exact. Owner-loss cancel under
+     * backpressure is delivered as controller HUP when BEAM closes the port
+     * (CMD_CANCEL may sit behind unread INPUT frames in the OS pipe). */
+    struct pollfd fds[3];
+    nfds_t nfds = 0;
+    const int idx_output = (int)nfds++;
+    fds[idx_output].fd = output_pipe[0];
+    fds[idx_output].events = POLLIN | POLLHUP | POLLERR;
+    fds[idx_output].revents = 0;
+
+    const int idx_controller = (int)nfds++;
+    fds[idx_controller].fd = STDIN_FILENO;
+    fds[idx_controller].events = POLLHUP | POLLERR;
+    if (pending_input == NULL) {
+      fds[idx_controller].events |= POLLIN;
+    }
+    fds[idx_controller].revents = 0;
+
+    if (pending_input != NULL && input_write_fd >= 0 && pending_off < pending_len) {
+      int idx_stdin = (int)nfds++;
+      fds[idx_stdin].fd = input_write_fd;
+      fds[idx_stdin].events = POLLOUT;
+      fds[idx_stdin].revents = 0;
+    }
+
     int wait = remaining_ms(deadline);
     if (wait > 25) wait = 25;
-    int polled = poll(fds, 2, wait);
+    int polled = poll(fds, nfds, wait);
     if (polled < 0 && errno != EINTR) {
       reason = REASON_CANCELLED;
       break;
     }
 
-    /* Drain child output before accepting the next input frame. If both pipes
-     * are ready and input wins, a duplex child (for example cat or
-     * hash-object --stdin-paths) can fill stdout while the launcher blocks
-     * writing stdin. Bounded Elixir-side input frames plus output-first
-     * ordering keep both pipes making progress. */
-    if (fds[0].revents & (POLLIN | POLLHUP)) {
+    /* 1) Drain child output first so duplex readers cannot fill stdout while
+     * we still hold pending stdin. */
+    if (fds[idx_output].revents & (POLLIN | POLLHUP | POLLERR)) {
       ssize_t count = read(output_pipe[0], output, sizeof(output));
       if (count > 0) {
         uint64_t available = max_output - output_bytes;
@@ -1169,7 +1239,24 @@ static int run_exec(int argc, char **argv, int execution_mode) {
       }
     }
 
-    if (fds[1].revents & (POLLIN | POLLHUP)) {
+    /* 2) Controller hangup/error cancels even when POLLIN is also set. */
+    if (fds[idx_controller].revents & (POLLHUP | POLLERR)) {
+      reason = REASON_CANCELLED;
+      break;
+    }
+
+    /* 3) Progress any pending nonblocking stdin write. */
+    if (pending_input != NULL) {
+      if (try_write_pending(input_write_fd, &pending_input, &pending_len, &pending_off) != 0) {
+        reason = REASON_CANCELLED;
+        break;
+      }
+    }
+
+    /* 4) Accept the next controller frame only when no input remains pending.
+     * CLOSE is only readable after the prior INPUT fully drains, so deferred
+     * close_stdin_pending is unreachable and intentionally omitted. */
+    if (pending_input == NULL && (fds[idx_controller].revents & POLLIN)) {
       uint8_t input_tag = 0;
       uint8_t *input_payload = NULL;
       uint32_t input_length = 0;
@@ -1188,20 +1275,35 @@ static int run_exec(int argc, char **argv, int execution_mode) {
           reason = REASON_CANCELLED;
           break;
         }
+        /* CLOSE after a prior INPUT is ordered by the pending gate above. */
         if (input_write_fd >= 0) {
           close(input_write_fd);
           input_write_fd = -1;
         }
       } else if (input_tag == CMD_INPUT) {
-        /* Fail closed: never write after stdin was closed. */
-        if (input_write_fd < 0 ||
-            (input_length > 0 &&
-             write_all(input_write_fd, input_payload, input_length) != 0)) {
+        /* Fail closed: never write after stdin was closed; reject oversized
+         * native frames above IO_CHUNK (Elixir must frame at this bound). */
+        if (input_write_fd < 0 || input_length > (uint32_t)IO_CHUNK) {
           free(input_payload);
           reason = REASON_CANCELLED;
           break;
         }
-        free(input_payload);
+        if (input_length == 0) {
+          free(input_payload);
+        } else {
+          pending_input = input_payload;
+          pending_len = input_length;
+          pending_off = 0;
+          if (try_write_pending(input_write_fd, &pending_input, &pending_len, &pending_off) !=
+              0) {
+            free(pending_input);
+            pending_input = NULL;
+            pending_len = 0;
+            pending_off = 0;
+            reason = REASON_CANCELLED;
+            break;
+          }
+        }
       } else {
         free(input_payload);
         reason = REASON_CANCELLED;
@@ -1213,6 +1315,11 @@ static int run_exec(int argc, char **argv, int execution_mode) {
     if (waited == child) child_done = 1;
     if (waited < 0 && errno == ECHILD) child_done = 1;
   }
+
+  free(pending_input);
+  pending_input = NULL;
+  pending_len = 0;
+  pending_off = 0;
 
   if (input_write_fd >= 0) {
     close(input_write_fd);

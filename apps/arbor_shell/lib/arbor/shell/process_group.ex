@@ -20,7 +20,13 @@ defmodule Arbor.Shell.ProcessGroup do
   @output_limit 2
   @cancelled 3
   @containment_failure 4
+  # Native launcher accepts at most IO_CHUNK (8192) payload bytes per CMD_INPUT.
   @stdin_frame_bytes 8_192
+  # Prior interactive per-call protocol ceiling: one Port {:packet, 4} control
+  # packet is MAX_CONTROL_PACKET (16 MiB) including the 1-byte tag, so payload
+  # max is 16 MiB - 1. Reject larger interactive calls with a stable error
+  # instead of queueing an unbounded number of native frames.
+  @max_interactive_input_bytes 16 * 1024 * 1024 - 1
 
   @teardown_timeout_ms 2_000
   @cleanup_retry_ms 100
@@ -167,28 +173,63 @@ defmodule Arbor.Shell.ProcessGroup do
          caller_mon,
          caller
        ) do
-    with :ok <- ensure_caller_alive(caller_mon, caller),
-         {:ok, handle} <-
-           open_with_launcher(
-             launcher_command,
-             executable,
-             args,
-             opts,
-             start_time,
-             timeout,
-             max_output_bytes
-           ),
-         :ok <- ensure_caller_alive(caller_mon, caller, handle),
-         :ok <- start(handle, Keyword.get(opts, :stdin)),
+    case ensure_caller_alive(caller_mon, caller) do
+      {:error, :caller_dead} = error ->
+        error
+
+      :ok ->
+        case open_with_launcher(
+               launcher_command,
+               executable,
+               args,
+               opts,
+               start_time,
+               timeout,
+               max_output_bytes
+             ) do
+          {:error, reason} ->
+            {:error, reason}
+
+          {:ok, handle} ->
+            # Port owner observes caller DOWN between frames and while waiting
+            # for a nosuspend command slot. No separate kill-watch: a second
+            # native kill can target a reused PGID after the first containment.
+            run_owned_one_shot_after_open(handle, opts, caller_mon, caller)
+        end
+    end
+  end
+
+  defp run_owned_one_shot_after_open(handle, opts, caller_mon, caller) do
+    cancel_id = Keyword.get(opts, :cancel_id)
+
+    framing_opts = [
+      caller_mon: caller_mon,
+      deadline: handle.deadline,
+      cancel_id: cancel_id
+    ]
+
+    # Exactly-once containment owners for this path:
+    # - ensure_caller_alive/3 for owner loss between framing steps
+    # - start/3 for CMD_START + initial stdin framing failures
+    # - close_stdin/2 for EOF framing failures
+    # Do not re-contain here: terminate/kill on a reused PGID is unsafe.
+    with :ok <- ensure_caller_alive(caller_mon, caller, handle),
+         :ok <- start(handle, Keyword.get(opts, :stdin), framing_opts),
          :ok <- ensure_caller_alive(caller_mon, caller, handle),
          # One-shot path always closes child stdin after optional initial bytes so
          # EOF-reading programs (e.g. cat) exit. Interactive PortSession leaves
          # stdin open for later send_input/2.
-         {:ok, handle} <- close_stdin(handle) do
-      collect(handle, Keyword.get(opts, :cancel_id), [], 0, caller_mon, caller)
+         {:ok, handle} <- close_stdin(handle, framing_opts) do
+      collect(handle, cancel_id, [], 0, caller_mon, caller)
     else
-      {:error, :caller_dead} = error ->
-        error
+      {:error, :caller_dead} ->
+        {:ok, %{reason: :cancelled, exit_code: 137, output: ""}}
+
+      {:error, :timeout} ->
+        {:ok, %{reason: :timeout, exit_code: 137, output: ""}}
+
+      {:error, :cancelled} ->
+        {:ok, %{reason: :cancelled, exit_code: 137, output: ""}}
 
       {:error, reason} ->
         {:error, reason}
@@ -299,14 +340,26 @@ defmodule Arbor.Shell.ProcessGroup do
   end
 
   @spec start(t(), iodata() | nil) :: :ok | {:error, term()}
-  def start(%__MODULE__{port: port} = handle, stdin) do
+  @spec start(t(), iodata() | nil, keyword()) :: :ok | {:error, term()}
+  def start(handle, stdin), do: start(handle, stdin, [])
+
+  def start(%__MODULE__{port: port, deadline: deadline} = handle, stdin, opts)
+      when is_list(opts) do
+    # Prefer explicit opts deadline; fall back to the handle absolute deadline.
+    cmd_opts = framing_command_opts(opts, deadline)
+
     with {:ok, encoded_stdin} <- encode_input(stdin),
-         :ok <- command(port, <<@start>>),
-         :ok <- maybe_send_stdin(port, encoded_stdin) do
+         :ok <- check_command_preflight(cmd_opts),
+         :ok <- command(port, <<@start>>, cmd_opts),
+         :ok <- maybe_send_stdin(port, encoded_stdin, cmd_opts) do
       :ok
     else
       {:error, reason} ->
-        {:ok, _terminal_reason} = terminate_until_exhausted(handle, :cancelled)
+        # Owner loss / cancel / timeout under stdin backpressure cannot rely on
+        # CMD_CANCEL being readable: the native loop holds at most one pending
+        # INPUT and will not drain further controller frames until that write
+        # completes. Bounded terminate always closes the port and kill-helper.
+        _ = contain_after_start_failure(handle, reason)
         {:error, reason}
     end
   end
@@ -319,15 +372,28 @@ defmodule Arbor.Shell.ProcessGroup do
   interactive `PortSession` leaves stdin open for later input.
   """
   @spec close_stdin(t()) :: {:ok, t()} | {:error, term()}
-  def close_stdin(%__MODULE__{stdin_open: false} = handle), do: {:ok, handle}
+  @spec close_stdin(t(), keyword()) :: {:ok, t()} | {:error, term()}
+  def close_stdin(handle), do: close_stdin(handle, [])
 
-  def close_stdin(%__MODULE__{port: port} = handle) do
-    case command(port, <<@close_stdin>>) do
-      :ok ->
-        {:ok, %{handle | stdin_open: false}}
+  def close_stdin(%__MODULE__{stdin_open: false} = handle, _opts), do: {:ok, handle}
 
+  def close_stdin(%__MODULE__{port: port, deadline: deadline} = handle, opts)
+      when is_list(opts) do
+    cmd_opts = framing_command_opts(opts, deadline)
+
+    with :ok <- check_command_preflight(cmd_opts),
+         :ok <- command(port, <<@close_stdin>>, cmd_opts) do
+      {:ok, %{handle | stdin_open: false}}
+    else
       {:error, reason} ->
-        {:ok, _terminal_reason} = terminate_until_exhausted(handle, :cancelled)
+        requested =
+          case reason do
+            :timeout -> :timeout
+            :cancelled -> :cancelled
+            _other -> :cancelled
+          end
+
+        {:ok, _terminal_reason} = terminate_until_exhausted(handle, requested)
         {:error, reason}
     end
   end
@@ -335,7 +401,12 @@ defmodule Arbor.Shell.ProcessGroup do
   @spec terminate(t(), :timeout | :output_limit | :cancelled) ::
           {:ok, terminal_reason()} | {:error, term()}
   def terminate(%__MODULE__{} = handle, requested_reason) do
+    # Single nosuspend cancel attempt only (command/2). Native CMD_CANCEL may
+    # sit behind a pending INPUT frame because the launcher stops controller
+    # POLLIN while one payload is pending — enqueue success is best-effort.
+    # Never retry cancel forever; always fall through to the 2s teardown path.
     _ = command(handle.port, <<@cancel>>)
+
     teardown_deadline = System.monotonic_time(:millisecond) + @teardown_timeout_ms
 
     case await_terminal(handle.port, teardown_deadline) do
@@ -344,8 +415,11 @@ defmodule Arbor.Shell.ProcessGroup do
         {:ok, normalize_requested_reason(reason, requested_reason)}
 
       {:error, _reason} ->
+        # Required even when cancel enqueue succeeded: close port (HUP) and
+        # prove process-group exhaustion via the native kill helper.
         kill_result = kill_group(handle.group_id)
         close_port(handle.port)
+        drain_port_mailbox(handle.port)
 
         case kill_result do
           :ok -> {:ok, requested_reason}
@@ -369,11 +443,30 @@ defmodule Arbor.Shell.ProcessGroup do
   end
 
   @spec send_input(t(), iodata()) :: :ok | {:error, term()}
-  def send_input(%__MODULE__{stdin_open: false}, _data), do: {:error, :stdin_closed}
+  @spec send_input(t(), iodata(), keyword()) :: :ok | {:error, term()}
+  def send_input(handle, data), do: send_input(handle, data, [])
 
-  def send_input(%__MODULE__{port: port}, data) do
-    with {:ok, encoded} <- encode_input(data) do
-      command(port, [<<@input>>, encoded])
+  def send_input(%__MODULE__{stdin_open: false}, _data, _opts), do: {:error, :stdin_closed}
+
+  def send_input(%__MODULE__{port: port, deadline: deadline}, data, opts)
+      when is_list(opts) do
+    # encode_input(nil) is valid for one-shot optional stdin, but interactive
+    # send_input must reject nil as invalid input — not as a size-ceiling miss.
+    # Invalid/oversized rejections happen before framing and do not kill the
+    # still-usable session; PortSession must preserve that contract.
+    cmd_opts = framing_command_opts(opts, deadline)
+
+    with {:ok, encoded} when is_binary(encoded) <- encode_input(data),
+         :ok <- ensure_interactive_input_bound(encoded) do
+      # Same native IO_CHUNK framing as one-shot initial stdin so interactive
+      # duplex sessions cannot block the launcher on a multi-MiB write_all.
+      # Use nosuspend framing so a full controller pipe cannot freeze the
+      # session owner under duplex backpressure. Owner DOWN and both accepted
+      # cancel forms are observed between frames and while waiting for a slot.
+      send_stdin_frames(port, encoded, cmd_opts)
+    else
+      {:ok, nil} -> {:error, :invalid_shell_input}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -737,31 +830,194 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
+  # No-opts path: single nosuspend attempt. Used by terminate/2 cancel enqueue.
+  # Never retries — a saturated controller pipe must not block teardown.
   defp command(port, payload) do
-    if Port.command(port, payload), do: :ok, else: {:error, :port_command_failed}
-  catch
-    :error, reason -> {:error, reason}
-  end
-
-  defp maybe_send_stdin(_port, nil), do: :ok
-
-  defp maybe_send_stdin(port, stdin) when is_binary(stdin) do
-    send_stdin_frames(port, stdin)
-  end
-
-  defp send_stdin_frames(_port, <<>>), do: :ok
-
-  defp send_stdin_frames(port, stdin) when byte_size(stdin) <= @stdin_frame_bytes do
-    command(port, [<<@input>>, stdin])
-  end
-
-  defp send_stdin_frames(port, stdin) do
-    <<frame::binary-size(@stdin_frame_bytes), rest::binary>> = stdin
-
-    with :ok <- command(port, [<<@input>>, frame]) do
-      send_stdin_frames(port, rest)
+    try do
+      case Port.command(port, payload, [:nosuspend]) do
+        true -> :ok
+        false -> {:error, :port_command_busy}
+      end
+    catch
+      :error, reason -> {:error, reason}
     end
   end
+
+  # Framing path: bounded nosuspend retries until an absolute deadline, while
+  # also observing owner death and accepted cancel forms. A nil deadline never retries.
+  defp command(port, payload, opts) when is_list(opts) do
+    deadline = Keyword.get(opts, :deadline)
+    caller_mon = Keyword.get(opts, :caller_mon)
+    cancel_id = Keyword.get(opts, :cancel_id)
+    accept_nil_cancel = Keyword.get(opts, :accept_nil_cancel, false) == true
+
+    if is_integer(deadline) do
+      do_command_with_backpressure(
+        port,
+        payload,
+        deadline,
+        caller_mon,
+        cancel_id,
+        accept_nil_cancel
+      )
+    else
+      command(port, payload)
+    end
+  end
+
+  # Never block the port owner on a full controller→launcher pipe. Under duplex
+  # backpressure the launcher drains child stdout before accepting the next
+  # frame; a blocking Port.command would freeze owner-loss / deadline / cancel.
+  defp do_command_with_backpressure(
+         port,
+         payload,
+         deadline,
+         caller_mon,
+         cancel_id,
+         accept_nil_cancel
+       ) do
+    if System.monotonic_time(:millisecond) >= deadline do
+      {:error, :timeout}
+    else
+      try do
+        case Port.command(port, payload, [:nosuspend]) do
+          true ->
+            :ok
+
+          false ->
+            case wait_command_slot(deadline, caller_mon, cancel_id, accept_nil_cancel) do
+              :ok ->
+                do_command_with_backpressure(
+                  port,
+                  payload,
+                  deadline,
+                  caller_mon,
+                  cancel_id,
+                  accept_nil_cancel
+                )
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+        end
+      catch
+        :error, reason -> {:error, reason}
+      end
+    end
+  end
+
+  defp wait_command_slot(deadline, caller_mon, cancel_id, accept_nil_cancel) do
+    now = System.monotonic_time(:millisecond)
+
+    wait_ms =
+      cond do
+        is_integer(deadline) and deadline <= now -> 0
+        is_integer(deadline) -> min(deadline - now, 5)
+        true -> 0
+      end
+
+    if wait_ms == 0 do
+      {:error, :timeout}
+    else
+      receive do
+        # Exact execution/session cancel id (async one-shot + PortSession id form).
+        {:cancel_shell_execution, ^cancel_id} when not is_nil(cancel_id) ->
+          {:error, :cancelled}
+
+        # PortSession.kill/1 sends nil; interactive framing must accept it.
+        {:cancel_shell_execution, nil} when accept_nil_cancel ->
+          {:error, :cancelled}
+
+        {:DOWN, ^caller_mon, :process, _pid, _reason} when is_reference(caller_mon) ->
+          {:error, :caller_dead}
+      after
+        max(wait_ms, 1) -> :ok
+      end
+    end
+  end
+
+  defp maybe_send_stdin(_port, nil, _opts), do: :ok
+
+  defp maybe_send_stdin(port, stdin, opts) when is_binary(stdin) and is_list(opts) do
+    send_stdin_frames(port, stdin, opts)
+  end
+
+  defp send_stdin_frames(_port, <<>>, _opts), do: :ok
+
+  defp send_stdin_frames(port, stdin, opts)
+       when is_binary(stdin) and byte_size(stdin) <= @stdin_frame_bytes and is_list(opts) do
+    with :ok <- check_command_preflight(opts) do
+      command(port, [<<@input>>, stdin], opts)
+    end
+  end
+
+  defp send_stdin_frames(port, stdin, opts) when is_binary(stdin) and is_list(opts) do
+    <<frame::binary-size(@stdin_frame_bytes), rest::binary>> = stdin
+
+    # Check owner death / deadline between frames even when Port.command keeps
+    # returning true (driver accepted the write without backpressure).
+    with :ok <- check_command_preflight(opts),
+         :ok <- command(port, [<<@input>>, frame], opts) do
+      send_stdin_frames(port, rest, opts)
+    end
+  end
+
+  defp check_command_preflight(opts) when is_list(opts) do
+    deadline = Keyword.get(opts, :deadline)
+    caller_mon = Keyword.get(opts, :caller_mon)
+    cancel_id = Keyword.get(opts, :cancel_id)
+    accept_nil_cancel = Keyword.get(opts, :accept_nil_cancel, false) == true
+
+    if is_integer(deadline) and System.monotonic_time(:millisecond) >= deadline do
+      {:error, :timeout}
+    else
+      # Observe accepted cancel forms and owner death without waiting — frames
+      # must not leave cancel/DOWN sitting until the absolute deadline.
+      receive do
+        {:cancel_shell_execution, ^cancel_id} when not is_nil(cancel_id) ->
+          {:error, :cancelled}
+
+        {:cancel_shell_execution, nil} when accept_nil_cancel ->
+          {:error, :cancelled}
+
+        {:DOWN, ^caller_mon, :process, _pid, _reason} when is_reference(caller_mon) ->
+          {:error, :caller_dead}
+      after
+        0 -> :ok
+      end
+    end
+  end
+
+  # Normalize framing opts once so start/close/send_input share the same
+  # cancel and owner observation contract.
+  defp framing_command_opts(opts, default_deadline) when is_list(opts) do
+    [
+      deadline: Keyword.get(opts, :deadline, default_deadline),
+      caller_mon: Keyword.get(opts, :caller_mon),
+      cancel_id: Keyword.get(opts, :cancel_id),
+      accept_nil_cancel: Keyword.get(opts, :accept_nil_cancel, false) == true
+    ]
+  end
+
+  defp contain_after_start_failure(%__MODULE__{} = handle, reason) do
+    requested =
+      case reason do
+        :timeout -> :timeout
+        :cancelled -> :cancelled
+        _other -> :cancelled
+      end
+
+    # Always use bounded terminate (single cancel attempt + 2s await + kill).
+    # Partial framing must never surface as normal success.
+    terminate_until_exhausted(handle, requested)
+  end
+
+  defp ensure_interactive_input_bound(stdin)
+       when is_binary(stdin) and byte_size(stdin) <= @max_interactive_input_bytes do
+    :ok
+  end
+
+  defp ensure_interactive_input_bound(_stdin), do: {:error, :stdin_input_too_large}
 
   defp encode_input(nil), do: {:ok, nil}
 
