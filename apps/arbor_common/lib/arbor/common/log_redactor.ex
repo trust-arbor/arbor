@@ -6,9 +6,10 @@ defmodule Arbor.Common.LogRedactor do
   which covers both PII and secret patterns.
 
   Traversal is total and globally bounded:
-  - Lists are walked one cons cell at a time (including multi-cons improper tails)
-  - Maps use `:maps.iterator` / `:maps.next` (no full `Map.to_list/1`)
-  - Tuples use `elem/2` indexing (no full `Tuple.to_list/1`)
+  - Lists are peeled one cons cell at a time (proper and improper multi-cons)
+    without using `is_list/1` to decide whether to continue the spine
+  - Maps use `:maps.iterator` / `:maps.next` (no `Map.to_list/1`, no full copy)
+  - Tuples use `tuple_size/1` + `elem/2` (no `Tuple.to_list/1`)
   - Struct-tagged maps never invoke Enumerable or `struct/2` callbacks
   - Both map keys and values share one remaining-node budget
   - Binary redaction fails closed to `"[REDACTED]"` on any exception/throw
@@ -70,11 +71,12 @@ defmodule Arbor.Common.LogRedactor do
     {redact_binary(bin), budget - 1}
   end
 
+  # List guard is only for *entering* list mode. Spine continuation never uses
+  # is_list/1 — see continue_list_tail/5, which peels cons by pattern match.
   defp walk(list, depth, budget) when is_list(list) do
     if depth <= 0 do
       {@redacted_marker, budget - 1}
     else
-      # One node for the list spine root; walk cons cells without materializing.
       walk_list(list, depth - 1, budget - 1, [])
     end
   end
@@ -83,22 +85,25 @@ defmodule Arbor.Common.LogRedactor do
     if depth <= 0 do
       {@redacted_marker, budget - 1}
     else
-      # Index elements; never Tuple.to_list/1 (would allocate the full attacker
-      # controlled container before the node budget can stop us).
+      # Index only; never Tuple.to_list/1 (full attacker-controlled allocation).
       walk_tuple(tuple, 0, tuple_size(tuple), depth - 1, budget - 1, [])
     end
   end
 
   # Struct-tagged maps (real modules or forged atoms). Never call struct/2 or
-  # mod.__struct__/1 — those can raise or run arbitrary code in a Logger filter.
+  # mod.__struct__/1. Iterate in place — never Map.delete/Map.to_list the whole
+  # struct (that would allocate O(size) before the node budget can stop us).
   defp walk(%{__struct__: mod} = map, depth, budget) when is_atom(mod) do
     if depth <= 0 do
       {@redacted_marker, budget - 1}
     else
-      # Drop __struct__ then iterate the plain field map with a bounded iterator.
-      fields = Map.delete(map, :__struct__)
-
-      case walk_map_iterator(:maps.next(:maps.iterator(fields)), depth - 1, budget - 1, []) do
+      case walk_map_iterator(
+             :maps.next(:maps.iterator(map)),
+             depth - 1,
+             budget - 1,
+             [],
+             _skip_struct? = true
+           ) do
         {:complete, pairs, budget_left} ->
           case assemble_pairs(pairs) do
             {:ok, assembled} ->
@@ -109,7 +114,6 @@ defmodule Arbor.Common.LogRedactor do
           end
 
         {:incomplete, _pairs, budget_left} ->
-          # Partial struct-shaped maps are unsafe for Inspect/protocol dispatch.
           {@redacted_marker, budget_left}
       end
     end
@@ -119,7 +123,13 @@ defmodule Arbor.Common.LogRedactor do
     if depth <= 0 do
       {@redacted_marker, budget - 1}
     else
-      case walk_map_iterator(:maps.next(:maps.iterator(map)), depth - 1, budget - 1, []) do
+      case walk_map_iterator(
+             :maps.next(:maps.iterator(map)),
+             depth - 1,
+             budget - 1,
+             [],
+             _skip_struct? = false
+           ) do
         {:complete, pairs, budget_left} ->
           case assemble_pairs(pairs) do
             {:ok, assembled} -> {assembled, budget_left}
@@ -137,12 +147,20 @@ defmodule Arbor.Common.LogRedactor do
 
   defp walk(other, _depth, budget), do: {other, budget - 1}
 
-  # --- List: recursive cons traversal ---------------------------------------
-  # Walks proper and improper (multi-cons) lists one cell at a time. When the
-  # budget is exhausted, the unvisited remainder — including any improper tail —
-  # is replaced with a plain marker and never returned.
+  # --- List: recursive cons peel (no is_list/1 on the remainder) ------------
+  #
+  # Multi-cons improper lists such as [safe, "secret..." | tail] are stored as
+  # [safe | ["secret..." | tail]]. Each cons is peeled by [head | tail] match.
+  # Continuation decides by pattern match on the remainder:
+  #   []              -> proper terminator
+  #   [_ | _] = cons  -> another spine cell (proper or improper)
+  #   other           -> true improper non-list tail (must walk as a term)
+  #
+  # Never pass a multi-cell improper remainder wholesale to walk/3's generic
+  # `other` clause — that would preserve secret-bearing list spines unredacted.
 
   defp walk_list(_rest, _depth, budget, acc) when budget <= 0 do
+    # Drop unvisited remainder (including any improper secret tail).
     {Enum.reverse([@redacted_marker | acc]), 0}
   end
 
@@ -150,17 +168,24 @@ defmodule Arbor.Common.LogRedactor do
 
   defp walk_list([head | tail], depth, budget, acc) do
     {head_redacted, budget_left} = walk(head, depth, budget)
+    continue_list_tail(tail, depth, budget_left, head_redacted, acc)
+  end
 
-    # is_list/1 is true for improper lists too, so multi-cons improper spines
-    # (e.g. [a | [b | secret]]) continue recursively until a non-list tail.
-    if is_list(tail) do
-      walk_list(tail, depth, budget_left, [head_redacted | acc])
-    else
-      # True improper non-list tail: must walk (or fail closed) — never leave
-      # the original tail attached after a partial walk.
-      {tail_redacted, budget_final} = walk(tail, depth, budget_left)
-      {finish_improper(acc, head_redacted, tail_redacted), budget_final}
-    end
+  # Proper end of list.
+  defp continue_list_tail([], depth, budget, head_redacted, acc) do
+    walk_list([], depth, budget, [head_redacted | acc])
+  end
+
+  # Another cons cell — covers proper *and* improper multi-cons spines.
+  # Pattern `[_ | _]` matches improper lists; does not use is_list/1.
+  defp continue_list_tail([_ | _] = next_cons, depth, budget, head_redacted, acc) do
+    walk_list(next_cons, depth, budget, [head_redacted | acc])
+  end
+
+  # True improper non-list tail (binary, tuple, map, atom, ...). Walk it.
+  defp continue_list_tail(non_list_tail, depth, budget, head_redacted, acc) do
+    {tail_redacted, budget_final} = walk(non_list_tail, depth, budget)
+    {finish_improper(acc, head_redacted, tail_redacted), budget_final}
   end
 
   defp finish_improper(acc, head, tail) do
@@ -185,29 +210,33 @@ defmodule Arbor.Common.LogRedactor do
 
   # --- Map: bounded iterator (no Map.to_list/1) -----------------------------
 
-  defp walk_map_iterator(:none, _depth, budget, acc) do
+  defp walk_map_iterator(:none, _depth, budget, acc, _skip_struct?) do
     {:complete, Enum.reverse(acc), budget}
   end
 
-  defp walk_map_iterator(_next, _depth, budget, acc) when budget <= 0 do
-    # Stop iterating; unvisited pairs never enter the output.
+  defp walk_map_iterator(_next, _depth, budget, acc, _skip_struct?) when budget <= 0 do
     {:incomplete, Enum.reverse(acc), 0}
   end
 
-  defp walk_map_iterator({key, value, rest_iterator}, depth, budget, acc) do
-    {key_redacted, budget_after_key} = walk(key, depth, budget)
-    {value_redacted, budget_left} = walk(value, depth, budget_after_key)
+  defp walk_map_iterator({key, value, rest_iterator}, depth, budget, acc, skip_struct?) do
+    if skip_struct? and key == :__struct__ do
+      # Skip the tag without charging budget; never copy the whole map first.
+      walk_map_iterator(:maps.next(rest_iterator), depth, budget, acc, skip_struct?)
+    else
+      {key_redacted, budget_after_key} = walk(key, depth, budget)
+      {value_redacted, budget_left} = walk(value, depth, budget_after_key)
 
-    walk_map_iterator(
-      :maps.next(rest_iterator),
-      depth,
-      budget_left,
-      [{key_redacted, value_redacted} | acc]
-    )
+      walk_map_iterator(
+        :maps.next(rest_iterator),
+        depth,
+        budget_left,
+        [{key_redacted, value_redacted} | acc],
+        skip_struct?
+      )
+    end
   end
 
   # After key redaction, colliding keys must not silently merge secret values.
-  # Fail closed with a plain marker rather than emit an ambiguous map.
   defp assemble_pairs(pairs) do
     keys = Enum.map(pairs, fn {key, _value} -> key end)
 

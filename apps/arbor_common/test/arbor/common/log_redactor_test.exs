@@ -230,16 +230,20 @@ defmodule Arbor.Common.LogRedactorTest do
     test "multi-cons improper list tails with secrets are walked or fail closed" do
       secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
       secret_bin = "API_KEY=#{secret}"
+      secret_bin2 = "token=#{secret}"
 
-      # True improper spines (non-list final tails). Multi-cons form must not
-      # leave an unwalked improper tail attached after a partial walk.
+      # Owner regression: at least two heads plus a non-list tail that itself
+      # carries secret-bearing binaries. Shape [safe, "secret..." | tail] is
+      # [safe | ["secret..." | tail]] — spine must peel cons-by-cons; never
+      # pass the multi-cell improper remainder to walk/3 as opaque `other`.
+      two_heads_secret_tail = [:safe, secret_bin | {secret_bin2, :end}]
       multi_cons = [:ok | [:more | secret_bin]]
       shallow_improper = [:head | secret_bin]
       nested_improper = [1 | [2 | [3 | secret_bin]]]
-      # [a, b | secret] sugar → [a | [b | secret]]
       sugar_improper = [1, 2 | secret_bin]
 
       report = %{
+        two_heads: two_heads_secret_tail,
         multi: multi_cons,
         shallow: shallow_improper,
         nested: nested_improper,
@@ -252,27 +256,41 @@ defmodule Arbor.Common.LogRedactorTest do
 
       refute_sensitive(redacted, secret)
       assert_has_redacted_marker(redacted)
+
+      # Explicit shape check on the two-head improper form.
+      assert is_list(redacted.two_heads)
+      refute_sensitive(redacted.two_heads, secret)
     end
 
     test "large tuple does not leak a secret past the node budget" do
       secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
-      # Many small elements then a secret-bearing binary at the end. The walk
-      # must stop by budget without Tuple.to_list/1 of the full container, and
-      # must not emit the secret from an unwalked suffix.
-      huge = List.to_tuple(Enum.to_list(1..300) ++ ["token=#{secret}"])
+      # Far beyond the 256-node budget. elem/2 walk must fail closed without
+      # materialising every element, and must not emit the secret suffix.
+      n = 5_000
+      huge = List.to_tuple(Enum.to_list(1..n) ++ ["token=#{secret}"])
 
       event = %{level: :error, meta: %{}, msg: {:report, %{t: huge}}}
       assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
       refute_sensitive(redacted, secret)
+
+      # Bounded output: mid-tuple budget exhaustion replaces the whole tuple
+      # with a plain marker rather than a 5000-element redacted copy.
+      assert redacted.t == %{redacted: true} or is_tuple(redacted.t)
+
+      if is_tuple(redacted.t) do
+        assert tuple_size(redacted.t) <= 256
+      end
     end
 
     test "large map does not leak a secret past the node budget" do
       secret = "AKIA" <> "IOSFODNN7EXAMPLE"
+      n = 5_000
 
-      # First entries are inert; secret lives only in later keys/values so a
-      # budget-capped iterator walk must omit or redact it — never return raw.
+      # Iterator walk scales with the node budget, not container size. Secret
+      # only in late keys/values; raw secret must never appear, and walked
+      # pair count must stay within the global budget.
       wide =
-        1..400
+        1..n
         |> Enum.reduce(%{}, fn i, acc ->
           Map.put(acc, :"k#{i}", i)
         end)
@@ -283,6 +301,10 @@ defmodule Arbor.Common.LogRedactorTest do
       assert %{msg: {:report, redacted}} = LogRedactor.filter(event, [])
       refute_sensitive(redacted, secret)
       refute_struct_tagged_redaction_markers(redacted)
+
+      # Output map is far smaller than the attacker-controlled input.
+      assert map_size(redacted) < n
+      assert map_size(redacted) <= 256
     end
   end
 
