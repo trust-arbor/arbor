@@ -4,6 +4,9 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
   # Bounded terminal causality for benchmark report rows. Prefers an explicit
   # reason/error when present; otherwise derives from the first failed legacy
   # validation entry without exposing stdout or unbounded command output.
+  # Text fragments pass through Arbor.Common.SensitiveData before the final bound.
+
+  alias Arbor.Common.SensitiveData
 
   @max_reason_bytes 1_000
   @max_stderr_bytes 400
@@ -79,7 +82,7 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
 
     case parts do
       [] -> "validation_failed"
-      _ -> Enum.join(parts, " ")
+      _ -> Enum.join(parts, " ") |> finalize_reason_text()
     end
   end
 
@@ -88,6 +91,7 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
 
   defp maybe_reason_part(parts, label, value) when is_binary(value) do
     if String.valid?(value) and String.trim(value) != "" do
+      # Command/stderr/status text can carry credentials; redact before join.
       parts ++ ["#{label}=#{reason_string(value)}"]
     else
       parts
@@ -106,7 +110,10 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
 
   defp bounded_validation_stderr(stderr) when is_binary(stderr) do
     if String.valid?(stderr) and String.trim(stderr) != "" do
-      String.slice(stderr, 0, @max_stderr_bytes)
+      # Redact before the stderr excerpt bound so secrets near the cut are not kept.
+      stderr
+      |> redact_text()
+      |> String.slice(0, @max_stderr_bytes)
     else
       nil
     end
@@ -117,18 +124,42 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
   defp reason_string(nil), do: "unspecified"
 
   defp reason_string(value) when is_binary(value) do
-    if String.valid?(value) do
-      String.slice(value, 0, @max_reason_bytes)
-    else
-      bytes = binary_part(value, 0, min(byte_size(value), 500))
-      "invalid_utf8:#{Base.encode16(bytes, case: :lower)}"
-    end
+    value
+    |> then(fn text ->
+      if String.valid?(text) do
+        text
+      else
+        bytes = binary_part(text, 0, min(byte_size(text), 500))
+        "invalid_utf8:#{Base.encode16(bytes, case: :lower)}"
+      end
+    end)
+    |> finalize_reason_text()
   end
 
-  defp reason_string(value) when is_atom(value), do: Atom.to_string(value)
+  defp reason_string(value) when is_atom(value) do
+    value
+    |> Atom.to_string()
+    |> finalize_reason_text()
+  end
 
   defp reason_string(value) do
-    inspect(value, limit: 30, printable_limit: @max_reason_bytes, width: 120)
+    value
+    |> inspect(limit: 30, printable_limit: @max_reason_bytes, width: 120)
+    |> finalize_reason_text()
+  end
+
+  # Apply the existing SensitiveData redaction boundary, then enforce the
+  # final 1000-byte ceiling on the redacted text.
+  defp finalize_reason_text(text) when is_binary(text) do
+    text
+    |> redact_text()
+    |> String.slice(0, @max_reason_bytes)
+  end
+
+  defp redact_text(text) when is_binary(text) do
+    SensitiveData.redact(text)
+  rescue
+    _ -> text
   end
 
   defp map_value(map, string_key, atom_key) when is_map(map) do

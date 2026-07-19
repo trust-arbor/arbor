@@ -3,13 +3,21 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservations do
 
   # Closed projection of Arbor-supplied ACP usage into report-row observations.
   # Volatile provider usage is an observation, not a semantic-parity field.
+  #
+  # Grok ACP turn_completed usage (local evidence) supplies:
+  #   inputTokens, outputTokens, totalTokens, cachedReadTokens, reasoningTokens,
+  #   modelCalls, apiDurationMs, costUsdTicks, numTurns, and nested modelUsage.
+  # Nested modelUsage is intentionally excluded.
 
   # Signed 64-bit ceiling matches Arbor.LLM.finite_number?/1 integer bounds.
   @max_integer 9_223_372_036_854_775_807
   @max_encoded_bytes 16_384
 
-  # Canonical snake_case output key => accepted input aliases (prefer first match).
-  # Provider-native cost is projected as cost_ticks only — never labeled as USD.
+  # Canonical snake_case output key => accepted input aliases in precedence order.
+  # Alias selection is first PRESENT key (not first valid value): a malformed
+  # preferred field omits the observation rather than falling through.
+  # costUsdTicks projects as cost_ticks (never USD). Generic provider "cost"
+  # is not an established ACP alias here and is not accepted.
   @fields [
     {"input_tokens",
      [
@@ -30,19 +38,20 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservations do
        "completionTokens"
      ]},
     {"total_tokens", ["total_tokens", :total_tokens, "totalTokens"]},
-    {"cache_read_input_tokens",
+    {"cached_read_tokens",
      [
+       "cached_read_tokens",
+       :cached_read_tokens,
+       "cachedReadTokens",
        "cache_read_input_tokens",
        :cache_read_input_tokens,
        "cacheReadInputTokens"
      ]},
-    {"cache_creation_input_tokens",
-     [
-       "cache_creation_input_tokens",
-       :cache_creation_input_tokens,
-       "cacheCreationInputTokens"
-     ]},
-    {"cost_ticks", ["cost_ticks", :cost_ticks, "costTicks", "cost", :cost]}
+    {"reasoning_tokens", ["reasoning_tokens", :reasoning_tokens, "reasoningTokens"]},
+    {"model_calls", ["model_calls", :model_calls, "modelCalls"]},
+    {"api_duration_ms", ["api_duration_ms", :api_duration_ms, "apiDurationMs"]},
+    {"cost_ticks", ["cost_ticks", :cost_ticks, "costTicks", "costUsdTicks", :costUsdTicks]},
+    {"num_turns", ["num_turns", :num_turns, "numTurns"]}
   ]
 
   @context_aliases ["context_tokens", :context_tokens, "contextTokens"]
@@ -52,6 +61,7 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservations do
 
   Returns a JSON-clean map of accepted non-negative finite numeric fields.
   Malformed, negative, non-finite, nested, or oversized values are omitted.
+  Nested provider maps such as modelUsage are never projected.
   """
   @spec from_result(term()) :: map()
   def from_result(result) when is_map(result) and not is_struct(result) do
@@ -85,9 +95,9 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservations do
   @spec from_usage(term()) :: map()
   def from_usage(usage) when is_map(usage) and not is_struct(usage) do
     Enum.reduce(@fields, %{}, fn {canonical, aliases}, acc ->
-      case first_numeric(usage, aliases) do
-        nil -> acc
-        value -> Map.put(acc, canonical, value)
+      case first_present_numeric(usage, aliases) do
+        {:ok, value} -> Map.put(acc, canonical, value)
+        :omit -> acc
       end
     end)
   end
@@ -121,7 +131,10 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservations do
   end
 
   defp first_context_tokens(metrics) when is_map(metrics) do
-    first_numeric(metrics, @context_aliases)
+    case first_present_numeric(metrics, @context_aliases) do
+      {:ok, value} -> value
+      :omit -> nil
+    end
   end
 
   defp first_context_tokens(_metrics), do: nil
@@ -142,20 +155,33 @@ defmodule Arbor.Commands.CodingBenchmark.UsageObservations do
 
   defp maybe_put_context_tokens(observations, _value), do: observations
 
-  defp first_numeric(map, aliases) when is_map(map) do
-    Enum.find_value(aliases, fn key ->
+  # First PRESENT alias wins. If that value is malformed/negative/oversized,
+  # omit the field entirely — do not scan secondary aliases for a salvage.
+  defp first_present_numeric(map, aliases) when is_map(map) do
+    Enum.find_value(aliases, :omit, fn key ->
       case Map.fetch(map, key) do
-        {:ok, value} -> normalize_numeric(value)
-        :error -> nil
+        {:ok, value} ->
+          case normalize_numeric(value) do
+            nil -> :omit
+            normalized -> {:ok, normalized}
+          end
+
+        :error ->
+          nil
       end
     end)
+    |> case do
+      {:ok, value} -> {:ok, value}
+      :omit -> :omit
+      nil -> :omit
+    end
   end
 
-  defp first_numeric(_map, _aliases), do: nil
+  defp first_present_numeric(_map, _aliases), do: :omit
 
   # Token and tick counts must be non-negative finite numbers within signed-64.
-  # Floats are only retained when they are finite and convert cleanly; cost maps
-  # and other nested shapes are rejected (fail-closed per field).
+  # Floats are only retained when they are finite; nested maps (modelUsage,
+  # cost breakdowns) and other non-scalar shapes are rejected per field.
   defp normalize_numeric(value) when is_integer(value) do
     if value >= 0 and value <= @max_integer, do: value, else: nil
   end

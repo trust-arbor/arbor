@@ -86,4 +86,42 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReasonTest do
     assert TerminalReason.from_result(%{"payload" => %{"status" => "declined"}}, "declined") ==
              nil
   end
+
+  test "redacts API-key patterns from explicit errors and validation stderr" do
+    # Matches Arbor.Common.SensitiveData Anthropic API key pattern.
+    api_key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+
+    explicit = %{
+      "payload" => %{
+        "error" => "pipeline failed with key=#{api_key} during handler binding"
+      }
+    }
+
+    explicit_reason = TerminalReason.from_result(explicit, "pipeline_error")
+    assert is_binary(explicit_reason)
+    refute explicit_reason =~ api_key
+    assert explicit_reason =~ "[REDACTED]"
+    assert byte_size(explicit_reason) <= 1_000
+
+    validation = %{
+      "payload" => %{
+        "status" => "validation_failed",
+        "validation" => [
+          %{
+            "command" => "mix test",
+            "passed" => false,
+            "exit_code" => 1,
+            "stderr" => "export ANTHROPIC_API_KEY=#{api_key}\nCompilation failed"
+          }
+        ]
+      }
+    }
+
+    validation_reason = TerminalReason.from_result(validation, "validation_failed")
+    assert is_binary(validation_reason)
+    refute validation_reason =~ api_key
+    assert validation_reason =~ "[REDACTED]"
+    assert validation_reason =~ "exit_code=1"
+    assert byte_size(validation_reason) <= 1_000
+  end
 end
