@@ -108,7 +108,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
   end
 
   test "hanging executor is killed and cannot block pair-root cleanup" do
-    scenario = production_scenario!(1_000)
+    outer = min_pipeline_execution_timeout_ms()
+    scenario = production_scenario!(outer)
 
     Application.put_env(
       :arbor_commands,
@@ -127,16 +128,17 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
     assert {:ok, report} = run_production_scenario(scenario)
 
     assert_receive {:hanging_executor_started, pid, "agent_benchmark", task,
-                    %{"timeout" => 1_000}}
+                    %{"timeout" => ^outer}}
 
     refute Process.alive?(pid)
-    refute File.exists?(Path.dirname(task["repo_path"]))
+    fields = coding_task_fields(task)
+    refute File.exists?(Path.dirname(fields["repo_path"]))
 
     timed_out = row(report, "legacy")
     assert timed_out["terminal_status"] == "executor_timeout"
 
     assert timed_out["terminal_reason"] ==
-             "execution_timeout:1000;artifact_lease_retained:unconfirmed_worker_cleanup"
+             "execution_timeout:#{outer};artifact_lease_retained:unconfirmed_worker_cleanup"
 
     assert timed_out["objective_verifier"]["status"] == "failed"
 
@@ -147,7 +149,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
   end
 
   test "pipeline timeout cancel hook removes external process and filesystem resources" do
-    scenario = production_scenario!(1_000)
+    outer = min_pipeline_execution_timeout_ms()
+    scenario = production_scenario!(outer)
     resource_root = Path.join(scenario.root, "external-executor-resources")
     File.mkdir!(resource_root)
     {:ok, registry} = Agent.start_link(fn -> %{} end)
@@ -186,7 +189,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
   end
 
   test "hanging pipeline cancel hook is bounded before pair-root cleanup" do
-    scenario = production_scenario!(1_000, 50)
+    outer = min_pipeline_execution_timeout_ms()
+    scenario = production_scenario!(outer, 50)
 
     Application.put_env(
       :arbor_commands,
@@ -205,7 +209,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
     assert {:ok, report} = run_production_scenario(scenario)
 
     assert_receive {:hanging_pipeline_started, run_pid, "agent_benchmark", task,
-                    %{"timeout" => 1_000}}
+                    %{"timeout" => ^outer}}
 
     assert_receive {:hanging_cancel_started, cancel_pid, "agent_benchmark",
                     %{"task_id" => task_id}}
@@ -213,7 +217,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
     assert String.starts_with?(task_id, "coding-benchmark-pipeline-")
     refute Process.alive?(run_pid)
     refute Process.alive?(cancel_pid)
-    refute File.exists?(Path.dirname(task["repo_path"]))
+    fields = coding_task_fields(task)
+    refute File.exists?(Path.dirname(fields["repo_path"]))
 
     timed_out = row(report, "pipeline")
     assert timed_out["terminal_status"] == "executor_timeout"
@@ -222,7 +227,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
   end
 
   test "status-only production cancellation is not reported as worker cancellation" do
-    scenario = production_scenario!(1_000, 50)
+    outer = min_pipeline_execution_timeout_ms()
+    scenario = production_scenario!(outer, 50)
 
     Application.put_env(
       :arbor_commands,
@@ -253,7 +259,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
   end
 
   test "unconfirmed timeout retains artifact lease against late writers and identical reruns" do
-    scenario = production_scenario!(250, 50)
+    outer = min_pipeline_execution_timeout_ms()
+    scenario = production_scenario!(outer, 50)
 
     Application.put_env(
       :arbor_commands,

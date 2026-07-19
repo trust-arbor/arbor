@@ -65,12 +65,15 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
         only: [
           assert_exact_inputs: 4,
           benchmark_requests!: 0,
+          benchmark_requests!: 1,
+          coding_task_fields: 1,
           configure_runtime!: 2,
           configure_runtime!: 3,
           execution_digest: 1,
           git!: 2,
           install_capturing_executors: 0,
           install_leased_executors: 0,
+          min_pipeline_execution_timeout_ms: 0,
           production_scenario!: 0,
           production_scenario!: 1,
           production_scenario!: 2,
@@ -543,31 +546,109 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
     end
   end
 
+  def min_pipeline_execution_timeout_ms do
+    Adapter.plan_min_wall_clock_ms() + Adapter.pipeline_budget_reserve_ms()
+  end
+
+  def coding_task_fields(%{"kind" => "coding_change", "plan" => plan})
+      when is_map(plan) and not is_struct(plan) do
+    workspace = Map.get(plan, "workspace_policy", %{})
+    worker = Map.get(plan, "worker", %{})
+
+    %{
+      "acp_agent" => worker["provider"],
+      "base_ref" => plan["base_ref"],
+      "branch_name" => workspace["branch_name"],
+      "repo_path" => plan["repo_root"],
+      "task" => plan["task"],
+      "worktree_base_dir" => workspace["worktree_base_dir"]
+    }
+  end
+
+  def coding_task_fields(%{"kind" => "coding_change"} = task) do
+    %{
+      "acp_agent" => task["acp_agent"],
+      "base_ref" => task["base_ref"],
+      "branch_name" => task["branch_name"],
+      "repo_path" => task["repo_path"],
+      "task" => task["task"],
+      "worktree_base_dir" => task["worktree_base_dir"]
+    }
+  end
+
   def assert_exact_inputs(request, task, context, pair_root) do
     digest = execution_digest(request)
 
-    assert task == %{
-             "acp_agent" => "codex",
-             "base_ref" => request["base_commit_oid"],
-             "branch_name" =>
-               "arbor/coding-benchmark/happy-r1-#{request["executor_path"]}-#{String.slice(digest, 0, 12)}",
-             "kind" => "coding_change",
-             "open_pr" => false,
-             "repo_path" => request["workdir"],
-             "submit_review" => true,
-             "task" =>
-               "Complete the happy benchmark.\n\nAcceptance criteria:\n- Write the deterministic result marker.",
-             "worktree_base_dir" =>
-               Path.join([pair_root, "worktrees", request["executor_path"], digest])
-           }
+    outer_timeout =
+      Application.fetch_env!(:arbor_commands, :coding_benchmark_execution_timeout_ms)
+
+    branch_name =
+      "arbor/coding-benchmark/happy-r1-#{request["executor_path"]}-#{String.slice(digest, 0, 12)}"
+
+    worktree_base_dir =
+      Path.join([pair_root, "worktrees", request["executor_path"], digest])
+
+    task_text =
+      "Complete the happy benchmark.\n\nAcceptance criteria:\n- Write the deterministic result marker."
+
+    case request["executor_path"] do
+      "legacy" ->
+        assert task == %{
+                 "acp_agent" => "codex",
+                 "base_ref" => request["base_commit_oid"],
+                 "branch_name" => branch_name,
+                 "kind" => "coding_change",
+                 "open_pr" => false,
+                 "repo_path" => request["workdir"],
+                 "submit_review" => true,
+                 "task" => task_text,
+                 "worktree_base_dir" => worktree_base_dir
+               }
+
+        refute Map.has_key?(task, "plan")
+        refute Map.has_key?(task, "budgets")
+
+      "pipeline" ->
+        assert Map.keys(task) |> Enum.sort() == ["kind", "plan"]
+        assert task["kind"] == "coding_change"
+        plan = task["plan"]
+        assert is_map(plan) and not is_struct(plan)
+        assert plan["version"] == Plan.schema_version()
+        assert plan["task"] == task_text
+        assert plan["repo_root"] == request["workdir"]
+        assert plan["base_ref"] == request["base_commit_oid"]
+        assert plan["review_profile"] == "binding"
+        assert plan["worker"]["provider"] == "codex"
+
+        assert plan["workspace_policy"] == %{
+                 "mode" => "isolated",
+                 "branch_name" => branch_name,
+                 "worktree_base_dir" => worktree_base_dir
+               }
+
+        assert plan["output"]["draft_pr"] == false
+
+        expected_wall = outer_timeout - Adapter.pipeline_budget_reserve_ms()
+        assert plan["budgets"]["wall_clock_ms"] == expected_wall
+        assert expected_wall < outer_timeout
+        assert expected_wall >= Adapter.plan_min_wall_clock_ms()
+        assert expected_wall <= 86_400_000
+
+        refute Map.has_key?(task, "repo_path")
+        refute Map.has_key?(task, "acp_agent")
+        refute Map.has_key?(task, "branch_name")
+        refute Map.has_key?(task, "worktree_base_dir")
+        refute Map.has_key?(task, "open_pr")
+        refute Map.has_key?(task, "submit_review")
+    end
 
     assert context == %{
              "task_id" => "coding-benchmark-#{request["executor_path"]}-#{digest}",
-             "timeout" => 250
+             "timeout" => outer_timeout
            }
   end
 
-  def benchmark_requests! do
+  def benchmark_requests!(timeout_ms \\ min_pipeline_execution_timeout_ms()) do
     workspace = temp_directory!("coding-benchmark-adapter")
     source = Path.join(workspace, "source")
     pair_root = Path.join(workspace, "direct-pair")
@@ -582,7 +663,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
       git_clone!(source, Path.join(pair_root, executor))
     end
 
-    configure_runtime!(workspace, 250)
+    configure_runtime!(workspace, timeout_ms)
     input = benchmark_input()
     base_commit_oid = git!(source, ["rev-parse", "HEAD"])
     base_tree_oid = git!(source, ["rev-parse", "HEAD^{tree}"])
@@ -604,7 +685,12 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
       }
     end
 
-    %{legacy: request.("legacy"), pair_root: pair_root, pipeline: request.("pipeline")}
+    %{
+      legacy: request.("legacy"),
+      pair_root: pair_root,
+      pipeline: request.("pipeline"),
+      timeout_ms: timeout_ms
+    }
   end
 
   def production_scenario!(
@@ -689,22 +775,23 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
          artifact_mode,
          commit_mode \\ :descendant
        ) do
-    observe_fixture_repository(executor, task["repo_path"])
+    fields = coding_task_fields(task)
+    observe_fixture_repository(executor, fields["repo_path"])
 
     {:ok, worktree} =
       Arbor.Orchestrator.expected_coding_worktree_path(
-        task["worktree_base_dir"],
-        task["branch_name"]
+        fields["worktree_base_dir"],
+        fields["branch_name"]
       )
 
-    git!(task["repo_path"], [
+    git!(fields["repo_path"], [
       "worktree",
       "add",
       "--quiet",
       "-b",
-      task["branch_name"],
+      fields["branch_name"],
       worktree,
-      task["base_ref"]
+      fields["base_ref"]
     ])
 
     File.write!(Path.join(worktree, "result.txt"), "completed:happy\n")
@@ -712,12 +799,12 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
     commit!(worktree, "benchmark result")
 
     if commit_mode in [:unrelated, :replacement] do
-      git!(worktree, ["checkout", "--quiet", "--orphan", task["branch_name"] <> "-orphan"])
+      git!(worktree, ["checkout", "--quiet", "--orphan", fields["branch_name"] <> "-orphan"])
       git!(worktree, ["rm", "-rf", "--quiet", "."])
       File.write!(Path.join(worktree, "result.txt"), "completed:happy\n")
       git!(worktree, ["add", "--", "result.txt"])
       commit!(worktree, "unrelated benchmark result")
-      git!(worktree, ["branch", "-M", task["branch_name"]])
+      git!(worktree, ["branch", "-M", fields["branch_name"]])
       observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
 
       if commit_mode == :unrelated do
@@ -735,7 +822,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
             "commit-tree",
             "#{physical}^{tree}",
             "-p",
-            task["base_ref"],
+            fields["base_ref"],
             "-m",
             "forged replacement ancestry"
           ])
@@ -773,10 +860,12 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
   end
 
   defp symlink_worktree_result(executor, principal_id, task, context, outside) do
+    fields = coding_task_fields(task)
+
     {:ok, worktree} =
       Arbor.Orchestrator.expected_coding_worktree_path(
-        task["worktree_base_dir"],
-        task["branch_name"]
+        fields["worktree_base_dir"],
+        fields["branch_name"]
       )
 
     File.ln_s!(outside, worktree)
@@ -784,32 +873,34 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
   end
 
   defp wrong_worktree_result(executor, principal_id, task, context) do
-    worktree = Path.join(task["worktree_base_dir"], "unexpected-descendant")
+    fields = coding_task_fields(task)
+    worktree = Path.join(fields["worktree_base_dir"], "unexpected-descendant")
 
-    git!(task["repo_path"], [
+    git!(fields["repo_path"], [
       "worktree",
       "add",
       "--quiet",
       "-b",
-      task["branch_name"],
+      fields["branch_name"],
       worktree,
-      task["base_ref"]
+      fields["base_ref"]
     ])
 
     production_result(executor, principal_id, task, context, worktree, %{}, nil)
   end
 
   defp wrong_branch_result(executor, principal_id, task, context) do
-    worktree = Path.join(task["worktree_base_dir"], "wrong-branch")
+    fields = coding_task_fields(task)
+    worktree = Path.join(fields["worktree_base_dir"], "wrong-branch")
 
-    git!(task["repo_path"], [
+    git!(fields["repo_path"], [
       "worktree",
       "add",
       "--quiet",
       "-b",
       "benchmark-wrong-branch",
       worktree,
-      task["base_ref"]
+      fields["base_ref"]
     ])
 
     production_result(executor, principal_id, task, context, worktree, %{}, nil)
@@ -836,9 +927,11 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
   end
 
   defp coding_result(executor, task, worktree, artifacts) do
+    fields = coding_task_fields(task)
+
     %{
       "artifacts" => artifacts,
-      "branch" => task["branch_name"],
+      "branch" => fields["branch_name"],
       "commit" => if(worktree, do: git!(worktree, ["rev-parse", "HEAD"]), else: nil),
       "files" => ["result.txt"],
       "metrics" => %{
@@ -846,7 +939,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
         "total_rework_count" => 0,
         "validation_attempts" => 1
       },
-      "repo_path" => task["repo_path"],
+      "repo_path" => fields["repo_path"],
       "review" => %{
         "blast_radius" => "low",
         "human_required" => false,
@@ -883,8 +976,10 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
     archived_dot = if mode == :tampered_dot, do: dot <> "\n// post-compile tamper\n", else: dot
     File.write!(dot_path, archived_dot)
 
+    fields = coding_task_fields(task)
+
     case mode do
-      :symlink -> File.ln_s!(Path.join(task["repo_path"], "README.md"), plan_path)
+      :symlink -> File.ln_s!(Path.join(fields["repo_path"], "README.md"), plan_path)
       _other -> File.write!(plan_path, Jason.encode!(plan, pretty: true))
     end
 
@@ -1034,17 +1129,25 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
     }
   end
 
+  defp production_plan!(%{"kind" => "coding_change", "plan" => plan})
+       when is_map(plan) and not is_struct(plan) do
+    assert {:ok, normalized} = Plan.new(plan)
+    Plan.to_map(normalized)
+  end
+
   defp production_plan!(task) do
+    fields = coding_task_fields(task)
+
     assert {:ok, plan} =
              Plan.new(%{
-               "base_ref" => task["base_ref"],
-               "repo_root" => task["repo_path"],
-               "task" => task["task"],
-               "worker" => %{"provider" => task["acp_agent"]},
+               "base_ref" => fields["base_ref"],
+               "repo_root" => fields["repo_path"],
+               "task" => fields["task"],
+               "worker" => %{"provider" => fields["acp_agent"]},
                "workspace_policy" => %{
-                 "branch_name" => task["branch_name"],
+                 "branch_name" => fields["branch_name"],
                  "mode" => "isolated",
-                 "worktree_base_dir" => task["worktree_base_dir"]
+                 "worktree_base_dir" => fields["worktree_base_dir"]
                }
              })
 

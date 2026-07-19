@@ -2,6 +2,7 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   @moduledoc false
 
   alias Arbor.Commands.CodingBenchmark.{Git, Runtime}
+  alias Arbor.Contracts.Coding.Plan
 
   @app :arbor_commands
   @principal_key :coding_benchmark_principal_id
@@ -15,6 +16,12 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   @hash_pattern ~r/\A[0-9a-f]{64}\z/
   @id_pattern ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
   @max_counter 10_000
+  # Module-owned slice kept below the outer harness Task.yield deadline so graph
+  # expiry can settle and cancel without racing the outer bound. Not config-
+  # or manifest-overridable. Matches Plan's public 10s–24h wall-clock bounds.
+  @pipeline_budget_reserve_ms 5_000
+  @plan_min_wall_clock_ms 10_000
+  @plan_max_wall_clock_ms 86_400_000
 
   @spec run(map(), String.t(), function(), atom()) ::
           {:ok, map()} | {:error, term()} | {:error, term(), map()}
@@ -236,28 +243,100 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     end
   end
 
+  @doc false
+  @spec pipeline_budget_reserve_ms() :: pos_integer()
+  def pipeline_budget_reserve_ms, do: @pipeline_budget_reserve_ms
+
+  @doc false
+  @spec plan_min_wall_clock_ms() :: pos_integer()
+  def plan_min_wall_clock_ms, do: @plan_min_wall_clock_ms
+
   defp execution_inputs(request, scope, execution_timeout_ms) do
-    workdir = request["workdir"]
-
-    task = %{
-      "acp_agent" => request["acp_agent"],
-      "base_ref" => request["base_commit_oid"],
-      "branch_name" => scope.branch_name,
-      "kind" => "coding_change",
-      "open_pr" => false,
-      "repo_path" => workdir,
-      "submit_review" => true,
-      "task" => task_text(request["normalized_input"]),
-      "worktree_base_dir" => scope.worktree_root
-    }
-
     context = %{
       "task_id" => scope.task_id,
       "timeout" => execution_timeout_ms
     }
 
-    {:ok, task, context}
+    case request["executor_path"] do
+      "legacy" ->
+        {:ok, legacy_flat_task(request, scope), context}
+
+      "pipeline" ->
+        with {:ok, wall_clock_ms} <- pipeline_wall_clock_ms(execution_timeout_ms),
+             {:ok, task} <- pipeline_plan_task(request, scope, wall_clock_ms) do
+          {:ok, task, context}
+        end
+    end
   end
+
+  defp legacy_flat_task(request, scope) do
+    %{
+      "acp_agent" => request["acp_agent"],
+      "base_ref" => request["base_commit_oid"],
+      "branch_name" => scope.branch_name,
+      "kind" => "coding_change",
+      "open_pr" => false,
+      "repo_path" => request["workdir"],
+      "submit_review" => true,
+      "task" => task_text(request["normalized_input"]),
+      "worktree_base_dir" => scope.worktree_root
+    }
+  end
+
+  # Graph wall budget is derived only from the trusted runtime execution
+  # timeout. Manifest/task/worker data must never select or widen it.
+  defp pipeline_wall_clock_ms(outer_timeout_ms)
+       when is_integer(outer_timeout_ms) and outer_timeout_ms > 0 do
+    wall_clock_ms = outer_timeout_ms - @pipeline_budget_reserve_ms
+
+    cond do
+      wall_clock_ms < @plan_min_wall_clock_ms ->
+        setup_error(:pipeline_budget_timeout_insufficient)
+
+      wall_clock_ms > @plan_max_wall_clock_ms ->
+        setup_error(:pipeline_budget_timeout_insufficient)
+
+      true ->
+        {:ok, wall_clock_ms}
+    end
+  end
+
+  defp pipeline_wall_clock_ms(_outer_timeout_ms),
+    do: setup_error(:pipeline_budget_timeout_insufficient)
+
+  defp pipeline_plan_task(request, scope, wall_clock_ms) do
+    plan_attrs = %{
+      "version" => Plan.schema_version(),
+      "task" => task_text(request["normalized_input"]),
+      "repo_root" => request["workdir"],
+      "base_ref" => request["base_commit_oid"],
+      "workspace_policy" => %{
+        "mode" => "isolated",
+        "branch_name" => scope.branch_name,
+        "worktree_base_dir" => scope.worktree_root
+      },
+      "worker" => %{"provider" => request["acp_agent"]},
+      "review_profile" => "binding",
+      "budgets" => %{"wall_clock_ms" => wall_clock_ms},
+      "output" => %{"draft_pr" => false}
+    }
+
+    case Plan.new(plan_attrs) do
+      {:ok, plan} ->
+        canonical = Plan.to_map(plan)
+
+        if canonical["budgets"]["wall_clock_ms"] == wall_clock_ms do
+          {:ok, %{"kind" => "coding_change", "plan" => canonical}}
+        else
+          setup_error(:pipeline_budget_mismatch)
+        end
+
+      {:error, reason} ->
+        setup_error({:invalid_pipeline_plan, reason})
+    end
+  end
+
+  defp setup_error(reason), do: {:error, {:benchmark_setup_error, reason}}
 
   defp execution_digest(request) do
     hash_json(%{

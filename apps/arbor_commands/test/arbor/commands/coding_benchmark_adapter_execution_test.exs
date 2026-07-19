@@ -27,7 +27,88 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterExecutionTest do
 
     assert_exact_inputs(requests.pipeline, pipeline_task, pipeline_context, requests.pair_root)
     refute legacy_context["task_id"] == pipeline_context["task_id"]
-    refute legacy_task["branch_name"] == pipeline_task["branch_name"]
+
+    legacy_fields = coding_task_fields(legacy_task)
+    pipeline_fields = coding_task_fields(pipeline_task)
+    refute legacy_fields["branch_name"] == pipeline_fields["branch_name"]
+  end
+
+  test "pipeline binds graph wall budget from trusted timeout minus module reserve" do
+    outer = min_pipeline_execution_timeout_ms() + 45_000
+    requests = benchmark_requests!(outer)
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_pipeline_test_reply,
+      {:error, :captured_pipeline}
+    )
+
+    assert {:error, :captured_pipeline, _envelope} = PipelineAdapter.run(requests.pipeline)
+    assert_receive {:executor_call, :pipeline, "agent_benchmark", task, context}
+
+    reserve = Adapter.pipeline_budget_reserve_ms()
+    wall = task["plan"]["budgets"]["wall_clock_ms"]
+
+    assert context["timeout"] == outer
+    assert wall == outer - reserve
+    assert wall < outer
+    assert wall >= Adapter.plan_min_wall_clock_ms()
+    assert wall <= 86_400_000
+    assert Map.keys(task) |> Enum.sort() == ["kind", "plan"]
+  end
+
+  test "pipeline fails closed before executor when trusted timeout cannot cover plan min plus reserve" do
+    insufficient = min_pipeline_execution_timeout_ms() - 1
+    requests = benchmark_requests!(insufficient)
+
+    assert {:error, {:benchmark_setup_error, :pipeline_budget_timeout_insufficient}} =
+             PipelineAdapter.run(requests.pipeline)
+
+    refute_receive {:executor_call, :pipeline, _principal, _task, _context}
+
+    # Legacy still uses the full outer timeout without plan budget derivation.
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_test_reply,
+      {:error, :captured_legacy}
+    )
+
+    assert {:error, :captured_legacy, _envelope} = LegacyAdapter.run(requests.legacy)
+    assert_receive {:executor_call, :legacy, "agent_benchmark", legacy_task, legacy_context}
+    assert legacy_context["timeout"] == insufficient
+    assert legacy_task["kind"] == "coding_change"
+    refute Map.has_key?(legacy_task, "plan")
+  end
+
+  test "security regression: request or worker data cannot select or widen pipeline budgets" do
+    outer = min_pipeline_execution_timeout_ms() + 20_000
+    requests = benchmark_requests!(outer)
+
+    poisoned =
+      Map.merge(requests.pipeline, %{
+        "budgets" => %{"wall_clock_ms" => 86_400_000},
+        "timeout" => 86_400_000,
+        "wall_clock_ms" => 86_400_000
+      })
+
+    assert {:error, :invalid_benchmark_request_keys} = PipelineAdapter.run(poisoned)
+    refute_receive {:executor_call, :pipeline, _principal, _task, _context}
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_pipeline_test_reply,
+      {:error, :captured_pipeline}
+    )
+
+    assert {:error, :captured_pipeline, _envelope} = PipelineAdapter.run(requests.pipeline)
+    assert_receive {:executor_call, :pipeline, "agent_benchmark", task, context}
+
+    expected_wall = outer - Adapter.pipeline_budget_reserve_ms()
+    assert context["timeout"] == outer
+    assert task["plan"]["budgets"]["wall_clock_ms"] == expected_wall
+    refute task["plan"]["budgets"]["wall_clock_ms"] == 86_400_000
+    refute Map.has_key?(task, "timeout")
+    refute Map.has_key?(task["plan"], "timeout")
   end
 
   test "production preflight returns a typed setup error before executor invocation" do
@@ -294,23 +375,32 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterExecutionTest do
       assert_receive {:production_executor_call, ^executor, "agent_benchmark", task, context,
                       returned_worktree, artifact_root}
 
-      pair_root = Path.dirname(task["repo_path"])
+      fields = coding_task_fields(task)
+      pair_root = Path.dirname(fields["repo_path"])
 
-      assert Path.dirname(task["worktree_base_dir"]) |> Path.dirname() ==
+      assert Path.dirname(fields["worktree_base_dir"]) |> Path.dirname() ==
                Path.join(pair_root, "worktrees")
 
       assert {:ok, expected_worktree} =
                Arbor.Orchestrator.expected_coding_worktree_path(
-                 task["worktree_base_dir"],
-                 task["branch_name"]
+                 fields["worktree_base_dir"],
+                 fields["branch_name"]
                )
 
       assert returned_worktree == expected_worktree
-      refute String.starts_with?(returned_worktree, task["repo_path"] <> "/")
+      refute String.starts_with?(returned_worktree, fields["repo_path"] <> "/")
 
       if executor == "pipeline" do
         refute String.starts_with?(artifact_root, returned_worktree <> "/")
         assert String.starts_with?(artifact_root, scenario.artifact_root <> "/task-")
+        assert Map.keys(task) |> Enum.sort() == ["kind", "plan"]
+
+        wall = task["plan"]["budgets"]["wall_clock_ms"]
+        assert wall == context["timeout"] - Adapter.pipeline_budget_reserve_ms()
+        assert wall < context["timeout"]
+      else
+        refute Map.has_key?(task, "plan")
+        assert task["kind"] == "coding_change"
       end
 
       assert context["timeout"] == @successful_fixture_execution_timeout_ms

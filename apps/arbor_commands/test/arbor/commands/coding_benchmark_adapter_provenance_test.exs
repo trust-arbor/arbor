@@ -267,6 +267,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterProvenanceTest do
   end
 
   test "objective verifier timeout is bounded by the benchmark timeout" do
+    # Scenario adapters do not use production plan-budget derivation; a short
+    # harness timeout still bounds verifier Task.yield independently.
     scenario = production_scenario!(1_000)
 
     assert {:ok, report} =
