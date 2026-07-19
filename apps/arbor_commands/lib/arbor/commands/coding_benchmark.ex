@@ -12,7 +12,15 @@ defmodule Arbor.Commands.CodingBenchmark do
   timing, and independently observed Git and artifact evidence.
   """
 
-  alias Arbor.Commands.CodingBenchmark.{Adapter, Git, LegacyAdapter, PipelineAdapter, Runtime}
+  alias Arbor.Commands.CodingBenchmark.{
+    Adapter,
+    ExactTargetTreeVerifier,
+    Git,
+    LegacyAdapter,
+    PipelineAdapter,
+    Runtime
+  }
+
   alias Arbor.Commands.CodingParity
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.{TranscriptDescriptor, WorkspaceReleaseDescriptor}
@@ -23,6 +31,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   @request_schema "arbor.coding_benchmark.adapter_request.v1"
   @executor_paths ["legacy", "pipeline"]
   @production_adapters [LegacyAdapter, PipelineAdapter]
+  @exact_target_tree_selector "exact_target_tree"
   @pipeline_artifact_path_keys [
     {"coding_plan_path", :coding_plan_path},
     {"coding_pipeline_path", :coding_pipeline_path},
@@ -167,6 +176,14 @@ defmodule Arbor.Commands.CodingBenchmark do
 
     * `:adapters` - map or keyword list with `legacy` and `pipeline` callbacks
     * `:verifiers` - map or keyword list keyed by manifest `verifier_id`
+      (except the reserved built-in `exact_target_tree` selector)
+
+  Prepared publications that select `exact_target_tree` must supply validated
+  `:exact_target_trees` (`fixture_id => target_tree_oid`) from publication
+  evidence. That reserved selector always installs the trusted built-in
+  verifier; Application config and ordinary runtime verifier registries cannot
+  override or spoof it. Target tree OIDs never enter adapter requests or public
+  report rows.
 
   Adapter modules implement `run/1`; unary functions are also accepted. A
   callback receives a trusted request containing the isolated `workdir` and the
@@ -406,13 +423,23 @@ defmodule Arbor.Commands.CodingBenchmark do
            ),
          {:ok, adapters} <- adapters(Keyword.get(opts, :adapters), dry_run?),
          :ok <- preflight_adapters(adapters, benchmark, dry_run?),
-         {:ok, verifiers} <- verifiers(Keyword.get(opts, :verifiers), manifest, dry_run?) do
+         {:ok, exact_target_trees} <-
+           exact_target_trees(Keyword.get(opts, :exact_target_trees), manifest, dry_run?),
+         {:ok, verifiers} <-
+           verifiers(
+             Keyword.get(opts, :verifiers),
+             manifest,
+             dry_run?,
+             exact_target_trees,
+             benchmark.execution_timeout_ms
+           ) do
       {:ok,
        %{
          acp_agent: acp_agent,
          adapters: adapters,
          benchmark: benchmark,
          dry_run?: dry_run?,
+         exact_target_trees: exact_target_trees,
          fixture_root: fixture_root,
          measure: measure,
          repetitions: repetitions,
@@ -505,24 +532,134 @@ defmodule Arbor.Commands.CodingBenchmark do
   defp adapters(_registry, true), do: {:ok, %{}}
 
   defp adapters(registry, false) do
-    with {:ok, registry} <- callback_registry(registry, "adapters"),
+    with {:ok, registry} <- callback_registry(registry, "adapters", @executor_paths),
          :ok <- exact_registry_keys(registry, @executor_paths, "adapters") do
       {:ok, registry}
     end
   end
 
-  defp verifiers(_registry, _manifest, true), do: {:ok, %{}}
+  defp verifiers(_registry, _manifest, true, _exact_target_trees, _timeout_ms), do: {:ok, %{}}
 
-  defp verifiers(registry, manifest, false) do
+  defp verifiers(registry, manifest, false, exact_target_trees, timeout_ms) do
     required = manifest["fixtures"] |> Enum.map(& &1["verifier_id"]) |> Enum.uniq() |> Enum.sort()
+    needs_exact_target_tree? = @exact_target_tree_selector in required
+    other_required = Enum.reject(required, &(&1 == @exact_target_tree_selector))
 
-    with {:ok, registry} <- callback_registry(registry, "verifiers"),
+    with :ok <- exact_target_tree_ownership(needs_exact_target_tree?, exact_target_trees),
+         {:ok, registry} <- callback_registry(registry, "verifiers", other_required),
+         :ok <- reject_reserved_verifier_override(registry),
+         registry <-
+           install_exact_target_tree_verifier(
+             registry,
+             needs_exact_target_tree?,
+             exact_target_trees,
+             timeout_ms
+           ),
          :ok <- required_registry_keys(registry, required, "verifiers") do
       {:ok, registry}
     end
   end
 
-  defp callback_registry(registry, field) when is_map(registry) or is_list(registry) do
+  defp exact_target_trees(_value, _manifest, true), do: {:ok, %{}}
+
+  defp exact_target_trees(nil, manifest, false) do
+    if exact_target_tree_fixture_ids(manifest) == [] do
+      {:ok, %{}}
+    else
+      runtime_error("exact_target_trees", "missing_for_exact_target_tree")
+    end
+  end
+
+  defp exact_target_trees(targets, manifest, false) when is_map(targets) do
+    required_ids = exact_target_tree_fixture_ids(manifest)
+
+    with :ok <- closed_exact_target_tree_keys(targets, required_ids),
+         {:ok, normalized} <- normalize_exact_target_trees(targets, required_ids) do
+      {:ok, normalized}
+    end
+  end
+
+  defp exact_target_trees(_targets, _manifest, false),
+    do: runtime_error("exact_target_trees", "expected_object")
+
+  defp exact_target_tree_fixture_ids(manifest) do
+    manifest["fixtures"]
+    |> Enum.filter(&(&1["verifier_id"] == @exact_target_tree_selector))
+    |> Enum.map(& &1["fixture_id"])
+    |> Enum.sort()
+  end
+
+  defp closed_exact_target_tree_keys(targets, required_ids) do
+    keys = Map.keys(targets)
+
+    cond do
+      Enum.any?(keys, &(not is_binary(&1))) ->
+        runtime_error("exact_target_trees", "invalid_fixture_id")
+
+      Enum.sort(keys) != Enum.sort(required_ids) ->
+        runtime_error("exact_target_trees", "fixture_set_mismatch")
+
+      true ->
+        :ok
+    end
+  end
+
+  defp normalize_exact_target_trees(targets, required_ids) do
+    Enum.reduce_while(required_ids, {:ok, %{}}, fn fixture_id, {:ok, acc} ->
+      case oid(Map.fetch!(targets, fixture_id), "exact_target_trees.#{fixture_id}") do
+        {:ok, target_tree_oid} ->
+          {:cont, {:ok, Map.put(acc, fixture_id, target_tree_oid)}}
+
+        {:error, %{"reason" => reason}} ->
+          {:halt, runtime_error("exact_target_trees.#{fixture_id}", reason)}
+
+        {:error, _reason} ->
+          {:halt, runtime_error("exact_target_trees.#{fixture_id}", "invalid_oid")}
+      end
+    end)
+  end
+
+  defp exact_target_tree_ownership(false, targets) when targets == %{}, do: :ok
+
+  defp exact_target_tree_ownership(false, _targets),
+    do: runtime_error("exact_target_trees", "unexpected_without_selector")
+
+  defp exact_target_tree_ownership(true, targets) when map_size(targets) > 0, do: :ok
+
+  defp exact_target_tree_ownership(true, _targets),
+    do: runtime_error("exact_target_trees", "missing_for_exact_target_tree")
+
+  defp reject_reserved_verifier_override(registry) do
+    if Map.has_key?(registry, @exact_target_tree_selector) do
+      runtime_error(
+        "verifiers.#{@exact_target_tree_selector}",
+        "builtin_selector_reserved"
+      )
+    else
+      :ok
+    end
+  end
+
+  defp install_exact_target_tree_verifier(registry, false, _targets, _timeout_ms), do: registry
+
+  defp install_exact_target_tree_verifier(registry, true, targets, timeout_ms) do
+    Map.put(
+      registry,
+      @exact_target_tree_selector,
+      ExactTargetTreeVerifier.build(targets, timeout_ms)
+    )
+  end
+
+  defp callback_registry(nil, field, required_other) do
+    if required_other == [] do
+      {:ok, %{}}
+    else
+      runtime_error(field, "missing_registry")
+    end
+  end
+
+  defp callback_registry(registry, field, _required_other)
+       when is_map(registry) or is_list(registry) do
     entries = if is_map(registry), do: Map.to_list(registry), else: registry
 
     Enum.reduce_while(entries, {:ok, %{}}, fn
@@ -545,7 +682,8 @@ defmodule Arbor.Commands.CodingBenchmark do
     end)
   end
 
-  defp callback_registry(_registry, field), do: runtime_error(field, "missing_registry")
+  defp callback_registry(_registry, field, _required_other),
+    do: runtime_error(field, "missing_registry")
 
   defp callback?(callback) when is_function(callback, 1), do: true
 

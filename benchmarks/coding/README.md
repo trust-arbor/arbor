@@ -45,10 +45,11 @@ tmp/coding-benchmark-prepared/
   `Arbor.Commands.CodingBenchmark.validate_manifest/1` (the prepare task
   already does this before publish).
 - **target-evidence.json** carries catalog and manifest digests plus per-fixture
-  base/target OIDs and normalized input hashes for a **future trusted objective
-  verifier**. It is not
-  worker-visible answer material, does not select modules or commands, and is
-  not yet configured as executable verification.
+  base/target OIDs and normalized input hashes for the trusted
+  `exact_target_tree` objective verifier. It is not worker-visible answer
+  material and does not select modules or commands. After stable sidecar reads
+  and closed publication validation, the runner retains only the fixture-bound
+  target tree OIDs needed by that built-in verifier.
 - **publication.json** is the publication linearization marker. The output root
   is reserved with an exclusive private mkdir before any fixture is written.
   The marker is written and verified under a private temporary name, then
@@ -76,9 +77,45 @@ unpublished root was created.
   claim. Immutable commit/tree pins and direct-parent checks bind the history.
 - Task objectives and acceptance criteria are derived from the actual diffs
   and tests between those commits.
-- `verifier_id` values (for example `exact_target_tree`) are **data selectors**
-  for a future runtime verifier registry. Catalog data cannot name MFA
+- `verifier_id` values are **data selectors**. The closed selector
+  `exact_target_tree` always resolves to Arbor's built-in verifier when a
+  prepared publication is validated; Application config and ordinary runtime
+  verifier options cannot override or spoof it. Catalog data cannot name MFA
   callbacks.
+
+## Objective verification (`exact_target_tree`)
+
+For each fixture that selects `exact_target_tree`, the harness compares the
+final canonical `HEAD^{tree}` of that executor's isolated workdir with the
+`target_tree_oid` bound to the same `fixture_id` in validated target evidence.
+
+- Target OIDs are never sent to coding workers, never included in adapter
+  requests, and never appear as answer material in the public report (only the
+  closed pass/fail objective status already admitted by the harness).
+- Scoring uses the hardened `CodingBenchmark.Git` primitive under one bounded
+  verifier deadline; manifests cannot select modules, shell strings, or MFAs.
+- Sidecar-free legacy manifests that do not use `exact_target_tree` continue to
+  require an explicit trusted verifier registry for their other selectors.
+
+### Operator configuration still required for a full paired run
+
+```bash
+# 1) Materialize curated fixtures (once per catalog revision)
+./bin/mix arbor.coding.benchmark.prepare \
+  --catalog benchmarks/coding/catalog-v1.json \
+  --output tmp/coding-benchmark-prepared
+
+# 2) Run the harness against the prepared root (trusted adapters via config)
+./bin/mix arbor.coding.benchmark \
+  --manifest tmp/coding-benchmark-prepared/manifest.json \
+  --acp-agent grok \
+  --output reports/coding-benchmark.json
+```
+
+Trusted adapter callbacks still come only from Application /
+`execute/2` configuration (`:coding_benchmark_adapters`). Do **not** configure
+`:coding_benchmark_verifiers` for `exact_target_tree` on prepared publications
+— that reserved selector is installed from validated evidence only.
 
 ## Review requirements
 
@@ -91,12 +128,14 @@ When editing the catalog:
 4. Re-run pure catalog tests and prepare integration tests after changes.
 5. Do not check in prepared nested `.git` fixtures.
 
-The current `exact_target_tree` selector measures reproduction of the reviewed
+The `exact_target_tree` selector measures reproduction of the reviewed
 canonical patch, not equivalence of every behaviorally valid implementation.
 
 ## Current external execution blocker
 
 The production coding-benchmark path still requires host Apple/Linux
-containment and validation baselines that may be unprovisioned. This catalog
-and materializer only make curated inputs **reproducible and reviewable**;
-they do not claim a completed legacy-vs-pipeline scoreboard run.
+containment and validation baselines that may be unprovisioned. This catalog,
+materializer, and built-in objective verifier make curated inputs
+**reproducible, reviewable, and objectively scorable** once those trusted
+adapters are available; they do not by themselves complete a live paired
+scoreboard run.

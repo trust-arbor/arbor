@@ -28,7 +28,9 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
 
   Adapter and verifier callbacks come only from trusted runtime configuration or
   the test-only `execute/2` options. A manifest cannot name executable modules or
-  functions.
+  functions. Prepared publications that select the closed `exact_target_tree`
+  verifier install Arbor's built-in implementation from validated target
+  evidence; Application config cannot override that selector.
   """
 
   use Mix.Task
@@ -40,6 +42,7 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
 
   @default_output "coding-benchmark-report.json"
   @max_manifest_bytes 1_048_576
+  @exact_target_tree_selector "exact_target_tree"
 
   @impl true
   def run(args) do
@@ -67,14 +70,15 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
          {:ok, manifest_path} <- existing_json_path(cli.manifest, root, "manifest"),
          {:ok, manifest} <- read_manifest(manifest_path),
          {:ok, normalized_manifest} <- CodingBenchmark.validate_manifest(manifest),
-         :ok <- validate_prepared_publication(manifest_path, manifest, normalized_manifest),
+         {:ok, exact_target_trees} <-
+           validate_prepared_publication(manifest_path, manifest, normalized_manifest),
          {:ok, output_path} <- output_json_path(cli.output, root),
          :ok <- distinct_paths(manifest_path, output_path),
          :ok <-
            output_outside_fixtures(output_path, normalized_manifest, Path.dirname(manifest_path)),
          :ok <- artifact_root_disjoint(normalized_manifest, Path.dirname(manifest_path)),
          {:ok, benchmark_opts} <-
-           benchmark_opts(cli, runtime_opts, Path.dirname(manifest_path)),
+           benchmark_opts(cli, runtime_opts, Path.dirname(manifest_path), exact_target_trees),
          {:ok, report} <- CodingBenchmark.run(manifest, benchmark_opts),
          :ok <- write_report(output_path, report) do
       {:ok, %{output_path: output_path, report: report}}
@@ -261,22 +265,41 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
 
     case {sidecar_state(evidence_path), sidecar_state(publication_path)} do
       {:absent, :absent} ->
-        :ok
+        {:ok, nil}
 
       {:regular, :regular} ->
         with {:ok, target_evidence} <- read_publication_sidecar(evidence_path, "target_evidence"),
-             {:ok, publication} <- read_publication_sidecar(publication_path, "publication") do
-          Catalog.validate_publication(
-            manifest,
-            normalized_manifest,
-            target_evidence,
-            publication
-          )
+             {:ok, publication} <- read_publication_sidecar(publication_path, "publication"),
+             :ok <-
+               Catalog.validate_publication(
+                 manifest,
+                 normalized_manifest,
+                 target_evidence,
+                 publication
+               ) do
+          {:ok, prepared_exact_target_trees(normalized_manifest, target_evidence)}
         end
 
       {_evidence, _publication} ->
         task_error("publication", "incomplete_or_unsafe_publication")
     end
+  end
+
+  # Retain only fixture-bound target tree OIDs for the closed built-in selector.
+  # Target OIDs remain harness-private and never enter adapter requests or reports.
+  defp prepared_exact_target_trees(normalized_manifest, target_evidence) do
+    evidence_fixtures = target_evidence["fixtures"]
+
+    targets =
+      normalized_manifest["fixtures"]
+      |> Enum.filter(&(&1["verifier_id"] == @exact_target_tree_selector))
+      |> Map.new(fn fixture ->
+        fixture_id = fixture["fixture_id"]
+        evidence = Map.fetch!(evidence_fixtures, fixture_id)
+        {fixture_id, evidence["target_tree_oid"]}
+      end)
+
+    if targets == %{}, do: nil, else: targets
   end
 
   defp sidecar_state(path) do
@@ -327,7 +350,7 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
     end
   end
 
-  defp benchmark_opts(cli, runtime_opts, fixture_root) do
+  defp benchmark_opts(cli, runtime_opts, fixture_root, exact_target_trees) do
     configured_adapters =
       Keyword.get_lazy(runtime_opts, :adapters, fn ->
         Application.get_env(:arbor_commands, :coding_benchmark_adapters)
@@ -351,10 +374,16 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
           workspace_root: workspace_root
         ]
         |> maybe_put_seed(cli.seed)
+        |> maybe_put_exact_target_trees(exact_target_trees)
 
       {:ok, opts}
     end
   end
+
+  defp maybe_put_exact_target_trees(opts, nil), do: opts
+
+  defp maybe_put_exact_target_trees(opts, exact_target_trees) when is_map(exact_target_trees),
+    do: Keyword.put(opts, :exact_target_trees, exact_target_trees)
 
   defp benchmark_workspace_root(runtime_opts) do
     case Keyword.fetch(runtime_opts, :workspace_root) do
