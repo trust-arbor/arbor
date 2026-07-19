@@ -1345,3 +1345,12 @@ reserve provider-session resume for a rework path that can reopen the original w
 **Tests that mutate global Application config must not run async.** Restoring values in `on_exit` does not prevent another async module from observing the temporary value. Mark the whole module `async: false` whenever it changes shared Application env, globally named processes, or shared ETS state (found 2026-07-19 when the Comms suite intermittently hid the Signal response channel).
 
 **Elixir `is_list/1` recognizes cons cells, including improper lists.** For `[a, b | tail]`, `is_list/1` is true for the outer list and for the remaining `[b | tail]`; it becomes false only at the final non-list tail. Do not infer that an improper spine bypasses a guarded recursive list walker. Reproduce the exact term in IEx/Tidewave before changing security traversal logic; bound each visited head and explicitly handle the final tail (verified 2026-07-19 while reviewing `LogRedactor`).
+
+**A strict CWD sandbox cannot use linked-worktree Git storage without a separate read grant.** The checkout files are inside the ACP worker's CWD, but its `.git` pointer resolves to the parent repository's common directory outside that root. For native Grok, use an owner-derived transient custom profile that extends `strict`, grants read-only access to the exact bidirectionally verified common directory, denies its own policy file after startup, and sets `GIT_OPTIONAL_LOCKS=0`; restore the project file before the first prompt. This permits `git status`/`git diff` while parent metadata writes and the parent working tree remain denied. Never trust a caller-supplied Git root or widen access to the parent checkout (found 2026-07-19 during the Phase 6 production strict-sandbox canary).
+
+**Do not fake a tool home by changing `HOME` and then calling `Path.expand("~")`.**
+`Path.expand/1` may resolve the OS account home rather than the newly assigned process
+environment, so a test can overwrite real CLI configuration or credentials. Inject the
+tool-specific home explicitly (for example `GROK_HOME`) and build fixture paths from that
+absolute value; restore the environment in `on_exit` (found 2026-07-19 when a Grok sandbox
+collision test wrote its temporary profile into the real `~/.grok`).

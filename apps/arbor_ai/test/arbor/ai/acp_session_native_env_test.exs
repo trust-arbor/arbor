@@ -93,6 +93,7 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
   @grok_strict_git_env [
     {"GIT_CONFIG_GLOBAL", "/dev/null"},
     {"GIT_CONFIG_SYSTEM", "/dev/null"},
+    {"GIT_OPTIONAL_LOCKS", "0"},
     {"GIT_CONFIG_COUNT", "1"},
     {"GIT_CONFIG_KEY_0", "core.excludesFile"},
     {"GIT_CONFIG_VALUE_0", "/dev/null"}

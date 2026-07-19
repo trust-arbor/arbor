@@ -42,6 +42,7 @@ defmodule Arbor.AI.AcpSession do
   require Logger
 
   alias Arbor.AI.AcpSession.Config
+  alias Arbor.AI.AcpSession.GrokSandbox
   alias Arbor.AI.AcpSession.RuntimeHome
   alias Arbor.AI.AcpTranscript
   alias Arbor.AI.OwnedOperation
@@ -716,31 +717,76 @@ defmodule Arbor.AI.AcpSession do
     Code.ensure_loaded?(acp_client_module())
   end
 
-  defp initialize_client(session_pid, provider, opts, workspace_plan, runtime_home_cleanup) do
+  defp resolve_client_opts(provider, opts) do
+    case Keyword.get(opts, :client_opts) do
+      nil -> Config.resolve(provider, opts)
+      raw when is_list(raw) -> {:ok, raw}
+      _other -> {:error, :invalid_acp_client_options}
+    end
+  end
+
+  defp configure_client_opts(client_opts, session_pid, opts, cwd) do
+    handler_opts =
+      client_opts
+      |> Keyword.get(:handler_opts, [])
+      |> normalize_handler_opts()
+      |> Keyword.put(:session_pid, session_pid)
+      |> Keyword.put(:agent_id, Keyword.get(opts, :agent_id))
+      |> Keyword.put(:cwd, cwd)
+
+    client_opts
+    |> Keyword.put(:event_listener, session_pid)
+    |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
+    |> Keyword.put(:handler_opts, handler_opts)
+    |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))
+    |> inject_os_cwd(cwd)
+  end
+
+  defp normalize_handler_opts(opts) when is_list(opts) do
+    if Keyword.keyword?(opts), do: opts, else: []
+  end
+
+  defp normalize_handler_opts(_opts), do: []
+
+  defp unwrap_grok_launch({:ok, result}), do: result
+
+  defp unwrap_grok_launch(
+         {:error, {:grok_sandbox_cleanup_failed, reason},
+          {:ok, client, client_monitor, workspace}}
+       ) do
+    demonitor_owner(client_monitor)
+    terminate_client(client)
+    cleanup_workspace(workspace)
+    {:error, {:grok_sandbox_cleanup_failed, reason}}
+  end
+
+  defp unwrap_grok_launch(
+         {:error, {:grok_sandbox_cleanup_failed, reason}, {:ok, client, workspace}}
+       ) do
+    terminate_client(client)
+    cleanup_workspace(workspace)
+    {:error, {:grok_sandbox_cleanup_failed, reason}}
+  end
+
+  defp unwrap_grok_launch({:error, {:grok_sandbox_cleanup_failed, reason}, {:ok, client}}) do
+    terminate_client(client)
+    {:error, {:grok_sandbox_cleanup_failed, reason}}
+  end
+
+  defp unwrap_grok_launch({:error, {:grok_sandbox_cleanup_failed, reason}, _result}),
+    do: {:error, {:grok_sandbox_cleanup_failed, reason}}
+
+  defp unwrap_grok_launch({:error, _reason} = error), do: error
+
+  defp initialize_client(session_pid, _provider, opts, workspace_plan, client_opts) do
     if acp_available?() do
       workspace = materialize_workspace(workspace_plan)
       cwd = workspace_cwd(workspace, opts)
 
-      resolved =
-        case Keyword.get(opts, :client_opts) do
-          nil -> Config.resolve(provider, opts)
-          raw -> {:ok, raw}
-        end
-
-      with {:ok, client_opts} <- resolved,
-           {:ok, client_opts} <- RuntimeHome.inject(client_opts, runtime_home_cleanup),
-           client_opts =
+      with {:ok, client} <-
              client_opts
-             |> Keyword.put(:event_listener, session_pid)
-             |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
-             |> Keyword.put_new(:handler_opts,
-               session_pid: session_pid,
-               agent_id: Keyword.get(opts, :agent_id),
-               cwd: cwd
-             )
-             |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))
-             |> inject_os_cwd(cwd),
-           {:ok, client} <- start_acp_client(client_opts) do
+             |> configure_client_opts(session_pid, opts, cwd)
+             |> start_acp_client() do
         {:ok, client, workspace}
       else
         {:error, reason} ->
@@ -754,7 +800,21 @@ defmodule Arbor.AI.AcpSession do
 
   defp start_client_owned(state) do
     with {:ok, runtime_home_cleanup} <- RuntimeHome.create() do
-      case do_start_client_owned(state, runtime_home_cleanup) do
+      result =
+        with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
+             {:ok, client_opts} <- RuntimeHome.inject(client_opts, runtime_home_cleanup) do
+          GrokSandbox.with_launch(
+            state.provider,
+            client_opts,
+            workspace_cwd(state.workspace, state.opts),
+            Keyword.get(state.opts, :grok_sandbox_authority),
+            state.owner,
+            fn prepared_opts -> do_start_client_owned(state, prepared_opts) end
+          )
+          |> unwrap_grok_launch()
+        end
+
+      case result do
         {:ok, client, client_monitor, workspace} ->
           {:ok, client, client_monitor, workspace, runtime_home_cleanup}
 
@@ -765,7 +825,7 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
-  defp do_start_client_owned(state, runtime_home_cleanup) do
+  defp do_start_client_owned(state, client_opts) do
     with {:ok, _opts, requested_remaining} <- Arbor.AI.Timeout.remaining(state.opts),
          {:ok, requested_deadline} <- Arbor.AI.Timeout.deadline(state.opts) do
       {remaining, deadline} = finite_start_deadline(requested_remaining, requested_deadline)
@@ -782,7 +842,7 @@ defmodule Arbor.AI.AcpSession do
                 state.provider,
                 state.opts,
                 state.workspace,
-                runtime_home_cleanup
+                client_opts
               )
 
             completed_at = System.monotonic_time(:millisecond)
@@ -1235,13 +1295,32 @@ defmodule Arbor.AI.AcpSession do
 
   defp maybe_reconnect(state) do
     session_pid = self()
-    opts = internal_reconnect_opts()
+    operation_opts = internal_reconnect_opts()
+    cwd = workspace_cwd(state.workspace, state.opts)
 
-    case OwnedOperation.run(
-           fn -> reconnect_client(state, session_pid) end,
-           opts,
-           :reconnect_timeout
-         ) do
+    result =
+      with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
+           {:ok, client_opts} <- RuntimeHome.inject(client_opts, state.runtime_home_cleanup) do
+        GrokSandbox.with_launch(
+          state.provider,
+          client_opts,
+          cwd,
+          Keyword.get(state.opts, :grok_sandbox_authority),
+          state.owner,
+          fn prepared_opts ->
+            OwnedOperation.run(
+              fn ->
+                reconnect_client(state, session_pid, prepared_opts, cwd, operation_opts)
+              end,
+              operation_opts,
+              :reconnect_timeout
+            )
+          end
+        )
+        |> unwrap_grok_launch()
+      end
+
+    case result do
       {:ok, client} ->
         case attach_client(client) do
           {:ok, client_monitor} ->
@@ -1265,29 +1344,16 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
-  defp reconnect_client(state, session_pid) do
-    resolved =
-      case Keyword.get(state.opts, :client_opts) do
-        nil -> Config.resolve(state.provider, state.opts)
-        raw -> {:ok, raw}
-      end
+  defp reconnect_client(state, session_pid, client_opts, cwd, operation_opts) do
+    client_opts = configure_client_opts(client_opts, session_pid, state.opts, cwd)
 
-    with {:ok, client_opts} <- resolved,
-         client_opts =
-           client_opts
-           |> Keyword.put(:event_listener, session_pid)
-           |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
-           |> Keyword.put_new(:handler_opts,
-             session_pid: session_pid,
-             agent_id: Keyword.get(state.opts, :agent_id),
-             cwd: Keyword.get(state.opts, :cwd)
-           ),
-         {:ok, client} <- start_acp_client(client_opts) do
+    with {:ok, client} <- start_acp_client(client_opts) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(acp_client_module(), :load_session, [
              client,
              state.last_session_id,
-             resolve_cwd([], state.opts)
+             cwd,
+             operation_opts
            ]) do
         {:ok, _session_info} ->
           {:ok, client}
@@ -3062,14 +3128,14 @@ defmodule Arbor.AI.AcpSession do
 
   defp inject_os_cwd(client_opts, cwd) do
     client_opts
-    |> Keyword.put_new(:cd, cwd)
+    |> Keyword.put(:cd, cwd)
     |> put_adapter_cwd(cwd)
   end
 
   defp put_adapter_cwd(client_opts, cwd) do
     case Keyword.get(client_opts, :adapter_opts) do
       ao when is_list(ao) ->
-        Keyword.put(client_opts, :adapter_opts, Keyword.put_new(ao, :cwd, cwd))
+        Keyword.put(client_opts, :adapter_opts, Keyword.put(ao, :cwd, cwd))
 
       _ ->
         client_opts
@@ -3093,7 +3159,9 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp workspace_cwd({:worktree, path, _branch}, _opts), do: path
+  defp workspace_cwd({:worktree_pending, path, _branch}, _opts), do: path
   defp workspace_cwd({:directory, path}, _opts), do: path
+  defp workspace_cwd({:directory_pending, path}, _opts), do: path
   defp workspace_cwd(_, opts), do: Keyword.get(opts, :cwd)
 
   # ex_mcp's Protocol.encode_session_{new,load,resume} require a non-nil

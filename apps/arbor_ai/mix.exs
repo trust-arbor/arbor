@@ -36,6 +36,7 @@ defmodule ArborAi.MixProject do
       {:arbor_shell, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
+      {:toml, "~> 0.7"},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
       # jido_ai and req_llm versions pinned in root mix.exs

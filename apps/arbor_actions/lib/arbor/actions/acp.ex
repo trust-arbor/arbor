@@ -414,7 +414,7 @@ defmodule Arbor.Actions.Acp do
            :ok <- Acp.require_acp!(),
            {:ok, provider} <- normalize_provider(Acp.param(params, :provider)),
            {:ok, meta, continuity} <-
-             managed_start_with_resume_fallback(provider, params, agent_id, task_id),
+             managed_start_with_resume_fallback(provider, params, agent_id, task_id, context),
            {:ok, result} <- public_start_result(meta, params, provider, continuity) do
         {:ok, result}
       else
@@ -426,8 +426,8 @@ defmodule Arbor.Actions.Acp do
       :exit, reason -> {:error, Acp.format_error(reason)}
     end
 
-    defp managed_start_with_resume_fallback(provider, params, agent_id, task_id) do
-      opts = build_managed_opts(params, agent_id, task_id)
+    defp managed_start_with_resume_fallback(provider, params, agent_id, task_id, context) do
+      opts = build_managed_opts(params, agent_id, task_id, context)
       resume_requested? = non_empty_string(params[:session_id]) != nil
 
       case managed_start(provider, opts) do
@@ -441,7 +441,7 @@ defmodule Arbor.Actions.Acp do
                 fallback_opts =
                   params
                   |> Map.delete(:session_id)
-                  |> build_managed_opts(agent_id, task_id)
+                  |> build_managed_opts(agent_id, task_id, context)
                   |> Keyword.put(:create_session, true)
 
                 case managed_start(provider, fallback_opts) do
@@ -527,14 +527,30 @@ defmodule Arbor.Actions.Acp do
     end
 
     @doc false
-    def build_managed_opts(params, agent_id, task_id) do
+    def build_managed_opts(params, agent_id, task_id, context) do
       params
       |> build_opts(agent_id)
       |> maybe_add(:principal_id, agent_id)
       |> maybe_add(:task_id, task_id)
       |> maybe_add(:use_pool, params[:use_pool] == true)
       |> maybe_add(:session_id, non_empty_string(params[:session_id]))
+      |> maybe_add_grok_sandbox_authority(params, context)
       |> maybe_add(:timeout, positive_timeout_or_nil(params[:timeout]))
+    end
+
+    def build_managed_opts(params, agent_id, task_id),
+      do: build_managed_opts(params, agent_id, task_id, %{})
+
+    defp grok_sandbox_authority(context) do
+      Map.get(context, :acp_grok_sandbox_authority)
+    end
+
+    defp maybe_add_grok_sandbox_authority(opts, params, context) do
+      if Acp.param(params, :provider) in [:grok, "grok"] do
+        maybe_add(opts, :grok_sandbox_authority, grok_sandbox_authority(context))
+      else
+        opts
+      end
     end
 
     @doc false

@@ -287,6 +287,29 @@ defmodule Arbor.Actions.AcpTest do
       refute Keyword.has_key?(opts, :agent_id)
     end
 
+    test "security regression: start opts include only atom-keyed grok sandbox authority from context" do
+      assert Keyword.get(
+               Acp.StartSession.build_managed_opts(
+                 %{provider: "grok", cwd: "/repo", model: "sonnet"},
+                 "agent_owner",
+                 "task_owner",
+                 %{acp_grok_sandbox_authority: :opaque_authority}
+               ),
+               :grok_sandbox_authority
+             ) ==
+               :opaque_authority
+
+      refute Keyword.has_key?(
+               Acp.StartSession.build_managed_opts(
+                 %{provider: "grok", cwd: "/repo", model: "sonnet"},
+                 "agent_owner",
+                 "task_owner",
+                 %{"acp_grok_sandbox_authority" => :string_key_authority}
+               ),
+               :grok_sandbox_authority
+             )
+    end
+
     test "normalize_permission_mode refuses unknown values instead of atomizing input" do
       assert Acp.StartSession.normalize_permission_mode("default") == :default
       assert Acp.StartSession.normalize_permission_mode(:deny) == :deny
@@ -360,6 +383,7 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(opts, :agent_id) == "agent_auth_ctx"
       assert Keyword.get(opts, :principal_id) == "agent_auth_ctx"
       assert Keyword.get(opts, :task_id) == "task_secure_1"
+      refute Keyword.has_key?(opts, :grok_sandbox_authority)
       assert Keyword.get(opts, :model) == "sonnet"
       assert Keyword.get(opts, :cwd) == "/repo"
       assert Keyword.get(opts, :use_pool) == true
@@ -445,8 +469,64 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(second_opts, :agent_id) == Keyword.get(first_opts, :agent_id)
       assert Keyword.get(second_opts, :principal_id) == Keyword.get(first_opts, :principal_id)
       assert Keyword.get(second_opts, :task_id) == Keyword.get(first_opts, :task_id)
+      refute Keyword.has_key?(first_opts, :grok_sandbox_authority)
+      refute Keyword.has_key?(second_opts, :grok_sandbox_authority)
       assert Keyword.get(second_opts, :timeout) == Keyword.get(first_opts, :timeout)
       assert Keyword.get(second_opts, :adapter_opts) == Keyword.get(first_opts, :adapter_opts)
+    end
+
+    test "Grok resume fallback preserves the same opaque sandbox authority" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :start_results},
+        [
+          {:error, {:unsupported_capability, :load_session}},
+          {:ok,
+           %{
+             worker_session_id: "acp_worker_grok_recovery",
+             session_id: "provider_sess_grok_fresh",
+             provider: "grok",
+             model: "grok-4.5",
+             status: "ready",
+             pooled: false
+           }}
+        ]
+      )
+
+      assert {:ok, %{continuity: "fresh_recovery"}} =
+               Acp.StartSession.run(
+                 %{
+                   provider: "grok",
+                   cwd: "/repo",
+                   session_id: "provider_sess_grok_old",
+                   fallback_to_fresh_on_resume_unavailable: true
+                 },
+                 %{
+                   agent_id: "agent_grok_recovery",
+                   task_id: "task_grok_recovery",
+                   acp_grok_sandbox_authority: :opaque_grok_authority
+                 }
+               )
+
+      assert_receive {:managed_start, :grok, first_opts}
+      assert_receive {:managed_start, :grok, second_opts}
+
+      assert Keyword.get(first_opts, :grok_sandbox_authority) == :opaque_grok_authority
+      assert Keyword.get(second_opts, :grok_sandbox_authority) == :opaque_grok_authority
+    end
+
+    test "non-Grok StartSession ignores atom-keyed grok authority opt input by design" do
+      install_fake_ai()
+
+      assert {:ok, _result} =
+               Acp.StartSession.run(
+                 %{provider: "claude", cwd: "/repo"},
+                 %{agent_id: "agent_start", acp_grok_sandbox_authority: :opaque_authority}
+               )
+
+      assert_receive {:managed_start, :claude, opts}
+      refute Keyword.has_key?(opts, :grok_sandbox_authority)
     end
 
     test "resume unavailable with fallback disabled fails closed without retry" do

@@ -1017,6 +1017,12 @@ defmodule Arbor.AI do
     Arbor.AI.AcpManaged.start_session(provider, opts)
   end
 
+  @doc false
+  @spec bind_grok_worktree(String.t(), String.t()) :: {:ok, term()} | {:error, term()}
+  def bind_grok_worktree(repository_root, worktree_root) do
+    Arbor.AI.AcpSession.GrokSandbox.bind(repository_root, worktree_root)
+  end
+
   @doc """
   Send a message on a managed ACP session.
 
