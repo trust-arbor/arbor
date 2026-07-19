@@ -39,7 +39,26 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     "--sandbox",
     "strict",
     "--no-memory",
+    "--no-subagents",
+    "--disable-web-search",
+    "--deny",
+    "MCPTool(*)",
     "agent",
+    "--no-leader",
+    "--model",
+    "grok-4.5",
+    "stdio"
+  ]
+
+  @grok_command_with_bound_mcp [
+    "grok",
+    "--sandbox",
+    "strict",
+    "--no-memory",
+    "--no-subagents",
+    "--disable-web-search",
+    "agent",
+    "--no-leader",
     "--model",
     "grok-4.5",
     "stdio"
@@ -52,6 +71,13 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   @profile_marker "# Managed transiently by Arbor."
   @max_metadata_bytes 4_096
   @max_profile_bytes 65_536
+  @ambient_mcp_relative_paths [
+    [".grok", "config.toml"],
+    [".mcp.json"],
+    [".cursor", "mcp.json"],
+    [".grok", "plugins"],
+    [".claude", "plugins"]
+  ]
 
   @opaque authority :: %Authority{}
 
@@ -111,45 +137,91 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
           {:ok, term()}
           | {:error, term()}
           | {:error, {:grok_sandbox_cleanup_failed, term()}, term()}
-  def with_launch(provider, client_opts, _cwd, _authority, _owner, fun)
+  def with_launch(provider, client_opts, cwd, authority, owner, fun) do
+    with_launch(provider, client_opts, cwd, authority, owner, [], fun)
+  end
+
+  @doc false
+  @spec with_launch(
+          atom(),
+          keyword(),
+          String.t() | nil,
+          term(),
+          pid() | nil,
+          [map()],
+          function()
+        ) ::
+          {:ok, term()}
+          | {:error, term()}
+          | {:error, {:grok_sandbox_cleanup_failed, term()}, term()}
+  def with_launch(provider, client_opts, _cwd, _authority, _owner, _mcp_servers, fun)
       when provider != :grok and is_list(client_opts) and is_function(fun, 1) do
     {:ok, fun.(client_opts)}
   end
 
-  def with_launch(:grok, client_opts, cwd, authority, owner, fun)
+  def with_launch(:grok, client_opts, cwd, authority, owner, mcp_servers, fun)
       when is_list(client_opts) and is_binary(cwd) and is_function(fun, 1) do
     with :ok <- validate_client_opts(client_opts),
+         :ok <- validate_bound_mcp_servers(mcp_servers),
          {:ok, worktree_root} <- canonical_directory(cwd),
+         :ok <- reject_ambient_mcp_sources(worktree_root),
          {:ok, kind} <- repository_kind(worktree_root) do
       case kind do
         :standalone ->
           with :ok <- reject_unexpected_authority(authority) do
-            {:ok, fun.(client_opts)}
+            run_standalone_launch(client_opts, worktree_root, mcp_servers, fun)
           end
 
         {:linked, metadata} ->
           with :ok <- verify_authority(authority, owner, worktree_root, metadata) do
-            run_linked_launch(client_opts, authority, fun)
+            run_linked_launch(client_opts, authority, mcp_servers, fun)
           end
       end
     end
   end
 
-  def with_launch(:grok, _client_opts, _cwd, _authority, _owner, _fun),
+  def with_launch(:grok, _client_opts, _cwd, _authority, _owner, _mcp_servers, _fun),
     do: {:error, :invalid_grok_launch}
 
-  def with_launch(_provider, _client_opts, _cwd, _authority, _owner, _fun),
+  def with_launch(_provider, _client_opts, _cwd, _authority, _owner, _mcp_servers, _fun),
     do: {:error, :invalid_acp_client_options}
 
-  defp run_linked_launch(client_opts, %Authority{} = authority, fun) do
+  defp run_linked_launch(client_opts, %Authority{} = authority, mcp_servers, fun) do
+    with_profile_lock(authority.worktree_root, fn ->
+      do_run_linked_launch(client_opts, authority, mcp_servers, fun)
+    end)
+  end
+
+  defp run_standalone_launch(client_opts, worktree_root, mcp_servers, fun) do
+    with_profile_lock(worktree_root, fn ->
+      with :ok <- reject_ambient_mcp_sources(worktree_root),
+           {:ok, profile_name} <- profile_name(worktree_root),
+           {:ok, profile_content} <- profile_content(profile_name, worktree_root, []),
+           :ok <- reject_global_profile_collision(profile_name, client_opts),
+           :ok <- reject_preexisting_backup(worktree_root),
+           :ok <- recover_orphaned_profile(worktree_root, profile_content),
+           {:ok, lease} <- install_profile(worktree_root, profile_content) do
+        execute_profiled_launch(
+          client_opts,
+          profile_name,
+          lease,
+          fn -> :ok end,
+          mcp_servers,
+          fun
+        )
+      end
+    end)
+  end
+
+  defp with_profile_lock(worktree_root, fun) do
     # :global lock IDs are {shared_resource, requester}; different session PIDs
     # therefore contend on the worktree resource instead of sharing a lock.
-    lock_id = {{__MODULE__, authority.worktree_root}, self()}
+    lock_id = {{__MODULE__, worktree_root}, self()}
 
     case :global.set_lock(lock_id, [node()], 0) do
       true ->
         try do
-          do_run_linked_launch(client_opts, authority, fun)
+          fun.()
         after
           :global.del_lock(lock_id, [node()])
         end
@@ -159,26 +231,35 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     end
   end
 
-  defp do_run_linked_launch(client_opts, authority, fun) do
+  defp do_run_linked_launch(client_opts, authority, mcp_servers, fun) do
     with :ok <- verify_authority(authority, authority.owner, authority.worktree_root),
+         :ok <- reject_ambient_mcp_sources(authority.worktree_root),
          {:ok, profile_name} <- profile_name(authority.common_dir),
-         {:ok, profile_content} <- profile_content(profile_name, authority),
+         {:ok, profile_content} <-
+           profile_content(profile_name, authority.worktree_root, [authority.common_dir]),
          :ok <- reject_global_profile_collision(profile_name, client_opts),
          :ok <- reject_preexisting_backup(authority.worktree_root),
          :ok <- recover_orphaned_profile(authority.worktree_root, profile_content),
          {:ok, lease} <- install_profile(authority.worktree_root, profile_content) do
-      execute_profiled_launch(client_opts, authority, profile_name, lease, fun)
+      execute_profiled_launch(
+        client_opts,
+        profile_name,
+        lease,
+        fn -> verify_authority(authority, authority.owner, authority.worktree_root) end,
+        mcp_servers,
+        fun
+      )
     end
   end
 
-  defp execute_profiled_launch(client_opts, authority, profile_name, lease, fun) do
+  defp execute_profiled_launch(client_opts, profile_name, lease, verify, mcp_servers, fun) do
     result =
-      with :ok <- verify_authority(authority, authority.owner, authority.worktree_root) do
+      with :ok <- verify.() do
         prepared_opts =
           Keyword.put(
             client_opts,
             :command,
-            List.replace_at(@expected_grok_command, @sandbox_command_index, profile_name)
+            profiled_command(profile_name, mcp_servers)
           )
 
         fun.(prepared_opts)
@@ -215,6 +296,32 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
       true ->
         :ok
     end
+  end
+
+  defp validate_bound_mcp_servers(servers) when is_list(servers) do
+    if Enum.all?(servers, &is_map/1),
+      do: :ok,
+      else: {:error, :invalid_grok_bound_mcp_servers}
+  end
+
+  defp validate_bound_mcp_servers(_servers),
+    do: {:error, :invalid_grok_bound_mcp_servers}
+
+  defp profiled_command(profile_name, []) do
+    List.replace_at(@expected_grok_command, @sandbox_command_index, profile_name)
+  end
+
+  defp profiled_command(profile_name, [_server | _rest]) do
+    List.replace_at(@grok_command_with_bound_mcp, @sandbox_command_index, profile_name)
+  end
+
+  defp reject_ambient_mcp_sources(worktree_root) do
+    Enum.reduce_while(@ambient_mcp_relative_paths, :ok, fn relative, :ok ->
+      case File.lstat(Path.join([worktree_root | relative])) do
+        {:error, :enoent} -> {:cont, :ok}
+        _other -> {:halt, {:error, :grok_ambient_mcp_configuration_forbidden}}
+      end
+    end)
   end
 
   defp reject_unexpected_authority(nil), do: :ok
@@ -263,8 +370,24 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     case File.lstat(dot_git) do
       {:ok, %File.Stat{type: :directory}} -> {:ok, :standalone}
       {:ok, %File.Stat{type: :regular}} -> linked_kind(worktree_root)
-      {:error, :enoent} -> {:ok, :standalone}
+      {:error, :enoent} -> reject_nested_repository_cwd(worktree_root)
       _other -> {:error, :invalid_grok_git_metadata}
+    end
+  end
+
+  defp reject_nested_repository_cwd(worktree_root) do
+    if git_metadata_in_ancestor?(Path.dirname(worktree_root)),
+      do: {:error, :grok_repository_root_required},
+      else: {:ok, :standalone}
+  end
+
+  defp git_metadata_in_ancestor?(path) do
+    parent = Path.dirname(path)
+
+    case File.lstat(Path.join(path, ".git")) do
+      {:error, :enoent} when parent != path -> git_metadata_in_ancestor?(parent)
+      {:error, :enoent} -> false
+      _other -> true
     end
   end
 
@@ -419,23 +542,42 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
        "-" <> (Base.encode16(digest, case: :lower) |> String.slice(0, 24))}
   end
 
-  defp profile_content(profile_name, authority) do
-    profile_path = Path.join([authority.worktree_root, ".grok", @profile_filename])
-    backup_path = Path.join([authority.worktree_root, ".grok", @backup_filename])
+  defp profile_content(profile_name, worktree_root, read_only_paths) do
+    denied_paths =
+      [
+        Path.join([worktree_root, ".grok", @profile_filename]),
+        Path.join([worktree_root, ".grok", @backup_filename])
+      ] ++ Enum.map(@ambient_mcp_relative_paths, &Path.join([worktree_root | &1]))
 
-    with {:ok, common_dir} <- toml_string(authority.common_dir),
-         {:ok, profile_path} <- toml_string(profile_path),
-         {:ok, backup_path} <- toml_string(backup_path) do
+    with {:ok, read_only} <- toml_array(read_only_paths),
+         {:ok, denied} <- toml_array(denied_paths) do
+      read_only_line = if read_only_paths == [], do: [], else: ["read_only = #{read_only}"]
+
       {:ok,
-       [
-         @profile_marker,
-         "[profiles.#{profile_name}]",
-         ~s(extends = "strict"),
-         ~s(read_only = ["#{common_dir}"]),
-         ~s(deny = ["#{profile_path}", "#{backup_path}"]),
-         ""
-       ]
+       ([
+          @profile_marker,
+          "[profiles.#{profile_name}]",
+          ~s(extends = "strict")
+        ] ++
+          read_only_line ++
+          [
+            "deny = #{denied}",
+            ""
+          ])
        |> Enum.join("\n")}
+    end
+  end
+
+  defp toml_array(values) when is_list(values) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, encoded} ->
+      case toml_string(value) do
+        {:ok, escaped} -> {:cont, {:ok, [~s("#{escaped}") | encoded]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, encoded} -> {:ok, "[" <> (encoded |> Enum.reverse() |> Enum.join(", ")) <> "]"}
+      {:error, _reason} = error -> error
     end
   end
 

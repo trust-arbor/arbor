@@ -5,6 +5,10 @@ defmodule Arbor.AI.Application do
 
   @impl true
   def start(_type, _args) do
+    # ExMCP debug-logs entire unsupported provider notifications. Native agents
+    # can include account or credential-bearing settings in those payloads.
+    :ok = Logger.put_module_level(ExMCP.ACP.Client, :info)
+
     # Propagate API keys from environment to ReqLLM
     propagate_api_keys()
 

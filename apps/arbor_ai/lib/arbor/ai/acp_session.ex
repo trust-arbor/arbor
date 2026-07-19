@@ -274,22 +274,26 @@ defmodule Arbor.AI.AcpSession do
     # the client instead of vanishing without terminate/2.
     Process.flag(:trap_exit, true)
 
-    provider = Keyword.fetch!(opts, :provider)
-    {owner, owner_monitor} = monitor_owner(Keyword.get(opts, :owner))
+    with {:ok, mcp_servers} <- normalize_bound_mcp_servers(Keyword.get(opts, :mcp_servers)) do
+      provider = Keyword.fetch!(opts, :provider)
+      {owner, owner_monitor} = monitor_owner(Keyword.get(opts, :owner))
 
-    state = %__MODULE__{
-      provider: provider,
-      model: Keyword.get(opts, :model),
-      owner: owner,
-      owner_monitor: owner_monitor,
-      stream_callback: Keyword.get(opts, :stream_callback),
-      mcp_servers: Keyword.get(opts, :mcp_servers),
-      workspace: workspace_plan(opts),
-      status: :starting,
-      opts: opts
-    }
+      state = %__MODULE__{
+        provider: provider,
+        model: Keyword.get(opts, :model),
+        owner: owner,
+        owner_monitor: owner_monitor,
+        stream_callback: Keyword.get(opts, :stream_callback),
+        mcp_servers: mcp_servers,
+        workspace: workspace_plan(opts),
+        status: :starting,
+        opts: opts
+      }
 
-    {:ok, state, {:continue, :start_client}}
+      {:ok, state, {:continue, :start_client}}
+    else
+      {:error, reason} -> {:stop, reason}
+    end
   end
 
   @impl true
@@ -453,15 +457,7 @@ defmodule Arbor.AI.AcpSession do
 
   defp do_create_session(opts, state) do
     cwd = resolve_cwd(opts, state.opts)
-
-    opts =
-      case state.mcp_servers do
-        servers when is_list(servers) and servers != [] ->
-          Keyword.put_new(opts, :mcp_servers, servers)
-
-        _ ->
-          opts
-      end
+    opts = bind_mcp_servers(opts, state.mcp_servers)
 
     result =
       OwnedOperation.run(
@@ -505,6 +501,7 @@ defmodule Arbor.AI.AcpSession do
 
   defp do_resume_session(session_id, opts, state) do
     cwd = resolve_cwd(opts, state.opts)
+    opts = bind_mcp_servers(opts, state.mcp_servers)
 
     result =
       OwnedOperation.run(
@@ -717,6 +714,22 @@ defmodule Arbor.AI.AcpSession do
     Code.ensure_loaded?(acp_client_module())
   end
 
+  defp normalize_bound_mcp_servers(nil), do: {:ok, []}
+
+  defp normalize_bound_mcp_servers(servers) when is_list(servers) do
+    if Enum.all?(servers, &is_map/1),
+      do: {:ok, servers},
+      else: {:error, :invalid_acp_mcp_servers}
+  end
+
+  defp normalize_bound_mcp_servers(_servers), do: {:error, :invalid_acp_mcp_servers}
+
+  defp bind_mcp_servers(opts, servers) do
+    opts
+    |> Keyword.delete(:mcp_servers)
+    |> Keyword.put(:mcp_servers, servers)
+  end
+
   defp resolve_client_opts(provider, opts) do
     case Keyword.get(opts, :client_opts) do
       nil -> Config.resolve(provider, opts)
@@ -802,13 +815,15 @@ defmodule Arbor.AI.AcpSession do
     with {:ok, runtime_home_cleanup} <- RuntimeHome.create() do
       result =
         with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
-             {:ok, client_opts} <- RuntimeHome.inject(client_opts, runtime_home_cleanup) do
+             {:ok, client_opts} <-
+               RuntimeHome.inject(client_opts, runtime_home_cleanup, state.provider) do
           GrokSandbox.with_launch(
             state.provider,
             client_opts,
             workspace_cwd(state.workspace, state.opts),
             Keyword.get(state.opts, :grok_sandbox_authority),
             state.owner,
+            state.mcp_servers,
             fn prepared_opts -> do_start_client_owned(state, prepared_opts) end
           )
           |> unwrap_grok_launch()
@@ -1300,13 +1315,15 @@ defmodule Arbor.AI.AcpSession do
 
     result =
       with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
-           {:ok, client_opts} <- RuntimeHome.inject(client_opts, state.runtime_home_cleanup) do
+           {:ok, client_opts} <-
+             RuntimeHome.inject(client_opts, state.runtime_home_cleanup, state.provider) do
         GrokSandbox.with_launch(
           state.provider,
           client_opts,
           cwd,
           Keyword.get(state.opts, :grok_sandbox_authority),
           state.owner,
+          state.mcp_servers,
           fn prepared_opts ->
             OwnedOperation.run(
               fn ->
@@ -1346,6 +1363,7 @@ defmodule Arbor.AI.AcpSession do
 
   defp reconnect_client(state, session_pid, client_opts, cwd, operation_opts) do
     client_opts = configure_client_opts(client_opts, session_pid, state.opts, cwd)
+    lifecycle_opts = bind_mcp_servers(operation_opts, state.mcp_servers)
 
     with {:ok, client} <- start_acp_client(client_opts) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
@@ -1353,7 +1371,7 @@ defmodule Arbor.AI.AcpSession do
              client,
              state.last_session_id,
              cwd,
-             operation_opts
+             lifecycle_opts
            ]) do
         {:ok, _session_info} ->
           {:ok, client}
@@ -2992,14 +3010,7 @@ defmodule Arbor.AI.AcpSession do
         workspace_cwd(state.workspace, state.opts) ||
         process_cwd_with_log()
 
-    new_opts =
-      case state.mcp_servers do
-        servers when is_list(servers) and servers != [] ->
-          Keyword.put_new(opts, :mcp_servers, servers)
-
-        _ ->
-          opts
-      end
+    new_opts = bind_mcp_servers(opts, state.mcp_servers)
 
     provider_opts = drop_transcript_capture_opts(new_opts)
 

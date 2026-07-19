@@ -193,6 +193,29 @@ another one. It doubles as user documentation — anyone standing up agents need
   exact capability and rule on an existing live coding agent before dogfooding the
   updated council. Do not broaden to `arbor://action/coding/**`.
 
+## 12. Native ACP MCP configuration is additive ambient authority
+
+- **What:** ACP `session/new.mcpServers` adds client-provided servers; it does not
+  replace servers the native provider discovers from its user home, compatibility
+  files, managed settings, repository config, or plugins. A same-name ACP entry is
+  not a portable shadowing mechanism. Grok initializes native configuration before
+  or alongside the session list.
+- **Symptom:** a delegated worker can discover a globally configured server such as
+  Tidewave and use it to read or evaluate outside Arbor's workspace capabilities.
+  Sending `mcpServers: []` still leaves the ambient server enabled. Sending a broken
+  duplicate merely adds another server. Grok debug logs can also print resolved OAuth
+  bearer material while diagnosing initialization.
+- **Action:** treat the provider process boundary as part of authorization. Launch
+  Grok with a private `GROK_HOME` containing only a private copy of `auth.json`; turn
+  off Claude/Cursor/Codex and managed MCP discovery; reject repository MCP/plugin
+  sources before startup; protect those paths with the transient strict profile; and
+  bind the normalized ACP MCP list once in `AcpSession`, replacing per-operation
+  attempts to widen it on create, load, and reconnect. Keep `MCPTool(*)` denied when
+  the bound list is empty; remove only that blanket denial when Arbor supplied an
+  explicit scoped ToolServer. Force provider logs into the private runtime at warning
+  verbosity, and keep `ExMCP.ACP.Client` at an `:info` module-level floor because
+  its debug fallback includes complete unsupported notification payloads.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -212,3 +235,5 @@ another one. It doubles as user documentation — anyone standing up agents need
 10. For binding council runs, grant and auto-trust the exact
     `arbor://action/coding/review/submit` terminal action; reconcile existing agents
     because template changes are not retroactive.
+11. For native ACP workers, isolate provider config and bind the session MCP list;
+    `mcpServers: []` does not disable provider-global or project MCP servers.

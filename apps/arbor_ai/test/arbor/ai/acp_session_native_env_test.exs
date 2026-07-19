@@ -84,7 +84,12 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
     "--sandbox",
     "strict",
     "--no-memory",
+    "--no-subagents",
+    "--disable-web-search",
+    "--deny",
+    "MCPTool(*)",
     "agent",
+    "--no-leader",
     "--model",
     "grok-4.5",
     "stdio"
@@ -100,7 +105,7 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
   ]
 
   describe "security regression: Grok strict sandbox launch" do
-    test "configured production override uses strict sandbox, no-memory, and minimal Git env" do
+    test "configured production override disables ambient authority and uses minimal Git env" do
       assert {:ok, opts} = Config.resolve(:grok, [])
 
       assert Keyword.get(opts, :command) == @grok_strict_command

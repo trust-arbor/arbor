@@ -11,7 +11,12 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     "--sandbox",
     "strict",
     "--no-memory",
+    "--no-subagents",
+    "--disable-web-search",
+    "--deny",
+    "MCPTool(*)",
     "agent",
+    "--no-leader",
     "--model",
     "grok-4.5",
     "stdio"
@@ -482,6 +487,16 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       profile_path = project_profile_path(worktree_root)
       backup_path = project_backup_path(worktree_root)
 
+      denied_paths = [
+        profile_path,
+        backup_path,
+        Path.join([worktree_root, ".grok", "config.toml"]),
+        Path.join(worktree_root, ".mcp.json"),
+        Path.join([worktree_root, ".cursor", "mcp.json"]),
+        Path.join([worktree_root, ".grok", "plugins"]),
+        Path.join([worktree_root, ".claude", "plugins"])
+      ]
+
       assert {:ok, :toml_ok} =
                GrokSandbox.with_launch(
                  :grok,
@@ -496,13 +511,10 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                    assert content =~
                             "read_only = [\"#{escape_toml(canonical_repo_common_dir(repository_root))}\"]"
 
-                   assert content =~
-                            "deny = [\"#{escape_toml(profile_path)}\", \"#{escape_toml(backup_path)}\"]"
-
                    assert {:ok, decoded} = Toml.decode(content, keys: :strings)
                    profile = get_in(decoded, ["profiles", expected_profile])
                    assert profile["read_only"] == [canonical_repo_common_dir(repository_root)]
-                   assert profile["deny"] == [profile_path, backup_path]
+                   assert profile["deny"] == denied_paths
 
                    :toml_ok
                  end
@@ -568,8 +580,9 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                )
     end
 
-    test "standalone worktree remains strict and requires no authority" do
+    test "standalone worktree receives a transient strict profile and requires no authority" do
       worktree_root = create_standalone_fixture!()
+      expected_profile = expected_profile_name(canonical_path(worktree_root))
 
       assert {:ok, :standalone_done} =
                GrokSandbox.with_launch(
@@ -579,7 +592,8 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                  nil,
                  self(),
                  fn prepared ->
-                   assert Keyword.get(prepared, :command) == @expected_grok_command
+                   assert Enum.at(Keyword.get(prepared, :command), 2) == expected_profile
+                   assert File.exists?(project_profile_path(worktree_root))
                    :standalone_done
                  end
                )
@@ -594,6 +608,79 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                  :unexpected,
                  self(),
                  fn _ -> flunk("callback should not run") end
+               )
+    end
+
+    test "security regression: ambient repository MCP sources fail closed before launch" do
+      sources = [
+        {[".grok", "config.toml"], :file},
+        {[".mcp.json"], :file},
+        {[".cursor", "mcp.json"], :file},
+        {[".grok", "plugins"], :directory},
+        {[".claude", "plugins"], :directory}
+      ]
+
+      for {relative, kind} <- sources do
+        worktree_root = create_standalone_fixture!()
+        path = Path.join([worktree_root | relative])
+        File.mkdir_p!(Path.dirname(path))
+
+        case kind do
+          :file -> File.write!(path, "untrusted MCP source\n")
+          :directory -> File.mkdir!(path)
+        end
+
+        assert {:error, :grok_ambient_mcp_configuration_forbidden} =
+                 GrokSandbox.with_launch(
+                   :grok,
+                   [command: @expected_grok_command],
+                   worktree_root,
+                   nil,
+                   self(),
+                   fn _ -> flunk("callback should not run") end
+                 )
+      end
+    end
+
+    test "security regression: a repository subdirectory cannot bypass root MCP checks" do
+      repository_root = create_git_repo!()
+      nested_cwd = Path.join([repository_root, "apps", "nested"])
+      File.mkdir_p!(nested_cwd)
+      on_exit(fn -> File.rm_rf!(repository_root) end)
+
+      assert {:error, :grok_repository_root_required} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: @expected_grok_command],
+                 nested_cwd,
+                 nil,
+                 self(),
+                 fn _ -> flunk("callback should not run") end
+               )
+    end
+
+    test "an explicitly bound ACP MCP server removes only the blanket MCP denial" do
+      worktree_root = create_standalone_fixture!()
+      bound_server = %{"name" => "arbor-tools", "type" => "http", "url" => "http://local"}
+
+      assert {:ok, :bound_mcp_ready} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: @expected_grok_command],
+                 worktree_root,
+                 nil,
+                 self(),
+                 [bound_server],
+                 fn prepared ->
+                   command = Keyword.fetch!(prepared, :command)
+                   refute "--deny" in command
+                   refute "MCPTool(*)" in command
+                   assert "--no-memory" in command
+                   assert "--no-subagents" in command
+                   assert "--disable-web-search" in command
+                   assert "--no-leader" in command
+                   :bound_mcp_ready
+                 end
                )
     end
 

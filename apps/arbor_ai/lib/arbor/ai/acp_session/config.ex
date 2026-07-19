@@ -70,18 +70,24 @@ defmodule Arbor.AI.AcpSession.Config do
 
   @native_providers %{
     gemini: %{command: ["gemini", "--experimental-acp"]},
-    # Global flags (`--sandbox` / `--no-memory`) must precede the `agent` subcommand;
-    # `--model` belongs to `agent` and must precede the `stdio` subcommand.
+    # Global policy flags must precede the `agent` subcommand; `--no-leader` and
+    # `--model` belong to `agent` and must precede the `stdio` subcommand.
     # Auth remains out-of-band via `grok login`.
-    # Strict sandbox is kernel-enforced cwd isolation; --no-memory disables
-    # cross-session memory so a leased coding worktree cannot leak prior context.
+    # Strict sandbox is kernel-enforced cwd isolation. Ambient MCP calls, web
+    # access, subagents, shared leaders, and cross-session memory are disabled;
+    # Arbor owns every authority channel exposed to a delegated coding worker.
     grok: %{
       command: [
         "grok",
         "--sandbox",
         "strict",
         "--no-memory",
+        "--no-subagents",
+        "--disable-web-search",
+        "--deny",
+        "MCPTool(*)",
         "agent",
+        "--no-leader",
         "--model",
         "grok-4.5",
         "stdio"

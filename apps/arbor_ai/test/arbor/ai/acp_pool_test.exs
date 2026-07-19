@@ -16,7 +16,12 @@ defmodule Arbor.AI.AcpPoolTest do
     "--sandbox",
     "strict",
     "--no-memory",
+    "--no-subagents",
+    "--disable-web-search",
+    "--deny",
+    "MCPTool(*)",
     "agent",
+    "--no-leader",
     "--model",
     "grok-4.5",
     "stdio"

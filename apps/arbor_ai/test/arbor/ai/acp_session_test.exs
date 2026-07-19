@@ -54,9 +54,10 @@ defmodule Arbor.AI.AcpSessionTest do
       end
     end
 
-    def new_session(client, cwd, _opts) do
+    def new_session(client, cwd, opts) do
       state = Agent.get(client, & &1)
       send(state.opts[:test_pid], {:fake_new_session, cwd})
+      send(state.opts[:test_pid], {:fake_new_session_opts, opts})
 
       case state.opts[:new_session_mode] do
         :stall ->
@@ -74,8 +75,9 @@ defmodule Arbor.AI.AcpSessionTest do
       end
     end
 
-    def load_session(client, session_id, _cwd, _opts) do
+    def load_session(client, session_id, _cwd, opts) do
       state = Agent.get(client, & &1)
+      send(state.opts[:test_pid], {:fake_load_session_opts, opts})
 
       case state.opts[:resume_mode] do
         :stall ->
@@ -243,6 +245,175 @@ defmodule Arbor.AI.AcpSessionTest do
       assert_receive {:DOWN, ^monitor, :process, ^session, :normal}, 1_000
       refute File.exists?(runtime_home)
     end)
+  end
+
+  test "security regression: ACP session MCP servers cannot be widened per operation" do
+    install_fake_progress_client(100)
+
+    bound_server = %{
+      "type" => "http",
+      "name" => "arbor-tools",
+      "url" => "http://127.0.0.1:41001/mcp"
+    }
+
+    hostile_server = %{
+      "type" => "http",
+      "name" => "ambient-host",
+      "url" => "http://127.0.0.1:41002/mcp"
+    }
+
+    for bound <- [[], [bound_server]] do
+      assert {:ok, session} =
+               AcpSession.start_link(
+                 provider: :test,
+                 mcp_servers: bound,
+                 client_opts: [test_pid: self()],
+                 timeout: 1_000
+               )
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:ok, %{"sessionId" => "fake-session"}} =
+               AcpSession.create_session(session,
+                 mcp_servers: [hostile_server],
+                 timeout: 1_000
+               )
+
+      assert_receive {:fake_new_session_opts, new_session_opts}
+      assert Keyword.fetch!(new_session_opts, :mcp_servers) == bound
+
+      assert {:ok, %{"sessionId" => "existing-session"}} =
+               AcpSession.resume_session(session, "existing-session",
+                 mcp_servers: [hostile_server],
+                 timeout: 1_000
+               )
+
+      assert_receive {:fake_load_session_opts, load_session_opts}
+      assert Keyword.fetch!(load_session_opts, :mcp_servers) == bound
+      assert :ok = AcpSession.close(session)
+    end
+  end
+
+  test "security regression: ACP clients cannot log raw debug notification payloads" do
+    previous_level = Logger.level()
+    Logger.configure(level: :debug)
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+
+    secret = "provider-secret-#{System.unique_integer([:positive])}"
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, client} = ExMCP.ACP.Client.start_link(_skip_connect: true)
+
+        send(client, {
+          :transport_message,
+          %{
+            "jsonrpc" => "2.0",
+            "method" => "_provider/settings/update",
+            "params" => %{"credential" => secret}
+          }
+        })
+
+        _state = :sys.get_state(client)
+        GenServer.stop(client)
+      end)
+
+    refute log =~ secret
+  end
+
+  test "security regression: Grok receives an isolated config home without ambient MCPs" do
+    install_fake_progress_client(100)
+
+    source_home =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-ai-grok-source-home-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir!(source_home)
+    auth = ~s({"access_token":"test-only","refresh_token":"test-only"})
+    File.write!(Path.join(source_home, "auth.json"), auth)
+    File.chmod!(Path.join(source_home, "auth.json"), 0o600)
+
+    File.write!(
+      Path.join(source_home, "config.toml"),
+      ~s([mcp_servers.ambient]\nurl = "http://127.0.0.1:4001/mcp"\n)
+    )
+
+    workspace = Path.join(source_home, "standalone-workspace")
+    File.mkdir!(workspace)
+
+    previous_grok_home = System.get_env("GROK_HOME")
+    System.put_env("GROK_HOME", source_home)
+
+    on_exit(fn ->
+      if previous_grok_home,
+        do: System.put_env("GROK_HOME", previous_grok_home),
+        else: System.delete_env("GROK_HOME")
+
+      File.rm_rf!(source_home)
+    end)
+
+    assert {:ok, configured_opts} = Config.resolve(:grok, [])
+
+    client_opts =
+      configured_opts
+      |> Keyword.update(:env, [], fn env ->
+        env ++ [{"RUST_LOG", "debug"}, {"GROK_LOG_FILE", "/tmp/unsafe-grok.log"}]
+      end)
+      |> Keyword.put(:test_pid, self())
+
+    assert {:ok, session} =
+             AcpSession.start_link(
+               provider: :grok,
+               client_opts: client_opts,
+               cwd: workspace,
+               timeout: 1_000
+             )
+
+    assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+    state = :sys.get_state(session)
+    started_opts = Agent.get(state.client, & &1.opts)
+    env = Map.new(Keyword.fetch!(started_opts, :env))
+    grok_home = Map.fetch!(env, "GROK_HOME")
+
+    assert Path.dirname(grok_home) == state.runtime_home_cleanup.path
+    refute grok_home == source_home
+    assert env["GROK_CLAUDE_MCPS_ENABLED"] == "false"
+    assert env["GROK_CURSOR_MCPS_ENABLED"] == "false"
+    assert env["GROK_CODEX_MCPS_ENABLED"] == "false"
+    assert env["GROK_MANAGED_MCPS_ENABLED"] == "false"
+    assert env["GROK_MCP_RECURSIVE_CONFIG_WATCH"] == "0"
+    assert env["GROK_CLAUDE_HOOKS_ENABLED"] == "false"
+    assert env["GROK_CURSOR_HOOKS_ENABLED"] == "false"
+    assert env["GROK_CODEX_HOOKS_ENABLED"] == "false"
+    assert env["GROK_OFFICIAL_MARKETPLACE_AUTO_REGISTER"] == "false"
+    assert env["GROK_TELEMETRY_ENABLED"] == "false"
+    assert env["GROK_FEEDBACK_ENABLED"] == "false"
+    assert env["GROK_MEMORY"] == "0"
+    assert env["GROK_SUBAGENTS"] == "0"
+    assert env["GROK_WEB_FETCH"] == "0"
+    assert env["RUST_LOG"] == "warn"
+    assert env["GROK_LOG_FILE"] == Path.join(grok_home, "grok.log")
+
+    assert File.read!(Path.join(grok_home, "auth.json")) == auth
+    refute File.exists?(Path.join(grok_home, "config.toml"))
+
+    assert {:ok, %File.Stat{type: :regular, mode: mode}} =
+             File.lstat(Path.join(grok_home, "auth.json"))
+
+    assert Bitwise.band(mode, 0o777) == 0o600
+
+    command = Keyword.fetch!(started_opts, :command)
+    assert "--no-subagents" in command
+    assert "--disable-web-search" in command
+    assert Enum.chunk_every(command, 2, 1, :discard) |> Enum.member?(["--deny", "MCPTool(*)"])
+    assert "--no-leader" in command
+
+    runtime_home = state.runtime_home_cleanup.path
+    assert :ok = AcpSession.close(session)
+    refute File.exists?(runtime_home)
   end
 
   test "security regression: lifecycle aliases cannot widen the caller deadline" do
