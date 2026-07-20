@@ -295,6 +295,48 @@ defmodule Arbor.AI.AcpSessionTest do
     end
   end
 
+  test "create_session uses directory workspace for provider session/new cwd" do
+    install_fake_progress_client(100)
+    workspace = temporary_directory("acp-session-cwd-workspace")
+
+    assert {:ok, session} =
+             AcpSession.start_link(
+               provider: :test,
+               client_opts: [test_pid: self()],
+               timeout: 1_000
+             )
+
+    assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+    assert {:ok, %{"sessionId" => "fake-session"}} =
+             AcpSession.create_session(session, workspace: {:directory, workspace})
+
+    assert_receive {:fake_new_session, ^workspace}
+    assert :ok = AcpSession.close(session)
+  end
+
+  test "create_session explicit cwd overrides directory workspace for provider session/new" do
+    install_fake_progress_client(100)
+    workspace = temporary_directory("acp-session-cwd-workspace")
+    explicit_cwd = temporary_directory("acp-session-explicit-cwd")
+
+    assert {:ok, session} =
+             AcpSession.start_link(
+               provider: :test,
+               workspace: {:directory, workspace},
+               client_opts: [test_pid: self()],
+               timeout: 1_000
+             )
+
+    assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+    assert {:ok, %{"sessionId" => "fake-session"}} =
+             AcpSession.create_session(session, cwd: explicit_cwd)
+
+    assert_receive {:fake_new_session, ^explicit_cwd}
+    assert :ok = AcpSession.close(session)
+  end
+
   test "security regression: ACP clients cannot log raw debug notification payloads" do
     previous_level = Logger.level()
     Logger.configure(level: :debug)
@@ -669,6 +711,14 @@ defmodule Arbor.AI.AcpSessionTest do
       assert :ok = AcpSession.close(session)
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
     end
+  end
+
+  defp temporary_directory(prefix) do
+    suffix = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(System.tmp_dir!(), "#{prefix}-#{suffix}")
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
   end
 
   describe "AcpSession prompt timeout behavior" do

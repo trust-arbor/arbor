@@ -109,6 +109,8 @@ defmodule Arbor.AI.AcpSession do
   - `:model` — model string override (optional)
   - `:system_prompt` — system prompt for the agent (optional)
   - `:cwd` — working directory for the session (optional)
+  - `:workspace` — workspace plan; a directory workspace supplies the session
+    cwd when no explicit `:cwd` is provided
   - `:stream_callback` — `fn(update) -> any()` for streaming events (optional)
   - `:timeout` — timeout for ACP operations in ms (default: 120_000)
   - `:name` — GenServer name registration (optional)
@@ -136,7 +138,10 @@ defmodule Arbor.AI.AcpSession do
 
   ## Options
 
-  - `:cwd` — working directory for the session (overrides init cwd)
+  - `:cwd` — working directory for the session (overrides init cwd and the
+    initialized directory workspace)
+  - `:workspace` — directory workspace used when no explicit `:cwd` is
+    provided
   """
   @spec create_session(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(session, opts \\ []) do
@@ -456,7 +461,7 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp do_create_session(opts, state) do
-    cwd = resolve_cwd(opts, state.opts)
+    cwd = resolve_cwd(opts, state.opts, state.workspace)
     opts = bind_mcp_servers(opts, state.mcp_servers)
 
     result =
@@ -500,7 +505,7 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp do_resume_session(session_id, opts, state) do
-    cwd = resolve_cwd(opts, state.opts)
+    cwd = resolve_cwd(opts, state.opts, state.workspace)
     opts = bind_mcp_servers(opts, state.mcp_servers)
 
     result =
@@ -3181,9 +3186,11 @@ defmodule Arbor.AI.AcpSession do
   # is set up) would raise FunctionClauseError at the wire boundary.
   # File.cwd!() — the BEAM process's working directory — is the natural
   # "agent works from where the server runs" default.
-  defp resolve_cwd(opts, state_opts) do
+  defp resolve_cwd(opts, state_opts, workspace) do
     Keyword.get(opts, :cwd) ||
       Keyword.get(state_opts, :cwd) ||
+      workspace_cwd(Keyword.get(opts, :workspace), []) ||
+      workspace_cwd(workspace, []) ||
       process_cwd_with_log()
   end
 
