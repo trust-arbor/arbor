@@ -3,6 +3,7 @@ defmodule Arbor.AI.AcpPoolTest do
 
   alias Arbor.AI.AcpPool
   alias Arbor.AI.AcpSession
+  alias Arbor.AI.AcpSession.Config
   alias Arbor.AI.AcpSession.GrokSandbox
   alias Arbor.Common.SafePath
 
@@ -11,21 +12,6 @@ defmodule Arbor.AI.AcpPoolTest do
   # We test the pool using _skip_connect: true so no real agent processes spawn.
   # AcpSession.start_link with _skip_connect returns {:ok, pid} immediately.
   @test_client_opts [command: ["echo", "test"], _skip_connect: true]
-  @grok_expected_command [
-    "grok",
-    "--sandbox",
-    "strict",
-    "--no-memory",
-    "--no-subagents",
-    "--disable-web-search",
-    "--deny",
-    "MCPTool(*)",
-    "agent",
-    "--no-leader",
-    "--model",
-    "grok-4.5",
-    "stdio"
-  ]
 
   defmodule StartupClient do
     @moduledoc false
@@ -117,8 +103,20 @@ defmodule Arbor.AI.AcpPoolTest do
     {:ok, pool: pool}
   end
 
+  defp fixture_suffix do
+    :crypto.strong_rand_bytes(16)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp fixture_path(prefix) do
+    path = Path.join(System.tmp_dir!(), "#{prefix}-#{fixture_suffix()}")
+
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
+  end
+
   defp temp_path(prefix) do
-    path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+    path = fixture_path(prefix)
     File.mkdir_p!(path)
     path
   end
@@ -149,20 +147,10 @@ defmodule Arbor.AI.AcpPoolTest do
 
   defp create_linked_fixture! do
     repository = create_git_repo!()
-    branch = "grok-test-#{System.unique_integer([:positive])}"
-
-    worktree =
-      Path.join(
-        System.tmp_dir!(),
-        "arbor-ai-grok-worktree-#{System.unique_integer([:positive])}"
-      )
+    branch = "grok-test-#{fixture_suffix()}"
+    worktree = fixture_path("arbor-ai-grok-worktree")
 
     run_git!(["worktree", "add", "-b", branch, worktree], repository)
-
-    on_exit(fn ->
-      File.rm_rf!(repository)
-      File.rm_rf!(worktree)
-    end)
 
     {canonical_path(repository), canonical_path(worktree)}
   end
@@ -178,7 +166,8 @@ defmodule Arbor.AI.AcpPoolTest do
   end
 
   defp probe_client_opts(overrides) do
-    Keyword.merge([command: @grok_expected_command], overrides)
+    {:ok, trusted_opts} = Config.resolve(:grok, [])
+    Keyword.merge(trusted_opts, overrides)
   end
 
   defp create_temporary_workspace_isolation! do
