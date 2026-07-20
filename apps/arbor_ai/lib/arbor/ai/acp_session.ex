@@ -1247,23 +1247,77 @@ defmodule Arbor.AI.AcpSession do
 
   # -- Usage & Context Tracking --
 
+  # Extract bounded input/output token counts from an ACP prompt result.
+  # Precedence: top-level string/atom "usage", then "_meta"/:_meta -> "usage"/:usage.
+  # Token aliases are first-PRESENT: an invalid preferred key yields 0 and does
+  # not fall through to a later alias. Only non-negative finite integers count.
+  # Never copies arbitrary _meta into session state.
+  defp extract_prompt_usage(result) when is_map(result) do
+    usage = prompt_usage_map(result)
+
+    %{
+      input_tokens: usage_token(usage, ["input_tokens", :input_tokens, "inputTokens"]),
+      output_tokens: usage_token(usage, ["output_tokens", :output_tokens, "outputTokens"])
+    }
+  end
+
+  defp extract_prompt_usage(_), do: %{input_tokens: 0, output_tokens: 0}
+
+  defp prompt_usage_map(result) do
+    cond do
+      is_map(Map.get(result, "usage")) ->
+        Map.get(result, "usage")
+
+      is_map(Map.get(result, :usage)) ->
+        Map.get(result, :usage)
+
+      true ->
+        nested_meta_usage(result)
+    end
+  end
+
+  defp nested_meta_usage(result) do
+    meta = Map.get(result, "_meta") || Map.get(result, :_meta)
+
+    cond do
+      not is_map(meta) ->
+        %{}
+
+      is_map(Map.get(meta, "usage")) ->
+        Map.get(meta, "usage")
+
+      is_map(Map.get(meta, :usage)) ->
+        Map.get(meta, :usage)
+
+      true ->
+        %{}
+    end
+  end
+
+  # First present alias wins. Missing keys continue; present-but-invalid => 0.
+  defp usage_token(usage, keys) when is_map(usage) do
+    Enum.find_value(keys, 0, fn key ->
+      case Map.fetch(usage, key) do
+        {:ok, value} when is_integer(value) and value >= 0 ->
+          if Arbor.LLM.finite_number?(value), do: value, else: 0
+
+        {:ok, _invalid} ->
+          0
+
+        :error ->
+          nil
+      end
+    end)
+  end
+
   defp accumulate_usage(state, result) when is_map(result) do
-    usage = Map.get(result, "usage") || Map.get(result, :usage) || %{}
-
-    # Handle both snake_case (native ACP) and camelCase (Claude/Codex adapters)
-    input =
-      Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens) ||
-        Map.get(usage, "inputTokens") || 0
-
-    output =
-      Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens) ||
-        Map.get(usage, "outputTokens") || 0
+    %{input_tokens: input, output_tokens: output} = extract_prompt_usage(result)
 
     %{
       state
       | usage: %{
-          input_tokens: state.usage.input_tokens + input,
-          output_tokens: state.usage.output_tokens + output
+          input_tokens: checked_add_tokens(state.usage.input_tokens, input),
+          output_tokens: checked_add_tokens(state.usage.output_tokens, output)
         },
         # Latest input_tokens approximates current context size
         context_tokens: input
@@ -1272,12 +1326,23 @@ defmodule Arbor.AI.AcpSession do
 
   defp accumulate_usage(state, _), do: state
 
+  # Keep the last valid signed-64 cumulative count when addition would overflow.
+  defp checked_add_tokens(current, delta)
+       when is_integer(current) and is_integer(delta) do
+    sum = current + delta
+
+    if Arbor.LLM.finite_number?(sum), do: sum, else: current
+  end
+
+  defp checked_add_tokens(current, _delta) when is_integer(current), do: current
+  defp checked_add_tokens(_current, _delta), do: 0
+
   # -- Cost Attribution --
 
   defp maybe_report_usage(state, result) do
     if Code.ensure_loaded?(Arbor.AI.BudgetTracker) and
          Process.whereis(Arbor.AI.BudgetTracker) != nil do
-      usage = Map.get(result, "usage") || Map.get(result, :usage) || %{}
+      usage = extract_prompt_usage(result)
       model = state.model || "unknown"
 
       try do
@@ -1286,12 +1351,8 @@ defmodule Arbor.AI.AcpSession do
           provider_to_backend(state.provider),
           %{
             model: model,
-            input_tokens:
-              Map.get(usage, "input_tokens") || Map.get(usage, :input_tokens) ||
-                Map.get(usage, "inputTokens") || 0,
-            output_tokens:
-              Map.get(usage, "output_tokens") || Map.get(usage, :output_tokens) ||
-                Map.get(usage, "outputTokens") || 0
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens
           }
         ])
       rescue

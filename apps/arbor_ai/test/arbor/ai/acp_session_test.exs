@@ -41,6 +41,34 @@ defmodule Arbor.AI.AcpSessionTest do
     end
   end
 
+  defmodule FakeUsageClient do
+    @moduledoc false
+
+    def start_link(opts), do: Agent.start_link(fn -> opts end)
+
+    def new_session(_client, _cwd, _opts), do: {:ok, %{"sessionId" => "fake-session"}}
+    def load_session(_client, session_id, _cwd, _opts), do: {:ok, %{"sessionId" => session_id}}
+    def set_config_option(_client, _session_id, _key, _value), do: :ok
+    def cancel(_client, _session_id), do: :ok
+
+    def disconnect(client) do
+      Agent.stop(client, :normal)
+      :ok
+    end
+
+    def prompt(client, _session_id, _content, _opts) do
+      result =
+        Agent.get_and_update(client, fn state ->
+          case Keyword.get(state, :results, []) do
+            [next | rest] -> {next, Keyword.put(state, :results, rest)}
+            [] -> {Keyword.get(state, :default_result, %{"text" => "ok"}), state}
+          end
+        end)
+
+      {:ok, result}
+    end
+  end
+
   defmodule FakeProgressClient do
     @moduledoc false
 
@@ -1437,6 +1465,28 @@ defmodule Arbor.AI.AcpSessionTest do
   describe "status includes usage" do
     @test_client_opts [command: ["echo", "test"], _skip_connect: true]
 
+    defp install_fake_usage_client(client_opts) do
+      original_client = Application.get_env(:arbor_ai, :acp_client_module)
+      Application.put_env(:arbor_ai, :acp_client_module, FakeUsageClient)
+
+      on_exit(fn ->
+        restore_env(:acp_client_module, original_client)
+      end)
+
+      client_opts
+    end
+
+    defp start_usage_session(results) do
+      client_opts = install_fake_usage_client(results: results)
+
+      {:ok, session} =
+        AcpSession.start_link(provider: :test, client_opts: client_opts)
+
+      on_exit(fn -> safely_close_session(session) end)
+
+      session
+    end
+
     test "status returns zero usage on fresh session" do
       {:ok, session} =
         AcpSession.start_link(provider: :test, client_opts: @test_client_opts)
@@ -1445,6 +1495,162 @@ defmodule Arbor.AI.AcpSessionTest do
       assert status.usage == %{input_tokens: 0, output_tokens: 0}
 
       GenServer.stop(session)
+    end
+
+    test "security regression: nested Grok _meta.usage camelCase updates cumulative status" do
+      # Observed Grok ACP 0.2.106 shape: usage lives under string-keyed _meta,
+      # not top-level, with camelCase inputTokens/outputTokens.
+      session =
+        start_usage_session([
+          %{
+            "text" => "done",
+            "stopReason" => "end_turn",
+            "_meta" => %{
+              "usage" => %{"inputTokens" => 120, "outputTokens" => 45}
+            }
+          }
+        ])
+
+      assert {:ok, result} = AcpSession.send_message(session, "hello", timeout: 1_000)
+      assert Map.keys(result) |> Enum.sort() == ["_meta", "stopReason", "text"]
+      refute Map.has_key?(result, "usage")
+      assert result["_meta"]["usage"]["inputTokens"] == 120
+
+      status = AcpSession.status(session)
+      assert status.usage == %{input_tokens: 120, output_tokens: 45}
+      assert status.context_tokens == 120
+    end
+
+    test "top-level usage retains precedence over nested _meta.usage" do
+      session =
+        start_usage_session([
+          %{
+            "text" => "done",
+            "usage" => %{"input_tokens" => 10, "output_tokens" => 2},
+            "_meta" => %{
+              "usage" => %{"inputTokens" => 999, "outputTokens" => 999}
+            }
+          }
+        ])
+
+      assert {:ok, _result} = AcpSession.send_message(session, "hello", timeout: 1_000)
+
+      status = AcpSession.status(session)
+      assert status.usage == %{input_tokens: 10, output_tokens: 2}
+      assert status.context_tokens == 10
+    end
+
+    test "malformed nested _meta usage is ignored without corrupting counters" do
+      session =
+        start_usage_session([
+          %{
+            "text" => "done",
+            "_meta" => %{
+              "usage" => %{
+                "inputTokens" => -5,
+                "outputTokens" => "not-an-int",
+                "extra" => %{nested: true}
+              },
+              "other" => "ignored-noise"
+            }
+          }
+        ])
+
+      assert {:ok, result} = AcpSession.send_message(session, "hello", timeout: 1_000)
+      # Public result is unchanged; we never promote or strip _meta.
+      assert result["_meta"]["usage"]["inputTokens"] == -5
+
+      status = AcpSession.status(session)
+      assert status.usage == %{input_tokens: 0, output_tokens: 0}
+      assert status.context_tokens == 0
+    end
+
+    test "successive turns accumulate usage from nested and top-level shapes" do
+      session =
+        start_usage_session([
+          %{
+            "text" => "turn-1",
+            "_meta" => %{"usage" => %{"inputTokens" => 100, "outputTokens" => 20}}
+          },
+          %{
+            "text" => "turn-2",
+            "usage" => %{"input_tokens" => 50, "output_tokens" => 10}
+          },
+          %{
+            "text" => "turn-3",
+            :_meta => %{usage: %{"inputTokens" => 25, "outputTokens" => 5}}
+          }
+        ])
+
+      assert {:ok, _} = AcpSession.send_message(session, "one", timeout: 1_000)
+      assert AcpSession.status(session).usage == %{input_tokens: 100, output_tokens: 20}
+
+      assert {:ok, _} = AcpSession.send_message(session, "two", timeout: 1_000)
+      assert AcpSession.status(session).usage == %{input_tokens: 150, output_tokens: 30}
+
+      assert {:ok, _} = AcpSession.send_message(session, "three", timeout: 1_000)
+      status = AcpSession.status(session)
+      assert status.usage == %{input_tokens: 175, output_tokens: 35}
+      assert status.context_tokens == 25
+    end
+
+    test "security regression: first-present usage alias does not fall through on invalid preferred key" do
+      # Nested under _meta so validation admits the result; preferred snake_case
+      # keys are present but invalid while camelCase aliases are valid. First-
+      # present semantics must return 0, not fall through to the later alias.
+      session =
+        start_usage_session([
+          %{
+            "text" => "done",
+            "_meta" => %{
+              "usage" => %{
+                "input_tokens" => -1,
+                "inputTokens" => 999,
+                "output_tokens" => "bad",
+                "outputTokens" => 50
+              }
+            }
+          }
+        ])
+
+      assert {:ok, result} = AcpSession.send_message(session, "hello", timeout: 1_000)
+      assert result["_meta"]["usage"]["inputTokens"] == 999
+
+      status = AcpSession.status(session)
+      assert status.usage == %{input_tokens: 0, output_tokens: 0}
+      assert status.context_tokens == 0
+    end
+
+    test "security regression: cumulative usage preserves last valid signed-64 count on overflow" do
+      # Both turn deltas are individually finite; their sum is not. Counters must
+      # keep the pre-overflow cumulative value rather than widening past signed-64.
+      near_max = 9_223_372_036_854_775_800
+
+      session =
+        start_usage_session([
+          %{
+            "text" => "turn-1",
+            "usage" => %{"input_tokens" => near_max, "output_tokens" => near_max}
+          },
+          %{
+            "text" => "turn-2",
+            "usage" => %{"input_tokens" => 20, "output_tokens" => 20}
+          }
+        ])
+
+      assert {:ok, _} = AcpSession.send_message(session, "one", timeout: 1_000)
+
+      assert AcpSession.status(session).usage == %{
+               input_tokens: near_max,
+               output_tokens: near_max
+             }
+
+      assert {:ok, _} = AcpSession.send_message(session, "two", timeout: 1_000)
+
+      status = AcpSession.status(session)
+      assert status.usage == %{input_tokens: near_max, output_tokens: near_max}
+      # Latest turn input still updates context size; only cumulative is clamped.
+      assert status.context_tokens == 20
     end
   end
 
