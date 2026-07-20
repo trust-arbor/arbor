@@ -222,6 +222,17 @@ defmodule Arbor.Actions.CouncilTest do
       ledger = review_ledger()
       parent = self()
 
+      reviewer_outcomes = %{
+        "security" => %{
+          "status" => "failed",
+          "reason_code" => "branch_failed",
+          "provider" => "openai_oauth",
+          "model" => "gpt-5.6-sol",
+          "reason" => ~s(access_token="abcdefghijklmnopqrstuvwx" refresh_token_invalidated),
+          "effective_vote" => "abstain"
+        }
+      }
+
       decision = %{
         "decision" => "deadlock",
         "approve_count" => 1,
@@ -236,6 +247,7 @@ defmodule Arbor.Actions.CouncilTest do
           %{"id" => "finding-2", "reason" => "active_blocking"},
           %{"id" => "finding-1", "reason" => "corroborated_major"}
         ],
+        "reviewer_outcomes" => reviewer_outcomes,
         "human_required" => false
       }
 
@@ -260,8 +272,11 @@ defmodule Arbor.Actions.CouncilTest do
       assert result.review_disposition == "rework"
       assert result.blocking_ids == ["finding-1", "finding-2"]
       assert result.finding_ledger == ledger
+      assert result.reviewer_outcomes["security"]["reason"] =~ "[REDACTED]"
+      refute result.reviewer_outcomes["security"]["reason"] =~ "abcdefghijklmnopqrstuvwx"
       assert result.feedback["review"]["disposition"] == "rework"
       assert result.feedback["review"]["blocking_ids"] == ["finding-1", "finding-2"]
+      assert result.feedback["review"]["reviewer_outcomes"] == result.reviewer_outcomes
 
       assert [first | _] = result.feedback["review"]["active_findings"]
       assert first["id"] == "finding-1"
@@ -275,6 +290,7 @@ defmodule Arbor.Actions.CouncilTest do
       assert persisted_review["review_cycle"] == 2
       assert persisted_review["review_disposition"] == "rework"
       assert persisted_review["blocking_ids"] == ["finding-1", "finding-2"]
+      assert persisted_review["reviewer_outcomes"] == result.reviewer_outcomes
     end
 
     test "architectural ledger handoff routes rejected decisions to human review without security veto" do
@@ -1860,6 +1876,18 @@ defmodule Arbor.Actions.CouncilTest do
         blocking_ids: Enum.map(1..25, &"finding-#{&1}"),
         blocking_reasons:
           Enum.map(1..25, &%{"id" => "finding-#{&1}", "reason" => "active_blocking"}),
+        reviewer_outcomes:
+          Map.new(1..10, fn index ->
+            {"reviewer-#{index}",
+             %{
+               "status" => "failed",
+               "reason_code" => "branch_failed",
+               "provider" => "openai_oauth",
+               "model" => "gpt-5.6-sol",
+               "reason" => String.duplicate(<<1>>, 512),
+               "effective_vote" => "abstain"
+             }}
+          end),
         human_required: false
       }
 
@@ -1873,12 +1901,75 @@ defmodule Arbor.Actions.CouncilTest do
       assert feedback == result.feedback
       assert length(feedback["review"]["active_findings"]) <= 20
       assert length(feedback["review"]["blocking_ids"]) <= 20
+      assert map_size(feedback["review"]["reviewer_outcomes"]) == 10
       assert byte_size(result.feedback_json) <= 32_768
+
+      assert Enum.all?(feedback["review"]["reviewer_outcomes"], fn {_perspective, outcome} ->
+               outcome["reason_code"] == "branch_failed" and
+                 outcome["effective_vote"] == "abstain" and
+                 (is_nil(outcome["reason"]) or String.length(outcome["reason"]) <= 256)
+             end)
 
       assert Enum.all?(feedback["review"]["active_findings"], fn finding ->
                String.length(finding["title"]) <= 1_000 and
                  String.length(finding["required_action"]) <= 1_000 and
                  String.length(finding["evidence"]) <= 1_000
+             end)
+    end
+
+    test "emergency feedback compaction preserves reviewer failure outcomes" do
+      wide_text = String.duplicate(<<0x1F600::utf8>>, 350)
+
+      ledger =
+        update_in(review_ledger_with_many_findings(), ["findings"], fn findings ->
+          Map.new(findings, fn {id, finding} ->
+            {id,
+             Map.merge(finding, %{
+               "title" => wide_text,
+               "required_action" => wide_text,
+               "evidence" => wide_text
+             })}
+          end)
+        end)
+
+      decision = %{
+        decision: "deadlock",
+        review_cycle: 1,
+        finding_ledger: ledger,
+        review_disposition: "rework",
+        blocking_ids: Enum.map(1..25, &"finding-#{&1}"),
+        blocking_reasons: Enum.map(1..25, &%{"id" => "finding-#{&1}", "reason" => wide_text}),
+        reviewer_outcomes:
+          Map.new(1..10, fn index ->
+            {"reviewer-#{index}",
+             %{
+               "status" => "failed",
+               "reason_code" => "branch_failed",
+               "reason" => wide_text,
+               "effective_vote" => "abstain"
+             }}
+          end),
+        human_required: false
+      }
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(
+                 Map.put(@valid_review_params, :finding_ledger, ledger),
+                 %{review_runner: fn _, _, _ -> {:ok, decision} end, persist_verdict: false}
+               )
+
+      assert {:ok, feedback} = Jason.decode(result.feedback_json)
+      assert feedback == result.feedback
+      assert feedback["feedback_truncated"]
+      assert map_size(feedback["review"]["reviewer_outcomes"]) == 10
+      assert byte_size(result.feedback_json) <= 32_768
+
+      assert Enum.all?(feedback["review"]["reviewer_outcomes"], fn {_perspective, outcome} ->
+               outcome == %{
+                 "effective_vote" => "abstain",
+                 "reason_code" => "branch_failed",
+                 "status" => "failed"
+               }
              end)
     end
   end

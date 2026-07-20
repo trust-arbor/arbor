@@ -1340,6 +1340,7 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       :review_disposition,
       :blocking_ids,
       :blocking_reasons,
+      :reviewer_outcomes,
       :human_required
     ]
 
@@ -1352,6 +1353,16 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
         "findings" => %{},
         "cycles" => %{},
         "out_of_scope" => []
+      }
+
+      reviewer_outcomes = %{
+        "security" => %{
+          "status" => "failed",
+          "reason_code" => "branch_failed",
+          "provider" => "openai_oauth",
+          "model" => "gpt-5.6-sol",
+          "effective_vote" => "abstain"
+        }
       }
 
       engine_runner = fn _graph, _engine_opts ->
@@ -1370,6 +1381,7 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
              "exec.decide.review_disposition" => "accept",
              "exec.decide.blocking_ids" => [],
              "exec.decide.blocking_reasons" => [],
+             "exec.decide.reviewer_outcomes" => reviewer_outcomes,
              "exec.decide.human_required" => false,
              # Must not forward arbitrary nested context outside the allowlist.
              "exec.decide.secret_internal" => "must-not-project",
@@ -1394,6 +1406,7 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       assert decision.review_disposition == "accept"
       assert decision.blocking_ids == []
       assert decision.blocking_reasons == []
+      assert decision.reviewer_outcomes == reviewer_outcomes
       # Legitimate false must survive; absence is what omits the key.
       assert decision.human_required == false
       assert Map.has_key?(decision, :human_required)
@@ -1402,6 +1415,163 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       refute Map.has_key?(decision, "secret_internal")
       refute Map.has_key?(decision, :arbitrary_payload)
       refute Map.has_key?(decision, "arbitrary_payload")
+    end
+
+    test "bounds and redacts reviewer outcomes at the Consult boundary" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      secret = "abcdefghijklmnopqrstuvwx"
+
+      reviewer_outcomes =
+        Map.new(1..10, fn index ->
+          perspective = "reviewer-#{String.pad_leading(Integer.to_string(index), 2, "0")}"
+
+          {perspective,
+           %{
+             "status" => "failed",
+             "reason_code" => "branch_failed",
+             "provider" => "openai_oauth",
+             "model" => String.duplicate("m", 1_000),
+             "reason" => ~s(access_token="#{secret}" ) <> String.duplicate("diagnostic", 100),
+             "effective_vote" => "abstain",
+             "untrusted_extra" => String.duplicate("x", 10_000)
+           }}
+        end)
+        |> put_in(["reviewer-01", "provider"], "sk-" <> String.duplicate("a", 32))
+        |> put_in(
+          ["reviewer-01", "reason"],
+          ~s(access_token="#{secret}" ) <> String.duplicate("diagnostic", 500_000)
+        )
+
+      assert Arbor.Consensus.sanitize_reviewer_outcomes(
+               Map.put(reviewer_outcomes, "reviewer-11", %{})
+             ) == %{}
+
+      secret_perspective = "sk-" <> String.duplicate("b", 32)
+
+      assert Arbor.Consensus.sanitize_reviewer_outcomes(%{
+               secret_perspective => %{"status" => "failed"}
+             }) == %{}
+
+      engine_runner = fn _graph, _engine_opts ->
+        {:ok,
+         %{
+           context: %{
+             "exec.decide.decision" => "approved",
+             "exec.decide.reviewer_outcomes" => reviewer_outcomes
+           }
+         }}
+      end
+
+      assert {:ok, decision} =
+               Consult.decide(TestAdvisoryEvaluator, "Sanitize reviewer outcomes",
+                 graph: graph_path,
+                 engine_runner: engine_runner
+               )
+
+      assert map_size(decision.reviewer_outcomes) == 10
+      assert Map.has_key?(decision.reviewer_outcomes, "reviewer-01")
+
+      outcome = decision.reviewer_outcomes["reviewer-01"]
+      assert byte_size(outcome["model"]) == 256
+      assert outcome["provider"] == "[REDACTED]"
+      assert byte_size(outcome["reason"]) <= 512
+      assert outcome["reason"] =~ "[REDACTED]"
+      refute outcome["reason"] =~ secret
+      refute Map.has_key?(outcome, "untrusted_extra")
+    end
+
+    test "security regression: long quoted secrets are redacted before reason truncation" do
+      secret = String.duplicate("s", 4_096)
+
+      for quote <- [~s("), ~s(')] do
+        outcomes = %{
+          "security" => %{
+            "status" => "failed",
+            "reason_code" => "branch_failed",
+            "reason" => "access_token=#{quote}#{secret}#{quote}",
+            "effective_vote" => "abstain"
+          }
+        }
+
+        reason =
+          outcomes
+          |> Arbor.Consensus.sanitize_reviewer_outcomes()
+          |> get_in(["security", "reason"])
+
+        assert reason =~ "[REDACTED]"
+        refute reason =~ String.duplicate("s", 32)
+        assert byte_size(reason) <= 512
+      end
+    end
+
+    test "security regression: credential URIs are redacted when their terminator is truncated" do
+      password = String.duplicate("p", 4_096)
+      credential_uri = "postgres://reviewer:#{password}@database.internal"
+
+      outcome =
+        %{
+          "security" => %{
+            "status" => "failed",
+            "reason_code" => "branch_failed",
+            "provider" => credential_uri,
+            "model" => credential_uri,
+            "reason" => credential_uri,
+            "effective_vote" => "abstain"
+          }
+        }
+        |> Arbor.Consensus.sanitize_reviewer_outcomes()
+        |> Map.fetch!("security")
+
+      assert outcome["provider"] == "[REDACTED]"
+      assert outcome["model"] == "[REDACTED]"
+      assert outcome["reason"] == "[REDACTED]"
+      refute inspect(outcome) =~ String.duplicate("p", 32)
+    end
+
+    test "security regression: structured reasons are rejected without inspection" do
+      outcomes = %{
+        "security" => %{
+          "status" => "failed",
+          "reason_code" => "branch_failed",
+          "reason" => %{"nested" => List.duplicate("secret diagnostic", 1_000)},
+          "effective_vote" => "abstain"
+        }
+      }
+
+      outcome =
+        outcomes
+        |> Arbor.Consensus.sanitize_reviewer_outcomes()
+        |> Map.fetch!("security")
+
+      refute Map.has_key?(outcome, "reason")
+    end
+
+    test "security regression: oversized integer reasons are rejected without conversion" do
+      oversized_integer = :binary.decode_unsigned(:binary.copy(<<255>>, 4_096))
+
+      outcome =
+        %{
+          "security" => %{
+            "status" => "failed",
+            "reason_code" => "branch_failed",
+            "reason" => oversized_integer,
+            "effective_vote" => "abstain"
+          }
+        }
+        |> Arbor.Consensus.sanitize_reviewer_outcomes()
+        |> Map.fetch!("security")
+
+      refute Map.has_key?(outcome, "reason")
+    end
+
+    test "rejects oversized perspective keys before projecting an outcome" do
+      perspective = String.duplicate("p", 1_000_000)
+
+      assert Arbor.Consensus.sanitize_reviewer_outcomes(%{
+               perspective => %{"status" => "failed", "reason_code" => "branch_failed"}
+             }) == %{}
     end
 
     test "falls back to council.* review fields for legacy prefix compatibility" do

@@ -1006,10 +1006,23 @@ defmodule Arbor.Actions.ConsensusTest do
     end
 
     test "failed, malformed, and unknown reports become abstentions without prose vote inference" do
+      secret = "abcdefghijklmnopqrstuvwx"
+
+      failed_security =
+        make_review_branch("security", review_report("reject"), "fail")
+        |> put_in(["context_updates", "llm.provider"], "openai_oauth")
+        |> put_in(["context_updates", "llm.model"], "gpt-5.6-sol")
+        |> Map.put(
+          "failure_reason",
+          ~s(LLM call failed: access_token="#{secret}" refresh_token_invalidated)
+        )
+
       results = [
         make_review_branch("correctness", review_report("approve")),
-        make_review_branch("security", review_report("reject"), "fail"),
-        make_review_branch("maintainability", "I approve this code"),
+        failed_security,
+        make_review_branch("maintainability", "I approve this code")
+        |> put_in(["context_updates", "llm.provider"], "xai_oauth")
+        |> put_in(["context_updates", "llm.model"], "grok-4.5"),
         make_review_branch("unknown", review_report("reject"))
       ]
 
@@ -1023,6 +1036,56 @@ defmodule Arbor.Actions.ConsensusTest do
       assert result["perspective_votes"]["maintainability"] == "abstain"
       assert result["approve_count"] == 1
       assert result["abstain_count"] == 2
+
+      assert result["reviewer_outcomes"]["correctness"] == %{
+               "status" => "reported",
+               "reason_code" => "valid_report",
+               "submitted_vote" => "approve",
+               "effective_vote" => "approve"
+             }
+
+      assert result["reviewer_outcomes"]["security"]["status"] == "failed"
+      assert result["reviewer_outcomes"]["security"]["reason_code"] == "branch_failed"
+      assert result["reviewer_outcomes"]["security"]["provider"] == "openai_oauth"
+      assert result["reviewer_outcomes"]["security"]["model"] == "gpt-5.6-sol"
+      assert result["reviewer_outcomes"]["security"]["effective_vote"] == "abstain"
+      assert result["reviewer_outcomes"]["security"]["reason"] =~ "[REDACTED]"
+      refute result["reviewer_outcomes"]["security"]["reason"] =~ secret
+
+      assert result["reviewer_outcomes"]["maintainability"] == %{
+               "status" => "invalid",
+               "reason_code" => "malformed_response",
+               "provider" => "xai_oauth",
+               "model" => "grok-4.5",
+               "effective_vote" => "abstain"
+             }
+
+      refute Map.has_key?(result["reviewer_outcomes"], "unknown")
+      assert {:ok, _encoded} = Jason.encode(result["reviewer_outcomes"])
+    end
+
+    test "missing reviewer branches are explicit rather than indistinguishable abstentions" do
+      assert {:ok, result} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [make_review_branch("correctness", review_report("approve"))],
+                   review_cycle: 1,
+                   finding_ledger: review_ledger()
+                 },
+                 %{}
+               )
+
+      assert result["reviewer_outcomes"]["security"] == %{
+               "status" => "missing",
+               "reason_code" => "missing_branch",
+               "effective_vote" => "abstain"
+             }
+
+      assert result["reviewer_outcomes"]["maintainability"] == %{
+               "status" => "missing",
+               "reason_code" => "missing_branch",
+               "effective_vote" => "abstain"
+             }
     end
 
     test "projects a security veto as rejected human review" do

@@ -81,11 +81,12 @@ defmodule Arbor.LLM.OAuth do
           {:ok, token}
 
         :refresh ->
-          # No valid cached access_token (grok stores ONLY a refresh_token; openai's cached one may
-          # be expiring) — mint one via refresh. Providers ROTATE the refresh_token, so we WRITE
-          # the rotated tokens back to the Arbor-owned store (~/.arbor/oauth), never the CLI file —
-          # so the CLI credential is never consumed and the next call has a fresh refresh_token.
-          # Single-flight the refresh so concurrent same-provider callers do not race rotation.
+          # No valid cached access_token (Grok stores only a refresh_token; OpenAI's cached one may
+          # be expiring), so the transitional implementation refreshes and writes the rotation to
+          # Arbor's local store. This does NOT create an Arbor-owned credential family: the source
+          # CLI may still hold and rotate the same lineage. The roadmap replaces this unsafe import
+          # mode with explicit Arbor-owned login and source-owned access-token read-through.
+          # Single-flight prevents races only among Arbor callers in this BEAM cluster.
           if is_binary(tokens["refresh_token"]) do
             refresh_singleflight(key, config)
           else
@@ -160,9 +161,9 @@ defmodule Arbor.LLM.OAuth do
 
   defp normalize_oauth_provider(_provider), do: {:error, :invalid_oauth_provider}
 
-  # Store-first: read the Arbor-owned copy (~/.arbor/oauth/<key>.json); import from the CLI file on
-  # first use. This is what makes rotation safe — write-back keeps the Arbor store current without
-  # ever consuming the CLI credential.
+  # Store-first transitional behavior: read Arbor's local copy, importing the CLI file on first
+  # use. A copied rotating refresh token is not independently owned and can conflict with its CLI
+  # source. See the ownership warning in the moduledoc and the planned migration.
   defp read_tokens(key, config) do
     case read_stored_tokens(key) do
       {:ok, tokens} ->
@@ -285,7 +286,7 @@ defmodule Arbor.LLM.OAuth do
 
   # Called only while holding the provider-scoped :global lock.
   defp refresh_under_lock(key, config) do
-    # Double-check the Arbor-owned store: another caller may have already refreshed + persisted.
+    # Double-check the local store: another Arbor caller may have already refreshed + persisted.
     case read_stored_tokens(key) do
       {:ok, latest} ->
         case usable_access_token(latest, config) do
@@ -358,7 +359,7 @@ defmodule Arbor.LLM.OAuth do
     {:error, {:invalid_refreshed_refresh_token, :missing_or_not_binary}}
   end
 
-  # Persist tokens to the Arbor-owned store via atomic same-directory publication.
+  # Persist tokens to Arbor's local store via atomic same-directory publication.
   # Encode first; exclusive temp (mode 0600 before content); write + fsync; rename over target;
   # fsync the parent directory so the directory entry is crash-durable; ensure final mode 0600.
   # Never delete the old target before rename. Failures clean the temp and return an error.

@@ -43,8 +43,11 @@ defmodule Arbor.Consensus do
 
   @behaviour Arbor.Contracts.API.Consensus
 
-  alias Arbor.Consensus.{ConsultationLog, Coordinator, EventStore}
+  alias Arbor.Consensus.{ConsultationLog, Coordinator, EventStore, ReviewerOutcomes}
   alias Arbor.Consensus.Evaluators.Consult
+
+  @doc false
+  defdelegate sanitize_reviewer_outcomes(outcomes), to: ReviewerOutcomes, as: :sanitize
 
   # ============================================================================
   # Proposal Lifecycle

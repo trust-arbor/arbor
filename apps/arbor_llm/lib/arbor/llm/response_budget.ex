@@ -153,6 +153,21 @@ defmodule Arbor.LLM.ResponseBudget do
   def decode_json_with_measurements(_body, _opts),
     do: {:error, {:invalid_json, :binary_body_required}}
 
+  @doc false
+  @spec decode_json_source_with_measurements(binary(), keyword()) ::
+          {:ok, term(), map()} | {:error, term()}
+  def decode_json_source_with_measurements(body, opts) when is_binary(body) do
+    with {:ok, _limits, normalized} <- normalize_limits(opts),
+         {:ok, _source_measurements} <- JSONPreflight.scan(body, normalized),
+         {:ok, decoded} <- decode_after_preflight(body),
+         {:ok, decoded_measurements} <- measure(decoded, normalized) do
+      {:ok, decoded, decoded_measurements}
+    end
+  end
+
+  def decode_json_source_with_measurements(_body, _opts),
+    do: {:error, {:invalid_json, :binary_body_required}}
+
   @spec decode_json_numbers(binary(), keyword(), [String.t()]) ::
           {:ok, term(), %{String.t() => String.t()}} | {:error, term()}
   def decode_json_numbers(body, opts, keys) when is_binary(body) do

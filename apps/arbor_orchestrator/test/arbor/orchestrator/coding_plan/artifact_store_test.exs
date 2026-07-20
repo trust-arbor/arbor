@@ -254,6 +254,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              "validation_outputs" => [%{"command" => "mix test", "passed" => true}],
              "review_verdict" => %{
                "recommendation" => "approve",
+               "reviewer_outcomes" => %{
+                 "security" => %{
+                   "status" => "failed",
+                   "reason_code" => "branch_failed",
+                   "provider" => "openai_oauth",
+                   "model" => "gpt-5.6-sol",
+                   "effective_vote" => "abstain"
+                 }
+               },
                "tier_decision" => "allow",
                "human_required" => false,
                "security_veto" => false,
@@ -304,6 +313,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
     assert evidence["review_verdict"] == %{
              "recommendation" => "approve",
+             "reviewer_outcomes" => %{
+               "security" => %{
+                 "status" => "failed",
+                 "reason_code" => "branch_failed",
+                 "provider" => "openai_oauth",
+                 "model" => "gpt-5.6-sol",
+                 "effective_vote" => "abstain"
+               }
+             },
              "tier_decision" => "allow",
              "human_required" => false,
              "security_veto" => false,
@@ -408,7 +426,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       "status" => "change_committed",
       "canonical_status" => "change_committed",
       "validation" => [%{"command" => "mix test", "passed" => true}],
-      "review" => %{"recommendation" => "approve"},
+      "review" => %{
+        "recommendation" => "approve",
+        "reviewer_outcomes" => %{
+          "security" => %{
+            "status" => "failed",
+            "reason_code" => "branch_failed",
+            "provider" => "openai_oauth",
+            "model" => "gpt-5.6-sol",
+            "effective_vote" => "abstain"
+          }
+        }
+      },
       "tier_decision" => "allow",
       "human_required" => false,
       "security_veto" => false,

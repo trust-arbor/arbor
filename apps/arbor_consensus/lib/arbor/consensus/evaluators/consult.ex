@@ -27,6 +27,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   """
 
   alias Arbor.Consensus.ConsultationLog
+  alias Arbor.Consensus.ReviewerOutcomes
   alias Arbor.Contracts.Consensus.Proposal
   alias Arbor.Contracts.Security.SigningAuthority
 
@@ -1055,6 +1056,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     :review_disposition,
     :blocking_ids,
     :blocking_reasons,
+    :reviewer_outcomes,
     :human_required
   ]
 
@@ -1276,11 +1278,16 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   defp project_review_decision_fields(ctx) do
     Enum.reduce(@review_decision_fields, %{}, fn field, acc ->
       case fetch_decide_field(ctx, field) do
-        {:ok, value} -> Map.put(acc, field, value)
+        {:ok, value} -> Map.put(acc, field, project_review_field(field, value))
         :error -> acc
       end
     end)
   end
+
+  defp project_review_field(:reviewer_outcomes, outcomes),
+    do: ReviewerOutcomes.sanitize(outcomes)
+
+  defp project_review_field(_field, value), do: value
 
   defp fetch_decide_field(ctx, field) when is_atom(field) do
     name = Atom.to_string(field)

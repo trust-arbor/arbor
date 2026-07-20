@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 470,
+  "entry_count": 472,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -2943,7 +2943,7 @@
       "anchor": "applied-learning-a-copied-oauth-refresh-token-can-be-invalidated-by-its-source-cli",
       "source_date": "2026-07-12",
       "source_incident": "found 2026-07-12 validating `gpt-5.6-sol` for the review council).",
-      "content_sha256": "75d6a7144083d4ea3a7c43e6abf4c871f88e57e5f22becebd5a56e53c68a5c9d",
+      "content_sha256": "8d211fa77330ba5675b52cae308e69fbd803a834add899bcc2da57ddd0a0799e",
       "always_loaded": false
     },
     {
@@ -5654,8 +5654,34 @@
       "source_incident": "found 2026-07-20 after adding AcpPool settlement tracking).",
       "content_sha256": "585bd2856e150ed9301f8446c75ca8e7dfcd7876860f463ccba96bf324157175",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 471,
+      "source_kind": "post-migration",
+      "slug": "streamed-function-call-arguments-are-not-terminal-json-until-the-protocol-says-the-item-is-done",
+      "title": "Streamed function-call arguments are not terminal JSON until the protocol says the item is done.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-streamed-function-call-arguments-are-not-terminal-json-until-the-protocol-says-the-item-is-done",
+      "source_date": "2026-07-20",
+      "source_incident": "found 2026-07-20 reproducing the xAI council reviewer failure against the raw SSE stream).",
+      "content_sha256": "5fea29e4167f81e06096baa08d7b0ad751e7fed22a2a8ca70629a1de93d137c4",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 472,
+      "source_kind": "post-migration",
+      "slug": "reviewer-failure-evidence-must-be-bounded-at-first-projection-and-survive-rework-feedback",
+      "title": "Reviewer failure evidence must be bounded at first projection and survive rework feedback.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-reviewer-failure-evidence-must-be-bounded-at-first-projection-and-survive-rework-feedback",
+      "source_date": "2026-07-20",
+      "source_incident": "found 2026-07-20 reviewing council abstention observability).",
+      "content_sha256": "ba514187ba7dcff07b1ae3fc54bf93bd9f66e5d87ae9b5ae3cf1416cef391fed",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 9
+  "post_migration_entry_count": 11
 }

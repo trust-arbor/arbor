@@ -1583,6 +1583,7 @@ defmodule Arbor.Actions.Coding do
         security_veto: map_value(review, :security_veto),
         authority_widening: map_value(review, :authority_widening),
         tier_reasons: map_value(review, :tier_reasons),
+        reviewer_outcomes: map_value(review, :reviewer_outcomes),
         verdict: verdict_summary(map_value(review, :verdict))
       }
       |> reject_nil_values()

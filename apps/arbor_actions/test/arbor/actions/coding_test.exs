@@ -1007,7 +1007,14 @@ defmodule Arbor.Actions.CodingTest do
              tier_decision: :human_review,
              human_required: true,
              security_veto: false,
-             tier_reasons: [:high_blast_radius]
+             tier_reasons: [:high_blast_radius],
+             reviewer_outcomes: %{
+               "security" => %{
+                 "status" => "failed",
+                 "reason_code" => "branch_failed",
+                 "effective_vote" => "abstain"
+               }
+             }
            }}
 
         Git.PR, params, _context ->
@@ -1040,6 +1047,7 @@ defmodule Arbor.Actions.CodingTest do
       assert result.blast_radius == :high
       assert result.review_recommendation == :keep
       assert result.review.files == ["security.txt"]
+      assert result.review.reviewer_outcomes["security"]["reason_code"] == "branch_failed"
       refute Map.has_key?(result, :pr_url)
 
       assert_receive {:review, _review_params}

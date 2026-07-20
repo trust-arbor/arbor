@@ -688,13 +688,14 @@ defmodule Arbor.Actions.Consensus do
            {:ok, finding_ledger} <- finding_ledger_param(params),
            {:ok, delta_ranges} <- delta_ranges_param(params),
            {:ok, ledger} <- ReviewLedgerCore.new(finding_ledger),
-           {:ok, reports} <- strict_reports(results, ledger, review_cycle, delta_ranges),
+           {:ok, reports, reviewer_outcomes} <-
+             strict_reports(results, ledger, review_cycle, delta_ranges),
            {:ok, completed_ledger} <-
              ReviewLedgerCore.apply_cycle(ledger, review_cycle, %{
                "reports" => reports,
                "delta_ranges" => delta_ranges
              }) do
-        {:ok, result_for(completed_ledger)}
+        {:ok, result_for(completed_ledger, reviewer_outcomes)}
       else
         {:error, reason} -> review_error(reason)
       end
@@ -762,42 +763,169 @@ defmodule Arbor.Actions.Consensus do
     defp parse_review_cycle(_cycle), do: {:error, :invalid_review_cycle}
 
     defp strict_reports(results, ledger, review_cycle, delta_ranges) do
-      Enum.reduce_while(results, {:ok, %{}}, fn branch, {:ok, reports} ->
+      results
+      |> Enum.reduce_while({:ok, %{}, %{}}, fn branch, {:ok, reports, outcomes} ->
         case strict_report(branch, ledger, review_cycle, delta_ranges) do
-          {:ok, perspective, report} ->
+          {:ok, perspective, report, outcome} ->
             if Map.has_key?(reports, perspective) do
               {:halt, {:error, :ambiguous_duplicate_perspective_report}}
             else
-              {:cont, {:ok, Map.put(reports, perspective, report)}}
+              {:cont,
+               {:ok, Map.put(reports, perspective, report),
+                put_reviewer_outcome(outcomes, perspective, outcome)}}
             end
 
           {:error, reason} ->
             {:halt, {:error, reason}}
 
-          :abstain ->
-            {:cont, {:ok, reports}}
+          {:abstain, perspective, outcome} ->
+            {:cont, {:ok, reports, put_reviewer_outcome(outcomes, perspective, outcome)}}
+
+          :ignore ->
+            {:cont, {:ok, reports, outcomes}}
         end
       end)
-    end
+      |> case do
+        {:ok, reports, outcomes} ->
+          {:ok, reports, complete_reviewer_outcomes(ledger["perspectives"], outcomes)}
 
-    defp strict_report(branch, ledger, review_cycle, delta_ranges) when is_map(branch) do
-      with {:ok, perspective} <- branch_perspective(branch),
-           true <- perspective in ledger["perspectives"],
-           true <- Map.get(branch, "status") in ["success", "partial_success"],
-           %{} = context_updates <- Map.get(branch, "context_updates"),
-           response when is_binary(response) <- Map.get(context_updates, "last_response"),
-           {:ok, report} when is_map(report) <- Jason.decode(response),
-           report <-
-             ReviewLedgerCore.project_report_to_authority(perspective, report, ledger),
-           true <- valid_report?(ledger, review_cycle, delta_ranges, perspective, report) do
-        {:ok, perspective, report}
-      else
-        {:error, :ambiguous_branch_perspective} -> {:error, :ambiguous_branch_perspective}
-        _other -> :abstain
+        {:error, _reason} = error ->
+          error
       end
     end
 
-    defp strict_report(_branch, _ledger, _review_cycle, _delta_ranges), do: :abstain
+    defp strict_report(branch, ledger, review_cycle, delta_ranges) when is_map(branch) do
+      case branch_perspective(branch) do
+        {:ok, perspective} ->
+          if perspective in ledger["perspectives"] do
+            classify_expected_branch(branch, perspective, ledger, review_cycle, delta_ranges)
+          else
+            :ignore
+          end
+
+        {:error, :ambiguous_branch_perspective} ->
+          {:error, :ambiguous_branch_perspective}
+
+        _other ->
+          :ignore
+      end
+    end
+
+    defp strict_report(_branch, _ledger, _review_cycle, _delta_ranges), do: :ignore
+
+    defp classify_expected_branch(branch, perspective, ledger, review_cycle, delta_ranges) do
+      context_updates = Map.get(branch, "context_updates")
+
+      cond do
+        Map.get(branch, "status") not in ["success", "partial_success"] ->
+          {:abstain, perspective,
+           reviewer_outcome(
+             "failed",
+             "branch_failed",
+             context_updates,
+             reason: Map.get(branch, "failure_reason")
+           )}
+
+        not is_map(context_updates) ->
+          {:abstain, perspective, reviewer_outcome("missing", "missing_context_updates", nil)}
+
+        not is_binary(Map.get(context_updates, "last_response")) ->
+          {:abstain, perspective,
+           reviewer_outcome("missing", "missing_response", context_updates)}
+
+        true ->
+          classify_response(
+            Map.get(context_updates, "last_response"),
+            context_updates,
+            perspective,
+            ledger,
+            review_cycle,
+            delta_ranges
+          )
+      end
+    end
+
+    defp classify_response(
+           response,
+           context_updates,
+           perspective,
+           ledger,
+           review_cycle,
+           delta_ranges
+         ) do
+      case Jason.decode(response) do
+        {:ok, report} when is_map(report) ->
+          projected = ReviewLedgerCore.project_report_to_authority(perspective, report, ledger)
+
+          if valid_report?(ledger, review_cycle, delta_ranges, perspective, projected) do
+            vote = normalized_vote(Map.get(projected, "vote"))
+            status = if vote == "abstain", do: "abstained", else: "reported"
+            reason_code = if vote == "abstain", do: "deliberate_abstention", else: "valid_report"
+
+            {:ok, perspective, projected,
+             reviewer_outcome(status, reason_code, context_updates, submitted_vote: vote)}
+          else
+            {:abstain, perspective,
+             reviewer_outcome("invalid", "ledger_invalid_report", context_updates,
+               submitted_vote: normalized_vote(Map.get(projected, "vote"))
+             )}
+          end
+
+        {:ok, _other} ->
+          {:abstain, perspective,
+           reviewer_outcome("invalid", "response_not_object", context_updates)}
+
+        {:error, _reason} ->
+          {:abstain, perspective,
+           reviewer_outcome("invalid", "malformed_response", context_updates)}
+      end
+    end
+
+    defp normalized_vote(vote) when vote in ["approve", "reject", "abstain"], do: vote
+    defp normalized_vote(_vote), do: nil
+
+    defp reviewer_outcome(status, reason_code, context_updates, opts \\ []) do
+      %{
+        "status" => status,
+        "reason_code" => reason_code
+      }
+      |> maybe_put_outcome("provider", context_value(context_updates, "llm.provider"))
+      |> maybe_put_outcome("model", context_value(context_updates, "llm.model"))
+      |> maybe_put_outcome("reason", Keyword.get(opts, :reason))
+      |> maybe_put_outcome("submitted_vote", Keyword.get(opts, :submitted_vote))
+    end
+
+    defp context_value(context, key) when is_map(context) do
+      case Map.get(context, key) do
+        value when is_binary(value) and value != "" -> value
+        _other -> nil
+      end
+    end
+
+    defp context_value(_context, _key), do: nil
+
+    defp maybe_put_outcome(outcome, _key, nil), do: outcome
+    defp maybe_put_outcome(outcome, key, value), do: Map.put(outcome, key, value)
+
+    defp put_reviewer_outcome(outcomes, perspective, outcome) do
+      case Map.get(outcomes, perspective) do
+        %{"status" => status} when status in ["reported", "abstained"] -> outcomes
+        _other -> Map.put(outcomes, perspective, outcome)
+      end
+    end
+
+    defp complete_reviewer_outcomes(perspectives, outcomes) do
+      Map.new(perspectives, fn perspective ->
+        outcome =
+          Map.get(
+            outcomes,
+            perspective,
+            reviewer_outcome("missing", "missing_branch", nil)
+          )
+
+        {perspective, outcome}
+      end)
+    end
 
     defp branch_perspective(branch) do
       case {Map.get(branch, "id"), Map.get(branch, "perspective")} do
@@ -828,11 +956,20 @@ defmodule Arbor.Actions.Consensus do
       )
     end
 
-    defp result_for(ledger) do
+    defp result_for(ledger, reviewer_outcomes) do
       context = ReviewLedgerCore.to_context(ledger)
       decision = context["review.decision"]
       counts = decision["vote_counts"]
       disposition = decision["disposition"]
+      perspective_votes = context["review.perspective_votes"]
+
+      reviewer_outcomes =
+        reviewer_outcomes
+        |> Map.new(fn {perspective, outcome} ->
+          {perspective,
+           Map.put(outcome, "effective_vote", Map.get(perspective_votes, perspective, "abstain"))}
+        end)
+        |> Arbor.Consensus.sanitize_reviewer_outcomes()
 
       %{
         "decision" => top_level_decision(disposition),
@@ -840,7 +977,8 @@ defmodule Arbor.Actions.Consensus do
         "reject_count" => counts["reject"],
         "abstain_count" => counts["abstain"],
         "quorum_met" => disposition == "accept",
-        "perspective_votes" => context["review.perspective_votes"],
+        "perspective_votes" => perspective_votes,
+        "reviewer_outcomes" => reviewer_outcomes,
         "security_veto" => decision["security_veto"],
         "status" => "decided",
         "review_cycle" => ledger["review_cycle"],

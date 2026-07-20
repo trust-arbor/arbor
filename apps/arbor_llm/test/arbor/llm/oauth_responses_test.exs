@@ -41,6 +41,56 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
             }} = Responses.parse_sse(raw)
   end
 
+  test "xAI in-progress function calls may have empty arguments before the terminal item" do
+    raw =
+      sse(%{
+        "sequence_number" => 29,
+        "type" => "response.output_item.added",
+        "output_index" => 1,
+        "item" => %{
+          "arguments" => "",
+          "call_id" => "call-1",
+          "name" => "lookup",
+          "type" => "function_call",
+          "id" => "item-1",
+          "status" => "in_progress"
+        }
+      }) <>
+        sse(%{
+          "type" => "response.output_item.done",
+          "item" => %{
+            "type" => "function_call",
+            "call_id" => "call-1",
+            "name" => "lookup",
+            "arguments" => Jason.encode!(%{"q" => "complete"})
+          }
+        }) <>
+        "data: [DONE]\n\n"
+
+    assert {:ok,
+            %{
+              tool_calls: [
+                %{id: "call-1", name: "lookup", arguments: %{"q" => "complete"}}
+              ]
+            }} = Responses.parse_sse(raw)
+  end
+
+  test "terminal function-call arguments must contain complete JSON" do
+    raw =
+      sse(%{
+        "type" => "response.output_item.done",
+        "item" => %{
+          "type" => "function_call",
+          "call_id" => "call-1",
+          "name" => "lookup",
+          "arguments" => ""
+        }
+      })
+
+    assert {:error, {:invalid_responses_event, {:invalid_tool_arguments, {:invalid_json, _}}}} =
+             Responses.parse_sse(raw)
+  end
+
   test "security regression: Responses events enforce byte, event, work, and depth ceilings" do
     valid = sse(%{"type" => "response.output_text.delta", "delta" => "x"})
     deep = String.duplicate("[", 33) <> "0" <> String.duplicate("]", 33)

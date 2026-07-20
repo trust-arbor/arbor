@@ -45,10 +45,10 @@ defmodule Arbor.Actions.Council do
   - ConsultOne: `arbor://ai/generate`
   """
 
-  alias Arbor.Common.SafeAtom
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Council.BlastRadius
+  alias Arbor.Common.SafeAtom
   alias Arbor.Contracts.Consensus.CodeReviewRequest
   alias Arbor.Contracts.Judge.Verdict
   alias Arbor.Contracts.Security.SigningAuthority
@@ -875,14 +875,16 @@ defmodule Arbor.Actions.Council do
         "action" => Atom.to_string(routing.action),
         "blast_radius" => Atom.to_string(routing.blast_radius)
       },
-      "review" => %{
-        "review_cycle" => completed_review_cycle(decision, request),
-        "finding_ledger" => completed_finding_ledger(decision),
-        "review_disposition" => review_disposition(decision),
-        "blocking_ids" => review_blocking_ids(decision),
-        "blocking_reasons" => review_blocking_reasons(decision),
-        "human_required" => result.human_required
-      }
+      "review" =>
+        %{
+          "review_cycle" => completed_review_cycle(decision, request),
+          "finding_ledger" => completed_finding_ledger(decision),
+          "review_disposition" => review_disposition(decision),
+          "blocking_ids" => review_blocking_ids(decision),
+          "blocking_reasons" => review_blocking_reasons(decision),
+          "human_required" => result.human_required
+        }
+        |> maybe_put_reviewer_outcomes(decision)
     }
   end
 
@@ -978,6 +980,7 @@ defmodule Arbor.Actions.Council do
       |> Map.put(:review_disposition, review["review_disposition"])
       |> Map.put(:blocking_ids, review["blocking_ids"])
       |> Map.put(:blocking_reasons, review["blocking_reasons"])
+      |> maybe_put(:reviewer_outcomes, review["reviewer_outcomes"])
     end
   end
 
@@ -1847,6 +1850,7 @@ defmodule Arbor.Actions.Council do
         {"disposition", :disposition},
         {"blocking_ids", :blocking_ids},
         {"blocking_reasons", :blocking_reasons},
+        {"reviewer_outcomes", :reviewer_outcomes},
         {"human_required", :human_required}
       ],
       fn {string_key, atom_key} ->
@@ -1875,13 +1879,22 @@ defmodule Arbor.Actions.Council do
             else: routing.human_required
           )
       }
+      |> maybe_put_reviewer_outcomes(decision)
     end
   end
 
   defp review_compact_metadata(decision, %CodeReviewRequest{} = request) do
     case review_metadata(decision, request) do
-      nil -> nil
-      review -> Map.take(review, ["review_cycle", "review_disposition", "blocking_ids"])
+      nil ->
+        nil
+
+      review ->
+        Map.take(review, [
+          "review_cycle",
+          "review_disposition",
+          "blocking_ids",
+          "reviewer_outcomes"
+        ])
     end
   end
 
@@ -1932,6 +1945,16 @@ defmodule Arbor.Actions.Council do
     |> Enum.take(@feedback_list_limit)
   end
 
+  defp maybe_put_reviewer_outcomes(review, decision) do
+    case value(decision, "reviewer_outcomes") do
+      outcomes when is_map(outcomes) ->
+        Map.put(review, "reviewer_outcomes", Arbor.Consensus.sanitize_reviewer_outcomes(outcomes))
+
+      _other ->
+        review
+    end
+  end
+
   defp review_feedback(review) do
     %{
       "review_cycle" => review["review_cycle"],
@@ -1941,6 +1964,7 @@ defmodule Arbor.Actions.Council do
       "human_required" => review["human_required"],
       "active_findings" => active_findings(review["finding_ledger"])
     }
+    |> maybe_put("reviewer_outcomes", review["reviewer_outcomes"])
   end
 
   defp bounded_feedback_json(feedback) do
@@ -1955,11 +1979,7 @@ defmodule Arbor.Actions.Council do
       if byte_size(json) <= @feedback_json_bytes_limit do
         {feedback, json}
       else
-        minimal = %{
-          "recommendation" => feedback["recommendation"],
-          "flags" => feedback["flags"],
-          "feedback_truncated" => true
-        }
+        minimal = minimal_feedback(feedback)
 
         {minimal, Jason.encode!(minimal)}
       end
@@ -1995,7 +2015,60 @@ defmodule Arbor.Actions.Council do
       |> Enum.take(6)
       |> Enum.map(&compact_active_finding/1)
     end)
+    |> Map.update("reviewer_outcomes", %{}, &compact_reviewer_outcomes/1)
   end
+
+  defp compact_reviewer_outcomes(outcomes) when is_map(outcomes) do
+    Map.new(outcomes, fn {perspective, outcome} ->
+      compacted =
+        if is_map(outcome) do
+          Map.update(outcome, "reason", nil, &compact_text/1)
+        else
+          %{}
+        end
+
+      {perspective, compacted}
+    end)
+  end
+
+  defp compact_reviewer_outcomes(_outcomes), do: %{}
+
+  defp minimal_feedback(feedback) do
+    %{
+      "recommendation" => feedback["recommendation"],
+      "flags" => feedback["flags"],
+      "feedback_truncated" => true
+    }
+    |> maybe_put("review", minimal_review_feedback(feedback["review"]))
+  end
+
+  defp minimal_review_feedback(review) when is_map(review) do
+    %{}
+    |> maybe_put("review_cycle", review["review_cycle"])
+    |> maybe_put("disposition", review["disposition"])
+    |> maybe_put("human_required", review["human_required"])
+    |> maybe_put(
+      "reviewer_outcomes",
+      minimal_reviewer_outcomes(review["reviewer_outcomes"])
+    )
+  end
+
+  defp minimal_review_feedback(_review), do: nil
+
+  defp minimal_reviewer_outcomes(outcomes) when is_map(outcomes) do
+    Map.new(outcomes, fn {perspective, outcome} ->
+      projection =
+        if is_map(outcome) do
+          Map.take(outcome, ~w(status reason_code submitted_vote effective_vote))
+        else
+          %{}
+        end
+
+      {perspective, projection}
+    end)
+  end
+
+  defp minimal_reviewer_outcomes(_outcomes), do: nil
 
   defp compact_active_finding(finding) do
     finding

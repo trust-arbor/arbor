@@ -60,6 +60,16 @@ defmodule Arbor.LLM.ResponseBudgetTest do
              ResponseBudget.decode_json(body, @limits)
   end
 
+  test "source-only decoding leaves incomplete embedded JSON for protocol-aware consumers" do
+    body = Jason.encode!(%{"name" => "lookup", "arguments" => ""})
+
+    assert {:ok, %{"name" => "lookup", "arguments" => ""}, measurements} =
+             ResponseBudget.decode_json_source_with_measurements(body, @limits)
+
+    assert measurements.nodes > 0
+    assert {:error, {:invalid_json, _}} = ResponseBudget.decode_json(body, @limits)
+  end
+
   test "security regression: embedded tool arguments share one retained aggregate budget" do
     arguments = Jason.encode!(%{"items" => List.duplicate(0, 4_500)})
 

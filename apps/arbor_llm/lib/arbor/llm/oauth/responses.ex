@@ -380,7 +380,8 @@ defmodule Arbor.LLM.OAuth.Responses do
 
     with {:ok, preflight} <- ResponseBudget.preflight_json(data, limits),
          {:ok, state} <- charge_measurements(state, preflight),
-         {:ok, decoded, retained} <- ResponseBudget.decode_json_with_measurements(data, limits),
+         {:ok, decoded, retained} <-
+           ResponseBudget.decode_json_source_with_measurements(data, limits),
          {:ok, state} <- charge_measurements(state, measurement_delta(retained, preflight)),
          {:ok, state} <- retain_response_event(decoded, state) do
       {:ok, state}
@@ -415,7 +416,8 @@ defmodule Arbor.LLM.OAuth.Responses do
          },
          state
        ) do
-    with {:ok, tool_call} <- tool_call_from_item(item) do
+    with {:ok, tool_call, measurements} <- tool_call_from_item(item),
+         {:ok, state} <- charge_measurements(state, measurements) do
       {:ok, %{state | tool_calls: [tool_call | state.tool_calls]}}
     end
   end
@@ -428,8 +430,8 @@ defmodule Arbor.LLM.OAuth.Responses do
 
     with :ok <- bounded_tool_field(id, :id),
          :ok <- bounded_tool_field(name, :name),
-         {:ok, arguments} <- decode_args(item["arguments"]) do
-      {:ok, %{id: id, name: name, arguments: arguments}}
+         {:ok, arguments, measurements} <- decode_args(item["arguments"]) do
+      {:ok, %{id: id, name: name, arguments: arguments}, measurements}
     end
   end
 
@@ -441,16 +443,16 @@ defmodule Arbor.LLM.OAuth.Responses do
   defp bounded_tool_field(_value, field), do: {:error, {:invalid_tool_field, field}}
 
   defp decode_args(args) when is_binary(args) do
-    case ResponseBudget.decode_json(args, tool_argument_limits()) do
-      {:ok, map} when is_map(map) -> {:ok, map}
-      {:ok, _other} -> {:error, :tool_arguments_must_be_map}
+    case ResponseBudget.decode_json_with_measurements(args, tool_argument_limits()) do
+      {:ok, map, measurements} when is_map(map) -> {:ok, map, measurements}
+      {:ok, _other, _measurements} -> {:error, :tool_arguments_must_be_map}
       {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
     end
   end
 
   defp decode_args(map) when is_map(map) do
-    case ResponseBudget.validate(map, tool_argument_limits()) do
-      :ok -> {:ok, map}
+    case ResponseBudget.measure(map, tool_argument_limits()) do
+      {:ok, measurements} -> {:ok, map, measurements}
       {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
     end
   end
