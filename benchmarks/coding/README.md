@@ -5,8 +5,8 @@ coding tasks for the Phase 6 legacy-vs-pipeline conformance harness.
 
 It does **not** run that benchmark. The Apple Container/Linux validation
 baseline was provisioned and passed its live adversarial matrix on 2026-07-16;
-real paired execution still requires trusted adapter/runtime configuration and
-an operator-started benchmark run.
+an accepted paired result still requires an operator-started run with trusted
+adapter/runtime configuration and available provider capacity.
 
 ## Files
 
@@ -136,7 +136,15 @@ canonical patch, not equivalence of every behaviorally valid implementation.
 
 The host containment and dependency-baseline gate is cleared. The catalog,
 materializer, and built-in objective verifier make curated inputs
-**reproducible, reviewable, and objectively scorable**. The remaining work is
-to install the trusted benchmark roots, adapters, principal, and timeouts in the
-running node, execute the prepared legacy/pipeline pairs, and retain the report;
-these files do not by themselves constitute a completed scoreboard run.
+**reproducible, reviewable, and objectively scorable**. Trusted roots, adapters,
+principal authority, timeouts, and frozen prepared publications were exercised
+through r6 and r7 on 2026-07-20. Neither report is accepted comparative evidence:
+r6 exposed runtime contamination, settlement, security-state, and approval-timeout
+defects that were corrected afterward; r7 restored its temporary runtime settings
+cleanly but all three pairs were unavailable because xAI returned HTTP 403 for the
+team credit/spending limit. The next required step is a fresh frozen Grok 4.5 run
+after provider capacity is restored. These catalog files and the invalid/interim
+reports do not by themselves constitute a completed scoreboard run.
+
+The [`DOT-orchestrated coding workflow` Phase 6 record](../../.arbor/roadmap/3-in-progress/dot-orchestrated-coding-workflow.md)
+tracks the accepted controls, invalid-run findings, fixes, and final evidence gate.
