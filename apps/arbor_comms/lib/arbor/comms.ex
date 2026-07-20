@@ -533,6 +533,31 @@ defmodule Arbor.Comms do
     Voice.ping(phone_node)
   end
 
+  @doc "Stop any in-progress listen on the phone."
+  @spec voice_stop_listen(node()) :: :ok | {:error, term()}
+  def voice_stop_listen(phone_node) do
+    Voice.stop_listen(phone_node)
+  end
+
+  @doc "Cancel in-progress TTS playback on the phone."
+  @spec voice_tts_stop(node()) :: :ok | {:error, term()}
+  def voice_tts_stop(phone_node) do
+    Voice.tts_stop(phone_node)
+  end
+
+  @doc "Verify the current speaker against phone-side enrollments (VOICE-21)."
+  @spec voice_speaker_verify(node(), keyword()) :: {:ok, map()} | {:error, term()}
+  def voice_speaker_verify(phone_node, opts \\ []) do
+    Voice.speaker_verify(phone_node, opts)
+  end
+
+  @doc "Enroll the current speaker on the phone (records ~5 s phone-side)."
+  @spec voice_speaker_enroll(node(), String.t() | atom(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def voice_speaker_enroll(phone_node, name, opts \\ []) do
+    Voice.speaker_enroll(phone_node, name, opts)
+  end
+
   # -- History --
 
   @doc """
