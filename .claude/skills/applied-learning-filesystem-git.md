@@ -4,6 +4,15 @@ Read this when handling paths, files, symlinks, worktrees, Git provenance, index
 
 ## Retained Applied Learning
 
+<!-- applied-learning: portable-directory-cleanup-must-account-for-platform-specific-errno-atoms -->
+<a id="applied-learning-portable-directory-cleanup-must-account-for-platform-specific-errno-atoms"></a>
+**Portable directory cleanup must account for platform-specific errno atoms.**
+On macOS, `File.rmdir/1` can return `{:error, :eexist}` for a non-empty
+directory, where Linux typically returns `{:error, :enotempty}`. When a
+non-empty shared directory is an expected benign outcome, handle both forms
+while continuing to fail closed for other errors (found 2026-07-20 in
+benchmark artifact lease cleanup).
+
 <!-- applied-learning: inspect-formatter-diffs-before-staging-a-narrow-change -->
 <a id="applied-learning-inspect-formatter-diffs-before-staging-a-narrow-change"></a>
 **Inspect formatter diffs before staging a narrow change.** A source file may

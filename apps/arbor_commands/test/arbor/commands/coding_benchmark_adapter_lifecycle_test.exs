@@ -306,7 +306,10 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
     second_pipeline = row(second, "pipeline")
     assert second_pipeline["terminal_status"] == "executor_timeout"
     assert second_pipeline["cancellation_observations"]["cleanup"]["status"] == "unverified"
-    assert second_pipeline["terminal_reason"] =~ "artifact_lease_retained:unconfirmed_worker_cleanup"
+
+    assert second_pipeline["terminal_reason"] =~
+             "artifact_lease_retained:unconfirmed_worker_cleanup"
+
     refute second_pipeline["terminal_reason"] =~ "artifact_task_root_exists"
 
     assert File.dir?(artifact_root)
@@ -378,8 +381,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
 
     first_evidence =
       for executor <- ~w(legacy pipeline) do
-        assert_receive {:production_executor_call, ^executor, _principal, _task, context, worktree,
-                        reported_artifact_root}
+        assert_receive {:production_executor_call, ^executor, _principal, _task, context,
+                        worktree, reported_artifact_root}
 
         task_id = context["task_id"]
         assert is_binary(task_id) and task_id != ""
@@ -421,8 +424,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
 
     second_evidence =
       for executor <- ~w(legacy pipeline) do
-        assert_receive {:production_executor_call, ^executor, _principal, _task, context, worktree,
-                        reported_artifact_root}
+        assert_receive {:production_executor_call, ^executor, _principal, _task, context,
+                        worktree, reported_artifact_root}
 
         task_id = context["task_id"]
         assert is_binary(task_id) and task_id != ""
@@ -440,8 +443,8 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterLifecycleTest do
         assert is_binary(worktree) and worktree != ""
 
         rerun = row(second, executor)
-        refute rerun["terminal_reason"] =~ "artifact_task_root_exists"
-        refute rerun["terminal_reason"] =~ "artifact_lease_retained"
+        refute (rerun["terminal_reason"] || "") =~ "artifact_task_root_exists"
+        refute (rerun["terminal_reason"] || "") =~ "artifact_lease_retained"
         assert rerun["terminal_status"] == "change_committed"
 
         %{

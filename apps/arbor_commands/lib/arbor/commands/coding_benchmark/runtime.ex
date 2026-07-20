@@ -721,7 +721,7 @@ defmodule Arbor.Commands.CodingBenchmark.Runtime do
     case File.rmdir(path) do
       :ok -> :ok
       {:error, :enoent} -> :ok
-      {:error, :enotempty} -> :ok
+      {:error, reason} when reason in [:enotempty, :eexist] -> :ok
       {:error, reason} -> {:error, {:artifact_lease_directory_remove_failed, reason}}
     end
   end
