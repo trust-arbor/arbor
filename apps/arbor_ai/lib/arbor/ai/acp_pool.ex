@@ -188,6 +188,44 @@ defmodule Arbor.AI.AcpPool do
   end
 
   @doc """
+  Settle every idle pool session owned by an exact `task_id` + `agent_id` pair.
+
+  Authority is the nonblank exact pair only — opaque session PIDs are never
+  accepted. Matching uses `SessionProfile.task_id` and `SessionProfile.agent_id`
+  equality (never prefix/wildcard). Checked-out matches refuse atomically
+  without detaching any matching entry. Idle matches are detached from all pool
+  indexes first, then closed **synchronously** before success so callers can
+  safely remove the session cwd/worktree.
+
+  No matches is idempotent success (`settled_count: 0`). Generic pool reuse is
+  unchanged outside this explicit settlement path.
+
+  Returns a JSON-clean receipt with `task_id`, `agent_id`, `principal_id`
+  (same principal string), `settled_count`, and `status` — never PIDs.
+  """
+  @spec settle_task_sessions(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def settle_task_sessions(task_id, agent_id, opts \\ [])
+
+  def settle_task_sessions(task_id, agent_id, opts)
+      when is_binary(task_id) and is_binary(agent_id) and is_list(opts) do
+    task_id = String.trim(task_id)
+    agent_id = String.trim(agent_id)
+
+    if task_id == "" or agent_id == "" or String.contains?(task_id, <<0>>) or
+         String.contains?(agent_id, <<0>>) do
+      {:error, :invalid_task_agent}
+    else
+      with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 30_000),
+           {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+        safe_pool_call({:settle_task_sessions, task_id, agent_id, opts}, remaining)
+      end
+    end
+  end
+
+  def settle_task_sessions(_task_id, _agent_id, _opts), do: {:error, :invalid_task_agent}
+
+  @doc """
   Get pool status for all providers.
 
   Returns a map keyed by provider with counts, plus session details.
@@ -442,6 +480,16 @@ defmodule Arbor.AI.AcpPool do
 
       :not_found ->
         {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:settle_task_sessions, task_id, agent_id, opts}, _from, state) do
+    case Arbor.AI.Timeout.ensure_active(opts) do
+      :ok ->
+        settle_task_sessions_reply(state, task_id, agent_id, opts)
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -1198,6 +1246,144 @@ defmodule Arbor.AI.AcpPool do
   end
 
   defp safe_close(_), do: :ok
+
+  # Exact task+agent settlement: refuse busy matches without mutation; detach
+  # idle matches from every pool index first, then close each process
+  # synchronously so callers may delete cwd only after confirmed termination.
+  defp settle_task_sessions_reply(state, task_id, agent_id, opts) do
+    matches =
+      Enum.filter(state.sessions, fn {_ref, entry} ->
+        profile = entry.profile
+
+        match?(%SessionProfile{}, profile) and profile.task_id == task_id and
+          profile.agent_id == agent_id
+      end)
+
+    busy =
+      Enum.any?(matches, fn {_ref, entry} -> entry.status == :checked_out end)
+
+    if busy do
+      {:reply, {:error, :sessions_busy}, state}
+    else
+      {detached, state} =
+        Enum.reduce(matches, {[], state}, fn {ref, entry}, {pids, acc} ->
+          {[entry.pid | pids], remove_session(acc, ref)}
+        end)
+
+      # Close every detached process even when one fails; only then report.
+      failures =
+        detached
+        |> Enum.reverse()
+        |> Enum.reduce([], fn pid, acc ->
+          case sync_close(pid, opts) do
+            :ok -> acc
+            {:error, reason} -> [{pid_gone_reason(pid), reason} | acc]
+          end
+        end)
+        |> Enum.reverse()
+
+      case {failures, Arbor.AI.Timeout.ensure_active(opts)} do
+        {[], :ok} ->
+          receipt = %{
+            "agent_id" => agent_id,
+            "principal_id" => agent_id,
+            "settled_count" => length(detached),
+            "status" => "settled",
+            "task_id" => task_id
+          }
+
+          {:reply, {:ok, receipt}, state}
+
+        {[], {:error, reason}} ->
+          {:reply, {:error, reason}, state}
+
+        {failures, _} ->
+          {:reply, {:error, {:settlement_close_failed, sanitize_close_failures(failures)}}, state}
+      end
+    end
+  end
+
+  # Synchronous close used only by explicit task settlement. Detach already
+  # happened; await process death so cwd removal is safe for the caller.
+  defp sync_close(pid, opts) when is_pid(pid) do
+    if Process.alive?(pid) do
+      ref = Process.monitor(pid)
+
+      close_result =
+        try do
+          case AcpSession.close(pid, close_opts(opts)) do
+            :ok -> :ok
+            {:ok, _} -> :ok
+            {:error, reason} -> {:error, reason}
+            other -> {:error, {:unexpected_close_result, other}}
+          end
+        rescue
+          exception ->
+            {:error, Exception.message(exception)}
+        catch
+          :exit, {:noproc, _} -> :ok
+          :exit, {:normal, _} -> :ok
+          :exit, reason -> {:error, Arbor.LLM.sanitize_external_reason(reason)}
+        end
+
+      case await_process_down(ref, pid, opts) do
+        :ok ->
+          case close_result do
+            :ok -> :ok
+            # Process is confirmed gone; treat close races as success.
+            {:error, _} -> :ok
+          end
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      :ok
+    end
+  end
+
+  defp sync_close(_pid, _opts), do: :ok
+
+  defp close_opts(opts) when is_list(opts) do
+    timeout_keys = Arbor.LLM.timeout_option_keys()
+
+    Enum.filter(opts, fn
+      {key, _value} when is_atom(key) -> key == :deadline_ms or key in timeout_keys
+      _ -> false
+    end)
+  end
+
+  defp await_process_down(ref, pid, opts) do
+    with {:ok, _opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        remaining ->
+          Process.demonitor(ref, [:flush])
+
+          if Process.alive?(pid) do
+            {:error, :close_timeout}
+          else
+            :ok
+          end
+      end
+    end
+  end
+
+  # Receipts must stay JSON-clean — never echo PIDs.
+  defp pid_gone_reason(pid) when is_pid(pid) do
+    if Process.alive?(pid), do: :process_still_alive, else: :process_exited
+  end
+
+  defp sanitize_close_failures(failures) when is_list(failures) do
+    Enum.map(failures, fn
+      {marker, reason} ->
+        {marker, Arbor.LLM.sanitize_external_reason(reason)}
+
+      other ->
+        Arbor.LLM.sanitize_external_reason(other)
+    end)
+  end
 
   # -- Private: Config --
 

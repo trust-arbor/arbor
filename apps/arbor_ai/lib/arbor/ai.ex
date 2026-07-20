@@ -974,6 +974,50 @@ defmodule Arbor.AI do
     end
   end
 
+  @doc """
+  Settle every idle `AcpPool` session for an exact nonblank `task_id` +
+  `agent_id` (principal) pair.
+
+  Matches `SessionProfile.task_id` and `SessionProfile.agent_id` exactly.
+  Checked-out matches refuse without removing any matching entry. Idle matches
+  are detached from pool indexes and closed synchronously before success so
+  callers may safely remove the session cwd/worktree.
+
+  When the pool process is not running there are no pool-owned sessions to
+  settle — returns idempotent success with `settled_count: 0`. Busy or
+  unconfirmed closes return `{:error, reason}` so callers fail closed.
+  """
+  @spec acp_settle_task_sessions(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def acp_settle_task_sessions(task_id, agent_id, opts \\ [])
+
+  def acp_settle_task_sessions(task_id, agent_id, opts)
+      when is_binary(task_id) and is_binary(agent_id) and is_list(opts) do
+    alias Arbor.AI.AcpPool
+
+    task_id = String.trim(task_id)
+    agent_id = String.trim(agent_id)
+
+    if task_id == "" or agent_id == "" do
+      {:error, :invalid_task_agent}
+    else
+      if Code.ensure_loaded?(AcpPool) and is_pid(Process.whereis(AcpPool)) do
+        AcpPool.settle_task_sessions(task_id, agent_id, opts)
+      else
+        {:ok,
+         %{
+           "agent_id" => agent_id,
+           "principal_id" => agent_id,
+           "settled_count" => 0,
+           "status" => "settled",
+           "task_id" => task_id
+         }}
+      end
+    end
+  end
+
+  def acp_settle_task_sessions(_task_id, _agent_id, _opts), do: {:error, :invalid_task_agent}
+
   # -- Managed ACP Session API (opaque durable handles) --
 
   @doc """

@@ -28,11 +28,10 @@ defmodule ArborCommands.MixProject do
     ]
   end
 
-  # Level 2 — depends on arbor_orchestrator (Session) and arbor_agent
-  # (Manager) for direct cross-library calls. arbor_common stays the
-  # home of the command framework (Router, Intake, behaviour);
-  # arbor_commands hosts the side-effecting Command implementations that
-  # need to reach beyond Context.
+  # L8 — depends on arbor_orchestrator (Session) and arbor_agent (Manager)
+  # for direct cross-library calls. arbor_common stays the home of the
+  # command framework (Router, Intake, behaviour); arbor_commands hosts the
+  # side-effecting Command implementations that need to reach beyond Context.
   defp deps do
     [
       {:arbor_contracts, in_umbrella: true},
@@ -44,6 +43,10 @@ defmodule ArborCommands.MixProject do
       # leases through the public Arbor.Actions boundary before parent roots
       # may be removed (hierarchy-safe L8 → L6).
       {:arbor_actions, in_umbrella: true},
+      # L4 AI facade — coding-benchmark settles exact task+principal ACP pool
+      # sessions through Arbor.AI before workspace trees are removed so idle
+      # pooled workers cannot retain a deleted worktree cwd (L8 → L4).
+      {:arbor_ai, in_umbrella: true},
       # L1 signals facade — coding-benchmark approval accounting queries
       # interaction audit events by task correlation_id.
       {:arbor_signals, in_umbrella: true},

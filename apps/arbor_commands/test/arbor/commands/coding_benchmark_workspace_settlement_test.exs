@@ -2,7 +2,10 @@ defmodule Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest do
   use Arbor.Commands.CodingBenchmarkAdapterCase, async: false
 
   alias Arbor.Actions
+  alias Arbor.AI.AcpPool
   alias Arbor.Commands.CodingBenchmark.Adapter
+
+  @test_client_opts [command: ["echo", "test"], _skip_connect: true]
 
   defmodule WorkspaceActions do
     @moduledoc false
@@ -164,6 +167,150 @@ defmodule Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest do
       observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
       send(observer, {:hanging_workspace_cancel, principal_id, task_id})
       :ok
+    end
+  end
+
+  defmodule IdleAcpWorkspaceExecutor do
+    @moduledoc false
+    alias Arbor.AI.AcpPool
+    alias Arbor.Commands.CodingBenchmarkAdapterCase, as: Support
+    alias Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest.WorkspaceActions
+
+    @test_client_opts [command: ["echo", "test"], _skip_connect: true]
+
+    def run(principal_id, task, context) do
+      fields = Support.coding_task_fields(task)
+      task_id = context["task_id"]
+
+      {:ok, lease} = WorkspaceActions.acquire(principal_id, fields, task_id)
+      {:ok, _} = WorkspaceActions.retain(principal_id, task_id, lease.workspace_id)
+
+      # Mirror production pooling: after the worker returns, a non-tool session
+      # is checked back into AcpPool idle with cwd = worktree.
+      {:ok, session} =
+        AcpPool.checkout(:test,
+          client_opts: @test_client_opts,
+          task_id: task_id,
+          agent_id: principal_id,
+          cwd: lease.worktree_path
+        )
+
+      :ok = AcpPool.checkin(session)
+
+      observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+
+      send(observer, {
+        :acp_idle_retained,
+        task_id,
+        principal_id,
+        session,
+        lease.workspace_id,
+        lease.worktree_path
+      })
+
+      {:ok,
+       %{
+         "result_type" => "coding_change",
+         "status" => "no_changes",
+         "workspace_id" => lease.workspace_id,
+         "worktree_path" => lease.worktree_path,
+         "branch" => fields["branch_name"],
+         "metrics" => %{"workspace_release_status" => "retained"}
+       }}
+    end
+
+    def cancel_task(_principal_id, _context), do: :ok
+  end
+
+  defmodule BusyAcpWorkspaceExecutor do
+    @moduledoc false
+    alias Arbor.AI.AcpPool
+    alias Arbor.Commands.CodingBenchmarkAdapterCase, as: Support
+    alias Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest.WorkspaceActions
+
+    @test_client_opts [command: ["echo", "test"], _skip_connect: true]
+
+    def run(principal_id, task, context) do
+      fields = Support.coding_task_fields(task)
+      task_id = context["task_id"]
+
+      {:ok, lease} = WorkspaceActions.acquire(principal_id, fields, task_id)
+      {:ok, _} = WorkspaceActions.retain(principal_id, task_id, lease.workspace_id)
+
+      parent = self()
+
+      # Hold checkout in a long-lived process so settlement sees a busy match
+      # after the executor returns (caller-death auto-checkin would free it).
+      holder =
+        spawn(fn ->
+          {:ok, session} =
+            AcpPool.checkout(:test,
+              client_opts: @test_client_opts,
+              task_id: task_id,
+              agent_id: principal_id,
+              cwd: lease.worktree_path
+            )
+
+          send(parent, {:acp_holder_ready, session})
+
+          receive do
+            {:release, from} ->
+              _ = AcpPool.checkin(session)
+              send(from, {:acp_holder_released, self()})
+          end
+        end)
+
+      session =
+        receive do
+          {:acp_holder_ready, ready_session} -> ready_session
+        after
+          5_000 -> raise "ACP holder failed to check out a busy session"
+        end
+
+      observer = Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer)
+
+      send(observer, {
+        :acp_busy_held,
+        task_id,
+        principal_id,
+        holder,
+        session,
+        lease.workspace_id,
+        lease.worktree_path
+      })
+
+      {:ok,
+       %{
+         "result_type" => "coding_change",
+         "status" => "no_changes",
+         "workspace_id" => lease.workspace_id,
+         "worktree_path" => lease.worktree_path,
+         "branch" => fields["branch_name"],
+         "metrics" => %{"workspace_release_status" => "retained"}
+       }}
+    end
+
+    def cancel_task(_principal_id, _context), do: :ok
+  end
+
+  defp start_acp_pool! do
+    case Process.whereis(AcpPool) do
+      pid when is_pid(pid) ->
+        :ok
+
+      _ ->
+        start_supervised!(AcpPool.Supervisor)
+
+        start_supervised!(
+          {AcpPool,
+           [
+             default_max: 8,
+             default_idle_timeout_ms: 300_000,
+             cleanup_interval_ms: 100_000
+           ]}
+        )
+
+        :ok
     end
   end
 
@@ -368,6 +515,7 @@ defmodule Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest do
 
   test "Adapter.settle_task_workspaces is scoped through the public Actions facade" do
     assert function_exported?(Actions, :settle_coding_workspaces, 3)
+    assert function_exported?(Arbor.AI, :acp_settle_task_sessions, 3)
     assert function_exported?(Adapter, :settle_task_workspaces, 1)
 
     assert {:error, :invalid_benchmark_task_id} = Adapter.settle_task_workspaces("")
@@ -381,11 +529,151 @@ defmodule Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest do
     assert receipt["settled_count"] == 0
   end
 
+  test "ACP settlement precedes workspace settlement and terminates idle task pool sessions" do
+    start_acp_pool!()
+    scenario = production_scenario!()
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_executor_module,
+      IdleAcpWorkspaceExecutor
+    )
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_pipeline_executor_module,
+      IdleAcpWorkspaceExecutor
+    )
+
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, report} = run_production_scenario(scenario)
+
+    retained =
+      for _ <- 1..2 do
+        assert_receive {
+                         :acp_idle_retained,
+                         task_id,
+                         "agent_benchmark",
+                         session,
+                         _workspace_id,
+                         worktree_path
+                       },
+                       5_000
+
+        %{task_id: task_id, session: session, worktree_path: worktree_path}
+      end
+
+    for entry <- retained do
+      refute Process.alive?(entry.session),
+             "idle ACP pool session must be settled before worktree removal"
+
+      refute File.exists?(entry.worktree_path),
+             "settled worktree must be removed: #{entry.worktree_path}"
+
+      # Idempotent residual settle after confirmed ACP+workspace teardown.
+      assert {:ok, receipt} = Adapter.settle_task_workspaces(entry.task_id)
+      assert receipt["settled_count"] == 0
+    end
+
+    for executor <- ~w(legacy pipeline) do
+      result = row(report, executor)
+      refute result["terminal_status"] == "workspace_cleanup_failed"
+
+      refute is_binary(result["terminal_reason"]) and
+               String.contains?(
+                 result["terminal_reason"] || "",
+                 "workspace_settlement_unconfirmed"
+               )
+    end
+
+    refute Enum.any?(
+             Path.wildcard(Path.join(scenario.root, "arbor-coding-benchmark-*")),
+             &File.dir?/1
+           )
+  end
+
+  test "security regression: busy ACP settlement prevents workspace removal and surfaces cleanup failure" do
+    start_acp_pool!()
+    scenario = production_scenario!()
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_executor_module,
+      BusyAcpWorkspaceExecutor
+    )
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_pipeline_executor_module,
+      BusyAcpWorkspaceExecutor
+    )
+
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, report} = run_production_scenario(scenario)
+
+    held =
+      for _ <- 1..2 do
+        assert_receive {
+                         :acp_busy_held,
+                         task_id,
+                         "agent_benchmark",
+                         holder,
+                         session,
+                         _workspace_id,
+                         worktree_path
+                       },
+                       5_000
+
+        %{
+          task_id: task_id,
+          holder: holder,
+          session: session,
+          worktree_path: worktree_path
+        }
+      end
+
+    # Busy ACP settlement is unconfirmed: worktrees and pair roots must remain.
+    assert Enum.all?(held, &File.exists?(&1.worktree_path))
+    assert Enum.all?(held, &Process.alive?(&1.session))
+
+    for executor <- ~w(legacy pipeline) do
+      result = row(report, executor)
+      assert result["terminal_status"] == "workspace_cleanup_failed"
+      assert result["terminal_reason"] =~ "workspace_settlement_unconfirmed"
+      assert result["terminal_reason"] =~ "sessions_busy"
+    end
+
+    # Release holders, then settle exactly so global state does not leak.
+    for entry <- held do
+      send(entry.holder, {:release, self()})
+
+      receive do
+        {:acp_holder_released, holder} when holder == entry.holder -> :ok
+      after
+        5_000 -> flunk("ACP holder did not release #{inspect(entry.holder)}")
+      end
+
+      assert {:ok, _} = Adapter.settle_task_workspaces(entry.task_id)
+      refute Process.alive?(entry.session)
+      refute File.exists?(entry.worktree_path)
+    end
+  end
+
   test "security regression: CodingBenchmark module source never unconditional File.rm_rf of pair/run roots" do
     source =
       File.read!(
         Path.expand(
           "../../../lib/arbor/commands/coding_benchmark.ex",
+          __DIR__
+        )
+      )
+
+    adapter_source =
+      File.read!(
+        Path.expand(
+          "../../../lib/arbor/commands/coding_benchmark/adapter.ex",
           __DIR__
         )
       )
@@ -397,5 +685,12 @@ defmodule Arbor.Commands.CodingBenchmarkWorkspaceSettlementTest do
     refute source =~ "File.rm_rf(run_root)"
     assert source =~ "finalize_workspace_settlement"
     assert source =~ "remove_owned_benchmark_root"
+
+    # ACP pool settlement must precede workspace lease settlement.
+    acp_idx = :binary.match(adapter_source, "acp_settle_task_sessions")
+    workspace_idx = :binary.match(adapter_source, "settle_coding_workspaces")
+    assert acp_idx != :nomatch
+    assert workspace_idx != :nomatch
+    assert elem(acp_idx, 0) < elem(workspace_idx, 0)
   end
 end

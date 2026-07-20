@@ -402,6 +402,159 @@ defmodule Arbor.AI.AcpPoolTest do
     end
   end
 
+  describe "settle_task_sessions/3" do
+    test "settles only exact task+agent idle matches, cleans indexes, and terminates processes" do
+      restart_pool!(default_max: 5, default_idle_timeout_ms: 300_000)
+
+      task_id = "settle-task-#{System.unique_integer([:positive])}"
+      agent_id = "settle-agent-#{System.unique_integer([:positive])}"
+      other_task = "other-task-#{System.unique_integer([:positive])}"
+      other_agent = "other-agent-#{System.unique_integer([:positive])}"
+      cwd = temp_path("acp-settle-cwd")
+
+      assert {:ok, match1} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: cwd,
+                 affinity_key: "settle-affinity-#{System.unique_integer([:positive])}"
+               )
+
+      assert {:ok, match2} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: Path.join(cwd, "alt")
+               )
+
+      assert {:ok, other_by_task} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: other_task,
+                 agent_id: agent_id,
+                 cwd: cwd
+               )
+
+      assert {:ok, other_by_agent} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: other_agent,
+                 cwd: cwd
+               )
+
+      assert :ok = AcpPool.checkin(match1)
+      assert :ok = AcpPool.checkin(match2)
+      assert :ok = AcpPool.checkin(other_by_task)
+      assert :ok = AcpPool.checkin(other_by_agent)
+
+      assert length(AcpPool.sessions()) == 4
+
+      assert {:ok, receipt} = AcpPool.settle_task_sessions(task_id, agent_id)
+      assert receipt["status"] == "settled"
+      assert receipt["task_id"] == task_id
+      assert receipt["agent_id"] == agent_id
+      assert receipt["principal_id"] == agent_id
+      assert receipt["settled_count"] == 2
+      refute Map.has_key?(receipt, "pid")
+      refute Map.has_key?(receipt, :pid)
+
+      refute Process.alive?(match1)
+      refute Process.alive?(match2)
+      assert Process.alive?(other_by_task)
+      assert Process.alive?(other_by_agent)
+
+      remaining = AcpPool.sessions()
+      assert length(remaining) == 2
+
+      assert Enum.all?(remaining, fn info ->
+               not (info.task_id == task_id and info.agent_id == agent_id)
+             end)
+
+      status = AcpPool.status()
+      assert status[:test].total == 2
+      assert status[:test].idle == 2
+      assert status[:test].checked_out == 0
+
+      # Exact-scope only: unrelated idle entries remain reusable.
+      assert {:ok, reused} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: other_task,
+                 agent_id: agent_id,
+                 cwd: cwd
+               )
+
+      assert reused == other_by_task
+    end
+
+    test "no matches and repeated settle are idempotent success" do
+      task_id = "missing-task-#{System.unique_integer([:positive])}"
+      agent_id = "missing-agent-#{System.unique_integer([:positive])}"
+
+      assert {:ok, receipt1} = AcpPool.settle_task_sessions(task_id, agent_id)
+      assert receipt1["settled_count"] == 0
+      assert receipt1["status"] == "settled"
+
+      assert {:ok, receipt2} = AcpPool.settle_task_sessions(task_id, agent_id)
+      assert receipt2["settled_count"] == 0
+      assert receipt2 == receipt1
+    end
+
+    test "busy matching sessions refuse without removing any matching entries" do
+      task_id = "busy-task-#{System.unique_integer([:positive])}"
+      agent_id = "busy-agent-#{System.unique_integer([:positive])}"
+      cwd = temp_path("acp-settle-busy")
+
+      assert {:ok, busy} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: cwd
+               )
+
+      assert {:ok, idle} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: Path.join(cwd, "idle")
+               )
+
+      assert :ok = AcpPool.checkin(idle)
+
+      assert {:error, :sessions_busy} = AcpPool.settle_task_sessions(task_id, agent_id)
+
+      # Atomic busy refusal: neither the busy nor the idle match was removed.
+      assert Process.alive?(busy)
+      assert Process.alive?(idle)
+
+      sessions = AcpPool.sessions()
+      assert length(sessions) == 2
+
+      assert Enum.any?(sessions, &(&1.pid == busy and &1.status == :checked_out))
+      assert Enum.any?(sessions, &(&1.pid == idle and &1.status == :idle))
+
+      :ok = AcpPool.checkin(busy)
+
+      assert {:ok, receipt} = AcpPool.settle_task_sessions(task_id, agent_id)
+      assert receipt["settled_count"] == 2
+      refute Process.alive?(busy)
+      refute Process.alive?(idle)
+      assert AcpPool.sessions() == []
+    end
+
+    test "rejects blank or non-binary task/agent ids" do
+      assert {:error, :invalid_task_agent} = AcpPool.settle_task_sessions("", "agent")
+      assert {:error, :invalid_task_agent} = AcpPool.settle_task_sessions("task", "  ")
+      assert {:error, :invalid_task_agent} = AcpPool.settle_task_sessions(nil, "agent")
+      assert {:error, :invalid_task_agent} = AcpPool.settle_task_sessions("task", :agent)
+    end
+  end
+
   describe "status/0" do
     test "returns empty status for no sessions" do
       assert %{} = AcpPool.status()

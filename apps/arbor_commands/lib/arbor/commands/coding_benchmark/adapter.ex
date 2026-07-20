@@ -97,17 +97,31 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   end
 
   @doc """
-  Settle every coding workspace lease for a deterministic benchmark task id
-  under the configured principal through the public `Arbor.Actions` facade.
+  Settle exact-task ACP pool sessions, then every coding workspace lease for a
+  deterministic benchmark task id under the configured principal.
+
+  Order is load-bearing: pooled ACP workers may remain idle with `cwd` pointing
+  at the task worktree after checkin. ACP settlement must confirm those
+  processes are closed **before** workspace lease settlement removes the tree.
+  Both steps use public facades only (`Arbor.AI`, `Arbor.Actions`). Unconfirmed
+  ACP settlement fails closed so parent roots are retained.
   """
   @spec settle_task_workspaces(String.t()) :: {:ok, map()} | {:error, term()}
   def settle_task_workspaces(task_id) when is_binary(task_id) and task_id != "" do
-    with {:ok, principal_id} <- configured_principal_id() do
+    with {:ok, principal_id} <- configured_principal_id(),
+         {:ok, _acp_receipt} <- settle_task_acp_sessions(task_id, principal_id) do
       Arbor.Actions.settle_coding_workspaces(task_id, principal_id)
     end
   end
 
   def settle_task_workspaces(_task_id), do: {:error, :invalid_benchmark_task_id}
+
+  # Exact task+principal ACP pool settlement through the public AI facade.
+  # Must precede workspace removal so idle pooled sessions cannot hold a
+  # deleted worktree cwd.
+  defp settle_task_acp_sessions(task_id, principal_id) do
+    Arbor.AI.acp_settle_task_sessions(task_id, principal_id)
+  end
 
   @spec cancel(map(), String.t(), function(), atom(), :unsupported | function()) ::
           :ok | {:ok, term()} | {:error, term()}
