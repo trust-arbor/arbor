@@ -7,9 +7,24 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
   @env_vars ~w(ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ARBOR_ACP_ALTERNATE_MODEL)
 
   setup do
+    prior_providers = Application.fetch_env(:arbor_ai, :acp_providers)
+
+    stripped_providers =
+      case prior_providers do
+        {:ok, providers} -> Map.delete(providers, :grok)
+        :error -> %{}
+      end
+
     saved = Enum.map(@env_vars, fn v -> {v, System.get_env(v)} end)
 
+    Application.put_env(:arbor_ai, :acp_providers, stripped_providers)
+
     on_exit(fn ->
+      case prior_providers do
+        :error -> Application.delete_env(:arbor_ai, :acp_providers)
+        {:ok, providers} -> Application.put_env(:arbor_ai, :acp_providers, providers)
+      end
+
       Enum.each(saved, fn
         {v, nil} -> System.delete_env(v)
         {v, val} -> System.put_env(v, val)
@@ -40,6 +55,75 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
       adapter_opts = Keyword.fetch!(opts, :adapter_opts)
 
       refute Keyword.has_key?(adapter_opts, :env)
+    end
+  end
+
+  describe "resolve/2 for :grok command hardening" do
+    @describetag :fast
+
+    test "uses immutable strict sandbox shape with Bash(*) denial" do
+      assert {:ok, opts} = Config.resolve(:grok, [])
+
+      command = Keyword.fetch!(opts, :command)
+
+      assert command == [
+               "grok",
+               "--sandbox",
+               "strict",
+               "--no-memory",
+               "--no-subagents",
+               "--disable-web-search",
+               "--deny",
+               "MCPTool(*)",
+               "--deny",
+               "Bash(*)",
+               "agent",
+               "--no-leader",
+               "--model",
+               "grok-4.5",
+               "stdio"
+             ]
+
+      assert Enum.at(command, 6) == "--deny"
+      assert Enum.at(command, 7) == "MCPTool(*)"
+      assert Enum.at(command, 8) == "--deny"
+      assert Enum.at(command, 9) == "Bash(*)"
+    end
+
+    test "rejects app-level :grok overrides that remove Bash(*) denial" do
+      prior = Application.get_env(:arbor_ai, :acp_providers)
+
+      Application.put_env(
+        :arbor_ai,
+        :acp_providers,
+        Map.put(prior, :grok, %{
+          command: [
+            "grok",
+            "--sandbox",
+            "strict",
+            "--no-memory",
+            "--no-subagents",
+            "--disable-web-search",
+            "--deny",
+            "MCPTool(*)",
+            "agent",
+            "--no-leader",
+            "--model",
+            "grok-4.5",
+            "stdio"
+          ],
+          env: [
+            {"GIT_CONFIG_GLOBAL", "/dev/null"},
+            {"GIT_CONFIG_SYSTEM", "/dev/null"},
+            {"GIT_OPTIONAL_LOCKS", "0"},
+            {"GIT_CONFIG_COUNT", "1"},
+            {"GIT_CONFIG_KEY_0", "core.excludesFile"},
+            {"GIT_CONFIG_VALUE_0", "/dev/null"}
+          ]
+        })
+      )
+
+      assert {:error, :invalid_grok_command} = Config.resolve(:grok, [])
     end
   end
 

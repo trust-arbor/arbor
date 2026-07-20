@@ -68,30 +68,34 @@ defmodule Arbor.AI.AcpSession.Config do
     {"GIT_CONFIG_VALUE_0", "/dev/null"}
   ]
 
+  @grok_strict_command [
+    "grok",
+    "--sandbox",
+    "strict",
+    "--no-memory",
+    "--no-subagents",
+    "--disable-web-search",
+    "--deny",
+    "MCPTool(*)",
+    "--deny",
+    "Bash(*)",
+    "agent",
+    "--no-leader",
+    "--model",
+    "grok-4.5",
+    "stdio"
+  ]
+
   @native_providers %{
     gemini: %{command: ["gemini", "--experimental-acp"]},
     # Global policy flags must precede the `agent` subcommand; `--no-leader` and
     # `--model` belong to `agent` and must precede the `stdio` subcommand.
     # Auth remains out-of-band via `grok login`.
-    # Strict sandbox is kernel-enforced cwd isolation. Ambient MCP calls, web
-    # access, subagents, shared leaders, and cross-session memory are disabled;
-    # Arbor owns every authority channel exposed to a delegated coding worker.
+    # Grok's boundary is command-shaping + process/worktree isolation, not an OS
+    # network namespace. We therefore deny tool classes that can escape the local
+    # model boundary (MCPTool, Bash) and bind a strict runtime profile.
     grok: %{
-      command: [
-        "grok",
-        "--sandbox",
-        "strict",
-        "--no-memory",
-        "--no-subagents",
-        "--disable-web-search",
-        "--deny",
-        "MCPTool(*)",
-        "agent",
-        "--no-leader",
-        "--model",
-        "grok-4.5",
-        "stdio"
-      ],
+      command: @grok_strict_command,
       env: @grok_strict_git_env
     },
     opencode: %{command: ["opencode", "acp"]},
@@ -166,15 +170,24 @@ defmodule Arbor.AI.AcpSession.Config do
         override -> {:ok, override}
       end
 
-    case config do
-      {:ok, provider_config} ->
-        opts = maybe_inject_alternate_endpoint(provider, opts)
-        {:ok, merge_opts(provider_config, opts)}
-
+    with {:ok, provider_config} <- config,
+         {:ok, provider_config} <- enforce_grok_command_policy(provider, provider_config) do
+      opts = maybe_inject_alternate_endpoint(provider, opts)
+      {:ok, merge_opts(provider_config, opts)}
+    else
       {:error, _} = error ->
         error
     end
   end
+
+  defp enforce_grok_command_policy(:grok, %{command: @grok_strict_command} = provider_config),
+    do: {:ok, provider_config}
+
+  defp enforce_grok_command_policy(:grok, _provider_config),
+    do: {:error, :invalid_grok_command}
+
+  defp enforce_grok_command_policy(_provider, provider_config),
+    do: {:ok, provider_config}
 
   # When the Claude CLI is pointed at an OpenAI/Anthropic-compatible endpoint
   # that ISN'T api.anthropic.com (e.g. an Ollama server serving the Anthropic

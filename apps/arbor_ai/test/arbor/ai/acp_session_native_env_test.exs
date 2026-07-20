@@ -12,13 +12,20 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
   # values are resolved from the OS env at spawn; literals pass through; unset refs
   # are dropped (and logged). Kept distinct from the real :cursor provider.
   setup do
-    prior = Application.get_env(:arbor_ai, :acp_providers, %{})
+    prior = Application.fetch_env(:arbor_ai, :acp_providers)
+
+    base_providers =
+      case prior do
+        {:ok, providers} -> Map.delete(providers, :grok)
+        :error -> %{}
+      end
+
     System.put_env("ARBOR_TEST_ACP_KEY", "secret-123")
 
     Application.put_env(
       :arbor_ai,
       :acp_providers,
-      Map.put(prior, :test_native_env, %{
+      Map.put(base_providers, :test_native_env, %{
         command: ["fake-agent", "acp"],
         args: ["--model", "anthropic/claude-4-sonnet"],
         env: [
@@ -30,7 +37,11 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
     )
 
     on_exit(fn ->
-      Application.put_env(:arbor_ai, :acp_providers, prior)
+      case prior do
+        :error -> Application.delete_env(:arbor_ai, :acp_providers)
+        {:ok, providers} -> Application.put_env(:arbor_ai, :acp_providers, providers)
+      end
+
       System.delete_env("ARBOR_TEST_ACP_KEY")
     end)
 
@@ -88,6 +99,8 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
     "--disable-web-search",
     "--deny",
     "MCPTool(*)",
+    "--deny",
+    "Bash(*)",
     "agent",
     "--no-leader",
     "--model",

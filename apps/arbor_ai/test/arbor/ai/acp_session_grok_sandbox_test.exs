@@ -15,6 +15,8 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     "--disable-web-search",
     "--deny",
     "MCPTool(*)",
+    "--deny",
+    "Bash(*)",
     "agent",
     "--no-leader",
     "--model",
@@ -673,12 +675,18 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                  [bound_server],
                  fn prepared ->
                    command = Keyword.fetch!(prepared, :command)
-                   refute "--deny" in command
-                   refute "MCPTool(*)" in command
+                   assert "Bash(*)" in command
+                   # Bash is still hard-denied under bound MCP because it can spawn
+                   # uncontrolled process and network capabilities.
                    assert "--no-memory" in command
                    assert "--no-subagents" in command
                    assert "--disable-web-search" in command
                    assert "--no-leader" in command
+                   assert "Bash(*)" in command
+                   refute "MCPTool(*)" in command
+                   assert Enum.at(command, 5) == "--disable-web-search"
+                   assert Enum.at(command, 6) == "--deny"
+                   assert Enum.at(command, 7) == "Bash(*)"
                    :bound_mcp_ready
                  end
                )
@@ -687,6 +695,79 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     test "hostile command and explicit :cd are rejected" do
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+      bound_server = %{"name" => "bound", "type" => "http", "url" => "http://local"}
+
+      missing_bash = [
+        "grok",
+        "--sandbox",
+        "strict",
+        "--no-memory",
+        "--no-subagents",
+        "--disable-web-search",
+        "--deny",
+        "MCPTool(*)",
+        "agent",
+        "--no-leader",
+        "--model",
+        "grok-4.5",
+        "stdio"
+      ]
+
+      changed_bash_shape = [
+        "grok",
+        "--sandbox",
+        "strict",
+        "--no-memory",
+        "--no-subagents",
+        "--disable-web-search",
+        "--deny",
+        "MCPTool(*)",
+        "--deny",
+        "shell",
+        "agent",
+        "--no-leader",
+        "--model",
+        "grok-4.5",
+        "stdio"
+      ]
+
+      reordered_bash_shape = [
+        "grok",
+        "--sandbox",
+        "strict",
+        "--no-memory",
+        "--no-subagents",
+        "--disable-web-search",
+        "--deny",
+        "Bash(*)",
+        "--deny",
+        "MCPTool(*)",
+        "agent",
+        "--no-leader",
+        "--model",
+        "grok-4.5",
+        "stdio"
+      ]
+
+      duplicated_bash_shape = [
+        "grok",
+        "--sandbox",
+        "strict",
+        "--no-memory",
+        "--no-subagents",
+        "--disable-web-search",
+        "--deny",
+        "MCPTool(*)",
+        "--deny",
+        "Bash(*)",
+        "--deny",
+        "Bash(*)",
+        "agent",
+        "--no-leader",
+        "--model",
+        "grok-4.5",
+        "stdio"
+      ]
 
       hostile = [
         "grok",
@@ -702,7 +783,89 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_command_mismatch} =
                GrokSandbox.with_launch(
                  :grok,
+                 [command: missing_bash],
+                 worktree_root,
+                 nil,
+                 self(),
+                 fn _ -> flunk("callback should not run") end
+               )
+
+      assert {:error, :grok_sandbox_command_mismatch} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: reordered_bash_shape],
+                 worktree_root,
+                 nil,
+                 self(),
+                 fn _ -> flunk("callback should not run") end
+               )
+
+      assert {:error, :grok_sandbox_command_mismatch} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: changed_bash_shape],
+                 worktree_root,
+                 nil,
+                 self(),
+                 fn _ -> flunk("callback should not run") end
+               )
+
+      assert {:error, :grok_sandbox_command_mismatch} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: duplicated_bash_shape],
+                 worktree_root,
+                 nil,
+                 self(),
+                 fn _ -> flunk("callback should not run") end
+               )
+
+      assert {:error, :grok_sandbox_command_mismatch} =
+               GrokSandbox.with_launch(
+                 :grok,
                  [command: hostile],
+                 worktree_root,
+                 authority,
+                 self(),
+                 fn _ -> flunk("callback should not run") end
+               )
+
+      assert {:error, :grok_sandbox_command_mismatch} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: missing_bash],
+                 worktree_root,
+                 authority,
+                 self(),
+                 [bound_server],
+                 fn _ -> flunk("callback should not run") end
+               )
+
+      assert {:error, :grok_sandbox_command_mismatch} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: reordered_bash_shape],
+                 worktree_root,
+                 authority,
+                 self(),
+                 [bound_server],
+                 fn _ -> flunk("callback should not run") end
+               )
+
+      assert {:error, :grok_sandbox_command_mismatch} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: changed_bash_shape],
+                 worktree_root,
+                 authority,
+                 self(),
+                 fn _ -> flunk("callback should not run") end
+               )
+
+      assert {:error, :grok_sandbox_command_mismatch} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: duplicated_bash_shape],
                  worktree_root,
                  authority,
                  self(),
