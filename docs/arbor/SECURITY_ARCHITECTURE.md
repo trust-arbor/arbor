@@ -1,275 +1,391 @@
-# Arbor Security Architecture — Current State and Target
-
-This document captures the layered security architecture Arbor is migrating toward, the threat model that motivates each layer, and a phased migration path. It's intended as both an internal direction-setting document and material for enterprise-customer conversations about security posture.
+<!-- markdownlint-disable MD013 -->
+
+# Arbor Security Architecture
+
+**State reviewed:** 2026-07-19
+
+This document describes the security controls represented by the current source and
+the Phase 6 decisions. It deliberately separates implemented controls from planned
+work and from historical design material. It is an architecture overview, not a
+compliance certification, a deployment guide, or a promise that every caller uses
+every available gate.
+
+## Executive Summary
+
+Arbor treats an agent operation as a chain of questions:
+
+1. **Who is asking?** The principal has a registered cryptographic identity.
+2. **What is it asking to do?** The operation has a registered resource URI and
+   requires a capability that covers that URI.
+3. **What does the operator's policy allow?** Granular rules can block, ask for
+   approval, allow with notification, or allow automatically. System ceilings can
+   still make an operation more restrictive.
+4. **Where can the operation reach?** File paths are checked against capability
+   roots, and outbound data is classified by destination and taint. Some outbound
+   operations are blocked or require approval.
+5. **Did the thing being approved remain the same?** Authorized runs can bind the
+   principal, caller, author, worktree, graph, compiled code, and action/handler
+   bindings. Coding approval can bind the exact Git tree that was inspected.
+6. **Who cleans up?** Worktrees, ACP sessions, and containment units have owners and
+   monitored registries. Cleanup does not depend only on a final graph node.
+
+In plain language, one lock is not trusted to do every job. Identity, permission,
+path checks, information-flow checks, approval, code binding, and operating-system
+containment cover different failure modes. That is defense in depth, not a claim
+that Arbor makes a compromised host or a fully compromised BEAM safe. A caller can
+also bypass a control if it uses an explicitly trusted or legacy path; the sections
+below identify those boundaries.
+
+## Status Vocabulary
+
+- **Implemented today** means the source contains the control and a supported caller
+  path uses it. Configuration and caller selection can still matter.
+- **Partial / planned / unsupported** means the mechanism exists only for a bounded
+  path, needs further wiring or provisioning, or intentionally refuses execution.
+- **Historical target** means useful rationale from an earlier architecture document;
+  it is not a statement about the current runtime.
+
+## Implemented Today
+
+### Identity and external authentication
+
+- Arbor identities use Ed25519 signing keys. The public security facade owns identity
+  registration, status, signing-key storage, signed-request verification, and
+  suspension/revocation operations. Identity status is part of authorization; a
+  suspended or revoked identity is denied.
+- `Arbor.Contracts.Security.SignedRequest` signs a canonical payload containing the
+  request payload, principal ID, timestamp, and random nonce. The verifier checks
+  freshness, looks up the registered public key, verifies the Ed25519 signature, and
+  rejects a reused nonce.
+- Gateway clients can authenticate each HTTP request with
+  `Authorization: Signature <base64-envelope>`. The gateway binds the signature to
+  the actual method, request path, and body before verification. This is the current
+  external-agent authentication path; the gateway still permits its existing JWT or
+  API-key paths when a signature is absent or invalid.
+- Signing authority migration is underway. Newer long-lived callers can hold a
+  reload-stable, owner-bound authority reference, while the compatibility
+  `Arbor.Security.make_signer/2` closure remains for callers not yet migrated. The
+  compatibility path keeps decrypted key material in the caller process, so it is
+  not equivalent to an external signer or hardware boundary.
+
+Authoritative code: [`Arbor.Security`](../../apps/arbor_security/lib/arbor/security.ex),
+[`SignedRequest`](../../apps/arbor_contracts/lib/arbor/contracts/security/signed_request.ex),
+[`SignedRequestAuth`](../../apps/arbor_gateway/lib/arbor/gateway/signed_request_auth.ex),
+[`Identity.Verifier`](../../apps/arbor_security/lib/arbor/security/identity/verifier.ex),
+and [`Reload-Stable Signing Authority`](../../.arbor/decisions/2026-07-11-reload-stable-signing-authority.md).
+
+### Capabilities, delegation, and revocation
+
+Capabilities are signed, principal-scoped grants for resource URIs. The security
+facade supports:
+
+- grant, lookup, expiration, time bounds, usage/rate constraints, and optional
+  session/task scope;
+- Ed25519 capability signatures and verification;
+- signed delegation records with constrained delegation depth and a verifiable
+  delegation chain;
+- direct revocation, principal-wide revocation, session/task cleanup, and cascade
+  revocation of delegated children; and
+- persistent capability storage when the configured backend is enabled, with
+  in-memory-only operation possible by configuration.
+
+Authorization is not just a string comparison. The URI registry, identity status,
+capability store, scope, delegation chain, time constraints, approval constraints,
+and relevant taint/egress checks participate in the decision. Production configuration
+requires signed capabilities and enables strict identity and policy settings.
+
+Authoritative code: [`Arbor.Security`](../../apps/arbor_security/lib/arbor/security.ex),
+[`Capability.Signer`](../../apps/arbor_security/lib/arbor/security/capability/signer.ex),
+[`CapabilityStore`](../../apps/arbor_security/lib/arbor/security/capability_store.ex),
+and [`config/prod.exs`](../../config/prod.exs).
+
+### Granular trust policy
 
-## Scope and audience
-
-- **For internal engineering:** what we're building toward and why; what each piece of work unlocks
-- **For enterprise prospects:** the security model Arbor is engineered around, including which threats are addressed at which layer
-- **Not a specification:** implementation details are deferred to layer-specific design docs as work begins
-
-The current operational reality (single-operator dev box) is one valid configuration of this architecture. Production deployments will be different configurations of the same model.
+The current trust model is **granular policy**, not a scalar trust score or a band of
+trust tiers. A profile has a baseline and URI-prefix rules. Rules use
+segment-boundary-aware longest-prefix matching and resolve one of four modes:
 
-## Threat model
-
-The threats Arbor's identity and execution architecture must address, in rough order of immediacy:
-
-| ID | Threat | Realistic for |
-|---|---|---|
-| T1 | Other unix users on the host reading sensitive files | Multi-tenant systems, shared hosts |
-| T2 | External attacker compromises the operator's shell / SSH key / dev tools | Any deployment |
-| T3 | Operator clumsiness — accidentally `cat`ing a key into a log, pasting into chat, etc. | Any deployment |
-| T4 | Compromised Arbor agent inside the BEAM reading key material or other secrets | Any deployment where agents handle untrusted input — i.e., all of them |
-| T5 | Compromised agent invoking sensitive operations via granted capabilities | Same as T4 |
-| T6 | Compromised daemon — the BEAM is fully owned by the attacker | Network-exposed deployments |
-| T7 | Compromised CLI binary / tampered mix task / supply-chain attack | Any deployment |
-| T8 | Cross-operator attack: one operator forges or replays another operator's signed artifacts | Multi-operator deployments |
-| T9 | Insider attack: a trusted human exfiltrates keys or signed artifacts | Enterprise / regulated environments |
-
-The architecture below is designed so that each layer addresses a distinct subset of these threats, and adopting layers incrementally produces a meaningful security improvement at each step.
-
-## Current state (Layer 0)
-
-What's in place today:
-
-- **Single UID model.** The operator's UID runs the BEAM. Agents in the BEAM share that UID.
-- **Identity key on filesystem.** `~/.arbor/identity.key`, mode `0600`. Loaded via `Arbor.Orchestrator.Mix.Helpers.load_identity/1`.
-- **Key in BEAM memory.** Captured in the signer closure; passed as `:identity_private_key` in `Engine.run/2` opts. Anything in the BEAM can in principle read it.
-- **CLI runs in-process.** `mix arbor.pipeline.run` spawns its own BEAM, separate from any other Arbor BEAM on the box. State is per-invocation.
-- **Checkpoint HMAC bound to operator identity.** HKDF(operator_private_key, "arbor-checkpoint-hmac-v1") derives the secret; AAD includes run_id + current_node + graph_hash. Resume requires the same operator's identity.
-- **Capability system enforces what agents can do.** `Arbor.Security` evaluates resource URI access against granted caps. URI matcher rejects `..` traversal at the cap layer.
-- **FileGuard exists but wiring is partial.** Only invoked when callers pass `:file_path` opt to `Security.authorize/4`. Most production callers don't. Tracked as a defense-in-depth follow-up.
-- **Shell sandbox** provides command allowlist / metacharacter check via `Arbor.Shell.Sandbox`.
-
-Threats addressed at this layer:
-
-- ✓ T1 (file perm 0600, though irrelevant on single-user host)
-- ✓ T8 (HMAC binding rejects cross-operator forgery)
-- ✗ T2, T3, T4, T6 — anything that compromises the operator's UID or the BEAM's process space defeats this layer
-
-## Target architecture (Layers 1–4)
-
-The full target is four independent trust boundaries, each adding meaningful defense against a distinct threat class:
-
-```
-┌───────────────────────────┐
-│ Operator's shell          │  azmaveth UID
-│ (mix arbor.* commands)    │
-└────────────┬──────────────┘
-             │ Layer 2: RPC + operator auth (mTLS / signed requests)
-             ▼
-┌───────────────────────────┐
-│ Arbor daemon              │  arbor UID
-│ - Pipeline engine         │  Layer 1: service-account isolation
-│ - Capability evaluator    │
-│ - Agents in BEAM          │
-└────────────┬──────────────┘
-             │ Layer 3: signing requests over UNIX socket
-             ▼
-┌───────────────────────────┐
-│ Arbor signer              │  arbor-signer UID or same arbor UID
-│ - Holds private key       │  Layer 4: hardware shim
-│ - Exposes sign / derive   │
-│ - Rate-limits, audits     │
-└────────────┬──────────────┘
-             │ Layer 4: hardware-backed key operations
-             ▼
-┌───────────────────────────┐
-│ Secure Enclave / TPM /    │  Hardware
-│ HSM                       │
-└───────────────────────────┘
-```
-
-### Layer 1 — Dedicated `arbor` service account
-
-The Arbor daemon runs under a dedicated `arbor` UID, in a dedicated `arbor` group. The operator's shell runs under their own UID. Filesystem access is scoped by ownership and group membership.
-
-**What it addresses:**
-
-- **T1** strengthened — `arbor` UID's files are unreadable by other users without `sudo`
-- **T2** — external attacker who compromises the operator's shell sees their own UID, not `arbor`'s. The identity key, the daemon's working state, and the BEAM's process memory are all behind a UID boundary.
-- **T3** — operator can't accidentally `cat ~/.arbor/identity.key` because their normal shell doesn't have read access to the daemon's files
-
-**What it does NOT address:**
-
-- **T4** — agents inside the BEAM still run under `arbor` UID; they retain whatever filesystem and process access the daemon has. Same problem, different UID.
-- **T6** — compromised daemon owns everything under `arbor`
-
-**Group scoping:**
-
-The `arbor` group enables clean filesystem scoping. Resources agents may touch (workspace dirs, scratch space, shared logs) are group-owned `*:arbor` with appropriate read/write bits. The operator can join the `arbor` group selectively for read-only access to logs, but the key file remains user-only (`arbor:arbor` mode 0600). The shape lets you express policies like "agents can read workspace, can't read /etc, can't read the operator's home" purely via filesystem perms.
-
-**Operational shape:**
-
-- Daemon launched at boot via systemd (Linux) or launchd (macOS)
-- Working directory: `/var/lib/arbor` or `/opt/arbor` (FHS-compliant on Linux)
-- Logs: `/var/log/arbor/` (or daemon-managed via systemd-journald)
-- Key file: `/var/lib/arbor/.arbor/identity.key`, owner `arbor:arbor`, mode `0600`
-- Operator's CLI no longer spawns Arbor — it talks to the running daemon (see Layer 2)
-
-### Layer 2 — CLI as authenticated RPC client
-
-CLI commands (`mix arbor.pipeline.*`) become thin RPC clients to the running daemon. Operators authenticate to the daemon at each invocation; the daemon is the source of truth for all pipeline state.
-
-**Authentication options (decision deferred to implementation):**
-
-- **mTLS:** operator client certs, daemon presents a cert. Standard for production services.
-- **Signed requests:** the operator's existing Ed25519 identity signs each RPC. The daemon verifies the signature against the operator's registered public key. Reuses existing crypto.
-- **OIDC bridge:** for enterprise SSO integration. The daemon validates OIDC tokens issued by the customer's IdP and maps them to operator identities.
-
-The right answer for Arbor is probably "signed requests for self-hosted operators + mTLS for service-to-service + OIDC for enterprise SSO." All three can be supported behind a common auth interface.
-
-**What it addresses:**
-
-- **T2** strengthened — compromised shell can attempt CLI calls, but without a valid operator credential the daemon refuses
-- **T7** — tampered CLI binary can't bypass the auth boundary; the daemon enforces what the operator was actually authorized to do
-- **T8** — multi-operator deployments get per-operator audit on every action
-
-**What it does NOT address:**
-
-- T4, T6 — once the daemon accepts an authenticated request, agents still execute inside the BEAM with whatever capabilities the request authorized
-
-**Operational shape:**
-
-- Daemon exposes pipeline operations via existing `arbor_gateway` HTTP endpoints (or a parallel UNIX socket for local-only deployments)
-- Operator's CLI reads their identity key, signs each RPC, sends it
-- The daemon's response includes the run_id; operators query / resume via the daemon, not by touching files directly
-
-**Implications for checkpoint HMAC (recommended option):**
-
-The Option D we shipped (operator-identity-bound HMAC) splits in service mode. Two identities now matter: the **operator** (CLI client) and the **daemon** (the BEAM doing the work). Three reasonable bindings:
-
-| Binding | Tradeoff |
-|---|---|
-| Daemon-only | Simpler. Loses per-operator audit on the checkpoint. Resume by any authenticated operator is fine |
-| Operator-only | Preserves the property we have today. But the operator key has to enter the daemon's process space → defeats half the point of service mode |
-| **Both bound (recommended)** | Daemon authenticates operator via Layer 2, then derives the checkpoint HMAC as `HKDF(daemon_key, "checkpoint-" <> operator_id <> "-" <> run_id)`. Resume requires the same daemon AND the same operator. Strong audit story. Neither raw key ever enters the resumer's process space. Implementation lives in Layer 3 (the signer) — daemon asks the signer to derive a per-(operator, run) HMAC |
-
-The "both bound" choice tells a clean enterprise story: every signed checkpoint identifies the operator who started it, the daemon that ran it, and (with Layer 4) the host it was produced on.
-
-### Layer 3 — External signer process
-
-A small dedicated process holds the private key and exposes only signing / key-derivation operations over a UNIX socket. The Arbor daemon's BEAM never has the raw key.
-
-**What it addresses:**
-
-- **T4** — even a compromised agent can only request signatures the signer is configured to allow, at the signer's rate limit. The agent can't exfiltrate the key because the key isn't in the BEAM.
-- **T6** — compromised daemon owns everything under its UID, but the signer is a separate process under its own UID; the daemon can request signatures (auditable, rate-limitable) but can't extract the key
-
-**Operational shape:**
-
-- Signer process runs under `arbor-signer` UID (separate from `arbor`) or as `arbor` (less isolation but simpler)
-- UNIX socket at `/var/run/arbor/signer.sock`, mode `0600`, owned `arbor:arbor` so only the daemon can connect
-- Minimal protocol: `sign(payload, purpose)`, `derive_hmac(salt, purpose)`. Maybe `health_check`. Nothing else.
-- Audit log: every signing request gets a structured event (timestamp, caller PID, purpose, payload hash). Forwarded to whatever audit infrastructure the operator configures
-- Rate limiting: per-purpose budgets (e.g., "no more than 100 checkpoint signatures per minute per run_id") so a runaway pipeline can't ask the signer to sign forever
-- Optional human-in-the-loop: certain signature purposes (e.g., signing a new capability grant) can require operator confirmation via a separate notification channel
-
-**Signer protocol design notes (deferred to implementation):**
-
-- Simple line-oriented or length-prefixed binary protocol over UNIX socket
-- Could be a small Elixir app, but a Go or Rust binary has the advantage of being deployable independently of the BEAM (smaller footprint, separate update cadence)
-- A pure-Erlang version using Erlang distribution between two nodes is possible but conflates the trust boundary with BEAM-internal communication
-- The "right" answer probably depends on whether enterprise customers care about minimizing the trusted code base (in which case: small Rust binary)
-
-**Backward compatibility with the current signer closure:**
-
-The current `Arbor.Orchestrator.Engine` uses a `signer = fn resource -> ... end` closure threaded through opts. Layer 3 swaps this closure for one that delegates to the signer process. The interface stays the same; the implementation changes. All in-tree callers see no API change.
-
-### Layer 4 — Hardware-backed signer
-
-The signer process becomes a thin shim to hardware. The private key is generated in and never leaves a hardware security boundary.
-
-**Platform options:**
-
-- **Apple Secure Enclave** (macOS, M-series and T2 Macs): native API, key generation + signing without the key bytes ever entering the OS
-- **TPM 2.0** (most Linux servers and many Windows workstations): standard PKCS#11 interface, well-supported toolchain
-- **HSM** (enterprise): network-attached or PCIe-attached hardware security module; PKCS#11 or vendor-specific API
-- **Cloud KMS** (cloud deployments): AWS KMS, GCP Cloud KMS, Azure Key Vault; signing operations remote to a cloud-provider HSM
-
-**What it addresses:**
-
-- **T6** fully — the daemon can request signatures but cannot extract the key under any compromise scenario
-- **T9** — insider with root on the box can request signatures (auditable) but cannot copy the key off the device
-- Attestation: hardware can produce a signed statement asserting "this key lives in hardware that meets X compliance bar." Enterprise compliance requirements (FIPS 140-2, Common Criteria) become satisfiable
-
-**Operational shape:**
-
-- For dev / single-operator self-hosted: macOS Secure Enclave or TPM is free and zero-config
-- For enterprise: customer brings their own HSM (or cloud KMS), Arbor's signer process is configured to use it
-- For air-gapped: dedicated HSM appliance, no network egress required from the signing path
-
-The hardware layer is what makes Arbor a credible component of a FIPS / SOC 2 / HIPAA / FedRAMP story for enterprise customers. The signer process's interface to hardware is platform-specific; the daemon's interface to the signer is stable across all hardware choices.
-
-## Migration path
-
-The four layers can be adopted independently. Each is a meaningful security improvement; none requires the others to land first. A reasonable phased path:
-
-### Phase 1 — Identity facade refactor (low effort, near-term)
-
-Pull identity-loading and signing operations out of `Helpers.load_identity/1` and the ad-hoc signer closures into a proper `Arbor.Identity` facade. File-backed today, but with a clean interface (`resolve/1`, `sign/2`, `derive_secret/2`) that can be re-implemented to delegate to Layer 3 without API changes.
-
-Zero security improvement on its own. Sets up the seam for everything that follows. Roughly an afternoon's work.
-
-### Phase 2 — Service account documentation + tooling
-
-Document how to set up the `arbor` UID, `arbor` group, directory layout, launchd/systemd unit. Provide reference configs. Update IDENTITY.md to cover service-mode deployment alongside dev-mode.
-
-No code change in Arbor itself. But the operational tooling and docs are real work — installer scripts, sample unit files, group permission setup. Maybe a `mix arbor.deploy.init` task that scaffolds the layout.
-
-Adds Layer 1 for operators willing to do the setup. Doesn't change the per-invocation CLI model yet.
-
-### Phase 3 — CLI as RPC client
-
-Migrate `mix arbor.pipeline.*` from in-process pipeline execution to RPC against a running daemon. Existing `arbor_gateway` already has HTTP endpoints; this phase mostly extends them and writes a thin CLI client.
-
-This is the big phase — touches gateway, CLI, auth, possibly session/state management. Multiple commits over several days. The deliverable is "you can `mix arbor.pipeline.run foo.dot` and it executes on the running daemon under `arbor` UID rather than spinning up your own BEAM as `azmaveth`."
-
-Adds Layer 2 (with Layer 1 already in place). The "both bound" checkpoint HMAC decision lands here.
-
-### Phase 4 — External signer process
-
-Build the signer binary (probably Rust or Go for footprint reasons, but pure-Elixir is also fine to start). Define the UNIX socket protocol. Update `Arbor.Identity` (from Phase 1) to delegate to the signer process. The signer holds the key; the daemon does not.
-
-Adds Layer 3. Meaningful step toward the agent-in-BEAM threat (T4) that nothing else addresses.
-
-### Phase 5 — Hardware backing
-
-Integrate Secure Enclave for macOS dev installs and TPM/PKCS#11 for Linux production installs. The signer's interface to hardware is platform-specific; both implementations live behind the same API.
-
-Adds Layer 4. Makes Arbor a credible component of compliance-regulated deployments.
-
-## Trade-offs at each layer
-
-For each layer, what it costs and what it can defer:
-
-| Layer | Engineering cost | Operational cost | Can defer? |
-|---|---|---|---|
-| 1 (service account) | Low (mostly docs + scripts) | Moderate (operators learn new setup) | Yes — single-UID dev works fine |
-| 2 (RPC CLI) | High (real refactor) | Low (daemon runs in background, CLI is the same UX) | Yes — single-operator dev can stay in-process |
-| 3 (external signer) | Medium-high (new component) | Low (transparent to operators) | Yes — only matters once you care about T4 |
-| 4 (hardware) | Medium (platform integration) | Varies (free for Mac/TPM, cost for HSM) | Yes — enterprise prereq, not single-user |
-
-The architecture rewards staged adoption. Each layer's value is independently legible to the customer at that layer's tier.
-
-## Open questions / future decisions
-
-These are deliberately not pinned down here — each becomes its own design conversation at the relevant phase:
-
-- **Daemon process model:** long-running OTP app vs spawned-per-run vs Erlang distribution cluster?
-- **Operator authentication to daemon (Phase 3):** signed requests (reuse existing identity), mTLS, OIDC bridge — or all three behind a common interface?
-- **Signer protocol (Phase 4):** custom binary protocol, gRPC, or Erlang-distribution between two cookied nodes?
-- **Signer language (Phase 4):** Elixir / Erlang for simplicity, Go / Rust for smaller trusted codebase footprint?
-- **Audit infrastructure:** structured log lines forwarded to OpenTelemetry, dedicated immutable store, or operator's existing SIEM?
-- **Key rotation flow:** how does the daemon learn about a new operator key? Manual restart, signal, or watchable file?
-- **Multi-tenancy:** if a single daemon serves multiple operators, where does the trust boundary live? Per-operator BEAM nodes? Per-operator capability namespacing within a shared BEAM?
-
-These questions will be answered as the corresponding phases land. Capturing them here so they're not forgotten and so enterprise conversations have a clear picture of where the architecture has decided vs. where it has deliberately left flexibility.
-
-## Related
-
-- [`docs/arbor/IDENTITY.md`](./IDENTITY.md) — operator-facing guide to identity keys (Layer 0 setup)
-- [`.arbor/roadmap/5-completed/security-checkpoints-unverified-by-default.md`](../../.arbor/roadmap/5-completed/security-checkpoints-unverified-by-default.md) — checkpoint HMAC fix (Layer 0 work)
-- [`.arbor/roadmap/5-completed/security-uri-matcher-path-traversal-fail-open.md`](../../.arbor/roadmap/5-completed/security-uri-matcher-path-traversal-fail-open.md) — URI matcher hardening (Layer 0 work)
-- [`apps/arbor_security/lib/arbor/security/crypto.ex`](../../apps/arbor_security/lib/arbor/security/crypto.ex) — HKDF implementation (used by Layer 0+ checkpoint HMAC; will be wrapped by Layer 3 signer)
-- [`apps/arbor_gateway/`](../../apps/arbor_gateway/) — existing gateway with HTTP endpoints; substrate for Phase 3
+- `block`: deny;
+- `ask`: require confirmation;
+- `allow`: proceed with notification semantics handled by the caller; or
+- `auto`: proceed without an approval prompt.
+
+The effective decision is the most restrictive combination of the profile rule,
+system security ceiling, optional model constraint, and taint-derived restriction.
+Trust policy can also resolve egress standing per destination tier. A capability may
+refine an ask only when its egress constraints cover the resolved tier and destination.
+
+The old scalar tier model, including language such as `untrusted` through
+`autonomous` as a progression or a 0-100 authorization score, is retired. Taint levels
+such as `trusted`, `derived`, `untrusted`, and `hostile` remain a separate
+information-flow classification; they are not trust tiers.
+
+Use [`Arbor.Trust`](../../apps/arbor_trust/lib/arbor/trust.ex),
+[`Policy`](../../apps/arbor_trust/lib/arbor/trust/policy.ex), and
+[`ProfileResolver`](../../apps/arbor_trust/lib/arbor/trust/profile_resolver.ex) for
+the current model. The retirement rationale is recorded in
+[`finish-retiring-trust-tiers.md`](../../.arbor/roadmap/5-completed/finish-retiring-trust-tiers.md).
+
+### FileGuard and path containment
+
+`Arbor.Security.FileGuard` is an authorization layer for filesystem capabilities. It
+combines capability lookup with safe-root resolution, traversal rejection, symlink or
+junction containment, file-pattern and exclusion constraints, and depth limits.
+
+The security facade integrates FileGuard into filesystem authorization in two ways:
+
+- when a caller supplies `file_path`, the concrete path is normalized and checked
+  against the matched capability; and
+- for a path-bearing `arbor://fs/...` URI without `file_path`, the URI path is
+  normalized against the capability root as defense in depth.
+
+Failures in this binding path fail closed. `SafePath` is also used by authorized run
+workdir checks and other workspace boundaries. This protects the path decision; it
+does not turn a process with unrestricted host privileges into a filesystem sandbox.
+
+Authoritative code: [`FileGuard`](../../apps/arbor_security/lib/arbor/security/file_guard.ex),
+[`Arbor.Security`](../../apps/arbor_security/lib/arbor/security.ex), and
+[`SafePath`](../../apps/arbor_common/lib/arbor/common/safe_path.ex).
+
+### RunAuthorization and immutable execution identity
+
+Authorized Engine runs can carry a `RunAuthorization` that binds:
+
+- execution principal, caller, author, task, and session IDs;
+- canonical workdir and filesystem identity;
+- source graph hash and compiled graph hash;
+- a JSON-clean execution manifest and digest; and
+- exact action, handler, and node-module bindings.
+
+The binding is digest-checked, inherited by child graphs as a restricted subset, and
+verified on checkpoint/resume. Authorized graph nodes cannot replace the principal or
+adapt the graph. Workdir identity is rechecked so a path replacement is not silently
+accepted. Signing authority itself stays in trusted runtime options rather than the
+checkpoint projection.
+
+This is an execution identity and code-binding control. It does not prove that the
+BEAM process, the operating system, or every un-authorized legacy run is uncompromised.
+
+Authoritative code: [`RunAuthorization`](../../apps/arbor_orchestrator/lib/arbor/orchestrator/engine/run_authorization.ex),
+[`ExecutionManifest`](../../apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan/execution_manifest.ex),
+and [`DOT pipeline guide`](./DOT_PIPELINE_GUIDE.md).
+
+### Taint and egress gates
+
+Arbor tracks taint through action inputs and outputs and uses resolved security
+classification rather than guessing from a URI name. For an enforced external
+destination, untrusted or hostile taint is a hard block and cannot be overridden by
+trust standing or a capability. The gate also considers destination tier:
+
+- `on_host` and `none` are local and allowed;
+- `on_premises` is allowed unless its deployment flag is enabled;
+- `external_provider` is governed by trust standing and may ask or block; and
+- `external_peer` is currently classified and observed, but remains advisory for the
+  ACP 1.0 deferral.
+
+The gate is enabled in development and production configuration, while tests keep it
+dark unless a test explicitly enables it. Production's default cloud-provider
+standing is `allow`, so enabling the gate alone is not equivalent to denying all
+external traffic. Operators can provision stricter per-agent egress modes and enable
+on-premises gating.
+
+Authoritative code: [`EgressGate`](../../apps/arbor_security/lib/arbor/security/egress_gate.ex),
+[`Arbor.Trust.Policy`](../../apps/arbor_trust/lib/arbor/trust/policy.ex),
+[`config/prod.exs`](../../config/prod.exs), and the
+[`URI addressing and classification decision`](../../.arbor/decisions/2026-06-14-uri-addressing-vs-security-classification.md).
+
+### Durable ownership, approval, and review
+
+The coding workflow uses ownership boundaries below the graph:
+
+- the Engine run process owns pipeline execution by default;
+- `arbor_actions` owns monitored worktree leases;
+- `arbor_ai` owns managed ACP sessions and keeps their PIDs private; and
+- registries monitor owners and make cancellation and cleanup independent of happy-path
+  finalizer nodes.
+
+Public task and Engine context carry opaque or JSON-clean handles, not PIDs, functions,
+or rich authority structs. Worktree cleanup removes only paths created by the lease;
+reused or pre-existing worktrees are not automatically removed. Owner death, task
+cancellation, and process loss have explicit cleanup paths, with durable retention
+state for the coding workspace lifecycle.
+
+Coding approval is not a generic "the operator saw some diff" flag. The reviewed commit
+action binds approval to the inspected HEAD, a bounded worktree fingerprint, and, when
+available, the exact committable tree OID. It rechecks those values after approval and
+immediately before mutation. A fresh exact-resource signed request is minted for the
+nested Git commit authorization. Denial and rework do not mutate Git.
+
+The council review path is similarly bound to the reviewed task/worktree data and
+review-cycle ledger rather than being a free-standing approval of arbitrary later
+content. This is a workflow-specific control, not a claim that every Arbor action is
+council-reviewed.
+
+Authoritative docs and code: [`Coding task dispatch`](./CODING_TASK_DISPATCH.md),
+[`coding workflow execution boundaries`](../../.arbor/decisions/2026-07-09-coding-workflow-execution-boundaries.md),
+[`ReviewedCommit`](../../apps/arbor_actions/lib/arbor/actions/coding/reviewed_commit.ex),
+[`ReviewTree`](../../apps/arbor_actions/lib/arbor/actions/coding/review_tree.ex), and
+[`code-review-council.dot`](../../apps/arbor_actions/priv/pipelines/code-review-council.dot).
+
+### Shell containment and ACP boundaries
+
+Arbor has two intentionally different Shell execution modes:
+
+- **Direct execution** is a trusted structured-argv primitive for childless commands.
+  It pins executable and cwd identity, applies one deadline and output ceiling, tracks
+  ownership, and requires containment exhaustion before timeout, cancellation, launcher
+  failure, or owner loss becomes terminal. Agent-facing authorization rejects compound
+  commands, wrappers, noncanonical executables, and nonempty ambient environments.
+- **Spawn-capable execution** is a separate closed contract for Mix, compilers, and
+  test runners that need descendants. It does not use a caller-selected backend or
+  self-declared capability. The built-in Apple Container path performs preflight,
+  admission, owner binding, closed-environment setup, no-network unit creation, and
+  positive settlement before publishing terminal output. If a required guarantee or
+  admission asset is missing, it refuses to start candidate work.
+
+The direct launcher is not a substitute for descendant containment. A process group can
+be escaped by `setsid`, so spawn-capable cleanup requires an OS-owned unit or an
+equivalent proof of whole-unit exhaustion.
+
+Authoritative code: [`Arbor.Shell`](../../apps/arbor_shell/lib/arbor/shell.ex),
+[`Executor`](../../apps/arbor_shell/lib/arbor/shell/executor.ex), and
+[`spawn-capable shell containment decision`](../../.arbor/decisions/2026-07-13-spawn-capable-shell-containment.md).
+
+### Grok ACP private runtime and no-shell profile
+
+The managed Grok ACP path creates a private Arbor runtime tree and a private `grok`
+home with restrictive modes. It stages authentication only into that private home,
+binds a verified Arbor agent profile, and disables ambient MCP/configuration sources,
+hooks, telemetry, memory, subagents, and web fetch through a closed environment.
+
+The `arbor-no-shell` profile exposes native file tools and disallows terminal commands,
+task/subagent controls, and task-output/kill controls. The launch command is checked
+against the expected strict Grok command, including `--deny Bash(*)`, and the worktree
+authority is verified before and during launch. This is a strong profile-specific
+boundary, not a universal guarantee for every ACP provider or every manually launched
+CLI.
+
+Authoritative code: [`RuntimeHome`](../../apps/arbor_ai/lib/arbor/ai/acp_session/runtime_home.ex),
+[`GrokSandbox`](../../apps/arbor_ai/lib/arbor/ai/acp_session/grok_sandbox.ex), and
+[`ACP trust enforcement status`](../../.arbor/decisions/2026-07-06-acp-trust-enforcement-status.md).
+
+### Distributed security signal caveat
+
+Signals are normally fire-and-forget observability and must not be treated as the
+execution lifecycle or authorization source of truth. There is a deliberate,
+load-bearing exception in `arbor_security`: cluster-scoped security signals currently
+carry distributed nonce, capability, and identity state synchronization. That transport
+must be treated as security-critical until it is replaced by an explicit synchronization
+mechanism. Security-topic subscriptions are capability-restricted; an open signal topic
+is not evidence of security authorization.
+
+Authoritative code: [`CapabilityStore`](../../apps/arbor_security/lib/arbor/security/capability_store.ex),
+[`Identity.Registry`](../../apps/arbor_security/lib/arbor/security/identity/registry.ex),
+and [`Arbor.Signals`](../../apps/arbor_signals/lib/arbor/signals.ex).
+
+## Partial, Planned, or Unsupported Controls
+
+The following boundaries are important because their names can otherwise sound more
+complete than their current implementation.
+
+### Signing and identity boundaries
+
+- The reload-stable signing-authority broker is the intended owner of long-lived signing
+  authority, but migration is staged. Legacy signer closures remain in some callers.
+- The old four-layer external signer and hardware-backed key architecture is not
+  implemented as a general Arbor deployment mode. There is no claim here that private
+  keys are outside the BEAM, that a separate UID is mandatory, or that Secure Enclave,
+  TPM, HSM, or cloud KMS integration is complete.
+- Signed-request authentication is available, but Gateway intentionally passes through
+  to other auth schemes when the signature is absent or invalid. Deployment policy must
+  decide which schemes are acceptable on each endpoint.
+
+### ACP authorization granularity
+
+The ACP permission callback can route a tool request through trust policy and capability
+authorization when the session is launched in the callback-enabled mode. It is not safe
+to infer that from every ACP session: `permission_mode: bypass` intentionally skips the
+callback and is prohibited for the reviewed coding-agent path. Current callback
+authorization is still generally tool-level; mapping arguments such as a Bash command
+or an Edit path to a fully argument-scoped resource URI remains incomplete. Worktree
+isolation, tool allowlists, and the Grok no-shell profile therefore remain necessary
+defense in depth.
+
+### Egress and URI work
+
+- `external_peer` ACP egress is classified and emits telemetry but remains advisory in
+  the ACP 1.0 policy; it is not a universal hard block.
+- Full consolidation of all historical URI shapes and destination-specific coverage for
+  every comms/ACP path remain tracked work. Classification and runtime destination
+  resolution are the current enforcement direction.
+- Egress enforcement depends on the caller supplying the resolved tier, taint, and trust
+  standing to the security gate. The kernel does not derive an agent's trust profile by
+  itself on every entry path.
+
+### Spawn-capable platform work
+
+- The spawn-capable API is deliberately unavailable when the production containment
+  backend or its admission evidence is missing. A configured callback, arbitrary module,
+  or legacy `spawn_backend` setting cannot reactivate it.
+- The only implemented spawn-capable backend is Apple Container on macOS 26 with the reviewed
+  signed 1.1.x CLI/API-server/plugin layout, pinned kernel, immutable local images, and
+  a verified Linux/arm64 guest toolchain. Provisioning those assets is an operator
+  prerequisite; code presence alone does not prove a host can execute this path.
+- Linux dependency-baseline authority and Linux/arm64 guest materialization exist for
+  the Apple Container validation design, but a general native Linux spawn-capable
+  containment backend is not documented as supported here.
+- Windows has path-containment handling for filesystem links/reparse-point behavior,
+  but no supported Windows spawn-capable containment backend is claimed. The Windows
+  shell-containment compatibility item remains open.
+
+## Current Platform Support and Limitations
+
+| Platform | Current position |
+| --- | --- |
+| macOS | Core Elixir security and direct childless Shell paths are the primary development surface. Spawn-capable validation is bounded to macOS 26 with Apple Container 1.1.x admission evidence and required locally provisioned assets. Missing assets fail closed. |
+| Linux | Core identity, capability, trust, taint, egress, and path-policy code is not described as macOS-only. Linux/arm64 dependency-baseline and guest-image evidence support the Apple Container design, but no general native Linux spawn-capable backend is supported by this document. |
+| Windows | FileGuard/SafePath code accounts for Windows junction and reparse-point containment behavior. Native spawn-capable containment and equivalent whole-unit cleanup are not a supported Arbor platform mode. |
+
+Platform support means that the relevant code path can run or fail closed; it does not
+mean the same OS-level isolation primitive exists everywhere. Operators must verify
+the actual runtime, signed assets, configuration, and authorization mode for the
+deployment.
+
+## Historical Target Architecture
+
+The previous version of this document described a four-layer target:
+
+1. a dedicated `arbor` service account;
+2. an authenticated CLI-to-daemon RPC boundary;
+3. a separate signer process holding the private key; and
+4. hardware-backed signing through Secure Enclave, TPM, HSM, or cloud KMS.
+
+That model remains useful historical rationale: a UID boundary protects against an
+operator-shell compromise, an RPC boundary separates a CLI from daemon authority, a
+signer process reduces the BEAM's access to raw keys, and hardware can protect keys
+even from a compromised daemon or root-level insider. It is **not** the current Arbor
+deployment architecture. The current implementation instead uses in-process security
+facades, staged signing-authority migration, capability/trust policy, run binding, and
+bounded Shell/ACP containment.
+
+Likewise, early Arbor documents described progressive scalar trust tiers and scores.
+Those terms are historical rationale only. As of the 2026-06-29 trust-policy retirement,
+current design work must use profile baselines, URI-prefix rules, system ceilings,
+capabilities, approval modes, and taint classification.
+
+Do not use this historical section to infer that daemon RPC, external signer processes,
+hardware keys, service-account installation, or scalar trust graduation are available
+features.
+
+## Related Authority
+
+- [`docs/arbor-security-design.md`](../arbor-security-design.md) - action authorization
+  risks and remaining hardening context.
+- [`Agent security gates`](../../.claude/skills/agent-security-gates.md) - gate-by-gate
+  operational checklist.
+- [`CONTRACT_RULES.md`](./CONTRACT_RULES.md) - facade and dependency-boundary rules.
+- [`Coding task dispatch`](./CODING_TASK_DISPATCH.md) - reviewed coding workflow contract.
+- [`2026-07-13 spawn-capable containment decision`](../../.arbor/decisions/2026-07-13-spawn-capable-shell-containment.md)
+  - platform admission and containment boundary.
+- [`2026-07-06 ACP trust enforcement status`](../../.arbor/decisions/2026-07-06-acp-trust-enforcement-status.md)
+  - callback-enabled ACP limitations.
