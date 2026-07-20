@@ -46,9 +46,12 @@ defmodule Arbor.Actions.Council do
   """
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Council.BlastRadius
   alias Arbor.Contracts.Consensus.CodeReviewRequest
   alias Arbor.Contracts.Judge.Verdict
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Persistence.VerdictLog
 
   @feedback_text_limit 1_000
@@ -514,11 +517,10 @@ defmodule Arbor.Actions.Council do
     def run(params, context) do
       Actions.emit_started(__MODULE__, loggable_params(params))
 
-      run_authorization =
-        Map.get(context, :run_authorization) || Map.get(context, "run_authorization")
+      bound? = Council.bound_review_context?(context)
 
       with {:ok, request} <- Council.build_code_review_request(params),
-           :ok <- Council.reject_bound_review_overrides(params, run_authorization),
+           :ok <- Council.reject_bound_review_overrides(params, bound?),
            {:ok, request, decision} <- run_review_with_snapshot(request, params, context),
            :ok <- Council.validate_review_decision_cycle(decision, request),
            {:ok, verdict} <- Council.verdict_from_review_decision(decision, request) do
@@ -583,9 +585,7 @@ defmodule Arbor.Actions.Council do
     defp open_review_snapshot(request, params, context) do
       workspace_id = Council.get_param(params, :workspace_id)
       candidate_commit = request.candidate_commit
-
-      bound? =
-        not is_nil(Map.get(context, :run_authorization) || Map.get(context, "run_authorization"))
+      bound? = Council.bound_review_context?(context)
 
       cond do
         valid_id?(workspace_id) and valid_id?(candidate_commit) ->
@@ -987,51 +987,673 @@ defmodule Arbor.Actions.Council do
   end
 
   defp default_review_runner(%CodeReviewRequest{} = request, params, action_context) do
+    # JSON-clean review context only — never put signing credentials or
+    # RunAuthorization into Engine initial_values / checkpoints.
     context =
       request
       |> CodeReviewRequest.to_context()
       |> Map.merge(review_context_overlay(action_context))
 
     question = Map.fetch!(context, "council.question")
-    run_authorization = context_value(action_context, :run_authorization)
 
-    with :ok <- reject_bound_review_overrides(params, run_authorization) do
+    with {:ok, launch} <- review_launch_mode(params, action_context),
+         :ok <- reject_bound_review_overrides(params, launch.bound?) do
       opts =
         [
-          graph: review_graph_path(params, run_authorization),
+          graph: review_graph_path(params, launch.bound?),
           context: context
         ]
-        |> maybe_put_unbound_review_overrides(params, run_authorization)
+        |> maybe_put_unbound_review_overrides(params, launch.bound?)
         |> put_opt(:timeout, get_param(params, :timeout))
-        |> put_opt(:nested_engine_opts, context_value(action_context, :nested_engine_opts))
-        |> put_opt(:run_authorization, run_authorization)
+        |> Keyword.merge(launch.decide_opts)
+        # Process-local Consult seam only (same class as review_runner).
+        # Never agent/DOT-controlled; never enters initial_values/checkpoints.
+        |> put_opt(:engine_runner, review_engine_runner(action_context))
 
       Arbor.Consensus.decide(question, opts)
     end
   end
 
-  @doc false
-  def reject_bound_review_overrides(_params, nil), do: :ok
+  defp review_engine_runner(action_context) do
+    case context_value(action_context, :engine_runner) do
+      runner when is_function(runner, 2) -> runner
+      _other -> nil
+    end
+  end
 
-  def reject_bound_review_overrides(params, _run_authorization) do
+  @doc false
+  # Pure presence/classification only — no file IO or launch construction.
+  # Bound when an inherited RunAuthorization or a root SigningAuthority key is
+  # present (even if later validation fails closed at launch time).
+  def bound_review_context?(context) when is_map(context) do
+    classify_review_launch(context) != :unbound
+  end
+
+  def bound_review_context?(_context), do: false
+
+  @doc false
+  def reject_bound_review_overrides(_params, bound?) when bound? in [nil, false], do: :ok
+
+  def reject_bound_review_overrides(params, _bound?) do
     case Enum.find([:graph, :quorum], &(not is_nil(get_param(params, &1)))) do
       nil -> :ok
       key -> {:error, {:bound_council_override, key}}
     end
   end
 
-  defp review_graph_path(params, nil),
+  # Pure launch classifier (no IO, no lease lookup, no authority canonicalize).
+  #
+  # :inherited — any non-nil run_authorization claim (atom/string spelling)
+  # :authorized_root — any signing_authority key presence (including nil/malformed)
+  # :unbound — neither selector is present
+  #
+  # All-values presence only: never Map.get first-wins. Conflicting claims still
+  # classify as bound so unbound graph/mode overrides cannot open an escape hatch;
+  # launch construction later fails closed on conflict/malformed values.
+  # Present-nil run_authorization alone is absence for inheritance (matches
+  # resolve_run_authorization_claims/1); present-nil signing_authority binds root.
+  defp classify_review_launch(context) when is_map(context) do
+    run_auth_values = map_claim_values(context, :run_authorization)
+    signing_present? = map_claim_values(context, :signing_authority) != []
+
+    cond do
+      Enum.any?(run_auth_values, &(not is_nil(&1))) ->
+        :inherited
+
+      signing_present? ->
+        :authorized_root
+
+      true ->
+        :unbound
+    end
+  end
+
+  defp classify_review_launch(_context), do: :unbound
+
+  # :inherited — parent Engine RunAuthorization forwarded unchanged
+  # :authorized_root — legacy coding path with process-local SigningAuthority
+  # :unbound — no authorization lineage (legacy unbound/advisory council)
+  #
+  # Launch selectors are all-values (never first-wins). Conflicting atom/string
+  # spellings of run_authorization / signing_authority fail closed before a
+  # launch mode is chosen.
+  defp review_launch_mode(params, action_context) do
+    with {:ok, run_auth} <- resolve_run_authorization_claims(action_context) do
+      case run_auth do
+        {:present, authority} ->
+          with {:ok, nested_opts} <- resolve_inherited_nested_engine_opts(action_context) do
+            decide_opts =
+              [run_authorization: authority]
+              |> put_opt(:nested_engine_opts, nested_opts)
+
+            {:ok, %{bound?: true, decide_opts: decide_opts}}
+          end
+
+        :absent ->
+          case map_claim_values(action_context, :signing_authority) do
+            [] ->
+              {:ok, %{bound?: false, decide_opts: []}}
+
+            _present ->
+              # Presence of signing_authority (including nil) binds root path.
+              case authorized_root_decide_opts(params, action_context) do
+                {:ok, decide_opts} ->
+                  {:ok, %{bound?: true, decide_opts: decide_opts}}
+
+                {:error, _reason} = error ->
+                  error
+              end
+          end
+      end
+    end
+  end
+
+  defp authorized_root_decide_opts(params, action_context) do
+    with {:ok, authority} <- require_canonical_signing_authority(action_context),
+         principal = authority.principal_id,
+         :ok <- reject_system_principal(principal),
+         :ok <- agree_present_identities(action_context, principal),
+         :ok <- reject_root_mixed_credentials(action_context),
+         {:ok, task_id} <- require_lineage_task_id(action_context),
+         {:ok, workdir} <- review_lease_workdir(params, action_context, principal, task_id),
+         {:ok, nested_opts} <- root_nested_engine_opts(action_context),
+         {:ok, caller_id} <- optional_lineage_or_default(action_context, :caller_id, principal),
+         {:ok, author_id} <- optional_lineage_or_default(action_context, :author_id, principal),
+         {:ok, session_id} <- optional_lineage_id(action_context, :session_id) do
+      # Authority is top-level for Consult/run_as — never nested discovery.
+      # nested_engine_opts may carry only max_depth on the root path.
+      decide_opts =
+        [
+          authorization: true,
+          agent_id: principal,
+          execution_principal: principal,
+          workdir: workdir,
+          signing_authority: authority,
+          caller_id: caller_id,
+          author_id: author_id,
+          task_id: task_id
+        ]
+        |> put_opt(:session_id, session_id)
+        |> put_opt(:nested_engine_opts, nested_opts)
+
+      {:ok, decide_opts}
+    end
+  end
+
+  # All-values for run_authorization: every atom/string spelling is binding.
+  # Equal non-nil duplicates collapse; all-nil is absence; mixed/conflict fails.
+  defp resolve_run_authorization_claims(action_context) do
+    case map_claim_values(action_context, :run_authorization) do
+      [] ->
+        {:ok, :absent}
+
+      values ->
+        case Enum.uniq(values) do
+          [nil] ->
+            {:ok, :absent}
+
+          [authority] when not is_nil(authority) ->
+            {:ok, {:present, authority}}
+
+          _conflict ->
+            {:error, :conflicting_run_authorization}
+        end
+    end
+  end
+
+  # Inherited nested_engine_opts: all-values envelopes must be identical lists
+  # (exact term equality). Consult.decide then applies its allowlist projection.
+  # A string/atom alias therefore cannot smuggle an alternate credential bag.
+  defp resolve_inherited_nested_engine_opts(action_context) do
+    case map_claim_values(action_context, :nested_engine_opts) do
+      [] ->
+        {:ok, nil}
+
+      values ->
+        case Enum.uniq(values) do
+          [nested] when is_list(nested) ->
+            if Keyword.keyword?(nested) do
+              {:ok, nested}
+            else
+              {:error, :invalid_nested_engine_opts}
+            end
+
+          [nil] ->
+            {:ok, nil}
+
+          _conflict ->
+            {:error, :conflicting_nested_engine_opts}
+        end
+    end
+  end
+
+  defp require_canonical_signing_authority(action_context) do
+    # Presence of the key (including nil) is bound — never downgrade to unbound.
+    # Accept only an actual %SigningAuthority{} struct; well-formed maps/lists
+    # must not rehydrate via canonicalize/1.
+    # All-values: every atom/string spelling is validated; equal canonical
+    # duplicates may pass; nil/malformed/conflict fail closed.
+    case map_claim_values(action_context, :signing_authority) do
+      [] ->
+        {:error, :missing_signing_authority}
+
+      values ->
+        collapse_signing_authority_claims(values)
+    end
+  end
+
+  defp collapse_signing_authority_claims(values) do
+    Enum.reduce_while(values, :absent, fn raw, acc ->
+      case normalize_signing_authority_claim(raw) do
+        {:ok, canonical} ->
+          case acc do
+            :absent ->
+              {:cont, {:ok, canonical}}
+
+            {:ok, ^canonical} ->
+              {:cont, {:ok, canonical}}
+
+            {:ok, _other} ->
+              {:halt, {:error, :conflicting_signing_authority}}
+          end
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      :absent -> {:error, :missing_signing_authority}
+      other -> other
+    end
+  end
+
+  defp normalize_signing_authority_claim(nil), do: {:error, :invalid_signing_authority}
+
+  defp normalize_signing_authority_claim(%SigningAuthority{} = authority) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, %SigningAuthority{} = canonical} -> {:ok, canonical}
+      {:error, reason} -> {:error, {:invalid_signing_authority, reason}}
+    end
+  end
+
+  defp normalize_signing_authority_claim(_other), do: {:error, :invalid_signing_authority}
+
+  defp reject_system_principal(principal) when principal in ["system", "agent_system"],
+    do: {:error, :system_principal_forbidden}
+
+  defp reject_system_principal(_principal), do: :ok
+
+  # Every present execution-principal identity claim must equal
+  # authority.principal_id. Missing sources are fine; present-but-divergent or
+  # malformed sources fail closed. caller_id / author_id / session_id remain
+  # distinct lineage and are not compared here.
+  # AuthContext uses principal_id (not a nonexistent agent_id field).
+  # Engine context carries execution identity in the flat key "session.agent_id"
+  # — never infer authority from a nested session map.
+  #
+  # All-values (never first-wins): enumerate every atom- and string-key spelling
+  # of each claim independently. Present nil/malformed fails closed. Conflicting
+  # duplicate spellings fail closed; equal duplicates may pass.
+  defp agree_present_identities(action_context, principal) do
+    with :ok <- agree_direct_identity_claims(action_context, :agent_id, principal),
+         :ok <- agree_direct_identity_claims(action_context, :execution_principal, principal),
+         :ok <- agree_direct_identity_claims(action_context, :principal_id, principal),
+         :ok <- agree_flat_session_agent_id_claims(action_context, principal),
+         :ok <-
+           agree_nested_identity_claims(action_context, :auth_context, :principal_id, principal),
+         :ok <-
+           agree_nested_identity_claims(action_context, :signed_request, :agent_id, principal) do
+      :ok
+    end
+  end
+
+  # Direct claims: presence of the key (including nil) binds and must match principal.
+  defp agree_direct_identity_claims(action_context, field, principal) do
+    action_context
+    |> map_claim_values(field)
+    |> Enum.reduce_while(:ok, fn raw, :ok ->
+      case normalize_present_identity(raw) do
+        :absent ->
+          {:halt, {:error, :invalid_principal_id}}
+
+        {:ok, ^principal} ->
+          {:cont, :ok}
+
+        {:ok, _other} ->
+          {:halt, {:error, {:identity_mismatch, field}}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # Present flat session.agent_id must validate; present-nil/malformed is not absence.
+  # Both atom and string spellings are independent claims (no first-wins).
+  defp agree_flat_session_agent_id_claims(action_context, principal)
+       when is_map(action_context) do
+    action_context
+    |> map_claim_values_for_keys([:"session.agent_id", "session.agent_id"])
+    |> Enum.reduce_while(:ok, fn raw, :ok ->
+      case normalize_present_identity(raw) do
+        :absent ->
+          {:halt, {:error, :invalid_principal_id}}
+
+        {:ok, ^principal} ->
+          {:cont, :ok}
+
+        {:ok, _other} ->
+          {:halt, {:error, {:identity_mismatch, :session_agent_id}}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp agree_flat_session_agent_id_claims(_action_context, _principal), do: :ok
+
+  # Nested envelopes may omit the identity field (optional). When the nested
+  # field is present — including nil — every atom/string spelling is validated
+  # independently against the authority principal.
+  defp agree_nested_identity_claims(action_context, envelope_key, nested_field, principal) do
+    action_context
+    |> map_claim_values(envelope_key)
+    |> Enum.reduce_while(:ok, fn envelope, :ok ->
+      case agree_nested_field_claims(envelope, nested_field, principal, envelope_key) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp agree_nested_field_claims(envelope, nested_field, principal, source)
+       when is_map(envelope) do
+    envelope
+    |> map_claim_values(nested_field)
+    |> Enum.reduce_while(:ok, fn raw, :ok ->
+      case normalize_present_identity(raw) do
+        :absent ->
+          # Nested key present with nil is a present-nil claim, not absence.
+          {:halt, {:error, :invalid_principal_id}}
+
+        {:ok, ^principal} ->
+          {:cont, :ok}
+
+        {:ok, _other} ->
+          {:halt, {:error, {:identity_mismatch, source}}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # Envelope present but not a map, or present-nil envelope: no nested field
+  # claims to validate (optional envelope shape).
+  defp agree_nested_field_claims(_envelope, _nested_field, _principal, _source), do: :ok
+
+  defp normalize_present_identity(nil), do: :absent
+
+  defp normalize_present_identity(value) when is_atom(value) and value not in [true, false] do
+    normalize_present_identity(Atom.to_string(value))
+  end
+
+  # Opaque after validation: blank includes whitespace-only (trim only as
+  # predicate). Accepted values are never rewritten before exact comparison.
+  defp normalize_present_identity(value) when is_binary(value) do
+    cond do
+      String.trim(value) == "" ->
+        {:error, :invalid_principal_id}
+
+      not String.valid?(value) or String.contains?(value, <<0>>) ->
+        {:error, :invalid_principal_id}
+
+      value in ["system", "agent_system"] ->
+        {:error, :system_principal_forbidden}
+
+      true ->
+        {:ok, value}
+    end
+  end
+
+  defp normalize_present_identity(_value), do: {:error, :invalid_principal_id}
+
+  # Collect every present value for a logical atom key under both atom and
+  # string spellings. Maps cannot duplicate a single key type, but atom+string
+  # aliases are independent entries and must all be validated.
+  defp map_claim_values(context, key) when is_map(context) and is_atom(key) do
+    map_claim_values_for_keys(context, [key, Atom.to_string(key)])
+  end
+
+  defp map_claim_values(_context, _key), do: []
+
+  defp map_claim_values_for_keys(context, keys) when is_map(context) and is_list(keys) do
+    Enum.reduce(keys, [], fn key, acc ->
+      if Map.has_key?(context, key) do
+        [Map.get(context, key) | acc]
+      else
+        acc
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp map_claim_values_for_keys(_context, _keys), do: []
+
+  # Root launch rejects mixed signer/authorizer/private-key controls by key
+  # presence (including nil). Nested signing_authority is forbidden — authority
+  # is projected top-level only. Every nested_engine_opts spelling is audited
+  # (no first-wins envelope selection).
+  defp reject_root_mixed_credentials(action_context) do
+    top_level_keys = [:signer, :authorizer, :identity_private_key]
+    nested_keys = [:signer, :authorizer, :identity_private_key, :signing_authority]
+
+    top_level = Enum.filter(top_level_keys, &has_context_key?(action_context, &1))
+
+    case map_claim_values(action_context, :nested_engine_opts) do
+      [] ->
+        if top_level == [] do
+          :ok
+        else
+          {:error, {:root_mixed_credentials, top_level}}
+        end
+
+      envelopes ->
+        nested_result =
+          Enum.reduce_while(envelopes, {:ok, []}, fn nested, {:ok, acc} ->
+            case nested do
+              nil ->
+                {:cont, {:ok, acc}}
+
+              nested when is_list(nested) ->
+                if Keyword.keyword?(nested) do
+                  forbidden = Enum.filter(nested_keys, &Keyword.has_key?(nested, &1))
+                  {:cont, {:ok, acc ++ forbidden}}
+                else
+                  {:halt, :invalid}
+                end
+
+              _other ->
+                {:halt, :invalid}
+            end
+          end)
+
+        case nested_result do
+          :invalid ->
+            {:error, :invalid_nested_engine_opts}
+
+          {:ok, nested_forbidden} ->
+            forbidden = Enum.uniq(top_level ++ nested_forbidden)
+
+            if forbidden == [] do
+              :ok
+            else
+              {:error, {:root_mixed_credentials, forbidden}}
+            end
+        end
+    end
+  end
+
+  # Fixed workdir from the exact coding workspace lease — never File.cwd!,
+  # process dictionary, or a caller-supplied workdir/cwd scalar.
+  # Authority is exact nonblank task_id + principal_id lineage via the registry's
+  # lineage-only inspect (owner-PID is deliberately ignored).
+  defp review_lease_workdir(params, action_context, principal, task_id)
+       when is_binary(principal) and is_binary(task_id) do
+    workspace_id = get_param(params, :workspace_id)
+
+    # Opaque after validation: blank includes whitespace-only (trim only as
+    # predicate). Never rewrite the accepted workspace_id before lineage lookup.
+    if is_binary(workspace_id) and String.trim(workspace_id) != "" and
+         String.valid?(workspace_id) and not String.contains?(workspace_id, <<0>>) do
+      case inspect_lease_with_exact_lineage(workspace_id, principal, task_id, action_context) do
+        {:ok, lease} ->
+          extract_lease_worktree_path(lease)
+
+        {:error, reason} ->
+          {:error, {:review_lease_inspect_failed, reason}}
+      end
+    else
+      {:error, :missing_review_workspace}
+    end
+  end
+
+  defp inspect_lease_with_exact_lineage(workspace_id, principal, task_id, action_context) do
+    server_opts =
+      case Map.get(action_context, :workspace_registry) ||
+             Map.get(action_context, "workspace_registry") do
+        nil -> []
+        server -> [server: server]
+      end
+
+    WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+      workspace_id,
+      task_id,
+      principal,
+      server_opts
+    )
+  end
+
+  defp extract_lease_worktree_path(lease) when is_map(lease) do
+    path =
+      Map.get(lease, :worktree_path) ||
+        Map.get(lease, "worktree_path")
+
+    if is_binary(path) and String.trim(path) != "" and String.valid?(path) and
+         not String.contains?(path, <<0>>) do
+      {:ok, path}
+    else
+      {:error, :invalid_review_workdir}
+    end
+  end
+
+  defp extract_lease_worktree_path(_lease), do: {:error, :invalid_review_workdir}
+
+  defp require_lineage_task_id(action_context) do
+    case present_lineage_value(action_context, :task_id) do
+      :absent ->
+        {:error, {:review_lease_inspect_failed, :incomplete_task_principal}}
+
+      {:ok, task_id} ->
+        {:ok, task_id}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # Root path nested opts: only max_depth. SigningAuthority is top-level.
+  # All-values: every nested_engine_opts spelling is projected to the same
+  # sanitized max_depth form; conflicts fail closed. Ignored non-credential
+  # duplicate keys cannot alter authority once projected to max_depth-only.
+  defp root_nested_engine_opts(action_context) do
+    case map_claim_values(action_context, :nested_engine_opts) do
+      [] ->
+        {:ok, nil}
+
+      values ->
+        Enum.reduce_while(values, :absent, fn nested, acc ->
+          case project_root_nested_opts(nested) do
+            {:ok, projected} ->
+              case acc do
+                :absent ->
+                  {:cont, {:ok, projected}}
+
+                {:ok, ^projected} ->
+                  {:cont, {:ok, projected}}
+
+                {:ok, _other} ->
+                  {:halt, {:error, :conflicting_nested_engine_opts}}
+              end
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+        end)
+        |> case do
+          :absent -> {:ok, nil}
+          other -> other
+        end
+    end
+  end
+
+  defp project_root_nested_opts(nil), do: {:ok, nil}
+  defp project_root_nested_opts([]), do: {:ok, nil}
+
+  defp project_root_nested_opts(nested) when is_list(nested) do
+    if Keyword.keyword?(nested) do
+      # Within one envelope, max_depth may repeat; all occurrences must agree
+      # (Keyword.fetch is first-wins and must not hide a later conflict).
+      depths =
+        nested
+        |> Enum.filter(fn {key, _value} -> key == :max_depth end)
+        |> Enum.map(fn {_key, value} -> value end)
+
+      case Enum.uniq(depths) do
+        [] ->
+          {:ok, nil}
+
+        [max_depth] ->
+          {:ok, [max_depth: max_depth]}
+
+        _conflict ->
+          {:error, :conflicting_nested_engine_opts}
+      end
+    else
+      {:error, :invalid_nested_engine_opts}
+    end
+  end
+
+  defp project_root_nested_opts(_other), do: {:error, :invalid_nested_engine_opts}
+
+  # Present lineage is forwarded; absent defaults to principal for caller/author.
+  # Malformed or system values fail closed rather than being silently dropped.
+  defp optional_lineage_or_default(action_context, key, principal) do
+    case present_lineage_value(action_context, key) do
+      :absent -> {:ok, principal}
+      {:ok, id} -> {:ok, id}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp optional_lineage_id(action_context, key) do
+    case present_lineage_value(action_context, key) do
+      :absent -> {:ok, nil}
+      {:ok, id} -> {:ok, id}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # Lineage claims are all-values: every atom/string spelling is validated
+  # independently. Present nil/malformed fails closed. Conflicting values fail
+  # closed; equal duplicate spellings collapse to the shared opaque value.
+  defp present_lineage_value(action_context, key) do
+    case map_claim_values(action_context, key) do
+      [] ->
+        :absent
+
+      values ->
+        Enum.reduce_while(values, :absent, fn raw, acc ->
+          case normalize_present_identity(raw) do
+            :absent ->
+              {:halt, {:error, :invalid_principal_id}}
+
+            {:ok, id} ->
+              case acc do
+                :absent ->
+                  {:cont, {:ok, id}}
+
+                {:ok, ^id} ->
+                  {:cont, {:ok, id}}
+
+                {:ok, _other} ->
+                  {:halt, {:error, {:identity_mismatch, key}}}
+              end
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+        end)
+    end
+  end
+
+  defp has_context_key?(context, key) when is_map(context) and is_atom(key) do
+    Map.has_key?(context, key) or Map.has_key?(context, Atom.to_string(key))
+  end
+
+  defp review_graph_path(params, bound?) when bound? in [nil, false],
     do: get_param(params, :graph) || default_code_review_graph_path()
 
-  defp review_graph_path(_params, _run_authorization), do: default_code_review_graph_path()
+  defp review_graph_path(_params, _bound?), do: default_code_review_graph_path()
 
-  defp maybe_put_unbound_review_overrides(opts, params, nil) do
+  defp maybe_put_unbound_review_overrides(opts, params, bound?) when bound? in [nil, false] do
     opts
     |> Keyword.put(:mode, "decision")
     |> put_opt(:quorum, get_param(params, :quorum))
   end
 
-  defp maybe_put_unbound_review_overrides(opts, _params, _run_authorization), do: opts
+  defp maybe_put_unbound_review_overrides(opts, _params, _bound?), do: opts
 
   defp review_context_overlay(context) when is_map(context) do
     case context_value(context, :review_context) do

@@ -63,6 +63,35 @@ defmodule Arbor.Contracts.Security.SigningAuthorityBootstrapTest do
                )
     end
 
+    test "security regression: invalid UTF-8 and NUL principal_id fail closed; opaque bytes preserved" do
+      invalid_utf8 = "agent_" <> <<0xFF>>
+      with_nul = "human_ok" <> <<0>>
+      spaced = @principal <> " "
+
+      assert {:error, :invalid_principal_id} =
+               SigningAuthorityBootstrap.new(
+                 token: @token,
+                 principal_id: invalid_utf8,
+                 purpose: :session
+               )
+
+      assert {:error, :invalid_principal_id} =
+               SigningAuthorityBootstrap.new(
+                 token: @token,
+                 principal_id: with_nul,
+                 purpose: :session
+               )
+
+      assert {:ok, bootstrap} =
+               SigningAuthorityBootstrap.new(
+                 token: @token,
+                 principal_id: spaced,
+                 purpose: :session
+               )
+
+      assert bootstrap.principal_id == spaced
+    end
+
     test "rejects all duplicate logical attributes" do
       assert {:error, :duplicate_attribute} =
                SigningAuthorityBootstrap.new(%{

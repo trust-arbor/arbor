@@ -606,6 +606,277 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                })
     end
 
+    test "security regression: inspect_lease_by_lineage ignores owner PID and requires exact task+principal",
+         %{tmp_dir: tmp_dir} do
+      # Even the live owner process is denied when either lineage value mismatches;
+      # the exact pair succeeds without relying on owner-PID authority.
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      task_id = "task_lineage_inspect_#{System.unique_integer([:positive])}"
+      principal_id = "agent_lineage_inspect_#{System.unique_integer([:positive])}"
+      other_principal = "agent_other_#{System.unique_integer([:positive])}"
+      other_task = "task_other_#{System.unique_integer([:positive])}"
+      server = :"workspace_lineage_inspect_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server, retention_journal: :disabled, retention_runtime_id: "lineage-inspect-test"}
+      )
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: "test/lineage-only-inspect",
+                   worktree_base_dir: Path.join(tmp_dir, "lineage-worktrees"),
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      # Live owner is this test process; mismatched principal still denied.
+      assert {:error, :not_authorized} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 task_id,
+                 other_principal,
+                 server: server
+               )
+
+      # Mismatched task_id denied even as the live owner.
+      assert {:error, :not_authorized} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 other_task,
+                 principal_id,
+                 server: server
+               )
+
+      # Exact pair succeeds without owner-PID authority.
+      assert {:ok, inspected} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 task_id,
+                 principal_id,
+                 server: server
+               )
+
+      assert inspected.workspace_id == lease.workspace_id
+      assert inspected.worktree_path == lease.worktree_path
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+    end
+
+    test "security regression: inspect_lease_by_lineage preserves opaque whitespace identities",
+         %{tmp_dir: tmp_dir} do
+      # Whitespace is significant after validation. Trimming before comparison
+      # would let " agent_x " authorize a lease bound to "agent_x".
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      task_id = "task_opaque_ws_#{System.unique_integer([:positive])}"
+      principal_id = "agent_opaque_ws_#{System.unique_integer([:positive])}"
+      spaced_task = task_id <> " "
+      spaced_principal = " " <> principal_id
+      server = :"workspace_opaque_ws_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server, retention_journal: :disabled, retention_runtime_id: "opaque-ws-test"}
+      )
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: "test/opaque-whitespace-lineage",
+                   worktree_base_dir: Path.join(tmp_dir, "opaque-ws-worktrees"),
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      # All-whitespace is blank and must reject without rewriting.
+      assert {:error, :invalid_task_principal} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 "   ",
+                 principal_id,
+                 server: server
+               )
+
+      assert {:error, :invalid_task_principal} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 task_id,
+                 "\t\n",
+                 server: server
+               )
+
+      # workspace_id itself is opaque: leading/trailing whitespace must not trim
+      # into a valid lookup of the real lease.
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id <> " ",
+                 task_id,
+                 principal_id,
+                 server: server
+               )
+
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 " " <> lease.workspace_id,
+                 task_id,
+                 principal_id,
+                 server: server
+               )
+
+      # Whitespace-bearing aliases must not authorize the exact stored lineage.
+      assert {:error, :not_authorized} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 spaced_task,
+                 principal_id,
+                 server: server
+               )
+
+      assert {:error, :not_authorized} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 task_id,
+                 spaced_principal,
+                 server: server
+               )
+
+      # Exact opaque pair still succeeds.
+      assert {:ok, inspected} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 task_id,
+                 principal_id,
+                 server: server
+               )
+
+      assert inspected.workspace_id == lease.workspace_id
+
+      # Acquire with whitespace-bearing lineage; exact spaced form matches, trimmed does not.
+      assert {:ok, spaced_lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: "test/opaque-whitespace-stored",
+                   worktree_base_dir: Path.join(tmp_dir, "opaque-ws-stored-worktrees"),
+                   task_id: spaced_task,
+                   principal_id: spaced_principal
+                 },
+                 server: server
+               )
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 spaced_lease.workspace_id,
+                 spaced_task,
+                 spaced_principal,
+                 server: server
+               )
+
+      assert {:error, :not_authorized} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 spaced_lease.workspace_id,
+                 String.trim(spaced_task),
+                 String.trim(spaced_principal),
+                 server: server
+               )
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release(spaced_lease.workspace_id, :remove, %{
+                 server: server,
+                 task_id: spaced_task,
+                 principal_id: spaced_principal
+               })
+    end
+
+    test "security regression: inspect_lease_by_lineage never returns retention blockers as active",
+         %{tmp_dir: tmp_dir} do
+      # A creation/retention blocker with matching lineage must not be inspectable
+      # as an active lease — missing active lease is always :not_found.
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      task_id = "task_blocker_lineage_#{System.unique_integer([:positive])}"
+      principal_id = "agent_blocker_lineage_#{System.unique_integer([:positive])}"
+      workspace_id = "ws_blocker_lineage_#{System.unique_integer([:positive])}"
+      server = :"workspace_blocker_lineage_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server, retention_journal: :disabled, retention_runtime_id: "blocker-lineage-test"}
+      )
+
+      server_pid = Process.whereis(server)
+      assert is_pid(server_pid)
+
+      worktree_path = Path.join(tmp_dir, "blocker-lineage-worktree")
+      File.mkdir_p!(worktree_path)
+
+      # Inject a retention/creation blocker with exact matching lineage. Ordinary
+      # inspect_lease may surface blockers; lineage-only inspect must not.
+      :sys.replace_state(server_pid, fn state ->
+        blocker = %{
+          workspace_id: workspace_id,
+          repo_path: repo,
+          worktree_path: worktree_path,
+          branch: "test/blocker-lineage",
+          task_id: task_id,
+          principal_id: principal_id,
+          target: {repo, "test/blocker-lineage"},
+          ownership: :pending,
+          lifecycle: :creating,
+          active: false,
+          dormant: true,
+          status: :creating_blocked
+        }
+
+        %{
+          state
+          | retention_blockers: Map.put(state.retention_blockers, workspace_id, blocker),
+            retention_blockers_by_target:
+              Map.put(state.retention_blockers_by_target, blocker.target, blocker)
+        }
+      end)
+
+      assert map_size(:sys.get_state(server_pid).retention_blockers) == 1
+
+      # Ordinary inspect may still expose the blocker to authorized lineage.
+      assert {:ok, blocker_view} =
+               WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      assert blocker_view.active == false
+      assert blocker_view.status == "creating_blocked" or blocker_view.lifecycle == "creating"
+
+      # Lineage-only inspect authorizes and returns active leases only.
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 workspace_id,
+                 task_id,
+                 principal_id,
+                 server: server
+               )
+    end
+
     test "security regression: task_id alone without principal does not authorize resume", %{
       tmp_dir: tmp_dir
     } do

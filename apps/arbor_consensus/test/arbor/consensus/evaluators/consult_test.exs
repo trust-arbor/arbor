@@ -312,6 +312,1003 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       refute Keyword.has_key?(engine_opts, :authorization)
     end
 
+    test "security regression: authorization true without run_authorization forwards principal lineage" do
+      # Root authorized launch for the legacy coding council path: no inherited
+      # RunAuthorization. Requires a canonical %SigningAuthority{} top-level
+      # (never opaque doubles / nested discovery); principal never defaults to
+      # "system".
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      parent = self()
+      principal = "agent_root_auth_#{System.unique_integer([:positive])}"
+      task_id = "task_root_auth_#{System.unique_integer([:positive])}"
+      workdir = File.cwd!()
+      expected_graph = compile_graph!(graph_path)
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:root_authorized_engine_run, graph, engine_opts})
+        {:ok, %{context: %{"council.decision" => "approved"}}}
+      end
+
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(TestAdvisoryEvaluator, "Root authorized council",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 execution_principal: principal,
+                 caller_id: principal,
+                 author_id: principal,
+                 task_id: task_id,
+                 workdir: workdir,
+                 signing_authority: signing_authority,
+                 nested_engine_opts: [
+                   max_depth: 3,
+                   actions_executor: :must_not_cross
+                 ],
+                 engine_runner: engine_runner
+               )
+
+      assert_receive {:root_authorized_engine_run, actual_graph, engine_opts}
+      assert actual_graph.compiled
+      assert actual_graph == expected_graph
+      assert engine_opts[:authorization] == true
+      assert engine_opts[:agent_id] == principal
+      assert engine_opts[:execution_principal] == principal
+      assert engine_opts[:caller_id] == principal
+      assert engine_opts[:author_id] == principal
+      assert engine_opts[:task_id] == task_id
+      assert engine_opts[:workdir] == workdir
+      refute Keyword.has_key?(engine_opts, :run_authorization)
+      assert Keyword.fetch!(engine_opts, :signing_authority) == signing_authority
+      assert engine_opts[:max_depth] == 3
+      refute Keyword.has_key?(engine_opts, :actions_executor)
+      refute Map.has_key?(engine_opts[:initial_values], :signing_authority)
+      refute Map.has_key?(engine_opts[:initial_values], "signing_authority")
+      refute Map.has_key?(engine_opts[:initial_values], :agent_id)
+      refute Map.has_key?(engine_opts[:initial_values], :workdir)
+      refute engine_opts[:agent_id] in ["system", "agent_system"]
+    end
+
+    test "security regression: root path rejects overrides, mixed credentials, and non-canonical authority" do
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      principal = "agent_bound_root_#{System.unique_integer([:positive])}"
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn _graph, _engine_opts -> flunk("engine runner must not be called") end
+
+      assert {:error, {:bound_council_override, :mode}} =
+               Consult.decide(TestAdvisoryEvaluator, "Bound root auth",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 signing_authority: signing_authority,
+                 mode: "advisory",
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, {:mixed_signing_credentials, forbidden}} =
+               Consult.decide(TestAdvisoryEvaluator, "mixed credentials",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 signing_authority: signing_authority,
+                 nested_engine_opts: [
+                   signer: fn _ -> {:ok, :signed} end
+                 ],
+                 engine_runner: engine_runner
+               )
+
+      assert :signer in forbidden
+
+      # Nested signing_authority is forbidden on the root path (top-level only).
+      assert {:error, {:mixed_signing_credentials, nested_sa_forbidden}} =
+               Consult.decide(TestAdvisoryEvaluator, "nested authority discovery",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 signing_authority: signing_authority,
+                 nested_engine_opts: [signing_authority: signing_authority],
+                 engine_runner: engine_runner
+               )
+
+      assert :signing_authority in nested_sa_forbidden
+
+      assert {:error, :missing_signing_authority} =
+               Consult.decide(TestAdvisoryEvaluator, "missing authority",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 engine_runner: engine_runner
+               )
+
+      # Present nil/malformed signing_authority binds and fails closed (never unbound).
+      assert {:error, :invalid_signing_authority} =
+               Consult.decide(TestAdvisoryEvaluator, "nil authority",
+                 graph: graph_path,
+                 signing_authority: nil,
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, :invalid_signing_authority} =
+               Consult.decide(TestAdvisoryEvaluator, "opaque double",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 signing_authority: {:opaque, make_ref()},
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, {:identity_mismatch, :agent_id}} =
+               Consult.decide(TestAdvisoryEvaluator, "mismatched agent_id",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: "agent_other_#{System.unique_integer([:positive])}",
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, {:identity_mismatch, :execution_principal}} =
+               Consult.decide(TestAdvisoryEvaluator, "mismatched execution_principal",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 execution_principal: "agent_other_#{System.unique_integer([:positive])}",
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, {:identity_mismatch, :principal_id}} =
+               Consult.decide(TestAdvisoryEvaluator, "mismatched principal_id",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 principal_id: "agent_other_#{System.unique_integer([:positive])}",
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      # Flat Engine key "session.agent_id" is the identity claim; nested session maps are not.
+      assert {:error, {:identity_mismatch, :session_agent_id}} =
+               Consult.decide(TestAdvisoryEvaluator, "mismatched flat session.agent_id",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 "session.agent_id": "agent_other_#{System.unique_integer([:positive])}",
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, {:identity_mismatch, :auth_context}} =
+               Consult.decide(TestAdvisoryEvaluator, "mismatched auth_context",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 auth_context: %{
+                   principal_id: "agent_other_#{System.unique_integer([:positive])}"
+                 },
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, {:identity_mismatch, :signed_request}} =
+               Consult.decide(TestAdvisoryEvaluator, "mismatched signed_request",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 signed_request: %{agent_id: "agent_other_#{System.unique_integer([:positive])}"},
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      # Well-formed map/list authority is rejected (struct required; no rehydrate).
+      well_formed_map = %{
+        token: :crypto.strong_rand_bytes(32),
+        principal_id: principal,
+        purpose: :legacy_coding_task_executor
+      }
+
+      assert {:error, :invalid_signing_authority} =
+               Consult.decide(TestAdvisoryEvaluator, "well-formed map authority",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 signing_authority: well_formed_map,
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, :invalid_signing_authority} =
+               Consult.decide(TestAdvisoryEvaluator, "well-formed list authority",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 signing_authority: [
+                   token: well_formed_map.token,
+                   principal_id: principal,
+                   purpose: :legacy_coding_task_executor
+                 ],
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, :system_principal_forbidden} =
+               Consult.decide(TestAdvisoryEvaluator, "system agent_id",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: "system",
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+    end
+
+    test "security regression: flat session.agent_id accepted; nested session maps ignored; opaque whitespace preserved" do
+      # Engine identity lives at flat "session.agent_id". Nested %{session: %{agent_id: ...}}
+      # must not authorize or mismatch. Whitespace-bearing identities are opaque.
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      parent = self()
+      principal = "agent_flat_session_#{System.unique_integer([:positive])}"
+      other = "agent_other_#{System.unique_integer([:positive])}"
+      spaced_principal = principal <> " "
+      workdir = File.cwd!()
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      {:ok, spaced_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: spaced_principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:flat_session_engine_run, graph, engine_opts})
+        {:ok, %{context: %{"council.decision" => "approved"}}}
+      end
+
+      # Matching flat atom key is accepted.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(TestAdvisoryEvaluator, "flat atom session.agent_id match",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 "session.agent_id": principal,
+                 workdir: workdir,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      assert_receive {:flat_session_engine_run, _graph, engine_opts}
+      assert engine_opts[:agent_id] == principal
+
+      # Matching flat string key is accepted (List.keyfind path; Keyword string keys raise).
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "flat string session.agent_id match",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {"session.agent_id", principal},
+                   {:workdir, workdir},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert_receive {:flat_session_engine_run, _graph2, _}
+
+      # Mismatched string-key claim also uses List.keyfind and fails closed.
+      assert {:error, {:identity_mismatch, :session_agent_id}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "flat string session.agent_id mismatch",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {"session.agent_id", other},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Nested session map alone is ignored (not an identity claim).
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(TestAdvisoryEvaluator, "nested session ignored",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 session: %{agent_id: other},
+                 workdir: workdir,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      assert_receive {:flat_session_engine_run, _graph3, _}
+
+      # Nested session map must not mask a real flat mismatch either.
+      assert {:error, {:identity_mismatch, :session_agent_id}} =
+               Consult.decide(TestAdvisoryEvaluator, "nested does not mask flat mismatch",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 session: %{agent_id: principal},
+                 "session.agent_id": other,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      # All-whitespace is blank and rejects (trim only as predicate).
+      assert {:error, :invalid_principal_id} =
+               Consult.decide(TestAdvisoryEvaluator, "whitespace-only agent_id",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: "   ",
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      assert {:error, :invalid_principal_id} =
+               Consult.decide(TestAdvisoryEvaluator, "whitespace-only session.agent_id",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: principal,
+                 "session.agent_id": "\t  \n",
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      # Opaque whitespace: "agent_x " must not match authority principal "agent_x".
+      assert {:error, {:identity_mismatch, :agent_id}} =
+               Consult.decide(TestAdvisoryEvaluator, "opaque whitespace agent_id",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: spaced_principal,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               )
+
+      # Matching spaced principal through flat session.agent_id and agent_id is accepted.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(TestAdvisoryEvaluator, "opaque spaced match",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: spaced_principal,
+                 "session.agent_id": spaced_principal,
+                 workdir: workdir,
+                 signing_authority: spaced_authority,
+                 engine_runner: engine_runner
+               )
+
+      assert_receive {:flat_session_engine_run, _graph4, spaced_opts}
+      assert spaced_opts[:agent_id] == spaced_principal
+
+      # Trimmed claim must not authorize a whitespace-bearing principal.
+      assert {:error, {:identity_mismatch, :agent_id}} =
+               Consult.decide(TestAdvisoryEvaluator, "trimmed does not match spaced",
+                 graph: graph_path,
+                 authorization: true,
+                 agent_id: String.trim(spaced_principal),
+                 signing_authority: spaced_authority,
+                 engine_runner: engine_runner
+               )
+    end
+
+    test "security regression: signing_authority and launch selectors are all-occurrences never first-wins" do
+      # Keyword.fetch!/get first-wins hid a later hostile signing_authority,
+      # run_authorization, authorization, or nested_engine_opts occurrence.
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      parent = self()
+      principal = "agent_sa_list_#{System.unique_integer([:positive])}"
+      workdir = File.cwd!()
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      {:ok, other_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:sa_list_engine_run, graph, engine_opts})
+        {:ok, %{context: %{"council.decision" => "approved"}}}
+      end
+
+      # Conflicting duplicate atom signing_authority fails closed.
+      assert {:error, :conflicting_signing_authority} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "duplicate atom signing_authority conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:signing_authority, other_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Mixed atom/string signing_authority conflict fails closed.
+      assert {:error, :conflicting_signing_authority} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "mixed signing_authority conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {"signing_authority", other_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Present-nil duplicate next to a valid claim fails closed.
+      assert {:error, :invalid_signing_authority} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "present-nil signing_authority alias",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {"signing_authority", nil},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # String-only signing_authority is not ignored by Keyword.has_key?.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "string-only signing_authority",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {"signing_authority", signing_authority},
+                   {:workdir, workdir},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert_receive {:sa_list_engine_run, _g1, opts1}
+      assert Keyword.fetch!(opts1, :signing_authority) == signing_authority
+
+      # Equal atom/string signing_authority duplicates may pass.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "equal signing_authority duplicates",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {"signing_authority", signing_authority},
+                   {:workdir, workdir},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert_receive {:sa_list_engine_run, _g2, _}
+
+      # Conflicting run_authorization fails closed.
+      assert {:error, :conflicting_run_authorization} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "run_authorization conflict",
+                 [
+                   {:graph, graph_path},
+                   {:run_authorization, {:opaque_a, make_ref()}},
+                   {"run_authorization", {:opaque_b, make_ref()}},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Conflicting authorization true/false fails closed.
+      assert {:error, :conflicting_authorization} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "authorization conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {"authorization", false},
+                   {:signing_authority, signing_authority},
+                   {:agent_id, principal},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Conflicting nested_engine_opts max_depth projections fail closed on root.
+      assert {:error, :conflicting_nested_engine_opts} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "nested_engine_opts conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:nested_engine_opts, [max_depth: 1]},
+                   {"nested_engine_opts", [max_depth: 2]},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Equal nested max_depth projections may pass; extra non-credential keys on
+      # one envelope are stripped and cannot alter the sanitized root boundary.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "equal nested projections",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:workdir, workdir},
+                   {:nested_engine_opts, [max_depth: 4, ignored_noise: true]},
+                   {"nested_engine_opts", [max_depth: 4]},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert_receive {:sa_list_engine_run, _g3, opts3}
+      assert opts3[:max_depth] == 4
+      refute Keyword.has_key?(opts3, :ignored_noise)
+    end
+
+    test "security regression: all-occurrences list identity claims never first-wins" do
+      # Keyword.get is first-wins and Keyword APIs reject string keys. Hostile
+      # duplicate atom keys or mixed atom/string tuples must all be validated.
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      parent = self()
+      principal = "agent_list_all_values_#{System.unique_integer([:positive])}"
+      other = "agent_other_#{System.unique_integer([:positive])}"
+      workdir = File.cwd!()
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:list_all_values_engine_run, graph, engine_opts})
+        {:ok, %{context: %{"council.decision" => "approved"}}}
+      end
+
+      # Conflicting duplicate atom agent_id keys fail closed.
+      assert {:error, {:identity_mismatch, :agent_id}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "duplicate atom agent_id conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:agent_id, other},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Mixed atom/string agent_id conflict fails closed.
+      assert {:error, {:identity_mismatch, :agent_id}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "mixed agent_id conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {"agent_id", other},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # String-only hostile agent_id is not ignored (was invisible to Keyword.get).
+      assert {:error, {:identity_mismatch, :agent_id}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "string-only hostile agent_id",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {"agent_id", other},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Equal duplicate atom agent_id keys may pass.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "equal duplicate agent_id",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:agent_id, principal},
+                   {:workdir, workdir},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert_receive {:list_all_values_engine_run, _graph, engine_opts}
+      assert engine_opts[:agent_id] == principal
+
+      # Equal atom/string agent_id spellings may pass.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "equal mixed agent_id",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {"agent_id", principal},
+                   {:workdir, workdir},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert_receive {:list_all_values_engine_run, _graph2, _}
+
+      # Present-nil direct claim fails closed.
+      assert {:error, :invalid_principal_id} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "present-nil agent_id",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, nil},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Conflicting flat session.agent_id atom/string claims fail closed.
+      assert {:error, {:identity_mismatch, :session_agent_id}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "session.agent_id conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:"session.agent_id", principal},
+                   {"session.agent_id", other},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Nested auth_context principal_id atom/string conflict fails closed.
+      assert {:error, {:identity_mismatch, :auth_context}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "nested auth_context conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:auth_context,
+                    %{
+                      "principal_id" => other,
+                      principal_id: principal
+                    }},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Conflicting caller_id lineage claims fail closed.
+      assert {:error, {:identity_mismatch, :caller_id}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "caller_id lineage conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:caller_id, principal},
+                   {"caller_id", other},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Invalid UTF-8 / NUL claims fail closed.
+      assert {:error, :invalid_principal_id} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "invalid utf8 agent_id",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, "agent_ok" <> <<0xFF>>},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert {:error, :invalid_principal_id} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "nul principal_id",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:principal_id, "agent_ok" <> <<0>>},
+                   {:signing_authority, signing_authority},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+    end
+
+    test "security regression: within-envelope keyword duplicates and workdir claims never first-wins" do
+      # Gaps left by outer-envelope-only reconciliation: duplicate max_depth /
+      # credential keys inside one nested list, and present-nil/conflict workdir.
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      parent = self()
+      principal = "agent_within_kw_#{System.unique_integer([:positive])}"
+      workdir = File.cwd!()
+      other_workdir = Path.join(System.tmp_dir!(), "hostile-workdir")
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:within_kw_engine_run, graph, engine_opts})
+        {:ok, %{context: %{"council.decision" => "approved"}}}
+      end
+
+      signer_a = fn _req -> {:ok, :signed_a} end
+      signer_b = fn _req -> {:ok, :signed_b} end
+
+      # Within one nested_engine_opts list: conflicting max_depth fails closed.
+      assert {:error, :conflicting_nested_engine_opts} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "within-envelope max_depth conflict",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:nested_engine_opts, [max_depth: 1, max_depth: 2]},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Equal within-envelope max_depth may pass.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "within-envelope equal max_depth",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:workdir, workdir},
+                   {:nested_engine_opts, [max_depth: 5, max_depth: 5]},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert_receive {:within_kw_engine_run, _g1, opts1}
+      assert opts1[:max_depth] == 5
+
+      # Inherited path: conflicting credential allowlist entries inside one list.
+      parent_ra = {:opaque_parent_ra, make_ref()}
+
+      assert {:error, :conflicting_nested_engine_opts} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "within-envelope signer conflict",
+                 [
+                   {:graph, graph_path},
+                   {:run_authorization, parent_ra},
+                   {:nested_engine_opts, [signer: signer_a, signer: signer_b, max_depth: 2]},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Equal credential allowlist entries within one list may pass.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "within-envelope equal signer",
+                 [
+                   {:graph, graph_path},
+                   {:run_authorization, parent_ra},
+                   {:nested_engine_opts,
+                    [signer: signer_a, signer: signer_a, max_depth: 2, max_depth: 2]},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert_receive {:within_kw_engine_run, _g2, opts2}
+      assert opts2[:signer] == signer_a
+      assert opts2[:max_depth] == 2
+
+      # workdir: present nil fails closed (never discarded before reconciliation).
+      assert {:error, :invalid_workdir} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "present-nil workdir",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:workdir, nil},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # workdir: nil next to a valid claim fails closed (not first-wins valid).
+      assert {:error, :invalid_workdir} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "nil then valid workdir",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:workdir, nil},
+                   {:workdir, workdir},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert {:error, :invalid_workdir} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "valid then nil workdir",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:workdir, workdir},
+                   {"workdir", nil},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # workdir: conflicting path values fail closed.
+      assert {:error, {:identity_mismatch, :workdir}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "conflicting workdir",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:workdir, workdir},
+                   {"workdir", other_workdir},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # workdir: blank / malformed fail closed.
+      assert {:error, :invalid_workdir} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "blank workdir",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:workdir, "   "},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert {:error, :invalid_workdir} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "nul workdir",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:workdir, "/tmp/ok" <> <<0>>},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      # Equal workdir duplicates (atom/string) may pass.
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "equal workdir duplicates",
+                 [
+                   {:graph, graph_path},
+                   {:authorization, true},
+                   {:agent_id, principal},
+                   {:signing_authority, signing_authority},
+                   {:workdir, workdir},
+                   {"workdir", workdir},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+
+      assert_receive {:within_kw_engine_run, _g3, opts3}
+      assert opts3[:workdir] == workdir
+
+      # Bound override after a first-wins nil still fails closed.
+      assert {:error, {:bound_council_override, :mode}} =
+               Consult.decide(
+                 TestAdvisoryEvaluator,
+                 "bound mode override after nil",
+                 [
+                   {:graph, graph_path},
+                   {:run_authorization, parent_ra},
+                   {:mode, nil},
+                   {:mode, "advisory"},
+                   {:engine_runner, engine_runner}
+                 ]
+               )
+    end
+
     test "rejects mode and quorum overrides when bound" do
       graph_path = write_decision_graph!()
       on_exit(fn -> File.rm(graph_path) end)

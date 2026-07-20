@@ -288,6 +288,43 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   @doc """
+  Inspect an **active** lease using **only** exact opaque `task_id` +
+  `principal_id` lineage.
+
+  Deliberately ignores live owner-PID authority: the GenServer caller PID is
+  never consulted. Use this when a process that happens to own the lease must
+  still prove exact task+principal binding (for example council root workdir
+  derivation). Opaque `workspace_id` alone is never authority.
+
+  Identity strings are opaque after validation: blank, invalid UTF-8, and
+  NUL-bearing values are rejected, but accepted values are never trimmed or
+  otherwise rewritten before exact comparison. Retained/creation blockers are
+  never returned — a missing active lease is `:not_found` even when a blocker
+  shares the same lineage.
+
+  Supports `:server` selection like other registry operations.
+  """
+  @spec inspect_lease_by_lineage(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def inspect_lease_by_lineage(workspace_id, task_id, principal_id, opts \\ [])
+
+  def inspect_lease_by_lineage(workspace_id, task_id, principal_id, opts)
+      when is_binary(workspace_id) and is_binary(task_id) and is_binary(principal_id) and
+             is_list(opts) do
+    # Opaque after validation: blank includes whitespace-only; never rewrite an
+    # accepted identity before lookup or exact comparison.
+    if valid_opaque_id?(workspace_id) and valid_opaque_id?(task_id) and
+         valid_opaque_id?(principal_id) do
+      call({:inspect_by_lineage, workspace_id, task_id, principal_id}, opts)
+    else
+      {:error, :invalid_task_principal}
+    end
+  end
+
+  def inspect_lease_by_lineage(_workspace_id, _task_id, _principal_id, _opts),
+    do: {:error, :invalid_task_principal}
+
+  @doc """
   Release a lease when authorized.
 
   Modes:
@@ -681,6 +718,24 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           _ ->
             {:reply, {:error, :not_found}, state}
         end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Lineage-only inspect: never install owner_pid from the GenServer caller.
+  # Active leases only — retention/creation blockers are not inspectable here.
+  def handle_call(
+        {:inspect_by_lineage, workspace_id, task_id, principal_id},
+        _from,
+        state
+      ) do
+    caller = %{task_id: task_id, principal_id: principal_id, owner_pid: nil}
+
+    case fetch_lineage_authorized(state, workspace_id, caller) do
+      {:ok, lease} ->
+        {:reply, {:ok, public_view(lease)}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -4080,6 +4135,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  # Exact task+principal only — never owner_pid / live-process authority.
+  defp fetch_lineage_authorized(state, workspace_id, caller) do
+    case Map.fetch(state.leases, workspace_id) do
+      :error ->
+        {:error, :not_found}
+
+      {:ok, lease} ->
+        if principal_task_match?(lease, caller),
+          do: {:ok, lease},
+          else: {:error, :not_authorized}
+    end
+  end
+
   defp authorized?(lease, caller) do
     owner_match?(lease, caller) or principal_task_match?(lease, caller)
   end
@@ -4100,6 +4168,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp non_empty_id?(id) when is_binary(id), do: String.trim(id) != ""
   defp non_empty_id?(_id), do: false
+
+  # Opaque identity validation for lineage-only inspect: never rewrite accepted
+  # values. Blank includes whitespace-only (trim used only as predicate);
+  # leading/trailing whitespace around nonblank content remains distinct.
+  defp valid_opaque_id?(id) when is_binary(id) do
+    String.trim(id) != "" and String.valid?(id) and not String.contains?(id, <<0>>)
+  end
+
+  defp valid_opaque_id?(_id), do: false
 
   defp validate_task_principal_pair(nil, nil), do: :ok
 

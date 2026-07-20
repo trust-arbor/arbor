@@ -74,6 +74,59 @@ defmodule Arbor.Contracts.Security.SigningAuthorityTest do
                )
     end
 
+    test "security regression: invalid UTF-8 and embedded NUL principal_id fail closed" do
+      # Authority principals must reject hostile byte sequences without rewriting
+      # accepted IDs. Fails open before the fix when only prefix was checked.
+      invalid_utf8 = "agent_" <> <<0xFF, 0xFE>>
+      with_nul = "agent_valid" <> <<0>> <> "tail"
+
+      assert {:error, :invalid_principal_id} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: invalid_utf8,
+                 purpose: :session
+               )
+
+      assert {:error, :invalid_principal_id} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: with_nul,
+                 purpose: :session
+               )
+
+      assert {:error, :invalid_principal_id} =
+               SigningAuthority.new(%{
+                 token: @valid_token,
+                 principal_id: invalid_utf8,
+                 purpose: :session
+               })
+    end
+
+    test "security regression: accepted principal_id is preserved byte-for-byte" do
+      # Opaque after validation: trailing/interior whitespace must not be trimmed.
+      spaced = @valid_principal <> " "
+      interior = "agent_ab cd_ef"
+
+      assert {:ok, authority} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: spaced,
+                 purpose: :session
+               )
+
+      assert authority.principal_id == spaced
+      assert authority.principal_id != String.trim(spaced)
+
+      assert {:ok, interior_authority} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: interior,
+                 purpose: :session
+               )
+
+      assert interior_authority.principal_id == interior
+    end
+
     test "rejects empty, blank/whitespace, boolean, or nil purpose" do
       assert {:error, :invalid_purpose} =
                SigningAuthority.new(

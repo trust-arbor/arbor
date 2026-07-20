@@ -578,6 +578,1096 @@ defmodule Arbor.Actions.CouncilTest do
       refute Map.has_key?(consensus_opts[:context], "nested_engine_opts")
     end
 
+    test "security regression: authorized-root launch uses SigningAuthority principal and real lease workdir",
+         %{tmp_dir: tmp_dir} do
+      # Fails before the fix: signing_authority without run_authorization launched
+      # the council unbound, so Engine tool loops defaulted agent/caller to "system".
+      # Workdir must come from a real WorkspaceLeaseRegistry lease bound to the
+      # exact task_id+principal_id — not a fake lease_inspector.
+      parent = self()
+      principal = "agent_legacy_council_#{System.unique_integer([:positive])}"
+      task_id = "task_legacy_council_#{System.unique_integer([:positive])}"
+      caller_id = "agent_caller_#{System.unique_integer([:positive])}"
+      authority_context = %{task_id: task_id, agent_id: principal}
+
+      repo = create_git_repo(Path.join(tmp_dir, "legacy_root_auth_repo"))
+      File.mkdir_p!(Path.join(repo, "lib"))
+      File.write!(Path.join(repo, "lib/a.ex"), "defmodule A do\n  def value, do: :base\nend\n")
+      git!(repo, ["add", "lib/a.ex"])
+      git!(repo, ["commit", "-m", "base module"])
+      base_commit = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/legacy-root-auth",
+                   worktree_base_dir: Path.join(tmp_dir, "legacy_root_auth_worktrees"),
+                   base_ref: base_commit
+                 },
+                 authority_context
+               )
+
+      on_exit(fn ->
+        _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, authority_context)
+      end)
+
+      File.write!(
+        Path.join(lease.worktree_path, "lib/a.ex"),
+        "defmodule A do\n  def value, do: :candidate\nend\n"
+      )
+
+      git!(lease.worktree_path, ["add", "lib/a.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "candidate module"])
+      candidate_commit = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:legacy_engine_run, graph, engine_opts})
+
+        {:ok,
+         %{
+           context: %{
+             "council.decision" => "approved",
+             "council.approve_count" => 3,
+             "council.reject_count" => 0,
+             "council.abstain_count" => 0,
+             "council.quorum_met" => true
+           }
+         }}
+      end
+
+      params =
+        @valid_review_params
+        |> Map.put(:workspace_id, lease.workspace_id)
+        |> Map.put(:commit_hash, candidate_commit)
+        |> Map.put(:agent_id, principal)
+        |> Map.put(:branch, lease.branch)
+        |> Map.put(:base_ref, base_commit)
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: principal,
+                 task_id: task_id,
+                 caller_id: caller_id,
+                 auth_context: %{principal_id: principal},
+                 signed_request: %{agent_id: principal},
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+
+      assert result.decision == "approved"
+      assert_receive {:legacy_engine_run, graph, engine_opts}
+      assert is_map(graph)
+
+      # Engine-bound process-local opts after Consult.decide / authorized-root.
+      assert engine_opts[:authorization] == true
+      assert engine_opts[:agent_id] == principal
+      assert engine_opts[:execution_principal] == principal
+      assert engine_opts[:caller_id] == caller_id
+      assert engine_opts[:author_id] == principal
+      assert engine_opts[:task_id] == task_id
+      assert engine_opts[:workdir] == lease.worktree_path
+      assert Keyword.fetch!(engine_opts, :signing_authority) == signing_authority
+      refute Keyword.has_key?(engine_opts, :run_authorization)
+      refute engine_opts[:agent_id] in ["system", "agent_system"]
+
+      # Credentials stay out of JSON initial context/checkpoints.
+      initial = engine_opts[:initial_values]
+      assert is_map(initial)
+      refute Map.has_key?(initial, :signing_authority)
+      refute Map.has_key?(initial, "signing_authority")
+      refute Map.has_key?(initial, :run_authorization)
+      refute Map.has_key?(initial, "run_authorization")
+      refute Map.has_key?(initial, :nested_engine_opts)
+      refute Map.has_key?(initial, "nested_engine_opts")
+      refute Map.has_key?(initial, :engine_runner)
+      refute Map.has_key?(initial, "engine_runner")
+      refute Map.has_key?(initial, :workdir)
+      refute Map.has_key?(initial, "workdir")
+
+      # Lineage-only registry API: even the live owner (this test process after
+      # acquire) is denied when principal mismatches; exact pair succeeds.
+      assert {:error, :not_authorized} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 task_id,
+                 "agent_other_#{System.unique_integer([:positive])}"
+               )
+
+      assert {:ok, inspected} =
+               WorkspaceLeaseRegistry.inspect_lease_by_lineage(
+                 lease.workspace_id,
+                 task_id,
+                 principal
+               )
+
+      assert inspected.worktree_path == lease.worktree_path
+
+      assert {:ok, reviewed_pipeline} =
+               Arbor.Actions.reviewed_pipeline("code_review_council")
+
+      assert is_binary(reviewed_pipeline.path)
+    end
+
+    test "security regression: flat session.agent_id accepted; nested session maps ignored; opaque whitespace preserved",
+         %{tmp_dir: tmp_dir} do
+      # Engine identity is flat "session.agent_id". Nested session maps must not
+      # authorize or mismatch. Whitespace-bearing identities stay opaque.
+      parent = self()
+      principal = "agent_council_flat_#{System.unique_integer([:positive])}"
+      other = "agent_other_#{System.unique_integer([:positive])}"
+      spaced_principal = principal <> " "
+      task_id = "task_council_flat_#{System.unique_integer([:positive])}"
+      authority_context = %{task_id: task_id, agent_id: principal}
+
+      repo = create_git_repo(Path.join(tmp_dir, "council_flat_session_repo"))
+      File.mkdir_p!(Path.join(repo, "lib"))
+      File.write!(Path.join(repo, "lib/a.ex"), "defmodule A do\n  def value, do: :base\nend\n")
+      git!(repo, ["add", "lib/a.ex"])
+      git!(repo, ["commit", "-m", "base module"])
+      base_commit = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/council-flat-session",
+                   worktree_base_dir: Path.join(tmp_dir, "council_flat_session_worktrees"),
+                   base_ref: base_commit
+                 },
+                 authority_context
+               )
+
+      on_exit(fn ->
+        _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, authority_context)
+      end)
+
+      File.write!(
+        Path.join(lease.worktree_path, "lib/a.ex"),
+        "defmodule A do\n  def value, do: :candidate\nend\n"
+      )
+
+      git!(lease.worktree_path, ["add", "lib/a.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "candidate module"])
+      candidate_commit = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:council_flat_session_run, graph, engine_opts})
+
+        {:ok,
+         %{
+           context: %{
+             "council.decision" => "approved",
+             "council.approve_count" => 3,
+             "council.reject_count" => 0,
+             "council.abstain_count" => 0,
+             "council.quorum_met" => true
+           }
+         }}
+      end
+
+      params =
+        @valid_review_params
+        |> Map.put(:workspace_id, lease.workspace_id)
+        |> Map.put(:commit_hash, candidate_commit)
+        |> Map.put(:agent_id, principal)
+        |> Map.put(:branch, lease.branch)
+        |> Map.put(:base_ref, base_commit)
+
+      # Matching flat atom key is accepted.
+      assert {:ok, result} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: principal,
+                 task_id: task_id,
+                 "session.agent_id": principal,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+
+      assert result.decision == "approved"
+      assert_receive {:council_flat_session_run, _graph, engine_opts}
+      assert engine_opts[:agent_id] == principal
+
+      # Matching flat string key is accepted.
+      # Association entries must precede keyword-style map entries.
+      assert {:ok, _} =
+               Council.ReviewChange.run(
+                 params,
+                 %{
+                   "session.agent_id" => principal,
+                   persist_verdict: false,
+                   agent_id: principal,
+                   task_id: task_id,
+                   signing_authority: signing_authority,
+                   engine_runner: engine_runner
+                 }
+               )
+
+      assert_receive {:council_flat_session_run, _graph2, _}
+
+      # Nested session map alone is ignored (not an identity claim).
+      assert {:ok, _} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: principal,
+                 task_id: task_id,
+                 session: %{agent_id: other},
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+
+      assert_receive {:council_flat_session_run, _graph3, _}
+
+      # Nested session map must not mask a real flat mismatch.
+      assert {:error, {:identity_mismatch, :session_agent_id}} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: principal,
+                 task_id: task_id,
+                 session: %{agent_id: principal},
+                 "session.agent_id": other,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+
+      # All-whitespace is blank and rejects (trim only as predicate).
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: "   ",
+                 task_id: task_id,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: principal,
+                 task_id: task_id,
+                 "session.agent_id": "\t  \n",
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+
+      # Present flat session.agent_id with nil is not absence — fail closed.
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: principal,
+                 task_id: task_id,
+                 "session.agent_id": nil,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(
+                 params,
+                 %{
+                   "session.agent_id" => nil,
+                   persist_verdict: false,
+                   agent_id: principal,
+                   task_id: task_id,
+                   signing_authority: signing_authority,
+                   engine_runner: engine_runner
+                 }
+               )
+
+      # Present malformed values fail closed (boolean/map).
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: principal,
+                 task_id: task_id,
+                 "session.agent_id": true,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: principal,
+                 task_id: task_id,
+                 "session.agent_id": %{agent_id: principal},
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+
+      # Opaque whitespace: spaced agent_id must not match unspaced authority principal.
+      assert {:error, {:identity_mismatch, :agent_id}} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: spaced_principal,
+                 task_id: task_id,
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner
+               })
+    end
+
+    test "security regression: inherited run_authorization path stays bound and unchanged" do
+      # Companion to the authorized-root regression: when a parent Engine
+      # already projected run_authorization, forward it unchanged (no root
+      # authorization rewrite, no system principal, no graph override).
+      parent = self()
+      principal = "agent_pipeline_council_#{System.unique_integer([:positive])}"
+      authority = {:opaque_parent_run_authorization, make_ref()}
+      signer = fn _resource -> {:ok, :signed} end
+      authorizer = fn _agent_id, _handler_type -> :ok end
+      candidate_commit = String.duplicate("c", 40)
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:pipeline_engine_run, graph, engine_opts})
+
+        {:ok,
+         %{
+           context: %{
+             "council.decision" => "approved",
+             "council.approve_count" => 2,
+             "council.reject_count" => 0,
+             "council.abstain_count" => 0,
+             "council.quorum_met" => true
+           }
+         }}
+      end
+
+      snapshot_opener = fn _workspace_id, ^candidate_commit, _caller ->
+        {:ok,
+         %{
+           review_snapshot_id: "review_snap_pipeline_auth",
+           candidate_commit: candidate_commit,
+           base_commit: "main"
+         }}
+      end
+
+      snapshot_closer = fn "review_snap_pipeline_auth", _caller ->
+        send(parent, :pipeline_snapshot_closed)
+        {:ok, %{active: false}}
+      end
+
+      params =
+        @valid_review_params
+        |> Map.put(:workspace_id, "ws_pipeline_auth")
+        |> Map.put(:commit_hash, candidate_commit)
+        |> Map.put(:agent_id, principal)
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 agent_id: principal,
+                 run_authorization: authority,
+                 nested_engine_opts: [signer: signer, authorizer: authorizer, max_depth: 2],
+                 # Must not rewrite inherited authority path into root agent_id opts:
+                 signing_authority: signing_authority,
+                 engine_runner: engine_runner,
+                 review_snapshot_opener: snapshot_opener,
+                 review_snapshot_closer: snapshot_closer
+               })
+
+      assert result.decision == "approved"
+      assert_receive :pipeline_snapshot_closed
+      assert_receive {:pipeline_engine_run, graph, engine_opts}
+      assert is_map(graph)
+
+      # Inherited RunAuthorization is forwarded; authorization is enabled via
+      # binding without inventing a root agent_id rewrite from context.
+      assert engine_opts[:run_authorization] == authority
+      assert engine_opts[:authorization] == true
+      refute Keyword.has_key?(engine_opts, :agent_id)
+      assert engine_opts[:signer] == signer
+      assert engine_opts[:authorizer] == authorizer
+      assert engine_opts[:max_depth] == 2
+      # Parent signing_authority is not re-projected onto the inherited path.
+      refute Keyword.has_key?(engine_opts, :signing_authority)
+
+      initial = engine_opts[:initial_values]
+      assert is_map(initial)
+      refute Map.has_key?(initial, :run_authorization)
+      refute Map.has_key?(initial, :signing_authority)
+      refute Map.has_key?(initial, :engine_runner)
+    end
+
+    test "security regression: identity mismatch, mixed credentials, and malformed authority fail closed",
+         %{tmp_dir: tmp_dir} do
+      principal = "agent_identity_guard_#{System.unique_integer([:positive])}"
+      other = "agent_other_#{System.unique_integer([:positive])}"
+      task_id = "task_identity_guard_#{System.unique_integer([:positive])}"
+      authority_context = %{task_id: task_id, agent_id: principal}
+
+      repo = create_git_repo(Path.join(tmp_dir, "identity_guard_repo"))
+      File.mkdir_p!(Path.join(repo, "lib"))
+      File.write!(Path.join(repo, "lib/a.ex"), "defmodule A do\n  def value, do: :base\nend\n")
+      git!(repo, ["add", "lib/a.ex"])
+      git!(repo, ["commit", "-m", "base"])
+      base_commit = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/identity-guard",
+                   worktree_base_dir: Path.join(tmp_dir, "identity_guard_worktrees"),
+                   base_ref: base_commit
+                 },
+                 authority_context
+               )
+
+      on_exit(fn ->
+        _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, authority_context)
+      end)
+
+      git!(lease.worktree_path, ["commit", "--allow-empty", "-m", "candidate"])
+      candidate_commit = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      base_context = %{
+        persist_verdict: false,
+        task_id: task_id,
+        signing_authority: signing_authority,
+        engine_runner: fn _, _ -> flunk("must not launch on identity failure") end
+      }
+
+      params =
+        @valid_review_params
+        |> Map.put(:workspace_id, lease.workspace_id)
+        |> Map.put(:commit_hash, candidate_commit)
+        |> Map.put(:branch, lease.branch)
+        |> Map.put(:base_ref, base_commit)
+
+      # Context agent_id must agree with authority.principal_id — never wins.
+      assert {:error, {:identity_mismatch, :agent_id}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.put(base_context, :agent_id, other)
+               )
+
+      assert {:error, {:identity_mismatch, :execution_principal}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   execution_principal: other
+                 })
+               )
+
+      assert {:error, {:identity_mismatch, :principal_id}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   principal_id: other
+                 })
+               )
+
+      # Flat Engine key "session.agent_id" is the identity claim; nested session maps are not.
+      assert {:error, {:identity_mismatch, :session_agent_id}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   "session.agent_id": other
+                 })
+               )
+
+      # AuthContext uses principal_id (not agent_id).
+      assert {:error, {:identity_mismatch, :auth_context}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   auth_context: %{principal_id: other}
+                 })
+               )
+
+      assert {:error, {:identity_mismatch, :signed_request}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   signed_request: %{agent_id: other}
+                 })
+               )
+
+      # Root path rejects mixed signer/authorizer injection by key presence.
+      assert {:error, {:root_mixed_credentials, forbidden}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   nested_engine_opts: [
+                     signer: fn _ -> {:ok, :signed} end,
+                     authorizer: fn _, _ -> :ok end
+                   ]
+                 })
+               )
+
+      assert :signer in forbidden
+      assert :authorizer in forbidden
+
+      # System principal is never admitted for root launch.
+      assert {:error, :system_principal_forbidden} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.put(base_context, :agent_id, "system")
+               )
+
+      # Mismatched lease lineage cannot inspect/use the bound worktree —
+      # same-process owner PID must not substitute for exact task+principal.
+      assert {:error, {:review_lease_inspect_failed, :not_authorized}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   task_id: "task_wrong_#{System.unique_integer([:positive])}"
+                 })
+               )
+
+      # Well-formed map/list authority is rejected (struct required; no rehydrate).
+      well_formed_map = %{
+        token: :crypto.strong_rand_bytes(32),
+        principal_id: principal,
+        purpose: :legacy_coding_task_executor
+      }
+
+      assert {:error, :invalid_signing_authority} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   signing_authority: well_formed_map
+                 })
+               )
+
+      assert {:error, :invalid_signing_authority} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   signing_authority: [
+                     token: well_formed_map.token,
+                     principal_id: principal,
+                     purpose: :legacy_coding_task_executor
+                   ]
+                 })
+               )
+
+      # Malformed / nil authority fails closed (presence binds; never unbound).
+      assert {:error, :invalid_signing_authority} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   signing_authority: %{token: "too-short", principal_id: principal, purpose: :x}
+                 })
+               )
+
+      assert {:error, :invalid_signing_authority} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   signing_authority: nil
+                 })
+               )
+
+      # Bound overrides still rejected when signing_authority is present.
+      assert {:error, {:bound_council_override, :graph}} =
+               Council.ReviewChange.run(
+                 Map.put(params, :graph, "/tmp/not-reviewed.dot"),
+                 Map.put(base_context, :agent_id, principal)
+               )
+    end
+
+    test "security regression: signing_authority and launch selectors are all-values never first-wins",
+         %{tmp_dir: tmp_dir} do
+      # context_value/has_context_key first-wins hid a conflicting or present-nil
+      # signing_authority / run_authorization / nested_engine_opts spelling.
+      parent = self()
+      principal = "agent_sa_all_values_#{System.unique_integer([:positive])}"
+      task_id = "task_sa_all_values_#{System.unique_integer([:positive])}"
+      authority_context = %{task_id: task_id, agent_id: principal}
+
+      repo = create_git_repo(Path.join(tmp_dir, "sa_all_values_repo"))
+      File.mkdir_p!(Path.join(repo, "lib"))
+      File.write!(Path.join(repo, "lib/a.ex"), "defmodule A do\n  def value, do: :base\nend\n")
+      git!(repo, ["add", "lib/a.ex"])
+      git!(repo, ["commit", "-m", "base"])
+      base_commit = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/sa-all-values",
+                   worktree_base_dir: Path.join(tmp_dir, "sa_all_values_worktrees"),
+                   base_ref: base_commit
+                 },
+                 authority_context
+               )
+
+      on_exit(fn ->
+        _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, authority_context)
+      end)
+
+      git!(lease.worktree_path, ["commit", "--allow-empty", "-m", "candidate"])
+      candidate_commit = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      {:ok, other_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:sa_all_values_engine_run, graph, engine_opts})
+
+        {:ok,
+         %{
+           context: %{
+             "council.decision" => "approved",
+             "council.approve_count" => 3,
+             "council.reject_count" => 0,
+             "council.abstain_count" => 0,
+             "council.quorum_met" => true
+           }
+         }}
+      end
+
+      params =
+        @valid_review_params
+        |> Map.put(:workspace_id, lease.workspace_id)
+        |> Map.put(:commit_hash, candidate_commit)
+        |> Map.put(:branch, lease.branch)
+        |> Map.put(:base_ref, base_commit)
+        |> Map.put(:agent_id, principal)
+
+      base_context = %{
+        persist_verdict: false,
+        task_id: task_id,
+        agent_id: principal,
+        engine_runner: engine_runner
+      }
+
+      # Conflicting atom/string signing_authority fails closed (not first-wins).
+      assert {:error, :conflicting_signing_authority} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "signing_authority" => other_authority,
+                   signing_authority: signing_authority
+                 })
+               )
+
+      # Present-nil string spelling next to a valid atom claim fails closed.
+      assert {:error, :invalid_signing_authority} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "signing_authority" => nil,
+                   signing_authority: signing_authority
+                 })
+               )
+
+      # Equal canonical atom/string signing_authority duplicates may pass.
+      assert {:ok, _} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "signing_authority" => signing_authority,
+                   signing_authority: signing_authority
+                 })
+               )
+
+      assert_receive {:sa_all_values_engine_run, _graph, engine_opts}
+      assert Keyword.fetch!(engine_opts, :signing_authority) == signing_authority
+
+      # Conflicting run_authorization spellings fail closed before launch.
+      assert {:error, :conflicting_run_authorization} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "run_authorization" => {:opaque_b, make_ref()},
+                   run_authorization: {:opaque_a, make_ref()},
+                   signing_authority: signing_authority
+                 })
+               )
+
+      # Equal run_authorization spellings inherit without rewriting to root.
+      parent_ra = {:opaque_parent_ra, make_ref()}
+
+      assert {:ok, _} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "run_authorization" => parent_ra,
+                   run_authorization: parent_ra,
+                   # Present but ignored on inherited path for root rewrite:
+                   signing_authority: signing_authority,
+                   engine_runner: fn graph, engine_opts ->
+                     send(parent, {:sa_inherited_engine_run, graph, engine_opts})
+
+                     {:ok,
+                      %{
+                        context: %{
+                          "council.decision" => "approved",
+                          "council.approve_count" => 2,
+                          "council.reject_count" => 0,
+                          "council.abstain_count" => 0,
+                          "council.quorum_met" => true
+                        }
+                      }}
+                   end,
+                   review_snapshot_opener: fn _ws, ^candidate_commit, _caller ->
+                     {:ok,
+                      %{
+                        review_snapshot_id: "snap_sa_inherit",
+                        candidate_commit: candidate_commit,
+                        base_commit: base_commit
+                      }}
+                   end,
+                   review_snapshot_closer: fn "snap_sa_inherit", _caller ->
+                     {:ok, %{active: false}}
+                   end
+                 })
+               )
+
+      assert_receive {:sa_inherited_engine_run, _g2, inherited_opts}
+      assert inherited_opts[:run_authorization] == parent_ra
+      refute Keyword.has_key?(inherited_opts, :signing_authority)
+
+      # Conflicting nested_engine_opts envelopes fail closed on root path.
+      # Association entries must precede keyword-style map entries.
+      assert {:error, :conflicting_nested_engine_opts} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "nested_engine_opts" => [max_depth: 1],
+                   signing_authority: signing_authority,
+                   nested_engine_opts: [max_depth: 2]
+                 })
+               )
+
+      # Equal nested_engine_opts projections (max_depth only) may pass.
+      assert {:ok, _} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "nested_engine_opts" => [max_depth: 3],
+                   signing_authority: signing_authority,
+                   nested_engine_opts: [max_depth: 3]
+                 })
+               )
+
+      assert_receive {:sa_all_values_engine_run, _g3, nested_opts}
+      assert nested_opts[:max_depth] == 3
+
+      # Within one nested_engine_opts list: conflicting max_depth must fail closed
+      # (Keyword first-wins would hide a later conflict). Equal dups may pass.
+      assert {:error, :conflicting_nested_engine_opts} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   signing_authority: signing_authority,
+                   nested_engine_opts: [
+                     {:max_depth, 1},
+                     {:max_depth, 2}
+                   ]
+                 })
+               )
+
+      assert {:ok, _} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   signing_authority: signing_authority,
+                   nested_engine_opts: [
+                     {:max_depth, 7},
+                     {:max_depth, 7}
+                   ]
+                 })
+               )
+
+      assert_receive {:sa_all_values_engine_run, _g4, within_opts}
+      assert within_opts[:max_depth] == 7
+    end
+
+    test "security regression: all-values identity and lineage claims never first-wins",
+         %{tmp_dir: tmp_dir} do
+      # Conflicting atom/string (or nested) spellings must fail closed. Equal
+      # duplicates may pass. Present-nil direct claims fail closed. First-wins
+      # Map.get atom-then-string would hide the hostile alias.
+      parent = self()
+      principal = "agent_all_values_#{System.unique_integer([:positive])}"
+      other = "agent_other_#{System.unique_integer([:positive])}"
+      task_id = "task_all_values_#{System.unique_integer([:positive])}"
+      authority_context = %{task_id: task_id, agent_id: principal}
+
+      repo = create_git_repo(Path.join(tmp_dir, "all_values_repo"))
+      File.mkdir_p!(Path.join(repo, "lib"))
+      File.write!(Path.join(repo, "lib/a.ex"), "defmodule A do\n  def value, do: :base\nend\n")
+      git!(repo, ["add", "lib/a.ex"])
+      git!(repo, ["commit", "-m", "base"])
+      base_commit = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/all-values",
+                   worktree_base_dir: Path.join(tmp_dir, "all_values_worktrees"),
+                   base_ref: base_commit
+                 },
+                 authority_context
+               )
+
+      on_exit(fn ->
+        _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, authority_context)
+      end)
+
+      git!(lease.worktree_path, ["commit", "--allow-empty", "-m", "candidate"])
+      candidate_commit = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: principal,
+          purpose: :legacy_coding_task_executor
+        })
+
+      engine_runner = fn graph, engine_opts ->
+        send(parent, {:all_values_engine_run, graph, engine_opts})
+
+        {:ok,
+         %{
+           context: %{
+             "council.decision" => "approved",
+             "council.approve_count" => 3,
+             "council.reject_count" => 0,
+             "council.abstain_count" => 0,
+             "council.quorum_met" => true
+           }
+         }}
+      end
+
+      params =
+        @valid_review_params
+        |> Map.put(:workspace_id, lease.workspace_id)
+        |> Map.put(:commit_hash, candidate_commit)
+        |> Map.put(:branch, lease.branch)
+        |> Map.put(:base_ref, base_commit)
+        |> Map.put(:agent_id, principal)
+
+      base_context = %{
+        persist_verdict: false,
+        task_id: task_id,
+        signing_authority: signing_authority,
+        engine_runner: engine_runner
+      }
+
+      # Conflicting atom vs string agent_id spellings fail closed (not first-wins).
+      assert {:error, {:identity_mismatch, :agent_id}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "agent_id" => other,
+                   agent_id: principal
+                 })
+               )
+
+      # Equal atom/string agent_id spellings may pass.
+      assert {:ok, _} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "agent_id" => principal,
+                   agent_id: principal
+                 })
+               )
+
+      assert_receive {:all_values_engine_run, _graph, engine_opts}
+      assert engine_opts[:agent_id] == principal
+
+      # Present-nil direct identity claim fails closed (not treated as absence).
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.put(base_context, :agent_id, nil)
+               )
+
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "agent_id" => nil,
+                   agent_id: principal
+                 })
+               )
+
+      # Conflicting flat session.agent_id spellings fail closed.
+      assert {:error, {:identity_mismatch, :session_agent_id}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "session.agent_id" => other,
+                   agent_id: principal,
+                   "session.agent_id": principal
+                 })
+               )
+
+      # Nested auth_context principal_id atom/string conflict fails closed.
+      assert {:error, {:identity_mismatch, :auth_context}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   auth_context: %{
+                     "principal_id" => other,
+                     principal_id: principal
+                   }
+                 })
+               )
+
+      # Nested signed_request agent_id present-nil fails closed.
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   signed_request: %{agent_id: nil}
+                 })
+               )
+
+      # Conflicting task_id lineage spellings fail closed before lease inspect.
+      assert {:error, {:identity_mismatch, :task_id}} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   "task_id" => "task_hostile_#{System.unique_integer([:positive])}",
+                   agent_id: principal,
+                   task_id: task_id
+                 })
+               )
+
+      # Invalid UTF-8 / NUL identity claims fail closed.
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   execution_principal: "agent_ok" <> <<0xFF>>
+                 })
+               )
+
+      assert {:error, :invalid_principal_id} =
+               Council.ReviewChange.run(
+                 params,
+                 Map.merge(base_context, %{
+                   agent_id: principal,
+                   principal_id: "agent_ok" <> <<0>>
+                 })
+               )
+    end
+
+    test "security regression: bound_review_context? pure classifier for bound/unbound/malformed/conflict" do
+      # Pure presence only — no lease IO. Conflicting/malformed selectors still
+      # classify as bound so unbound graph overrides cannot open an escape hatch.
+      opaque_ra = {:opaque_parent_ra, make_ref()}
+      other_ra = {:opaque_other_ra, make_ref()}
+
+      # Unbound: empty, non-authority keys, or present-nil run_authorization alone.
+      refute Council.bound_review_context?(%{})
+      refute Council.bound_review_context?(%{question: "x", agent_id: "agent_x"})
+      refute Council.bound_review_context?(%{run_authorization: nil})
+      refute Council.bound_review_context?(%{"run_authorization" => nil})
+      # Association entries must precede keyword-style map entries.
+      refute Council.bound_review_context?(%{"run_authorization" => nil, run_authorization: nil})
+      refute Council.bound_review_context?(nil)
+      refute Council.bound_review_context?(run_authorization: opaque_ra)
+
+      # Bound inherited: any non-nil run_authorization spelling.
+      assert Council.bound_review_context?(%{run_authorization: opaque_ra})
+      assert Council.bound_review_context?(%{"run_authorization" => opaque_ra})
+
+      # Bound root: any signing_authority key presence, including nil/malformed.
+      assert Council.bound_review_context?(%{signing_authority: nil})
+      assert Council.bound_review_context?(%{"signing_authority" => :not_a_struct})
+      assert Council.bound_review_context?(%{signing_authority: %{token: "x"}})
+
+      # Conflicting run_authorization spellings still classify bound (not unbound).
+      assert Council.bound_review_context?(%{
+               "run_authorization" => other_ra,
+               run_authorization: opaque_ra
+             })
+
+      # Conflicting signing_authority spellings still classify bound.
+      assert Council.bound_review_context?(%{
+               "signing_authority" => :malformed,
+               signing_authority: nil
+             })
+
+      # Non-nil run_authorization wins classification over present signing_authority.
+      # (Still bound; launch prefers inherited path.)
+      assert Council.bound_review_context?(%{
+               run_authorization: opaque_ra,
+               signing_authority: nil
+             })
+    end
+
+    test "security regression: signing_authority without snapshot scope fails closed" do
+      {:ok, signing_authority} =
+        Arbor.Contracts.Security.SigningAuthority.new(%{
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: "agent_scope_guard",
+          purpose: :legacy_coding_task_executor
+        })
+
+      assert {:error, :missing_bound_review_snapshot} =
+               Council.ReviewChange.run(@valid_review_params, %{
+                 signing_authority: signing_authority,
+                 agent_id: "agent_scope_guard",
+                 review_runner: fn _, _, _ -> flunk("must not run without snapshot scope") end,
+                 persist_verdict: false
+               })
+    end
+
     test "rejects graph and quorum overrides for bound reviews" do
       context = %{
         persist_verdict: false,

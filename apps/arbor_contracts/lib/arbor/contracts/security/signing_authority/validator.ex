@@ -37,12 +37,27 @@ defmodule Arbor.Contracts.Security.SigningAuthority.Validator do
   def validate_token(token) when is_binary(token), do: {:error, :token_too_short}
   def validate_token(_), do: {:error, :invalid_token}
 
+  @doc """
+  Validate an authority principal id without rewriting accepted bytes.
+
+  Accepts only non-empty binaries in the `agent_` or `human_` namespaces.
+  Invalid UTF-8 and embedded NUL bytes fail closed. Accepted values are
+  compared and stored byte-for-byte — never trimmed or normalized.
+  """
   @spec validate_principal_id(term()) :: :ok | {:error, :invalid_principal_id}
   def validate_principal_id(id) when is_binary(id) and byte_size(id) > 0 do
-    if String.starts_with?(id, "agent_") or String.starts_with?(id, "human_") do
-      :ok
-    else
-      {:error, :invalid_principal_id}
+    cond do
+      not String.valid?(id) ->
+        {:error, :invalid_principal_id}
+
+      String.contains?(id, <<0>>) ->
+        {:error, :invalid_principal_id}
+
+      String.starts_with?(id, "agent_") or String.starts_with?(id, "human_") ->
+        :ok
+
+      true ->
+        {:error, :invalid_principal_id}
     end
   end
 
