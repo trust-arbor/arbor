@@ -2,7 +2,7 @@
 
 # Arbor Security Architecture
 
-**State reviewed:** 2026-07-19
+**State reviewed:** 2026-07-20
 
 This document describes the security controls represented by the current source and
 the Phase 6 decisions. It deliberately separates implemented controls from planned
@@ -17,7 +17,10 @@ Arbor treats an agent operation as a chain of questions:
 1. **Who is asking?** The principal has a registered cryptographic identity.
 2. **What is it asking to do?** The operation has a registered resource URI and
    requires a capability that covers that URI. Delegated grants can only narrow
-   authority, and revoking a parent grant can revoke its delegated children.
+   authority, and revoking a parent grant can revoke its delegated children. In the
+   reviewed coding workflow, a worker receives authority for its task and workspace,
+   while the workflow adds only task-scoped steering and approval-answer rights to
+   its delegator. Neither grant becomes authority over unrelated workers or tasks.
 3. **What does the operator's policy allow?** Granular rules can block, ask for
    approval, allow with notification, or allow automatically. System ceilings can
    still make an operation more restrictive.
@@ -30,8 +33,12 @@ Arbor treats an agent operation as a chain of questions:
    to the exact Git tree that was inspected; this review control is not universal
    to every Arbor action.
 6. **Who cleans up?** Worktrees, ACP sessions, and containment units have owners and
-   monitored registries. Cleanup does not depend only on a final graph node, though
-   these mechanisms are not a complete incident-response or audit system.
+   monitored registries. Cleanup does not depend only on a final graph node.
+7. **What evidence remains?** Signed requests, immutable run bindings, checkpoints,
+   journals, and bounded artifacts help attribute and recover supported operations.
+   They are not one complete, tamper-proof audit or incident-response system. Some
+   approval state is intentionally volatile, and distributed security synchronization
+   is asynchronous rather than a consensus protocol.
 
 In plain language, one lock is not trusted to do every job. Identity, permission,
 path checks, information-flow checks, approval, code binding, and operating-system
@@ -39,12 +46,14 @@ containment cover different failure modes. That is defense in depth. Arbor still
 trusts the host operating system and code running inside its BEAM; compromise of
 either boundary can defeat in-process controls. Enforcement also depends on which
 caller path is used: explicitly trusted and legacy paths do not all invoke every
-gate. The sections below identify those boundaries.
+gate. A control described as implemented is not necessarily provisioned or enabled in
+a particular deployment. The sections below identify those boundaries.
 
 ## Status Vocabulary
 
 - **Implemented today** means the source contains the control and a supported caller
-  path uses it. Configuration and caller selection can still matter.
+  path uses it. It does not mean every deployment has provisioned or enabled that path;
+  configuration and caller selection still matter.
 - **Partial / planned / unsupported** means the mechanism exists only for a bounded
   path, needs further wiring or provisioning, or intentionally refuses execution.
 - **Historical target** means useful rationale from an earlier architecture document;
@@ -186,10 +195,12 @@ destination, untrusted or hostile taint is a hard block and cannot be overridden
 trust standing or a capability. The gate also considers destination tier:
 
 - `on_host` and `none` are local and allowed;
-- `on_premises` is allowed unless its deployment flag is enabled;
+- `on_premises` is allowed unless the operator enables
+  `:arbor_security, :gate_on_premises_egress`;
 - `external_provider` is governed by trust standing and may ask or block; and
-- `external_peer` is currently classified and observed, but remains advisory for the
-  ACP 1.0 deferral.
+- `external_peer` is currently classified and observed but not blocked by the egress
+  gate. Arbor 1.0 deliberately keeps this ACP/peer tier telemetry-only while endpoint
+  coverage is completed; the linked URI-classification decision records that deferral.
 
 The gate is enabled in development and production configuration, while tests keep it
 dark unless a test explicitly enables it. Production's default cloud-provider
@@ -229,11 +240,27 @@ review-cycle ledger rather than being a free-standing approval of arbitrary late
 content. This is a workflow-specific control, not a claim that every Arbor action is
 council-reviewed.
 
+When a coding task creates a delegated worker, lifecycle code adds only the steering
+and approval-answer capabilities scoped to that exact task or worker to the delegator.
+Those grants are revoked when the task becomes terminal and do not authorize answers
+for another principal's worker. The worker separately receives only the capabilities
+needed for its reviewed task and workspace; it does not inherit the delegator's full
+authority.
+
+While an approval is live, its origin-node `InteractionRegistry.Authority` serializes
+answer, abandonment, expiry, and owner timeout under one non-extendable deadline. The
+Tracker entry is discovery data, not lifecycle truth, so a late answer loses once
+timeout has won. This authority is currently volatile: authority or node restart fails
+closed by making the request unanswerable, but it does not reconstruct or resume the
+approval. Durable admission, terminal-state recovery, and failover remain planned.
+
 Authoritative docs and code: [`Coding task dispatch`](./CODING_TASK_DISPATCH.md),
 [`coding workflow execution boundaries`](../../.arbor/decisions/2026-07-09-coding-workflow-execution-boundaries.md),
 [`ReviewedCommit`](../../apps/arbor_actions/lib/arbor/actions/coding/reviewed_commit.ex),
-[`ReviewTree`](../../apps/arbor_actions/lib/arbor/actions/coding/review_tree.ex), and
-[`code-review-council.dot`](../../apps/arbor_actions/priv/pipelines/code-review-council.dot).
+[`ReviewTree`](../../apps/arbor_actions/lib/arbor/actions/coding/review_tree.ex),
+[`code-review-council.dot`](../../apps/arbor_actions/priv/pipelines/code-review-council.dot),
+[`InteractionRegistry.Authority`](../../apps/arbor_comms/lib/arbor/comms/interaction_registry/authority.ex),
+and [`durable interaction terminal authority`](../../.arbor/roadmap/0-inbox/durable-interaction-terminal-authority.md).
 
 ### Shell containment and ACP boundaries
 
@@ -343,7 +370,8 @@ defense in depth.
 ### Egress and URI work
 
 - `external_peer` ACP egress is classified and emits telemetry but remains advisory in
-  the ACP 1.0 policy; it is not a universal hard block.
+  Arbor 1.0; the accepted URI-classification decision deliberately defers universal
+  enforcement while ACP endpoint coverage is completed.
 - Full consolidation of all historical URI shapes and destination-specific coverage for
   every comms/ACP path remain tracked work. Classification and runtime destination
   resolution are the current enforcement direction.
@@ -362,7 +390,8 @@ defense in depth.
   live proof used macOS 26 and Apple Container 1.1.0; later accepted host versions
   still require the same admission evidence. Provisioning those assets is an
   operator prerequisite; code presence alone does not prove a host can execute this
-  path.
+  path. The [`Phase 6 live matrix`](../../.arbor/roadmap/3-in-progress/dot-orchestrated-coding-workflow.md)
+  records the accepted host proof and its evidence digest.
 - Linux dependency-baseline authority and Linux/arm64 guest materialization exist for
   the Apple Container validation design, but a general native Linux spawn-capable
   containment backend is not documented as supported here.
