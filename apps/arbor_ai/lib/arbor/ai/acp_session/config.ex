@@ -68,6 +68,9 @@ defmodule Arbor.AI.AcpSession.Config do
     {"GIT_CONFIG_VALUE_0", "/dev/null"}
   ]
 
+  # Grok's global "execute" tool must be removed for command shaping, and this
+  # pair must be present on every supported command variant before the `agent`
+  # subcommand. We retain `--deny Bash(*)` as alias defense-in-depth.
   @grok_strict_command [
     "grok",
     "--sandbox",
@@ -79,6 +82,8 @@ defmodule Arbor.AI.AcpSession.Config do
     "MCPTool(*)",
     "--deny",
     "Bash(*)",
+    "--disallowed-tools",
+    "execute",
     "agent",
     "--no-leader",
     "--model",
@@ -92,8 +97,8 @@ defmodule Arbor.AI.AcpSession.Config do
     # `--model` belong to `agent` and must precede the `stdio` subcommand.
     # Auth remains out-of-band via `grok login`.
     # Grok's boundary is command-shaping + process/worktree isolation, not an OS
-    # network namespace. We therefore deny tool classes that can escape the local
-    # model boundary (MCPTool, Bash) and bind a strict runtime profile.
+    # network namespace. We therefore remove built-in execution and deny `Bash(*)`
+    # as defense-in-depth before binding a strict runtime profile.
     grok: %{
       command: @grok_strict_command,
       env: @grok_strict_git_env

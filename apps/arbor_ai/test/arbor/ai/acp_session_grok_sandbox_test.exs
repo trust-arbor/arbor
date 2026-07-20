@@ -17,6 +17,26 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     "MCPTool(*)",
     "--deny",
     "Bash(*)",
+    "--disallowed-tools",
+    "execute",
+    "agent",
+    "--no-leader",
+    "--model",
+    "grok-4.5",
+    "stdio"
+  ]
+
+  @expected_grok_command_with_bound_mcp [
+    "grok",
+    "--sandbox",
+    "strict",
+    "--no-memory",
+    "--no-subagents",
+    "--disable-web-search",
+    "--disallowed-tools",
+    "execute",
+    "--deny",
+    "Bash(*)",
     "agent",
     "--no-leader",
     "--model",
@@ -675,6 +695,17 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                  [bound_server],
                  fn prepared ->
                    command = Keyword.fetch!(prepared, :command)
+                   expected_profile = expected_profile_name(canonical_path(worktree_root))
+                   assert Enum.at(command, 2) == expected_profile
+
+                   assert List.replace_at(
+                            @expected_grok_command_with_bound_mcp,
+                            2,
+                            expected_profile
+                          ) == command
+
+                   assert Enum.at(command, 6) == "--disallowed-tools"
+                   assert Enum.at(command, 7) == "execute"
                    assert "Bash(*)" in command
                    # Bash is still hard-denied under bound MCP because it can spawn
                    # uncontrolled process and network capabilities.
@@ -684,9 +715,6 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                    assert "--no-leader" in command
                    assert "Bash(*)" in command
                    refute "MCPTool(*)" in command
-                   assert Enum.at(command, 5) == "--disable-web-search"
-                   assert Enum.at(command, 6) == "--deny"
-                   assert Enum.at(command, 7) == "Bash(*)"
                    :bound_mcp_ready
                  end
                )
@@ -697,7 +725,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
       bound_server = %{"name" => "bound", "type" => "http", "url" => "http://local"}
 
-      missing_bash = [
+      missing_disallowed_shape = [
         "grok",
         "--sandbox",
         "strict",
@@ -706,6 +734,8 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         "--disable-web-search",
         "--deny",
         "MCPTool(*)",
+        "--deny",
+        "Bash(*)",
         "agent",
         "--no-leader",
         "--model",
@@ -713,7 +743,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         "stdio"
       ]
 
-      changed_bash_shape = [
+      changed_disallowed_shape = [
         "grok",
         "--sandbox",
         "strict",
@@ -723,6 +753,8 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         "--deny",
         "MCPTool(*)",
         "--deny",
+        "Bash(*)",
+        "--disallowed-tools",
         "shell",
         "agent",
         "--no-leader",
@@ -731,7 +763,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         "stdio"
       ]
 
-      reordered_bash_shape = [
+      reordered_disallowed_shape = [
         "grok",
         "--sandbox",
         "strict",
@@ -739,7 +771,27 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         "--no-subagents",
         "--disable-web-search",
         "--deny",
+        "MCPTool(*)",
+        "--disallowed-tools",
+        "execute",
+        "--deny",
         "Bash(*)",
+        "agent",
+        "--no-leader",
+        "--model",
+        "grok-4.5",
+        "stdio"
+      ]
+
+      reordered_disallowed_shape_bare = [
+        "grok",
+        "--sandbox",
+        "strict",
+        "--no-memory",
+        "--no-subagents",
+        "--disable-web-search",
+        "--disallowed-tools",
+        "execute",
         "--deny",
         "MCPTool(*)",
         "agent",
@@ -749,7 +801,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         "stdio"
       ]
 
-      duplicated_bash_shape = [
+      duplicated_disallowed_shape = [
         "grok",
         "--sandbox",
         "strict",
@@ -760,8 +812,12 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         "MCPTool(*)",
         "--deny",
         "Bash(*)",
+        "--disallowed-tools",
+        "execute",
         "--deny",
         "Bash(*)",
+        "--disallowed-tools",
+        "execute",
         "agent",
         "--no-leader",
         "--model",
@@ -783,7 +839,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_command_mismatch} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: missing_bash],
+                 [command: missing_disallowed_shape],
                  worktree_root,
                  nil,
                  self(),
@@ -793,7 +849,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_command_mismatch} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: reordered_bash_shape],
+                 [command: reordered_disallowed_shape],
                  worktree_root,
                  nil,
                  self(),
@@ -803,7 +859,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_command_mismatch} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: changed_bash_shape],
+                 [command: changed_disallowed_shape],
                  worktree_root,
                  nil,
                  self(),
@@ -813,7 +869,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_command_mismatch} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: duplicated_bash_shape],
+                 [command: duplicated_disallowed_shape],
                  worktree_root,
                  nil,
                  self(),
@@ -833,7 +889,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_command_mismatch} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: missing_bash],
+                 [command: missing_disallowed_shape],
                  worktree_root,
                  authority,
                  self(),
@@ -844,7 +900,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_command_mismatch} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: reordered_bash_shape],
+                 [command: reordered_disallowed_shape_bare],
                  worktree_root,
                  authority,
                  self(),
@@ -855,7 +911,18 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_command_mismatch} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: changed_bash_shape],
+                 [command: reordered_disallowed_shape],
+                 worktree_root,
+                 authority,
+                 self(),
+                 [bound_server],
+                 fn _ -> flunk("callback should not run") end
+               )
+
+      assert {:error, :grok_sandbox_command_mismatch} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 [command: changed_disallowed_shape],
                  worktree_root,
                  authority,
                  self(),
@@ -865,7 +932,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_command_mismatch} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: duplicated_bash_shape],
+                 [command: duplicated_disallowed_shape],
                  worktree_root,
                  authority,
                  self(),

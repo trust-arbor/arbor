@@ -409,6 +409,10 @@ defmodule Arbor.AI.AcpSessionTest do
     assert "--no-subagents" in command
     assert "--disable-web-search" in command
     assert Enum.chunk_every(command, 2, 1, :discard) |> Enum.member?(["--deny", "MCPTool(*)"])
+
+    assert Enum.chunk_every(command, 2, 1, :discard)
+           |> Enum.member?(["--disallowed-tools", "execute"])
+
     assert "--no-leader" in command
 
     runtime_home = state.runtime_home_cleanup.path
