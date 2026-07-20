@@ -16,7 +16,7 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
 
     base_providers =
       case prior do
-        {:ok, providers} -> Map.delete(providers, :grok)
+        {:ok, providers} -> providers
         :error -> %{}
       end
 
@@ -118,7 +118,10 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
   ]
 
   describe "security regression: Grok strict sandbox launch" do
-    test "configured production override disables ambient authority and uses minimal Git env" do
+    test "umbrella config leaves the security-sensitive Grok command to the hardened default" do
+      providers = Application.get_env(:arbor_ai, :acp_providers, %{})
+      refute Map.has_key?(providers, :grok)
+
       assert {:ok, opts} = Config.resolve(:grok, [])
 
       assert Keyword.get(opts, :command) == @grok_strict_command

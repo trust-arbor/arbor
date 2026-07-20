@@ -138,8 +138,9 @@ config :arbor_signals,
   restricted_topics: [:security, :identity]
 
 # ACP CLI agents for the multi-model review council (subscription-based, no per-token cost).
-# Built-in defaults (Arbor.AI.AcpSession.Config) already cover codex/opencode/hermes/gemini/etc.
-# Overrides REPLACE the per-provider default (not deep-merge), so claude's full config is repeated.
+# Built-in defaults (Arbor.AI.AcpSession.Config) cover native providers, including the
+# security-sensitive Grok command. Overrides REPLACE the per-provider default rather than
+# deep-merging, so keep policy-owned native launch commands out of this map.
 config :arbor_ai, :acp_providers, %{
   # claude → run Opus (built-in default is sonnet)
   # Adapter pinned to ClaudeSDK (the SDK-protocol-based adapter that talks
@@ -150,42 +151,6 @@ config :arbor_ai, :acp_providers, %{
     transport_mod: ExMCP.ACP.AdapterTransport,
     adapter: ExMCP.ACP.Adapters.ClaudeSDK,
     adapter_opts: [model: "opus"]
-  },
-
-  # grok (Grok 4.5) — VERIFIED native ACP via `mix arbor.acp.probe grok`.
-  # Global policy flags precede `agent`; `--no-leader` and `--model` are agent
-  # options and must precede the `stdio` subcommand.
-  # Strict sandbox is kernel-enforced cwd isolation (closes the r5 FS-isolation
-  # gap). Ambient MCP calls, web, subagents, shared leaders, and cross-session
-  # memory are disabled. Strict denies the user's Git config, so inject only the
-  # minimal static Git env worktree Git needs.
-  # Re-verified on Grok CLI 0.2.103 on 2026-07-18; ACP telemetry reports
-  # modelId "grok-4.5" (usage model "grok-4.5-build").
-  # Install: curl -fsSL https://x.ai/cli/install.sh | bash
-  grok: %{
-    command: [
-      "grok",
-      "--sandbox",
-      "strict",
-      "--no-memory",
-      "--no-subagents",
-      "--disable-web-search",
-      "--deny",
-      "MCPTool(*)",
-      "agent",
-      "--no-leader",
-      "--model",
-      "grok-4.5",
-      "stdio"
-    ],
-    env: [
-      {"GIT_CONFIG_GLOBAL", "/dev/null"},
-      {"GIT_CONFIG_SYSTEM", "/dev/null"},
-      {"GIT_OPTIONAL_LOCKS", "0"},
-      {"GIT_CONFIG_COUNT", "1"},
-      {"GIT_CONFIG_KEY_0", "core.excludesFile"},
-      {"GIT_CONFIG_VALUE_0", "/dev/null"}
-    ]
   }
 
   # agy (Antigravity CLI, intended for Gemini 3.5 Flash) — NO native ACP. Verified via
