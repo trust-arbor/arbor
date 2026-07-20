@@ -8,6 +8,57 @@ automatic merge or unattended authorization.
 path) require the stdio signing proxy, not bare HTTP/Bearer. See
 [EXTERNAL_MCP_CLIENT.md](./EXTERNAL_MCP_CLIENT.md).
 
+## Runtime and authentication boundary
+
+The current OAuth coding worker is **Grok 4.5** (`worker.provider: "grok"`,
+`worker.model: "grok-4.5"`). Do not select `grok-code-fast`; it is not the
+reviewed coding model for this path. Arbor launches each worker with a private,
+ephemeral runtime/config home rather than the live Arbor home. When the
+isolated Grok home is first created, Arbor stages only the bounded OAuth
+`auth.json` credential into it, preserves mode `0600`, and removes the runtime
+home at session cleanup. Authentication staging is not a general-purpose copy
+of the operator's configuration directory.
+
+Managed, repository, and plugin MCP discovery is disabled for Grok sessions.
+That includes ambient repository files and directories such as `.mcp.json`,
+`.grok/config.toml`, `.cursor/mcp.json`, `.grok/plugins`, and
+`.claude/plugins`. The only MCP endpoint a session may use is the explicit
+Arbor-bound endpoint supplied at session creation. MCP registration is
+immutable for the session lifetime and cannot be widened by a later create,
+load, resume, or tool call.
+
+The attested Grok profile is an Arbor-owned file with mode `0600`. It exposes
+native `read_file`, `search_replace`, `grep`, and `list_dir` tools and denies
+`run_terminal_cmd`, `task`, `get_task_output`, and `kill_task`. This profile is
+an execution boundary, not a prompt suggestion: launch verification fails
+closed if the file, content, mode, command, or isolated home does not match.
+
+## Workspace and Git binding
+
+The plan's `repo_root`, workspace policy, and worker `cwd` are explicit
+bindings. They are checked as canonical paths before launch and must remain
+consistent through implementation, validation, review, and release. A provider
+conversation can continue only when the plan explicitly supplies
+`resume_provider` and `resume_session_id`; provider-session continuity does
+not imply workspace continuity. A resumed provider session in a new worktree
+must not be described as retaining the old worktree, and a missing provider
+session may recover only through the documented single fresh-conversation
+fallback.
+
+For linked worktrees, the Grok boundary permits the Git common directory only
+when the worktree's `.git` metadata resolves to the repository's exact
+`--git-common-dir`. The worker's Git environment sets `GIT_OPTIONAL_LOCKS=0`.
+This is a narrowly scoped read exception for the validated common directory;
+it does not authorize arbitrary paths, repository config, hooks, or sibling
+worktrees.
+
+The owner observes approvals and cancellation. Poll status and pending
+approvals through the task-scoped MCP tools, answer only approvals whose
+provenance and authority match the task owner, and treat cancellation as a
+hard lifecycle operation with bounded worker/resource cleanup. Worker prose,
+terminal JSON, provider session identifiers, and a returned cancellation request
+are advisory evidence; the owner-observed task/workspace state is authoritative.
+
 ## Canonical payload
 
 Dispatch with a signed MCP request. The stable coding envelope is:
@@ -60,6 +111,10 @@ different task must never inherit a prior task's provider conversation, terminal
 cwd, workspace plan, or ToolServer/MCP endpoint merely because an idle pooled
 process exists. One-shot steering such as `cd NEW_WORKTREE` is not a workspace
 rebind.
+
+This is **session continuity**, not workspace continuity: reuse or explicit
+provider resume never changes the owner, run authorization, task binding, or
+canonical workspace selected by the new dispatch.
 
 **Structured workspace forms on checkout.** `Arbor.AI.acp_checkout/2` accepts
 `:workspace` as either a binary path (legacy cwd/ToolServer alias) or a

@@ -2,6 +2,39 @@
 
 Comprehensive reference for writing and running Arbor orchestrator pipelines using the DOT graph format.
 
+## Execution boundary
+
+DOT describes the immutable orchestration graph; it does not become the
+authority for a run. At execution, Arbor binds the compiled graph to an
+immutable `RunAuthorization` containing the run's principal, task/session
+scope, signer, graph/manifest identity, and approved capability boundary.
+Nodes must not replace that principal or widen the authorization through DOT
+attributes, context values, or nested calls. The coding workflow adds
+workspace, provider, review, and owner-observation rules; see
+[CODING_TASK_DISPATCH.md](./CODING_TASK_DISPATCH.md) for those operational
+details rather than duplicating them here.
+
+Keep these concerns separate:
+
+- **Graph validation** proves DOT shape, handler/action placement, parameter
+  syntax, reachability, and profile invariants.
+- **Capability middleware** enforces the bound principal's authority at runtime
+  before node execution; passing validation does not grant capabilities.
+- **Actions** remain capability-gated syscalls. A graph cannot turn a denied
+  action into an allowed one by setting `authorization`, `agent_id`, or a
+  context key.
+
+For durable or review-sensitive graphs, checkpoints and manifests must remain
+JSON-clean. Store bounded strings, numbers, booleans, lists, and maps in
+context; reconstruct typed structs, PIDs, signers, capabilities, and other
+runtime resources at the process boundary. Treat the compiled graph hash and
+execution manifest as immutable after authorization.
+
+For coding graphs specifically, review and commit are bound to the exact
+candidate/base tree and commit, while workspace state and approvals are
+owner-observed. Do not route from worker prose or terminal JSON when an action
+can inspect the workspace or review tree directly.
+
 ## Quick Start
 
 A minimal pipeline has three nodes: start, at least one work node, and exit.
@@ -778,6 +811,13 @@ Arbor.Orchestrator.Validation.Validator.validate(graph, exclude: ["codergen_prom
 ## Middleware
 
 Middleware runs before and after each node execution. It provides cross-cutting concerns like capability checking, taint tracking, and checkpointing.
+
+Capability middleware is a runtime enforcement layer, not a replacement for
+graph validation. Use validation to reject an unsafe or malformed graph before
+execution; use middleware to re-check the already-bound principal and
+capabilities at every node. Do not encode coding-specific authorization or
+workspace policy in a new handler. Use the reviewed coding plan/compiler and
+actions documented in [CODING_TASK_DISPATCH.md](./CODING_TASK_DISPATCH.md).
 
 ### Available Middleware
 

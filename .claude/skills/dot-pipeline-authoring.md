@@ -2,11 +2,32 @@
 
 Write or modify Arbor's `.dot` orchestration pipelines. For a syntax-only reference, see [`docs/arbor/DOT_PIPELINE_GUIDE.md`](../../docs/arbor/DOT_PIPELINE_GUIDE.md). For invoking and running already-written pipelines from code, see [`dot-pipeline-execution.md`](./dot-pipeline-execution.md).
 
+For the coding-change workflow, read [`docs/arbor/CODING_TASK_DISPATCH.md`](../../docs/arbor/CODING_TASK_DISPATCH.md).
+It owns Grok 4.5 runtime isolation, attested native-tool profiles, immutable
+MCP/workspace binding, provider-versus-workspace continuity, and
+owner-observed approval/cancellation behavior. Keep those operational rules
+there; this skill covers DOT authoring and generic execution semantics.
+
 ## When to write a new pipeline
 
 Reach for a new `.dot` when you need to compose multiple steps with explicit gating, parallelism, or routing — and the policy should be visible to humans reviewing the work, not buried in code. Reach for plain Elixir when the work is a single function call, or when control flow depends on runtime values that don't compose into a graph cleanly (e.g. tight inner loops).
 
 Before writing a new pipeline, search `apps/arbor_orchestrator/specs/pipelines/stdlib/` — there's already `retry-escalate.dot` (LLM-model escalation), `feedback-loop.dot` (generate / critique / revise), `propose-approve.dot`, `synthesize.dot`, and several others. If one fits with `pass_context` parameterization, invoke it rather than copy.
+
+## Authoring invariants
+
+- Treat the graph, compiled execution manifest, and `RunAuthorization` as
+  immutable after preflight. Let the executor bind the caller's principal;
+  do not use node attributes or context to impersonate another principal.
+- Keep context JSON-clean because the Engine checkpoints it after nodes. Pass
+  identifiers and bounded data, then reconstruct typed runtime values at the
+  action or handler boundary.
+- Use graph validation for structure and declared placement, capability
+  middleware for runtime authority, and Jido actions for capability-gated side
+  effects. Do not move business policy into a generic handler.
+- For reviewable changes, make commit/tree identity and owner-observed
+  workspace state explicit in the action contracts. Worker prose is not a
+  substitute for inspection or a review-bound tree snapshot.
 
 ## Canonical node types (15)
 
