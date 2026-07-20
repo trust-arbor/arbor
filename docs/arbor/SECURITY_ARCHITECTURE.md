@@ -16,7 +16,8 @@ Arbor treats an agent operation as a chain of questions:
 
 1. **Who is asking?** The principal has a registered cryptographic identity.
 2. **What is it asking to do?** The operation has a registered resource URI and
-   requires a capability that covers that URI.
+   requires a capability that covers that URI. Delegated grants can only narrow
+   authority, and revoking a parent grant can revoke its delegated children.
 3. **What does the operator's policy allow?** Granular rules can block, ask for
    approval, allow with notification, or allow automatically. System ceilings can
    still make an operation more restrictive.
@@ -25,16 +26,20 @@ Arbor treats an agent operation as a chain of questions:
    operations are blocked or require approval.
 5. **Did the thing being approved remain the same?** Authorized runs can bind the
    principal, caller, author, worktree, graph, compiled code, and action/handler
-   bindings. Coding approval can bind the exact Git tree that was inspected.
+   bindings. The coding workflow can bind approval and independent council review
+   to the exact Git tree that was inspected; this review control is not universal
+   to every Arbor action.
 6. **Who cleans up?** Worktrees, ACP sessions, and containment units have owners and
-   monitored registries. Cleanup does not depend only on a final graph node.
+   monitored registries. Cleanup does not depend only on a final graph node, though
+   these mechanisms are not a complete incident-response or audit system.
 
 In plain language, one lock is not trusted to do every job. Identity, permission,
 path checks, information-flow checks, approval, code binding, and operating-system
-containment cover different failure modes. That is defense in depth, not a claim
-that Arbor makes a compromised host or a fully compromised BEAM safe. A caller can
-also bypass a control if it uses an explicitly trusted or legacy path; the sections
-below identify those boundaries.
+containment cover different failure modes. That is defense in depth. Arbor still
+trusts the host operating system and code running inside its BEAM; compromise of
+either boundary can defeat in-process controls. Enforcement also depends on which
+caller path is used: explicitly trusted and legacy paths do not all invoke every
+gate. The sections below identify those boundaries.
 
 ## Status Vocabulary
 
@@ -153,9 +158,12 @@ Authorized Engine runs can carry a `RunAuthorization` that binds:
 
 - execution principal, caller, author, task, and session IDs;
 - canonical workdir and filesystem identity;
-- source graph hash and compiled graph hash;
-- a JSON-clean execution manifest and digest; and
-- exact action, handler, and node-module bindings.
+- source graph hash and compiled graph hash.
+
+When the caller supplies a validated execution manifest, the same authorization
+also binds the JSON-clean manifest and digest plus exact action, handler, and
+node-module indexes. Authorized runs without a manifest retain the identity,
+workdir, and graph bindings but do not acquire those exact implementation indexes.
 
 The binding is digest-checked, inherited by child graphs as a restricted subset, and
 verified on checkpoint/resume. Authorized graph nodes cannot replace the principal or
@@ -255,8 +263,10 @@ Authoritative code: [`Arbor.Shell`](../../apps/arbor_shell/lib/arbor/shell.ex),
 
 The managed Grok ACP path creates a private Arbor runtime tree and a private `grok`
 home with restrictive modes. It stages authentication only into that private home,
-binds a verified Arbor agent profile, and disables ambient MCP/configuration sources,
-hooks, telemetry, memory, subagents, and web fetch through a closed environment.
+binds a verified Arbor agent profile, and overlays mandatory settings that disable
+ambient MCP/configuration sources, hooks, telemetry, memory, subagents, and web
+fetch. The overlay replaces security-relevant Grok variables but preserves unrelated
+caller-supplied environment entries; it is not a complete environment allowlist.
 
 The `arbor-no-shell` profile exposes native file tools and disallows terminal commands,
 task/subagent controls, and task-output/kill controls. The launch command is checked
@@ -274,14 +284,33 @@ Authoritative code: [`RuntimeHome`](../../apps/arbor_ai/lib/arbor/ai/acp_session
 Signals are normally fire-and-forget observability and must not be treated as the
 execution lifecycle or authorization source of truth. There is a deliberate,
 load-bearing exception in `arbor_security`: cluster-scoped security signals currently
-carry distributed nonce, capability, and identity state synchronization. That transport
-must be treated as security-critical until it is replaced by an explicit synchronization
-mechanism. Security-topic subscriptions are capability-restricted; an open signal topic
-is not evidence of security authorization.
+carry distributed nonce, capability, and identity state synchronization.
+
+Ordinary callers remain unable to subscribe to restricted `security.*` topics under
+the capability authorizer. The nonce cache, capability store, and identity registry
+instead use a narrow internal subscription path. The Signals bus verifies that the
+caller PID is the configured, registered owner for a fixed role and exact event; it
+does not accept wildcard or dotted event configuration. These subscriptions are bound
+to and monitored with the owner process, survive a test/reset operation while the
+owner is alive, and cannot be removed through the ordinary unsubscribe path by another
+caller. Each security store fails startup when its required subscriptions cannot be
+established. It monitors the bus, retries subscription after a bus restart with a
+bounded backoff, and stops rather than continuing unsynchronized when recovery is
+exhausted.
+
+This closes the previously unwired subscription path, but it does not turn Signals
+into a consensus protocol or durable security journal. Delivery and cluster
+propagation remain asynchronous: a partition or simultaneous use of one nonce on two
+nodes can create a window before peers observe the update. The registered-owner check
+also assumes code inside the same BEAM is trusted; it is process ownership, not a
+cryptographic isolation boundary. The signal transport must remain security-critical
+until an explicit distributed synchronization mechanism replaces it.
 
 Authoritative code: [`CapabilityStore`](../../apps/arbor_security/lib/arbor/security/capability_store.ex),
 [`Identity.Registry`](../../apps/arbor_security/lib/arbor/security/identity/registry.ex),
-and [`Arbor.Signals`](../../apps/arbor_signals/lib/arbor/signals.ex).
+[`SignalSync`](../../apps/arbor_security/lib/arbor/security/signal_sync.ex),
+[`Arbor.Signals`](../../apps/arbor_signals/lib/arbor/signals.ex), and
+[`Signals.Bus`](../../apps/arbor_signals/lib/arbor/signals/bus.ex).
 
 ## Partial, Planned, or Unsupported Controls
 
@@ -327,10 +356,13 @@ defense in depth.
 - The spawn-capable API is deliberately unavailable when the production containment
   backend or its admission evidence is missing. A configured callback, arbitrary module,
   or legacy `spawn_backend` setting cannot reactivate it.
-- The only implemented spawn-capable backend is Apple Container on macOS 26 with the reviewed
-  signed 1.1.x CLI/API-server/plugin layout, pinned kernel, immutable local images, and
-  a verified Linux/arm64 guest toolchain. Provisioning those assets is an operator
-  prerequisite; code presence alone does not prove a host can execute this path.
+- The only implemented spawn-capable backend is Apple Container on macOS 26 or later
+  with the reviewed signed 1.1.x CLI/API-server/plugin layout, pinned kernel,
+  immutable local images, and a verified Linux/arm64 guest toolchain. The accepted
+  live proof used macOS 26 and Apple Container 1.1.0; later accepted host versions
+  still require the same admission evidence. Provisioning those assets is an
+  operator prerequisite; code presence alone does not prove a host can execute this
+  path.
 - Linux dependency-baseline authority and Linux/arm64 guest materialization exist for
   the Apple Container validation design, but a general native Linux spawn-capable
   containment backend is not documented as supported here.
@@ -342,7 +374,7 @@ defense in depth.
 
 | Platform | Current position |
 | --- | --- |
-| macOS | Core Elixir security and direct childless Shell paths are the primary development surface. Spawn-capable validation is bounded to macOS 26 with Apple Container 1.1.x admission evidence and required locally provisioned assets. Missing assets fail closed. |
+| macOS | Core Elixir security and direct childless Shell paths are the primary development surface. Spawn-capable admission accepts macOS 26 or later with Apple Container 1.1.x evidence and required locally provisioned assets; the accepted live proof used macOS 26 and Apple Container 1.1.0. Missing assets fail closed. |
 | Linux | Core identity, capability, trust, taint, egress, and path-policy code is not described as macOS-only. Linux/arm64 dependency-baseline and guest-image evidence support the Apple Container design, but no general native Linux spawn-capable backend is supported by this document. |
 | Windows | FileGuard/SafePath code accounts for Windows junction and reparse-point containment behavior. Native spawn-capable containment and equivalent whole-unit cleanup are not a supported Arbor platform mode. |
 
