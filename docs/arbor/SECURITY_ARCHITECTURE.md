@@ -229,6 +229,13 @@ reused or pre-existing worktrees are not automatically removed. Owner death, tas
 cancellation, and process loss have explicit cleanup paths, with durable retention
 state for the coding workspace lifecycle.
 
+Workspace teardown also observes dependency order. A one-shot owner that will delete
+a task worktree first settles idle ACP pool sessions for the exact task and agent.
+Settlement runs outside the pool GenServer, continues if its caller exits, and keeps
+any unconfirmed live process tracked. The owner removes the workspace only after a
+positive settlement receipt; busy or unconfirmed sessions retain the workspace and
+surface cleanup failure. Normal same-task pool reuse remains unchanged.
+
 Coding approval is not a generic "the operator saw some diff" flag. The reviewed commit
 action binds approval to the inspected HEAD, a bounded worktree fingerprint, and, when
 available, the exact committable tree OID. It rechecks those values after approval and

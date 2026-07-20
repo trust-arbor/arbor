@@ -118,6 +118,14 @@ This is **session continuity**, not workspace continuity: reuse or explicit
 provider resume never changes the owner, run authorization, task binding, or
 canonical workspace selected by the new dispatch.
 
+Generic task execution keeps this reuse behavior. A one-shot harness that is
+about to remove a task worktree must first call
+`Arbor.AI.acp_settle_task_sessions/3` for the exact task and agent. The pool
+refuses checked-out matches, closes idle matches outside the pool GenServer,
+and reports success only after every detached process is confirmed down. The
+harness may settle and remove the workspace lease only after that receipt;
+otherwise it retains the workspace and reports cleanup failure.
+
 **Structured workspace forms on checkout.** `Arbor.AI.acp_checkout/2` accepts
 `:workspace` as either a binary path (legacy cwd/ToolServer alias) or a
 structured session plan:

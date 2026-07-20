@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 468,
+  "entry_count": 469,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5628,8 +5628,21 @@
       "source_incident": "found 2026-07-20 while launching the Phase 6 r10 benchmark).",
       "content_sha256": "03f1a385ce079c194c75bb999d9f429553cc16062a602756e4134d6a95c2a97b",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 469,
+      "source_kind": "post-migration",
+      "slug": "ephemeral-workspace-teardown-must-settle-task-scoped-pooled-sessions-first",
+      "title": "Ephemeral workspace teardown must settle task-scoped pooled sessions first.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-ephemeral-workspace-teardown-must-settle-task-scoped-pooled-sessions-first",
+      "source_date": "2026-07-20",
+      "source_incident": "found 2026-07-20 after the Phase 6 r10 benchmark).",
+      "content_sha256": "7e74c2092140db1f3a93359303540d3070c8c4590e858c40addd5114f7cf399d",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 7
+  "post_migration_entry_count": 8
 }
