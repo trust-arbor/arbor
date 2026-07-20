@@ -146,8 +146,20 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     defp send_signal(_pid, _message), do: :ok
   end
 
+  defp fixture_suffix do
+    :crypto.strong_rand_bytes(16)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp fixture_path(prefix) do
+    path = Path.join(System.tmp_dir!(), "#{prefix}-#{fixture_suffix()}")
+
+    on_exit(fn -> File.rm_rf!(path) end)
+    path
+  end
+
   defp temp_path(prefix) do
-    path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+    path = fixture_path(prefix)
     File.mkdir_p!(path)
     path
   end
@@ -230,13 +242,9 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
 
   defp create_linked_fixture!(worktree_suffix \\ "worktree", branch_suffix \\ nil) do
     repository = create_git_repo!()
-    branch = branch_suffix || "grok-test-#{System.unique_integer([:positive])}"
+    branch = branch_suffix || "grok-test-#{fixture_suffix()}"
 
-    worktree =
-      Path.join(
-        System.tmp_dir!(),
-        "arbor-ai-grok-worktree-#{worktree_suffix}-#{System.unique_integer([:positive])}"
-      )
+    worktree = fixture_path("arbor-ai-grok-worktree-#{worktree_suffix}")
 
     git_cmd(repository, ["worktree", "add", "-b", branch, worktree])
 
@@ -251,6 +259,8 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
   defp create_standalone_fixture!() do
     worktree = temp_path("arbor-ai-grok-standalone")
     File.mkdir_p!(Path.join(worktree, ".git"))
+
+    on_exit(fn -> File.rm_rf!(worktree) end)
     worktree
   end
 
