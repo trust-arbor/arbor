@@ -209,6 +209,12 @@ defmodule Arbor.Signals do
   def subscribe(pattern, handler, opts \\ []),
     do: subscribe_to_signals_matching_pattern(pattern, handler, opts)
 
+  @doc false
+  @spec subscribe_security_sync(atom(), atom()) ::
+          {:ok, String.t(), pid()} | {:error, :unauthorized}
+  def subscribe_security_sync(role, event),
+    do: Bus.subscribe_security_sync(role, event)
+
   @doc "Unsubscribe from signals."
   @spec unsubscribe(String.t()) :: :ok | {:error, :not_found}
   def unsubscribe(subscription_id),

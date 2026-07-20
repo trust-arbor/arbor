@@ -10,6 +10,7 @@ defmodule Arbor.Signals.Config do
       config :arbor_signals,
         authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
         restricted_topics: [:security, :identity],
+        security_sync_subscribers: %{},
         channel_auto_rotate_interval_ms: 86_400_000,
         channel_rotate_on_leave: true,
         relay_enabled: true,
@@ -23,6 +24,8 @@ defmodule Arbor.Signals.Config do
 
   @default_authorizer Arbor.Signals.Adapters.CapabilityAuthorizer
   @default_restricted_topics [:security, :identity]
+  @default_security_sync_subscribers %{}
+  @security_sync_event_pattern ~r/^[a-z][a-z0-9_]*$/
   @default_auto_rotate_interval_ms 86_400_000
   @default_rotate_on_leave true
 
@@ -57,6 +60,39 @@ defmodule Arbor.Signals.Config do
   def restricted_topics do
     Application.get_env(:arbor_signals, :restricted_topics, @default_restricted_topics)
   end
+
+  @doc false
+  @spec security_sync_owner(atom(), atom()) :: {:ok, atom()} | :error
+  def security_sync_owner(role, event) when is_atom(role) and is_atom(event) do
+    subscribers =
+      Application.get_env(
+        :arbor_signals,
+        :security_sync_subscribers,
+        @default_security_sync_subscribers
+      )
+
+    with true <- is_map(subscribers),
+         %{owner: owner, events: events} <- Map.get(subscribers, role),
+         true <- is_atom(owner) and owner not in [nil, true, false],
+         true <- valid_security_sync_events?(events),
+         true <- event in events do
+      {:ok, owner}
+    else
+      _ -> :error
+    end
+  end
+
+  def security_sync_owner(_role, _event), do: :error
+
+  defp valid_security_sync_events?(events) do
+    is_list(events) and events != [] and Enum.all?(events, &valid_security_sync_event?/1) and
+      length(events) == length(Enum.uniq(events))
+  end
+
+  defp valid_security_sync_event?(event) when is_atom(event) and event not in [nil, true, false],
+    do: Regex.match?(@security_sync_event_pattern, Atom.to_string(event))
+
+  defp valid_security_sync_event?(_event), do: false
 
   @doc """
   Return the configured auto-rotation interval for channel keys in milliseconds.

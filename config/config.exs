@@ -135,7 +135,36 @@ config :arbor_signals,
   # via Arbor.Security.can?/3 (runtime bridge, no compile-time dep on arbor_security).
   # Test env overrides to OpenAuthorizer for isolated testing.
   authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
-  restricted_topics: [:security, :identity]
+  restricted_topics: [:security, :identity],
+  # Bootstrap-only subscriptions for load-bearing distributed security state.
+  # Signals verifies the caller is the configured registered process and only
+  # admits the fixed events listed for that role.
+  security_sync_subscribers: %{
+    nonce_cache: %{
+      owner: Arbor.Security.Identity.NonceCache,
+      events: [:nonce_seen]
+    },
+    capability_store: %{
+      owner: Arbor.Security.CapabilityStore,
+      events: [
+        :capability_granted,
+        :capability_revoked,
+        :capabilities_revoked_all,
+        :capabilities_cascade_revoked,
+        :capabilities_scope_revoked
+      ]
+    },
+    identity_registry: %{
+      owner: Arbor.Security.Identity.Registry,
+      events: [
+        :identity_registered,
+        :identity_deregistered,
+        :identity_suspended,
+        :identity_resumed,
+        :identity_revoked
+      ]
+    }
+  }
 
 # ACP CLI agents for the multi-model review council (subscription-based, no per-token cost).
 # Built-in defaults (Arbor.AI.AcpSession.Config) cover native providers, including the

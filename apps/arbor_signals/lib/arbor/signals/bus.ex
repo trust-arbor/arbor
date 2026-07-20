@@ -97,6 +97,13 @@ defmodule Arbor.Signals.Bus do
     GenServer.call(__MODULE__, {:subscribe, pattern, handler, opts})
   end
 
+  @doc false
+  @spec subscribe_security_sync(atom(), atom()) ::
+          {:ok, String.t(), pid()} | {:error, :unauthorized}
+  def subscribe_security_sync(role, event) do
+    GenServer.call(__MODULE__, {:subscribe_security_sync, role, event})
+  end
+
   @doc """
   Unsubscribe from signals.
   """
@@ -133,6 +140,7 @@ defmodule Arbor.Signals.Bus do
     {:ok,
      %{
        subscriptions: %{},
+       security_sync_monitors: %{},
        stats: %{
          total_published: 0,
          total_delivered: 0,
@@ -188,13 +196,53 @@ defmodule Arbor.Signals.Bus do
     end
   end
 
+  def handle_call({:subscribe_security_sync, role, event}, {caller_pid, _tag}, state) do
+    case security_sync_owner(role, event, caller_pid) do
+      {:ok, owner_pid} ->
+        sub_id = generate_subscription_id()
+
+        subscription = %{
+          id: sub_id,
+          pattern: "security.#{event}",
+          handler: security_sync_handler(owner_pid),
+          async: true,
+          filter: nil,
+          principal_id: {:internal_security_sync, role},
+          authorized_topics: MapSet.new([:security]),
+          security_sync_owner: owner_pid,
+          created_at: DateTime.utc_now()
+        }
+
+        state =
+          state
+          |> put_in([:subscriptions, sub_id], subscription)
+          |> monitor_security_sync_owner(owner_pid)
+
+        {:reply, {:ok, sub_id, self()}, state}
+
+      :error ->
+        state = update_in(state, [:stats, :total_auth_denied], &(&1 + 1))
+        {:reply, {:error, :unauthorized}, state}
+    end
+  end
+
   @impl true
-  def handle_call({:unsubscribe, subscription_id}, _from, state) do
-    if Map.has_key?(state.subscriptions, subscription_id) do
-      state = update_in(state, [:subscriptions], &Map.delete(&1, subscription_id))
-      {:reply, :ok, state}
-    else
-      {:reply, {:error, :not_found}, state}
+  def handle_call({:unsubscribe, subscription_id}, {caller_pid, _tag}, state) do
+    case Map.fetch(state.subscriptions, subscription_id) do
+      :error ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok, %{security_sync_owner: owner_pid}} when owner_pid != caller_pid ->
+        state = update_in(state, [:stats, :total_auth_denied], &(&1 + 1))
+        {:reply, {:error, :not_found}, state}
+
+      {:ok, subscription} ->
+        state =
+          state
+          |> update_in([:subscriptions], &Map.delete(&1, subscription_id))
+          |> maybe_demonitor_security_sync_owner(subscription)
+
+        {:reply, :ok, state}
     end
   end
 
@@ -203,7 +251,16 @@ defmodule Arbor.Signals.Bus do
     subs =
       state.subscriptions
       |> Map.values()
-      |> Enum.map(&Map.take(&1, [:id, :pattern, :async, :principal_id, :created_at]))
+      |> Enum.map(
+        &Map.take(&1, [
+          :id,
+          :pattern,
+          :async,
+          :principal_id,
+          :security_sync_owner,
+          :created_at
+        ])
+      )
 
     {:reply, subs, state}
   end
@@ -214,15 +271,128 @@ defmodule Arbor.Signals.Bus do
     {:reply, stats, state}
   end
 
-  def handle_call(:reset, _from, _state) do
-    {:reply, :ok,
-     %{
-       subscriptions: %{},
-       stats: %{total_published: 0, total_delivered: 0, total_errors: 0, total_auth_denied: 0}
-     }}
+  def handle_call(:reset, _from, state) do
+    {:reply, :ok, reset_preserving_security_sync(state)}
   end
 
+  @impl true
+  def handle_info({:DOWN, ref, :process, owner_pid, _reason}, state) do
+    case Map.get(state.security_sync_monitors, owner_pid) do
+      ^ref ->
+        subscriptions =
+          Map.reject(state.subscriptions, fn {_id, subscription} ->
+            Map.get(subscription, :security_sync_owner) == owner_pid
+          end)
+
+        {:noreply,
+         %{
+           state
+           | subscriptions: subscriptions,
+             security_sync_monitors: Map.delete(state.security_sync_monitors, owner_pid)
+         }}
+
+      _other ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
+
   # Private functions — Authorization
+
+  defp security_sync_owner(role, event, caller_pid) do
+    # Registered-name ownership is the in-process trust boundary. Arbitrary code
+    # execution inside this BEAM is already able to kill or message these stores
+    # directly, so defending against a hostile process that seizes a dead owner's
+    # registered name is outside this primitive's threat model. Never accept a
+    # caller-supplied owner PID or handler here.
+    with {:ok, owner_name} <- Config.security_sync_owner(role, event),
+         ^caller_pid <- Process.whereis(owner_name),
+         true <- Process.alive?(caller_pid) do
+      {:ok, caller_pid}
+    else
+      _ -> :error
+    end
+  end
+
+  defp security_sync_handler(owner_pid) do
+    fn signal ->
+      send(owner_pid, {:signal_received, signal})
+      :ok
+    end
+  end
+
+  defp monitor_security_sync_owner(state, owner_pid) do
+    case Map.has_key?(state.security_sync_monitors, owner_pid) do
+      true ->
+        state
+
+      false ->
+        put_in(state, [:security_sync_monitors, owner_pid], Process.monitor(owner_pid))
+    end
+  end
+
+  defp maybe_demonitor_security_sync_owner(state, subscription) do
+    case Map.get(subscription, :security_sync_owner) do
+      nil ->
+        state
+
+      owner_pid ->
+        owner_still_subscribed? =
+          Enum.any?(state.subscriptions, fn {_id, other_subscription} ->
+            Map.get(other_subscription, :security_sync_owner) == owner_pid
+          end)
+
+        if owner_still_subscribed? do
+          state
+        else
+          case Map.pop(state.security_sync_monitors, owner_pid) do
+            {nil, _monitors} ->
+              state
+
+            {ref, monitors} ->
+              Process.demonitor(ref, [:flush])
+              %{state | security_sync_monitors: monitors}
+          end
+        end
+    end
+  end
+
+  defp reset_preserving_security_sync(state) do
+    subscriptions =
+      Map.filter(state.subscriptions, fn {_id, subscription} ->
+        case Map.get(subscription, :security_sync_owner) do
+          owner_pid when is_pid(owner_pid) -> Process.alive?(owner_pid)
+          _other -> false
+        end
+      end)
+
+    owner_pids =
+      subscriptions
+      |> Map.values()
+      |> Enum.map(&Map.fetch!(&1, :security_sync_owner))
+      |> Enum.uniq()
+
+    {monitors, stale_monitors} = Map.split(state.security_sync_monitors, owner_pids)
+    demonitor_security_sync_owners(stale_monitors)
+
+    monitors =
+      Enum.reduce(owner_pids, monitors, fn owner_pid, acc ->
+        Map.put_new_lazy(acc, owner_pid, fn -> Process.monitor(owner_pid) end)
+      end)
+
+    %{
+      subscriptions: subscriptions,
+      security_sync_monitors: monitors,
+      stats: %{total_published: 0, total_delivered: 0, total_errors: 0, total_auth_denied: 0}
+    }
+  end
+
+  defp demonitor_security_sync_owners(monitors) do
+    Enum.each(monitors, fn {_owner_pid, ref} ->
+      Process.demonitor(ref, [:flush])
+    end)
+  end
 
   # Compute which restricted topics a pattern overlaps with.
   # A wildcard category ("*") or category matching a restricted topic triggers auth.

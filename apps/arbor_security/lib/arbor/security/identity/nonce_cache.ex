@@ -28,9 +28,11 @@ defmodule Arbor.Security.Identity.NonceCache do
   require Logger
 
   alias Arbor.Security.Config
+  alias Arbor.Security.SignalSync
 
   @cleanup_interval_ms 60_000
   @signal_type "nonce_seen"
+  @signal_events [:nonce_seen]
 
   # Client API
 
@@ -64,14 +66,20 @@ defmodule Arbor.Security.Identity.NonceCache do
 
   @impl true
   def init(_opts) do
-    schedule_cleanup()
-    subscribe_to_distributed_signals()
+    case subscribe_to_distributed_signals() do
+      {:ok, signal_sync} ->
+        schedule_cleanup()
 
-    {:ok,
-     %{
-       nonces: %{},
-       stats: %{total_checked: 0, total_rejected: 0}
-     }}
+        {:ok,
+         %{
+           nonces: %{},
+           signal_sync: signal_sync,
+           stats: %{total_checked: 0, total_rejected: 0}
+         }}
+
+      {:error, reason} ->
+        {:stop, {:security_sync_subscription_failed, reason}}
+    end
   end
 
   @impl true
@@ -114,27 +122,28 @@ defmodule Arbor.Security.Identity.NonceCache do
     {:noreply, record_remote_nonce(signal, state)}
   end
 
-  def handle_info(_msg, state), do: {:noreply, state}
+  def handle_info(message, state) do
+    case SignalSync.handle_info(message, state.signal_sync) do
+      {:ok, signal_sync} ->
+        {:noreply, %{state | signal_sync: signal_sync}}
+
+      {:stop, reason, signal_sync} ->
+        {:stop, reason, %{state | signal_sync: signal_sync}}
+
+      :unhandled ->
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    SignalSync.release(Map.get(state, :signal_sync))
+  end
 
   # Private
 
   defp subscribe_to_distributed_signals do
-    if Config.distributed_signals_enabled?() do
-      bus = Arbor.Signals.Bus
-
-      if Code.ensure_loaded?(bus) and Process.whereis(bus) do
-        me = self()
-
-        Arbor.Signals.subscribe("security.#{@signal_type}", fn signal ->
-          send(me, {:signal_received, signal})
-          :ok
-        end)
-      end
-    end
-
-    :ok
-  catch
-    _, _ -> :ok
+    SignalSync.establish(:nonce_cache, @signal_events, Config.distributed_signals_enabled?())
   end
 
   defp emit_nonce_seen(nonce, expiry) do
@@ -159,14 +168,17 @@ defmodule Arbor.Security.Identity.NonceCache do
 
   defp record_remote_nonce(signal, state) do
     data = Map.get(signal, :data, %{})
+    origin_node = data[:origin_node] || data["origin_node"]
 
-    if data[:origin_node] == node() do
+    if origin_node in [node(), Atom.to_string(node())] do
       # Our own signal echoed back — ignore.
       state
     else
-      case Base.decode16(to_string(data[:nonce_hex] || ""), case: :mixed) do
+      nonce_hex = data[:nonce_hex] || data["nonce_hex"] || ""
+
+      case Base.decode16(to_string(nonce_hex), case: :mixed) do
         {:ok, nonce} when byte_size(nonce) > 0 ->
-          expiry = data[:expiry] || System.system_time(:second)
+          expiry = data[:expiry] || data["expiry"] || System.system_time(:second)
           put_in(state, [:nonces, nonce], expiry)
 
         _ ->

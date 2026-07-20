@@ -52,11 +52,19 @@ defmodule Arbor.Security.Identity.Registry do
   alias Arbor.Security.Crypto
   alias Arbor.Security.OIDC.IdentityStore
   alias Arbor.Security.OIDC.TokenVerifier
+  alias Arbor.Security.SignalSync
   alias Arbor.Signals
 
   # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
   @buffered_store Arbor.Persistence.BufferedStore
   @id_store :arbor_security_identities
+  @signal_events [
+    :identity_registered,
+    :identity_deregistered,
+    :identity_suspended,
+    :identity_resumed,
+    :identity_revoked
+  ]
 
   # Client API
 
@@ -287,16 +295,21 @@ defmodule Arbor.Security.Identity.Registry do
 
   @impl true
   def init(_opts) do
-    subscribe_to_distributed_signals()
+    case subscribe_to_distributed_signals() do
+      {:ok, signal_sync} ->
+        state = %{
+          by_agent_id: %{},
+          by_public_key_hash: %{},
+          by_name: %{},
+          signal_sync: signal_sync,
+          stats: %{total_registered: 0, total_deregistered: 0}
+        }
 
-    state = %{
-      by_agent_id: %{},
-      by_public_key_hash: %{},
-      by_name: %{},
-      stats: %{total_registered: 0, total_deregistered: 0}
-    }
+        {:ok, restore_from_store(state)}
 
-    {:ok, restore_from_store(state)}
+      {:error, reason} ->
+        {:stop, {:security_sync_subscription_failed, reason}}
+    end
   end
 
   @impl true
@@ -640,7 +653,23 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   @impl true
-  def handle_info(_msg, state), do: {:noreply, state}
+  def handle_info(message, state) do
+    case SignalSync.handle_info(message, state.signal_sync) do
+      {:ok, signal_sync} ->
+        {:noreply, %{state | signal_sync: signal_sync}}
+
+      {:stop, reason, signal_sync} ->
+        {:stop, reason, %{state | signal_sync: signal_sync}}
+
+      :unhandled ->
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    SignalSync.release(Map.get(state, :signal_sync))
+  end
 
   @impl true
   def format_status(status) when is_map(status) do
@@ -692,25 +721,11 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   defp subscribe_to_distributed_signals do
-    if Config.distributed_signals_enabled?() do
-      bus = Arbor.Signals.Bus
-
-      if Code.ensure_loaded?(bus) and Process.whereis(bus) do
-        me = self()
-
-        for type <-
-              ~w(identity_registered identity_deregistered identity_suspended identity_resumed identity_revoked) do
-          Signals.subscribe("security.#{type}", fn signal ->
-            send(me, {:signal_received, signal})
-            :ok
-          end)
-        end
-      end
-    end
-
-    :ok
-  catch
-    _, _ -> :ok
+    SignalSync.establish(
+      :identity_registry,
+      @signal_events,
+      Config.distributed_signals_enabled?()
+    )
   end
 
   defp emit_identity_signal(type, agent_id) do
@@ -730,7 +745,9 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   defp handle_distributed_signal(signal, state) do
-    if signal.data[:origin_node] == node() do
+    origin_node = signal.data[:origin_node] || signal.data["origin_node"]
+
+    if origin_node in [node(), Atom.to_string(node())] do
       state
     else
       handle_remote_identity_signal(signal.type, signal.data, state)

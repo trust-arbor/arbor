@@ -24,6 +24,7 @@ defmodule Arbor.Security.CapabilityStore do
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore.Serializer
   alias Arbor.Security.Config
+  alias Arbor.Security.SignalSync
   alias Arbor.Security.SystemAuthority
   alias Arbor.Signals
 
@@ -32,6 +33,13 @@ defmodule Arbor.Security.CapabilityStore do
   @cap_store :arbor_security_capabilities
 
   @cleanup_interval_ms 60_000
+  @signal_events [
+    :capability_granted,
+    :capability_revoked,
+    :capabilities_revoked_all,
+    :capabilities_cascade_revoked,
+    :capabilities_scope_revoked
+  ]
 
   # Client API
 
@@ -156,24 +164,30 @@ defmodule Arbor.Security.CapabilityStore do
 
   @impl true
   def init(_opts) do
-    schedule_cleanup()
-    subscribe_to_distributed_signals()
+    case subscribe_to_distributed_signals() do
+      {:ok, signal_sync} ->
+        schedule_cleanup()
 
-    state = %{
-      by_id: %{},
-      by_principal: %{},
-      by_issuer: %{},
-      by_parent: %{},
-      by_usage: %{},
-      stats: %{
-        total_granted: 0,
-        total_revoked: 0,
-        total_expired: 0,
-        total_cascade_revoked: 0
-      }
-    }
+        state = %{
+          by_id: %{},
+          by_principal: %{},
+          by_issuer: %{},
+          by_parent: %{},
+          by_usage: %{},
+          signal_sync: signal_sync,
+          stats: %{
+            total_granted: 0,
+            total_revoked: 0,
+            total_expired: 0,
+            total_cascade_revoked: 0
+          }
+        }
 
-    {:ok, restore_from_store(state)}
+        {:ok, restore_from_store(state)}
+
+      {:error, reason} ->
+        {:stop, {:security_sync_subscription_failed, reason}}
+    end
   end
 
   @impl true
@@ -383,7 +397,23 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   @impl true
-  def handle_info(_msg, state), do: {:noreply, state}
+  def handle_info(message, state) do
+    case SignalSync.handle_info(message, state.signal_sync) do
+      {:ok, signal_sync} ->
+        {:noreply, %{state | signal_sync: signal_sync}}
+
+      {:stop, reason, signal_sync} ->
+        {:stop, reason, %{state | signal_sync: signal_sync}}
+
+      :unhandled ->
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    SignalSync.release(Map.get(state, :signal_sync))
+  end
 
   # Private functions
 
@@ -639,47 +669,18 @@ defmodule Arbor.Security.CapabilityStore do
   # ===========================================================================
 
   defp subscribe_to_distributed_signals do
-    if Config.distributed_signals_enabled?() do
-      bus = Arbor.Signals.Bus
-
-      if Code.ensure_loaded?(bus) and Process.whereis(bus) do
-        me = self()
-
-        Signals.subscribe("security.capability_granted", fn signal ->
-          send(me, {:signal_received, signal})
-          :ok
-        end)
-
-        Signals.subscribe("security.capability_revoked", fn signal ->
-          send(me, {:signal_received, signal})
-          :ok
-        end)
-
-        Signals.subscribe("security.capabilities_revoked_all", fn signal ->
-          send(me, {:signal_received, signal})
-          :ok
-        end)
-
-        Signals.subscribe("security.capabilities_cascade_revoked", fn signal ->
-          send(me, {:signal_received, signal})
-          :ok
-        end)
-
-        Signals.subscribe("security.capabilities_scope_revoked", fn signal ->
-          send(me, {:signal_received, signal})
-          :ok
-        end)
-      end
-    end
-
-    :ok
-  catch
-    _, _ -> :ok
+    SignalSync.establish(
+      :capability_store,
+      @signal_events,
+      Config.distributed_signals_enabled?()
+    )
   end
 
   defp handle_distributed_signal(signal, state) do
     # Ignore signals originating from this node (we already have the state)
-    if signal.data[:origin_node] == node() do
+    origin_node = signal.data[:origin_node] || signal.data["origin_node"]
+
+    if origin_node in [node(), Atom.to_string(node())] do
       state
     else
       handle_remote_signal(signal.type, signal.data, state)
