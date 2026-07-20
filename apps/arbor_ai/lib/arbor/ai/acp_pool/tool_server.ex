@@ -4,7 +4,8 @@ defmodule Arbor.AI.AcpPool.ToolServer do
 
   Started by `AcpPool` when a session profile includes `tool_modules`.
   CLI agents (Claude, Gemini, Codex) connect to this server via the
-  `mcpServers` field in the ACP `session/new` request.
+  `mcpServers` field in the ACP `session/new` request. The emitted entry uses
+  the standard ACP HTTP descriptor with string keys.
 
   ## Lifecycle
 
@@ -101,14 +102,22 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   Build the `mcp_servers` list for an ACP session/new request.
 
   Returns the format expected by `ExMCP.ACP.Client.new_session/3`:
-  `[%{"uri" => "http://...", "name" => "arbor-tools"}]`
+  `[%{"type" => "http", "name" => "arbor-tools", "url" => "http://...", "headers" => []}]`
 
   Pass a `host` option for remote-accessible servers (default: "127.0.0.1").
   """
   @spec mcp_servers_entry(non_neg_integer(), keyword()) :: [map()]
   def mcp_servers_entry(port, opts \\ []) do
     host = Keyword.get(opts, :host, "127.0.0.1")
-    [%{"uri" => "http://#{host}:#{port}", "name" => "arbor-tools"}]
+
+    [
+      %{
+        "type" => "http",
+        "name" => "arbor-tools",
+        "url" => "http://#{host}:#{port}",
+        "headers" => []
+      }
+    ]
   end
 
   # -- MCP Request Handler --

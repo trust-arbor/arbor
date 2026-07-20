@@ -111,10 +111,16 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     end
   end
 
-  describe "mcp_servers_entry/1" do
-    test "returns correctly formatted MCP server list" do
-      entries = ToolServer.mcp_servers_entry(12345)
-      assert [%{"uri" => "http://127.0.0.1:12345", "name" => "arbor-tools"}] = entries
+  describe "mcp_servers_entry/2" do
+    test "returns the exact standard ACP HTTP descriptor" do
+      assert [
+               %{
+                 "type" => "http",
+                 "name" => "arbor-tools",
+                 "url" => "http://127.0.0.1:12345",
+                 "headers" => []
+               }
+             ] == ToolServer.mcp_servers_entry(12345)
     end
   end
 
