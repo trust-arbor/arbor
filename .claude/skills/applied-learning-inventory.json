@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 469,
+  "entry_count": 470,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5641,8 +5641,21 @@
       "source_incident": "found 2026-07-20 after the Phase 6 r10 benchmark).",
       "content_sha256": "7e74c2092140db1f3a93359303540d3070c8c4590e858c40addd5114f7cf399d",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 470,
+      "source_kind": "post-migration",
+      "slug": "plain-beam-hot-loading-does-not-migrate-live-genserver-state",
+      "title": "Plain BEAM hot loading does not migrate live GenServer state.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-plain-beam-hot-loading-does-not-migrate-live-genserver-state",
+      "source_date": "2026-07-20",
+      "source_incident": "found 2026-07-20 after adding AcpPool settlement tracking).",
+      "content_sha256": "585bd2856e150ed9301f8446c75ca8e7dfcd7876860f463ccba96bf324157175",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 8
+  "post_migration_entry_count": 9
 }

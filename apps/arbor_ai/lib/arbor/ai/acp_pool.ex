@@ -778,7 +778,7 @@ defmodule Arbor.AI.AcpPool do
   end
 
   def handle_info({:settlement_finished, key, result}, state) do
-    case Map.get(state.settlements, key) do
+    case Map.get(settlements(state), key) do
       %Settlement{} = settlement ->
         # Drop the worker monitor; normal exit may still race a DOWN.
         if is_reference(settlement.worker_ref) do
@@ -817,11 +817,16 @@ defmodule Arbor.AI.AcpPool do
 
     # Best-effort force of any detached settlement survivors so terminate does
     # not strand live processes outside the pool indexes.
-    Enum.each(state.settlements, fn {_key, %Settlement{pids: pids}} ->
+    Enum.each(settlements(state), fn {_key, %Settlement{pids: pids}} ->
       force_terminate_pids(pids)
     end)
 
     :ok
+  end
+
+  @impl true
+  def code_change(_old_vsn, state, _extra) do
+    {:ok, Map.put_new(state, :settlements, %{})}
   end
 
   # -- Private: Matching --
@@ -1329,7 +1334,7 @@ defmodule Arbor.AI.AcpPool do
   defp settle_task_sessions_call(state, from, task_id, agent_id, opts) do
     key = settlement_key(task_id, agent_id)
 
-    case Map.get(state.settlements, key) do
+    case Map.get(settlements(state), key) do
       %Settlement{worker_ref: nil} = settlement ->
         # Detached survivors remain tracked without an active worker. Re-arm
         # force cleanup rather than reporting no-match success.
@@ -1338,8 +1343,8 @@ defmodule Arbor.AI.AcpPool do
 
       %Settlement{} = settlement ->
         settlement = %{settlement | callers: settlement.callers ++ [from]}
-        settlements = Map.put(state.settlements, key, settlement)
-        {:noreply, %{state | settlements: settlements}}
+        settlements = Map.put(settlements(state), key, settlement)
+        {:noreply, put_settlements(state, settlements)}
 
       nil ->
         matches =
@@ -1422,7 +1427,7 @@ defmodule Arbor.AI.AcpPool do
       end)
 
     settlement = %{settlement | worker_pid: worker_pid, worker_ref: worker_ref}
-    %{state | settlements: Map.put(state.settlements, key, settlement)}
+    put_settlements(state, Map.put(settlements(state), key, settlement))
   end
 
   defp start_force_settlement_worker(state, key, settlement, from, opts) do
@@ -1454,7 +1459,7 @@ defmodule Arbor.AI.AcpPool do
       |> Enum.filter(&(is_pid(&1) and Process.alive?(&1)))
 
     if survivors == [] do
-      %{state | settlements: Map.delete(state.settlements, key)}
+      put_settlements(state, Map.delete(settlements(state), key))
     else
       residual = %{
         settlement
@@ -1464,17 +1469,23 @@ defmodule Arbor.AI.AcpPool do
           worker_ref: nil
       }
 
-      %{state | settlements: Map.put(state.settlements, key, residual)}
+      put_settlements(state, Map.put(settlements(state), key, residual))
     end
   end
 
   defp find_settlement_by_worker_ref(state, worker_ref) do
-    Enum.find_value(state.settlements, :not_found, fn {key, %Settlement{} = settlement} ->
+    Enum.find_value(settlements(state), :not_found, fn {key, %Settlement{} = settlement} ->
       if is_reference(worker_ref) and settlement.worker_ref == worker_ref do
         {:ok, key, settlement}
       end
     end)
   end
+
+  # `arbor.recompile` loads new BEAM code without a release-upgrade
+  # `code_change/3` pass. Read the newly added field defensively until the first
+  # settlement write materializes it in a pre-reload GenServer state.
+  defp settlements(state), do: Map.get(state, :settlements, %{})
+  defp put_settlements(state, value), do: Map.put(state, :settlements, value)
 
   # Worker vanished without a normal finish report: force-confirm survivors.
   # complete_settlement keeps any remaining live pids tracked.

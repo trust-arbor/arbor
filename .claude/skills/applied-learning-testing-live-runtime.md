@@ -377,3 +377,7 @@ locally and then asks the code server for bytes cannot be transferred to a runni
 Keep the `{module, beam_binary}` tuple returned by `Code.compile_quoted/1` or
 `Code.compile_string/1` and pass that exact binary to `:code.load_binary/3` on the target
 node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
+
+<!-- applied-learning: plain-beam-hot-loading-does-not-migrate-live-genserver-state -->
+<a id="applied-learning-plain-beam-hot-loading-does-not-migrate-live-genserver-state"></a>
+**Plain BEAM hot loading does not migrate live GenServer state.** `arbor.recompile` uses `:code.load_binary/3`; it does not invoke `code_change/3`. When a hot-reloaded module adds state keys, either reload through `:sys.change_code/4` or make reads and writes backward-compatible with pre-reload maps until the state is materialized; otherwise the first post-reload call crashes the server (found 2026-07-20 after adding AcpPool settlement tracking).

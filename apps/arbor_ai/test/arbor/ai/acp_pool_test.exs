@@ -782,6 +782,31 @@ defmodule Arbor.AI.AcpPoolTest do
       assert length(sessions) == 1
       assert Enum.any?(sessions, &(&1.pid == match and &1.status == :idle))
     end
+
+    test "hot reload compatibility materializes missing settlement state" do
+      task_id = "settle-reload-#{System.unique_integer([:positive])}"
+      agent_id = "settle-agent-#{System.unique_integer([:positive])}"
+      cwd = temp_path("acp-settle-reload")
+
+      assert {:ok, match} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: cwd
+               )
+
+      assert :ok = AcpPool.checkin(match)
+
+      # A plain BEAM hot load does not invoke code_change/3. Reproduce the
+      # pre-field state held by an already-running pool process.
+      :sys.replace_state(AcpPool, &Map.delete(&1, :settlements))
+
+      assert {:ok, receipt} = AcpPool.settle_task_sessions(task_id, agent_id)
+      assert receipt["settled_count"] == 1
+      refute Process.alive?(match)
+      assert Map.has_key?(:sys.get_state(AcpPool), :settlements)
+    end
   end
 
   describe "status/0" do
