@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-19",
-  "entry_count": 462,
+  "entry_count": 463,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5550,8 +5550,21 @@
       "source_incident": "live r6 on 2026-07-19 America/Chicago: irq_0f9b88fb1290267d was created 22:11:09, owner timed out/released at 22:16:09, and the valid bound approval was answered at 22:20:52; no commit occurred.",
       "content_sha256": "6e71ba66aaf3d9cdd9c6d50ba005d26dc99ebaf216b53e86bdcc5bb63b3bfc43",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 463,
+      "source_kind": "post-migration",
+      "slug": "arm-owner-timeouts-at-the-terminal-authority-before-waiting",
+      "title": "Arm owner timeouts at the terminal authority before waiting.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-arm-owner-timeouts-at-the-terminal-authority-before-waiting",
+      "source_date": "2026-07-19",
+      "source_incident": "found 2026-07-19 reviewing the coding approval timeout regression.",
+      "content_sha256": "cefcbe3ef7c5c11a651752376366dbffcee6d61036f7dba0a6294581fd2d611b",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 1
+  "post_migration_entry_count": 2
 }
