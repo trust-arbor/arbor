@@ -10,6 +10,11 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @grok_agent_profile_filename "arbor-agent-profile.md"
   @grok_agent_profile_content """
   ---
+  name: arbor-no-shell
+  description: Arbor ACP coding profile with native file tools and no process execution.
+  prompt_mode: full
+  permission_mode: default
+  agents_md: true
   tools:
     - read_file
     - search_replace
@@ -21,6 +26,9 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     - get_task_output
     - kill_task
   ---
+
+  Use native file tools for reading and editing.
+  Process execution and subagents are unavailable by design.
   """
   @max_grok_auth_bytes 1_048_576
   @grok_isolation_env [
