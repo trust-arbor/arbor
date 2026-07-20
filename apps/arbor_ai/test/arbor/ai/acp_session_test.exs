@@ -315,6 +315,24 @@ defmodule Arbor.AI.AcpSessionTest do
     assert :ok = AcpSession.close(session)
   end
 
+  test "create_session uses initialized directory workspace when cwd and workspace opts are absent" do
+    install_fake_progress_client(100)
+    workspace = temporary_directory("acp-session-initialized-workspace")
+
+    assert {:ok, session} =
+             AcpSession.start_link(
+               provider: :test,
+               workspace: {:directory, workspace},
+               client_opts: [test_pid: self()],
+               timeout: 1_000
+             )
+
+    assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+    assert {:ok, %{"sessionId" => "fake-session"}} = AcpSession.create_session(session)
+    assert_receive {:fake_new_session, ^workspace}
+    assert :ok = AcpSession.close(session)
+  end
+
   test "create_session explicit cwd overrides directory workspace for provider session/new" do
     install_fake_progress_client(100)
     workspace = temporary_directory("acp-session-cwd-workspace")
