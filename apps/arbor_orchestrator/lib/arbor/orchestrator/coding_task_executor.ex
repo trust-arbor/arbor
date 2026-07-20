@@ -107,6 +107,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @max_metric_usage_string_bytes 1_024
   @max_metric_usage_encoded_bytes 16_384
   @max_validation_failure_reason_bytes 512
+  @max_pipeline_failure_reason_bytes 512
+
+  @pipeline_error_failure_nodes %{
+    "worker_recovery_send_failed" => "retry_recovered_send"
+  }
 
   @terminal_control_errors MapSet.new([
                              :unsupported,
@@ -1620,7 +1625,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         {:error, :missing_terminal_status}
 
       status == "pipeline_error" ->
-        {:error, {:pipeline_error, pipeline_error_detail(clean, worker_provider)}}
+        {:error, {:pipeline_error, pipeline_error_detail(clean, engine_result, worker_provider)}}
 
       not MapSet.member?(@success_statuses, status) ->
         {:error, {:unknown_terminal_status, status}}
@@ -1999,7 +2004,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     |> reject_nil_values()
   end
 
-  defp pipeline_error_detail(context, worker_provider) do
+  defp pipeline_error_detail(context, engine_result, worker_provider) do
     %{
       "status" => "pipeline_error",
       "error" => context_get(context, "error"),
@@ -2010,6 +2015,22 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     }
     |> Map.merge(workspace_release_projection(context))
     |> reject_nil_values()
+    |> maybe_put_pipeline_failure_reason(context_get(context, "error"), engine_result)
+  end
+
+  defp maybe_put_pipeline_failure_reason(detail, error_code, engine_result) do
+    with node_id when is_binary(node_id) <- Map.get(@pipeline_error_failure_nodes, error_code),
+         reasons when is_map(reasons) and not is_struct(reasons) <-
+           engine_result_field(engine_result, :node_failure_reasons, "node_failure_reasons"),
+         reason when is_binary(reason) <- Map.get(reasons, node_id),
+         true <-
+           byte_size(reason) in 1..@max_pipeline_failure_reason_bytes and String.valid?(reason),
+         bounded when is_binary(bounded) and bounded != "" <-
+           RunLifecycleAdapter.bound_failure_reason(reason) do
+      Map.put(detail, "failure_reason", bounded)
+    else
+      _other -> detail
+    end
   end
 
   defp attach_workspace_release_artifact(artifacts, result) do

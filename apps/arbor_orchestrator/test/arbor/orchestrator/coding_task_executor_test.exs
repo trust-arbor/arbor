@@ -2462,6 +2462,48 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                run_with_context(%{"status" => "weird", "branch" => "b1"})
     end
 
+    test "pipeline_error preserves the matched Engine failure separately from its machine code" do
+      provider_failure =
+        "Action acp_send_message failed: ACP error: 403 Forbidden: monthly spending limit reached"
+
+      assert {:error, {:pipeline_error, detail}} =
+               run_with_engine_result(
+                 %{
+                   "status" => "pipeline_error",
+                   "error" => "worker_recovery_send_failed",
+                   "workspace_id" => "ws_x"
+                 },
+                 %{
+                   node_failure_reasons: %{
+                     "implement" => "initial send failed",
+                     "retry_recovered_send" => provider_failure
+                   }
+                 }
+               )
+
+      assert detail["error"] == "worker_recovery_send_failed"
+      assert detail["failure_reason"] == provider_failure
+    end
+
+    test "pipeline_error rejects unrelated, nonbinary, and oversized Engine failures" do
+      context = %{
+        "status" => "pipeline_error",
+        "error" => "worker_recovery_send_failed"
+      }
+
+      for node_failure_reasons <- [
+            %{"implement" => "unrelated failure"},
+            %{"retry_recovered_send" => %{raw: "not a bounded string"}},
+            %{"retry_recovered_send" => String.duplicate("x", 513)}
+          ] do
+        assert {:error, {:pipeline_error, detail}} =
+                 run_with_engine_result(context, %{node_failure_reasons: node_failure_reasons})
+
+        assert detail["error"] == "worker_recovery_send_failed"
+        refute Map.has_key?(detail, "failure_reason")
+      end
+    end
+
     test "approval_denied preserves request/note without leaking arbitrary metadata" do
       assert {:ok, result} =
                run_with_context(%{
