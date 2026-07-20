@@ -146,6 +146,12 @@ defmodule Arbor.Comms do
 
   # -- Human-in-the-loop interactions (public facade) --
 
+  @doc "List interactions whose authority still reports them as pending."
+  @spec pending_interactions() :: [Arbor.Contracts.Comms.Interaction.t()]
+  def pending_interactions do
+    InteractionRouter.pending()
+  end
+
   @doc """
   Wait for an operator response to an interaction request.
 
@@ -171,7 +177,18 @@ defmodule Arbor.Comms do
   end
 
   @doc """
-  Look up a durable resolved interaction response (cluster-coherent TTL store).
+  Abandon a pending interaction with an explicit lifecycle reason.
+
+  Public facade over `InteractionRouter.abandon/2`.
+  """
+  @spec abandon_interaction(String.t(), atom() | String.t()) :: :ok | {:error, term()}
+  def abandon_interaction(request_id, reason)
+      when is_binary(request_id) and (is_atom(reason) or is_binary(reason)) do
+    InteractionRouter.abandon(request_id, reason)
+  end
+
+  @doc """
+  Look up a retained response from the interaction's authority node.
   """
   @spec get_interaction_response(String.t()) ::
           {:ok, %{response: term(), metadata: map()}} | :not_found

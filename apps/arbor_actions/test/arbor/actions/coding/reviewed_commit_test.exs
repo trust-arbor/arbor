@@ -229,6 +229,37 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
     assert payload["interaction_outcome"] == ""
   end
 
+  test "security regression: owner timeout blocks late reviewed commit approval" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("late_approval")
+    grant_git_commit!(agent_id)
+
+    context =
+      agent_id
+      |> build_context(build_signer(agent_id))
+      |> Map.put(:approval_timeout_ms, 250)
+
+    task = Task.async(fn -> ReviewedCommit.run(dirty_params(repo, head), context) end)
+    request = await_pending_request(agent_id)
+
+    assert {:error, "approval timed out"} = Task.await(task, 5_000)
+    assert {:ok, ^head} = git_head(repo)
+    assert :not_found = Arbor.Comms.get_interaction_response(request.request_id)
+
+    refute Enum.any?(
+             Arbor.Comms.InteractionRouter.pending(),
+             &(&1.request_id == request.request_id)
+           )
+
+    assert {:error, {:already_terminal, :abandoned}} =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert :not_found = Arbor.Comms.get_interaction_response(request.request_id)
+    assert {:ok, ^head} = git_head(repo)
+  end
+
   test "security regression: deny never mutates git and returns approval_denied payload" do
     {repo, head} = init_dirty_repo!()
     agent_id = unique_agent("deny")

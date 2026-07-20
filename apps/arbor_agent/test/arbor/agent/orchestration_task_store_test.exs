@@ -313,6 +313,15 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     {:ok, store: store, supervisor: supervisor}
   end
 
+  test "architecture regression: cleanup defaults to the Arbor.Comms facade", %{store: store} do
+    state = :sys.get_state(store)
+
+    assert state.approval_cleanup_interaction_router == Module.concat([:Arbor, :Comms])
+
+    refute state.approval_cleanup_interaction_router ==
+             Module.concat([:Arbor, :Comms, :InteractionRouter])
+  end
+
   test "dispatch returns before the runner completes, then stores the structured result", %{
     store: store
   } do

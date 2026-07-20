@@ -596,7 +596,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     assert message =~ "run_authorization_workdir_changed"
   end
 
-  test "direct unbound callers cannot extend the global approval timeout" do
+  test "security regression: direct approval timeout abandons the interaction" do
     Application.put_env(:arbor_orchestrator, :approval_timeout_ms, 20)
 
     agent_id = "agent_approval_timeout_#{System.unique_integer([:positive])}"
@@ -626,8 +626,15 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     assert message =~ "timed out after 0s"
     refute message =~ "timed out after 10s"
 
-    # Resolve the now-ownerless interaction so it does not leak into later tests.
-    assert :ok = Arbor.Comms.InteractionRouter.respond(request.request_id, :denied)
+    refute Enum.any?(
+             Arbor.Comms.InteractionRouter.pending(),
+             &(&1.request_id == request.request_id)
+           )
+
+    assert {:error, {:already_terminal, :abandoned}} =
+             Arbor.Comms.InteractionRouter.respond(request.request_id, :approved)
+
+    assert :not_found = Arbor.Comms.InteractionRouter.get_response(request.request_id)
   end
 
   defp await_pending_request(agent_id, attempts \\ 100)

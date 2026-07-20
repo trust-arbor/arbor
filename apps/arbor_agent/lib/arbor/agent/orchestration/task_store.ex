@@ -39,8 +39,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_runner Arbor.Agent.Orchestration.TaskRunner
   @default_approval_cleanup_mfa {Arbor.Agent.Orchestration, :cleanup_approvals_for_task, 2}
   @default_approval_cleanup_consensus Arbor.Consensus
-  # Avoid a hard compile-time dep edge on arbor_comms; same default as Orchestration.
-  @default_approval_cleanup_interaction_router Module.concat([:Arbor, :Comms, :InteractionRouter])
+  # Avoid a hard compile-time dep edge on arbor_comms; call only its public facade.
+  @default_approval_cleanup_interaction_router Module.concat([:Arbor, :Comms])
   @default_approval_cleanup_audit Arbor.Security
   @default_max_tasks 1_000
   @default_steer_retry_delay_ms 100
@@ -111,7 +111,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     * `:approval_cleanup_descriptor` - private closed scalar lifecycle cleanup
       descriptor only (`caller_id` and optional `trace_id`). Executable
       selectors (MFA, modules, functions, PIDs) are stripped on store and never
-      retained. Cleanup MFA, Consensus/InteractionRouter/Audit modules, and the
+      retained. Cleanup MFA, Consensus/Comms/Audit modules, and the
       cleanup supervisor are pinned at TaskStore init (production defaults:
       `Orchestration.cleanup_approvals_for_task/2`, real backends, normal task
       supervisor). Tests may override those only at store start.

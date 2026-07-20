@@ -131,12 +131,21 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   defmodule FakeInteractionRouter do
-    def pending do
+    def pending_interactions do
       Process.get({__MODULE__, :pending}, [])
     end
 
-    def respond(id, response, metadata) do
+    def respond_to_interaction(id, response, metadata) do
       send(self(), {:interaction_respond, id, response, metadata})
+      complete(id)
+    end
+
+    def abandon_interaction(id, reason) do
+      send(self(), {:interaction_abandon, id, reason})
+      complete(id)
+    end
+
+    defp complete(id) do
       result = Process.get({__MODULE__, :answer_result}, :ok)
 
       if result == :ok do
@@ -434,6 +443,34 @@ defmodule Arbor.Agent.OrchestrationTest do
       end
     end
 
+    def abandon_interaction(id, reason) do
+      ensure_table()
+
+      case :ets.lookup(@table, {:interaction_id, id}) do
+        [{{:interaction_id, ^id}, token}] ->
+          case :ets.lookup(@table, token) do
+            [{^token, state}] ->
+              send(state.owner, {:interaction_abandon, id, reason})
+
+              if state.answer_result == :ok do
+                pending =
+                  Enum.reject(state.interaction_pending, &(Map.get(&1, :request_id) == id))
+
+                :ets.insert(@table, {token, %{state | interaction_pending: pending}})
+                :ets.delete(@table, {:interaction_id, id})
+              end
+
+              state.answer_result
+
+            _ ->
+              :ok
+          end
+
+        _ ->
+          :ok
+      end
+    end
+
     def audit(actor_id, approval_id, source, decision, opts) do
       ensure_table()
 
@@ -459,10 +496,12 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   defmodule SharedInteractionRouter do
-    def pending, do: SharedApprovalState.interaction_pending()
+    def pending_interactions, do: SharedApprovalState.interaction_pending()
 
-    def respond(id, response, metadata),
+    def respond_to_interaction(id, response, metadata),
       do: SharedApprovalState.respond_interaction(id, response, metadata)
+
+    def abandon_interaction(id, reason), do: SharedApprovalState.abandon_interaction(id, reason)
   end
 
   defmodule SharedAudit do
@@ -816,17 +855,12 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert_received {:consensus_cancel, "prop_matching"}
 
-      assert_received {:interaction_respond, "irq_matching", :rejected, metadata}
-      assert metadata.actor == "human_1"
-      assert metadata.task_id == task_id
-      assert metadata.decision == :task_cancelled
-      assert metadata.cleanup == :task_cancellation
-      assert metadata.note =~ "task was cancelled"
+      assert_received {:interaction_abandon, "irq_matching", :task_cancellation}
 
       refute_received {:consensus_cancel, "prop_prefix"}
       refute_received {:consensus_cancel, "prop_missing"}
-      refute_received {:interaction_respond, "irq_other", _, _}
-      refute_received {:interaction_respond, "irq_missing", _, _}
+      refute_received {:interaction_abandon, "irq_other", _}
+      refute_received {:interaction_abandon, "irq_missing", _}
 
       assert {:ok, remaining} =
                Orchestration.list_pending_approvals(
@@ -944,9 +978,7 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert {:ok, %{state: :cancelled}} = Orchestration.cancel_task(task_id, opts)
 
       assert_receive {:consensus_cancel, "prop_cancel_match_" <> ^task_id}
-      assert_receive {:interaction_respond, "irq_cancel_match_" <> ^task_id, :rejected, metadata}
-      assert metadata.task_id == task_id
-      assert metadata.decision == :task_cancelled
+      assert_receive {:interaction_abandon, "irq_cancel_match_" <> ^task_id, :task_cancellation}
 
       assert_receive {:audit_answered, "human_1", "prop_cancel_match_" <> ^task_id, :consensus,
                       :task_cancelled, _},
@@ -958,8 +990,8 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       refute_received {:consensus_cancel, "prop_cancel_prefix_" <> ^task_id}
       refute_received {:consensus_cancel, "prop_cancel_missing_" <> ^task_id}
-      refute_received {:interaction_respond, "irq_cancel_prefix_" <> ^task_id, _, _}
-      refute_received {:interaction_respond, "irq_cancel_missing_" <> ^task_id, _, _}
+      refute_received {:interaction_abandon, "irq_cancel_prefix_" <> ^task_id, _}
+      refute_received {:interaction_abandon, "irq_cancel_missing_" <> ^task_id, _}
 
       assert {:ok, remaining} =
                Orchestration.list_pending_approvals(
@@ -975,7 +1007,7 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert MapSet.member?(remaining_ids, "irq_cancel_missing_" <> task_id)
 
       refute_receive {:consensus_cancel, "prop_cancel_match_" <> ^task_id}, 200
-      refute_receive {:interaction_respond, "irq_cancel_match_" <> ^task_id, _, _}, 200
+      refute_receive {:interaction_abandon, "irq_cancel_match_" <> ^task_id, _}, 200
     end
 
     test "failed task cancellation leaves every pending approval untouched" do
@@ -1019,7 +1051,7 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert Enum.sort(Enum.map(remaining, & &1.id)) == ["irq_matching", "prop_matching"]
       refute_received {:consensus_cancel, _}
-      refute_received {:interaction_respond, _, _, _}
+      refute_received {:interaction_abandon, _, _}
       refute_received {:audit_answered, _, _, _, _, _}
     end
 
@@ -1053,16 +1085,20 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert {:ok, %{state: :cancelled}} = Orchestration.cancel_task("task_1", opts)
       assert_received {:consensus_cancel, "prop_matching"}
-      assert_received {:interaction_respond, "irq_matching", :rejected, _}
+      assert_received {:interaction_abandon, "irq_matching", :task_cancellation}
 
       assert {:ok, %{state: :cancelled}} = Orchestration.cancel_task("task_1", opts)
       refute_received {:consensus_cancel, _}
-      refute_received {:interaction_respond, _, _, _}
+      refute_received {:interaction_abandon, _, _}
     end
 
-    test "already-resolved backend results do not fail a successful task cancellation" do
+    test "security regression: an answer winning cancellation cleanup is handled safely" do
       Process.put({FakeConsensus, :cancel_result}, {:error, :already_decided})
-      Process.put({FakeInteractionRouter, :answer_result}, {:error, :not_found})
+
+      Process.put(
+        {FakeInteractionRouter, :answer_result},
+        {:error, {:already_terminal, :responded}}
+      )
 
       Process.put(
         {FakeConsensus, :pending},
@@ -1093,7 +1129,7 @@ defmodule Arbor.Agent.OrchestrationTest do
                )
 
       assert_received {:consensus_cancel, "prop_stale"}
-      assert_received {:interaction_respond, "irq_stale", :rejected, _}
+      assert_received {:interaction_abandon, "irq_stale", :task_cancellation}
 
       assert_received {:audit_answered, "human_1", "prop_stale", :consensus, :task_cancelled,
                        consensus_audit}
@@ -1105,7 +1141,7 @@ defmodule Arbor.Agent.OrchestrationTest do
                        interaction_audit}
 
       assert interaction_audit[:outcome] == :already_resolved
-      assert interaction_audit[:error] == ":not_found"
+      assert interaction_audit[:error] == "{:already_terminal, :responded}"
     end
 
     test "denies unauthorized cancellation before calling the task store cancel" do
@@ -1166,16 +1202,11 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert_received {:consensus_cancel, "prop_matching"}
 
-      assert_received {:interaction_respond, "irq_matching", :rejected, metadata}
-      assert metadata.actor == "dispatch_owner"
-      assert metadata.task_id == task_id
-      assert metadata.decision == :task_terminated
-      assert metadata.cleanup == :task_termination
-      assert metadata.note =~ "task terminated"
+      assert_received {:interaction_abandon, "irq_matching", :task_termination}
 
       refute_received {:consensus_cancel, "prop_prefix"}
       refute_received {:consensus_cancel, "prop_missing"}
-      refute_received {:interaction_respond, "irq_other", _, _}
+      refute_received {:interaction_abandon, "irq_other", _}
 
       assert_received {:audit_answered, "dispatch_owner", "prop_matching", :consensus,
                        :task_terminated, consensus_audit}
@@ -1314,15 +1345,11 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert_receive {:consensus_cancel, prop_id}, 1_000
       assert prop_id == "prop_match_" <> task_id
 
-      assert_receive {:interaction_respond, irq_id, :rejected, metadata}, 1_000
+      assert_receive {:interaction_abandon, irq_id, :task_termination}, 1_000
       assert irq_id == "irq_match_" <> task_id
-      assert metadata.decision == :task_terminated
-      assert metadata.cleanup == :task_termination
-      assert metadata.actor == "dispatch_owner"
-      assert metadata.task_id == task_id
 
       refute_receive {:consensus_cancel, _}, 200
-      refute_receive {:interaction_respond, _, _, _}, 200
+      refute_receive {:interaction_abandon, _, _}, 200
 
       assert {:ok, remaining} =
                Orchestration.list_pending_approvals(

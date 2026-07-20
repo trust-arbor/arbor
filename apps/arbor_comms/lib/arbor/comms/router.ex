@@ -89,6 +89,20 @@ defmodule Arbor.Comms.Router do
         )
 
         :not_interaction
+
+      {:error, {:already_terminal, _status}} ->
+        Logger.info(
+          "[Router] Signal response references terminal request_id #{request_id}; passing through"
+        )
+
+        :not_interaction
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Router] Signal response could not transition request_id #{request_id}: #{inspect(reason)}"
+        )
+
+        :not_interaction
     end
   end
 

@@ -6,10 +6,10 @@ defmodule Arbor.Comms.InteractionRouter do
 
   Multi-node correct from Phase 1:
 
-  - **Outstanding state** lives in `InteractionRegistry` (per-node ETS
-    today, distributed-store later). Channel adapters that receive a
-    response on Node B look up by `request_id` — no PID held across
-    nodes.
+  - **Outstanding state** is serialized by the interaction's origin-node
+    authority. Phoenix.Tracker mirrors discovery across the cluster, so a
+    channel adapter on Node B can route a response by `request_id` without
+    holding a PID across nodes.
 
   - **Response delivery** broadcasts on the per-agent PubSub topic
     `"interaction:agent:" <> agent_id`. The agent's session/executor
@@ -87,9 +87,10 @@ defmodule Arbor.Comms.InteractionRouter do
   interaction's `response_topic`. Cluster-aware — works regardless of
   which node hosts the waiting agent.
 
-  The answer is also stored in a durable public lookup
+  The answer is also retained in the authority process
   (`get_response/1`) so waiters that subscribe after publication still
-  observe the decision without sleeps or lost-message races.
+  observe the decision without sleeps or lost-message races. This lookup is
+  intentionally in-memory and does not survive authority or node restart.
   """
   @spec respond(String.t(), Interaction.response(), map()) :: :ok | {:error, term()}
   def respond(request_id, response, metadata \\ %{}) when is_binary(request_id) do
@@ -101,17 +102,55 @@ defmodule Arbor.Comms.InteractionRouter do
         broadcast_response(interaction, response, metadata)
         :ok
 
+      {:error, {:already_terminal, status}} ->
+        Logger.debug("[InteractionRouter] respond/3: request_id #{request_id} already #{status}")
+
+        {:error, {:already_terminal, status}}
+
       :not_found ->
         Logger.debug(
           "[InteractionRouter] respond/3: unknown request_id #{request_id} (already resolved or expired?)"
         )
 
         {:error, :not_found}
+
+      {:error, reason} ->
+        Logger.warning(
+          "[InteractionRouter] respond/3: request_id #{request_id} transition failed: #{inspect(reason)}"
+        )
+
+        {:error, reason}
     end
   end
 
   @doc """
-  Durable public lookup for a resolved interaction response.
+  Abandon a pending interaction with an explicit lifecycle reason.
+
+  Abandonment is idempotent. If a response already won the terminal
+  transition, returns an `:already_terminal` error and leaves that response
+  unchanged.
+  """
+  @spec abandon(String.t(), atom() | String.t()) :: :ok | {:error, term()}
+  def abandon(request_id, reason)
+      when is_binary(request_id) and (is_atom(reason) or is_binary(reason)) do
+    case InteractionRegistry.abandon(request_id, reason) do
+      {:ok, %Interaction{} = interaction} ->
+        emit_signal(:abandoned, interaction, %{})
+        :ok
+
+      {:ok, :already_abandoned} ->
+        :ok
+
+      {:error, _reason} = error ->
+        error
+
+      :not_found ->
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  In-memory public lookup for a responded interaction.
 
   Returns `{:ok, %{response: term(), metadata: map()}}` when the answer is
   still within the registry TTL, otherwise `:not_found`.
@@ -132,8 +171,8 @@ defmodule Arbor.Comms.InteractionRouter do
   Wait for an interaction response without the
   visible-request-before-subscribe race.
 
-  Subscribes to the agent response topic first, then checks the durable
-  `get_response/1` store, then blocks on PubSub. Always unsubscribes.
+  Subscribes to the agent response topic first, then captures and arms the
+  origin authority before blocking on PubSub. Always unsubscribes.
 
   Options:
     * `:timeout` — milliseconds (default 60_000)
@@ -147,32 +186,30 @@ defmodule Arbor.Comms.InteractionRouter do
     pubsub = Keyword.get(opts, :pubsub, Arbor.Comms.PubSub)
     topic = Interaction.response_topic_for_agent(agent_id)
 
-    # Subscribe before any durable lookup so a concurrent respond cannot
-    # land in the gap between check and receive.
+    # Subscribe before capturing and arming the origin authority so a
+    # concurrent response cannot land in the gap before receive/after.
     :ok = Phoenix.PubSub.subscribe(pubsub, topic)
 
     try do
-      case get_response(request_id) do
-        {:ok, %{response: response, metadata: metadata}} ->
-          {:ok, response, metadata}
+      case InteractionRegistry.capture_timeout_authority(request_id, timeout) do
+        {:ok, _capture, {:terminal, terminal}} ->
+          timeout_terminal_result(terminal)
 
-        :not_found ->
+        {:ok, capture, :armed} ->
           receive do
             {:interaction_response, %{request_id: ^request_id, response: response} = payload} ->
               metadata = Map.get(payload, :metadata) || Map.get(payload, "metadata") || %{}
               {:ok, response, metadata}
           after
             timeout ->
-              # Last-chance durable lookup: response may have been stored while
-              # we were in receive/after without a delivered mailbox message.
-              case get_response(request_id) do
-                {:ok, %{response: response, metadata: metadata}} ->
-                  {:ok, response, metadata}
-
-                :not_found ->
-                  {:error, :timeout}
-              end
+              finalize_timeout(capture, request_id)
           end
+
+        :not_found ->
+          {:error, :timeout}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     after
       Phoenix.PubSub.unsubscribe(pubsub, topic)
@@ -185,6 +222,19 @@ defmodule Arbor.Comms.InteractionRouter do
   """
   @spec pending() :: [Interaction.t()]
   def pending, do: InteractionRegistry.list_pending()
+
+  defp finalize_timeout(capture, request_id) do
+    case InteractionRegistry.finalize_timeout(capture, request_id) do
+      {:ok, terminal} -> timeout_terminal_result(terminal)
+      _ -> {:error, :timeout}
+    end
+  end
+
+  defp timeout_terminal_result(%{status: :responded, response: response, metadata: metadata}) do
+    {:ok, response, metadata || %{}}
+  end
+
+  defp timeout_terminal_result(_terminal), do: {:error, :timeout}
 
   ## Private — request flow
 

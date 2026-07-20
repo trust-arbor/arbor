@@ -5,7 +5,7 @@ defmodule Arbor.Agent.Orchestration do
   Slice 1 intentionally wraps the existing approval backends:
 
     * `Arbor.Consensus` authorization proposals
-    * `Arbor.Comms.InteractionRouter` approval requests, when available
+    * `Arbor.Comms` interaction requests, when available
 
   The module does not own approval state. It normalizes, filters, and answers
   requests held by those systems.
@@ -605,6 +605,17 @@ defmodule Arbor.Agent.Orchestration do
           opts
         )
 
+      {:error, {:already_terminal, _status} = backend_reason} ->
+        record_task_approval_cleanup(
+          approval,
+          task_id,
+          caller_id,
+          reason,
+          :already_resolved,
+          backend_reason,
+          opts
+        )
+
       {:error, backend_reason} ->
         Logger.warning(
           "Approval cleanup after task #{cleanup_reason_label(reason)} failed " <>
@@ -628,16 +639,14 @@ defmodule Arbor.Agent.Orchestration do
 
   defp dispatch_task_lifecycle_cleanup(
          %PendingApproval{source: :interaction, id: id},
-         task_id,
-         caller_id,
+         _task_id,
+         _caller_id,
          reason,
          opts
        ) do
-    metadata = task_lifecycle_cleanup_metadata(task_id, caller_id, reason, opts)
-
     opts
-    |> interaction_router()
-    |> apply_if_exported(:respond, [id, :rejected, metadata])
+    |> interaction_backend()
+    |> apply_if_exported(:abandon_interaction, [id, reason])
   end
 
   defp dispatch_task_lifecycle_cleanup(
@@ -650,16 +659,6 @@ defmodule Arbor.Agent.Orchestration do
     opts
     |> consensus_module()
     |> apply_if_exported(:cancel, [id])
-  end
-
-  defp task_lifecycle_cleanup_metadata(task_id, caller_id, reason, opts) do
-    {decision, cleanup_tag, note} = cleanup_semantics(reason)
-
-    decision
-    |> answer_metadata(caller_id, opts)
-    |> Map.put(:task_id, task_id)
-    |> Map.put(:cleanup, cleanup_tag)
-    |> Map.put(:note, note)
   end
 
   defp record_task_approval_cleanup(
@@ -762,8 +761,8 @@ defmodule Arbor.Agent.Orchestration do
 
   defp interaction_pending(opts) do
     opts
-    |> interaction_router()
-    |> apply_if_exported(:pending, [])
+    |> interaction_backend()
+    |> apply_if_exported(:pending_interactions, [])
     |> case do
       interactions when is_list(interactions) ->
         interactions
@@ -838,8 +837,8 @@ defmodule Arbor.Agent.Orchestration do
     metadata = answer_metadata(decision, caller_id, opts)
 
     opts
-    |> interaction_router()
-    |> apply_if_exported(:respond, [id, response, metadata])
+    |> interaction_backend()
+    |> apply_if_exported(:respond_to_interaction, [id, response, metadata])
     |> normalize_backend_result()
   end
 
@@ -1124,8 +1123,8 @@ defmodule Arbor.Agent.Orchestration do
     :exit, _ -> false
   end
 
-  defp interaction_router(opts) do
-    opt(opts, :interaction_router, Module.concat([:Arbor, :Comms, :InteractionRouter]))
+  defp interaction_backend(opts) do
+    opt(opts, :interaction_router, Module.concat([:Arbor, :Comms]))
   end
 
   defp security_module(opts), do: opt(opts, :security_module, Arbor.Security)

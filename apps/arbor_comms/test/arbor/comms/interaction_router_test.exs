@@ -376,6 +376,77 @@ defmodule Arbor.Comms.InteractionRouterTest do
     test "responding to an unknown request_id returns {:error, :not_found}" do
       assert {:error, :not_found} = InteractionRouter.respond("irq_nonexistent", :approved)
     end
+
+    test "non-approval text is terminally responded without an approval decision" do
+      assert {:ok, request_id} =
+               InteractionRouter.request(
+                 %{
+                   kind: :clarification,
+                   agent_id: "test_agent",
+                   user_id: "no_presence_user",
+                   description: "Which branch?"
+                 },
+                 adapter_map: %{}
+               )
+
+      assert :ok = InteractionRouter.respond(request_id, {:text, "main"})
+      assert {:ok, terminal} = InteractionRegistry.get_terminal(request_id)
+      assert terminal.status == :responded
+      assert terminal.decision == nil
+      assert terminal.response == {:text, "main"}
+    end
+  end
+
+  describe "await_response/3 terminal lifecycle" do
+    test "immediate retained response still wins before the waiter subscribes" do
+      assert {:ok, request_id} =
+               InteractionRouter.request(
+                 %{
+                   kind: :approval,
+                   agent_id: "test_agent",
+                   user_id: "no_presence_user",
+                   description: "Approve immediately?"
+                 },
+                 adapter_map: %{}
+               )
+
+      assert :ok = InteractionRouter.respond(request_id, :approved, %{decision: :approve})
+
+      assert {:ok, :approved, %{decision: :approve}} =
+               InteractionRouter.await_response(request_id, "test_agent", timeout: 5)
+    end
+
+    test "security regression: timeout abandons and rejects every late approval" do
+      assert {:ok, request_id} =
+               InteractionRouter.request(
+                 %{
+                   kind: :approval,
+                   agent_id: "test_agent",
+                   user_id: "no_presence_user",
+                   description: "Approve before timeout?"
+                 },
+                 adapter_map: %{}
+               )
+
+      assert {:error, :timeout} =
+               InteractionRouter.await_response(request_id, "test_agent", timeout: 5)
+
+      refute Enum.any?(InteractionRouter.pending(), &(&1.request_id == request_id))
+      assert {:ok, terminal} = InteractionRegistry.get_terminal(request_id)
+      assert terminal.status == :abandoned
+      assert terminal.reason == :await_timeout
+      assert :not_found = InteractionRouter.get_response(request_id)
+
+      assert {:error, {:already_terminal, :abandoned}} =
+               InteractionRouter.respond(request_id, :approved, %{decision: :approve})
+
+      assert :not_found = InteractionRouter.get_response(request_id)
+      assert {:ok, terminal_after_late_response} = InteractionRegistry.get_terminal(request_id)
+      assert terminal_after_late_response.status == :abandoned
+      assert terminal_after_late_response.response == nil
+
+      assert :ok = Arbor.Comms.abandon_interaction(request_id, :await_timeout)
+    end
   end
 
   ## Helpers
