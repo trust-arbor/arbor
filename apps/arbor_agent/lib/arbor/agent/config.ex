@@ -14,6 +14,7 @@ defmodule Arbor.Agent.Config do
       config :arbor_agent,
         default_task_executor: Arbor.Agent.Orchestration.TaskRunner,
         executor_callback_timeout_ms: 250,
+        executor_finalization_timeout_ms: 2_000,
         task_executors: %{
           "coding_change" => MyApp.CodingPipelineExecutor
         }
@@ -22,7 +23,8 @@ defmodule Arbor.Agent.Config do
   Without an explicit runner override, both the default and kinded paths use
   the JSON-clean TaskExecutor boundary. Unknown, blank, unavailable, or
   invalid configured executors fail closed. Optional progress/cancel callbacks
-  are bounded by `executor_callback_timeout_ms/0`.
+  are bounded by `executor_callback_timeout_ms/0`. Required terminal artifact
+  finalization uses the separate `executor_finalization_timeout_ms/0` bound.
 
   Production root wiring maps structured kinds (for example `"coding_change"`)
   to concrete TaskExecutor modules in the umbrella `config/config.exs`. This
@@ -42,6 +44,9 @@ defmodule Arbor.Agent.Config do
   # Best-effort bound for optional task_status/2 and cancel_task/2 callbacks.
   # Short on purpose: hung executors must not freeze status or cancellation.
   @default_executor_callback_timeout_ms 250
+  # Terminal artifact publication may write a bounded file and is mandatory for
+  # executors that opt in, so it gets a larger but still finite deadline.
+  @default_executor_finalization_timeout_ms 2_000
   @coding_executor_modes MapSet.new(["pipeline", "legacy"])
 
   @doc "Return the operator-selected coding executor mode."
@@ -151,6 +156,25 @@ defmodule Arbor.Agent.Config do
          ) do
       ms when is_integer(ms) and ms > 0 -> ms
       _ -> @default_executor_callback_timeout_ms
+    end
+  end
+
+  @doc """
+  Timeout (ms) for an opted-in executor's mandatory `finalize_task/4` callback.
+
+  Finalization runs after terminal steering reconciliation and before TaskStore
+  publishes a successful result. A timeout fails the outer task rather than
+  silently dropping required terminal evidence.
+  """
+  @spec executor_finalization_timeout_ms() :: pos_integer()
+  def executor_finalization_timeout_ms do
+    case Application.get_env(
+           @app,
+           :executor_finalization_timeout_ms,
+           @default_executor_finalization_timeout_ms
+         ) do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> @default_executor_finalization_timeout_ms
     end
   end
 

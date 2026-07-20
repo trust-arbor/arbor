@@ -53,6 +53,13 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   Operational errors are retained by TaskStore as deferred controls for bounded
   retry. Explicit runner overrides report steering as unsupported.
 
+  Configured executors may implement `finalize_task/4` for mandatory terminal artifact retention.
+  TaskStore calls it only after a successful configured
+  executor return and terminal steering reconciliation. It is time-bounded
+  separately from status and cancellation; an error, exit, or timeout fails
+  the outer task. The callback must preserve and return a JSON-clean result,
+  and explicit runner overrides do not invoke this callback.
+
   ## Task kinds
 
   Plain string tasks and legacy maps with `input` / `prompt` / `message` /
@@ -148,6 +155,9 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
           | {:ok, :queued, steering_delivery_mode()}
           | {:error, :unsupported | term()}
 
+  @typedoc "Ordered, terminally reconciled steering controls."
+  @type reconciled_steering_controls :: [steering_control()]
+
   @doc """
   Execute a task for `agent_id` with the given task payload and context.
 
@@ -193,5 +203,25 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   """
   @callback steer_task(agent_id(), steering_control(), execution_context()) :: steering_result()
 
-  @optional_callbacks task_status: 2, cancel_task: 2, steer_task: 3
+  @doc """
+  Optionally finalize a successful configured executor result.
+
+  TaskStore calls this only for a successful configured executor return, after
+  terminal steering reconciliation. The callback is time-bounded separately
+  from status and cancellation callbacks. An implementing executor uses it for
+  mandatory terminal artifact retention and must preserve and return a
+  JSON-clean result payload. An error, exit, or timeout makes the outer task
+  fail. Explicit runner overrides do not invoke this callback.
+  """
+  @callback finalize_task(
+              agent_id(),
+              result_payload(),
+              reconciled_steering_controls(),
+              execution_context()
+            ) :: {:ok, result_payload()} | {:error, term()}
+
+  @optional_callbacks task_status: 2,
+                      cancel_task: 2,
+                      steer_task: 3,
+                      finalize_task: 4
 end

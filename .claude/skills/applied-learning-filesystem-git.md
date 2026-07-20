@@ -266,3 +266,7 @@ environment, so a test can overwrite real CLI configuration or credentials. Inje
 tool-specific home explicitly (for example `GROK_HOME`) and build fixture paths from that
 absolute value; restore the environment in `on_exit` (found 2026-07-19 when a Grok sandbox
 collision test wrote its temporary profile into the real `~/.grok`).
+
+<!-- applied-learning: use-lstat-to-reject-a-symlink-leaf-without-rejecting-canonicalized-system-ancestors -->
+<a id="applied-learning-use-lstat-to-reject-a-symlink-leaf-without-rejecting-canonicalized-system-ancestors"></a>
+**Use `lstat` to reject a symlink leaf without rejecting canonicalized system ancestors.** `SafePath.resolve_real/1` can turn macOS `/var` into `/private/var`; requiring the resolved string to equal the caller's expanded spelling rejects an ordinary directory reached through a system alias. When the invariant is "the final path entry itself is not a symlink," require `File.lstat/1` to report the expected type, then use the canonical path for downstream containment and identity checks (found 2026-07-20 while testing terminal coding-evidence roots).

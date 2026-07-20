@@ -4,6 +4,17 @@ Read this when changing durable stores, checkpoints, journals, migrations, recov
 
 ## Retained Applied Learning
 
+<!-- applied-learning: trust-the-store-s-advertised-durability-class-not-its-configured-backend -->
+<a id="applied-learning-trust-the-store-s-advertised-durability-class-not-its-configured-backend"></a>
+**Trust the store's advertised durability class, not its configured backend.**
+`Arbor.Persistence.BufferedStore` reports `:process_lifetime` even when it fronts
+a database, because its cache-first writes deliberately absorb backend failures
+and cannot guarantee that every acknowledged value survives restart. Do not call
+such data durable merely because `backend: Postgres` is configured; use
+`Arbor.Persistence.durability_class/3` through the facade and select a store whose
+contract matches the recovery claim (found 2026-07-20 while designing terminal
+coding-task artifact retention).
+
 <!-- applied-learning: run-postgres-specific-tests-with-the-postgres-test-adapter -->
 <a id="applied-learning-run-postgres-specific-tests-with-the-postgres-test-adapter"></a>
 **Run Postgres-specific tests with the Postgres test adapter.** Arbor defaults

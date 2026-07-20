@@ -51,9 +51,49 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterProvenanceTest do
     end)
   end
 
+  test "known optional artifact evidence: task_evidence is admitted but not provenance" do
+    provenance =
+      assert_pipeline_artifact_descriptors_accepted(fn artifacts, root ->
+        Map.put(artifacts, "task_evidence", %{
+          "path" => Path.join(root, "task-evidence.json"),
+          "sha256" => String.duplicate("b", 64),
+          "byte_size" => 96,
+          "schema_version" => 1,
+          "task_id" => "coding-benchmark-task"
+        })
+      end)
+
+    refute Map.has_key?(provenance, "task_evidence")
+  end
+
   test "security regression: optional artifact evidence rejects unknown top-level artifact" do
     assert_pipeline_artifact_descriptors_rejected(fn artifacts, _root ->
       Map.put(artifacts, "unexpected_evidence", %{})
+    end)
+  end
+
+  test "security regression: optional artifact evidence rejects task_evidence unknown field" do
+    assert_pipeline_artifact_descriptors_rejected(fn artifacts, root ->
+      Map.put(artifacts, "task_evidence", %{
+        "path" => Path.join(root, "task-evidence.json"),
+        "sha256" => String.duplicate("b", 64),
+        "byte_size" => 96,
+        "schema_version" => 1,
+        "task_id" => "coding-benchmark-task",
+        "content" => "inline evidence"
+      })
+    end)
+  end
+
+  test "security regression: optional artifact evidence rejects malformed task_evidence" do
+    assert_pipeline_artifact_descriptors_rejected(fn artifacts, root ->
+      Map.put(artifacts, "task_evidence", %{
+        "path" => Path.join(root, "task-evidence.json"),
+        "sha256" => "not-a-digest",
+        "byte_size" => 96,
+        "schema_version" => 1,
+        "task_id" => "coding-benchmark-task"
+      })
     end)
   end
 

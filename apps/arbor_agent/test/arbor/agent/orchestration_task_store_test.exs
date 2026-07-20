@@ -269,6 +269,57 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
   end
 
+  defmodule FinalizingExecutor do
+    def run(agent_id, task, context) do
+      send(recording_pid(), {:finalizing_executor_started, self(), agent_id, task, context})
+
+      receive do
+        {:finish, result} -> result
+      after
+        1_000 -> {:error, :test_timeout}
+      end
+    end
+
+    def steer_task(agent_id, control, context) do
+      send(recording_pid(), {:finalizing_steer_called, agent_id, control, context, self()})
+      {:ok, :queued, :next_stage}
+    end
+
+    def finalize_task(agent_id, result, controls, context) do
+      send(recording_pid(), {:finalize_task_called, agent_id, result, controls, context, self()})
+
+      case Application.get_env(:arbor_agent, :task_store_test_finalize, :success) do
+        :success ->
+          {:ok, Map.put(result, "finalized", true)}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        :raise ->
+          raise "finalize_task boom"
+
+        :exit ->
+          exit(:finalize_task_exit)
+
+        :hang ->
+          receive do
+          after
+            30_000 -> {:error, :late_finalization}
+          end
+
+        :invalid ->
+          :ok
+
+        :non_json ->
+          {:ok, Map.put(result, "owner", self())}
+      end
+    end
+
+    defp recording_pid do
+      Application.fetch_env!(:arbor_agent, :task_store_test_pid)
+    end
+  end
+
   defmodule NoRunModule do
     def other, do: :ok
   end
@@ -295,6 +346,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     original_progress = Application.get_env(:arbor_agent, :task_store_test_progress)
     original_cancel = Application.get_env(:arbor_agent, :task_store_test_cancel)
     original_steer = Application.get_env(:arbor_agent, :task_store_test_steer)
+    original_finalize = Application.get_env(:arbor_agent, :task_store_test_finalize)
     original_cleanup_behavior = Application.get_env(:arbor_agent, :lifecycle_cleanup_behavior)
 
     Application.put_env(:arbor_agent, :task_store_test_pid, self())
@@ -307,6 +359,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       restore_env(:task_store_test_progress, original_progress)
       restore_env(:task_store_test_cancel, original_cancel)
       restore_env(:task_store_test_steer, original_steer)
+      restore_env(:task_store_test_finalize, original_finalize)
       restore_env(:lifecycle_cleanup_behavior, original_cleanup_behavior)
     end)
 
@@ -464,6 +517,143 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     refute_receive {:task_steering_transition, %{task_id: ^task_id, status: "delivered"}},
                    100
+  end
+
+  test "terminal finalization receives reconciled controls before success is published", %{
+    supervisor: supervisor
+  } do
+    store = start_finalizing_store(supervisor)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "retain evidence"},
+               name: store,
+               task_id: "task_finalize_success"
+             )
+
+    assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task,
+                    %{"task_id" => ^task_id}}
+
+    assert {:ok, control} =
+             TaskStore.steer(task_id, "preserve this correction", name: store)
+
+    assert control["status"] == "queued"
+    assert_receive {:finalizing_steer_called, "agent_1", queued_control, _, _}
+    assert queued_control["control_id"] == control["control_id"]
+
+    send(runner_pid, {:finish, {:ok, %{"status" => "no_changes", "branch" => "test/x"}}})
+
+    assert_receive {:finalize_task_called, "agent_1", original_result, [final_control], context,
+                    _callback_pid},
+                   1_000
+
+    assert original_result == %{"status" => "no_changes", "branch" => "test/x"}
+    assert context == %{"task_id" => task_id}
+    assert final_control["control_id"] == control["control_id"]
+    assert final_control["status"] == "delivered"
+    assert is_binary(final_control["delivered_at"])
+    assert final_control["message"] == "preserve this correction"
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :done
+      assert status.steering["counts"] == %{"delivered" => 1}
+
+      assert {:ok, result} = TaskStore.result(task_id, name: store)
+      assert result.result_type == :coding_change
+      assert result.raw["finalized"] == true
+    end)
+  end
+
+  test "opted-in terminal finalization failures and timeouts fail the outer task", %{
+    supervisor: supervisor
+  } do
+    cases = [
+      {{:error, :disk_full}, ":disk_full"},
+      {:raise, ":executor_callback_exception"},
+      {:exit, ":executor_callback_exit"},
+      {:invalid, ":invalid_finalization_result"},
+      {:non_json, ":non_json_finalization_result"},
+      {:hang, ":executor_callback_timeout"}
+    ]
+
+    for {mode, expected_reason} <- cases do
+      Application.put_env(:arbor_agent, :task_store_test_finalize, mode)
+
+      store =
+        start_finalizing_store(supervisor,
+          executor_finalization_timeout_ms: 40
+        )
+
+      task_id = "task_finalize_#{System.unique_integer([:positive])}"
+
+      assert {:ok, ^task_id} =
+               TaskStore.dispatch(
+                 "agent_1",
+                 %{"kind" => "coding_change", "input" => "fail finalization"},
+                 name: store,
+                 task_id: task_id
+               )
+
+      assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
+      send(runner_pid, {:finish, {:ok, %{"status" => "no_changes", "branch" => "test/x"}}})
+
+      assert_eventually(fn ->
+        assert {:ok, status} = TaskStore.status(task_id, name: store)
+        assert status.state == :failed
+
+        assert {:error, {:failed, {:task_finalization_failed, ^expected_reason}}} =
+                 TaskStore.result(task_id, name: store)
+      end)
+    end
+  end
+
+  test "terminal finalization is not called for executor failure or explicit runner overrides", %{
+    supervisor: supervisor
+  } do
+    store = start_finalizing_store(supervisor)
+
+    assert {:ok, failed_task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "runner fails"},
+               name: store
+             )
+
+    assert_receive {:finalizing_executor_started, failed_runner, "agent_1", _task, _context}
+    send(failed_runner, {:finish, {:error, :runner_failed}})
+
+    assert_eventually(fn ->
+      assert {:error, {:failed, :runner_failed}} =
+               TaskStore.result(failed_task_id, name: store)
+    end)
+
+    refute_receive {:finalize_task_called, _, _, _, _, _}, 50
+
+    override_store =
+      Module.concat(__MODULE__, :"FinalizerOverride#{System.unique_integer([:positive])}")
+
+    start_supervised!(
+      {TaskStore, name: override_store, task_supervisor: supervisor},
+      id: override_store
+    )
+
+    assert {:ok, override_task_id} =
+             TaskStore.dispatch("agent_1", "override",
+               name: override_store,
+               runner: FinalizingExecutor,
+               task_id: "task_finalize_override"
+             )
+
+    assert_receive {:finalizing_executor_started, override_runner, "agent_1", "override", _opts}
+    send(override_runner, {:finish, {:ok, %{"content" => "done"}}})
+
+    assert_eventually(fn ->
+      assert {:ok, _result} = TaskStore.result(override_task_id, name: override_store)
+    end)
+
+    refute_receive {:finalize_task_called, _, _, _, _, _}, 50
   end
 
   test "failed completion keeps accepted queued controls explicitly unconfirmed", %{
@@ -1965,6 +2155,17 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   defp start_configured_steering_store(supervisor, opts \\ []) do
     store = Module.concat(__MODULE__, :"SteeringStore#{System.unique_integer([:positive])}")
     Application.put_env(:arbor_agent, :default_task_executor, SteeringExecutor)
+
+    start_supervised!({TaskStore, [name: store, task_supervisor: supervisor] ++ opts}, id: store)
+    store
+  end
+
+  defp start_finalizing_store(supervisor, opts \\ []) do
+    store = Module.concat(__MODULE__, :"FinalizingStore#{System.unique_integer([:positive])}")
+
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => FinalizingExecutor
+    })
 
     start_supervised!({TaskStore, [name: store, task_supervisor: supervisor] ++ opts}, id: store)
     store

@@ -193,6 +193,62 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
     refute Map.has_key?(result.payload.artifacts["acp_transcript"], "turns")
   end
 
+  test "promotes and canonicalizes a valid task evidence descriptor" do
+    task_evidence = %{
+      path: "/tmp/task/task-evidence.json",
+      sha256: String.duplicate("d", 64),
+      byte_size: 96,
+      schema_version: 1,
+      task_id: "task-1"
+    }
+
+    artifacts = coding_artifacts(%{"task_evidence" => task_evidence})
+    raw = %{status: "change_committed", branch: "agent/x", artifacts: artifacts}
+
+    result = TaskArtifacts.normalize(raw)
+
+    assert result.result_type == :coding_change
+
+    assert result.payload.artifacts["task_evidence"] == %{
+             "path" => "/tmp/task/task-evidence.json",
+             "sha256" => String.duplicate("d", 64),
+             "byte_size" => 96,
+             "schema_version" => 1,
+             "task_id" => "task-1"
+           }
+
+    assert result.payload.report.artifacts["task_evidence"] ==
+             result.payload.artifacts["task_evidence"]
+  end
+
+  test "security regression: rejects inline, unknown, and malformed task evidence" do
+    valid = %{
+      "path" => "/tmp/task/task-evidence.json",
+      "sha256" => String.duplicate("e", 64),
+      "byte_size" => 96,
+      "schema_version" => 1,
+      "task_id" => "task-1"
+    }
+
+    for bad <- [
+          Map.put(valid, "content", "inline evidence"),
+          Map.put(valid, "authority", "execute"),
+          Map.put(valid, "sha256", "not-a-digest"),
+          Map.delete(valid, "task_id")
+        ] do
+      raw = %{
+        "status" => "no_changes",
+        "artifacts" => coding_artifacts(%{"task_evidence" => bad})
+      }
+
+      assert TaskArtifacts.normalize(raw) == %{
+               result_type: :value,
+               payload: %{value: raw},
+               raw: raw
+             }
+    end
+  end
+
   test "security regression: rejects inline unknown and malformed acp transcript descriptors" do
     valid = %{
       "path" => "/tmp/t.json",

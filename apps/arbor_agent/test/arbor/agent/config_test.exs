@@ -19,16 +19,35 @@ defmodule Arbor.Agent.ConfigTest do
     original_executors = Application.get_env(:arbor_agent, :task_executors)
     original_default = Application.get_env(:arbor_agent, :default_task_executor)
     original_callback_timeout = Application.get_env(:arbor_agent, :executor_callback_timeout_ms)
+
+    original_finalization_timeout =
+      Application.get_env(:arbor_agent, :executor_finalization_timeout_ms)
+
     original_mode = Application.get_env(:arbor_agent, :coding_executor_mode)
 
     on_exit(fn ->
       restore_env(:task_executors, original_executors)
       restore_env(:default_task_executor, original_default)
       restore_env(:executor_callback_timeout_ms, original_callback_timeout)
+      restore_env(:executor_finalization_timeout_ms, original_finalization_timeout)
       restore_env(:coding_executor_mode, original_mode)
     end)
 
     :ok
+  end
+
+  test "executor_finalization_timeout_ms/0 has a larger positive default and accepts config" do
+    Application.delete_env(:arbor_agent, :executor_finalization_timeout_ms)
+    assert Config.executor_finalization_timeout_ms() == 2_000
+
+    Application.put_env(:arbor_agent, :executor_finalization_timeout_ms, 750)
+    assert Config.executor_finalization_timeout_ms() == 750
+
+    Application.put_env(:arbor_agent, :executor_finalization_timeout_ms, 0)
+    assert Config.executor_finalization_timeout_ms() == 2_000
+
+    Application.put_env(:arbor_agent, :executor_finalization_timeout_ms, "nope")
+    assert Config.executor_finalization_timeout_ms() == 2_000
   end
 
   test "default_task_executor/0 returns TaskRunner by default" do

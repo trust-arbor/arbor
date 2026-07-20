@@ -39,6 +39,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
                                  ))
   @coding_artifact_optional_keys MapSet.new(~w(
                                    acp_transcript
+                                   task_evidence
                                    workspace_release
                                  ))
   @coding_artifact_path_keys ~w(
@@ -51,7 +52,12 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   @max_provider_session_id_length 200
 
   alias Arbor.Contracts.Comms.ApprovalAnswer
-  alias Arbor.Contracts.Coding.{TranscriptDescriptor, WorkspaceReleaseDescriptor}
+
+  alias Arbor.Contracts.Coding.{
+    TaskEvidenceDescriptor,
+    TranscriptDescriptor,
+    WorkspaceReleaseDescriptor
+  }
 
   @doc "Normalize a runner result into the public task-result artifact shape."
   @spec normalize(term()) :: map()
@@ -435,6 +441,9 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   defp valid_optional_artifact_field?("acp_transcript", value),
     do: TranscriptDescriptor.valid?(value)
 
+  defp valid_optional_artifact_field?("task_evidence", value),
+    do: TaskEvidenceDescriptor.valid?(value)
+
   defp valid_optional_artifact_field?("workspace_release", value),
     do: WorkspaceReleaseDescriptor.valid?(value)
 
@@ -451,6 +460,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
     normalized
     |> normalize_optional_artifact("acp_transcript", TranscriptDescriptor)
+    |> normalize_optional_artifact("task_evidence", TaskEvidenceDescriptor)
     |> normalize_optional_artifact("workspace_release", WorkspaceReleaseDescriptor)
   end
 

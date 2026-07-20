@@ -30,6 +30,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   time-bounded under the task supervisor (see Config
   `executor_callback_timeout_ms/0`); hung callbacks are killed and status falls
   back to the stored view while cancel continues with the turn bridge + hard kill.
+  An opted-in `finalize_task/4` callback is different: TaskStore calls it after
+  terminal steering reconciliation but before publishing success, and failure or
+  timeout fails the outer task so required evidence is never silently omitted.
   """
 
   use GenServer
@@ -197,6 +200,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
        max_tasks: Keyword.get(opts, :max_tasks, @default_max_tasks),
        executor_callback_timeout_ms:
          Keyword.get(opts, :executor_callback_timeout_ms, Config.executor_callback_timeout_ms()),
+       executor_finalization_timeout_ms:
+         Keyword.get(
+           opts,
+           :executor_finalization_timeout_ms,
+           Config.executor_finalization_timeout_ms()
+         ),
        steer_retry_delay_ms:
          Keyword.get(opts, :steer_retry_delay_ms, @default_steer_retry_delay_ms),
        max_steer_retry_delay_ms:
@@ -425,7 +434,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     remove_ref(state, ref)
   end
 
-  # Publish terminal record first; return optional cleanup job for later mailbox drain.
+  # Finalize opted-in successful results before publishing the terminal record;
+  # return optional approval cleanup for a later mailbox drain.
   defp terminalize_completion(state, task_id, result, now) do
     case Map.fetch(state.tasks, task_id) do
       {:ok, record} ->
@@ -441,6 +451,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             |> Map.put(:updated_at, now)
             |> maybe_reconcile_terminal_controls()
             |> maybe_revoke_completed_task_capabilities()
+            |> maybe_finalize_task_result(result, state)
 
           {put_in(state.tasks[task_id], record),
            cleanup_job(task_id, descriptor, :task_termination)}
@@ -976,6 +987,82 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp maybe_reconcile_terminal_controls(record), do: record
 
+  # Configured executors may make terminal evidence retention mandatory. The
+  # callback sees the exact successful executor result plus controls only after
+  # their terminal states are reconciled. Explicit runner overrides never cross
+  # this library boundary.
+  defp maybe_finalize_task_result(
+         %{state: :done, context_mode: :json_clean} = record,
+         runner_result,
+         state
+       ) do
+    module = Map.get(record, :executor)
+
+    if is_atom(module) and Code.ensure_loaded?(module) and
+         function_exported?(module, :finalize_task, 4) do
+      finalize_configured_task(record, runner_result, state, module)
+    else
+      record
+    end
+  end
+
+  defp maybe_finalize_task_result(record, _runner_result, _state), do: record
+
+  defp finalize_configured_task(record, {:ok, result}, state, module)
+       when is_map(result) and not is_struct(result) do
+    case canonicalize_and_roundtrip(result) do
+      {:ok, clean_result} ->
+        invoke_task_finalizer(record, clean_result, state, module)
+
+      {:error, _reason} ->
+        finalization_failed(record, :non_json_success_result)
+    end
+  end
+
+  defp finalize_configured_task(record, _runner_result, _state, _module),
+    do: finalization_failed(record, :invalid_success_result)
+
+  defp invoke_task_finalizer(record, result, state, module) do
+    timeout =
+      Map.get(
+        state,
+        :executor_finalization_timeout_ms,
+        Config.executor_finalization_timeout_ms()
+      )
+
+    callback_result =
+      call_executor_callback(
+        state,
+        fn -> module.finalize_task(record.agent_id, result, record.controls, record.context) end,
+        timeout
+      )
+
+    case callback_result do
+      {:ok, finalized} when is_map(finalized) and not is_struct(finalized) ->
+        case canonicalize_and_roundtrip(finalized) do
+          {:ok, clean} -> Map.put(record, :result, normalize_result(clean))
+          {:error, _reason} -> finalization_failed(record, :non_json_finalization_result)
+        end
+
+      {:error, reason} ->
+        finalization_failed(record, reason)
+
+      _other ->
+        finalization_failed(record, :invalid_finalization_result)
+    end
+  end
+
+  defp finalization_failed(record, reason) do
+    record
+    |> Map.merge(%{
+      state: :failed,
+      current_step: "failed",
+      waiting_on: nil,
+      result: nil,
+      error: {:task_finalization_failed, bounded_error(reason)}
+    })
+  end
+
   defp bounded_error(result) do
     result
     |> inspect(limit: 10, printable_limit: 160)
@@ -1215,6 +1302,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   # supervisor so a hung callback cannot freeze status or block cancellation.
   defp call_executor_callback(state, fun) when is_function(fun, 0) do
     timeout = Map.get(state, :executor_callback_timeout_ms, Config.executor_callback_timeout_ms())
+    call_executor_callback(state, fun, timeout)
+  end
+
+  defp call_executor_callback(state, fun, timeout)
+       when is_function(fun, 0) and is_integer(timeout) and timeout > 0 do
     supervisor = Map.fetch!(state, :task_supervisor)
 
     # Rescue/catch inside the task so raises do not log as Task.Supervisor

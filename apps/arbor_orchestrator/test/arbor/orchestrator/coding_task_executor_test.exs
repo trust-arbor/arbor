@@ -102,6 +102,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     def archive(root, plan, dot_source, manifest) do
       Arbor.Orchestrator.CodingPlan.ArtifactStore.archive(root, plan, dot_source, manifest)
     end
+
+    def archive_terminal_evidence(root, task_id, result, controls) do
+      Arbor.Orchestrator.CodingPlan.ArtifactStore.archive_terminal_evidence(
+        root,
+        task_id,
+        result,
+        controls
+      )
+    end
   end
 
   defmodule ObservedCompiler do
@@ -271,6 +280,30 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defmodule InvalidArtifactStoreReply do
     @moduledoc false
     def archive(_root, _plan, _dot_source, _manifest), do: {:ok, %{"unexpected" => "reply"}}
+  end
+
+  defmodule InvalidTerminalArtifactStoreReply do
+    @moduledoc false
+    def archive_terminal_evidence(_root, _task_id, _result, _controls),
+      do: {:ok, %{"unexpected" => "reply"}}
+  end
+
+  defmodule RaisingTerminalArtifactStore do
+    @moduledoc false
+    def archive_terminal_evidence(_root, _task_id, _result, _controls),
+      do: raise("terminal evidence store failed")
+  end
+
+  defmodule InsecureTerminalArtifactStore do
+    @moduledoc false
+
+    def archive_terminal_evidence(root, task_id, result, controls) do
+      with {:ok, descriptor} <-
+             ArtifactStore.archive_terminal_evidence(root, task_id, result, controls),
+           :ok <- File.chmod(descriptor["path"], 0o644) do
+        {:ok, descriptor}
+      end
+    end
   end
 
   defmodule SlowRunner do
@@ -631,6 +664,45 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       },
       overrides
     )
+  end
+
+  defp prepare_finalize_artifacts do
+    task_id = "task_coding_1"
+    digest = Base.encode16(:crypto.hash(:sha256, task_id), case: :lower)
+    root = Path.join(Config.coding_pipeline_logs_root(), "task-" <> digest)
+    File.mkdir_p!(root)
+
+    for filename <- ["coding-plan.json", "coding-pipeline.dot", "coding-compile-manifest.json"] do
+      path = Path.join(root, filename)
+      File.write!(path, "{}")
+      File.chmod!(path, 0o600)
+    end
+
+    root
+  end
+
+  defp finalize_result(root) do
+    %{
+      "status" => "change_committed",
+      "canonical_status" => "change_committed",
+      "response_text" => "kept result field",
+      "workspace_release_status" => "retained",
+      "workspace_expires_at" => "2026-07-21T12:00:00Z",
+      "metrics" => %{"completed_node_count" => 2},
+      "validation" => [%{"command" => "mix test", "passed" => true}],
+      "review" => %{"recommendation" => "approve"},
+      "artifacts" => %{
+        "coding_plan_path" => Path.join(root, "coding-plan.json"),
+        "coding_pipeline_path" => Path.join(root, "coding-pipeline.dot"),
+        "compile_manifest_path" => Path.join(root, "coding-compile-manifest.json"),
+        "graph_hash" => String.duplicate("a", 64),
+        "compiler_version" => "coding-plan-1"
+      }
+    }
+  end
+
+  defp sha256(value) do
+    Base.encode16(:crypto.hash(:sha256, value), case: :lower)
   end
 
   defp configured_repo_path do
@@ -2848,6 +2920,142 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                )
 
       refute Process.get(:coding_task_control_calls)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Terminal evidence finalization
+  # ---------------------------------------------------------------------------
+
+  describe "finalize_task" do
+    test "attaches evidence while preserving the successful executor result" do
+      root = prepare_finalize_artifacts()
+      result = finalize_result(root)
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 result,
+                 [valid_control()],
+                 valid_context()
+               )
+
+      assert finalized["response_text"] == "kept result field"
+      assert finalized["workspace_release_status"] == "retained"
+      assert finalized["workspace_expires_at"] == "2026-07-21T12:00:00Z"
+      assert finalized["metrics"] == %{"completed_node_count" => 2}
+      assert finalized["artifacts"]["coding_plan_path"] == result["artifacts"]["coding_plan_path"]
+
+      assert Map.keys(finalized["artifacts"]) |> MapSet.new() ==
+               MapSet.new(~w(
+                 coding_plan_path
+                 coding_pipeline_path
+                 compile_manifest_path
+                 graph_hash
+                 compiler_version
+                 task_evidence
+               ))
+
+      evidence = finalized["artifacts"]["task_evidence"]
+      assert evidence["task_id"] == "task_coding_1"
+      assert evidence["path"] == Path.join(root, "coding-terminal-evidence.json")
+      assert evidence["byte_size"] == File.stat!(evidence["path"]).size
+      assert evidence["sha256"] == sha256(File.read!(evidence["path"]))
+    end
+
+    test "rejects a symlink artifact and a path outside the trusted task root" do
+      root = prepare_finalize_artifacts()
+      outside = Path.join(Process.get(:coding_executor_tmp_dir), "outside-plan.json")
+      File.write!(outside, "outside")
+      File.rm!(Path.join(root, "coding-plan.json"))
+      File.ln_s!(outside, Path.join(root, "coding-plan.json"))
+
+      assert {:error, {:invalid_finalize_artifact_file, :symlink}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 finalize_result(root),
+                 [],
+                 valid_context()
+               )
+
+      result = put_in(finalize_result(root), ["artifacts", "coding_plan_path"], outside)
+
+      assert {:error, {:invalid_finalize_artifact_path, "coding_plan_path"}} =
+               CodingTaskExecutor.finalize_task("agent_1", result, [], valid_context())
+    end
+
+    test "rejects malformed controls and malformed store replies" do
+      root = prepare_finalize_artifacts()
+
+      assert {:error, {:invalid_task_id, :control_character}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 finalize_result(root),
+                 [],
+                 valid_context(%{"task_id" => "task\nwith-control"})
+               )
+
+      assert {:error, {:invalid_finalize_controls, :too_many}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 finalize_result(root),
+                 Enum.map(1..101, &valid_control(%{"sequence" => &1, "control_id" => "c-#{&1}"})),
+                 valid_context()
+               )
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        InvalidTerminalArtifactStoreReply
+      )
+
+      assert {:error,
+              {:invalid_coding_terminal_evidence_descriptor, {:unknown_field, "unexpected"}}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 finalize_result(root),
+                 [],
+                 valid_context()
+               )
+    end
+
+    test "rejects store exceptions instead of returning result without evidence" do
+      root = prepare_finalize_artifacts()
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        RaisingTerminalArtifactStore
+      )
+
+      assert {:error, {:coding_terminal_evidence_store_error, "terminal evidence store failed"}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 finalize_result(root),
+                 [],
+                 valid_context()
+               )
+    end
+
+    test "independently rejects an insecure terminal evidence file mode" do
+      root = prepare_finalize_artifacts()
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        InsecureTerminalArtifactStore
+      )
+
+      assert {:error,
+              {:invalid_coding_terminal_evidence_descriptor,
+               {:terminal_evidence_file_unavailable,
+                {:invalid_finalize_artifact_file, :insecure_mode}}}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 finalize_result(root),
+                 [],
+                 valid_context()
+               )
     end
   end
 

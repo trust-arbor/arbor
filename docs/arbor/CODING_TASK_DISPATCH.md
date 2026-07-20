@@ -402,6 +402,18 @@ result from returning, so no descriptor can be attached through that result
 path even when source capture already persisted the file. In that case the
 deterministic task-root path shown above remains the post-mortem lookup.
 
+### Terminal task evidence artifact
+
+Completed coding results expose only the bounded descriptor under
+`artifacts.task_evidence`; public results never include the evidence body. The
+task-owned private JSON artifact is mode `0600` and contains references to the
+plan, DOT graph, and their hashes, plus reconciled steering history, bounded
+validation outputs, and the review verdict.
+
+This artifact is post-mortem and audit evidence. It is not execution authority,
+does not grant approval or replay capability, and does not claim that
+`TaskStore` state or queued controls survive a BEAM restart.
+
 ## Rollback (legacy executor)
 
 Rollback is operator-only, temporary for **one release window**, and selected

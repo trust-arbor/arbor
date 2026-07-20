@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
-  "source_captured_on": "2026-07-19",
-  "entry_count": 463,
+  "source_captured_on": "2026-07-20",
+  "entry_count": 465,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5563,8 +5563,34 @@
       "source_incident": "found 2026-07-19 reviewing the coding approval timeout regression.",
       "content_sha256": "cefcbe3ef7c5c11a651752376366dbffcee6d61036f7dba0a6294581fd2d611b",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 464,
+      "source_kind": "post-migration",
+      "slug": "trust-the-store-s-advertised-durability-class-not-its-configured-backend",
+      "title": "Trust the store's advertised durability class, not its configured backend.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-trust-the-store-s-advertised-durability-class-not-its-configured-backend",
+      "source_date": "2026-07-20",
+      "source_incident": "found 2026-07-20 while designing terminal coding-task artifact retention).",
+      "content_sha256": "1f8e525758557a58ba11e6036cfec55ebef8ebd37a17a84ce40166a8bde663fe",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 465,
+      "source_kind": "post-migration",
+      "slug": "use-lstat-to-reject-a-symlink-leaf-without-rejecting-canonicalized-system-ancestors",
+      "title": "Use `lstat` to reject a symlink leaf without rejecting canonicalized system ancestors.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-use-lstat-to-reject-a-symlink-leaf-without-rejecting-canonicalized-system-ancestors",
+      "source_date": "2026-07-20",
+      "source_incident": "found 2026-07-20 while testing terminal coding-evidence roots).",
+      "content_sha256": "b9f7be8511b6ecb73f24f873d7a9c15f69f93764a5837cb404ecb6799ff20266",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 2
+  "post_migration_entry_count": 4
 }

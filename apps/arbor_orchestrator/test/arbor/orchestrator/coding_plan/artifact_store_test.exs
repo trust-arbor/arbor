@@ -213,6 +213,177 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     refute Enum.any?(File.ls!(root), &String.contains?(&1, ".tmp-"))
   end
 
+  test "archives closed terminal evidence with digest, size, and restrictive mode", %{root: root} do
+    File.mkdir_p!(root)
+    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    result = terminal_result(root)
+    controls = [terminal_control()]
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, controls)
+
+    {:ok, canonical_root} = Arbor.Common.SafePath.resolve_real(root)
+    evidence_path = Path.join(canonical_root, "coding-terminal-evidence.json")
+    bytes = File.read!(evidence_path)
+
+    assert descriptor == %{
+             "path" => evidence_path,
+             "sha256" => Base.encode16(:crypto.hash(:sha256, bytes), case: :lower),
+             "byte_size" => byte_size(bytes),
+             "schema_version" => 1,
+             "task_id" => "task_coding_1"
+           }
+
+    assert {:ok, stat} = File.stat(evidence_path)
+    assert (stat.mode &&& 0o777) == 0o600
+
+    assert Jason.decode!(bytes) == %{
+             "schema_version" => 1,
+             "task_id" => "task_coding_1",
+             "terminal_status" => "change_committed",
+             "canonical_status" => "change_committed",
+             "compiled_workflow" => %{
+               "coding_plan_path" => Path.join(canonical_root, "coding-plan.json"),
+               "coding_pipeline_path" => Path.join(canonical_root, "coding-pipeline.dot"),
+               "compile_manifest_path" =>
+                 Path.join(canonical_root, "coding-compile-manifest.json"),
+               "graph_hash" => String.duplicate("a", 64),
+               "compiler_version" => "coding-plan-1"
+             },
+             "steering_history" => controls,
+             "validation_outputs" => [%{"command" => "mix test", "passed" => true}],
+             "review_verdict" => %{
+               "recommendation" => "approve",
+               "tier_decision" => "allow",
+               "human_required" => false,
+               "security_veto" => false,
+               "blast_radius" => "low"
+             }
+           }
+
+    assert Enum.sort(File.ls!(root)) == [
+             "coding-terminal-evidence.json"
+           ]
+  end
+
+  test "terminal evidence is deterministic and closed", %{root: root} do
+    File.mkdir_p!(root)
+    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    result = terminal_result(root)
+
+    assert {:ok, first} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, [])
+
+    first_bytes = File.read!(first["path"])
+
+    assert {:ok, second} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, [])
+
+    assert second == first
+    assert File.read!(second["path"]) == first_bytes
+
+    top_level_keys =
+      ~r/^  "([^"]+)":/m
+      |> Regex.scan(first_bytes, capture: :all_but_first)
+      |> List.flatten()
+
+    assert top_level_keys == Enum.sort(top_level_keys)
+
+    evidence = Jason.decode!(first_bytes)
+    assert Map.keys(evidence) |> MapSet.new() == MapSet.new(~w(
+             schema_version
+             task_id
+             terminal_status
+             canonical_status
+             compiled_workflow
+             steering_history
+             validation_outputs
+             review_verdict
+           ))
+    assert evidence["validation_outputs"] == [%{"command" => "mix test", "passed" => true}]
+
+    assert evidence["review_verdict"] == %{
+             "recommendation" => "approve",
+             "tier_decision" => "allow",
+             "human_required" => false,
+             "security_veto" => false,
+             "blast_radius" => "low"
+           }
+  end
+
+  test "large unretained result fields do not prevent bounded evidence archival", %{root: root} do
+    File.mkdir_p!(root)
+
+    result =
+      root
+      |> terminal_result()
+      |> Map.put("diff", String.duplicate("x", 1_100_000))
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, [])
+
+    evidence = File.read!(descriptor["path"])
+    refute evidence =~ ~s("diff")
+    assert byte_size(evidence) < 1_048_576
+  end
+
+  test "rejects symlink roots, malformed evidence, oversized data, and bad controls", %{
+    base: base,
+    root: root
+  } do
+    File.mkdir_p!(root)
+    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    result = terminal_result(root)
+    link = Path.join(base, "root-link")
+    File.ln_s!(root, link)
+
+    assert {:error, {:invalid_terminal_root, _reason}} =
+             ArtifactStore.archive_terminal_evidence(link, "task_coding_1", result, [])
+
+    assert {:error, {:invalid_terminal_result, :not_successful}} =
+             ArtifactStore.archive_terminal_evidence(
+               root,
+               "task_coding_1",
+               Map.put(result, "canonical_status", "unknown"),
+               []
+             )
+
+    assert {:error, {:invalid_terminal_result, :not_successful}} =
+             ArtifactStore.archive_terminal_evidence(
+               root,
+               "task_coding_1",
+               Map.put(result, "status", "unknown"),
+               []
+             )
+
+    oversized = Map.put(result, "validation", [String.duplicate("x", 1_048_576)])
+
+    assert {:error, {:terminal_evidence_too_large, 1_048_576}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", oversized, [])
+
+    assert {:error, {:invalid_terminal_controls, :expected_list}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, %{})
+
+    assert {:error, {:invalid_terminal_task_id, :invalid_value}} =
+             ArtifactStore.archive_terminal_evidence(root, "task\nwith-control", result, [])
+
+    assert {:error, {:invalid_terminal_control, :identity_or_order}} =
+             ArtifactStore.archive_terminal_evidence(
+               root,
+               "task_coding_1",
+               result,
+               [terminal_control(%{"task_id" => "other-task"})]
+             )
+
+    assert {:error, {:invalid_terminal_controls, :too_many}} =
+             ArtifactStore.archive_terminal_evidence(
+               root,
+               "task_coding_1",
+               result,
+               Enum.map(1..101, &terminal_control(%{"sequence" => &1, "control_id" => "c-#{&1}"}))
+             )
+  end
+
   defp plan_fixture do
     %{
       "version" => 1,
@@ -228,6 +399,47 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       "graph_hash" => String.duplicate("a", 64),
       "template_version" => "coding-change-v1"
     }
+  end
+
+  defp terminal_result(root) do
+    {:ok, expanded_root} = Arbor.Common.SafePath.resolve_real(root)
+
+    %{
+      "status" => "change_committed",
+      "canonical_status" => "change_committed",
+      "validation" => [%{"command" => "mix test", "passed" => true}],
+      "review" => %{"recommendation" => "approve"},
+      "tier_decision" => "allow",
+      "human_required" => false,
+      "security_veto" => false,
+      "blast_radius" => "low",
+      "artifacts" => %{
+        "coding_plan_path" => Path.join(expanded_root, "coding-plan.json"),
+        "coding_pipeline_path" => Path.join(expanded_root, "coding-pipeline.dot"),
+        "compile_manifest_path" => Path.join(expanded_root, "coding-compile-manifest.json"),
+        "graph_hash" => String.duplicate("a", 64),
+        "compiler_version" => "coding-plan-1"
+      }
+    }
+  end
+
+  defp terminal_control(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "control_id" => "control_exact_1",
+        "task_id" => "task_coding_1",
+        "sequence" => 1,
+        "status" => "delivered",
+        "sender_id" => "agent_owner",
+        "message" => "apply the correction",
+        "queued_at" => "2026-07-10T12:00:00Z",
+        "delivered_at" => "2026-07-10T12:01:00Z",
+        "target_stage" => nil,
+        "delivery_mode" => "same_session_follow_up",
+        "error" => nil
+      },
+      overrides
+    )
   end
 
   defp read_artifacts(descriptor) do

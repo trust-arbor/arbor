@@ -42,7 +42,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @behaviour Arbor.Contracts.Agent.TaskExecutor
 
   alias Arbor.Common.SafePath
-  alias Arbor.Contracts.Coding.{Plan, TranscriptDescriptor, WorkspaceReleaseDescriptor}
+
+  alias Arbor.Contracts.Coding.{
+    Plan,
+    TaskEvidenceDescriptor,
+    TranscriptDescriptor,
+    WorkspaceReleaseDescriptor
+  }
+
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Config
 
@@ -184,6 +191,43 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   ))
 
   @artifact_path_keys ~w(coding_plan_path coding_pipeline_path compile_manifest_path)
+
+  @finalize_result_keys MapSet.new(~w(
+    status
+    canonical_status
+    branch
+    commit
+    commit_hash
+    repo_path
+    worktree_path
+    diff
+    files
+    validation
+    review
+    review_recommendation
+    tier_decision
+    human_required
+    security_veto
+    blast_radius
+    pr_url
+    workspace_id
+    worker_session_id
+    worker_provider_session_id
+    response_text
+    error
+    approval_request_id
+    approval_note
+    acp_agent
+    worker_provider
+    metrics
+    workspace_release_status
+    workspace_expires_at
+    artifacts
+  ))
+
+  @finalize_artifact_optional_keys MapSet.new(~w(acp_transcript workspace_release))
+  @max_finalize_controls 100
+  @max_finalize_task_id_bytes 512
 
   @success_statuses MapSet.new(~w(
     approval_denied
@@ -342,6 +386,32 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, managed_control} <- build_managed_control(control_data) do
       deliver_managed_control(control_data.task_id, agent_id, managed_control)
     end
+  end
+
+  @doc "Persist terminal coding evidence and attach its verified descriptor."
+  @impl true
+  @spec finalize_task(String.t(), map(), list(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def finalize_task(agent_id, result, controls, context) do
+    with :ok <- validate_agent_id(agent_id),
+         {:ok, exec_ctx} <- validate_context(context),
+         :ok <- validate_finalize_task_id(exec_ctx.task_id),
+         :ok <- validate_finalize_result(result),
+         :ok <- validate_finalize_controls(controls),
+         {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
+         :ok <- validate_finalize_artifact_files(result, logs_root),
+         {:ok, descriptor} <-
+           archive_terminal_evidence(logs_root, exec_ctx.task_id, result, controls),
+         {:ok, descriptor} <-
+           validate_terminal_evidence_descriptor(descriptor, logs_root, exec_ctx.task_id) do
+      artifacts = Map.fetch!(result, "artifacts")
+      {:ok, Map.put(result, "artifacts", Map.put(artifacts, "task_evidence", descriptor))}
+    end
+  rescue
+    exception -> {:error, {:coding_task_finalize_error, Exception.message(exception)}}
+  catch
+    :exit, reason -> {:error, {:coding_task_finalize_exit, reason}}
+    kind, reason -> {:error, {:coding_task_finalize_throw, {kind, reason}}}
   end
 
   # ===========================================================================
@@ -546,6 +616,228 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     case String.trim(agent_id) do
       "" -> {:error, :invalid_agent_id}
       _ -> :ok
+    end
+  end
+
+  defp validate_agent_id(_agent_id), do: {:error, :invalid_agent_id}
+
+  defp validate_finalize_result(result) when is_map(result) and not is_struct(result) do
+    with :ok <- ensure_string_keyed_json_map(result, :non_json_result),
+         :ok <- reject_unknown_keys(result, @finalize_result_keys, :unknown_result_key),
+         {:ok, _status} <- require_nonblank(result, "status"),
+         {:ok, canonical_status} <- require_nonblank(result, "canonical_status"),
+         true <- MapSet.member?(@success_statuses, Map.fetch!(result, "status")),
+         true <- MapSet.member?(@success_statuses, canonical_status),
+         :ok <- validate_finalize_artifacts(Map.get(result, "artifacts")),
+         :ok <- validate_finalize_optional_data(result) do
+      :ok
+    else
+      false -> {:error, {:invalid_finalize_result, :not_successful}}
+      {:error, _reason} = error -> error
+      _ -> {:error, {:invalid_finalize_result, :malformed}}
+    end
+  end
+
+  defp validate_finalize_result(_result), do: {:error, :invalid_finalize_result}
+
+  defp validate_finalize_task_id(task_id)
+       when is_binary(task_id) and byte_size(task_id) <= @max_finalize_task_id_bytes do
+    if String.valid?(task_id) and String.trim(task_id) != "" and
+         not String.contains?(task_id, <<0>>) and
+         not String.match?(task_id, ~r/[\x00-\x1F\x7F]/),
+       do: :ok,
+       else: {:error, {:invalid_task_id, :control_character}}
+  end
+
+  defp validate_finalize_task_id(_task_id),
+    do: {:error, {:invalid_task_id, :invalid_value}}
+
+  defp validate_finalize_artifacts(artifacts)
+       when is_map(artifacts) and not is_struct(artifacts) do
+    required = @artifact_descriptor_keys
+    keys = Map.keys(artifacts) |> MapSet.new()
+
+    with true <- MapSet.subset?(required, keys),
+         true <- MapSet.subset?(keys, MapSet.union(required, @finalize_artifact_optional_keys)),
+         :ok <-
+           validate_nonblank_binary(Map.get(artifacts, "coding_plan_path"), "coding_plan_path"),
+         :ok <-
+           validate_nonblank_binary(
+             Map.get(artifacts, "coding_pipeline_path"),
+             "coding_pipeline_path"
+           ),
+         :ok <-
+           validate_nonblank_binary(
+             Map.get(artifacts, "compile_manifest_path"),
+             "compile_manifest_path"
+           ),
+         :ok <- validate_hash(Map.get(artifacts, "graph_hash"), "graph_hash"),
+         :ok <-
+           validate_nonblank_binary(Map.get(artifacts, "compiler_version"), "compiler_version") do
+      :ok
+    else
+      false -> {:error, {:invalid_finalize_artifacts, :fields}}
+      {:error, _reason} = error -> error
+      _ -> {:error, {:invalid_finalize_artifacts, :fields}}
+    end
+  end
+
+  defp validate_finalize_artifacts(_artifacts),
+    do: {:error, {:invalid_finalize_artifacts, :expected_map}}
+
+  defp validate_finalize_optional_data(result) do
+    with :ok <- validate_finalize_json_field(result, "validation", &is_list/1),
+         :ok <- validate_finalize_json_field(result, "review", &is_map/1) do
+      :ok
+    end
+  end
+
+  defp validate_finalize_json_field(result, key, predicate) do
+    case Map.fetch(result, key) do
+      :error ->
+        :ok
+
+      {:ok, nil} ->
+        :ok
+
+      {:ok, value} ->
+        if predicate.(value) and not is_struct(value),
+          do: ensure_json_value(value),
+          else: {:error, {:invalid_finalize_field, key}}
+    end
+  end
+
+  defp validate_finalize_controls(controls) when is_list(controls) do
+    if length(controls) > @max_finalize_controls do
+      {:error, {:invalid_finalize_controls, :too_many}}
+    else
+      Enum.reduce_while(controls, :ok, fn control, :ok ->
+        if is_map(control) and not is_struct(control) do
+          case ensure_string_keyed_json_map(control, :non_json_control) do
+            :ok -> {:cont, :ok}
+            {:error, _reason} = error -> {:halt, error}
+          end
+        else
+          {:halt, {:error, {:invalid_finalize_control, :expected_map}}}
+        end
+      end)
+    end
+  end
+
+  defp validate_finalize_controls(_controls),
+    do: {:error, {:invalid_finalize_controls, :expected_list}}
+
+  defp validate_finalize_artifact_files(result, root) do
+    artifacts = Map.fetch!(result, "artifacts")
+
+    expected = %{
+      "coding_plan_path" => Path.join(root, "coding-plan.json"),
+      "coding_pipeline_path" => Path.join(root, "coding-pipeline.dot"),
+      "compile_manifest_path" => Path.join(root, "coding-compile-manifest.json")
+    }
+
+    with :ok <- validate_finalize_artifact_paths(artifacts, expected),
+         :ok <- validate_regular_terminal_file(expected["coding_plan_path"]),
+         :ok <- validate_regular_terminal_file(expected["coding_pipeline_path"]),
+         :ok <- validate_regular_terminal_file(expected["compile_manifest_path"]) do
+      :ok
+    end
+  end
+
+  defp validate_finalize_artifact_paths(artifacts, expected) do
+    Enum.reduce_while(@artifact_path_keys, :ok, fn key, :ok ->
+      expected_path = Map.fetch!(expected, key)
+
+      case Map.get(artifacts, key) do
+        path when is_binary(path) ->
+          if path == expected_path,
+            do: {:cont, :ok},
+            else: {:halt, {:error, {:invalid_finalize_artifact_path, key}}}
+
+        _ ->
+          {:halt, {:error, {:invalid_finalize_artifact_path, key}}}
+      end
+    end)
+  end
+
+  defp validate_regular_terminal_file(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        if Bitwise.band(mode, 0o777) == 0o600,
+          do: :ok,
+          else: {:error, {:invalid_finalize_artifact_file, :insecure_mode}}
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, {:invalid_finalize_artifact_file, :symlink}}
+
+      {:ok, _stat} ->
+        {:error, {:invalid_finalize_artifact_file, :not_regular}}
+
+      {:error, reason} ->
+        {:error, {:invalid_finalize_artifact_file, reason}}
+    end
+  end
+
+  defp archive_terminal_evidence(root, task_id, result, controls) do
+    store = Config.coding_plan_artifact_store()
+
+    cond do
+      not is_atom(store) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      not Code.ensure_loaded?(store) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      not function_exported?(store, :archive_terminal_evidence, 4) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      true ->
+        invoke_terminal_evidence_store(store, root, task_id, result, controls)
+    end
+  end
+
+  defp invoke_terminal_evidence_store(store, root, task_id, result, controls) do
+    case store.archive_terminal_evidence(root, task_id, result, controls) do
+      {:ok, descriptor} when is_map(descriptor) -> {:ok, descriptor}
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_coding_terminal_evidence_store_reply}
+    end
+  rescue
+    exception -> {:error, {:coding_terminal_evidence_store_error, Exception.message(exception)}}
+  catch
+    :exit, reason -> {:error, {:coding_terminal_evidence_store_exit, reason}}
+    kind, reason -> {:error, {:coding_terminal_evidence_store_throw, {kind, reason}}}
+  end
+
+  defp validate_terminal_evidence_descriptor(descriptor, root, task_id) do
+    with {:ok, normalized} <- TaskEvidenceDescriptor.normalize(descriptor),
+         :ok <- validate_terminal_evidence_descriptor_identity(normalized, root, task_id),
+         :ok <- validate_terminal_evidence_file(normalized) do
+      {:ok, normalized}
+    else
+      {:error, reason} -> {:error, {:invalid_coding_terminal_evidence_descriptor, reason}}
+      _ -> {:error, :invalid_coding_terminal_evidence_descriptor}
+    end
+  end
+
+  defp validate_terminal_evidence_descriptor_identity(descriptor, root, task_id) do
+    expected_path = Path.join(root, "coding-terminal-evidence.json")
+
+    if descriptor["task_id"] == task_id and descriptor["path"] == expected_path,
+      do: :ok,
+      else: {:error, :terminal_evidence_descriptor_mismatch}
+  end
+
+  defp validate_terminal_evidence_file(descriptor) do
+    with :ok <- validate_regular_terminal_file(descriptor["path"]),
+         {:ok, bytes} <- File.read(descriptor["path"]),
+         true <- byte_size(bytes) == descriptor["byte_size"],
+         true <- sha256(bytes) == descriptor["sha256"] do
+      :ok
+    else
+      false -> {:error, :terminal_evidence_file_mismatch}
+      {:error, reason} -> {:error, {:terminal_evidence_file_unavailable, reason}}
+      _ -> {:error, :terminal_evidence_file_mismatch}
     end
   end
 

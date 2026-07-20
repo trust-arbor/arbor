@@ -25,7 +25,13 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   alias Arbor.Commands.CodingParity
   alias Arbor.Common.SafePath
-  alias Arbor.Contracts.Coding.{TranscriptDescriptor, WorkspaceReleaseDescriptor}
+
+  alias Arbor.Contracts.Coding.{
+    TaskEvidenceDescriptor,
+    TranscriptDescriptor,
+    WorkspaceReleaseDescriptor
+  }
+
   alias Arbor.Orchestrator
   alias Arbor.Shell
 
@@ -44,7 +50,7 @@ defmodule Arbor.Commands.CodingBenchmark do
     coding_plan_path coding_pipeline_path compile_manifest_path compiler_version graph_hash
   )
   @required_pipeline_artifact_keys MapSet.new(@pipeline_provenance_keys)
-  @optional_pipeline_artifact_keys MapSet.new(~w(workspace_release acp_transcript))
+  @optional_pipeline_artifact_keys MapSet.new(~w(workspace_release acp_transcript task_evidence))
   @allowed_pipeline_artifact_keys MapSet.union(
                                     @required_pipeline_artifact_keys,
                                     @optional_pipeline_artifact_keys
@@ -226,7 +232,8 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   This is the same gate that runs before trusted artifact reads: required
   provenance keys must be present, only the reviewed key set is admitted, and
-  any optional `workspace_release` / `acp_transcript` descriptors must satisfy
+  any optional `workspace_release`, `acp_transcript`, or `task_evidence`
+  descriptors must satisfy
   their public contracts. Successful validation returns the required provenance
   subset only; optional evidence is never elevated into authority fields.
   """
@@ -2408,6 +2415,9 @@ defmodule Arbor.Commands.CodingBenchmark do
   defp valid_optional_artifact_descriptor?("acp_transcript", descriptor),
     do: TranscriptDescriptor.valid?(descriptor)
 
+  defp valid_optional_artifact_descriptor?("task_evidence", descriptor),
+    do: TaskEvidenceDescriptor.valid?(descriptor)
+
   defp exact_provenance_paths(artifacts, trusted_root) do
     with {:ok, %{type: :directory}} <- File.lstat(trusted_root),
          {:ok, ^trusted_root} <- SafePath.resolve_real(trusted_root),
@@ -2467,6 +2477,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   defp artifact_atom_key("graph_hash"), do: :graph_hash
   defp artifact_atom_key("workspace_release"), do: :workspace_release
   defp artifact_atom_key("acp_transcript"), do: :acp_transcript
+  defp artifact_atom_key("task_evidence"), do: :task_evidence
 
   defp read_trusted_artifact(path, trusted_root, max_bytes) do
     with {:ok, expected} <- trusted_artifact_identity(path, trusted_root),
