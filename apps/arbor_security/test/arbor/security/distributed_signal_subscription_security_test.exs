@@ -33,6 +33,7 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
   setup do
     original_authorizer = Application.get_env(:arbor_signals, :authorizer)
     original_allow_open = Application.get_env(:arbor_signals, :allow_open_authorizer)
+    original_distributed_signals = Application.get_env(:arbor_security, :distributed_signals)
 
     Application.put_env(
       :arbor_signals,
@@ -41,11 +42,15 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
     )
 
     Application.delete_env(:arbor_signals, :allow_open_authorizer)
+    Application.put_env(:arbor_security, :distributed_signals, true)
+    ensure_signals_children()
     restart_security_stores()
 
     on_exit(fn ->
       restore_env(:authorizer, original_authorizer)
       restore_env(:allow_open_authorizer, original_allow_open)
+      restore_security_env(:distributed_signals, original_distributed_signals)
+      restart_security_stores()
     end)
 
     :ok
@@ -175,6 +180,31 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
     end)
   end
 
+  defp ensure_signals_children do
+    {:ok, _started} = Application.ensure_all_started(:arbor_signals)
+
+    for child <- [
+          {Arbor.Signals.Store, []},
+          {Arbor.Signals.TopicKeys, []},
+          {Arbor.Signals.Channels, []},
+          {Arbor.Signals.Bus, []},
+          {Arbor.Signals.Relay, []}
+        ] do
+      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, {:already_started, _pid}} ->
+          :ok
+
+        {:error, :already_present} ->
+          {module, _opts} = child
+          :ok = Supervisor.delete_child(Arbor.Signals.Supervisor, module)
+          {:ok, _pid} = Supervisor.start_child(Arbor.Signals.Supervisor, child)
+      end
+    end
+  end
+
   defp internal_subscriptions do
     Enum.filter(Bus.list_subscriptions(), fn subscription ->
       match?({:internal_security_sync, _role}, subscription.principal_id)
@@ -199,4 +229,7 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_signals, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_signals, key, value)
+
+  defp restore_security_env(key, nil), do: Application.delete_env(:arbor_security, key)
+  defp restore_security_env(key, value), do: Application.put_env(:arbor_security, key, value)
 end

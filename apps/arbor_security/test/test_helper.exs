@@ -1,35 +1,6 @@
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 Code.require_file("support/oidc_test_helper.ex", __DIR__)
 
-# Security state synchronization is load-bearing and fails closed when Signals
-# is unavailable. Test config leaves dependency supervision trees empty, so
-# start the Signals children before the security stores below.
-Application.ensure_all_started(:arbor_signals)
-
-for child <- [
-      {Arbor.Signals.Store, []},
-      {Arbor.Signals.TopicKeys, []},
-      {Arbor.Signals.Channels, []},
-      {Arbor.Signals.Bus, []},
-      {Arbor.Signals.Relay, []}
-    ] do
-  case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
-    {:ok, _pid} ->
-      :ok
-
-    {:error, {:already_started, _pid}} ->
-      :ok
-
-    {:error, :already_present} ->
-      {module, _opts} = child
-      :ok = Supervisor.delete_child(Arbor.Signals.Supervisor, module)
-      {:ok, _pid} = Supervisor.start_child(Arbor.Signals.Supervisor, child)
-
-    {:error, reason} ->
-      IO.warn("Failed to start #{inspect(elem(child, 0))}: #{inspect(reason)}")
-  end
-end
-
 # Start BufferedStore instances first (used by CapabilityStore, Registry, and SigningKeyStore)
 buffered_store = Arbor.Persistence.BufferedStore
 

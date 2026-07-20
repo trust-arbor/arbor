@@ -33,6 +33,9 @@ config :arbor_trust, start_children: false
 
 config :arbor_security,
   start_children: false,
+  # Distributed state synchronization is exercised by its focused regression
+  # suite. Other app tests start isolated security stores without a Signals bus.
+  distributed_signals: false,
   # Disable file persistence in tests — everything in-memory only
   storage_backend: nil,
   # Tests that bypass Security.grant/1 create unsigned capabilities.
