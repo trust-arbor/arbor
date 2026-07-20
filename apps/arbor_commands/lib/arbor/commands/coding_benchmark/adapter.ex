@@ -116,9 +116,10 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
 
   def settle_task_workspaces(_task_id), do: {:error, :invalid_benchmark_task_id}
 
-  # Exact task+principal ACP pool settlement through the public AI facade.
-  # Must precede workspace removal so idle pooled sessions cannot hold a
-  # deleted worktree cwd.
+  # Exact task+agent ACP pool settlement through the public AI facade.
+  # `principal_id` is the SessionProfile agent/principal identity passed as
+  # the canonical `agent_id` argument. Must precede workspace removal so idle
+  # pooled sessions cannot hold a deleted worktree cwd.
   defp settle_task_acp_sessions(task_id, principal_id) do
     Arbor.AI.acp_settle_task_sessions(task_id, principal_id)
   end

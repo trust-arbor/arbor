@@ -976,16 +976,21 @@ defmodule Arbor.AI do
 
   @doc """
   Settle every idle `AcpPool` session for an exact nonblank `task_id` +
-  `agent_id` (principal) pair.
+  `agent_id` pair.
 
-  Matches `SessionProfile.task_id` and `SessionProfile.agent_id` exactly.
-  Checked-out matches refuse without removing any matching entry. Idle matches
-  are detached from pool indexes and closed synchronously before success so
-  callers may safely remove the session cwd/worktree.
+  The second identity is the SessionProfile agent/principal. Matches
+  `SessionProfile.task_id` and `SessionProfile.agent_id` exactly. Checked-out
+  matches refuse without removing any matching entry. Idle matches are
+  detached from pool indexes and closed under a shared deadline before success
+  so callers may safely remove the session cwd/worktree. Closing does not block
+  unrelated pool operations; in-progress settlements continue if the caller
+  exits or times out.
 
   When the pool process is not running there are no pool-owned sessions to
   settle — returns idempotent success with `settled_count: 0`. Busy or
   unconfirmed closes return `{:error, reason}` so callers fail closed.
+
+  Receipts use the single canonical identity field `agent_id` (never PIDs).
   """
   @spec acp_settle_task_sessions(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -1007,7 +1012,6 @@ defmodule Arbor.AI do
         {:ok,
          %{
            "agent_id" => agent_id,
-           "principal_id" => agent_id,
            "settled_count" => 0,
            "status" => "settled",
            "task_id" => task_id

@@ -50,6 +50,25 @@ defmodule Arbor.AI.AcpPoolTest do
     end
   end
 
+  # Same-library settlement close seam probe: delays until the pool force-kills
+  # the session under the shared settlement deadline (or a long safety bound).
+  defmodule SettlementCloseProbe do
+    @moduledoc false
+
+    def hang(pid, _opts, test_pid) when is_pid(pid) and is_pid(test_pid) do
+      send(test_pid, {:settlement_close_hang, pid})
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        30_000 ->
+          Process.demonitor(ref, [:flush])
+          :ok
+      end
+    end
+  end
+
   defmodule ScopeToolAction do
     @moduledoc false
     def to_tool do
@@ -456,7 +475,8 @@ defmodule Arbor.AI.AcpPoolTest do
       assert receipt["status"] == "settled"
       assert receipt["task_id"] == task_id
       assert receipt["agent_id"] == agent_id
-      assert receipt["principal_id"] == agent_id
+      # Canonical identity field is agent_id (SessionProfile agent/principal).
+      refute Map.has_key?(receipt, "principal_id")
       assert receipt["settled_count"] == 2
       refute Map.has_key?(receipt, "pid")
       refute Map.has_key?(receipt, :pid)
@@ -552,6 +572,215 @@ defmodule Arbor.AI.AcpPoolTest do
       assert {:error, :invalid_task_agent} = AcpPool.settle_task_sessions("task", "  ")
       assert {:error, :invalid_task_agent} = AcpPool.settle_task_sessions(nil, "agent")
       assert {:error, :invalid_task_agent} = AcpPool.settle_task_sessions("task", :agent)
+    end
+
+    test "pool stays responsive while settlement close is delayed" do
+      restart_pool!(default_max: 5, default_idle_timeout_ms: 300_000)
+      install_hang_settlement_close!()
+
+      task_id = "settle-responsive-#{System.unique_integer([:positive])}"
+      agent_id = "settle-agent-#{System.unique_integer([:positive])}"
+      other_task = "other-responsive-#{System.unique_integer([:positive])}"
+      cwd = temp_path("acp-settle-responsive")
+
+      assert {:ok, match} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: cwd
+               )
+
+      assert {:ok, unrelated} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: other_task,
+                 agent_id: agent_id,
+                 cwd: Path.join(cwd, "other")
+               )
+
+      assert :ok = AcpPool.checkin(match)
+      assert :ok = AcpPool.checkin(unrelated)
+
+      settle_task =
+        Task.async(fn ->
+          AcpPool.settle_task_sessions(task_id, agent_id, timeout: 2_000)
+        end)
+
+      assert_receive {:settlement_close_hang, ^match}, 1_000
+
+      # Unrelated pool ops must not wait on the delayed close.
+      {status_us, status} = :timer.tc(fn -> AcpPool.status() end)
+      assert status_us < 500_000
+      assert is_map(status)
+      assert status[:test].total >= 1
+
+      {checkout_us, checkout_result} =
+        :timer.tc(fn ->
+          AcpPool.checkout(:test,
+            client_opts: @test_client_opts,
+            task_id: other_task,
+            agent_id: agent_id,
+            cwd: Path.join(cwd, "other")
+          )
+        end)
+
+      assert checkout_us < 500_000
+      assert {:ok, ^unrelated} = checkout_result
+
+      assert {:ok, receipt} = Task.await(settle_task, 5_000)
+      assert receipt["settled_count"] == 1
+      refute Process.alive?(match)
+      assert Process.alive?(unrelated)
+    end
+
+    test "delayed/failed closes still terminate every detached match under one deadline" do
+      restart_pool!(default_max: 5, default_idle_timeout_ms: 300_000)
+      install_hang_settlement_close!()
+
+      task_id = "settle-force-#{System.unique_integer([:positive])}"
+      agent_id = "settle-agent-#{System.unique_integer([:positive])}"
+      cwd = temp_path("acp-settle-force")
+
+      assert {:ok, match1} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: cwd
+               )
+
+      assert {:ok, match2} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: Path.join(cwd, "alt")
+               )
+
+      assert :ok = AcpPool.checkin(match1)
+      assert :ok = AcpPool.checkin(match2)
+
+      started = System.monotonic_time(:millisecond)
+
+      assert {:ok, receipt} =
+               AcpPool.settle_task_sessions(task_id, agent_id, timeout: 500)
+
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert receipt["settled_count"] == 2
+      refute Process.alive?(match1)
+      refute Process.alive?(match2)
+      # One shared deadline, not N sequential full close budgets.
+      assert elapsed < 2_500
+      assert AcpPool.sessions() == []
+    end
+
+    test "in-progress settlement retry cannot return false no-match success" do
+      restart_pool!(default_max: 5, default_idle_timeout_ms: 300_000)
+      install_hang_settlement_close!()
+
+      task_id = "settle-inflight-#{System.unique_integer([:positive])}"
+      agent_id = "settle-agent-#{System.unique_integer([:positive])}"
+      cwd = temp_path("acp-settle-inflight")
+
+      assert {:ok, match} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: cwd
+               )
+
+      assert :ok = AcpPool.checkin(match)
+
+      first =
+        Task.async(fn ->
+          AcpPool.settle_task_sessions(task_id, agent_id, timeout: 2_000)
+        end)
+
+      assert_receive {:settlement_close_hang, ^match}, 1_000
+
+      # Detached but still alive: a concurrent settle must join, not empty-succeed.
+      assert Process.alive?(match)
+      refute Enum.any?(AcpPool.sessions(), &(&1.pid == match))
+
+      second =
+        Task.async(fn ->
+          AcpPool.settle_task_sessions(task_id, agent_id, timeout: 2_000)
+        end)
+
+      assert {:ok, receipt1} = Task.await(first, 5_000)
+      assert {:ok, receipt2} = Task.await(second, 5_000)
+
+      assert receipt1["settled_count"] == 1
+      assert receipt2["settled_count"] == 1
+      refute Process.alive?(match)
+
+      assert {:ok, empty} = AcpPool.settle_task_sessions(task_id, agent_id)
+      assert empty["settled_count"] == 0
+    end
+
+    test "caller death does not abandon detached settlement cleanup" do
+      restart_pool!(default_max: 5, default_idle_timeout_ms: 300_000)
+      install_hang_settlement_close!()
+
+      task_id = "settle-orphan-#{System.unique_integer([:positive])}"
+      agent_id = "settle-agent-#{System.unique_integer([:positive])}"
+      cwd = temp_path("acp-settle-orphan")
+
+      assert {:ok, match} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: cwd
+               )
+
+      assert :ok = AcpPool.checkin(match)
+
+      caller =
+        spawn(fn ->
+          _ = AcpPool.settle_task_sessions(task_id, agent_id, timeout: 2_000)
+        end)
+
+      assert_receive {:settlement_close_hang, ^match}, 1_000
+      assert Process.alive?(match)
+
+      Process.exit(caller, :kill)
+
+      # Cleanup continues without the original caller.
+      assert wait_until(fn -> not Process.alive?(match) end, 5_000)
+
+      assert {:ok, empty} = AcpPool.settle_task_sessions(task_id, agent_id)
+      assert empty["settled_count"] == 0
+      assert AcpPool.sessions() == []
+    end
+
+    test "expired preflight leaves indexed sessions unchanged" do
+      task_id = "settle-expired-#{System.unique_integer([:positive])}"
+      agent_id = "settle-agent-#{System.unique_integer([:positive])}"
+      cwd = temp_path("acp-settle-expired")
+
+      assert {:ok, match} =
+               AcpPool.checkout(:test,
+                 client_opts: @test_client_opts,
+                 task_id: task_id,
+                 agent_id: agent_id,
+                 cwd: cwd
+               )
+
+      assert :ok = AcpPool.checkin(match)
+
+      past = System.monotonic_time(:millisecond) - 1_000
+
+      assert {:error, :timeout} =
+               AcpPool.settle_task_sessions(task_id, agent_id, deadline_ms: past)
+
+      assert Process.alive?(match)
+      sessions = AcpPool.sessions()
+      assert length(sessions) == 1
+      assert Enum.any?(sessions, &(&1.pid == match and &1.status == :idle))
     end
   end
 
@@ -1246,6 +1475,47 @@ defmodule Arbor.AI.AcpPoolTest do
          opts
        )}
     )
+  end
+
+  # Installs the same-library settlement close MFA seam (never exposed on the
+  # public Arbor.AI facade). Production always uses AcpSession.close/2.
+  defp install_hang_settlement_close! do
+    original = Application.get_env(:arbor_ai, :acp_pool_session_close_mfa)
+
+    Application.put_env(
+      :arbor_ai,
+      :acp_pool_session_close_mfa,
+      {SettlementCloseProbe, :hang, [self()]}
+    )
+
+    on_exit(fn ->
+      if original do
+        Application.put_env(:arbor_ai, :acp_pool_session_close_mfa, original)
+      else
+        Application.delete_env(:arbor_ai, :acp_pool_session_close_mfa)
+      end
+    end)
+
+    :ok
+  end
+
+  defp wait_until(fun, timeout_ms)
+       when is_function(fun, 0) and is_integer(timeout_ms) and timeout_ms > 0 do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_until(fun, deadline)
+  end
+
+  defp do_wait_until(fun, deadline) do
+    if fun.() do
+      true
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        false
+      else
+        Process.sleep(20)
+        do_wait_until(fun, deadline)
+      end
+    end
   end
 
   defp assert_process_exits(pid, timeout_ms)

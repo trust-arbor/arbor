@@ -75,6 +75,9 @@ defmodule Arbor.AI.AcpPool do
   @default_max 2
   @default_idle_timeout_ms 300_000
   @default_cleanup_interval_ms 60_000
+  # Post-deadline GenServer.call budget for force-confirm + reply after the
+  # shared settlement close deadline is exhausted.
+  @settlement_reply_slack_ms 2_000
 
   defstruct [
     :cleanup_ref,
@@ -83,6 +86,11 @@ defmodule Arbor.AI.AcpPool do
     by_profile_hash: %{},
     by_affinity: %{},
     monitors: %{},
+    # Exact task+agent settlements still owning detached (possibly live) pids.
+    # Keyed by {task_id, agent_id}. Prevents false no-match success while any
+    # detached process may still be alive, and keeps cleanup independent of the
+    # original caller's mailbox/lifetime.
+    settlements: %{},
     config: %{}
   ]
 
@@ -101,6 +109,21 @@ defmodule Arbor.AI.AcpPool do
       taint: :clean,
       last_active: nil,
       checkout_count: 0
+    ]
+  end
+
+  # In-progress exact task+agent settlement tracked on the pool GenServer.
+  defmodule Settlement do
+    @moduledoc false
+
+    defstruct [
+      :task_id,
+      :agent_id,
+      :pids,
+      :detached_count,
+      :worker_pid,
+      :worker_ref,
+      callers: []
     ]
   end
 
@@ -192,16 +215,24 @@ defmodule Arbor.AI.AcpPool do
 
   Authority is the nonblank exact pair only — opaque session PIDs are never
   accepted. Matching uses `SessionProfile.task_id` and `SessionProfile.agent_id`
-  equality (never prefix/wildcard). Checked-out matches refuse atomically
-  without detaching any matching entry. Idle matches are detached from all pool
-  indexes first, then closed **synchronously** before success so callers can
-  safely remove the session cwd/worktree.
+  equality (never prefix/wildcard). The second identity is the SessionProfile
+  agent/principal; receipts use the single canonical field `agent_id`.
 
-  No matches is idempotent success (`settled_count: 0`). Generic pool reuse is
-  unchanged outside this explicit settlement path.
+  Checked-out matches refuse atomically without detaching any matching entry.
+  When all exact matches are idle they are detached from pool indexes first,
+  then closed off the pool GenServer under one shared deadline so unrelated
+  checkout/checkin/status calls stay responsive. Settlement continues if the
+  original caller exits or times out, and an in-progress settlement for the
+  same pair cannot report no-match success while any detached process may
+  still be alive. Prefer graceful `AcpSession.close`; survivors are
+  force-terminated and positively confirmed down before success.
 
-  Returns a JSON-clean receipt with `task_id`, `agent_id`, `principal_id`
-  (same principal string), `settled_count`, and `status` — never PIDs.
+  No matches (and no in-progress settlement) is idempotent success
+  (`settled_count: 0`). Generic pool reuse is unchanged outside this explicit
+  settlement path.
+
+  Returns a JSON-clean receipt with `task_id`, `agent_id`, `settled_count`,
+  and `status` — never PIDs.
   """
   @spec settle_task_sessions(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -218,12 +249,22 @@ defmodule Arbor.AI.AcpPool do
     else
       with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 30_000),
            {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
-        safe_pool_call({:settle_task_sessions, task_id, agent_id, opts}, remaining)
+        # Settlement work uses `remaining` as the shared close deadline. The
+        # GenServer.call budget is slightly larger so force-confirm + reply can
+        # complete after graceful attempts exhaust the shared deadline.
+        call_timeout = settlement_call_timeout(remaining)
+        safe_pool_call({:settle_task_sessions, task_id, agent_id, opts}, call_timeout)
       end
     end
   end
 
   def settle_task_sessions(_task_id, _agent_id, _opts), do: {:error, :invalid_task_agent}
+
+  defp settlement_call_timeout(:infinity), do: :infinity
+
+  defp settlement_call_timeout(remaining) when is_integer(remaining) and remaining >= 0 do
+    remaining + @settlement_reply_slack_ms
+  end
 
   @doc """
   Get pool status for all providers.
@@ -483,12 +524,13 @@ defmodule Arbor.AI.AcpPool do
     end
   end
 
-  def handle_call({:settle_task_sessions, task_id, agent_id, opts}, _from, state) do
+  def handle_call({:settle_task_sessions, task_id, agent_id, opts}, from, state) do
     case Arbor.AI.Timeout.ensure_active(opts) do
       :ok ->
-        settle_task_sessions_reply(state, task_id, agent_id, opts)
+        settle_task_sessions_call(state, from, task_id, agent_id, opts)
 
       {:error, reason} ->
+        # Expired preflight: leave every indexed session untouched.
         {:reply, {:error, reason}, state}
     end
   end
@@ -708,7 +750,7 @@ defmodule Arbor.AI.AcpPool do
   end
 
   @impl true
-  def handle_info({:DOWN, monitor_ref, :process, pid, _reason}, state) do
+  def handle_info({:DOWN, monitor_ref, :process, pid, reason}, state) do
     case Map.get(state.monitors, monitor_ref) do
       {:session, session_ref} ->
         Logger.debug("AcpPool: session #{inspect(pid)} died, removing from pool")
@@ -718,6 +760,32 @@ defmodule Arbor.AI.AcpPool do
       {:caller, session_ref} ->
         Logger.debug("AcpPool: caller #{inspect(pid)} died, auto-checkin session")
         state = auto_checkin(state, monitor_ref, session_ref)
+        {:noreply, state}
+
+      nil ->
+        case find_settlement_by_worker_ref(state, monitor_ref) do
+          {:ok, key, settlement} ->
+            # Worker crashed before reporting. Force-confirm survivors so we
+            # never forget a live detached process, then reply to waiters.
+            result = finalize_orphaned_settlement(settlement, reason)
+            state = complete_settlement(state, key, settlement, result)
+            {:noreply, state}
+
+          :not_found ->
+            {:noreply, state}
+        end
+    end
+  end
+
+  def handle_info({:settlement_finished, key, result}, state) do
+    case Map.get(state.settlements, key) do
+      %Settlement{} = settlement ->
+        # Drop the worker monitor; normal exit may still race a DOWN.
+        if is_reference(settlement.worker_ref) do
+          Process.demonitor(settlement.worker_ref, [:flush])
+        end
+
+        state = complete_settlement(state, key, settlement, result)
         {:noreply, state}
 
       nil ->
@@ -745,6 +813,12 @@ defmodule Arbor.AI.AcpPool do
     Enum.each(state.sessions, fn {_ref, entry} ->
       if entry.tool_server, do: ToolServer.stop(entry.tool_server.ref)
       safe_close(entry.pid)
+    end)
+
+    # Best-effort force of any detached settlement survivors so terminate does
+    # not strand live processes outside the pool indexes.
+    Enum.each(state.settlements, fn {_key, %Settlement{pids: pids}} ->
+      force_terminate_pids(pids)
     end)
 
     :ok
@@ -1247,102 +1321,353 @@ defmodule Arbor.AI.AcpPool do
 
   defp safe_close(_), do: :ok
 
-  # Exact task+agent settlement: refuse busy matches without mutation; detach
-  # idle matches from every pool index first, then close each process
-  # synchronously so callers may delete cwd only after confirmed termination.
-  defp settle_task_sessions_reply(state, task_id, agent_id, opts) do
-    matches =
-      Enum.filter(state.sessions, fn {_ref, entry} ->
-        profile = entry.profile
+  # Exact task+agent settlement:
+  # 1. Join any in-progress settlement for the same pair (never false no-match).
+  # 2. Refuse busy matches without mutation.
+  # 3. Atomically detach only when every exact match is idle.
+  # 4. Close off-GenServer under one shared deadline; reply when confirmed.
+  defp settle_task_sessions_call(state, from, task_id, agent_id, opts) do
+    key = settlement_key(task_id, agent_id)
 
-        match?(%SessionProfile{}, profile) and profile.task_id == task_id and
-          profile.agent_id == agent_id
-      end)
+    case Map.get(state.settlements, key) do
+      %Settlement{worker_ref: nil} = settlement ->
+        # Detached survivors remain tracked without an active worker. Re-arm
+        # force cleanup rather than reporting no-match success.
+        state = start_force_settlement_worker(state, key, settlement, from, opts)
+        {:noreply, state}
 
-    busy =
-      Enum.any?(matches, fn {_ref, entry} -> entry.status == :checked_out end)
+      %Settlement{} = settlement ->
+        settlement = %{settlement | callers: settlement.callers ++ [from]}
+        settlements = Map.put(state.settlements, key, settlement)
+        {:noreply, %{state | settlements: settlements}}
 
-    if busy do
-      {:reply, {:error, :sessions_busy}, state}
-    else
-      {detached, state} =
-        Enum.reduce(matches, {[], state}, fn {ref, entry}, {pids, acc} ->
-          {[entry.pid | pids], remove_session(acc, ref)}
-        end)
+      nil ->
+        matches =
+          Enum.filter(state.sessions, fn {_ref, entry} ->
+            profile = entry.profile
 
-      # Close every detached process even when one fails; only then report.
-      failures =
-        detached
-        |> Enum.reverse()
-        |> Enum.reduce([], fn pid, acc ->
-          case sync_close(pid, opts) do
-            :ok -> acc
-            {:error, reason} -> [{pid_gone_reason(pid), reason} | acc]
-          end
-        end)
-        |> Enum.reverse()
+            match?(%SessionProfile{}, profile) and profile.task_id == task_id and
+              profile.agent_id == agent_id
+          end)
 
-      case {failures, Arbor.AI.Timeout.ensure_active(opts)} do
-        {[], :ok} ->
-          receipt = %{
-            "agent_id" => agent_id,
-            "principal_id" => agent_id,
-            "settled_count" => length(detached),
-            "status" => "settled",
-            "task_id" => task_id
-          }
+        busy? = Enum.any?(matches, fn {_ref, entry} -> entry.status == :checked_out end)
 
-          {:reply, {:ok, receipt}, state}
+        cond do
+          busy? ->
+            {:reply, {:error, :sessions_busy}, state}
 
-        {[], {:error, reason}} ->
-          {:reply, {:error, reason}, state}
+          matches == [] ->
+            {:reply, {:ok, settlement_receipt(task_id, agent_id, 0)}, state}
 
-        {failures, _} ->
-          {:reply, {:error, {:settlement_close_failed, sanitize_close_failures(failures)}}, state}
-      end
+          true ->
+            {detached, state} =
+              Enum.reduce(matches, {[], state}, fn {ref, entry}, {pids, acc} ->
+                {[entry.pid | pids], remove_session(acc, ref)}
+              end)
+
+            pids = Enum.reverse(detached)
+
+            settlement = %Settlement{
+              task_id: task_id,
+              agent_id: agent_id,
+              pids: pids,
+              detached_count: length(pids),
+              worker_pid: nil,
+              worker_ref: nil,
+              callers: [from]
+            }
+
+            state = start_settlement_worker(state, key, settlement, opts, :full)
+            {:noreply, state}
+        end
     end
   end
 
-  # Synchronous close used only by explicit task settlement. Detach already
-  # happened; await process death so cwd removal is safe for the caller.
-  defp sync_close(pid, opts) when is_pid(pid) do
+  defp settlement_key(task_id, agent_id), do: {task_id, agent_id}
+
+  defp settlement_receipt(task_id, agent_id, settled_count) do
+    %{
+      "agent_id" => agent_id,
+      "settled_count" => settled_count,
+      "status" => "settled",
+      "task_id" => task_id
+    }
+  end
+
+  defp normalize_settlement_result(:ok, task_id, agent_id, settled_count) do
+    {:ok, settlement_receipt(task_id, agent_id, settled_count)}
+  end
+
+  defp normalize_settlement_result({:error, reason}, _task_id, _agent_id, _settled_count) do
+    {:error, reason}
+  end
+
+  defp start_settlement_worker(state, key, %Settlement{} = settlement, opts, mode) do
+    pool = self()
+    pids = settlement.pids
+    task_id = settlement.task_id
+    agent_id = settlement.agent_id
+    count = settlement.detached_count
+
+    {worker_pid, worker_ref} =
+      spawn_monitor(fn ->
+        result =
+          case mode do
+            :full -> settle_detached_sessions(pids, opts)
+            :force -> force_only_settlement(pids)
+          end
+
+        reply = normalize_settlement_result(result, task_id, agent_id, count)
+        send(pool, {:settlement_finished, key, reply})
+      end)
+
+    settlement = %{settlement | worker_pid: worker_pid, worker_ref: worker_ref}
+    %{state | settlements: Map.put(state.settlements, key, settlement)}
+  end
+
+  defp start_force_settlement_worker(state, key, settlement, from, opts) do
+    settlement = %{settlement | callers: settlement.callers ++ [from]}
+    start_settlement_worker(state, key, settlement, opts, :force)
+  end
+
+  defp force_only_settlement(pids) do
+    case force_terminate_and_confirm(pids, 1_000) do
+      :ok ->
+        :ok
+
+      {:error, failures} ->
+        {:error, {:settlement_close_failed, sanitize_close_failures(failures)}}
+    end
+  end
+
+  # Reply to waiters. Clear the settlement only when every detached process is
+  # confirmed down — otherwise keep survivors tracked so a later retry cannot
+  # report false no-match success while a live process remains unindexed.
+  defp complete_settlement(state, key, %Settlement{} = settlement, result) do
+    Enum.each(settlement.callers, fn caller ->
+      GenServer.reply(caller, result)
+    end)
+
+    survivors =
+      settlement.pids
+      |> List.wrap()
+      |> Enum.filter(&(is_pid(&1) and Process.alive?(&1)))
+
+    if survivors == [] do
+      %{state | settlements: Map.delete(state.settlements, key)}
+    else
+      residual = %{
+        settlement
+        | pids: survivors,
+          callers: [],
+          worker_pid: nil,
+          worker_ref: nil
+      }
+
+      %{state | settlements: Map.put(state.settlements, key, residual)}
+    end
+  end
+
+  defp find_settlement_by_worker_ref(state, worker_ref) do
+    Enum.find_value(state.settlements, :not_found, fn {key, %Settlement{} = settlement} ->
+      if is_reference(worker_ref) and settlement.worker_ref == worker_ref do
+        {:ok, key, settlement}
+      end
+    end)
+  end
+
+  # Worker vanished without a normal finish report: force-confirm survivors.
+  # complete_settlement keeps any remaining live pids tracked.
+  defp finalize_orphaned_settlement(%Settlement{} = settlement, reason) do
+    case force_terminate_and_confirm(List.wrap(settlement.pids), 1_000) do
+      :ok ->
+        {:ok,
+         settlement_receipt(settlement.task_id, settlement.agent_id, settlement.detached_count)}
+
+      {:error, failures} ->
+        {:error,
+         {:settlement_close_failed,
+          sanitize_close_failures([
+            {:worker_crashed, Arbor.LLM.sanitize_external_reason(reason)} | failures
+          ])}}
+    end
+  end
+
+  # Runs outside the pool GenServer. Shared wall-clock deadline across every
+  # detached pid (parallel graceful attempts), then force-confirm survivors.
+  # Graceful attempts reserve a small tail of the deadline for force-confirm so
+  # one slow close cannot consume the entire budget alone.
+  defp settle_detached_sessions(pids, opts) when is_list(pids) do
+    close_opts = close_opts(opts)
+    parent = self()
+    now = System.monotonic_time(:millisecond)
+
+    {graceful_deadline, confirm_ms} =
+      case Arbor.AI.Timeout.remaining(opts) do
+        {:ok, _opts, remaining} when is_integer(remaining) and remaining > 500 ->
+          confirm_ms = min(1_000, div(remaining, 4))
+          {now + (remaining - confirm_ms), confirm_ms}
+
+        {:ok, _opts, remaining} when is_integer(remaining) and remaining >= 0 ->
+          {now, max(remaining, 250)}
+
+        {:ok, _opts, :infinity} ->
+          {:infinity, 1_000}
+
+        {:error, _} ->
+          {now, 250}
+      end
+
+    Enum.each(pids, fn pid ->
+      spawn(fn ->
+        _ = attempt_session_close(pid, close_opts)
+        send(parent, {:settlement_close_attempted, pid})
+      end)
+    end)
+
+    _ = await_close_attempts(MapSet.new(pids), graceful_deadline)
+
+    case force_terminate_and_confirm(pids, confirm_ms) do
+      :ok ->
+        :ok
+
+      {:error, failures} ->
+        {:error, {:settlement_close_failed, sanitize_close_failures(failures)}}
+    end
+  end
+
+  defp await_close_attempts(%MapSet{} = pending, deadline) do
+    if MapSet.size(pending) == 0 do
+      :ok
+    else
+      do_await_close_attempts(pending, deadline)
+    end
+  end
+
+  defp do_await_close_attempts(pending, :infinity) do
+    receive do
+      {:settlement_close_attempted, pid} ->
+        await_close_attempts(MapSet.delete(pending, pid), :infinity)
+    end
+  end
+
+  defp do_await_close_attempts(pending, deadline) when is_integer(deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:settlement_close_attempted, pid} ->
+        await_close_attempts(MapSet.delete(pending, pid), deadline)
+    after
+      remaining ->
+        :timeout
+    end
+  end
+
+  defp attempt_session_close(pid, opts) when is_pid(pid) do
     if Process.alive?(pid) do
-      ref = Process.monitor(pid)
-
-      close_result =
-        try do
-          case AcpSession.close(pid, close_opts(opts)) do
-            :ok -> :ok
-            {:ok, _} -> :ok
-            {:error, reason} -> {:error, reason}
-            other -> {:error, {:unexpected_close_result, other}}
-          end
-        rescue
-          exception ->
-            {:error, Exception.message(exception)}
-        catch
-          :exit, {:noproc, _} -> :ok
-          :exit, {:normal, _} -> :ok
-          :exit, reason -> {:error, Arbor.LLM.sanitize_external_reason(reason)}
+      try do
+        case session_close(pid, opts) do
+          :ok -> :ok
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, reason}
+          other -> {:error, {:unexpected_close_result, other}}
         end
-
-      case await_process_down(ref, pid, opts) do
-        :ok ->
-          case close_result do
-            :ok -> :ok
-            # Process is confirmed gone; treat close races as success.
-            {:error, _} -> :ok
-          end
-
-        {:error, _} = error ->
-          error
+      rescue
+        exception ->
+          {:error, Exception.message(exception)}
+      catch
+        :exit, {:noproc, _} -> :ok
+        :exit, {:normal, _} -> :ok
+        :exit, reason -> {:error, Arbor.LLM.sanitize_external_reason(reason)}
       end
     else
       :ok
     end
   end
 
-  defp sync_close(_pid, _opts), do: :ok
+  defp attempt_session_close(_pid, _opts), do: :ok
+
+  # Same-library test seam: production always uses AcpSession.close/2. Tests
+  # may install an MFA via Application env; never accepted through public API.
+  defp session_close(pid, opts) do
+    case Application.get_env(:arbor_ai, :acp_pool_session_close_mfa) do
+      {mod, fun, extra} when is_atom(mod) and is_atom(fun) and is_list(extra) ->
+        apply(mod, fun, [pid, opts | extra])
+
+      _ ->
+        AcpSession.close(pid, opts)
+    end
+  end
+
+  defp force_terminate_pids(pids) when is_list(pids) do
+    Enum.each(pids, fn pid ->
+      if is_pid(pid) and Process.alive?(pid) do
+        try do
+          Process.unlink(pid)
+        catch
+          :error, _ -> :ok
+        end
+
+        Process.exit(pid, :kill)
+      end
+    end)
+  end
+
+  # Monitor first, then kill, so we never race past an already-dead process
+  # without a positive confirmation signal.
+  defp force_terminate_and_confirm(pids, timeout_ms)
+       when is_list(pids) and is_integer(timeout_ms) do
+    monitors =
+      pids
+      |> Enum.filter(&(is_pid(&1) and Process.alive?(&1)))
+      |> Enum.map(fn pid ->
+        ref = Process.monitor(pid)
+
+        try do
+          Process.unlink(pid)
+        catch
+          :error, _ -> :ok
+        end
+
+        Process.exit(pid, :kill)
+        {pid, ref}
+      end)
+
+    deadline = System.monotonic_time(:millisecond) + max(timeout_ms, 0)
+    await_monitors_down(monitors, deadline)
+  end
+
+  defp await_monitors_down([], _deadline), do: :ok
+
+  defp await_monitors_down(monitors, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:DOWN, ref, :process, pid, _reason} ->
+        monitors =
+          Enum.reject(monitors, fn {m_pid, m_ref} -> m_ref == ref or m_pid == pid end)
+
+        await_monitors_down(monitors, deadline)
+    after
+      remaining ->
+        survivors =
+          Enum.filter(monitors, fn {pid, ref} ->
+            Process.demonitor(ref, [:flush])
+            Process.alive?(pid)
+          end)
+
+        if survivors == [] do
+          :ok
+        else
+          failures =
+            Enum.map(survivors, fn _ ->
+              {:process_still_alive, :close_timeout}
+            end)
+
+          {:error, failures}
+        end
+    end
+  end
 
   defp close_opts(opts) when is_list(opts) do
     timeout_keys = Arbor.LLM.timeout_option_keys()
@@ -1353,28 +1678,7 @@ defmodule Arbor.AI.AcpPool do
     end)
   end
 
-  defp await_process_down(ref, pid, opts) do
-    with {:ok, _opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
-      receive do
-        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
-      after
-        remaining ->
-          Process.demonitor(ref, [:flush])
-
-          if Process.alive?(pid) do
-            {:error, :close_timeout}
-          else
-            :ok
-          end
-      end
-    end
-  end
-
-  # Receipts must stay JSON-clean — never echo PIDs.
-  defp pid_gone_reason(pid) when is_pid(pid) do
-    if Process.alive?(pid), do: :process_still_alive, else: :process_exited
-  end
-
+  # Receipts / errors must stay JSON-clean — never echo PIDs.
   defp sanitize_close_failures(failures) when is_list(failures) do
     Enum.map(failures, fn
       {marker, reason} ->
