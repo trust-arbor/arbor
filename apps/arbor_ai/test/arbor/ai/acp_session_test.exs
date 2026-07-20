@@ -167,12 +167,15 @@ defmodule Arbor.AI.AcpSessionTest do
   end
 
   defp install_passthrough_authz do
+    original_file_guard = Application.get_env(:arbor_ai, :file_guard_module)
+    original_security = Application.get_env(:arbor_ai, :security_module)
+
     Application.put_env(:arbor_ai, :file_guard_module, PassthroughFileGuard)
     Application.put_env(:arbor_ai, :security_module, PassthroughSecurity)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_ai, :file_guard_module)
-      Application.delete_env(:arbor_ai, :security_module)
+      restore_env(:file_guard_module, original_file_guard)
+      restore_env(:security_module, original_security)
     end)
   end
 
@@ -619,11 +622,7 @@ defmodule Arbor.AI.AcpSessionTest do
         assert {:ok, opts} = Config.resolve(:custom_agent)
         assert opts[:command] == ["my-agent", "--acp"]
       after
-        if original do
-          Application.put_env(:arbor_ai, :acp_providers, original)
-        else
-          Application.delete_env(:arbor_ai, :acp_providers)
-        end
+        restore_env(:acp_providers, original)
       end
     end
   end
@@ -1653,10 +1652,11 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     test "explicit opt wins over app env" do
+      original = Application.get_env(:arbor_ai, :acp_permission_timeout_ms)
       Application.put_env(:arbor_ai, :acp_permission_timeout_ms, 999)
 
       on_exit(fn ->
-        Application.delete_env(:arbor_ai, :acp_permission_timeout_ms)
+        restore_env(:acp_permission_timeout_ms, original)
       end)
 
       {:ok, state} = Handler.init(permission_timeout_ms: 12_345)
@@ -1664,10 +1664,11 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     test "app env wins when no explicit opt" do
+      original = Application.get_env(:arbor_ai, :acp_permission_timeout_ms)
       Application.put_env(:arbor_ai, :acp_permission_timeout_ms, 7_777)
 
       on_exit(fn ->
-        Application.delete_env(:arbor_ai, :acp_permission_timeout_ms)
+        restore_env(:acp_permission_timeout_ms, original)
       end)
 
       {:ok, state} = Handler.init([])
