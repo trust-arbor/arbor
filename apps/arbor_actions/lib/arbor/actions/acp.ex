@@ -850,13 +850,16 @@ defmodule Arbor.Actions.Acp do
 
           # Preserve the ACP stop_reason fact. Never default missing/blank values
           # to "end_turn" — owner graphs must gate on an explicit trusted end_turn.
+          # Cumulative usage is authoritative from owner-bound managed status when
+          # present; raw response top-level usage is only a fallback. Do not parse
+          # provider-specific `_meta` here — AcpSession already accumulated it.
           project_send_result(response, transcript_opts, %{
             text: map_get(response, :text) || map_get(response, "text") || "",
             stop_reason: normalize_stop_reason(response),
             session_id: provider_session_id(response, status),
             context_pressure:
               map_get(status, :context_pressure) || map_get(status, "context_pressure") || false,
-            usage: map_get(response, :usage) || map_get(response, "usage") || %{}
+            usage: project_managed_usage(status, response)
           })
 
         {:error, reason} ->
@@ -879,13 +882,33 @@ defmodule Arbor.Actions.Acp do
             stop_reason: normalize_stop_reason(response),
             session_id: map_get(response, :session_id) || map_get(response, "session_id") || "",
             context_pressure: Acp.check_context_pressure(pid),
-            usage: map_get(response, :usage) || map_get(response, "usage") || %{}
+            usage: plain_usage_map(response) || %{}
           })
 
         {:error, reason} ->
           {:error, Acp.format_error(reason)}
       end
     end
+
+    # Prefer cumulative usage from the managed status snapshot. Fall back to the
+    # raw response's top-level usage only when status usage is absent/empty.
+    # Status always wins when both are non-empty plain maps (avoids stale per-turn
+    # raw usage overwriting the session accumulator).
+    defp project_managed_usage(status, response) do
+      case plain_usage_map(status) do
+        usage when is_map(usage) -> usage
+        _ -> plain_usage_map(response) || %{}
+      end
+    end
+
+    defp plain_usage_map(source) when is_map(source) do
+      case map_get(source, :usage) || map_get(source, "usage") do
+        usage when is_map(usage) and not is_struct(usage) and map_size(usage) > 0 -> usage
+        _ -> nil
+      end
+    end
+
+    defp plain_usage_map(_source), do: nil
 
     defp project_send_result(_response, [], base) when is_map(base), do: {:ok, base}
 

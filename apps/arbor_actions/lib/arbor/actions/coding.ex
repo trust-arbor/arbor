@@ -186,7 +186,9 @@ defmodule Arbor.Actions.Coding do
                    context
                  ),
                {:ok, response} <- prompt_acp_agent(session, worktree_path, params, context) do
-            maybe_close_session(session, context)
+            # Best-effort close: capture the single close result for final cumulative
+            # usage, but never turn an otherwise valid coding result into an error.
+            close_result = maybe_close_session(session, context)
 
             case finish_change(
                    repo_root,
@@ -198,7 +200,7 @@ defmodule Arbor.Actions.Coding do
                    workspace
                  ) do
               {:ok, result} when is_map(result) ->
-                {:ok, attach_response_usage_metrics(result, response)}
+                {:ok, attach_usage_metrics(result, response, close_result)}
 
               other ->
                 other
@@ -474,16 +476,23 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
+    # Returns the CloseSession result map when available (for cumulative usage),
+    # otherwise nil. Close failures are swallowed so coding success is preserved.
     defp maybe_close_session(session, context) do
       case session_handle_params(session) do
         params when map_size(params) > 0 ->
-          call_action(Acp.CloseSession, params, context)
+          case call_action(Acp.CloseSession, params, context) do
+            {:ok, result} when is_map(result) and not is_struct(result) -> result
+            _ -> nil
+          end
 
         _ ->
-          :ok
+          nil
       end
-
-      :ok
+    rescue
+      _ -> nil
+    catch
+      _, _ -> nil
     end
 
     # Prefer managed worker_session_id; fall back to legacy session_pid for
@@ -537,11 +546,12 @@ defmodule Arbor.Actions.Coding do
 
     defp response_text(response), do: to_string(response[:text] || response["text"] || "")
 
-    # Preserve already-returned ACP usage on the action result so the legacy
-    # executor can surface it under metrics without a second provider call.
-    defp attach_response_usage_metrics(result, response)
-         when is_map(result) and is_map(response) do
-      case response_usage(response) do
+    # Prefer CloseSession's final cumulative usage snapshot; fall back to the
+    # SendMessage usage already returned on the prompt response. No second
+    # provider call or status probe — only the single close already performed.
+    defp attach_usage_metrics(result, response, close_result)
+         when is_map(result) do
+      case preferred_usage(close_result, response) do
         usage when is_map(usage) and map_size(usage) > 0 ->
           metrics =
             result
@@ -558,16 +568,23 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
-    defp attach_response_usage_metrics(result, _response), do: result
+    defp attach_usage_metrics(result, _response, _close_result), do: result
 
-    defp response_usage(response) when is_map(response) do
-      case map_value(response, :usage) do
+    defp preferred_usage(close_result, response) do
+      case plain_usage_map(close_result) do
+        usage when is_map(usage) -> usage
+        _ -> plain_usage_map(response)
+      end
+    end
+
+    defp plain_usage_map(source) when is_map(source) do
+      case map_value(source, :usage) do
         usage when is_map(usage) and not is_struct(usage) and map_size(usage) > 0 -> usage
         _ -> nil
       end
     end
 
-    defp response_usage(_response), do: nil
+    defp plain_usage_map(_source), do: nil
 
     defp run_validations(worktree_path, params, context) do
       commands = validation_commands(params)

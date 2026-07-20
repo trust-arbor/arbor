@@ -1125,6 +1125,128 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(opts, :task_id) == "task_owner"
     end
 
+    test "managed send projects cumulative usage from status when raw response usage is empty" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           "text" => "done",
+           "stop_reason" => "end_turn",
+           "session_id" => "provider_sess_1",
+           "usage" => %{}
+         }}
+      )
+
+      :persistent_term.put(
+        {FakeAI, :status_result},
+        {:ok,
+         %{
+           worker_session_id: "acp_worker_usage_empty",
+           session_id: "provider_sess_1",
+           provider: "claude",
+           model: "opus",
+           status: "ready",
+           pooled: false,
+           context_pressure: false,
+           context_tokens: 99,
+           usage: %{"input_tokens" => 250, "output_tokens" => 80, "cost" => 1.5}
+         }}
+      )
+
+      assert {:ok, result} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_usage_empty", prompt: "continue"},
+                 %{agent_id: "agent_usage", task_id: "task_usage"}
+               )
+
+      assert result.usage == %{"input_tokens" => 250, "output_tokens" => 80, "cost" => 1.5}
+      assert result.context_pressure == false
+      assert result.session_id == "provider_sess_1"
+      # Public result stays JSON-clean and does not leak full status/provider response.
+      assert json_clean?(result)
+      refute Map.has_key?(result, :context_tokens)
+      refute Map.has_key?(result, :provider)
+      refute Map.has_key?(result, :status)
+      refute Map.has_key?(result, :_meta)
+      refute inspect(result) =~ "stream_tail"
+
+      assert_receive {:managed_send, "acp_worker_usage_empty", "continue", _}
+      assert_receive {:managed_status, "acp_worker_usage_empty", status_opts}
+      assert Keyword.get(status_opts, :principal_id) == "agent_usage"
+      assert Keyword.get(status_opts, :task_id) == "task_usage"
+    end
+
+    test "managed send prefers status cumulative usage over stale non-empty raw response usage" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           "text" => "done",
+           "stop_reason" => "end_turn",
+           "session_id" => "provider_sess_1",
+           "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+         }}
+      )
+
+      :persistent_term.put(
+        {FakeAI, :status_result},
+        {:ok,
+         %{
+           worker_session_id: "acp_worker_usage_prefer",
+           session_id: "provider_sess_1",
+           provider: "claude",
+           model: "opus",
+           status: "ready",
+           pooled: false,
+           context_pressure: true,
+           context_tokens: 42,
+           usage: %{"input_tokens" => 900, "output_tokens" => 300}
+         }}
+      )
+
+      assert {:ok, result} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_usage_prefer", prompt: "continue"},
+                 %{agent_id: "agent_usage", task_id: "task_usage"}
+               )
+
+      assert result.usage == %{"input_tokens" => 900, "output_tokens" => 300}
+      refute result.usage == %{"input_tokens" => 1, "output_tokens" => 1}
+      assert result.context_pressure == true
+      assert json_clean?(result)
+    end
+
+    test "managed send falls back to raw top-level usage when status usage is unavailable" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           "text" => "done",
+           "stop_reason" => "end_turn",
+           "session_id" => "provider_sess_1",
+           "usage" => %{"input_tokens" => 40, "output_tokens" => 12}
+         }}
+      )
+
+      :persistent_term.put({FakeAI, :status_result}, {:error, :session_unavailable})
+
+      assert {:ok, result} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_usage_fallback", prompt: "continue"},
+                 %{agent_id: "agent_usage", task_id: "task_usage"}
+               )
+
+      assert result.usage == %{"input_tokens" => 40, "output_tokens" => 12}
+      assert result.context_pressure == false
+      assert json_clean?(result)
+    end
+
     test "security regression: does not default missing ACP stop_reason to end_turn" do
       install_fake_ai()
 

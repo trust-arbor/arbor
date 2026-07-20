@@ -68,6 +68,7 @@ defmodule Arbor.Actions.CodingTest do
 
         Acp.CloseSession, params, _context ->
           send(parent, {:close_session, params})
+          # No usage on close → fall back to SendMessage usage.
           {:ok, %{status: "closed"}}
 
         Shell.Execute, _params, _context ->
@@ -96,10 +97,144 @@ defmodule Arbor.Actions.CodingTest do
       assert result.metrics.usage["input_tokens"] == 120
       assert result.metrics.usage["outputTokens"] == 40
       assert result.metrics.usage["cost"] == 3
+      assert {:ok, _} = Jason.encode(result)
 
       assert_receive {:send_message, _}
       assert_receive {:close_session, _}
       # Exactly one close; no extra provider usage probe after SendMessage.
+      refute_received {:close_session, _}
+    end
+
+    test "prefers CloseSession cumulative usage over SendMessage usage for final metrics",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          send(parent, {:start_session, params})
+          {:ok, %{worker_session_id: "acp_worker_coding_usage", session_id: "acp-session"}}
+
+        Acp.SendMessage, params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          send(parent, {:send_message, params})
+
+          {:ok,
+           %{
+             text: "STATUS: implemented\nCreated feature.txt",
+             usage: %{
+               "input_tokens" => 10,
+               "output_tokens" => 5
+             }
+           }}
+
+        Acp.CloseSession, params, _context ->
+          send(parent, {:close_session, params})
+
+          {:ok,
+           %{
+             status: "closed",
+             usage: %{
+               "input_tokens" => 500,
+               "output_tokens" => 200,
+               "cost" => 7
+             }
+           }}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   base_ref: base_branch,
+                   branch_name: "test/coding-close-usage",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["true"],
+                   pr_title: "",
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "change_committed"
+      assert result.metrics.usage["input_tokens"] == 500
+      assert result.metrics.usage["output_tokens"] == 200
+      assert result.metrics.usage["cost"] == 7
+      refute result.metrics.usage["input_tokens"] == 10
+      assert {:ok, _} = Jason.encode(result)
+
+      assert_receive {:send_message, _}
+      assert_receive {:close_session, close_params}
+      assert close_params.worker_session_id == "acp_worker_coding_usage"
+      # Exactly one close; no separate status probe from the composite action.
+      refute_received {:close_session, _}
+    end
+
+    test "close-session failure remains best-effort and does not fail a valid coding result",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          send(parent, {:start_session, params})
+          {:ok, %{worker_session_id: "acp_worker_close_fail", session_id: "acp-session"}}
+
+        Acp.SendMessage, params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          send(parent, {:send_message, params})
+
+          {:ok,
+           %{
+             text: "STATUS: implemented\nCreated feature.txt",
+             usage: %{"input_tokens" => 33, "output_tokens" => 11}
+           }}
+
+        Acp.CloseSession, params, _context ->
+          send(parent, {:close_session, params})
+          {:error, "session already gone"}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   base_ref: base_branch,
+                   branch_name: "test/coding-close-fail",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["true"],
+                   pr_title: "",
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "change_committed"
+      assert result.metrics.usage["input_tokens"] == 33
+      assert result.metrics.usage["output_tokens"] == 11
+      assert {:ok, _} = Jason.encode(result)
+
+      assert_receive {:close_session, _}
       refute_received {:close_session, _}
     end
 
