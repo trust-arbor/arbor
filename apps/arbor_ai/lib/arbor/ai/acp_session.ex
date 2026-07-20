@@ -2208,7 +2208,12 @@ defmodule Arbor.AI.AcpSession do
             await_prompt_result(prompt, timers, new_state)
 
           {:error, :stream_callback_timeout, new_state} ->
-            timeout_prompt(:stream_callback_timeout, prompt, timers, new_state)
+            timeout_prompt(
+              prompt_timeout_kind(prompt, :stream_callback_timeout),
+              prompt,
+              timers,
+              new_state
+            )
         end
 
       # start_timer/3 delivers {:timeout, TRef, payload}; TRef is both the
@@ -2252,7 +2257,12 @@ defmodule Arbor.AI.AcpSession do
         )
 
       {:error, :stream_callback_timeout, state} ->
-        timeout_prompt(:stream_callback_timeout, prompt, empty_prompt_timers(), state)
+        timeout_prompt(
+          prompt_timeout_kind(prompt, :stream_callback_timeout),
+          prompt,
+          empty_prompt_timers(),
+          state
+        )
     end
   end
 
@@ -2268,6 +2278,16 @@ defmodule Arbor.AI.AcpSession do
       timeout_prompt(:timeout, prompt, empty_prompt_timers(), state)
     end
   end
+
+  defp prompt_timeout_kind(prompt, fallback) do
+    if hard_deadline_exhausted?(prompt), do: :timeout, else: fallback
+  end
+
+  defp hard_deadline_exhausted?(%{deadline_ms: deadline}) when is_integer(deadline) do
+    System.monotonic_time(:millisecond) >= deadline
+  end
+
+  defp hard_deadline_exhausted?(_prompt), do: false
 
   defp complete_durable_prompt_success(prompt, result, state) do
     case capture_prompt_turn(prompt, :success, result, nil, state) do

@@ -909,6 +909,36 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     @tag timeout: 1_000
+    test "security regression: hard prompt deadline wins over stream callback timeout" do
+      install_fake_progress_client(200)
+      test_pid = self()
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          client_opts: [test_pid: self()],
+          stream_callback: fn _update ->
+            send(test_pid, :stream_callback_started)
+            Process.sleep(100)
+            :ok
+          end
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+
+      assert {:error, :timeout} =
+               AcpSession.send_message(session, "steady_progress",
+                 timeout: 50,
+                 inactivity_timeout_ms: 200
+               )
+
+      assert_receive :stream_callback_started
+
+      assert %{status: :recovery_required, session_id: "fake-session"} =
+               AcpSession.status(session)
+    end
+
+    @tag timeout: 1_000
     test "security regression: late client DOWN cannot clear the recovery fence" do
       install_fake_progress_client(30)
 
