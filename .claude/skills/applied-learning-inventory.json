@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 465,
+  "entry_count": 466,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -4022,8 +4022,8 @@
       "destination": ".claude/skills/applied-learning-acp-mcp.md",
       "anchor": "applied-learning-the-mcp-task-timeout-does-not-replace-a-structured-coding-plan-s-wall-clock-budget",
       "source_date": "2026-07-16",
-      "source_incident": "found 2026-07-16/17 during retained-workspace remediation and benchmark-isolation dogfood; reconfirmed 2026-07-18 when a one-hour exact-candidate repair timed out during its final test-only steer and when the production benchmark adapter still emitted a flat task).",
-      "content_sha256": "07d659dcbf1af762bea4b2139f45a13c6934829a6ff0f0488b49f4e6bfd9fe13",
+      "source_incident": "found 2026-07-16/17 during retained-workspace remediation and benchmark-isolation dogfood; reconfirmed 2026-07-18 when a one-hour exact-candidate repair timed out during its final test-only steer and 2026-07-20 when a correct Grok rework exhausted its graph budget during second validation).",
+      "content_sha256": "22054afe805fa043ee9c922d9260c5294b35858a44490c76f1d7fd1e44ca076b",
       "always_loaded": false
     },
     {
@@ -5589,8 +5589,21 @@
       "source_incident": "found 2026-07-20 while testing terminal coding-evidence roots).",
       "content_sha256": "b9f7be8511b6ecb73f24f873d7a9c15f69f93764a5837cb404ecb6799ff20266",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 466,
+      "source_kind": "post-migration",
+      "slug": "acp-usage-extraction-must-follow-the-provider-s-prompt-result-shape",
+      "title": "ACP usage extraction must follow the provider's prompt-result shape.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-acp-usage-extraction-must-follow-the-provider-s-prompt-result-shape",
+      "source_date": "2026-07-20",
+      "source_incident": "found 2026-07-20 when Grok CLI 0.2.106 returned nonzero inputTokens/outputTokens only under _meta.usage, leaving the r8 report at zero before a459458d).",
+      "content_sha256": "85dba7d4f1a9ec356644dc3aaa7529cec767616de1209d1e75948653a62c1338",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 4
+  "post_migration_entry_count": 5
 }
