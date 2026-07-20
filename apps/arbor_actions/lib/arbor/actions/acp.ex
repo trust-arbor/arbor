@@ -754,6 +754,10 @@ defmodule Arbor.Actions.Acp do
     @moduledoc """
     Send a coding prompt to an ACP session and get the response.
 
+    For managed sessions, the returned `usage` is the authoritative cumulative
+    session snapshot. Raw provider response usage is used only when that snapshot
+    is unavailable.
+
     ## Parameters
 
     | Name | Type | Required | Description |
