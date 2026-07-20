@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 467,
+  "entry_count": 468,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5615,8 +5615,21 @@
       "source_incident": "found 2026-07-20 in benchmark artifact lease cleanup).",
       "content_sha256": "00c1f3297c84834d058a56393d45f45cc59e3b0494979fa5f322ac1aa70992fb",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 468,
+      "source_kind": "post-migration",
+      "slug": "retain-compiled-beam-binaries-when-loading-exs-diagnostic-modules-remotely",
+      "title": "Retain compiled BEAM binaries when loading `.exs` diagnostic modules remotely.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-retain-compiled-beam-binaries-when-loading-exs-diagnostic-modules-remotely",
+      "source_date": "2026-07-20",
+      "source_incident": "found 2026-07-20 while launching the Phase 6 r10 benchmark).",
+      "content_sha256": "03f1a385ce079c194c75bb999d9f429553cc16062a602756e4134d6a95c2a97b",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 6
+  "post_migration_entry_count": 7
 }

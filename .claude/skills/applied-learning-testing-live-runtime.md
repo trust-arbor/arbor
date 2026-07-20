@@ -367,3 +367,13 @@ positive and false-positive tests could run concurrently, redefining the module 
 intermittently failing an otherwise unrelated validation shard. Compile immutable shared
 modules once per generated test module, and leave only per-test resources in `setup`
 (found 2026-07-19 during cross-app validation of the legacy council authority fix).
+
+<!-- applied-learning: retain-compiled-beam-binaries-when-loading-exs-diagnostic-modules-remotely -->
+<a id="applied-learning-retain-compiled-beam-binaries-when-loading-exs-diagnostic-modules-remotely"></a>
+**Retain compiled BEAM binaries when loading `.exs` diagnostic modules remotely.** A
+module defined directly in an `.exs` launcher may return `:error` from
+`:code.get_object_code/1`, even immediately after compilation, so a helper that recompiles
+locally and then asks the code server for bytes cannot be transferred to a running node.
+Keep the `{module, beam_binary}` tuple returned by `Code.compile_quoted/1` or
+`Code.compile_string/1` and pass that exact binary to `:code.load_binary/3` on the target
+node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
