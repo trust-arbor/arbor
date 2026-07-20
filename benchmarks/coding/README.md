@@ -98,6 +98,24 @@ final canonical `HEAD^{tree}` of that executor's isolated workdir with the
 - Sidecar-free legacy manifests that do not use `exact_target_tree` continue to
   require an explicit trusted verifier registry for their other selectors.
 
+## Per-invocation execution identity
+
+Each `Arbor.Commands.CodingBenchmark.run/2` call allocates a cryptographically
+strong, harness-private `execution_namespace` and an exclusive run root under
+the configured workspace. Production adapter **task IDs**, pipeline **run IDs**,
+branch names, worktree roots, artifact leases, cancel, verification, and
+workspace settlement all derive from that invocation-scoped identity plus the
+fixture/path/repetition inputs.
+
+- Separate invocations of the same frozen manifest/seed/repetition **must not**
+  reuse task/run IDs, including across BEAM restarts. Do not treat VM-local
+  counters (`System.unique_integer/1`) as durable identity.
+- The raw namespace is not published in public report rows and is not forwarded
+  as a worker-visible ACP task field. Target tree OIDs remain harness-private
+  answer material as well.
+- Legacy and pipeline executor paths stay distinct under one invocation; repeated
+  derivation for the same request (execute / verify / cancel) stays stable.
+
 ### Operator configuration still required for a full paired run
 
 ```bash

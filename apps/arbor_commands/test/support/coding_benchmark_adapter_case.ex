@@ -675,23 +675,30 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
     base_tree_oid = git!(source, ["rev-parse", "HEAD^{tree}"])
     normalized_input_hash = normalized_input_hash!(input, base_tree_oid)
 
+    # One invocation-scoped namespace shared by both executor-path requests,
+    # mirroring CodingBenchmark.run/2. Fresh for every benchmark_requests!/1 call.
+    execution_namespace =
+      :crypto.strong_rand_bytes(32) |> Base.encode16(case: :lower)
+
     request = fn executor ->
       %{
         "acp_agent" => "codex",
         "base_commit_oid" => base_commit_oid,
         "base_tree_oid" => base_tree_oid,
+        "execution_namespace" => execution_namespace,
         "executor_path" => executor,
         "fixture_id" => "happy",
         "normalized_input" => input,
         "normalized_input_hash" => normalized_input_hash,
         "repetition" => 1,
-        "schema" => "arbor.coding_benchmark.adapter_request.v1",
+        "schema" => "arbor.coding_benchmark.adapter_request.v2",
         "seed" => 7,
         "workdir" => Path.join(pair_root, executor)
       }
     end
 
     %{
+      execution_namespace: execution_namespace,
       legacy: request.("legacy"),
       pair_root: pair_root,
       pipeline: request.("pipeline"),
@@ -1193,6 +1200,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
   def execution_digest(request) do
     hash_json(%{
       "base_commit_oid" => request["base_commit_oid"],
+      "execution_namespace" => request["execution_namespace"],
       "executor_path" => request["executor_path"],
       "fixture_id" => request["fixture_id"],
       "normalized_input_hash" => request["normalized_input_hash"],

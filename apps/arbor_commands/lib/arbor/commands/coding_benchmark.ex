@@ -37,9 +37,11 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   @manifest_schema "arbor.coding_benchmark.manifest.v1"
   @report_schema "arbor.coding_benchmark.report.v1"
-  @request_schema "arbor.coding_benchmark.adapter_request.v1"
+  @request_schema "arbor.coding_benchmark.adapter_request.v2"
   @executor_paths ["legacy", "pipeline"]
   @production_adapters [LegacyAdapter, PipelineAdapter]
+  @run_root_token_bytes 32
+  @max_run_root_create_attempts 16
   @exact_target_tree_selector "exact_target_tree"
   @pipeline_artifact_path_keys [
     {"coding_plan_path", :coding_plan_path},
@@ -199,6 +201,15 @@ defmodule Arbor.Commands.CodingBenchmark do
   normalized task input. It returns `{:ok, envelope}` or `{:error, reason}`.
   Envelopes have the closed keys `result`, `observations`, `counters`, and
   `worker_ownership`.
+
+  Each `run/2` invocation allocates a cryptographically strong, harness-private
+  `execution_namespace` and exclusive run root. Production adapter task IDs,
+  pipeline run IDs, branch names, worktree roots, artifact leases, cancel,
+  verification, and workspace settlement all derive from that invocation-scoped
+  identity plus fixture/path/repetition inputs. The raw namespace is never sent
+  to ACP workers or written into public report rows. Separate invocations of the
+  same frozen manifest/seed/repetition therefore cannot reuse lifecycle
+  identity, including across BEAM restarts.
 
   Every run requires trusted `:arbor_commands` Application configuration for
   `:coding_benchmark_workspace_root`, `:coding_benchmark_artifact_root`,
@@ -737,12 +748,14 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp execute_report(manifest, runtime) do
     case create_run_root(runtime.workspace_root) do
-      {:ok, run_root, run_identity} ->
+      {:ok, run_root, run_identity, execution_namespace} ->
         pairs = pair_specs(manifest, runtime)
 
         {rows, pair_reports, pairs_settled?} =
           Enum.reduce(pairs, {[], [], true}, fn pair, {rows, pair_reports, settled?} ->
-            {pair_rows, pair_report, pair_settled?} = execute_pair(pair, run_root, runtime)
+            {pair_rows, pair_report, pair_settled?} =
+              execute_pair(pair, run_root, runtime, execution_namespace)
+
             {rows ++ pair_rows, pair_reports ++ [pair_report], settled? and pair_settled?}
           end)
 
@@ -766,15 +779,36 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
+  # Exclusive crypto-suffixed run root. The suffix is the harness-private
+  # execution_namespace threaded into every adapter request for this invocation.
+  # System.unique_integer/1 is intentionally not used: it is only VM-lifetime
+  # unique and collides across BEAM restarts while durable PipelineStatus
+  # records survive.
   defp create_run_root(workspace_root) do
-    suffix = System.unique_integer([:positive, :monotonic])
-    path = Path.join(workspace_root, "arbor-coding-benchmark-#{suffix}")
+    exclusive_create_run_root(workspace_root, @max_run_root_create_attempts)
+  end
+
+  defp exclusive_create_run_root(_workspace_root, 0),
+    do: {:error, "create_failed:exclusive_create_exhausted"}
+
+  defp exclusive_create_run_root(workspace_root, remaining) when remaining > 0 do
+    execution_namespace = execution_namespace_token()
+    path = Path.join(workspace_root, "arbor-coding-benchmark-" <> execution_namespace)
 
     case Shell.create_private_owned_tree(path) do
-      {:ok, identity} -> {:ok, path, identity}
-      {:error, :root_exists} -> {:error, "create_failed:eexist"}
-      {:error, reason} -> {:error, "create_failed:#{reason_string(reason)}"}
+      {:ok, identity} ->
+        {:ok, path, identity, execution_namespace}
+
+      {:error, :root_exists} ->
+        exclusive_create_run_root(workspace_root, remaining - 1)
+
+      {:error, reason} ->
+        {:error, "create_failed:#{reason_string(reason)}"}
     end
+  end
+
+  defp execution_namespace_token do
+    :crypto.strong_rand_bytes(@run_root_token_bytes) |> Base.encode16(case: :lower)
   end
 
   defp pair_specs(manifest, runtime) do
@@ -789,7 +823,7 @@ defmodule Arbor.Commands.CodingBenchmark do
     if rem(first, 2) == 0, do: @executor_paths, else: Enum.reverse(@executor_paths)
   end
 
-  defp execute_pair(pair, run_root, runtime) do
+  defp execute_pair(pair, run_root, runtime, execution_namespace) do
     pair_root =
       Path.join(run_root, "#{pair.fixture["fixture_id"]}-#{pair.repetition}")
 
@@ -797,7 +831,7 @@ defmodule Arbor.Commands.CodingBenchmark do
       {:ok, prepared} ->
         executed =
           Enum.map(pair.order, fn executor ->
-            execute_adapter(executor, pair, prepared, runtime)
+            execute_adapter(executor, pair, prepared, runtime, execution_namespace)
           end)
 
         rows = Enum.map(executed, & &1.row)
@@ -1172,7 +1206,7 @@ defmodule Arbor.Commands.CodingBenchmark do
     |> write_exclusive_file(commit_oid <> "\n")
   end
 
-  defp execute_adapter(executor, pair, prepared, runtime) do
+  defp execute_adapter(executor, pair, prepared, runtime, execution_namespace) do
     fixture = pair.fixture
     workdir = prepared.workdirs[executor]
     input_hash = fixture["normalized_input_hash"]
@@ -1181,6 +1215,7 @@ defmodule Arbor.Commands.CodingBenchmark do
       "acp_agent" => runtime.acp_agent,
       "base_commit_oid" => prepared.commit_oid,
       "base_tree_oid" => fixture["base_tree_oid"],
+      "execution_namespace" => execution_namespace,
       "executor_path" => executor,
       "fixture_id" => fixture["fixture_id"],
       "normalized_input" => fixture["input"],

@@ -397,6 +397,162 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterExecutionTest do
     assert_receive {:pipeline_mark_abandoned, ^expected_task_id}
   end
 
+  test "security regression: separate run roots never collide on task/run identity" do
+    # Two semantically identical fixture/path/seed/repetition requests that only
+    # differ by harness-private execution_namespace (as if two CodingBenchmark.run/2
+    # invocations reused a frozen manifest after a BEAM restart).
+    base = benchmark_requests!()
+    assert {:ok, runtime} = Runtime.load()
+
+    ns_a = String.duplicate("a", 64)
+    ns_b = String.duplicate("b", 64)
+    refute ns_a == ns_b
+
+    request_a = Map.put(base.pipeline, "execution_namespace", ns_a)
+    request_b = Map.put(base.pipeline, "execution_namespace", ns_b)
+
+    # Drop workdir path differences so only the invocation namespace drives identity.
+    request_b = Map.put(request_b, "workdir", request_a["workdir"])
+
+    assert request_a["fixture_id"] == request_b["fixture_id"]
+    assert request_a["seed"] == request_b["seed"]
+    assert request_a["repetition"] == request_b["repetition"]
+    assert request_a["normalized_input_hash"] == request_b["normalized_input_hash"]
+    assert request_a["base_commit_oid"] == request_b["base_commit_oid"]
+    assert request_a["workdir"] == request_b["workdir"]
+    refute request_a["execution_namespace"] == request_b["execution_namespace"]
+
+    assert {:ok, scope_a} = Adapter.execution_scope(request_a, runtime)
+    assert {:ok, scope_b} = Adapter.execution_scope(request_b, runtime)
+
+    refute scope_a.task_id == scope_b.task_id
+    refute scope_a.branch_name == scope_b.branch_name
+    refute scope_a.worktree_root == scope_b.worktree_root
+    refute scope_a.artifact_root == scope_b.artifact_root
+    refute scope_a.artifact_lease == scope_b.artifact_lease
+
+    assert String.starts_with?(scope_a.task_id, "coding-benchmark-pipeline-")
+    assert String.starts_with?(scope_b.task_id, "coding-benchmark-pipeline-")
+
+    # Legacy stays distinct from pipeline under the same namespace.
+    legacy_a = Map.put(base.legacy, "execution_namespace", ns_a)
+    assert {:ok, legacy_scope} = Adapter.execution_scope(legacy_a, runtime)
+    refute legacy_scope.task_id == scope_a.task_id
+    refute legacy_scope.worktree_root == scope_a.worktree_root
+    assert String.starts_with?(legacy_scope.task_id, "coding-benchmark-legacy-")
+  end
+
+  test "security regression: verify and cancel derive the same identity as execution" do
+    requests = benchmark_requests!()
+    assert {:ok, runtime} = Runtime.load()
+
+    # Preview derives identity without exclusive create, so it can be compared
+    # with a later single execution of the same request.
+    assert {:ok, verify_before} = Adapter.verification_scope(requests.pipeline, runtime)
+    assert {:ok, verify_again} = Adapter.verification_scope(requests.pipeline, runtime)
+    assert verify_again.task_id == verify_before.task_id
+    assert verify_again.branch_name == verify_before.branch_name
+    assert verify_again.worktree_root == verify_before.worktree_root
+    assert verify_again.artifact_root == verify_before.artifact_root
+    assert verify_again.artifact_lease == verify_before.artifact_lease
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_pipeline_test_reply,
+      {:error, :captured_pipeline}
+    )
+
+    assert {:error, :captured_pipeline, _envelope} = PipelineAdapter.run(requests.pipeline)
+    assert_receive {:executor_call, :pipeline, "agent_benchmark", task, context}
+
+    assert context["task_id"] == verify_before.task_id
+    # Raw invocation nonce stays out of the ACP task envelope fields.
+    refute Map.has_key?(task, "execution_namespace")
+    plan = task["plan"]
+    assert is_map(plan)
+    refute Map.has_key?(plan, "execution_namespace")
+    refute Map.has_key?(plan["workspace_policy"] || %{}, "execution_namespace")
+    refute Map.has_key?(plan["worker"] || %{}, "execution_namespace")
+
+    assert {:ok, verify_after} = Adapter.verification_scope(requests.pipeline, runtime)
+    assert verify_after.task_id == context["task_id"]
+    assert verify_after.branch_name == verify_before.branch_name
+    assert verify_after.worktree_root == verify_before.worktree_root
+    assert verify_after.artifact_root == verify_before.artifact_root
+    assert verify_after.artifact_lease == verify_before.artifact_lease
+
+    Application.delete_env(:arbor_commands, :coding_benchmark_pipeline_executor_module)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :pipeline_status_module,
+      CapturingPipelineStatus
+    )
+
+    assert :ok = PipelineAdapter.cancel(requests.pipeline)
+    expected_task_id = context["task_id"]
+    assert_receive {:pipeline_mark_abandoned, ^expected_task_id}
+  end
+
+  test "security regression: consecutive harness invocations never reuse pipeline lifecycle identity" do
+    # Frozen-manifest replay: identical seed/fixture/repetition, two full run/2
+    # invocations. The second must not resolve lifecycle state under the first's
+    # deterministic task/run id (the r8/r9 production failure class).
+    scenario = production_scenario!()
+    install_capturing_executors()
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_test_reply,
+      {:error, :captured_legacy}
+    )
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_pipeline_test_reply,
+      {:error, :captured_pipeline}
+    )
+
+    assert {:ok, report_1} = run_production_scenario(scenario)
+    assert_receive {:executor_call, :pipeline, "agent_benchmark", _task_1, context_1}
+    assert_receive {:executor_call, :legacy, "agent_benchmark", _legacy_task_1, legacy_context_1}
+    task_id_1 = context_1["task_id"]
+    legacy_task_id_1 = legacy_context_1["task_id"]
+
+    assert is_binary(task_id_1) and task_id_1 != ""
+    assert String.starts_with?(task_id_1, "coding-benchmark-pipeline-")
+    refute task_id_1 == legacy_task_id_1
+
+    # Drain any remaining first-run messages before the second invocation.
+    flush_executor_calls()
+
+    assert {:ok, report_2} = run_production_scenario(scenario)
+    assert_receive {:executor_call, :pipeline, "agent_benchmark", _task_2, context_2}
+    assert_receive {:executor_call, :legacy, "agent_benchmark", _legacy_task_2, legacy_context_2}
+    task_id_2 = context_2["task_id"]
+    legacy_task_id_2 = legacy_context_2["task_id"]
+
+    refute task_id_1 == task_id_2
+    refute legacy_task_id_1 == legacy_task_id_2
+    refute task_id_2 == legacy_task_id_2
+
+    # Public report rows must not publish the invocation nonce or answer OIDs.
+    for report <- [report_1, report_2], row <- report["rows"] do
+      refute Map.has_key?(row, "execution_namespace")
+      refute Map.has_key?(row, "task_id")
+      refute Map.has_key?(row, "target_tree_oid")
+      refute Map.has_key?(row, "target_commit_oid")
+    end
+  end
+
+  defp flush_executor_calls do
+    receive do
+      {:executor_call, _path, _principal, _task, _context} -> flush_executor_calls()
+    after
+      0 -> :ok
+    end
+  end
+
   test "production harness observes sibling worktrees and separate provenance roots" do
     scenario = production_scenario!()
     install_leased_executors()

@@ -7,10 +7,14 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
 
   @app :arbor_commands
   @principal_key :coding_benchmark_principal_id
-  @request_schema "arbor.coding_benchmark.adapter_request.v1"
+  # v2 adds harness-private execution_namespace so task/run IDs cannot collide
+  # across separate CodingBenchmark.run/2 invocations of the same frozen
+  # manifest/seed/repetition (including after BEAM restarts).
+  @request_schema "arbor.coding_benchmark.adapter_request.v2"
   @request_keys MapSet.new(~w(
-    acp_agent base_commit_oid base_tree_oid executor_path fixture_id normalized_input
-    normalized_input_hash repetition schema seed workdir
+    acp_agent base_commit_oid base_tree_oid execution_namespace executor_path
+    fixture_id normalized_input normalized_input_hash repetition schema seed
+    workdir
   ))
   @input_keys MapSet.new(~w(acceptance_criteria objective))
   @oid_pattern ~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/
@@ -133,6 +137,7 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
          :ok <- valid_id(request["fixture_id"]),
          :ok <- valid_oid(request["base_commit_oid"], :invalid_base_commit_oid),
          :ok <- valid_oid(request["base_tree_oid"], :invalid_base_tree_oid),
+         :ok <- valid_execution_namespace(request["execution_namespace"]),
          :ok <- valid_hash(request["normalized_input_hash"]),
          :ok <- valid_integer(request["repetition"], 1, 100, :invalid_repetition),
          :ok <- valid_integer(request["seed"], 0, 2_147_483_647, :invalid_seed),
@@ -178,6 +183,16 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   end
 
   defp valid_hash(_value), do: {:error, :invalid_normalized_input_hash}
+
+  # 256-bit harness-private invocation nonce. Never forwarded into ACP task
+  # payloads or public report rows; only used to derive task/run identity.
+  defp valid_execution_namespace(value) when is_binary(value) do
+    if Regex.match?(@hash_pattern, value),
+      do: :ok,
+      else: {:error, :invalid_execution_namespace}
+  end
+
+  defp valid_execution_namespace(_value), do: {:error, :invalid_execution_namespace}
 
   defp valid_integer(value, min, max, _reason)
        when is_integer(value) and value >= min and value <= max,
@@ -373,6 +388,7 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   defp execution_digest(request) do
     hash_json(%{
       "base_commit_oid" => request["base_commit_oid"],
+      "execution_namespace" => request["execution_namespace"],
       "executor_path" => request["executor_path"],
       "fixture_id" => request["fixture_id"],
       "normalized_input_hash" => request["normalized_input_hash"],

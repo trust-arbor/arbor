@@ -31,6 +31,11 @@ defmodule Mix.Tasks.Arbor.Coding.Benchmark do
   functions. Prepared publications that select the closed `exact_target_tree`
   verifier install Arbor's built-in implementation from validated target
   evidence; Application config cannot override that selector.
+
+  Each invocation creates a collision-resistant execution namespace so production
+  adapter task/run IDs cannot collide with a prior frozen-manifest run (including
+  after BEAM restarts). That namespace stays harness-private and is not written
+  into public report rows.
   """
 
   use Mix.Task

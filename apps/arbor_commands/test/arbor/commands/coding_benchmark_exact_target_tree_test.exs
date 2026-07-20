@@ -108,7 +108,10 @@ defmodule Arbor.Commands.CodingBenchmarkExactTargetTreeTest do
       refute Map.has_key?(request, "target_commit_oid")
       refute_target_oid_leaked(request, scenario.target_tree_oid)
       assert request["fixture_id"] == "sample-task"
-      assert request["schema"] == "arbor.coding_benchmark.adapter_request.v1"
+      assert request["schema"] == "arbor.coding_benchmark.adapter_request.v2"
+      assert is_binary(request["execution_namespace"])
+      assert byte_size(request["execution_namespace"]) == 64
+      assert Regex.match?(~r/\A[0-9a-f]{64}\z/, request["execution_namespace"])
     end
 
     # Binding for a different fixture_id does not satisfy this fixture.
