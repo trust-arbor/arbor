@@ -5,6 +5,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
   alias Arbor.Common.SafePath
   alias Arbor.AI.AcpSession
   alias Arbor.AI.AcpSession.GrokSandbox
+  alias Arbor.AI.AcpSession.RuntimeHome
 
   @expected_grok_command [
     "grok",
@@ -17,8 +18,6 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     "MCPTool(*)",
     "--deny",
     "Bash(*)",
-    "--disallowed-tools",
-    "execute",
     "agent",
     "--no-leader",
     "--model",
@@ -33,8 +32,6 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     "--no-memory",
     "--no-subagents",
     "--disable-web-search",
-    "--disallowed-tools",
-    "execute",
     "--deny",
     "Bash(*)",
     "agent",
@@ -43,6 +40,21 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     "grok-4.5",
     "stdio"
   ]
+
+  @expected_agent_profile """
+  ---
+  tools:
+    - read_file
+    - search_replace
+    - grep
+    - list_dir
+  disallowedTools:
+    - run_terminal_cmd
+    - task
+    - get_task_output
+    - kill_task
+  ---
+  """
 
   defmodule ProbeAcpClient do
     def start_link(opts) do
@@ -236,7 +248,8 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
 
   defp create_temporary_workspace_isolation!() do
     home = temp_path("arbor-ai-grok-home")
-    grok_home = Path.join(home, ".grok")
+    File.chmod!(home, 0o700)
+    grok_home = Path.join(home, "grok")
     previous_grok_home = System.get_env("GROK_HOME")
 
     System.put_env("GROK_HOME", grok_home)
@@ -269,6 +282,15 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
 
   defp probe_client_opts(overrides) do
     Keyword.merge([command: @expected_grok_command], overrides)
+  end
+
+  defp grok_client_opts(overrides \\ []) do
+    runtime_home = System.fetch_env!("GROK_HOME") |> Path.dirname()
+
+    {:ok, opts} =
+      RuntimeHome.inject([command: @expected_grok_command], %{path: runtime_home}, :grok)
+
+    Keyword.merge(opts, overrides)
   end
 
   defp wait_for_status(session, status, attempts \\ 30, delay_ms \\ 20) do
@@ -312,7 +334,12 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
   end
 
   setup do
-    create_temporary_workspace_isolation!()
+    %{home: runtime_home} = create_temporary_workspace_isolation!()
+    Process.put(:grok_runtime_home, runtime_home)
+
+    assert {:ok, _opts} =
+             RuntimeHome.inject([command: @expected_grok_command], %{path: runtime_home}, :grok)
+
     :ok
   end
 
@@ -370,7 +397,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_linked_worktree_authority_required} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  tampered_authority,
                  self(),
@@ -462,7 +489,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, reason} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  authority,
                  self(),
@@ -483,7 +510,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:ok, :callback_seen} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  authority,
                  self(),
@@ -522,7 +549,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:ok, :toml_ok} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  authority,
                  self(),
@@ -558,7 +585,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:ok, :mutated} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  authority,
                  self(),
@@ -594,7 +621,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_global_profile_conflict} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  authority,
                  self(),
@@ -609,7 +636,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:ok, :standalone_done} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  nil,
                  self(),
@@ -625,7 +652,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :unexpected_grok_sandbox_authority} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  :unexpected,
                  self(),
@@ -655,7 +682,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         assert {:error, :grok_ambient_mcp_configuration_forbidden} =
                  GrokSandbox.with_launch(
                    :grok,
-                   [command: @expected_grok_command],
+                   grok_client_opts(),
                    worktree_root,
                    nil,
                    self(),
@@ -673,7 +700,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_repository_root_required} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  nested_cwd,
                  nil,
                  self(),
@@ -688,7 +715,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:ok, :bound_mcp_ready} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  nil,
                  self(),
@@ -702,10 +729,18 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                             @expected_grok_command_with_bound_mcp,
                             2,
                             expected_profile
+                          )
+                          |> List.insert_at(9, "--agent-profile")
+                          |> List.insert_at(
+                            10,
+                            Keyword.fetch!(prepared, :env)
+                            |> Map.new()
+                            |> Map.fetch!("GROK_HOME")
+                            |> RuntimeHome.grok_agent_profile_path()
                           ) == command
 
-                   assert Enum.at(command, 6) == "--disallowed-tools"
-                   assert Enum.at(command, 7) == "execute"
+                   refute "--disallowed-tools" in command
+                   refute "--tools" in command
                    assert "Bash(*)" in command
                    # Bash is still hard-denied under bound MCP because it can spawn
                    # uncontrolled process and network capabilities.
@@ -720,229 +755,38 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                )
     end
 
-    test "hostile command and explicit :cd are rejected" do
+    test "security regression: profile argument shape is exact" do
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
-      bound_server = %{"name" => "bound", "type" => "http", "url" => "http://local"}
+      opts = grok_client_opts()
+      command = Keyword.fetch!(opts, :command)
+      profile_index = Enum.find_index(command, &(&1 == "--agent-profile"))
 
-      missing_disallowed_shape = [
-        "grok",
-        "--sandbox",
-        "strict",
-        "--no-memory",
-        "--no-subagents",
-        "--disable-web-search",
-        "--deny",
-        "MCPTool(*)",
-        "--deny",
-        "Bash(*)",
-        "agent",
-        "--no-leader",
-        "--model",
-        "grok-4.5",
-        "stdio"
+      variants = [
+        List.delete_at(command, profile_index),
+        List.replace_at(command, profile_index + 1, "/tmp/untrusted-profile.md"),
+        command
+        |> List.delete_at(profile_index)
+        |> List.insert_at(profile_index + 2, "--agent-profile"),
+        List.insert_at(command, profile_index, "--agent-profile")
       ]
 
-      changed_disallowed_shape = [
-        "grok",
-        "--sandbox",
-        "strict",
-        "--no-memory",
-        "--no-subagents",
-        "--disable-web-search",
-        "--deny",
-        "MCPTool(*)",
-        "--deny",
-        "Bash(*)",
-        "--disallowed-tools",
-        "shell",
-        "agent",
-        "--no-leader",
-        "--model",
-        "grok-4.5",
-        "stdio"
-      ]
-
-      reordered_disallowed_shape = [
-        "grok",
-        "--sandbox",
-        "strict",
-        "--no-memory",
-        "--no-subagents",
-        "--disable-web-search",
-        "--deny",
-        "MCPTool(*)",
-        "--disallowed-tools",
-        "execute",
-        "--deny",
-        "Bash(*)",
-        "agent",
-        "--no-leader",
-        "--model",
-        "grok-4.5",
-        "stdio"
-      ]
-
-      reordered_disallowed_shape_bare = [
-        "grok",
-        "--sandbox",
-        "strict",
-        "--no-memory",
-        "--no-subagents",
-        "--disable-web-search",
-        "--disallowed-tools",
-        "execute",
-        "--deny",
-        "MCPTool(*)",
-        "agent",
-        "--no-leader",
-        "--model",
-        "grok-4.5",
-        "stdio"
-      ]
-
-      duplicated_disallowed_shape = [
-        "grok",
-        "--sandbox",
-        "strict",
-        "--no-memory",
-        "--no-subagents",
-        "--disable-web-search",
-        "--deny",
-        "MCPTool(*)",
-        "--deny",
-        "Bash(*)",
-        "--disallowed-tools",
-        "execute",
-        "--deny",
-        "Bash(*)",
-        "--disallowed-tools",
-        "execute",
-        "agent",
-        "--no-leader",
-        "--model",
-        "grok-4.5",
-        "stdio"
-      ]
-
-      hostile = [
-        "grok",
-        "--sandbox",
-        "not-strict",
-        "--no-memory",
-        "agent",
-        "--model",
-        "grok-4.5",
-        "stdio"
-      ]
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: missing_disallowed_shape],
-                 worktree_root,
-                 nil,
-                 self(),
-                 fn _ -> flunk("callback should not run") end
-               )
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: reordered_disallowed_shape],
-                 worktree_root,
-                 nil,
-                 self(),
-                 fn _ -> flunk("callback should not run") end
-               )
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: changed_disallowed_shape],
-                 worktree_root,
-                 nil,
-                 self(),
-                 fn _ -> flunk("callback should not run") end
-               )
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: duplicated_disallowed_shape],
-                 worktree_root,
-                 nil,
-                 self(),
-                 fn _ -> flunk("callback should not run") end
-               )
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: hostile],
-                 worktree_root,
-                 authority,
-                 self(),
-                 fn _ -> flunk("callback should not run") end
-               )
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: missing_disallowed_shape],
-                 worktree_root,
-                 authority,
-                 self(),
-                 [bound_server],
-                 fn _ -> flunk("callback should not run") end
-               )
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: reordered_disallowed_shape_bare],
-                 worktree_root,
-                 authority,
-                 self(),
-                 [bound_server],
-                 fn _ -> flunk("callback should not run") end
-               )
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: reordered_disallowed_shape],
-                 worktree_root,
-                 authority,
-                 self(),
-                 [bound_server],
-                 fn _ -> flunk("callback should not run") end
-               )
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: changed_disallowed_shape],
-                 worktree_root,
-                 authority,
-                 self(),
-                 fn _ -> flunk("callback should not run") end
-               )
-
-      assert {:error, :grok_sandbox_command_mismatch} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 [command: duplicated_disallowed_shape],
-                 worktree_root,
-                 authority,
-                 self(),
-                 fn _ -> flunk("callback should not run") end
-               )
+      for variant <- variants do
+        assert {:error, :grok_sandbox_command_mismatch} =
+                 GrokSandbox.with_launch(
+                   :grok,
+                   Keyword.put(opts, :command, variant),
+                   worktree_root,
+                   authority,
+                   self(),
+                   fn _ -> flunk("callback should not run") end
+                 )
+      end
 
       assert {:error, :grok_sandbox_cwd_override_forbidden} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command, cd: "/tmp/bad"],
+                 Keyword.put(opts, :cd, "/tmp/bad"),
                  worktree_root,
                  authority,
                  self(),
@@ -952,12 +796,65 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_native_transport_required} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command, adapter: :untrusted_adapter],
+                 Keyword.put(opts, :adapter, :untrusted_adapter),
                  worktree_root,
                  authority,
                  self(),
                  fn _ -> flunk("callback should not run") end
                )
+    end
+
+    test "security regression: agent profile bytes and filesystem binding are exact" do
+      worktree_root = create_standalone_fixture!()
+      opts = grok_client_opts()
+      grok_home = Keyword.fetch!(opts, :env) |> Map.new() |> Map.fetch!("GROK_HOME")
+      profile_path = RuntimeHome.grok_agent_profile_path(grok_home)
+
+      assert File.read!(profile_path) == @expected_agent_profile
+
+      mutations = [
+        {:missing, fn -> File.rm!(profile_path) end},
+        {:tampered, fn -> File.write!(profile_path, "---\ntools: [run_terminal_cmd]\n---\n") end},
+        {:reordered,
+         fn ->
+           File.write!(
+             profile_path,
+             String.replace(
+               @expected_agent_profile,
+               "  - grep\n  - list_dir",
+               "  - list_dir\n  - grep"
+             )
+           )
+         end},
+        {:symlink,
+         fn ->
+           File.rm!(profile_path)
+           File.ln_s!("/dev/null", profile_path)
+         end},
+        {:nonregular,
+         fn ->
+           File.rm!(profile_path)
+           File.mkdir!(profile_path)
+         end},
+        {:insecure_mode, fn -> File.chmod!(profile_path, 0o640) end}
+      ]
+
+      for {_name, mutate} <- mutations do
+        File.rm_rf!(profile_path)
+        File.write!(profile_path, @expected_agent_profile)
+        File.chmod!(profile_path, 0o600)
+        mutate.()
+
+        assert {:error, _reason} =
+                 GrokSandbox.with_launch(
+                   :grok,
+                   opts,
+                   worktree_root,
+                   nil,
+                   self(),
+                   fn _ -> flunk("callback should not run") end
+                 )
+      end
     end
 
     test "callback raise still restores transient profile state" do
@@ -967,7 +864,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert_raise RuntimeError, "callback exploded", fn ->
         GrokSandbox.with_launch(
           :grok,
-          [command: @expected_grok_command],
+          grok_client_opts(),
           worktree_root,
           authority,
           self(),
@@ -988,7 +885,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         Task.async(fn ->
           GrokSandbox.with_launch(
             :grok,
-            [command: @expected_grok_command],
+            grok_client_opts(),
             worktree_root,
             authority,
             owner,
@@ -1007,7 +904,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :grok_sandbox_profile_busy} =
                GrokSandbox.with_launch(
                  :grok,
-                 [command: @expected_grok_command],
+                 grok_client_opts(),
                  worktree_root,
                  authority,
                  owner,

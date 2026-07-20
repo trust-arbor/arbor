@@ -4,6 +4,7 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   import Bitwise
 
   alias Arbor.Common.SafePath
+  alias Arbor.AI.AcpSession.RuntimeHome
   alias Toml
 
   defmodule Authority do
@@ -45,8 +46,6 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     "MCPTool(*)",
     "--deny",
     "Bash(*)",
-    "--disallowed-tools",
-    "execute",
     "agent",
     "--no-leader",
     "--model",
@@ -61,8 +60,6 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     "--no-memory",
     "--no-subagents",
     "--disable-web-search",
-    "--disallowed-tools",
-    "execute",
     "--deny",
     "Bash(*)",
     "agent",
@@ -169,8 +166,8 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
 
   def with_launch(:grok, client_opts, cwd, authority, owner, mcp_servers, fun)
       when is_list(client_opts) and is_binary(cwd) and is_function(fun, 1) do
-    with :ok <- validate_client_opts(client_opts),
-         :ok <- validate_bound_mcp_servers(mcp_servers),
+    with :ok <- validate_bound_mcp_servers(mcp_servers),
+         :ok <- validate_client_opts(client_opts, mcp_servers),
          {:ok, worktree_root} <- canonical_directory(cwd),
          :ok <- reject_ambient_mcp_sources(worktree_root),
          {:ok, kind} <- repository_kind(worktree_root) do
@@ -262,12 +259,13 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
 
   defp execute_profiled_launch(client_opts, profile_name, lease, verify, mcp_servers, fun) do
     result =
-      with :ok <- verify.() do
+      with :ok <- validate_client_opts(client_opts, mcp_servers),
+           :ok <- verify.() do
         prepared_opts =
           Keyword.put(
             client_opts,
             :command,
-            profiled_command(profile_name, mcp_servers)
+            profiled_command(profile_name, mcp_servers, client_opts)
           )
 
         fun.(prepared_opts)
@@ -287,13 +285,10 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
       :erlang.raise(kind, reason, __STACKTRACE__)
   end
 
-  defp validate_client_opts(client_opts) do
+  defp validate_client_opts(client_opts, _mcp_servers) do
     cond do
       not Keyword.keyword?(client_opts) ->
         {:error, :invalid_acp_client_options}
-
-      Keyword.get(client_opts, :command) != @expected_grok_command ->
-        {:error, :grok_sandbox_command_mismatch}
 
       Keyword.has_key?(client_opts, :cd) ->
         {:error, :grok_sandbox_cwd_override_forbidden}
@@ -302,7 +297,23 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
         {:error, :grok_sandbox_native_transport_required}
 
       true ->
-        :ok
+        with {:ok, grok_home} <- effective_grok_home(client_opts),
+             :ok <- verify_grok_home_binding(client_opts, grok_home),
+             :ok <-
+               RuntimeHome.verify_grok_agent_profile(
+                 RuntimeHome.grok_agent_profile_path(grok_home)
+               ) do
+          expected =
+            expected_command(
+              "strict",
+              RuntimeHome.grok_agent_profile_path(grok_home),
+              []
+            )
+
+          if Keyword.get(client_opts, :command) == expected,
+            do: :ok,
+            else: {:error, :grok_sandbox_command_mismatch}
+        end
     end
   end
 
@@ -315,12 +326,28 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   defp validate_bound_mcp_servers(_servers),
     do: {:error, :invalid_grok_bound_mcp_servers}
 
-  defp profiled_command(profile_name, []) do
-    List.replace_at(@expected_grok_command, @sandbox_command_index, profile_name)
+  defp expected_command(sandbox, profile_path, []) do
+    @expected_grok_command
+    |> List.replace_at(@sandbox_command_index, sandbox)
+    |> bind_agent_profile_arg(profile_path)
   end
 
-  defp profiled_command(profile_name, [_server | _rest]) do
-    List.replace_at(@grok_command_with_bound_mcp, @sandbox_command_index, profile_name)
+  defp expected_command(sandbox, profile_path, [_server | _rest]) do
+    @grok_command_with_bound_mcp
+    |> List.replace_at(@sandbox_command_index, sandbox)
+    |> bind_agent_profile_arg(profile_path)
+  end
+
+  defp profiled_command(profile_name, mcp_servers, client_opts) do
+    {:ok, grok_home} = effective_grok_home(client_opts)
+    expected_command(profile_name, RuntimeHome.grok_agent_profile_path(grok_home), mcp_servers)
+  end
+
+  defp bind_agent_profile_arg(command, profile_path) do
+    agent_index = Enum.find_index(command, &(&1 == "agent"))
+
+    List.insert_at(command, agent_index + 1, "--agent-profile")
+    |> List.insert_at(agent_index + 2, profile_path)
   end
 
   defp reject_ambient_mcp_sources(worktree_root) do
@@ -634,22 +661,58 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   end
 
   defp effective_grok_home(client_opts) do
-    env = Keyword.get(client_opts, :env, [])
+    case normalize_env(Keyword.get(client_opts, :env)) do
+      {:ok, env} ->
+        case env_values(env, "GROK_HOME") do
+          [{"GROK_HOME", path}] when is_binary(path) and path != "" ->
+            if valid_path_string?(path) and Path.type(path) == :absolute and
+                 Path.expand(path) == path,
+               do: {:ok, path},
+               else: {:error, :invalid_grok_home}
 
-    Enum.find_value(env, System.get_env("GROK_HOME"), fn
-      {"GROK_HOME", value} when is_binary(value) and value != "" -> value
-      _other -> nil
-    end)
-    |> case do
-      nil ->
-        {:ok, Path.expand("~/.grok")}
+          _other ->
+            {:error, :invalid_grok_home}
+        end
 
-      path when is_binary(path) ->
-        if valid_path_string?(path) and Path.type(path) == :absolute,
-          do: {:ok, Path.expand(path)},
-          else: {:error, :invalid_grok_home}
+      :error ->
+        {:error, :invalid_grok_home}
     end
   end
+
+  defp verify_grok_home_binding(client_opts, grok_home) do
+    env = Keyword.fetch!(client_opts, :env)
+    runtime_home = Path.dirname(grok_home)
+
+    with [{"ARBOR_HOME", ^runtime_home}] <- env_values(env, "ARBOR_HOME"),
+         [{"GROK_HOME", ^grok_home}] <- env_values(env, "GROK_HOME"),
+         [{"GROK_LOG_FILE", log_file}] <- env_values(env, "GROK_LOG_FILE"),
+         true <- log_file == Path.join(grok_home, "grok.log"),
+         {:ok, %File.Stat{type: :directory, mode: runtime_mode}} <-
+           File.lstat(runtime_home),
+         true <- (runtime_mode &&& 0o7777) == 0o700,
+         {:ok, %File.Stat{type: :directory, mode: home_mode}} <- File.lstat(grok_home),
+         true <- (home_mode &&& 0o7777) == 0o700 do
+      :ok
+    else
+      _other -> {:error, :grok_sandbox_env_mismatch}
+    end
+  end
+
+  defp env_values(env, key), do: Enum.filter(env, &match?({^key, _}, &1))
+
+  defp normalize_env(env) when is_list(env) do
+    try do
+      if Enum.all?(env, &(is_tuple(&1) and tuple_size(&1) == 2)),
+        do: {:ok, env},
+        else: :error
+    rescue
+      _error -> :error
+    catch
+      _kind, _reason -> :error
+    end
+  end
+
+  defp normalize_env(_env), do: :error
 
   defp recover_orphaned_profile(worktree_root, generated_content) do
     profile_path = Path.join([worktree_root, ".grok", @profile_filename])

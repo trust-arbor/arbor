@@ -6,6 +6,7 @@ defmodule Arbor.AI.AcpSessionTest do
 
   alias Arbor.AI.AcpSession
   alias Arbor.AI.AcpSession.Config
+  alias Arbor.AI.AcpSession.RuntimeHome
   alias Arbor.AI.AcpManaged
   alias Arbor.AI.AcpManaged.SessionRegistry
 
@@ -410,10 +411,16 @@ defmodule Arbor.AI.AcpSessionTest do
     assert "--disable-web-search" in command
     assert Enum.chunk_every(command, 2, 1, :discard) |> Enum.member?(["--deny", "MCPTool(*)"])
 
-    assert Enum.chunk_every(command, 2, 1, :discard)
-           |> Enum.member?(["--disallowed-tools", "execute"])
+    refute "--disallowed-tools" in command
+    refute "--tools" in command
 
     assert "--no-leader" in command
+    profile_index = Enum.find_index(command, &(&1 == "--agent-profile"))
+    profile_path = Enum.at(command, profile_index + 1)
+    assert profile_path == RuntimeHome.grok_agent_profile_path(grok_home)
+    assert {:ok, %File.Stat{type: :regular, mode: profile_mode}} = File.lstat(profile_path)
+    assert Bitwise.band(profile_mode, 0o7777) == 0o600
+    assert RuntimeHome.verify_grok_agent_profile(profile_path) == :ok
 
     runtime_home = state.runtime_home_cleanup.path
     assert :ok = AcpSession.close(session)

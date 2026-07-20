@@ -101,8 +101,6 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
     "MCPTool(*)",
     "--deny",
     "Bash(*)",
-    "--disallowed-tools",
-    "execute",
     "agent",
     "--no-leader",
     "--model",

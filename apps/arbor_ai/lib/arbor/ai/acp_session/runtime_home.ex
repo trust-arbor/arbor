@@ -1,10 +1,27 @@
 defmodule Arbor.AI.AcpSession.RuntimeHome do
   @moduledoc false
 
+  import Bitwise
+
   @create_attempts 4
   @grok_auth_filename "auth.json"
   @grok_home_directory "grok"
   @grok_log_filename "grok.log"
+  @grok_agent_profile_filename "arbor-agent-profile.md"
+  @grok_agent_profile_content """
+  ---
+  tools:
+    - read_file
+    - search_replace
+    - grep
+    - list_dir
+  disallowedTools:
+    - run_terminal_cmd
+    - task
+    - get_task_output
+    - kill_task
+  ---
+  """
   @max_grok_auth_bytes 1_048_576
   @grok_isolation_env [
     {"GROK_CLAUDE_MCPS_ENABLED", "false"},
@@ -52,6 +69,39 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   end
 
   def cleanup(_cleanup_identity), do: {:error, :invalid_acp_runtime_home}
+
+  @doc false
+  @spec grok_agent_profile_path(String.t()) :: String.t()
+  def grok_agent_profile_path(grok_home) when is_binary(grok_home),
+    do: Path.join(grok_home, @grok_agent_profile_filename)
+
+  @doc false
+  @spec verify_grok_agent_profile(String.t()) :: :ok | {:error, atom()}
+  def verify_grok_agent_profile(path) when is_binary(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode, size: size}}
+      when (mode &&& 0o7777) == 0o600 and size == byte_size(@grok_agent_profile_content) ->
+        case Arbor.LLM.read_bounded_regular_file(path, byte_size(@grok_agent_profile_content)) do
+          {:ok, @grok_agent_profile_content} -> :ok
+          {:ok, _other} -> {:error, :grok_agent_profile_tampered}
+          {:error, _reason} -> {:error, :grok_agent_profile_unavailable}
+        end
+
+      {:ok, %File.Stat{type: :regular}} ->
+        {:error, :grok_agent_profile_insecure}
+
+      {:ok, _other} ->
+        {:error, :grok_agent_profile_nonregular}
+
+      {:error, :enoent} ->
+        {:error, :grok_agent_profile_missing}
+
+      {:error, _reason} ->
+        {:error, :grok_agent_profile_unavailable}
+    end
+  end
+
+  def verify_grok_agent_profile(_path), do: {:error, :grok_agent_profile_unavailable}
 
   defp create(0), do: {:error, :acp_runtime_home_unavailable}
 
@@ -136,8 +186,13 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
 
       with {:ok, created?} <- ensure_private_grok_home(grok_home),
            :ok <- maybe_stage_grok_auth(grok_home, created?),
+           :ok <- stage_grok_agent_profile(grok_home, created?),
+           {:ok, profile_path} <- bind_grok_agent_profile(client_opts, grok_home),
            {:ok, env} <- put_grok_isolation_env(Keyword.get(client_opts, :env), grok_home) do
-        {:ok, Keyword.put(client_opts, :env, env)}
+        {:ok,
+         client_opts
+         |> Keyword.put(:command, profile_command(client_opts, profile_path))
+         |> Keyword.put(:env, env)}
       end
     end
   end
@@ -169,7 +224,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   defp verify_private_directory(path) do
     case File.lstat(path) do
       {:ok, %File.Stat{type: :directory, mode: mode}}
-      when Bitwise.band(mode, 0o777) == 0o700 ->
+      when Bitwise.band(mode, 0o7777) == 0o700 ->
         :ok
 
       _other ->
@@ -189,7 +244,12 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
 
         {:ok, %File.Stat{type: :regular}} ->
           with {:ok, auth} <- Arbor.LLM.read_bounded_regular_file(source, @max_grok_auth_bytes),
-               :ok <- write_private_file(Path.join(grok_home, @grok_auth_filename), auth) do
+               :ok <-
+                 write_private_file(
+                   Path.join(grok_home, @grok_auth_filename),
+                   auth,
+                   :grok_auth_stage_failed
+                 ) do
             :ok
           else
             _other -> {:error, :unsafe_grok_auth_source}
@@ -199,6 +259,50 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
           {:error, :unsafe_grok_auth_source}
       end
     end
+  end
+
+  defp stage_grok_agent_profile(grok_home, true) do
+    path = grok_agent_profile_path(grok_home)
+
+    case write_private_file(path, @grok_agent_profile_content, :grok_agent_profile_stage_failed) do
+      :ok -> verify_grok_agent_profile(path)
+      {:error, :already_exists} -> verify_grok_agent_profile(path)
+      {:error, _reason} -> {:error, :grok_agent_profile_stage_failed}
+    end
+  end
+
+  defp stage_grok_agent_profile(grok_home, false) do
+    grok_home
+    |> grok_agent_profile_path()
+    |> verify_grok_agent_profile()
+  end
+
+  defp bind_grok_agent_profile(client_opts, grok_home) do
+    profile_path = grok_agent_profile_path(grok_home)
+
+    case Keyword.get(client_opts, :command) do
+      command when is_list(command) ->
+        case List.to_tuple(command) do
+          {"grok", "--sandbox", "strict", "--no-memory", "--no-subagents", "--disable-web-search",
+           "--deny", "MCPTool(*)", "--deny", "Bash(*)", "agent", "--no-leader", "--model",
+           "grok-4.5", "stdio"} ->
+            {:ok, profile_path}
+
+          _other ->
+            {:error, :grok_agent_command_mismatch}
+        end
+
+      _other ->
+        {:error, :grok_agent_command_mismatch}
+    end
+  end
+
+  defp profile_command(client_opts, profile_path) do
+    command = Keyword.fetch!(client_opts, :command)
+    agent_index = Enum.find_index(command, &(&1 == "agent"))
+
+    List.insert_at(command, agent_index + 1, "--agent-profile")
+    |> List.insert_at(agent_index + 2, profile_path)
   end
 
   defp source_grok_home do
@@ -218,7 +322,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
-  defp write_private_file(path, content) when is_binary(content) do
+  defp write_private_file(path, content, failure_reason) when is_binary(content) do
     case :file.open(path, [:raw, :binary, :write, :exclusive]) do
       {:ok, io} ->
         result =
@@ -232,15 +336,18 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
 
         with :ok <- result,
              {:ok, %File.Stat{type: :regular, mode: mode, size: size}} <- File.lstat(path),
-             true <- Bitwise.band(mode, 0o777) == 0o600,
+             true <- Bitwise.band(mode, 0o7777) == 0o600,
              true <- size == byte_size(content) do
           :ok
         else
-          _other -> {:error, :grok_auth_stage_failed}
+          _other -> {:error, failure_reason}
         end
 
+      {:error, :eexist} ->
+        {:error, :already_exists}
+
       {:error, _reason} ->
-        {:error, :grok_auth_stage_failed}
+        {:error, failure_reason}
     end
   end
 

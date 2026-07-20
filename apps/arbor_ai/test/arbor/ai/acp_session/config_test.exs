@@ -61,7 +61,7 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
   describe "resolve/2 for :grok command hardening" do
     @describetag :fast
 
-    test "uses immutable strict sandbox shape with explicit execute disallow" do
+    test "uses immutable strict sandbox shape without ineffective execute disallow" do
       assert {:ok, opts} = Config.resolve(:grok, [])
 
       command = Keyword.fetch!(opts, :command)
@@ -77,8 +77,6 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
                "MCPTool(*)",
                "--deny",
                "Bash(*)",
-               "--disallowed-tools",
-               "execute",
                "agent",
                "--no-leader",
                "--model",
@@ -88,12 +86,12 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
 
       assert Enum.at(command, 8) == "--deny"
       assert Enum.at(command, 9) == "Bash(*)"
-      assert Enum.at(command, 10) == "--disallowed-tools"
-      assert Enum.at(command, 11) == "execute"
-      assert Enum.at(command, 12) == "agent"
+      assert Enum.at(command, 10) == "agent"
+      refute "--disallowed-tools" in command
+      refute "--tools" in command
     end
 
-    test "rejects app-level :grok overrides that remove execute disallow" do
+    test "rejects app-level :grok overrides that change the strict command" do
       prior = Application.get_env(:arbor_ai, :acp_providers)
 
       Application.put_env(
@@ -111,6 +109,8 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
             "MCPTool(*)",
             "--deny",
             "Bash(*)",
+            "--tools",
+            "read_file",
             "agent",
             "--no-leader",
             "--model",

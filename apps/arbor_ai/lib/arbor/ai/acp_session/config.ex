@@ -68,9 +68,8 @@ defmodule Arbor.AI.AcpSession.Config do
     {"GIT_CONFIG_VALUE_0", "/dev/null"}
   ]
 
-  # Grok's global "execute" tool must be removed for command shaping, and this
-  # pair must be present on every supported command variant before the `agent`
-  # subcommand. We retain `--deny Bash(*)` as alias defense-in-depth.
+  # Grok's agent profile is bound by RuntimeHome after this trusted static
+  # command is resolved. `--deny Bash(*)` remains defense-in-depth for aliases.
   @grok_strict_command [
     "grok",
     "--sandbox",
@@ -82,8 +81,6 @@ defmodule Arbor.AI.AcpSession.Config do
     "MCPTool(*)",
     "--deny",
     "Bash(*)",
-    "--disallowed-tools",
-    "execute",
     "agent",
     "--no-leader",
     "--model",
