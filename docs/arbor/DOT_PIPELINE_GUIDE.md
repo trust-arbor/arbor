@@ -7,7 +7,9 @@ Comprehensive reference for writing and running Arbor orchestrator pipelines usi
 DOT describes the immutable orchestration graph; it does not become the
 authority for a run. At execution, Arbor binds the compiled graph to an
 immutable `RunAuthorization` containing the run's principal, task/session
-scope, signer, graph/manifest identity, and approved capability boundary.
+scope, graph/manifest identity, and approved capability boundary. The signing
+authority remains a process-local Engine credential and is deliberately absent
+from `RunAuthorization`, graph context, and checkpoints.
 Nodes must not replace that principal or widen the authorization through DOT
 attributes, context values, or nested calls. The coding workflow adds
 workspace, provider, review, and owner-observation rules; see

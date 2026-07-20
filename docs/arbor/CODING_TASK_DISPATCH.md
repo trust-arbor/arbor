@@ -49,8 +49,10 @@ For linked worktrees, the Grok boundary permits the Git common directory only
 when the worktree's `.git` metadata resolves to the repository's exact
 `--git-common-dir`. The worker's Git environment sets `GIT_OPTIONAL_LOCKS=0`.
 This is a narrowly scoped read exception for the validated common directory;
-it does not authorize arbitrary paths, repository config, hooks, or sibling
-worktrees.
+it does not authorize writes, hook execution, arbitrary paths, or sibling
+worktrees. Because repository config and hook files live under the common
+directory, they are readable metadata inside that exception even though the
+worker cannot execute or mutate them.
 
 The owner observes approvals and cancellation. Poll status and pending
 approvals through the task-scoped MCP tools, answer only approvals whose
