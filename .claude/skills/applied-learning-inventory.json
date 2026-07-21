@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 490,
+  "entry_count": 491,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5914,8 +5914,21 @@
       "source_incident": "found 2026-07-21 after incorrectly assuming `String.trim/1` raises on invalid UTF-8 during evidence-ref review).",
       "content_sha256": "5c2c9be2fe576cdb79c2bd43b699b86c0f76b93bd2f2c542bd78abed5a60c2ab",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 491,
+      "source_kind": "post-migration",
+      "slug": "validation-feedback-must-preserve-failure-local-diagnostics-not-only-stream-head-and-tail",
+      "title": "Validation feedback must preserve failure-local diagnostics, not only stream head and tail.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-validation-feedback-must-preserve-failure-local-diagnostics-not-only-stream-head-and-tail",
+      "source_date": "2026-07-21",
+      "source_incident": "found 2026-07-21 when cross-app validation reported 489 tests and 2 failures but omitted both failure blocks).",
+      "content_sha256": "b1d416965d779bfa81bae9f42995258b5d32c77cf295faae563747c3145792af",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 29
+  "post_migration_entry_count": 30
 }
