@@ -39,7 +39,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCoreTest do
                  %{
                    status: "discarded",
                    branch_retired: false,
-                   branch_preserved_reason: :branch_tip_diverged,
+                   branch_preserved_reason: "branch_tip_diverged",
                    cleanup_failure: {:secret, self()}
                  },
                  3
@@ -58,6 +58,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCoreTest do
                    cleanup_retry_count: 1,
                    cleanup_retry_limit: 3,
                    cleanup_dormant: false,
+                   cleanup_failure_category: "worktree_remove_failed",
                    cleanup_failure: {:worktree_remove_failed, "/private/path"},
                    discard_phase: :worktree
                  },
@@ -92,6 +93,96 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCoreTest do
 
       assert receipt["cleanup_status"] == "dormant"
       assert receipt["cleanup_failure_category"] == "cleanup_retries_exhausted"
+    end
+
+    test "security regression: discard_pending requires exact registry cleanup evidence" do
+      valid = %{
+        status: "discard_pending",
+        cleanup_retry_count: 1,
+        cleanup_retry_limit: 3,
+        cleanup_dormant: false,
+        cleanup_failure_category: "worktree_remove_failed",
+        discard_phase: "worktree"
+      }
+
+      malformed = [
+        {"missing retry count", Map.delete(valid, :cleanup_retry_count)},
+        {"negative retry count", Map.put(valid, :cleanup_retry_count, -1)},
+        {"oversized retry count", Map.put(valid, :cleanup_retry_count, 33)},
+        {"non-integer retry count", Map.put(valid, :cleanup_retry_count, "1")},
+        {"missing retry limit", Map.delete(valid, :cleanup_retry_limit)},
+        {"zero retry limit", Map.put(valid, :cleanup_retry_limit, 0)},
+        {"oversized retry limit", Map.put(valid, :cleanup_retry_limit, 33)},
+        {"non-integer retry limit", Map.put(valid, :cleanup_retry_limit, "3")},
+        {"missing dormant marker", Map.delete(valid, :cleanup_dormant)},
+        {"nil dormant marker", Map.put(valid, :cleanup_dormant, nil)},
+        {"string dormant marker", Map.put(valid, :cleanup_dormant, "false")},
+        {"missing failure category", Map.delete(valid, :cleanup_failure_category)},
+        {"raw failure fallback",
+         valid
+         |> Map.delete(:cleanup_failure_category)
+         |> Map.put(:cleanup_failure, {:worktree_remove_failed, "/private/secret"})},
+        {"blank failure category", Map.put(valid, :cleanup_failure_category, "")},
+        {"non-categorical failure", Map.put(valid, :cleanup_failure_category, "/private/secret")},
+        {"missing discard phase", Map.delete(valid, :discard_phase)},
+        {"unknown discard phase", Map.put(valid, :discard_phase, "cleanup")},
+        {"retrying marker with exhausted count", Map.put(valid, :cleanup_retry_count, 3)},
+        {"dormant marker before exhaustion", Map.put(valid, :cleanup_dormant, true)}
+      ]
+
+      for {label, result} <- malformed do
+        assert Core.release_receipt(result, 8) == :error, label
+      end
+    end
+
+    test "security regression: discarded requires boolean retirement and preserved reason" do
+      assert {:ok, retired} =
+               Core.release_receipt(%{status: "discarded", branch_retired: true}, 8)
+
+      assert retired == %{"branch_status" => "retired", "cleanup_status" => "complete"}
+
+      assert {:ok, preserved} =
+               Core.release_receipt(
+                 %{
+                   status: "discarded",
+                   branch_retired: false,
+                   branch_preserved_reason: "branch_provenance_not_created"
+                 },
+                 8
+               )
+
+      assert preserved["branch_status"] == "preserved"
+      assert preserved["branch_preserved_reason"] == "branch_provenance_not_created"
+
+      malformed = [
+        {"missing retirement marker", %{status: "discarded"}},
+        {"nil retirement marker", %{status: "discarded", branch_retired: nil}},
+        {"string retirement marker",
+         %{
+           status: "discarded",
+           branch_retired: "false",
+           branch_preserved_reason: "branch_provenance_not_created"
+         }},
+        {"preserved branch missing reason", %{status: "discarded", branch_retired: false}},
+        {"preserved branch blank reason",
+         %{status: "discarded", branch_retired: false, branch_preserved_reason: ""}},
+        {"preserved branch oversized reason",
+         %{
+           status: "discarded",
+           branch_retired: false,
+           branch_preserved_reason: String.duplicate("a", 129)
+         }},
+        {"preserved branch non-string reason",
+         %{
+           status: "discarded",
+           branch_retired: false,
+           branch_preserved_reason: :branch_provenance_not_created
+         }}
+      ]
+
+      for {label, result} <- malformed do
+        assert Core.release_receipt(result, 8) == :error, label
+      end
     end
   end
 

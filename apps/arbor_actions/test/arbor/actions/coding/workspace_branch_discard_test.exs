@@ -215,15 +215,38 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
   end
 
   describe "discard release mode" do
-    test "security regression: malformed lifecycle receipt fails closed without raw reasons" do
-      result = %{
-        status: "discard_pending",
-        pending_reason: {:backend, "/private/secret"},
-        cleanup_failure: {:internal, "/private/secret"}
-      }
+    test "security regression: malformed expected lifecycle statuses fail closed" do
+      malformed = [
+        %{
+          status: "discard_pending",
+          cleanup_retry_limit: 3,
+          cleanup_dormant: false,
+          cleanup_failure_category: "worktree_remove_failed",
+          discard_phase: "worktree",
+          pending_reason: {:backend, "/private/secret"}
+        },
+        %{
+          status: "discard_pending",
+          cleanup_retry_count: 1,
+          cleanup_retry_limit: 3,
+          cleanup_dormant: false,
+          cleanup_failure: {:internal, "/private/secret"},
+          discard_phase: "worktree"
+        },
+        %{status: "discarded", branch_retired: false},
+        %{
+          status: "discarded",
+          branch_retired: "false",
+          branch_preserved_reason: "branch_provenance_not_created"
+        }
+      ]
 
-      assert Workspace.Release.format_release_result(result) ==
-               {:error, {:invalid_release_receipt, "discard_pending"}}
+      for result <- malformed do
+        status = result.status
+
+        assert Workspace.Release.format_release_result(result) ==
+                 {:error, {:invalid_release_receipt, status}}
+      end
     end
 
     test "already released remains lifecycle-less after internal reason scrubbing" do
@@ -432,6 +455,18 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
       assert discarded.branch_preserved_reason == "branch_tip_diverged"
       assert discarded.cleanup_residue == true
       refute File.dir?(worktree_path)
+
+      assert {:ok, formatted} = Workspace.Release.format_release_result(discarded)
+
+      assert formatted.branch_lifecycle == %{
+               "branch_status" => "pending",
+               "cleanup_status" => "dormant",
+               "branch_preserved_reason" => "branch_tip_diverged",
+               "cleanup_retry_count" => @default_retained_cleanup_retry_limit,
+               "cleanup_retry_limit" => @default_retained_cleanup_retry_limit,
+               "cleanup_failure_category" => "branch_tip_diverged",
+               "discard_phase" => "branch"
+             }
 
       # The branch itself remains as local evidence at the divergent tip.
       assert branch_exists?(repo, branch)
