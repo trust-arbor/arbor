@@ -1925,7 +1925,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                WorkspaceLeaseRegistry.release(workspace_id, :remove, %{})
     end
 
-    test "post-create finalization failure removes owned worktree and keeps registry alive", %{
+    test "security regression: post-create failure retires its created branch", %{
       tmp_dir: tmp_dir
     } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
@@ -1966,6 +1966,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       expected_path = expected_worktree_path(worktree_base, branch)
       refute File.dir?(expected_path)
       refute worktree_registered?(repo_root, expected_path)
+      assert {:ok, :absent} = Git.observe_branch_ref(repo_root, branch)
 
       assert {:error, :not_found} =
                WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{server: server})
@@ -1982,9 +1983,173 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                )
 
       assert File.dir?(lease.worktree_path)
+      assert lease.branch_provenance == "created"
 
       assert {:ok, _} =
                WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, %{server: server})
+    end
+
+    test "security regression: post-create failure preserves a reused branch", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      repo_root = git!(repo, ["rev-parse", "--show-toplevel"])
+      branch = "test/workspace-post-create-reused"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      workspace_id = "ws_post_create_reused_#{System.unique_integer([:positive])}"
+      server = :"workspace_lease_post_create_reused_#{System.unique_integer([:positive])}"
+
+      git!(repo_root, ["branch", branch])
+      expected_tip = git!(repo_root, ["rev-parse", branch])
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
+
+      assert {:error, {:invalid, :base_commit}} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   workspace_id: workspace_id,
+                   repo_path: repo_root,
+                   branch: branch,
+                   worktree_base_dir: worktree_base,
+                   create_worktree: fn repo_path, branch_name, params ->
+                     {:ok, path, :owned, _base_commit, provenance} =
+                       Workspace.create_worktree(repo_path, branch_name, params)
+
+                     assert provenance == :reused
+                     {:ok, path, :owned, nil, :reused}
+                   end
+                 },
+                 server: server
+               )
+
+      expected_path = expected_worktree_path(worktree_base, branch)
+      refute File.dir?(expected_path)
+      refute worktree_registered?(repo_root, expected_path)
+      assert {:ok, {:present, ^expected_tip}} = Git.observe_branch_ref(repo_root, branch)
+
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{server: server})
+    end
+
+    test "security regression: post-create failure preserves unknown branch provenance", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      repo_root = git!(repo, ["rev-parse", "--show-toplevel"])
+      branch = "test/workspace-post-create-unknown"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      workspace_id = "ws_post_create_unknown_#{System.unique_integer([:positive])}"
+      server = :"workspace_lease_post_create_unknown_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
+
+      assert {:error, {:invalid, :base_commit}} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   workspace_id: workspace_id,
+                   repo_path: repo_root,
+                   branch: branch,
+                   worktree_base_dir: worktree_base,
+                   create_worktree: fn repo_path, branch_name, params ->
+                     {:ok, path, :owned, _expected_tip, :created} =
+                       Workspace.create_worktree(repo_path, branch_name, params)
+
+                     # Legacy four-tuples carry no provenance. Cleanup may
+                     # remove the owned worktree but must preserve the branch.
+                     {:ok, path, :owned, nil}
+                   end
+                 },
+                 server: server
+               )
+
+      expected_path = expected_worktree_path(worktree_base, branch)
+      refute File.dir?(expected_path)
+      refute worktree_registered?(repo_root, expected_path)
+
+      assert {:ok, {:present, _expected_tip}} = Git.observe_branch_ref(repo_root, branch)
+
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{server: server})
+    end
+
+    test "security regression: post-create branch tip race preserves durable residue", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      repo_root = git!(repo, ["rev-parse", "--show-toplevel"])
+      expected_tip = git!(repo_root, ["rev-parse", "HEAD"])
+
+      File.write!(Path.join(repo_root, "alternate.txt"), "alternate\n")
+      git!(repo_root, ["add", "alternate.txt"])
+      git!(repo_root, ["commit", "-m", "alternate tip"])
+      replacement_tip = git!(repo_root, ["rev-parse", "HEAD"])
+
+      branch = "test/workspace-post-create-tip-race"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      workspace_id = "ws_post_create_tip_race_#{System.unique_integer([:positive])}"
+      server = :"workspace_lease_post_create_tip_race_#{System.unique_integer([:positive])}"
+
+      cleanup = fn retained ->
+        result = WorkspaceLeaseRegistry.remove_owned_retained_worktree(retained)
+
+        if result == :ok do
+          git!(repo_root, [
+            "update-ref",
+            "refs/heads/#{branch}",
+            replacement_tip,
+            expected_tip
+          ])
+        end
+
+        result
+      end
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         retention_journal: :disabled,
+         retained_cleanup: cleanup,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
+
+      assert {:error, {:invalid, :base_commit}} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   workspace_id: workspace_id,
+                   repo_path: repo_root,
+                   branch: branch,
+                   base_ref: expected_tip,
+                   worktree_base_dir: worktree_base,
+                   create_worktree: fn repo_path, branch_name, params ->
+                     {:ok, path, :owned, ^expected_tip, :created} =
+                       Workspace.create_worktree(repo_path, branch_name, params)
+
+                     {:ok, path, :owned, nil, :created}
+                   end
+                 },
+                 server: server
+               )
+
+      expected_path = expected_worktree_path(worktree_base, branch)
+      refute File.dir?(expected_path)
+      refute worktree_registered?(repo_root, expected_path)
+
+      assert {:ok, {:present, ^replacement_tip}} = Git.observe_branch_ref(repo_root, branch)
+
+      state = :sys.get_state(server)
+      assert %{^workspace_id => retained} = state.retained_by_id
+      assert retained.lifecycle == :discarding
+      assert retained.discard_phase == :branch
+      assert retained.dormant == true
+      assert inspect(retained.cleanup_failure) =~ "branch_tip_diverged"
     end
 
     test "security regression: Workspace cleanup refuses a replacement inode", %{

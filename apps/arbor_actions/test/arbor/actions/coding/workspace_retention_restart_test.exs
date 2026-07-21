@@ -931,9 +931,10 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       send(owner, :stop)
     end
 
-    test "security regression: failed active put preserves creating blocker across restart", %{
-      tmp_dir: tmp_dir
-    } do
+    test "security regression: failed active put preserves durable discard residue across restart",
+         %{
+           tmp_dir: tmp_dir
+         } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       branch = "test/creating-blocker-restart"
       base = Path.join(tmp_dir, "worktrees")
@@ -947,7 +948,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       server =
         start_registry(60_000,
           retention_journal: {store_name, backend},
-          retention_runtime_id: "rt_creating_blocker"
+          retention_runtime_id: "rt_creating_blocker",
+          retained_cleanup_retry_limit: 1
         )
 
       :ok =
@@ -971,61 +973,58 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       assert_receive :active_marker_replaced, 2_000
       assert File.read!(Path.join(path, "survivor.txt")) == "must-live\n"
       assert active_count(server) == 0
-      assert retained_count(server) == 0
-      assert map_size(:sys.get_state(server_pid(server)).retention_blockers) == 1
+      assert retained_count(server) == 1
+      assert map_size(:sys.get_state(server_pid(server)).retention_blockers) == 0
+
+      retained = retained_from_state(server)
+      assert retained.lifecycle == :discarding
+      assert retained.discard_phase == :worktree
+      assert retained.dormant == true
 
       {:ok, key} = Core.record_key(workspace_id)
-      assert {:ok, creating_marker} = Persistence.get(store_name, backend, key)
+      assert {:ok, discard_marker} = Persistence.get(store_name, backend, key)
 
-      assert (Map.get(creating_marker, "lifecycle") || Map.get(creating_marker, :lifecycle)) ==
-               "creating"
+      assert (Map.get(discard_marker, "lifecycle") || Map.get(discard_marker, :lifecycle)) ==
+               "discarding"
+
+      assert (Map.get(discard_marker, "discard_phase") ||
+                Map.get(discard_marker, :discard_phase)) == "worktree"
 
       :ok = ControllableRetentionStore.set_mode(store_name, :ok)
       stop_registry(server)
-      server2 = start_registry(60_000, retention_journal: {store_name, backend})
+
+      server2 =
+        start_registry(60_000,
+          retention_journal: {store_name, backend},
+          retained_cleanup_retry_limit: 1
+        )
 
       state2 = :sys.get_state(server_pid(server2))
       assert map_size(state2.leases) == 0
-      assert map_size(state2.retained_by_id) == 0
-      assert map_size(state2.retention_blockers) == 1
-      assert is_nil(Map.get(hd(Map.values(state2.retention_blockers)), :expiry_ref))
+      assert map_size(state2.retained_by_id) == 1
+      assert map_size(state2.retention_blockers) == 0
+
+      retained2 = retained_from_state(server2)
+      assert retained2.lifecycle == :discarding
+      assert retained2.discard_phase == :worktree
+      assert retained2.dormant == true
+      assert is_nil(retained2.expiry_ref)
       assert durable_marker?(store_name, backend, workspace_id)
       assert File.exists?(Path.join(path, "survivor.txt"))
 
-      assert {:ok, %{lifecycle: "creating", dormant: true}} =
-               WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
-                 server: server2,
-                 task_id: task_id,
-                 principal_id: principal_id
-               })
-
-      assert {:error, :not_authorized} =
-               WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
-                 server: server2,
-                 task_id: task_id,
-                 principal_id: "agent-creating-blocker-alternate"
-               })
-
-      assert {:error, :retention_creation_blocked} =
+      assert {:error, :retained_identity_mismatch} =
                acquire(server2, repo, branch, tmp_dir, base,
                  workspace_id: workspace_id,
                  task_id: task_id,
                  principal_id: principal_id
                )
 
-      assert {:error, :retention_creation_blocked} =
+      assert {:error, :retained_workspace_not_authorized} =
                acquire(server2, repo, branch, tmp_dir, base,
                  workspace_id: "ws_creating_alternate",
                  task_id: "task-creating-alternate",
                  principal_id: "agent-creating-alternate"
                )
-
-      assert {:error, :retention_creation_blocked} =
-               WorkspaceLeaseRegistry.release(workspace_id, :remove, %{
-                 server: server2,
-                 task_id: task_id,
-                 principal_id: principal_id
-               })
 
       assert durable_marker?(store_name, backend, workspace_id)
       assert File.exists?(Path.join(path, "survivor.txt"))

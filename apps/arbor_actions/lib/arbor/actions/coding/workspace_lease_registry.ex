@@ -3518,9 +3518,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
               handle_post_create_failure(
                 state,
                 intent,
-                prepared.repo_path,
-                lease.worktree_path,
-                lease.ownership,
+                lease,
                 created_identity,
                 :workspace_id_collision
               )
@@ -3548,9 +3546,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                       handle_post_create_failure(
                         state,
                         intent,
-                        lease.repo_path,
-                        lease.worktree_path,
-                        lease.ownership,
+                        lease,
                         created_identity,
                         reason
                       )
@@ -3562,24 +3558,31 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                   handle_post_create_failure(
                     state,
                     intent,
-                    lease.repo_path,
-                    lease.worktree_path,
-                    lease.ownership,
+                    lease,
                     created_identity,
                     reason
                   )
               end
             end
 
-          {:error, reason, ownership_atom, canonical_path, created_identity} ->
+          {:error, reason, ownership_atom, canonical_path, created_identity, provenance_atom} ->
             Process.demonitor(owner_ref, [:flush])
+
+            failed_lease = %{
+              workspace_id: prepared.workspace_id,
+              task_id: prepared.task_id,
+              principal_id: prepared.principal_id,
+              repo_path: prepared.repo_path,
+              worktree_path: canonical_path || worktree_path,
+              branch: prepared.branch,
+              ownership: ownership_atom,
+              branch_provenance: provenance_atom
+            }
 
             handle_post_create_failure(
               state,
               intent,
-              prepared.repo_path,
-              canonical_path || worktree_path,
-              ownership_atom,
+              failed_lease,
               created_identity,
               reason
             )
@@ -3641,12 +3644,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           {:ok, bind_created_identity(lease, created_identity), created_identity}
 
         {:error, reason} ->
-          {:error, reason, ownership_atom, canonical_worktree_path, created_identity}
+          {:error, reason, ownership_atom, canonical_worktree_path, created_identity,
+           provenance_atom}
       end
     else
       {:error, reason} ->
         ownership_atom = normalize_ownership_for_cleanup(ownership)
-        {:error, reason, ownership_atom, normalize_created_path(worktree_path), nil}
+
+        {:error, reason, ownership_atom, normalize_created_path(worktree_path), nil, :unknown}
     end
   end
 
@@ -3663,23 +3668,21 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp handle_post_create_failure(
          state,
          intent,
-         repo_path,
-         worktree_path,
-         ownership,
+         failed_lease,
          identity,
          reason
        ) do
-    cleanup_result = cleanup_failed_create(repo_path, worktree_path, ownership, identity)
+    ownership = Map.get(failed_lease, :ownership)
 
-    case {normalize_ownership_for_cleanup(ownership), identity, cleanup_result} do
-      {:owned, nil, _} ->
+    case {normalize_ownership_for_cleanup(ownership), identity} do
+      {:owned, nil} ->
         if is_nil(intent) do
           {:reply, {:error, reason}, state}
         else
           blocker =
             creation_blocker_from_intent(
               intent,
-              %{repo_path: repo_path, worktree_path: worktree_path, branch: intent.branch},
+              failed_lease,
               reason
             )
 
@@ -3691,25 +3694,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           {:reply, {:error, reason}, state}
         end
 
-      {:owned, _identity, _cleanup_result} when not is_nil(intent) ->
-        case confirm_failed_create_removed(repo_path, worktree_path, cleanup_result) do
-          :ok ->
-            case settle_create_intent_after_failure(state, intent) do
-              {:ok, state} ->
-                {:reply, {:error, reason}, state}
+      {:owned, identity} when is_map(identity) ->
+        case begin_failed_create_discard(state, intent, failed_lease, identity) do
+          {:ok, state} ->
+            {:reply, {:error, reason}, state}
 
-              {:blocked, _blocker_reason, state} ->
-                {:reply, {:error, reason}, state}
+          {:pending, _cleanup_reason, state} ->
+            {:reply, {:error, reason}, state}
 
-              {:error, delete_reason, state} ->
-                {:reply, {:error, {:retention_journal_delete_failed, delete_reason}}, state}
-            end
-
-          {:error, cleanup_reason} ->
+          {:error, cleanup_reason, state} ->
             blocker =
               creation_blocker_from_intent(
                 intent,
-                %{repo_path: repo_path, worktree_path: worktree_path},
+                failed_lease,
                 {reason, cleanup_reason}
               )
 
@@ -3721,7 +3718,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             {:reply, {:error, reason}, state}
         end
 
-      {:reused, _identity, _cleanup_result} ->
+      {:reused, _identity} ->
         # A successful reused result did not create an owned worktree. Its
         # reserved intent may therefore be removed without create-cleanup
         # absence proof. Any deletion failure still preserves the blocker.
@@ -3740,13 +3737,96 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           blocker =
             creation_blocker_from_intent(
               intent,
-              %{repo_path: repo_path, worktree_path: worktree_path},
+              failed_lease,
               reason
             )
 
           {:reply, {:error, reason},
            put_creation_blocker(degrade_retention_journal(state, reason), blocker)}
         end
+    end
+  end
+
+  # Convert a failed owned acquisition into the existing crash-durable discard
+  # state machine before any destructive cleanup. The registration HEAD captured
+  # with the worktree identity is the exact branch deletion authority; the
+  # callback's base_commit may itself be the malformed value that caused
+  # finalization to fail.
+  defp begin_failed_create_discard(state, intent, failed_lease, identity) do
+    with {:ok, marker} <- failed_create_discard_marker(state, intent, failed_lease, identity),
+         :ok <- persist_retained_marker(state, marker) do
+      hot_marker = %{marker | durable_lifecycle: nil}
+      state = put_retained(state, hot_marker)
+
+      case continue_discard_retained(state, hot_marker) do
+        {:ok, _result, state2} ->
+          if Map.has_key?(state2.retained_by_id, marker.workspace_id) do
+            {:pending, :cleanup_residue, state2}
+          else
+            {:ok, state2}
+          end
+
+        {:error, reason, state2} ->
+          {:pending, reason, state2}
+      end
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp failed_create_discard_marker(state, intent, failed_lease, identity) do
+    registration = Map.get(identity, :worktree_registration)
+    expected_tip = if is_map(registration), do: Map.get(registration, :head)
+    branch = Map.get(failed_lease, :branch)
+    worktree_path = Map.get(failed_lease, :worktree_path)
+    repo_path = Map.get(failed_lease, :repo_path)
+
+    with :ok <- require_binary(expected_tip, :base_commit),
+         :ok <- require_binary(branch, :branch),
+         :ok <- require_binary(worktree_path, :worktree_path),
+         :ok <- require_binary(repo_path, :repo_path),
+         %{branch: ^branch, path: registration_path} <- registration,
+         true <-
+           registration_path == worktree_path or
+             registration_path_matches?(registration, worktree_path),
+         lstat when is_map(lstat) <- Map.get(identity, :lstat_identity) do
+      ttl_ms = min(state.retention_ttl_ms, Config.workspace_retention_max_ttl_ms())
+
+      {:ok,
+       %{
+         workspace_id: Map.get(failed_lease, :workspace_id),
+         owner_pid: Map.get(failed_lease, :owner_pid),
+         task_id: Map.get(failed_lease, :task_id),
+         principal_id: Map.get(failed_lease, :principal_id),
+         repo_path: repo_path,
+         worktree_path: worktree_path,
+         display_worktree_path: worktree_path,
+         branch: branch,
+         base_commit: expected_tip,
+         ownership: :owned,
+         branch_provenance:
+           BranchLifecycle.normalize_provenance(
+             Map.get(failed_lease, :branch_provenance, :unknown)
+           ),
+         lifecycle: :discarding,
+         discard_phase: :worktree,
+         runtime_id: Map.get(intent || %{}, :runtime_id) || state.retention_runtime_id,
+         durable_lifecycle: "discarding",
+         target: target_key(repo_path, branch, worktree_path),
+         lstat_identity: lstat,
+         worktree_registration: registration,
+         expiry_generation: make_ref(),
+         expiry_ref: nil,
+         expires_at:
+           Map.get(intent || %{}, :expires_at) ||
+             DateTime.add(DateTime.utc_now(), ttl_ms, :millisecond),
+         expires_at_ms: System.monotonic_time(:millisecond) + ttl_ms,
+         retry_count: Map.get(intent || %{}, :retry_count, 0),
+         cleanup_failure: nil,
+         dormant: false
+       }}
+    else
+      _ -> {:error, :failed_create_discard_identity_invalid}
     end
   end
 
@@ -3801,46 +3881,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       end
     else
       {:error, reason} ->
-        cleanup_result =
-          cleanup_failed_create(
-            lease.repo_path,
-            lease.worktree_path,
-            :owned,
-            Map.get(lease, :created_removal_identity)
-          )
-
-        case confirm_failed_create_removed(lease.repo_path, lease.worktree_path, cleanup_result) do
-          :ok ->
-            case settle_create_intent_after_failure(state, intent) do
-              {:ok, state} ->
-                {:error, :retention_identity_unavailable, state, :cleanup_confirmed}
-
-              {:blocked, _blocker_reason, state} ->
-                {:error, :retention_identity_unavailable, state, :evidence_preserved}
-
-              {:error, delete_reason, state} ->
-                {:error, {:retention_journal_delete_failed, delete_reason}, state,
-                 :evidence_preserved}
-            end
-
-          {:error, cleanup_reason} ->
-            # No durable identity exists, so preservation is the only safe
-            # fallback when the closed Git cleanup cannot prove absence.
-            blocker = creation_blocker_from_intent(intent, lease, {reason, cleanup_reason})
-            state = put_creation_blocker(state, blocker)
-            state = degrade_retention_journal(state, {:initial_identity_capture_failed, reason})
-
-            {:error, :retention_identity_unavailable, state, :evidence_preserved}
-        end
-    end
-  end
-
-  defp confirm_failed_create_removed(repo_path, worktree_path, _cleanup_result) do
-    with {:error, :enoent} <- File.lstat(worktree_path),
-         {:ok, :absent} <- worktree_path_registration_presence(repo_path, worktree_path) do
-      :ok
-    else
-      _ -> {:error, :failed_create_cleanup_unconfirmed}
+        finalize_failed_create_discard(
+          state,
+          lease,
+          intent,
+          Map.get(lease, :created_removal_identity),
+          :retention_identity_unavailable,
+          {:initial_identity_capture_failed, reason}
+        )
     end
   end
 
@@ -3930,8 +3978,26 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp creation_blocker_from_intent(nil, _fallback, reason),
-    do: %{workspace_id: "unknown", repo_path: "", worktree_path: "", branch: "", reason: reason}
+  defp creation_blocker_from_intent(nil, fallback, reason) do
+    repo_path = Map.get(fallback, :repo_path, "")
+    worktree_path = Map.get(fallback, :worktree_path, "")
+    branch = Map.get(fallback, :branch, "")
+
+    %{
+      workspace_id: Map.get(fallback, :workspace_id, "unknown"),
+      task_id: Map.get(fallback, :task_id),
+      principal_id: Map.get(fallback, :principal_id),
+      repo_path: repo_path,
+      worktree_path: worktree_path,
+      branch: branch,
+      ownership: :pending,
+      lifecycle: :creating,
+      active: false,
+      dormant: true,
+      target: target_key(repo_path, branch, worktree_path),
+      cleanup_failure: reason
+    }
+  end
 
   defp creation_blocker_from_intent(intent, fallback, reason) do
     blocker = %{
@@ -3993,39 +4059,48 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp preserve_or_cleanup_initial_marker_failure(state, lease, marker, intent, reason) do
     failure = {:retention_journal_write_failed, reason}
 
-    cleanup_result = remove_owned_retained_worktree(marker)
+    finalize_failed_create_discard(
+      state,
+      lease,
+      intent,
+      marker,
+      failure,
+      {:initial_marker_write_failed, reason}
+    )
+  end
 
-    case confirm_failed_create_removed(marker.repo_path, marker.worktree_path, cleanup_result) do
-      :ok ->
-        case settle_create_intent_after_failure(state, intent) do
-          {:ok, state} ->
-            {:error, failure, state, :cleanup_confirmed}
+  defp finalize_failed_create_discard(
+         state,
+         lease,
+         intent,
+         identity,
+         failure,
+         failure_context
+       ) do
+    case begin_failed_create_discard(state, intent, lease, identity) do
+      {:ok, state} ->
+        {:error, failure, state, :cleanup_confirmed}
 
-          {:blocked, _reason, state} ->
-            {:error, failure, state, :evidence_preserved}
+      {:pending, _reason, state} ->
+        {:error, failure, state, :evidence_preserved}
 
-          {:error, delete_reason, state} ->
-            {:error, {:retention_journal_delete_failed, delete_reason}, state,
-             :evidence_preserved}
-        end
-
-      {:error, cleanup_reason} ->
+      {:error, cleanup_reason, state} ->
         Logger.warning(
-          "initial active marker write failed and exact cleanup was unconfirmed; preserving evidence",
+          "failed workspace acquisition could not enter durable discard; preserving evidence",
           workspace_id: lease.workspace_id,
-          detail: inspect({reason, cleanup_reason})
+          detail: inspect({failure_context, cleanup_reason})
         )
 
         blocker =
           creation_blocker_from_intent(
             intent,
             lease,
-            {:initial_marker_write_failed, reason, cleanup_reason}
+            {failure_context, cleanup_reason}
           )
 
         state =
           state
-          |> degrade_retention_journal({:initial_marker_write_failed, reason})
+          |> degrade_retention_journal({failure_context, cleanup_reason})
           |> put_creation_blocker(blocker)
 
         {:error, failure, state, :evidence_preserved}
@@ -4190,21 +4265,6 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp normalize_create_worktree_result(other),
     do: {:error, {:invalid_create_worktree_result, other}}
-
-  # Post-create registration/finalization failed. Delete only when the callback
-  # supplied a valid owned marker; unknown ownership is never deletion authority.
-  defp cleanup_failed_create(repo_path, worktree_path, ownership, identity) do
-    case normalize_ownership(ownership) do
-      {:ok, :owned} when is_map(identity) ->
-        remove_owned_worktree(repo_path, worktree_path, identity)
-
-      {:ok, :owned} ->
-        {:error, :owned_worktree_identity_unavailable}
-
-      _ ->
-        :ok
-    end
-  end
 
   defp capture_created_identity(_repo_path, _path, _branch, :reused), do: {:ok, nil}
 
@@ -6761,39 +6821,6 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   def remove_owned_retained_worktree(_), do: {:error, :invalid_retained_cleanup}
-
-  # Failed-create cleanup: identity-checked git worktree remove only. Never
-  # File.rm_rf — leave evidence on failure so primary/non-owned paths cannot
-  # be swept by a fallback.
-  defp remove_owned_worktree(repo_root, worktree_path, identity)
-       when is_binary(repo_root) and is_binary(worktree_path) and is_map(identity) do
-    cond do
-      worktree_path == repo_root ->
-        {:error, :primary_checkout_not_retainable}
-
-      true ->
-        case Git.remove_worktree(repo_root, worktree_path, identity) do
-          :ok ->
-            :ok
-
-          {:error, reason} ->
-            Logger.warning(
-              "owned worktree create-failure cleanup could not remove via git; retaining evidence",
-              worktree_path: worktree_path,
-              detail: inspect(reason)
-            )
-
-            {:error, {:worktree_remove_failed, reason}}
-        end
-    end
-  rescue
-    error -> {:error, {:cleanup_raised, Exception.message(error)}}
-  catch
-    kind, reason -> {:error, {:cleanup_thrown, kind, reason}}
-  end
-
-  defp remove_owned_worktree(_repo_root, _worktree_path, _identity),
-    do: {:error, :owned_worktree_identity_unavailable}
 
   defp revalidate_destruction_identity(retained) when is_map(retained) do
     expected_lstat = Map.get(retained, :lstat_identity)
