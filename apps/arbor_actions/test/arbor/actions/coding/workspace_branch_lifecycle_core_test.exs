@@ -33,6 +33,17 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCoreTest do
   end
 
   describe "release_receipt/2" do
+    test "security regression: failure taxonomy rejects lowercase sensitive strings" do
+      sensitive = "private_secret_token"
+
+      assert Core.failure_category(sensitive) == "cleanup_failed"
+
+      assert Core.failure_category({:worktree_remove_failed, sensitive}) ==
+               "worktree_remove_failed"
+
+      refute inspect(Core.failure_category(sensitive)) =~ sensitive
+    end
+
     test "projects discarded and discard_pending outcomes without raw terms" do
       assert {:ok, discarded} =
                Core.release_receipt(

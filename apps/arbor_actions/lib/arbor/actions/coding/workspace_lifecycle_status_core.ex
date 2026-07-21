@@ -4,12 +4,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLifecycleStatusCore do
 
   The input is a snapshot of the registry's four primary state maps. The
   reducer never projects records, identifiers, paths, or raw failures. Failure
-  terms are passed directly to the existing closed categorical classifier.
+  terms are reduced to a finite, closed taxonomy and the resulting list is
+  explicitly bounded.
   """
 
-  alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore, as: BranchLifecycle
-
+  @max_failure_count_entries 8
   @max_retry_count 32
+  @unknown_failure_category "cleanup_failed"
+
+  alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore, as: BranchLifecycle
 
   @spec aggregate(map()) :: map()
   def aggregate(snapshot) when is_map(snapshot) do
@@ -198,22 +201,40 @@ defmodule Arbor.Actions.Coding.WorkspaceLifecycleStatusCore do
   end
 
   defp failure_counts(values) do
-    values
-    |> Enum.reduce(%{}, fn value, counts ->
-      category = categorize_failure(value)
-      Map.update(counts, category, 1, &(&1 + 1))
-    end)
+    counts =
+      Enum.reduce(values, %{}, fn value, counts ->
+        category = categorize_failure(value)
+        Map.update(counts, category, 1, &(&1 + 1))
+      end)
+
+    counts
+    |> bound_failure_counts()
     |> Enum.sort_by(fn {category, _count} -> category end)
     |> Enum.map(fn {category, count} -> %{"category" => category, "count" => count} end)
   end
 
-  defp categorize_failure(value) do
-    BranchLifecycle.failure_category(value)
-  rescue
-    _ -> "cleanup_failed"
-  catch
-    _, _ -> "cleanup_failed"
+  defp bound_failure_counts(counts) when map_size(counts) <= @max_failure_count_entries,
+    do: counts
+
+  defp bound_failure_counts(counts) do
+    kept_categories =
+      counts
+      |> Map.keys()
+      |> Enum.reject(&(&1 == @unknown_failure_category))
+      |> Enum.sort()
+      |> Enum.take(@max_failure_count_entries - 1)
+
+    overflow_count =
+      counts
+      |> Enum.reject(fn {category, _count} -> category in kept_categories end)
+      |> Enum.reduce(0, fn {_category, count}, total -> total + count end)
+
+    counts
+    |> Map.take(kept_categories)
+    |> Map.put(@unknown_failure_category, overflow_count)
   end
+
+  defp categorize_failure(value), do: BranchLifecycle.failure_category(value)
 
   defp journal_status(snapshot) do
     status = Map.get(snapshot, :journal_status)

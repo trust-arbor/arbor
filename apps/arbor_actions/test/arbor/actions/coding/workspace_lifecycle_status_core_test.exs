@@ -3,6 +3,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLifecycleStatusCoreTest do
 
   alias Arbor.Actions.Coding.WorkspaceLifecycleStatusCore, as: Core
 
+  @max_failure_count_entries 8
   @forbidden_key_fragments ~w(
     task_id workspace_id resource_id principal_id repo_path worktree_path branch ref oid pid
     callback command capability path raw stdout stderr
@@ -134,6 +135,53 @@ defmodule Arbor.Actions.Coding.WorkspaceLifecycleStatusCoreTest do
       assert status["cleanup"]["owner_death"]["failure_counts"] == []
       assert status["cleanup"]["validation"]["failure_counts"] == []
     end
+  end
+
+  test "security regression: lowercase sensitive failure values use the fixed category" do
+    sensitive = "private_secret_token"
+
+    status =
+      Core.aggregate(%{
+        retained_by_id: %{
+          workspace: %{lifecycle: :retained, cleanup_failure: sensitive}
+        },
+        journal_status: :poisoned,
+        journal_reason: sensitive
+      })
+
+    refute inspect(status) =~ sensitive
+    assert status["failure_counts"] == [%{"category" => "cleanup_failed", "count" => 2}]
+    assert status["journal"]["failure_category"] == "cleanup_failed"
+  end
+
+  test "failure counts remain bounded when many categories are present" do
+    categories = ~w(
+      branch_checked_out
+      branch_checked_out_race
+      branch_provenance_not_created
+      branch_ref_oid_mismatch
+      branch_tip_diverged
+      discard_identity_unavailable
+      marker_delete_failed
+      retention_identity_unavailable
+      worktree_remove_failed
+    )
+
+    retained_by_id =
+      categories
+      |> Enum.with_index()
+      |> Map.new(fn {category, index} ->
+        {"workspace-#{index}", %{lifecycle: :retained, cleanup_failure: category}}
+      end)
+
+    status = Core.aggregate(%{retained_by_id: retained_by_id})
+
+    assert length(status["failure_counts"]) == @max_failure_count_entries
+
+    assert Enum.find(status["failure_counts"], &(&1["category"] == "cleanup_failed")) ==
+             %{"category" => "cleanup_failed", "count" => 2}
+
+    assert Enum.sort_by(status["failure_counts"], & &1["category"]) == status["failure_counts"]
   end
 
   test "active_orphaned and unknown records do not enter workspace cleanup totals" do

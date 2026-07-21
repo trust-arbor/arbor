@@ -50,6 +50,28 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
     end
   end
 
+  test "security regression: public workspace view closes lowercase failure strings" do
+    sensitive = "private_secret_token"
+
+    view =
+      WorkspaceLeaseRegistry.public_view(%{
+        workspace_id: "workspace",
+        repo_path: "/private/repo",
+        worktree_path: "/private/worktree",
+        branch: "test/branch",
+        base_commit: "0123456789abcdef0123456789abcdef01234567",
+        ownership: :owned,
+        branch_provenance: :created,
+        active: false,
+        cleanup_failure: sensitive
+      })
+
+    encoded = Jason.encode!(view)
+
+    refute String.contains?(encoded, sensitive)
+    assert view.cleanup_failure_category == "cleanup_failed"
+  end
+
   describe "Workspace.Acquire / Inspect / Release" do
     test "acquire returns JSON-clean lease metadata and inspect sees live workspace state", %{
       tmp_dir: tmp_dir

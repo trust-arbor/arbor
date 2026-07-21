@@ -49,7 +49,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
     candidate_archive_failed: "candidate_archive_failed",
     unknown: "cleanup_failed"
   }
-  @failure_category_regex ~r/\A[a-z][a-z0-9_]{0,63}\z/
+  @failure_category_values Map.values(@failure_categories)
 
   @doc """
   Categorize a release result into closed branch lifecycle evidence.
@@ -392,7 +392,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
   defp required_failure_category(map) do
     case fetch_field(map, :cleanup_failure_category) do
       {:ok, value} when is_binary(value) ->
-        if String.valid?(value) and Regex.match?(@failure_category_regex, value),
+        if value in @failure_category_values,
           do: {:ok, value},
           else: :error
 
@@ -474,7 +474,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
     do: Map.get(@failure_categories, reason, @failure_categories.unknown)
 
   defp failure_category_for(reason) when is_binary(reason) do
-    if String.match?(reason, @failure_category_regex),
+    if reason in @failure_category_values,
       do: reason,
       else: @failure_categories.unknown
   end
