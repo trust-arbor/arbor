@@ -622,12 +622,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   Input must already be the post-normalization inventory: strictly sorted,
   unique, and every path must re-normalize to itself. Partitioning is greedy
   left-to-right under the closed runtime file-count cap (at most 20 exact
-  files per child), Shell argv-count ceiling, and argument-byte ceiling.
-  Every path appears in exactly one non-empty batch, including a final
-  partial batch; labels bind inventory count and SHA-256 over the exact
-  ordered batch paths. Slow/integration-tagged files are never excluded —
-  they remain in the exact inventory and are only split across sequential
-  children.
+  files per child), Shell argv-count ceiling, argument-byte ceiling, and
+  app test root boundary (a batch never mixes files from different
+  `apps/<app>/test` roots). Every path appears in exactly one non-empty
+  batch, including a final partial batch; labels bind inventory count and
+  SHA-256 over the exact ordered batch paths. Slow/integration-tagged files
+  are never excluded — they remain in the exact inventory and are only split
+  across sequential children.
   """
   @spec partition_test_batches(term()) :: {:ok, [test_batch()]} | {:error, term()}
   def partition_test_batches([]), do: {:ok, []}
@@ -682,19 +683,23 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   defp pack_test_batches(files) do
-    {batches, current, _count, _bytes} =
-      Enum.reduce(files, {[], [], 0, 0}, fn path, {batches, current, count, bytes} ->
+    {batches, current, _count, _bytes, _current_root} =
+      Enum.reduce(files, {[], [], 0, 0, nil}, fn path, {batches, current, count, bytes, root} ->
         cost = path_arg_bytes(path)
+        path_root = app_test_root(path)
 
         cond do
           current == [] ->
-            {batches, [path], 1, cost}
+            {batches, [path], 1, cost, path_root}
+
+          path_root != root ->
+            {[Enum.reverse(current) | batches], [path], 1, cost, path_root}
 
           count + 1 > @max_test_batch_files or bytes + cost > @max_test_batch_arg_bytes ->
-            {[Enum.reverse(current) | batches], [path], 1, cost}
+            {[Enum.reverse(current) | batches], [path], 1, cost, path_root}
 
           true ->
-            {batches, [path | current], count + 1, bytes + cost}
+            {batches, [path | current], count + 1, bytes + cost, root}
         end
       end)
 
@@ -709,6 +714,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       {:error, :empty_test_batch}
     else
       {:ok, final}
+    end
+  end
+
+  # Extract the canonical app test root (apps/<app>/test) from a normalized
+  # *_test.exs path. All validated batch paths match this shape.
+  defp app_test_root(path) when is_binary(path) do
+    case Path.split(path) do
+      ["apps", app, "test" | _rest] -> "apps/#{app}/test"
+      _ -> nil
     end
   end
 

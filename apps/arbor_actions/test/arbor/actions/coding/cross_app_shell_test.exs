@@ -29,7 +29,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     %{worktree: worktree}
   end
 
-  test "two affected app files form one multi-file batch mix test invocation", %{
+  test "two affected app files form separate per-app batch mix test invocations", %{
     worktree: worktree
   } do
     parent = self()
@@ -59,21 +59,17 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert check["exit_code"] == 0
     assert {:ok, _} = Jason.encode(check)
 
-    # Two exact files pack into one argv-safe multi-file child under the runtime cap.
-    expected_batch = [
-      "test",
-      "--",
-      "apps/alpha/test/alpha_test.exs",
-      "apps/beta/test/beta_test.exs"
-    ]
+    # App test root boundary forces separate per-app batches.
+    assert_receive {:mix_invocation, ^worktree, alpha_batch, opts_a}
+    assert alpha_batch == ["test", "--", "apps/alpha/test/alpha_test.exs"]
+    assert Keyword.get(opts_a, :timeout) == 30_000
 
-    assert_receive {:mix_invocation, ^worktree, ^expected_batch, opts1}
-    assert Keyword.get(opts1, :timeout) == 30_000
+    assert_receive {:mix_invocation, ^worktree, beta_batch, opts_b}
+    assert beta_batch == ["test", "--", "apps/beta/test/beta_test.exs"]
+    assert Keyword.get(opts_b, :timeout) == 30_000
 
     # Never a raw directory; only exact admitted file paths.
     refute_received {:mix_invocation, _, ["test", "--", "apps/alpha/test"], _}
-    refute_received {:mix_invocation, _, ["test", "--", "apps/alpha/test/alpha_test.exs"], _}
-    refute_received {:mix_invocation, _, ["test", "--", "apps/beta/test/beta_test.exs"], _}
     refute_received {:mix_invocation, _, _}
   end
 
@@ -390,18 +386,16 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     parent = self()
     mkdir_app_tests!(worktree, ["alpha", "beta"])
 
-    assert {:ok, [batch]} =
+    assert {:ok, [alpha_batch, beta_batch]} =
              Core.partition_test_batches([
                "apps/alpha/test/alpha_test.exs",
                "apps/beta/test/beta_test.exs"
              ])
 
-    assert batch.count == 2
-
-    assert batch.paths == [
-             "apps/alpha/test/alpha_test.exs",
-             "apps/beta/test/beta_test.exs"
-           ]
+    assert alpha_batch.count == 1
+    assert alpha_batch.paths == ["apps/alpha/test/alpha_test.exs"]
+    assert beta_batch.count == 1
+    assert beta_batch.paths == ["apps/beta/test/beta_test.exs"]
 
     # First clock read establishes deadline; subsequent reads are past it.
     {:ok, clock_agent} = Agent.start_link(fn -> {:init, 0} end)
@@ -432,9 +426,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute check["passed"]
     assert check["reason"] == "tests_timed_out"
 
+    # First batch is budget-exhausted (never launched), second may or may not
+    # appear in excerpt depending on ordering; at least the first is present.
     assert String.contains?(
              check["stdout_excerpt"],
-             "budget exhausted before #{batch.label}"
+             "budget exhausted before #{alpha_batch.label}"
            )
 
     refute_received {:mix_invocation, _}
@@ -964,15 +960,15 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     check = Shell.run_app_tests(worktree, ["apps/alpha/test", "apps/beta/test"], 10_000, 100_000)
     assert check["passed"]
 
-    expected_batch = [
-      "test",
-      "--",
-      "apps/alpha/test/alpha_test.exs",
-      "apps/beta/test/beta_test.exs"
-    ]
+    # App root boundary forces separate per-app batches.
+    assert_receive {:mix_invocation, alpha_args, opts_a}
+    assert alpha_args == ["test", "--", "apps/alpha/test/alpha_test.exs"]
+    assert Keyword.get(opts_a, :timeout) == 10_000
 
-    assert_receive {:mix_invocation, ^expected_batch, opts1}
-    assert Keyword.get(opts1, :timeout) == 10_000
+    assert_receive {:mix_invocation, beta_args, opts_b}
+    assert beta_args == ["test", "--", "apps/beta/test/beta_test.exs"]
+    assert Keyword.get(opts_b, :timeout) == 10_000
+
     refute_received {:mix_invocation, _, _}
   end
 

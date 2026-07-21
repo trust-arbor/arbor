@@ -281,24 +281,24 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   test "next_test_step caps each child by min(operation ceiling, remaining aggregate)" do
     assert :complete = Core.next_test_step(10_000, [], 600_000)
 
-    # Two exact files pack into one multi-file child under the runtime cap of 20.
-    assert {:ok, [pair_batch] = pair_batches} =
+    # Two exact files from different apps pack into separate children
+    # because the app test root boundary forces a batch reset.
+    assert {:ok, [_alpha_batch, _beta_batch] = pair_batches} =
              Core.partition_test_batches([
                "apps/alpha/test/a_test.exs",
                "apps/beta/test/b_test.exs"
              ])
 
-    assert length(pair_batches) == 1
-    assert pair_batch.count == 2
-    assert pair_batch.count <= Core.max_test_batch_runtime_files()
+    assert length(pair_batches) == 2
 
-    assert pair_batch.paths == [
-             "apps/alpha/test/a_test.exs",
-             "apps/beta/test/b_test.exs"
-           ]
+    assert [pair_alpha, pair_beta] = pair_batches
+    assert pair_alpha.paths == ["apps/alpha/test/a_test.exs"]
+    assert pair_alpha.count == 1
+    assert pair_beta.paths == ["apps/beta/test/b_test.exs"]
+    assert pair_beta.count == 1
 
     # Remaining aggregate above operation ceiling still yields the operation cap.
-    assert {:run, ^pair_batch, 30_000, []} =
+    assert {:run, ^pair_alpha, 30_000, [^pair_beta]} =
              Core.next_test_step(900_000, pair_batches, 30_000)
 
     # Force two batches (full + final partial) so timeout/rest shapes can be asserted.
@@ -548,19 +548,33 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert Enum.flat_map(pair_batches, & &1.paths) == pair
     assert Core.partition_test_batches(pair) == {:ok, pair_batches}
 
-    # Three files still pack into one child under the runtime cap of 20.
+    # Three files from two apps pack into two children (app root boundary).
     files = [
       "apps/alpha/test/a_test.exs",
       "apps/alpha/test/b_test.exs",
       "apps/beta/test/c_test.exs"
     ]
 
-    assert {:ok, [three_batch] = three_batches} = Core.partition_test_batches(files)
+    assert {:ok, [alpha_batch, beta_batch] = three_batches} = Core.partition_test_batches(files)
 
-    assert three_batch.paths == files
-    assert three_batch.count == 3
-    assert three_batch.total == 1
-    assert three_batch.label == "batch-1-of-1-n3-#{three_batch.inventory_sha256}"
+    assert alpha_batch.paths == [
+             "apps/alpha/test/a_test.exs",
+             "apps/alpha/test/b_test.exs"
+           ]
+
+    assert alpha_batch.count == 2
+    assert alpha_batch.index == 1
+    assert alpha_batch.total == 2
+
+    assert beta_batch.paths == ["apps/beta/test/c_test.exs"]
+    assert beta_batch.count == 1
+    assert beta_batch.index == 2
+    assert beta_batch.total == 2
+
+    assert alpha_batch.label =~ ~r/^batch-1-of-2-n2-[0-9a-f]{64}$/
+    assert beta_batch.label =~ ~r/^batch-2-of-2-n1-[0-9a-f]{64}$/
+    assert byte_size(alpha_batch.inventory_sha256) == 64
+    assert byte_size(beta_batch.inventory_sha256) == 64
     assert Enum.flat_map(three_batches, & &1.paths) == files
     assert Core.partition_test_batches(files) == {:ok, three_batches}
 
@@ -1232,6 +1246,120 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert aggregated["stdout_truncated"]
     assert String.contains?(excerpt, "...[omitted]...")
     assert {:ok, _} = Jason.encode(aggregated)
+  end
+
+  test "app root boundary: full 20-slot batch cannot absorb next app's first file" do
+    max = Core.max_test_batch_files()
+
+    alpha_files =
+      for i <- 1..max,
+          do: "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
+
+    all_files = alpha_files ++ ["apps/beta/test/first_test.exs"]
+
+    assert {:ok, batches} = Core.partition_test_batches(all_files)
+    assert length(batches) == 2
+    alpha_batch = List.first(batches)
+    beta_batch = List.last(batches)
+    assert alpha_batch.count == max
+    assert alpha_batch.paths == alpha_files
+    assert alpha_batch.index == 1
+    assert alpha_batch.total == 2
+    assert beta_batch.count == 1
+    assert beta_batch.paths == ["apps/beta/test/first_test.exs"]
+    assert beta_batch.index == 2
+    assert beta_batch.total == 2
+    assert Enum.flat_map(batches, & &1.paths) == all_files
+  end
+
+  test "app root boundary: small adjacent app inventories produce separate batches" do
+    files = [
+      "apps/alpha/test/a_test.exs",
+      "apps/beta/test/b_test.exs",
+      "apps/gamma/test/c_test.exs"
+    ]
+
+    assert {:ok, batches} = Core.partition_test_batches(files)
+    assert length(batches) == 3
+    assert Enum.map(batches, & &1.count) == [1, 1, 1]
+
+    assert Enum.map(batches, & &1.paths) == [
+             ["apps/alpha/test/a_test.exs"],
+             ["apps/beta/test/b_test.exs"],
+             ["apps/gamma/test/c_test.exs"]
+           ]
+
+    for batch <- batches, do: assert(batch.index <= batch.total)
+    total = List.first(batches).total
+    for batch <- batches, do: assert(batch.total == total)
+    assert total == 3
+  end
+
+  test "app root boundary: no loss, duplication, or reordering across batches" do
+    alpha = for i <- 1..8, do: "apps/alpha/test/a#{i}_test.exs"
+    beta = for i <- 1..12, do: "apps/beta/test/b#{i}_test.exs"
+    gamma = for i <- 1..3, do: "apps/gamma/test/g#{i}_test.exs"
+    all = (alpha ++ beta ++ gamma) |> Enum.sort()
+
+    assert {:ok, batches} = Core.partition_test_batches(all)
+    all_paths = Enum.flat_map(batches, & &1.paths)
+    assert all_paths == all
+    assert length(all_paths) == length(all)
+    assert length(Enum.uniq(all_paths)) == length(all_paths)
+  end
+
+  test "app root boundary: byte and count packing still works within one root" do
+    alpha_heavy =
+      for i <- 1..40,
+          do: "apps/alpha/test/heavy#{String.pad_leading(Integer.to_string(i), 3, "0")}_test.exs"
+
+    assert {:ok, batches} = Core.partition_test_batches(alpha_heavy)
+    assert length(batches) == 2
+    all_paths = Enum.flat_map(batches, & &1.paths)
+    assert all_paths == alpha_heavy
+
+    for batch <- batches do
+      assert batch.count == length(batch.paths)
+      assert batch.count <= Core.max_test_batch_files()
+      arg_bytes = Enum.reduce(batch.paths, 0, fn p, acc -> acc + byte_size(p) + 1 end)
+      assert arg_bytes <= Core.max_test_batch_arg_bytes()
+    end
+  end
+
+  test "app root boundary: forged cross-root remaining batch is rejected" do
+    alpha_files = for i <- 1..3, do: "apps/alpha/test/a#{i}_test.exs"
+    assert {:ok, batches} = Core.partition_test_batches(alpha_files)
+    assert length(batches) == 1
+    [real] = batches
+
+    forged_cross_root = %{
+      real
+      | paths: real.paths ++ ["apps/beta/test/evil_test.exs"],
+        count: length(real.paths) + 1
+    }
+
+    material = Enum.join(forged_cross_root.paths, <<0>>)
+
+    forged_cross_root = %{
+      forged_cross_root
+      | inventory_sha256: :crypto.hash(:sha256, material) |> Base.encode16(case: :lower)
+    }
+
+    forged_cross_root = %{
+      forged_cross_root
+      | label: "batch-1-of-1-n#{forged_cross_root.count}-#{forged_cross_root.inventory_sha256}"
+    }
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [forged_cross_root], 10_000)
+
+    forged_split = [
+      signed_batch(["apps/alpha/test/a1_test.exs", "apps/alpha/test/a2_test.exs"], 1, 2),
+      signed_batch(["apps/alpha/test/a3_test.exs", "apps/beta/test/evil_test.exs"], 2, 2)
+    ]
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, forged_split, 10_000)
   end
 
   defp signed_batch(paths, index, total) do
