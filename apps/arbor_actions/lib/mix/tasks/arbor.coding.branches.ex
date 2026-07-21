@@ -13,7 +13,11 @@ defmodule Mix.Tasks.Arbor.Coding.Branches do
 
   Audit output defaults to stdout. `--output` writes a new file without
   replacing an existing path, which keeps compiler and startup messages out of
-  the machine-readable manifest.
+  the machine-readable manifest. Add `--checkpoint PATH` to resume a dry-run:
+  verified proofs and deterministic preserve outcomes are reused only for the
+  exact repository, destination tip, branch tip, and proof-policy scope.
+  Transient failures are recorded for progress and retried on the next run.
+  With `--output`, the checkpoint defaults to `OUTPUT.checkpoint`.
   """
 
   use Mix.Task
@@ -24,6 +28,7 @@ defmodule Mix.Tasks.Arbor.Coding.Branches do
     repo: :string,
     destination: :string,
     output: :string,
+    checkpoint: :string,
     apply: :string,
     sha256: :string
   ]
@@ -41,6 +46,9 @@ defmodule Mix.Tasks.Arbor.Coding.Branches do
 
       is_binary(opts[:apply]) and is_binary(opts[:output]) ->
         Mix.raise("--output is only valid when generating an audit manifest")
+
+      is_binary(opts[:apply]) and is_binary(opts[:checkpoint]) ->
+        Mix.raise("--checkpoint is only valid when generating an audit manifest")
 
       is_binary(opts[:apply]) ->
         with_shell_runtime(fn -> apply_manifest(opts) end)
@@ -74,7 +82,18 @@ defmodule Mix.Tasks.Arbor.Coding.Branches do
     repo = opts[:repo] || Mix.raise("--repo is required for audit")
     destination = opts[:destination] || "main"
 
-    case Actions.audit_coding_branches(repo, destination) do
+    checkpoint = opts[:checkpoint] || default_checkpoint(opts[:output])
+
+    audit_opts =
+      [
+        checkpoint: checkpoint,
+        progress: fn snapshot ->
+          Mix.shell().error("branch audit progress: " <> Jason.encode!(snapshot))
+        end
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    case Actions.audit_coding_branches(repo, destination, audit_opts) do
       {:ok, manifest} ->
         {:ok, json} = Actions.encode_coding_branch_manifest(manifest)
         emit_audit(json, opts[:output])
@@ -94,6 +113,11 @@ defmodule Mix.Tasks.Arbor.Coding.Branches do
   end
 
   defp emit_audit(_json, _path), do: Mix.raise("--output must name a non-empty path")
+
+  defp default_checkpoint(path) when is_binary(path) and byte_size(path) > 0,
+    do: path <> ".checkpoint"
+
+  defp default_checkpoint(_path), do: nil
 
   defp apply_manifest(opts) do
     path = opts[:apply]

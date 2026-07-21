@@ -8,6 +8,8 @@ defmodule Arbor.Actions.Coding.BranchAudit do
   """
 
   alias Arbor.Actions.Coding.BranchAuditCore, as: Core
+  alias Arbor.Actions.Coding.BranchAuditCheckpoint
+  alias Arbor.Actions.Coding.BranchAuditCheckpointCore, as: CheckpointCore
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Coding.WorkspaceRetentionInventory
   alias Arbor.Actions.Git
@@ -18,7 +20,12 @@ defmodule Arbor.Actions.Coding.BranchAudit do
   @max_branches 4096
   @max_proofs 4096
   @max_manifest_bytes 32 * 1024 * 1024
+  @checkpoint_cadence 16
   @sha256 ~r/\A[0-9a-f]{64}\z/
+
+  @doc "Bounded number of proof attempts between durable checkpoint writes."
+  @spec checkpoint_cadence() :: pos_integer()
+  def checkpoint_cadence, do: @checkpoint_cadence
 
   @spec audit(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def audit(repo_path, destination, opts \\ [])
@@ -33,9 +40,18 @@ defmodule Arbor.Actions.Coding.BranchAudit do
            Git.list_local_branch_refs(repository["path"], limits["max_branch_count"]),
          {:ok, protections} <-
            protections(repository["path"], destination_observation, limits, opts) do
-      proofs = proofs(repository["path"], destination_observation, branches, protections, limits)
-      entries = Core.classify(branches, destination_observation, protections, proofs, limits)
-      build_manifest(repository, destination_observation, entries, [], limits)
+      with {:ok, proofs} <-
+             proofs(
+               repository,
+               destination_observation,
+               branches,
+               protections,
+               limits,
+               opts
+             ) do
+        entries = Core.classify(branches, destination_observation, protections, proofs, limits)
+        build_manifest(repository, destination_observation, entries, [], limits)
+      end
     else
       {:error, {:branch_inventory_overflow, _} = reason} ->
         blocked_manifest(repo_path, destination, limits, [reason_string(reason)])
@@ -163,7 +179,7 @@ defmodule Arbor.Actions.Coding.BranchAudit do
     end
   end
 
-  defp proofs(repo_path, destination, branches, protections, limits) do
+  defp proofs(repository, destination, branches, protections, limits, opts) do
     targets =
       branches
       |> Enum.reject(
@@ -174,18 +190,308 @@ defmodule Arbor.Actions.Coding.BranchAudit do
       |> Enum.map(fn {_oid, [branch]} -> branch end)
       |> Enum.sort_by(& &1["ref"])
 
-    targets
-    |> Enum.with_index()
-    |> Enum.reduce(%{}, fn {branch, index}, acc ->
-      result =
-        if index < limits["max_proof_attempts"] do
-          prove_branch(repo_path, branch, destination)
-        else
-          :not_attempted
+    scope = %{
+      "policy_version" => CheckpointCore.policy_version(),
+      "repository" => repository,
+      "destination" => destination
+    }
+
+    with {:ok, cache, _cache_state} <- load_checkpoint(opts, scope),
+         cache <- prune_stale_entries(cache, targets),
+         {:ok, cached_entries} <- validate_cached_entries(cache, targets, destination),
+         {:ok, proofs, next_cache} <-
+           prove_targets(
+             targets,
+             repository["path"],
+             destination,
+             cached_entries,
+             cache,
+             limits,
+             opts
+           ),
+         :ok <- persist_checkpoint(opts, next_cache) do
+      {:ok, proofs}
+    end
+  end
+
+  defp load_checkpoint(opts, scope) do
+    case checkpoint_path(opts) do
+      nil ->
+        {:ok, CheckpointCore.empty(scope["repository"], scope["destination"], %{}), :disabled}
+
+      path ->
+        BranchAuditCheckpoint.load(path, scope)
+    end
+  end
+
+  defp validate_cached_entries(cache, targets, destination) do
+    target_by_ref = Map.new(targets, &{&1["ref"], &1})
+
+    Enum.reduce_while(cache["entries"], {:ok, %{}}, fn cached, {:ok, acc} ->
+      case Map.get(target_by_ref, cached["ref"]) do
+        nil ->
+          {:cont, {:ok, acc}}
+
+        branch ->
+          case cached["status"] do
+            "verified_proof" ->
+              case Core.validate_adoption_proof(cached["proof"], branch, destination) do
+                :ok -> {:cont, {:ok, Map.put(acc, branch["ref"], cached)}}
+                {:error, _reason} -> {:halt, {:error, :invalid_checkpoint_proof}}
+              end
+
+            "deterministic_preserve" ->
+              {:cont, {:ok, Map.put(acc, branch["ref"], cached)}}
+
+            "transient_failure" ->
+              {:cont, {:ok, Map.put(acc, branch["ref"], cached)}}
+
+            _status ->
+              {:halt, {:error, :invalid_checkpoint_entry}}
+          end
+      end
+    end)
+  end
+
+  defp prune_stale_entries(cache, targets) do
+    target_by_ref = Map.new(targets, &{&1["ref"], &1})
+
+    entries =
+      Enum.filter(cache["entries"], fn entry ->
+        case Map.get(target_by_ref, entry["ref"]) do
+          %{"oid" => oid} -> entry["oid"] == oid
+          nil -> false
+        end
+      end)
+
+    Map.put(cache, "entries", entries)
+  end
+
+  defp prove_targets(targets, repo_path, destination, cached_entries, cache, limits, opts) do
+    proof_fun = Keyword.get(opts, :proof_fun, &prove_branch/3)
+    callback = Keyword.get(opts, :progress)
+    total = length(targets)
+
+    initial = %{
+      "completed" => 0,
+      "total" => total,
+      "cache_hits" => 0,
+      "retried" => 0,
+      "attempts" => 0,
+      "skipped" => 0,
+      "attempts_since_checkpoint" => 0,
+      "failure_categories" => %{}
+    }
+
+    {results, final_cache, _state} =
+      Enum.reduce_while(targets, {%{}, cache, initial}, fn branch,
+                                                           {results, current_cache, state} ->
+        cached = Map.get(cached_entries, branch["ref"])
+
+        case cached do
+          %{"status" => "verified_proof", "proof" => proof} ->
+            next_state = progress_state(state, :cache_hit, nil)
+            emit_progress(callback, next_state)
+            {:cont, {Map.put(results, branch["ref"], {:ok, proof}), current_cache, next_state}}
+
+          %{"status" => "deterministic_preserve", "failure" => failure} ->
+            next_state = progress_state(state, :cache_hit, failure)
+            emit_progress(callback, next_state)
+
+            {:cont,
+             {
+               Map.put(results, branch["ref"], cached_failure_result(failure)),
+               current_cache,
+               next_state
+             }}
+
+          _ ->
+            if state["attempts"] < limits["max_proof_attempts"] do
+              result = run_proof(proof_fun, repo_path, branch, destination)
+
+              {next_cache, normalized_result} =
+                cache_result(current_cache, branch, result, destination)
+
+              next_state =
+                progress_state(
+                  state,
+                  if(cached == nil, do: :attempt, else: :retry),
+                  failure_for_result(normalized_result)
+                )
+
+              with {:ok, next_state} <- checkpoint_after_attempt(opts, next_cache, next_state) do
+                emit_progress(callback, next_state)
+
+                {:cont,
+                 {Map.put(results, branch["ref"], normalized_result), next_cache, next_state}}
+              else
+                {:error, _reason} = error -> {:halt, {error, current_cache, state}}
+              end
+            else
+              next_state = progress_state(state, :skipped, nil)
+              emit_progress(callback, next_state)
+
+              {:cont,
+               {Map.put(results, branch["ref"], :not_attempted), current_cache, next_state}}
+            end
+        end
+      end)
+
+    case results do
+      {:error, _reason} = error -> error
+      _ -> {:ok, results, final_cache}
+    end
+  end
+
+  defp run_proof(proof_fun, repo_path, branch, destination) when is_function(proof_fun, 3) do
+    result = proof_fun.(repo_path, branch, destination)
+
+    case result do
+      {:ok, proof} when is_map(proof) ->
+        case Core.validate_adoption_proof(proof, branch, destination) do
+          :ok -> {:ok, proof}
+          {:error, _reason} -> {:error, {:invalid_input, :invalid_adoption_proof}}
         end
 
-      Map.put(acc, branch["ref"], result)
-    end)
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, :unknown_proof_result}
+    end
+  end
+
+  defp run_proof(_proof_fun, _repo_path, _branch, _destination),
+    do: {:error, :invalid_proof_function}
+
+  defp cache_result(cache, branch, {:ok, proof} = result, _destination) do
+    {:ok, next_cache} =
+      CheckpointCore.upsert(cache, branch, "verified_proof", %{"proof" => proof})
+
+    {next_cache, result}
+  end
+
+  defp cache_result(cache, branch, {:error, reason} = result, _destination) do
+    failure = Core.proof_failure(reason)
+
+    status =
+      if failure["retryable"] == false,
+        do: "deterministic_preserve",
+        else: "transient_failure"
+
+    {:ok, next_cache} = CheckpointCore.upsert(cache, branch, status, %{"failure" => failure})
+    {next_cache, result}
+  end
+
+  defp cached_failure_result(%{"category" => "not_adopted"}),
+    do: {:error, {:not_adopted, :cached}}
+
+  defp cached_failure_result(failure), do: {:error, {:proof_failure, failure}}
+
+  defp failure_for_result({:error, {:not_adopted, _reason}}),
+    do: Core.proof_failure({:not_adopted, :cached})
+
+  defp failure_for_result({:error, reason}), do: Core.proof_failure(reason)
+  defp failure_for_result(_result), do: nil
+
+  defp progress_state(state, kind, nil) do
+    next = Map.update!(state, "completed", &(&1 + 1))
+
+    case kind do
+      :cache_hit ->
+        Map.update!(next, "cache_hits", &(&1 + 1))
+
+      :retry ->
+        next
+        |> Map.update!("attempts", &(&1 + 1))
+        |> Map.update!("retried", &(&1 + 1))
+        |> Map.update!("attempts_since_checkpoint", &(&1 + 1))
+
+      :skipped ->
+        next
+        |> Map.update!("skipped", &(&1 + 1))
+        |> Map.update!(
+          "failure_categories",
+          &Map.update(&1, "not_attempted", 1, fn count -> count + 1 end)
+        )
+
+      :attempt ->
+        next
+        |> Map.update!("attempts", &(&1 + 1))
+        |> Map.update!("attempts_since_checkpoint", &(&1 + 1))
+    end
+  end
+
+  defp progress_state(state, kind, failure) do
+    next = progress_state(state, kind, nil)
+    category = failure["category"]
+
+    Map.update!(
+      next,
+      "failure_categories",
+      &Map.update(&1, category, 1, fn count -> count + 1 end)
+    )
+  end
+
+  defp emit_progress(callback, state) when is_function(callback, 1) do
+    snapshot = %{
+      "completed" => state["completed"],
+      "total" => state["total"],
+      "cache_hits" => state["cache_hits"],
+      "retried" => state["retried"],
+      "skipped" => state["skipped"],
+      "failure_categories" =>
+        state["failure_categories"]
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.map(fn {category, count} -> %{"category" => category, "count" => count} end)
+    }
+
+    try do
+      callback.(snapshot)
+    rescue
+      _error -> :ok
+    catch
+      _kind, _reason -> :ok
+    end
+  end
+
+  defp emit_progress(_callback, _state), do: :ok
+
+  defp checkpoint_after_attempt(opts, cache, state) do
+    case checkpoint_path(opts) do
+      nil ->
+        {:ok, state}
+
+      path ->
+        if state["attempts_since_checkpoint"] < @checkpoint_cadence do
+          {:ok, state}
+        else
+          with :ok <- write_checkpoint(opts, path, cache) do
+            {:ok, Map.put(state, "attempts_since_checkpoint", 0)}
+          end
+        end
+    end
+  end
+
+  defp persist_checkpoint(opts, cache) do
+    case checkpoint_path(opts) do
+      nil -> :ok
+      path -> write_checkpoint(opts, path, cache)
+    end
+  end
+
+  defp write_checkpoint(opts, path, cache) do
+    case Keyword.get(opts, :checkpoint_writer) do
+      writer when is_function(writer, 2) -> writer.(path, cache)
+      _other -> BranchAuditCheckpoint.write(path, cache)
+    end
+  end
+
+  defp checkpoint_path(opts) do
+    case Keyword.get(opts, :checkpoint, Keyword.get(opts, :checkpoint_path)) do
+      path when is_binary(path) and byte_size(path) > 0 -> path
+      _other -> nil
+    end
   end
 
   defp prove_branch(repo_path, branch, destination) do

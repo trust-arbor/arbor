@@ -262,6 +262,10 @@ This section is the always-loaded working set: 12 broad cross-task rules measuri
 <a id="applied-learning-always-search-for-all-occurrences-before-using-replace-all-true"></a>
 **Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.
 
+<!-- applied-learning: checkpoint-proof-cache-boundaries-and-progress -->
+<a id="applied-learning-checkpoint-proof-cache-boundaries-and-progress"></a>
+**Checkpointed historical proofs are observations, never mutation authority.** Bind every reusable result to the exact repository, destination ref/OID, branch ref/OID, and proof-policy version; persist only closed, sanitized statuses; retry transient failures; and make progress count cache hits, every retry, and budget-skipped targets independently of outcome success.
+
 
 <!-- applied-learning: anchor-manual-patches-with-unique-surrounding-context -->
 <a id="applied-learning-anchor-manual-patches-with-unique-surrounding-context"></a>

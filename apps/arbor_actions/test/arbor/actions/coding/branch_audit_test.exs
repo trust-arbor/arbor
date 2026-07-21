@@ -1,11 +1,237 @@
 defmodule Arbor.Actions.Coding.BranchAuditTest do
   use Arbor.Actions.ActionCase, async: false
+  import Bitwise
 
   alias Arbor.Actions
+  alias Arbor.Actions.Coding.BranchAuditCheckpoint
   alias Arbor.Actions.Coding.BranchAuditCore, as: Core
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
   @moduletag :fast
+
+  test "checkpoint proof hits skip the injected proof function and preserve the manifest", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = build_fixture(Path.join(tmp_dir, "repo"))
+    checkpoint = Path.join(tmp_dir, "branch-audit.checkpoint")
+
+    proof_fun = fn _repo, branch, destination ->
+      {:ok,
+       %{
+         "method" => "ancestry",
+         "base_commit" => branch["oid"],
+         "candidate_commit" => branch["oid"],
+         "destination_ref" => destination["ref"],
+         "destination_commit" => destination["oid"],
+         "candidate_commit_count" => 0,
+         "audit" => %{"candidate_range_count" => 0}
+       }}
+    end
+
+    assert {:ok, first} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: proof_fun
+             )
+
+    assert {:ok, second} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: fn _repo, _branch, _destination ->
+                 raise "cache miss"
+               end
+             )
+
+    assert first["manifest_sha256"] == second["manifest_sha256"]
+    assert (File.stat!(checkpoint).mode &&& 0o777) == 0o600
+  end
+
+  test "exit 137 failures are checkpointed but retried on resume", %{tmp_dir: tmp_dir} do
+    repo = build_fixture(Path.join(tmp_dir, "repo"))
+    checkpoint = Path.join(tmp_dir, "branch-audit.checkpoint")
+    progress = self()
+
+    failure = {:invalid_input, {:git_command_failed, 137}}
+
+    assert {:ok, first} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: fn _repo, _branch, _destination -> {:error, failure} end,
+               progress: fn snapshot -> send(progress, {:progress, snapshot}) end
+             )
+
+    assert {:ok, cache, :hit} =
+             BranchAuditCheckpoint.load(checkpoint, %{
+               "policy_version" =>
+                 Arbor.Actions.Coding.BranchAuditCheckpointCore.policy_version(),
+               "repository" => first["repository"],
+               "destination" => first["destination"]
+             })
+
+    assert Enum.all?(cache["entries"], fn entry ->
+             entry["status"] == "transient_failure" and
+               entry["failure"]["category"] == "git_command_failed" and
+               entry["failure"]["detail"] == "invalid_input" and
+               entry["failure"]["code"] == "137" and
+               entry["failure"]["retryable"]
+           end)
+
+    calls = :counters.new(1, [:atomics])
+
+    assert {:ok, _second} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: fn _repo, _branch, _destination ->
+                 :counters.add(calls, 1, 1)
+                 {:error, failure}
+               end,
+               progress: fn snapshot -> send(progress, {:resumed, snapshot}) end
+             )
+
+    assert :counters.get(calls, 1) == length(cache["entries"])
+
+    resumed =
+      for _ <- 1..length(cache["entries"]) do
+        receive do
+          {:resumed, snapshot} -> snapshot
+        after
+          1_000 -> flunk("missing resumed progress snapshot")
+        end
+      end
+
+    %{"retried" => retried, "failure_categories" => categories} = List.last(resumed)
+    assert retried == length(cache["entries"])
+    assert categories == [%{"category" => "git_command_failed", "count" => retried}]
+  end
+
+  test "range-too-large preserve results are deterministic cache hits", %{tmp_dir: tmp_dir} do
+    repo = build_fixture(Path.join(tmp_dir, "repo"))
+    checkpoint = Path.join(tmp_dir, "branch-audit.checkpoint")
+    range_failure = {:range_too_large, :destination, 256}
+
+    assert {:ok, first} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: fn _repo, _branch, _destination -> {:error, range_failure} end
+             )
+
+    assert {:ok, second} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: fn _repo, _branch, _destination -> raise "range cache miss" end
+             )
+
+    assert first["manifest_sha256"] == second["manifest_sha256"]
+  end
+
+  test "proof budget progress accounts for skipped targets", %{tmp_dir: tmp_dir} do
+    repo = build_fixture(Path.join(tmp_dir, "repo"))
+    progress = self()
+
+    assert {:ok, _manifest} =
+             Actions.audit_coding_branches(repo, "main",
+               max_proof_attempts: 1,
+               proof_fun: fn _repo, _branch, _destination ->
+                 {:error, {:range_too_large, :destination, 256}}
+               end,
+               progress: fn snapshot -> send(progress, {:budget_progress, snapshot}) end
+             )
+
+    snapshots =
+      Enum.reduce_while(1..64, [], fn _attempt, acc ->
+        receive do
+          {:budget_progress, snapshot} ->
+            next = [snapshot | acc]
+
+            if snapshot["completed"] == snapshot["total"],
+              do: {:halt, next},
+              else: {:cont, next}
+        after
+          1_000 -> flunk("missing budget progress snapshot")
+        end
+      end)
+
+    final = hd(snapshots)
+    assert final["completed"] == final["total"]
+    assert final["skipped"] > 0
+    assert Enum.any?(final["failure_categories"], &(&1["category"] == "not_attempted"))
+  end
+
+  test "changed branch OIDs are per-entry cache misses", %{tmp_dir: tmp_dir} do
+    repo = build_fixture(Path.join(tmp_dir, "repo"))
+    checkpoint = Path.join(tmp_dir, "branch-audit.checkpoint")
+    failure = {:range_too_large, :patch_evidence_bytes, 32 * 1024 * 1024}
+
+    assert {:ok, _first} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: fn _repo, _branch, _destination -> {:error, failure} end
+             )
+
+    git!(repo, ["checkout", "unique"])
+    add_commit(repo, "unique-rewritten.txt", "rewritten\n", "rewrite unique")
+    git!(repo, ["checkout", "main"])
+
+    calls = :counters.new(1, [:atomics])
+
+    assert {:ok, _second} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: fn _repo, _branch, _destination ->
+                 :counters.add(calls, 1, 1)
+                 {:error, failure}
+               end
+             )
+
+    assert :counters.get(calls, 1) >= 1
+  end
+
+  test "checkpoint cadence bounds the unwritten interruption tail", %{tmp_dir: tmp_dir} do
+    repo = build_fixture(Path.join(tmp_dir, "repo"))
+    checkpoint = Path.join(tmp_dir, "branch-audit.checkpoint")
+
+    for index <- 1..20 do
+      branch = "audit/cadence-#{index}"
+      git!(repo, ["checkout", "-b", branch, "main"])
+      add_commit(repo, "cadence-#{index}.txt", "cadence\n", "cadence #{index}")
+      git!(repo, ["checkout", "main"])
+    end
+
+    proof_calls = :counters.new(1, [:atomics])
+    cadence = Arbor.Actions.Coding.BranchAudit.checkpoint_cadence()
+
+    assert catch_throw(
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               checkpoint_writer: fn path, cache ->
+                 send(self(), {:checkpoint_write, length(cache["entries"])})
+                 BranchAuditCheckpoint.write(path, cache)
+               end,
+               proof_fun: fn _repo, _branch, _destination ->
+                 :counters.add(proof_calls, 1, 1)
+
+                 if :counters.get(proof_calls, 1) == cadence + 1,
+                   do: throw(:interrupted),
+                   else: {:error, {:range_too_large, :patch_bytes, 4 * 1024 * 1024}}
+               end
+             )
+           ) == :interrupted
+
+    assert_received {:checkpoint_write, written_entries} when written_entries == cadence
+
+    resumed_calls = :counters.new(1, [:atomics])
+
+    assert {:ok, _manifest} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: fn _repo, _branch, _destination ->
+                 :counters.add(resumed_calls, 1, 1)
+                 {:error, {:range_too_large, :patch_bytes, 4 * 1024 * 1024}}
+               end
+             )
+
+    assert :counters.get(resumed_calls, 1) <= cadence
+  end
 
   test "dry-run is deterministic and changes no local or hidden refs", %{tmp_dir: tmp_dir} do
     repo = build_fixture(Path.join(tmp_dir, "repo"))

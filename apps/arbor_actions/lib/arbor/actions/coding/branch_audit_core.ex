@@ -31,6 +31,11 @@ defmodule Arbor.Actions.Coding.BranchAuditCore do
   )
   @retention_lifecycles ~w(retained active creating discarding)
   @discard_phases ~w(archive worktree branch)
+  @deterministic_range_sides [:candidate, :destination, :patch_bytes, :patch_evidence_bytes]
+  @known_config_codes ~w(
+    invalid_config_output empty_match_output malformed_config_output malformed_config_record
+    invalid_config_entries unsafe_git_configuration invalid_worktree_config
+  )
 
   @type json :: map() | list() | String.t() | number() | boolean() | nil
 
@@ -166,6 +171,109 @@ defmodule Arbor.Actions.Coding.BranchAuditCore do
   @spec canonical_json(json()) :: String.t()
   def canonical_json(value), do: IO.iodata_to_binary(do_canonical_json(value))
 
+  @doc "Validate one adoption proof against the exact branch and destination observations."
+  @spec validate_adoption_proof(map(), map(), map()) :: :ok | {:error, term()}
+  def validate_adoption_proof(proof, branch, destination)
+      when is_map(proof) and is_map(branch) and is_map(destination) do
+    if valid_adoption_proof?(proof, proof["method"], branch, destination),
+      do: :ok,
+      else: {:error, :invalid_adoption_proof}
+  end
+
+  def validate_adoption_proof(_proof, _branch, _destination),
+    do: {:error, :invalid_adoption_proof}
+
+  @doc "Return bounded, JSON-clean status for a proof failure without retaining raw terms."
+  @spec proof_failure(term()) :: map()
+  def proof_failure({:not_adopted, _reason}),
+    do:
+      failure_status("not_adopted", "patch_not_represented_on_destination", "not_adopted", false)
+
+  def proof_failure({:range_too_large, side, limit})
+      when side in @deterministic_range_sides and is_integer(limit) and limit > 0,
+      do: failure_status("range_too_large", Atom.to_string(side), Integer.to_string(limit), false)
+
+  def proof_failure(
+        {:invalid_input, {:git_storage_validation_failed, _operation, exit_code, _stderr}}
+      )
+      when is_integer(exit_code),
+      do:
+        failure_status(
+          "git_storage_validation_failed",
+          "invalid_input",
+          "exit_" <> Integer.to_string(exit_code),
+          true
+        )
+
+  def proof_failure({:invalid_input, {:git_command_failed, exit_code}})
+      when is_integer(exit_code),
+      do:
+        failure_status("git_command_failed", "invalid_input", Integer.to_string(exit_code), true)
+
+  def proof_failure({:invalid_input, {:git_storage_identity_changed, _path}}),
+    do: failure_status("git_storage_identity_changed", "storage", "identity_changed", true)
+
+  def proof_failure({:git_storage_identity_changed, _path}),
+    do: failure_status("git_storage_identity_changed", "storage", "identity_changed", true)
+
+  def proof_failure({:invalid_input, {:invalid_git_storage_path, _option, _output}}),
+    do: failure_status("invalid_git_storage_path", "storage", "path_rejected", true)
+
+  def proof_failure({:invalid_git_storage_path, _option, _output}),
+    do: failure_status("invalid_git_storage_path", "storage", "path_rejected", true)
+
+  def proof_failure({:invalid_input, {:invalid_git_storage_directory, _path}}),
+    do: failure_status("invalid_git_storage_directory", "storage", "directory_rejected", true)
+
+  def proof_failure({:invalid_git_storage_directory, _path}),
+    do: failure_status("invalid_git_storage_directory", "storage", "directory_rejected", true)
+
+  def proof_failure({:invalid_input, {:git_config_audit_failed, code, _output}}),
+    do: failure_status("git_config_audit_failed", "config", categorical_code(code), true)
+
+  def proof_failure({:git_config_audit_failed, code, _output}),
+    do: failure_status("git_config_audit_failed", "config", categorical_code(code), true)
+
+  def proof_failure({:invalid_input, {:git_config_audit_failed, code}}),
+    do: failure_status("git_config_audit_failed", "config", categorical_code(code), true)
+
+  def proof_failure({:git_config_audit_failed, code}),
+    do: failure_status("git_config_audit_failed", "config", categorical_code(code), true)
+
+  def proof_failure({:invalid_input, {:unsafe_git_configuration, _entries}}),
+    do: failure_status("unsafe_git_configuration", "config", "unsafe_configuration", true)
+
+  def proof_failure({:unsafe_git_configuration, _entries}),
+    do: failure_status("unsafe_git_configuration", "config", "unsafe_configuration", true)
+
+  def proof_failure({:invalid_input, :invalid_git_output}),
+    do: failure_status("invalid_git_output", "git_output", "malformed", true)
+
+  def proof_failure(:invalid_git_output),
+    do: failure_status("invalid_git_output", "git_output", "malformed", true)
+
+  def proof_failure({:invalid_input, :output_limit}),
+    do: failure_status("output_limit", "git_output", "limit_exceeded", true)
+
+  def proof_failure(:output_limit),
+    do: failure_status("output_limit", "git_output", "limit_exceeded", true)
+
+  def proof_failure({:git_command_failed, exit_code}) when is_integer(exit_code),
+    do:
+      failure_status(
+        "git_command_failed",
+        "git_command_failed",
+        Integer.to_string(exit_code),
+        true
+      )
+
+  def proof_failure({:timeout, _detail}),
+    do: failure_status("timeout", "proof_timeout", "timeout", true)
+
+  def proof_failure(:timeout), do: failure_status("timeout", "proof_timeout", "timeout", true)
+
+  def proof_failure(_reason), do: failure_status("unknown", "unknown", "unknown", true)
+
   defp classify_unprotected(branch, destination, proofs, survivors, opts) do
     ref = branch["ref"]
 
@@ -265,30 +373,44 @@ defmodule Arbor.Actions.Coding.BranchAuditCore do
     if is_map(proof), do: Map.put(base, "proof", proof), else: base
   end
 
-  defp inspect_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
-
-  defp inspect_reason({:range_too_large, side, limit})
-       when side in [:candidate, :destination] and is_integer(limit) and limit > 0,
-       do: "range_too_large:#{side}:#{limit}"
-
-  defp inspect_reason({:git_storage_validation_failed, _operation, exit_code, _stderr})
-       when is_integer(exit_code),
-       do: "git_storage_validation_failed:exit_#{exit_code}"
-
-  defp inspect_reason({tag, value}) when is_atom(tag),
-    do: Atom.to_string(tag) <> ":" <> inspect_reason(value)
-
-  defp inspect_reason(reason) when is_integer(reason), do: Integer.to_string(reason)
-  defp inspect_reason(reason) when is_binary(reason), do: reason
-  defp inspect_reason(_reason), do: "unknown"
+  defp proof_error_reason({:proof_failure, failure}), do: render_failure_reason(failure)
 
   defp proof_error_reason(reason) do
-    detail = inspect_reason(reason)
-
-    if byte_size(detail) in 1..512 and Regex.match?(~r/\A[A-Za-z0-9_.:\/-]+\z/, detail),
-      do: "proof_error:" <> detail,
-      else: "proof_error:unknown"
+    render_failure_reason(proof_failure(reason))
   end
+
+  defp render_failure_reason(%{
+         "category" => category,
+         "detail" => detail,
+         "code" => code
+       }) do
+    cond do
+      category == "unknown" and detail == "unknown" and code == "unknown" ->
+        "proof_error:unknown"
+
+      category in ["git_storage_validation_failed", "git_command_failed"] and
+          detail == "invalid_input" ->
+        "proof_error:invalid_input:#{category}:#{code}"
+
+      true ->
+        "proof_error:" <> Enum.join([category, detail, code], ":")
+    end
+  end
+
+  defp failure_status(category, detail, code, retryable),
+    do: %{
+      "category" => category,
+      "detail" => detail,
+      "code" => code,
+      "retryable" => retryable
+    }
+
+  defp categorical_code(code) when code in @known_config_codes, do: Atom.to_string(code)
+
+  defp categorical_code(code) when is_integer(code) and code >= 0 and code <= 255,
+    do: "exit_" <> Integer.to_string(code)
+
+  defp categorical_code(_code), do: "unknown"
 
   defp validate_body(body) do
     with :ok <- validate_json(body),
