@@ -194,6 +194,16 @@ defmodule Arbor.Actions do
   def settle_coding_workspaces(_task_id, _principal_id, _opts),
     do: {:error, :invalid_task_principal}
 
+  @doc "Return bounded, JSON-clean coding workspace lifecycle status."
+  @spec coding_workspace_lifecycle_status(keyword()) :: {:ok, map()} | {:error, term()}
+  def coding_workspace_lifecycle_status(opts \\ [])
+
+  def coding_workspace_lifecycle_status(opts) when is_list(opts),
+    do: WorkspaceLeaseRegistry.lifecycle_status(opts)
+
+  def coding_workspace_lifecycle_status(_opts),
+    do: {:error, :invalid_lifecycle_status_options}
+
   @doc "Compute bounded proof that a published coding candidate reached a destination ref."
   @spec prove_coding_branch_adoption(map(), String.t()) :: {:ok, map()} | {:error, term()}
   def prove_coding_branch_adoption(candidate, destination_ref),
@@ -1320,6 +1330,7 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.Workspace.Acquire,
         Arbor.Actions.Coding.Workspace.Inspect,
         Arbor.Actions.Coding.Workspace.RecoverySummary,
+        Arbor.Actions.Coding.Workspace.LifecycleStatus,
         Arbor.Actions.Coding.Workspace.Release,
         Arbor.Actions.Coding.Workspace.CommittedChange,
         Arbor.Actions.Coding.ReviewTree.Read,
@@ -2357,6 +2368,7 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.Workspace.Inspect => "arbor://action/coding/workspace/inspect",
     Arbor.Actions.Coding.Workspace.RecoverySummary =>
       "arbor://action/coding/workspace/recovery_summary",
+    Arbor.Actions.Coding.Workspace.LifecycleStatus => "arbor://action/coding/workspace/status",
     Arbor.Actions.Coding.Workspace.Release => "arbor://action/coding/workspace/release",
     Arbor.Actions.Coding.Workspace.CommittedChange =>
       "arbor://action/coding/workspace/committed_change",

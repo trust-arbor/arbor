@@ -124,6 +124,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore, as: BranchLifecycle
+  alias Arbor.Actions.Coding.WorkspaceLifecycleStatusCore, as: LifecycleStatus
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: RetentionJournal
   alias Arbor.Actions.Git
   alias Arbor.Common.SafePath
@@ -420,6 +421,21 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   def branch_protection_inventory(_repo_path, _opts),
     do: {:error, :retention_inventory_unavailable}
+
+  @doc """
+  Return a bounded, JSON-clean aggregate of workspace lifecycle state.
+
+  This is a direct hot-state snapshot and intentionally does not validate the
+  retention journal inventory. It remains available while the journal is
+  poisoned, degraded, disabled, or malformed.
+  """
+  @spec lifecycle_status(keyword()) :: {:ok, map()} | {:error, term()}
+  def lifecycle_status(opts \\ [])
+
+  def lifecycle_status(opts) when is_list(opts),
+    do: call(:lifecycle_status, opts)
+
+  def lifecycle_status(_opts), do: {:error, :invalid_lifecycle_status_options}
 
   @doc false
   @spec acquire_validation_resource(String.t(), map() | keyword()) ::
@@ -920,6 +936,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call(:lifecycle_status, _from, state) do
+    snapshot = %{
+      leases: state.leases,
+      retained_by_id: state.retained_by_id,
+      retention_blockers: state.retention_blockers,
+      validation_resources: state.validation_resources,
+      retained_cleanup_retry_limit: Map.get(state, :retained_cleanup_retry_limit),
+      owner_death_retry_limit: Map.get(state, :owner_death_retry_limit),
+      validation_owner_cleanup_retry_limit: Map.get(state, :validation_owner_cleanup_retry_limit),
+      journal_status: get_in(state, [:retention_journal, :status]),
+      journal_reason: get_in(state, [:retention_journal, :reason])
+    }
+
+    {:reply, {:ok, LifecycleStatus.aggregate(snapshot)}, state}
   end
 
   def handle_call(

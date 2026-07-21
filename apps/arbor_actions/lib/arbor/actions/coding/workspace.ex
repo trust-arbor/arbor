@@ -12,6 +12,7 @@ defmodule Arbor.Actions.Coding.Workspace do
   | `Acquire` | `arbor://action/coding/workspace/acquire` |
   | `Inspect` | `arbor://action/coding/workspace/inspect` |
   | `RecoverySummary` | `arbor://action/coding/workspace/recovery_summary` |
+  | `LifecycleStatus` | `arbor://action/coding/workspace/status` |
   | `Release` | `arbor://action/coding/workspace/release` |
   | `CommittedChange` | `arbor://action/coding/workspace/committed_change` |
   """
@@ -1838,6 +1839,46 @@ defmodule Arbor.Actions.Coding.Workspace do
         Map.has_key?(map, key) -> Map.get(map, key)
         Map.has_key?(map, Atom.to_string(key)) -> Map.get(map, Atom.to_string(key))
         true -> nil
+      end
+    end
+  end
+
+  defmodule LifecycleStatus do
+    @moduledoc """
+    Read the bounded aggregate lifecycle status of the coding workspace registry.
+
+    The action accepts no authority-bearing parameters and returns counts and
+    categorical cleanup state only. It never returns workspace identities,
+    paths, principals, process details, or raw failures.
+    """
+
+    use Jido.Action,
+      name: "coding_workspace_lifecycle_status",
+      description: "Read bounded coding workspace lifecycle status",
+      category: "coding",
+      tags: ["coding", "workspace", "status", "lifecycle"],
+      schema: []
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+
+    def taint_roles, do: %{}
+
+    def effect_class, do: :read
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
+    def run(_params, _context) do
+      Actions.emit_started(__MODULE__, %{})
+
+      case WorkspaceLeaseRegistry.lifecycle_status() do
+        {:ok, status} ->
+          Actions.emit_completed(__MODULE__, %{status: "available"})
+          {:ok, status}
+
+        {:error, _reason} ->
+          Actions.emit_failed(__MODULE__, :workspace_lifecycle_status_unavailable)
+          {:error, :workspace_lifecycle_status_unavailable}
       end
     end
   end
