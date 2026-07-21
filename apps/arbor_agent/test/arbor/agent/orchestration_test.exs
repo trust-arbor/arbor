@@ -598,6 +598,9 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert_received {:grant, adoption_grant_opts}
       assert adoption_grant_opts[:resource] == "arbor://agent/task/adopt/task_1"
 
+      assert DateTime.diff(adoption_grant_opts[:expires_at], grant_opts[:expires_at], :second) >=
+               28 * 86_400
+
       assert_received {:task_dispatch, "agent_1", "write a patch", opts}
       assert opts[:task_id] == "task_1"
       assert opts[:metadata] == %{ticket: "A-1"}
@@ -641,6 +644,35 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       refute_received {:task_dispatch, _, _, _}
       refute_received {:audit_dispatched, _, _, _, _}
+    end
+
+    test "security regression: task ids cannot inject capability URI wildcards" do
+      invalid_task_ids = [
+        "*",
+        "**",
+        "task/**",
+        "task/child",
+        "..",
+        "task id",
+        "task\nnext",
+        String.duplicate("a", 257),
+        <<"task_", 255>>
+      ]
+
+      for task_id <- invalid_task_ids do
+        assert {:error, :invalid_task_id} =
+                 Orchestration.dispatch("agent_1", "write a patch",
+                   caller_id: "human_1",
+                   task_id: task_id,
+                   task_store: FakeTaskStore,
+                   security_module: FakeSecurity,
+                   audit_module: FakeAudit
+                 )
+      end
+
+      refute_received {:authorize, _, _, _, _}
+      refute_received {:grant, _}
+      refute_received {:task_dispatch, _, _, _}
     end
 
     test "fails before starting the task when the task approval-answer grant fails" do
@@ -1527,6 +1559,9 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert {:error, :invalid_destination_ref} =
                Orchestration.adopt_task_change("task_1", String.duplicate("x", 257), opts)
+
+      assert {:error, :invalid_destination_ref} =
+               Orchestration.adopt_task_change("task_1", "refs/heads/main\nnext", opts)
 
       refute_received {:task_adopt, _, _, _}
     end

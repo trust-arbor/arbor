@@ -975,7 +975,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     "prep_release_mode_remove" => %{
       "type" => "transform",
       "transform" => "constant",
-      "expression" => "remove",
+      "expression" => "publish",
+      "output_key" => "mode"
+    },
+    "prep_release_mode_publish_retain" => %{
+      "type" => "transform",
+      "transform" => "constant",
+      "expression" => "publish_retain",
       "output_key" => "mode"
     },
     "prep_release_mode_discard" => %{
@@ -989,6 +995,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "transform" => "constant",
       "expression" => "retain",
       "output_key" => "mode"
+    },
+    "publish_workspace" => %{
+      "type" => "exec",
+      "target" => "action",
+      "action" => "coding_workspace_release",
+      "context_keys" => "workspace_id,mode,commit_hash,repo_path",
+      "output_prefix" => "release",
+      "max_retries" => "0"
     },
     "release_workspace" => %{
       "type" => "exec",
@@ -1028,9 +1042,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"prep_release_mode_only", "outcome=fail"}
     ],
     "prep_release_mode_only" => [{"release_workspace_only", nil}],
-    "prep_release_mode_remove" => [{"release_workspace", nil}],
+    "prep_release_mode_remove" => [{"publish_workspace", nil}],
     "prep_release_mode_discard" => [{"release_workspace", nil}],
+    "prep_release_mode_publish_retain" => [{"publish_workspace", nil}],
     "prep_release_mode_retain" => [{"release_workspace", nil}],
+    "publish_workspace" => [{"done", nil}],
     "release_workspace" => [{"done", nil}],
     "release_workspace_only" => [{"status_pipeline_error", nil}],
     "route_release_mode" => [
@@ -1050,8 +1066,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     ],
     "route_success_workspace_retention" => [
       {"prep_release_mode_remove", "context.retain_workspace=false"},
-      {"prep_release_mode_retain", "context.retain_workspace=true"},
-      {"prep_release_mode_retain", nil}
+      {"prep_release_mode_publish_retain", "context.retain_workspace=true"},
+      {"prep_release_mode_publish_retain", nil}
     ],
     "status_pipeline_error" => [{"done", nil}]
   }
@@ -1102,10 +1118,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       end)
 
     errors
-    |> require_all_paths_through(
+    |> require_all_paths_through_any(
       graph,
       "close_worker",
-      "release_workspace",
+      MapSet.new(["publish_workspace", "release_workspace"]),
       "workspace_cleanup_release"
     )
     |> require_all_paths_through(

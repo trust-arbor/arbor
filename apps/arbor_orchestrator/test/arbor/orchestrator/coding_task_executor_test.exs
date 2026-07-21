@@ -111,6 +111,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         controls
       )
     end
+
+    def archive_adoption_evidence(root, task_id, candidate, proof) do
+      Arbor.Orchestrator.CodingPlan.ArtifactStore.archive_adoption_evidence(
+        root,
+        task_id,
+        candidate,
+        proof
+      )
+    end
   end
 
   defmodule ObservedCompiler do
@@ -703,6 +712,101 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   defp sha256(value) do
     Base.encode16(:crypto.hash(:sha256, value), case: :lower)
+  end
+
+  defp finalized_adoption_fixture do
+    ensure_shell_execution_registry!()
+    repo = configured_repo_path()
+    git!(repo, ["config", "user.email", "test@example.com"])
+    git!(repo, ["config", "user.name", "Test User"])
+    File.write!(Path.join(repo, "README.md"), "base\n")
+    git!(repo, ["add", "README.md"])
+    git!(repo, ["commit", "-m", "base"])
+    destination_ref = git!(repo, ["symbolic-ref", "HEAD"])
+    destination_branch = String.replace_prefix(destination_ref, "refs/heads/", "")
+    base_commit = git!(repo, ["rev-parse", "HEAD"])
+    branch = "test/executor-adoption"
+    git!(repo, ["checkout", "-b", branch])
+    File.write!(Path.join(repo, "candidate.txt"), "candidate\n")
+    git!(repo, ["add", "candidate.txt"])
+    git!(repo, ["commit", "-m", "candidate"])
+    candidate_commit = git!(repo, ["rev-parse", "HEAD"])
+    git!(repo, ["checkout", destination_branch])
+
+    assert {:ok, %{hidden_ref: evidence_ref}} =
+             Arbor.Actions.Git.archive_branch_evidence_ref(
+               repo,
+               branch,
+               "task_coding_1",
+               "ws_executor_adoption",
+               candidate_commit
+             )
+
+    root = prepare_finalize_artifacts()
+
+    result =
+      root
+      |> finalize_result()
+      |> Map.merge(%{
+        "branch" => branch,
+        "branch_provenance" => "created",
+        "base_commit" => base_commit,
+        "commit" => candidate_commit,
+        "commit_hash" => candidate_commit,
+        "repo_path" => repo,
+        "workspace_id" => "ws_executor_adoption",
+        "evidence_ref" => evidence_ref,
+        "published_commit" => candidate_commit,
+        "workspace_release_status" => "removed"
+      })
+
+    assert {:ok, finalized} =
+             CodingTaskExecutor.finalize_task("agent_1", result, [], valid_context())
+
+    %{
+      repo: repo,
+      root: root,
+      destination_ref: destination_ref,
+      branch: branch,
+      candidate_commit: candidate_commit,
+      finalized: finalized
+    }
+  end
+
+  defp ensure_shell_execution_registry! do
+    {:ok, _started} = Application.ensure_all_started(:arbor_shell)
+
+    if is_nil(Process.whereis(Arbor.Shell.ExecutionRegistry)) do
+      case Supervisor.start_child(
+             Arbor.Shell.Supervisor,
+             {Arbor.Shell.ExecutionRegistry, []}
+           ) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, {:already_started, _pid}} ->
+          :ok
+
+        {:error, :already_present} ->
+          Supervisor.restart_child(Arbor.Shell.Supervisor, Arbor.Shell.ExecutionRegistry)
+      end
+    end
+  end
+
+  defp branch_exists?(repo, branch) do
+    {_output, status} =
+      System.cmd("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}"],
+        stderr_to_stdout: true
+      )
+
+    status == 0
+  end
+
+  defp git!(repo, args) do
+    case System.cmd("git", ["-C", repo | args], stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      {output, status} -> flunk("git #{inspect(args)} exited #{status}: #{output}")
+    end
   end
 
   defp configured_repo_path do
@@ -2014,6 +2118,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "repo_path" => "/tmp/repo",
                  "worktree_path" => "/tmp/ws",
                  "workspace_id" => "ws_1",
+                 "workspace.branch_provenance" => "created",
+                 "workspace.base_commit" => "base-commit",
+                 "release.evidence_ref" => "refs/arbor/evidence/workspace/task",
+                 "release.published_commit" => "cafebabe",
                  "worker_session_id" => "w_1",
                  "worker_provider_session_id" => "provider-session-1",
                  "diff" => "diff --git a",
@@ -2025,7 +2133,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["commit"] == "cafebabe"
       assert result["commit_hash"] == "cafebabe"
       assert result["branch"] == "b1"
+      assert result["branch_provenance"] == "created"
+      assert result["base_commit"] == "base-commit"
       assert result["workspace_id"] == "ws_1"
+      assert result["evidence_ref"] == "refs/arbor/evidence/workspace/task"
+      assert result["published_commit"] == "cafebabe"
       assert result["worker_session_id"] == "w_1"
       assert result["worker_provider_session_id"] == "provider-session-1"
       assert result["worker_provider"] == "codex"
@@ -3077,6 +3189,47 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "agent_1",
                  finalize_result(root),
                  [],
+                 valid_context()
+               )
+    end
+  end
+
+  describe "adopt_task" do
+    test "records content-addressed proof before retiring the exact candidate branch" do
+      fixture = finalized_adoption_fixture()
+      git!(fixture.repo, ["merge", "--ff-only", fixture.branch])
+
+      assert {:ok, adopted} =
+               CodingTaskExecutor.adopt_task(
+                 "agent_1",
+                 fixture.finalized,
+                 %{"destination_ref" => fixture.destination_ref},
+                 valid_context()
+               )
+
+      assert adopted["adoption"]["status"] == "adopted"
+      assert adopted["adoption"]["method"] == "ancestry"
+      assert adopted["adoption"]["branch_retired"] == true
+      refute branch_exists?(fixture.repo, fixture.branch)
+
+      descriptor = adopted["artifacts"]["adoption_evidence"]
+      assert File.regular?(descriptor["path"])
+      assert Path.dirname(descriptor["path"]) == fixture.root
+
+      evidence = descriptor["path"] |> File.read!() |> Jason.decode!()
+      assert evidence["candidate"]["candidate_commit"] == fixture.candidate_commit
+      assert evidence["proof"]["destination_commit"] == fixture.candidate_commit
+    end
+
+    test "fails closed when the stored result disagrees with immutable terminal evidence" do
+      fixture = finalized_adoption_fixture()
+      tampered = Map.put(fixture.finalized, "commit_hash", String.duplicate("f", 40))
+
+      assert {:error, :adoption_candidate_result_mismatch} =
+               CodingTaskExecutor.adopt_task(
+                 "agent_1",
+                 tampered,
+                 %{"destination_ref" => fixture.destination_ref},
                  valid_context()
                )
     end

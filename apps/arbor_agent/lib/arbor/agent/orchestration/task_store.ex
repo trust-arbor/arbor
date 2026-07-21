@@ -651,12 +651,32 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp maybe_revoke_completed_task_capabilities(%{state: state} = record)
        when state in [:done, :failed, :cancelled] do
     case state do
-      :done -> revoke_non_adoption_task_capabilities(record)
-      _ -> revoke_task_capabilities(record)
+      :done ->
+        if retain_adoption_capability?(record) do
+          revoke_non_adoption_task_capabilities(record)
+        else
+          revoke_task_capabilities(record)
+        end
+
+      _ ->
+        revoke_task_capabilities(record)
     end
   end
 
   defp maybe_revoke_completed_task_capabilities(record), do: record
+
+  defp retain_adoption_capability?(%{
+         context_mode: :json_clean,
+         executor: module,
+         result: result
+       }) do
+    is_atom(module) and Code.ensure_loaded?(module) and
+      function_exported?(module, :adopt_task, 4) and
+      is_map(result) and
+      is_map(Map.get(result, :raw, Map.get(result, "raw")))
+  end
+
+  defp retain_adoption_capability?(_record), do: false
 
   defp take_approval_cleanup_descriptor(record) do
     case Map.get(record, :approval_cleanup_descriptor) do
@@ -1574,10 +1594,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp normalize_adoption_request(destination_ref)
        when is_binary(destination_ref) and
               byte_size(destination_ref) <= @max_destination_ref_bytes do
-    if String.trim(destination_ref) == "" do
-      {:error, :invalid_destination_ref}
+    destination_ref = String.trim(destination_ref)
+
+    if destination_ref != "" and String.valid?(destination_ref) and
+         not String.match?(destination_ref, ~r/[\x00-\x1F\x7F]/) do
+      canonicalize_and_roundtrip(%{"destination_ref" => destination_ref})
     else
-      canonicalize_and_roundtrip(%{"destination_ref" => String.trim(destination_ref)})
+      {:error, :invalid_destination_ref}
     end
   end
 

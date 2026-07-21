@@ -312,6 +312,12 @@ This section is the always-loaded working set: 12 broad cross-task rules measuri
 <a id="applied-learning-uri-prefix-checks-must-be-segment-aware-never-raw-string-starts-with-2"></a>
 **URI prefix checks must be segment-aware, never raw `String.starts_with?/2`.** A registry prefix like `arbor://action` raw-matches the retired plural namespace `arbor://actions/execute/...`; `arbor://fs/read` raw-matches `arbor://fs/reader/...`. That is the same footgun class as trust prefix-vs-glob, but at the namespace boundary. Use `Arbor.Contracts.Security.CapabilityUri.prefix_match?/2` for registry-style prefix checks so matching happens on parsed URI segments (found 2026-07-07 during Ring B/B1: `UriRegistry` accepted retired plural action URIs because of a raw prefix match).
 
+**Opaque identifiers interpolated into capability URIs must not become URI syntax.** A caller-supplied task id such as `**` can turn an intended exact grant like `arbor://agent/task/adopt/<task-id>` into a recursive wildcard capability. Before constructing a scoped capability URI, either encode/digest the opaque id into one safe segment or enforce a bounded single-segment alphabet; reject `/`, `*`, traversal segments, whitespace/control bytes, and invalid UTF-8 before any grant occurs (found 2026-07-21 while reviewing post-terminal coding-task adoption).
+
+<!-- applied-learning: idempotent-side-effects-must-reconstruct-their-full-durable-receipt -->
+<a id="applied-learning-idempotent-side-effects-must-reconstruct-their-full-durable-receipt"></a>
+**Idempotent side effects must reconstruct their full durable receipt.** An Engine retry can occur after an action's external side effects succeed but before its result is checkpointed. Returning a generic `already_released` response is not enough when downstream logic needs immutable evidence from the original response. Reconstruct the receipt only from durable state and reverify it before reporting success; for workspace publication, the retry carries the repo root and succeeds only when the deterministic task/workspace hidden ref still points to the exact candidate OID. Normalize failed replay proofs so the recovery path does not become a repository-state oracle (found 2026-07-21 while reviewing candidate publication crash replay).
+
 
 <!-- applied-learning: conserve-the-local-agent-s-tokens-for-planning-design-delegation-and-review -->
 <a id="applied-learning-conserve-the-local-agent-s-tokens-for-planning-design-delegation-and-review"></a>

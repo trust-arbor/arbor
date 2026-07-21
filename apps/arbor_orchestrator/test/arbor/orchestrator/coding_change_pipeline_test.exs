@@ -1271,11 +1271,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     test "acquire precedes mutation and cleanup branches through the reviewed retention policy" do
       graph = load_graph()
       assert graph.nodes["acquire_workspace"]
+      assert graph.nodes["publish_workspace"]
       assert graph.nodes["release_workspace"]
       assert graph.nodes["close_worker"]
 
+      publish = graph.nodes["publish_workspace"]
+      assert publish.attrs["action"] == "coding_workspace_release"
+      assert publish.attrs["context_keys"] == "workspace_id,mode,commit_hash,repo_path"
+
       release = graph.nodes["release_workspace"]
       assert release.attrs["action"] == "coding_workspace_release"
+      assert release.attrs["context_keys"] == "workspace_id,mode"
       assert graph.nodes["route_release_mode"].attrs["fan_out"] == "false"
       assert graph.nodes["route_success_workspace_retention"].attrs["fan_out"] == "false"
 
@@ -1378,10 +1384,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           {:pr_failed, "pr_failed", %{"open_pr" => "true"}, "retain", "retain"},
           {:implement_hard_fail, "pipeline_error", %{}, "retain", "retain"},
           {:worker_open_failed, "pipeline_error", %{}, "retain", "retain"},
-          {:change_committed, "change_committed", %{}, "retain", "remove"},
-          {:narrative_changed, "change_committed", %{}, "retain", "remove"},
-          {:pr_created, "pr_created", %{"open_pr" => "true"}, "retain", "remove"},
-          {:human_review_required, "human_review_required", %{}, "retain", "remove"}
+          {:change_committed, "change_committed", %{}, "publish_retain", "publish"},
+          {:narrative_changed, "change_committed", %{}, "publish_retain", "publish"},
+          {:pr_created, "pr_created", %{"open_pr" => "true"}, "publish_retain", "publish"},
+          {:human_review_required, "human_review_required", %{}, "publish_retain", "publish"}
         ] do
       test "#{scenario} release mode follows retain_workspace" do
         for {retain_workspace, expected_mode} <- [
@@ -1414,14 +1420,15 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_release_mode(calls, "retain")
     end
 
-    test "malformed retain_workspace retains instead of dead-ending before release" do
+    test "malformed retain_workspace publishes and retains instead of dead-ending" do
       assert {{:ok, result}, calls} =
                run_fixture(:change_committed, %{"retain_workspace" => "malformed"})
 
       assert result.context["status"] == "change_committed"
       assert "route_success_workspace_retention" in result.completed_nodes
-      assert "prep_release_mode_retain" in result.completed_nodes
-      assert_release_mode(calls, "retain")
+      assert "prep_release_mode_publish_retain" in result.completed_nodes
+      assert "publish_workspace" in result.completed_nodes
+      assert_release_mode(calls, "publish_retain")
     end
 
     test "narrative worker text with unchanged workspace returns no_changes" do

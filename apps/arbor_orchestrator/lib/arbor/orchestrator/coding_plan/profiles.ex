@@ -95,10 +95,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     prep_release_mode_only
                     prep_release_mode_remove
                     prep_release_mode_discard
+                    prep_release_mode_publish_retain
                     prep_release_mode_retain
                     prep_review_delta_diff
                     prep_review_delta_files
                     prep_review_delta_ranges
+                    publish_workspace
                     release_workspace
                     release_workspace_only
                     retry_recovered_send
@@ -326,6 +328,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "node_id" => "open_recovery_worker",
                                   "action" => "acp_start_session",
                                   "required_dominators" => ["close_stale_worker", "open_worker"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "publish_workspace",
+                                  "action" => "coding_workspace_release",
+                                  "required_dominators" => ["acquire_workspace"],
                                   "review_required_dominators" => [],
                                   "required_dominator_sets" => []
                                 },

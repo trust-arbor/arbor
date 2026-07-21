@@ -23,9 +23,14 @@ defmodule Arbor.Agent.Orchestration do
   @task_cancel_uri "arbor://agent/task/cancel"
   @task_steer_uri "arbor://agent/task/steer"
   @task_adopt_uri "arbor://agent/task/adopt"
+  @max_task_id_bytes 256
+  @task_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
   @max_destination_ref_bytes 256
   @interaction_request_prefix "irq"
   @approval_answer_cap_ttl_seconds 86_400
+  # Integration handoff commonly outlives the interactive approval window.
+  # Lifecycle settlement still revokes this exact task-scoped authority early.
+  @task_adoption_cap_ttl_seconds 30 * 86_400
   @task_cancel_cleanup_note "Pending approval closed because its orchestration task was cancelled"
   @task_terminal_cleanup_note "Pending approval closed because its orchestration task terminated"
 
@@ -614,7 +619,7 @@ defmodule Arbor.Agent.Orchestration do
     grant_opts = [
       principal: caller_id,
       resource: scoped_task_adopt_uri(task_id),
-      expires_at: DateTime.add(DateTime.utc_now(), @approval_answer_cap_ttl_seconds, :second),
+      expires_at: DateTime.add(DateTime.utc_now(), @task_adoption_cap_ttl_seconds, :second),
       constraints: %{},
       metadata: %{source: :orchestration_task_dispatch, task_id: task_id}
     ]
@@ -1188,8 +1193,11 @@ defmodule Arbor.Agent.Orchestration do
 
   defp normalize_id(_), do: {:error, :invalid_approval_id}
 
-  defp normalize_task_id(id) when is_binary(id) do
-    if String.trim(id) == "", do: {:error, :invalid_task_id}, else: {:ok, id}
+  defp normalize_task_id(id)
+       when is_binary(id) and byte_size(id) <= @max_task_id_bytes do
+    if String.valid?(id) and Regex.match?(@task_id_pattern, id),
+      do: {:ok, id},
+      else: {:error, :invalid_task_id}
   end
 
   defp normalize_task_id(_), do: {:error, :invalid_task_id}
@@ -1199,10 +1207,11 @@ defmodule Arbor.Agent.Orchestration do
               byte_size(destination_ref) <= @max_destination_ref_bytes do
     destination_ref = String.trim(destination_ref)
 
-    if destination_ref == "" do
-      {:error, :invalid_destination_ref}
-    else
+    if destination_ref != "" and String.valid?(destination_ref) and
+         not String.match?(destination_ref, ~r/[\x00-\x1F\x7F]/) do
       {:ok, destination_ref}
+    else
+      {:error, :invalid_destination_ref}
     end
   end
 

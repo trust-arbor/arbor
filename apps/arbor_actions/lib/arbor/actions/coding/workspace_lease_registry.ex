@@ -131,7 +131,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   @type ownership :: :owned | :reused
   @type branch_provenance :: :created | :reused | :unknown
-  @type release_mode :: :retain | :remove | :discard
+  @type release_mode :: :retain | :remove | :discard | :publish | :publish_retain
   @type discard_phase :: :archive | :worktree | :branch
 
   # Owner-death retries are a liveness aid, never deletion authority. An
@@ -344,6 +344,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   * `:retain` / `"retain"` - disarm cancellation cleanup and preserve the worktree
   * `:remove` / `"remove"` - remove only invocation-owned worktrees; reused paths
     survive. Local branches are always preserved for review.
+  * `:publish` / `"publish"` - archive the exact reviewed candidate tip to its
+    task/workspace-bound hidden evidence ref, then apply remove semantics.
+  * `:publish_retain` / `"publish_retain"` - archive the exact reviewed candidate
+    tip, then apply retain semantics.
   * `:discard` / `"discard"` - remove an invocation-owned worktree and retire the
     local branch only when this invocation created that exact branch and its tip
     still equals the recorded base. Crash-durable: intent is journaled before
@@ -815,7 +819,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                 release_retained_for_authorized_caller(state, retained, caller, mode)
 
               _ ->
-                {:reply, {:ok, already_released_view(workspace_id)}, state}
+                already_released_reply(state, workspace_id, mode, caller)
             end
         end
 
@@ -828,7 +832,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                 |> cleanup_workspace_attestations(lease.workspace_id)
                 |> cleanup_workspace_review_snapshots(lease.workspace_id)
 
-              case do_release(state, lease, mode) do
+              release_mode = publish_release_mode(mode, caller)
+
+              case do_release(state, lease, release_mode) do
                 {:ok, result, state} -> {:reply, {:ok, result}, state}
                 {:error, reason, state} -> {:reply, {:error, reason}, state}
               end
@@ -3000,7 +3006,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       force_partial_cleanup_failure_once:
         Keyword.get(opts, :force_partial_cleanup_failure_once) == true,
       deadline_ms: Keyword.get(opts, :deadline_ms),
-      snapshot_bounds: Keyword.get(opts, :snapshot_bounds) || %{}
+      snapshot_bounds: Keyword.get(opts, :snapshot_bounds) || %{},
+      candidate_commit: normalize_candidate_commit(Keyword.get(opts, :candidate_commit)),
+      repo_path: normalize_id(Keyword.get(opts, :repo_path))
     }
 
     {server_opts, caller}
@@ -3038,7 +3046,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         Map.get(opts, :force_partial_cleanup_failure_once) == true ||
           Map.get(opts, "force_partial_cleanup_failure_once") == true,
       deadline_ms: Map.get(opts, :deadline_ms) || Map.get(opts, "deadline_ms"),
-      snapshot_bounds: Map.get(opts, :snapshot_bounds) || Map.get(opts, "snapshot_bounds") || %{}
+      snapshot_bounds: Map.get(opts, :snapshot_bounds) || Map.get(opts, "snapshot_bounds") || %{},
+      candidate_commit:
+        normalize_candidate_commit(
+          Map.get(opts, :candidate_commit) || Map.get(opts, "candidate_commit")
+        ),
+      repo_path: normalize_id(Map.get(opts, :repo_path) || Map.get(opts, "repo_path"))
     }
 
     {server, caller}
@@ -4829,6 +4842,45 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp do_release(state, lease, :discard), do: do_release_discard(state, lease)
 
+  # A reviewable candidate becomes durable evidence before its worktree is
+  # released. The expected commit comes from the pinned graph's reviewed
+  # candidate context; archive_branch_evidence_ref/5 rechecks that the local
+  # branch still points at that exact OID before creating the hidden ref. A
+  # successful archive is idempotent, so retry cannot rebind evidence to a
+  # replacement branch tip.
+  defp do_release(state, lease, {:publish, candidate_commit, target_mode})
+       when target_mode in [:remove, :retain] and is_binary(candidate_commit) do
+    archive_input = %{
+      repo_path: lease.repo_path,
+      branch: lease.branch,
+      task_id: lease.task_id,
+      workspace_id: lease.workspace_id,
+      settlement_tip: candidate_commit
+    }
+
+    case invoke_retained_archive(state.retained_archive, archive_input) do
+      {:ok, %{hidden_ref: hidden_ref}} ->
+        case do_release(state, lease, target_mode) do
+          {:ok, result, next_state} ->
+            result =
+              result
+              |> Map.put(:published_commit, candidate_commit)
+              |> Map.put(:evidence_ref, hidden_ref)
+
+            {:ok, result, next_state}
+
+          {:error, reason, next_state} ->
+            {:error, reason, next_state}
+        end
+
+      {:error, reason} ->
+        {:error, {:candidate_archive_failed, reason}, state}
+    end
+  end
+
+  defp do_release(state, _lease, {:publish, _candidate_commit, _target_mode}),
+    do: {:error, :invalid_publish_release, state}
+
   # Discard: journal intent before any destructive work, remove owned worktree,
   # then retire the branch only when provenance is :created and tip still equals
   # the recorded base. Uncertain provenance / tip mismatch fail closed.
@@ -5466,6 +5518,38 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       status: "already_released"
     }
   end
+
+  # A publish action may complete its Git side effects and lose its reply when
+  # the Engine or caller crashes before checkpointing. The hidden evidence ref
+  # is the durable receipt. Reconstruct the response only after observing that
+  # exact task/workspace ref at the exact candidate OID; never synthesize
+  # publication success from deterministic naming alone.
+  defp already_released_reply(state, workspace_id, mode, caller)
+       when mode in [:publish, :publish_retain] do
+    case Git.verify_archived_evidence_ref(
+           caller.repo_path,
+           caller.task_id,
+           workspace_id,
+           caller.candidate_commit
+         ) do
+      {:ok, %{hidden_ref: hidden_ref}} ->
+        result =
+          workspace_id
+          |> already_released_view()
+          |> Map.put(:published_commit, caller.candidate_commit)
+          |> Map.put(:evidence_ref, hidden_ref)
+
+        {:reply, {:ok, result}, state}
+
+      {:error, _reason} ->
+        # Keep the public failure stable so callers cannot distinguish an
+        # absent repository, commit, or hidden ref through this replay path.
+        {:reply, {:error, :publication_replay_unverified}, state}
+    end
+  end
+
+  defp already_released_reply(state, workspace_id, _mode, _caller),
+    do: {:reply, {:ok, already_released_view(workspace_id)}, state}
 
   defp capture_retention_identity(lease) do
     with {:ok, canonical_repo} <- canonical_existing_path(lease.repo_path),
@@ -6941,14 +7025,34 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp normalize_mode(:retain), do: {:ok, :retain}
   defp normalize_mode(:remove), do: {:ok, :remove}
   defp normalize_mode(:discard), do: {:ok, :discard}
+  defp normalize_mode(:publish), do: {:ok, :publish}
+  defp normalize_mode(:publish_retain), do: {:ok, :publish_retain}
   defp normalize_mode("retain"), do: {:ok, :retain}
   defp normalize_mode("remove"), do: {:ok, :remove}
   defp normalize_mode("discard"), do: {:ok, :discard}
+  defp normalize_mode("publish"), do: {:ok, :publish}
+  defp normalize_mode("publish_retain"), do: {:ok, :publish_retain}
 
   defp normalize_mode(other),
     do:
       {:error,
-       "release mode must be \"retain\", \"remove\", or \"discard\", got: #{inspect(other)}"}
+       "release mode must be \"retain\", \"remove\", \"discard\", \"publish\", or \"publish_retain\", got: #{inspect(other)}"}
+
+  defp publish_release_mode(:publish, %{candidate_commit: candidate_commit}),
+    do: {:publish, candidate_commit, :remove}
+
+  defp publish_release_mode(:publish_retain, %{candidate_commit: candidate_commit}),
+    do: {:publish, candidate_commit, :retain}
+
+  defp publish_release_mode(mode, _caller), do: mode
+
+  defp normalize_candidate_commit(commit) when is_binary(commit) do
+    commit = commit |> String.trim() |> String.downcase()
+
+    if Regex.match?(~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, commit), do: commit, else: nil
+  end
+
+  defp normalize_candidate_commit(_commit), do: nil
 
   defp normalize_id(id) when is_binary(id) do
     if String.trim(id) == "", do: nil, else: id

@@ -1384,7 +1384,14 @@ digraph CodingChangeV1 {
   prep_release_mode_remove [
     type="transform",
     transform="constant",
-    expression="remove",
+    expression="publish",
+    output_key="mode"
+  ]
+
+  prep_release_mode_publish_retain [
+    type="transform",
+    transform="constant",
+    expression="publish_retain",
     output_key="mode"
   ]
 
@@ -1395,6 +1402,18 @@ digraph CodingChangeV1 {
     transform="constant",
     expression="discard",
     output_key="mode"
+  ]
+
+  // Successful candidates are published to immutable task-scoped evidence
+  // before their workspace is removed or retained. Only these paths have a
+  // reviewed commit_hash, so keep publication separate from ordinary release.
+  publish_workspace [
+    type="exec",
+    target="action",
+    action="coding_workspace_release",
+    context_keys="workspace_id,mode,commit_hash,repo_path",
+    output_prefix="release",
+    max_retries="0"
   ]
 
   release_workspace [
@@ -1786,14 +1805,16 @@ digraph CodingChangeV1 {
   // dead-ending before release.
   route_release_mode -> prep_release_mode_retain
 
-  route_success_workspace_retention -> prep_release_mode_retain [condition="context.retain_workspace=true"]
+  route_success_workspace_retention -> prep_release_mode_publish_retain [condition="context.retain_workspace=true"]
   route_success_workspace_retention -> prep_release_mode_remove [condition="context.retain_workspace=false"]
 
   // A malformed or absent plan value also retains; compiler-attested plans
   // always provide canonical true/false strings.
-  route_success_workspace_retention -> prep_release_mode_retain
+  route_success_workspace_retention -> prep_release_mode_publish_retain
 
   prep_release_mode_retain -> release_workspace -> done
-  prep_release_mode_remove -> release_workspace
+  prep_release_mode_publish_retain -> publish_workspace
+  prep_release_mode_remove -> publish_workspace
   prep_release_mode_discard -> release_workspace
+  publish_workspace -> done
 }

@@ -446,7 +446,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                approval_answer_cap_id: "cap_task_1",
                approval_answer_revoke: revoke_to(self()),
                steer_cap_id: "cap_task_steer_1",
-               steer_capability_revoke: revoke_steer_to(self())
+               steer_capability_revoke: revoke_steer_to(self()),
+               adoption_cap_id: "cap_task_adopt_1",
+               adoption_capability_revoke: revoke_adoption_to(self())
              )
 
     assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
@@ -475,6 +477,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert_receive {:revoke_approval_answer_capability, "cap_task_1"}
     assert_receive {:revoke_steer_capability, "cap_task_steer_1"}
+    assert_receive {:revoke_adoption_capability, "cap_task_adopt_1"}
   end
 
   test "steering mailbox preserves order and delivers configured controls once", %{
@@ -652,6 +655,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     send(runner_pid, {:finish, {:ok, %{"status" => "no_changes", "branch" => "test/x"}}})
 
     assert_eventually(fn -> assert {:ok, _} = TaskStore.result(task_id, name: store) end)
+    refute_receive {:revoke_adoption_capability, "cap_adoption"}
 
     assert {:ok, adopted_result} = TaskStore.adopt(task_id, " refs/heads/reviewed ", name: store)
     assert adopted_result.raw["finalized"] == true
@@ -693,6 +697,38 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     refute_receive {:revoke_adoption_capability, _}
   end
 
+  test "pruning a terminal adoptable task revokes its retained capability", %{
+    supervisor: supervisor
+  } do
+    store = start_finalizing_store(supervisor, max_tasks: 1)
+
+    assert {:ok, first_task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "retain adoption authority"},
+               name: store,
+               task_id: "task_adoption_prune_first",
+               adoption_cap_id: "cap_adoption_prune",
+               adoption_capability_revoke: revoke_adoption_to(self())
+             )
+
+    assert_receive {:finalizing_executor_started, first_runner, "agent_1", _task, _context}
+    send(first_runner, {:finish, {:ok, %{"status" => "no_changes"}}})
+    assert_eventually(fn -> assert {:ok, _} = TaskStore.result(first_task_id, name: store) end)
+    refute_receive {:revoke_adoption_capability, "cap_adoption_prune"}
+
+    assert {:ok, _second_task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "trigger pruning"},
+               name: store,
+               task_id: "task_adoption_prune_second"
+             )
+
+    assert_receive {:revoke_adoption_capability, "cap_adoption_prune"}
+    assert {:error, :not_found} = TaskStore.status(first_task_id, name: store)
+  end
+
   test "opted-in terminal finalization failures and timeouts fail the outer task", %{
     supervisor: supervisor
   } do
@@ -714,13 +750,16 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
         )
 
       task_id = "task_finalize_#{System.unique_integer([:positive])}"
+      adoption_cap_id = "cap_adoption_#{task_id}"
 
       assert {:ok, ^task_id} =
                TaskStore.dispatch(
                  "agent_1",
                  %{"kind" => "coding_change", "input" => "fail finalization"},
                  name: store,
-                 task_id: task_id
+                 task_id: task_id,
+                 adoption_cap_id: adoption_cap_id,
+                 adoption_capability_revoke: revoke_adoption_to(self())
                )
 
       assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
@@ -733,6 +772,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
         assert {:error, {:failed, {:task_finalization_failed, ^expected_reason}}} =
                  TaskStore.result(task_id, name: store)
       end)
+
+      assert_receive {:revoke_adoption_capability, ^adoption_cap_id}
     end
   end
 
@@ -2189,7 +2230,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                approval_answer_cap_id: "cap_task_cancel",
                approval_answer_revoke: revoke_to(self()),
                steer_cap_id: "cap_task_steer_cancel",
-               steer_capability_revoke: revoke_steer_to(self())
+               steer_capability_revoke: revoke_steer_to(self()),
+               adoption_cap_id: "cap_task_adopt_cancel",
+               adoption_capability_revoke: revoke_adoption_to(self())
              )
 
     assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
@@ -2207,6 +2250,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert {:error, :cancelled} = TaskStore.result(task_id, name: store)
     assert_receive {:revoke_approval_answer_capability, "cap_task_cancel"}
     assert_receive {:revoke_steer_capability, "cap_task_steer_cancel"}
+    assert_receive {:revoke_adoption_capability, "cap_task_adopt_cancel"}
   end
 
   test "cancel propagates agent_id and task_id to the scoped turn bridge before killing the runner",

@@ -11,6 +11,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @pipeline_filename "coding-pipeline.dot"
   @manifest_filename "coding-compile-manifest.json"
   @terminal_evidence_filename "coding-terminal-evidence.json"
+  @adoption_evidence_prefix "coding-adoption-evidence-"
   @max_terminal_evidence_bytes 1_048_576
   @max_terminal_controls 100
   @max_terminal_task_id_bytes 512
@@ -34,6 +35,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     status
     canonical_status
     branch
+    branch_provenance
+    base_commit
     commit
     commit_hash
     repo_path
@@ -60,6 +63,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     metrics
     workspace_release_status
     workspace_expires_at
+    evidence_ref
+    published_commit
     artifacts
   ))
 
@@ -139,6 +144,38 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     exception -> {:error, {:terminal_evidence_error, Exception.message(exception)}}
   catch
     kind, reason -> {:error, {:terminal_evidence_throw, {kind, reason}}}
+  end
+
+  @doc "Archive immutable proof that a terminal coding candidate was adopted."
+  @spec archive_adoption_evidence(String.t(), String.t(), map(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def archive_adoption_evidence(root, task_id, candidate, proof) do
+    with {:ok, root} <- normalize_existing_root(root),
+         :ok <- validate_terminal_task_id(task_id),
+         :ok <- validate_json_object(candidate, :invalid_adoption_candidate),
+         :ok <- validate_json_object(proof, :invalid_adoption_proof),
+         true <- Map.get(candidate, "task_id") == task_id,
+         body = %{
+           "schema_version" => 1,
+           "task_id" => task_id,
+           "candidate" => candidate,
+           "proof" => proof
+         },
+         {:ok, encoded} <- encode_canonical_json(body, :adoption_evidence),
+         :ok <- validate_terminal_evidence_size(encoded),
+         path = Path.join(root, @adoption_evidence_prefix <> sha256(encoded) <> ".json"),
+         :ok <- write_adoption_evidence_once(path, encoded),
+         {:ok, descriptor} <- verify_terminal_evidence(path, task_id, encoded) do
+      {:ok, descriptor}
+    else
+      false -> {:error, :adoption_task_identity_mismatch}
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_adoption_evidence}
+    end
+  rescue
+    exception -> {:error, {:adoption_evidence_error, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:adoption_evidence_throw, {kind, reason}}}
   end
 
   @doc "Append one source-captured ACP turn under this artifact root."
@@ -386,23 +423,55 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     validation = Map.get(result, "validation") || []
     review = terminal_review_verdict(result)
 
-    {:ok,
-     %{
-       "schema_version" => 1,
-       "task_id" => task_id,
-       "terminal_status" => Map.fetch!(result, "status"),
-       "canonical_status" => Map.fetch!(result, "canonical_status"),
-       "compiled_workflow" => Map.take(artifacts, ~w(
+    body =
+      %{
+        "schema_version" => 1,
+        "task_id" => task_id,
+        "terminal_status" => Map.fetch!(result, "status"),
+        "canonical_status" => Map.fetch!(result, "canonical_status"),
+        "compiled_workflow" => Map.take(artifacts, ~w(
          coding_plan_path
          coding_pipeline_path
          compile_manifest_path
          graph_hash
          compiler_version
        )),
-       "steering_history" => controls,
-       "validation_outputs" => validation,
-       "review_verdict" => review
-     }}
+        "steering_history" => controls,
+        "validation_outputs" => validation,
+        "review_verdict" => review
+      }
+      |> maybe_put_terminal_candidate(result, task_id)
+
+    {:ok, body}
+  end
+
+  defp maybe_put_terminal_candidate(body, result, task_id) do
+    candidate = %{
+      "task_id" => task_id,
+      "workspace_id" => Map.get(result, "workspace_id"),
+      "repo_path" => Map.get(result, "repo_path"),
+      "branch" => Map.get(result, "branch"),
+      "base_commit" => Map.get(result, "base_commit"),
+      "candidate_commit" => Map.get(result, "commit_hash") || Map.get(result, "commit"),
+      "branch_provenance" => Map.get(result, "branch_provenance"),
+      "evidence_ref" => Map.get(result, "evidence_ref")
+    }
+
+    if complete_terminal_candidate?(candidate) do
+      Map.put(body, "candidate", candidate)
+    else
+      body
+    end
+  end
+
+  defp complete_terminal_candidate?(candidate) do
+    Enum.all?(
+      ~w(task_id workspace_id repo_path branch base_commit candidate_commit branch_provenance evidence_ref),
+      fn key ->
+        value = Map.get(candidate, key)
+        is_binary(value) and String.valid?(value) and String.trim(value) != ""
+      end
+    )
   end
 
   defp terminal_review_verdict(result) do
@@ -470,6 +539,35 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
       false -> {:error, :terminal_evidence_verification_failed}
       {:error, reason} -> {:error, {:terminal_evidence_verification_failed, reason}}
       _ -> {:error, :terminal_evidence_verification_failed}
+    end
+  end
+
+  # The content-addressed name makes exact replay idempotent. TaskStore
+  # serializes adoption for one task; distinct observations remain distinct
+  # evidence files instead of overwriting an earlier proof.
+  defp write_adoption_evidence_once(path, encoded) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        atomic_write(path, encoded)
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        with true <- Bitwise.band(mode, 0o777) == 0o600,
+             {:ok, ^encoded} <- File.read(path) do
+          :ok
+        else
+          false -> {:error, :insecure_adoption_evidence_mode}
+          {:ok, _other} -> {:error, :adoption_evidence_conflict}
+          {:error, reason} -> {:error, {:adoption_evidence_unreadable, reason}}
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :adoption_evidence_symlink}
+
+      {:ok, _other} ->
+        {:error, :invalid_adoption_evidence_file}
+
+      {:error, reason} ->
+        {:error, {:adoption_evidence_unavailable, reason}}
     end
   end
 

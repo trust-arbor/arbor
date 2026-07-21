@@ -39,6 +39,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
                                  ))
   @coding_artifact_optional_keys MapSet.new(~w(
                                    acp_transcript
+                                   adoption_evidence
                                    task_evidence
                                    workspace_release
                                  ))
@@ -80,6 +81,8 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       payload:
         %{
           branch: value(raw, :branch),
+          branch_provenance: value(raw, :branch_provenance),
+          base_commit: value(raw, :base_commit),
           commit: value(raw, :commit),
           diff: value(raw, :diff),
           files: files(raw),
@@ -90,6 +93,8 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
           repo_path: value(raw, :repo_path),
           worktree_path: value(raw, :worktree_path),
           pr_url: value(raw, :pr_url),
+          evidence_ref: value(raw, :evidence_ref),
+          adoption: value(raw, :adoption),
           worker_provider_session_id:
             bounded_provider_session_id(value(raw, :worker_provider_session_id))
         }
@@ -441,6 +446,9 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   defp valid_optional_artifact_field?("acp_transcript", value),
     do: TranscriptDescriptor.valid?(value)
 
+  defp valid_optional_artifact_field?("adoption_evidence", value),
+    do: TaskEvidenceDescriptor.valid?(value)
+
   defp valid_optional_artifact_field?("task_evidence", value),
     do: TaskEvidenceDescriptor.valid?(value)
 
@@ -460,6 +468,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
     normalized
     |> normalize_optional_artifact("acp_transcript", TranscriptDescriptor)
+    |> normalize_optional_artifact("adoption_evidence", TaskEvidenceDescriptor)
     |> normalize_optional_artifact("task_evidence", TaskEvidenceDescriptor)
     |> normalize_optional_artifact("workspace_release", WorkspaceReleaseDescriptor)
   end

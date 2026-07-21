@@ -194,6 +194,17 @@ defmodule Arbor.Actions do
   def settle_coding_workspaces(_task_id, _principal_id, _opts),
     do: {:error, :invalid_task_principal}
 
+  @doc "Compute bounded proof that a published coding candidate reached a destination ref."
+  @spec prove_coding_branch_adoption(map(), String.t()) :: {:ok, map()} | {:error, term()}
+  def prove_coding_branch_adoption(candidate, destination_ref),
+    do: Arbor.Actions.Coding.Adoption.prove(candidate, destination_ref)
+
+  @doc "Settle an adoption proof by archiving evidence and retiring only its exact owned ref."
+  @spec settle_coding_branch_adoption(map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def settle_coding_branch_adoption(candidate, proof, opts \\ []),
+    do: Arbor.Actions.Coding.Adoption.settle(candidate, proof, opts)
+
   @doc """
   Reviewed hard maximum for the cross-app aggregate sequential test-stage
   budget in milliseconds.

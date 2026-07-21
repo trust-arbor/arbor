@@ -1850,6 +1850,10 @@ defmodule Arbor.Actions.Coding.Workspace do
     * `retain` - disarm cancellation cleanup and preserve the worktree
     * `remove` - remove only invocation-owned worktrees; reused paths survive.
       Reviewable local branches are always preserved.
+    * `publish` - archive the exact reviewed `candidate_commit` to immutable
+      task/workspace evidence, then apply `remove` semantics.
+    * `publish_retain` - archive the exact reviewed `candidate_commit`, then
+      apply `retain` semantics.
     * `discard` - remove an invocation-owned worktree and, only when this
       invocation created the exact branch and its tip still equals the recorded
       base, retire that local branch. Reused/pre-existing branches are never
@@ -1861,7 +1865,7 @@ defmodule Arbor.Actions.Coding.Workspace do
 
     use Jido.Action,
       name: "coding_workspace_release",
-      description: "Release a coding workspace lease (retain, remove, or discard)",
+      description: "Release or publish a coding workspace lease",
       category: "coding",
       tags: ["coding", "workspace", "worktree", "lease"],
       schema: [
@@ -1873,7 +1877,16 @@ defmodule Arbor.Actions.Coding.Workspace do
         mode: [
           type: :string,
           default: "retain",
-          doc: "Release mode: \"retain\" (default), \"remove\", or \"discard\""
+          doc:
+            "Release mode: \"retain\" (default), \"remove\", \"discard\", \"publish\", or \"publish_retain\""
+        ],
+        commit_hash: [
+          type: :string,
+          doc: "Exact reviewed candidate commit required by publish modes"
+        ],
+        repo_path: [
+          type: :string,
+          doc: "Repository root used to verify an idempotent publish replay"
         ]
       ]
 
@@ -1884,7 +1897,9 @@ defmodule Arbor.Actions.Coding.Workspace do
     def taint_roles do
       %{
         workspace_id: :control,
-        mode: :control
+        mode: :control,
+        commit_hash: :control,
+        repo_path: :control
       }
     end
 
@@ -1894,11 +1909,16 @@ defmodule Arbor.Actions.Coding.Workspace do
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(%{workspace_id: workspace_id} = params, context) when is_binary(workspace_id) do
       mode = Map.get(params, :mode) || Map.get(params, "mode") || "retain"
+      candidate_commit = Map.get(params, :commit_hash) || Map.get(params, "commit_hash")
+      repo_path = Map.get(params, :repo_path) || Map.get(params, "repo_path")
+
       Actions.emit_started(__MODULE__, %{workspace_id: workspace_id, mode: mode})
 
       case WorkspaceLeaseRegistry.release(workspace_id, mode, %{
              task_id: Workspace.context_task_id(context),
-             principal_id: Workspace.context_principal_id(context)
+             principal_id: Workspace.context_principal_id(context),
+             candidate_commit: candidate_commit,
+             repo_path: repo_path
            }) do
         {:ok, result} ->
           Actions.emit_completed(__MODULE__, %{

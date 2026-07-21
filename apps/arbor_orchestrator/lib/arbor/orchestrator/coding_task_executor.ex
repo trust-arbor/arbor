@@ -206,6 +206,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     status
     canonical_status
     branch
+    branch_provenance
+    base_commit
     commit
     commit_hash
     repo_path
@@ -232,6 +234,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     metrics
     workspace_release_status
     workspace_expires_at
+    evidence_ref
+    published_commit
     artifacts
   ))
 
@@ -253,6 +257,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     rework_exhausted
     validation_failed
   ))
+
+  @adoptable_statuses MapSet.new(~w(change_committed human_review_required pr_created))
+  @adoption_request_keys MapSet.new(~w(destination_ref))
+  @adoption_candidate_keys MapSet.new(~w(
+    base_commit
+    branch
+    branch_provenance
+    candidate_commit
+    evidence_ref
+    repo_path
+    task_id
+    workspace_id
+  ))
+  @max_destination_ref_bytes 256
 
   @type json_map :: Arbor.Contracts.Agent.TaskExecutor.json_map()
 
@@ -449,9 +467,157 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     kind, reason -> {:error, {:coding_task_finalize_throw, {kind, reason}}}
   end
 
+  @doc "Prove and settle post-terminal integration of a published coding candidate."
+  @impl true
+  @spec adopt_task(String.t(), map(), map(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def adopt_task(agent_id, result, request, context) do
+    with :ok <- validate_agent_id(agent_id),
+         {:ok, exec_ctx} <- validate_context(context),
+         {:ok, destination_ref} <- validate_adoption_request(request),
+         {:ok, root} <- prepare_task_logs_root(exec_ctx.task_id),
+         {:ok, candidate} <-
+           verified_adoption_candidate(result, root, exec_ctx.task_id, agent_id),
+         {:ok, proof} <-
+           Arbor.Actions.prove_coding_branch_adoption(candidate, destination_ref),
+         {:ok, adoption_descriptor} <-
+           archive_adoption_evidence(root, exec_ctx.task_id, candidate, proof),
+         {:ok, settlement} <-
+           Arbor.Actions.settle_coding_branch_adoption(candidate, proof) do
+      adoption = Map.merge(proof, settlement)
+
+      artifacts =
+        result
+        |> Map.fetch!("artifacts")
+        |> Map.put("adoption_evidence", adoption_descriptor)
+
+      {:ok,
+       result
+       |> Map.put("adoption", adoption)
+       |> Map.put("artifacts", artifacts)}
+    end
+  rescue
+    exception -> {:error, {:coding_task_adoption_error, Exception.message(exception)}}
+  catch
+    :exit, reason -> {:error, {:coding_task_adoption_exit, reason}}
+    kind, reason -> {:error, {:coding_task_adoption_throw, {kind, reason}}}
+  end
+
   # ===========================================================================
   # Validation
   # ===========================================================================
+
+  defp validate_adoption_request(request) when is_map(request) and not is_struct(request) do
+    with :ok <- ensure_string_keyed_json_map(request, :non_json_adoption_request),
+         true <- MapSet.equal?(Map.keys(request) |> MapSet.new(), @adoption_request_keys),
+         destination_ref when is_binary(destination_ref) <- Map.get(request, "destination_ref"),
+         true <-
+           String.valid?(destination_ref) and String.trim(destination_ref) != "" and
+             byte_size(destination_ref) <= @max_destination_ref_bytes and
+             not String.contains?(destination_ref, <<0>>) and
+             not String.match?(destination_ref, ~r/[\x00-\x1F\x7F]/) do
+      {:ok, destination_ref}
+    else
+      _other -> {:error, :invalid_adoption_request}
+    end
+  end
+
+  defp validate_adoption_request(_request), do: {:error, :invalid_adoption_request}
+
+  defp verified_adoption_candidate(result, root, task_id, agent_id)
+       when is_map(result) and not is_struct(result) do
+    with true <- MapSet.member?(@adoptable_statuses, Map.get(result, "status")),
+         artifacts when is_map(artifacts) <- Map.get(result, "artifacts"),
+         descriptor when is_map(descriptor) <- Map.get(artifacts, "task_evidence"),
+         {:ok, descriptor} <- validate_terminal_evidence_descriptor(descriptor, root, task_id),
+         {:ok, body} <- read_terminal_evidence_body(descriptor),
+         candidate when is_map(candidate) <- Map.get(body, "candidate"),
+         true <- MapSet.equal?(Map.keys(candidate) |> MapSet.new(), @adoption_candidate_keys),
+         true <- Map.get(candidate, "task_id") == task_id,
+         :ok <- candidate_matches_result(candidate, result) do
+      {:ok, Map.put(candidate, "principal_id", agent_id)}
+    else
+      false -> {:error, :coding_task_not_adoptable}
+      nil -> {:error, :missing_adoption_candidate_evidence}
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_adoption_candidate_evidence}
+    end
+  end
+
+  defp verified_adoption_candidate(_result, _root, _task_id, _agent_id),
+    do: {:error, :invalid_adoption_result}
+
+  defp read_terminal_evidence_body(descriptor) do
+    with {:ok, bytes} <- File.read(descriptor["path"]),
+         {:ok, body} when is_map(body) <- Jason.decode(bytes) do
+      {:ok, body}
+    else
+      {:error, reason} -> {:error, {:terminal_evidence_unavailable, reason}}
+      _other -> {:error, :invalid_terminal_evidence_body}
+    end
+  end
+
+  defp candidate_matches_result(candidate, result) do
+    matches? =
+      Enum.all?(
+        [
+          {"workspace_id", "workspace_id"},
+          {"repo_path", "repo_path"},
+          {"branch", "branch"},
+          {"base_commit", "base_commit"},
+          {"candidate_commit", "commit_hash"},
+          {"branch_provenance", "branch_provenance"},
+          {"evidence_ref", "evidence_ref"}
+        ],
+        fn {candidate_key, result_key} ->
+          Map.get(candidate, candidate_key) == Map.get(result, result_key)
+        end
+      )
+
+    if matches?, do: :ok, else: {:error, :adoption_candidate_result_mismatch}
+  end
+
+  defp archive_adoption_evidence(root, task_id, candidate, proof) do
+    store = Config.coding_plan_artifact_store()
+
+    cond do
+      not is_atom(store) or not Code.ensure_loaded?(store) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      not function_exported?(store, :archive_adoption_evidence, 4) ->
+        {:error, :coding_adoption_evidence_store_unavailable}
+
+      true ->
+        case store.archive_adoption_evidence(root, task_id, candidate, proof) do
+          {:ok, descriptor} when is_map(descriptor) ->
+            validate_adoption_evidence_descriptor(descriptor, root, task_id)
+
+          {:error, _reason} = error ->
+            error
+
+          _other ->
+            {:error, :invalid_coding_adoption_evidence_store_reply}
+        end
+    end
+  end
+
+  defp validate_adoption_evidence_descriptor(descriptor, root, task_id) do
+    with {:ok, normalized} <- TaskEvidenceDescriptor.normalize(descriptor),
+         true <- normalized["task_id"] == task_id,
+         true <- Path.dirname(normalized["path"]) == root,
+         true <-
+           Regex.match?(
+             ~r/\Acoding-adoption-evidence-[0-9a-f]{64}\.json\z/,
+             Path.basename(normalized["path"])
+           ),
+         :ok <- validate_terminal_evidence_file(normalized) do
+      {:ok, normalized}
+    else
+      false -> {:error, :invalid_coding_adoption_evidence_descriptor}
+      {:error, reason} -> {:error, {:invalid_coding_adoption_evidence_descriptor, reason}}
+      _other -> {:error, :invalid_coding_adoption_evidence_descriptor}
+    end
+  end
 
   defp validate_steering_agent_id(agent_id) when is_binary(agent_id) do
     if String.valid?(agent_id) and String.trim(agent_id) != "",
@@ -2308,6 +2474,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "status" => public_status,
       "canonical_status" => canonical_status,
       "branch" => context_get(context, "branch"),
+      "branch_provenance" => metric_context_value(context, "workspace", "branch_provenance"),
+      "base_commit" =>
+        metric_context_value(context, "workspace", "base_commit") ||
+          context_get(context, "base_ref"),
       "commit" => commit,
       "commit_hash" => commit_hash,
       "repo_path" => context_get(context, "repo_path"),
@@ -2329,6 +2499,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         context_get(context, "blast_radius") || nested_get(review, "blast_radius"),
       "pr_url" => extract_pr_url(context),
       "workspace_id" => context_get(context, "workspace_id"),
+      "evidence_ref" => metric_context_value(context, "release", "evidence_ref"),
+      "published_commit" => metric_context_value(context, "release", "published_commit"),
       "worker_session_id" => context_get(context, "worker_session_id"),
       "worker_provider_session_id" => context_get(context, "worker_provider_session_id"),
       "response_text" => extract_response_text(context),

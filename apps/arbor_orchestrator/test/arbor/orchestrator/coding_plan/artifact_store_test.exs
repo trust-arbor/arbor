@@ -329,6 +329,93 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
            }
   end
 
+  test "terminal evidence binds the published candidate identity", %{root: root} do
+    File.mkdir_p!(root)
+    candidate_commit = String.duplicate("b", 40)
+    base_commit = String.duplicate("a", 40)
+
+    result =
+      root
+      |> terminal_result()
+      |> Map.merge(%{
+        "workspace_id" => "ws_candidate_1",
+        "repo_path" => Path.expand(root),
+        "branch" => "test/candidate",
+        "base_commit" => base_commit,
+        "commit_hash" => candidate_commit,
+        "branch_provenance" => "created",
+        "evidence_ref" => "refs/arbor/evidence/workspace/task"
+      })
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, [])
+
+    evidence = descriptor["path"] |> File.read!() |> Jason.decode!()
+
+    assert evidence["candidate"] == %{
+             "task_id" => "task_coding_1",
+             "workspace_id" => "ws_candidate_1",
+             "repo_path" => Path.expand(root),
+             "branch" => "test/candidate",
+             "base_commit" => base_commit,
+             "candidate_commit" => candidate_commit,
+             "branch_provenance" => "created",
+             "evidence_ref" => "refs/arbor/evidence/workspace/task"
+           }
+  end
+
+  test "adoption evidence is content-addressed, immutable, and replayable", %{root: root} do
+    File.mkdir_p!(root)
+
+    candidate = %{
+      "task_id" => "task_coding_1",
+      "workspace_id" => "ws_candidate_1",
+      "candidate_commit" => String.duplicate("b", 40)
+    }
+
+    proof = %{
+      "method" => "ancestry",
+      "destination_ref" => "refs/heads/main",
+      "destination_commit" => String.duplicate("c", 40)
+    }
+
+    assert {:ok, first} =
+             ArtifactStore.archive_adoption_evidence(
+               root,
+               "task_coding_1",
+               candidate,
+               proof
+             )
+
+    assert {:ok, ^first} =
+             ArtifactStore.archive_adoption_evidence(
+               root,
+               "task_coding_1",
+               candidate,
+               proof
+             )
+
+    assert Path.basename(first["path"]) =~
+             ~r/\Acoding-adoption-evidence-[0-9a-f]{64}\.json\z/
+
+    body = first["path"] |> File.read!() |> Jason.decode!()
+    assert body["candidate"] == candidate
+    assert body["proof"] == proof
+
+    moved_proof = Map.put(proof, "destination_commit", String.duplicate("d", 40))
+
+    assert {:ok, second} =
+             ArtifactStore.archive_adoption_evidence(
+               root,
+               "task_coding_1",
+               candidate,
+               moved_proof
+             )
+
+    assert second["path"] != first["path"]
+    assert File.read!(first["path"]) |> Jason.decode!() == body
+  end
+
   test "large unretained result fields do not prevent bounded evidence archival", %{root: root} do
     File.mkdir_p!(root)
 

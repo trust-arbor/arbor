@@ -21,11 +21,13 @@ defmodule Arbor.Actions.GitAdoptionProofTest do
     candidate = commit!(repo, "candidate.txt", "candidate\n", "candidate")
 
     assert {:ok, proof} = Git.compute_adoption_proof(repo, base, candidate, "main")
-    assert proof.method == "ancestry"
-    assert proof.base_commit == base
-    assert proof.candidate_commit == candidate
-    assert proof.destination_commit == candidate
-    assert proof.candidate_commit_count == 1
+    assert proof["method"] == "ancestry"
+    assert proof["base_commit"] == base
+    assert proof["candidate_commit"] == candidate
+    assert proof["destination_ref"] == "refs/heads/main"
+    assert proof["destination_commit"] == candidate
+    assert proof["candidate_commit_count"] == 1
+    assert {:ok, _encoded} = Jason.encode(proof)
     assert :ok = Git.verify_adoption_proof(repo, proof)
   end
 
@@ -45,10 +47,10 @@ defmodule Arbor.Actions.GitAdoptionProofTest do
 
     assert {:ok, proof} = Git.compute_adoption_proof(repo, base, candidate, "destination")
 
-    assert proof.method == "patch_equivalence"
-    assert proof.audit.representation == "cherry_pick"
-    assert proof.candidate_commit_count == 2
-    assert length(proof.audit.candidate_patches) == 2
+    assert proof["method"] == "patch_equivalence"
+    assert proof["audit"]["representation"] == "cherry_pick"
+    assert proof["candidate_commit_count"] == 2
+    assert length(proof["audit"]["candidate_patches"]) == 2
     assert :ok = Git.verify_adoption_proof(repo, proof)
   end
 
@@ -67,9 +69,9 @@ defmodule Arbor.Actions.GitAdoptionProofTest do
     git!(repo, ["commit", "-m", "squashed candidate"])
 
     assert {:ok, proof} = Git.compute_adoption_proof(repo, base, candidate, "destination")
-    assert proof.method == "patch_equivalence"
-    assert proof.audit.representation == "squash"
-    assert proof.audit.aggregate_destination.commit != nil
+    assert proof["method"] == "patch_equivalence"
+    assert proof["audit"]["representation"] == "squash"
+    assert proof["audit"]["aggregate_destination"]["commit"] != nil
     assert :ok = Git.verify_adoption_proof(repo, proof)
   end
 
@@ -151,6 +153,22 @@ defmodule Arbor.Actions.GitAdoptionProofTest do
              Git.compute_adoption_proof(repo, base, candidate, "main")
   end
 
+  test "exact ancestry is not rejected by the patch fallback destination bound", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = new_repo(tmp_dir)
+    base = git_oid!(repo, ["rev-parse", "HEAD"])
+    candidate = commit!(repo, "candidate.txt", "candidate\n", "candidate")
+
+    for index <- 1..257 do
+      git!(repo, ["commit", "--allow-empty", "-m", "destination-#{index}"])
+    end
+
+    assert {:ok, proof} = Git.compute_adoption_proof(repo, base, candidate, "main")
+    assert proof["method"] == "ancestry"
+    assert proof["destination_commit"] == git_oid!(repo, ["rev-parse", "main"])
+  end
+
   test "supports SHA-256 repositories when Git supports them", %{tmp_dir: tmp_dir} do
     repo = Path.join(tmp_dir, "sha256-repo")
 
@@ -167,7 +185,7 @@ defmodule Arbor.Actions.GitAdoptionProofTest do
         assert byte_size(base) == 64
         assert byte_size(candidate) == 64
         assert {:ok, proof} = Git.compute_adoption_proof(repo, base, candidate, "HEAD")
-        assert proof.method == "ancestry"
+        assert proof["method"] == "ancestry"
         assert :ok = Git.verify_adoption_proof(repo, proof)
 
       {_output, _exit_code} ->

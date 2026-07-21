@@ -194,40 +194,39 @@ defmodule Arbor.Actions.Git do
            :ok <- adoption_destination_ref(destination_ref),
            {:ok, base} <- resolve_adoption_commit(repository_root, base),
            {:ok, candidate} <- resolve_adoption_commit(repository_root, candidate),
-           {:ok, destination} <- resolve_adoption_destination(repository_root, destination_ref),
+           {:ok, {resolved_destination_ref, destination}} <-
+             resolve_adoption_destination(repository_root, destination_ref),
            :ok <- require_adoption_ancestor(repository_root, base, candidate, :candidate),
            :ok <- require_adoption_ancestor(repository_root, base, destination, :destination),
            {:ok, candidate_count} <- adoption_range_count(repository_root, base, candidate),
-           {:ok, destination_count} <- adoption_range_count(repository_root, base, destination),
-           :ok <- bound_adoption_range(:candidate, candidate_count),
-           :ok <- bound_adoption_range(:destination, destination_count) do
-        proof = %{
-          method: "ancestry",
-          base_commit: base,
-          candidate_commit: candidate,
-          destination_ref: destination_ref,
-          destination_commit: destination,
-          candidate_commit_count: candidate_count,
-          audit: %{
-            candidate_range_count: candidate_count,
-            destination_range_count: destination_count
-          }
-        }
-
+           :ok <- bound_adoption_range(:candidate, candidate_count) do
         case adoption_ancestor?(repository_root, candidate, destination) do
           {:ok, true} ->
-            {:ok, proof}
+            {:ok,
+             %{
+               "method" => "ancestry",
+               "base_commit" => base,
+               "candidate_commit" => candidate,
+               "destination_ref" => resolved_destination_ref,
+               "destination_commit" => destination,
+               "candidate_commit_count" => candidate_count,
+               "audit" => %{"candidate_range_count" => candidate_count}
+             }}
 
           {:ok, false} ->
-            compute_patch_adoption_proof(
-              repository_root,
-              base,
-              candidate,
-              destination_ref,
-              destination,
-              candidate_count,
-              destination_count
-            )
+            with {:ok, destination_count} <-
+                   adoption_range_count(repository_root, base, destination),
+                 :ok <- bound_adoption_range(:destination, destination_count) do
+              compute_patch_adoption_proof(
+                repository_root,
+                base,
+                candidate,
+                resolved_destination_ref,
+                destination,
+                candidate_count,
+                destination_count
+              )
+            end
 
           {:error, reason} ->
             {:error, {:invalid_input, reason}}
@@ -360,7 +359,7 @@ defmodule Arbor.Actions.Git do
                destination_ref
              ]
            ),
-         {:ok, _symbolic_ref} <- parse_symbolic_destination(symbolic_output),
+         {:ok, symbolic_ref} <- parse_symbolic_destination(symbolic_output),
          {:ok, %{stdout: oid_output}} <-
            adoption_git(
              repository_root,
@@ -373,7 +372,7 @@ defmodule Arbor.Actions.Git do
            ),
          {:ok, oid} <- exact_adoption_oid_output(oid_output, nil),
          {:ok, oid} <- adoption_oid(oid) do
-      {:ok, oid}
+      {:ok, {symbolic_ref, oid}}
     else
       {:error, _reason} -> {:error, {:invalid_input, :destination_ref_not_found}}
     end
@@ -489,8 +488,8 @@ defmodule Arbor.Actions.Git do
            adoption_patch_evidence(repository_root, candidate_commits, true),
          {:ok, destination_patches} <-
            adoption_patch_evidence(repository_root, destination_commits, false) do
-      candidate_ids = Enum.map(candidate_patches, & &1.patch_id)
-      destination_ids = Enum.map(destination_patches, & &1.patch_id)
+      candidate_ids = Enum.map(candidate_patches, & &1["patch_id"])
+      destination_ids = Enum.map(destination_patches, & &1["patch_id"])
 
       cond do
         length(candidate_patches) != candidate_count ->
@@ -621,7 +620,8 @@ defmodule Arbor.Actions.Git do
 
           {:ok, patch_id, patch_bytes} ->
             if bytes + patch_bytes <= @adoption_patch_evidence_bytes_limit do
-              {:cont, {:ok, [%{commit: commit, patch_id: patch_id} | acc], bytes + patch_bytes}}
+              evidence = %{"commit" => commit, "patch_id" => patch_id}
+              {:cont, {:ok, [evidence | acc], bytes + patch_bytes}}
             else
               {:halt,
                {:error,
@@ -707,7 +707,7 @@ defmodule Arbor.Actions.Git do
       [line] ->
         case String.split(line, " ", trim: true) do
           [patch_id, _commit] ->
-            if Regex.match?(~r/\A[0-9a-f]{40}\z/, patch_id),
+            if Regex.match?(~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/, patch_id),
               do: {:ok, patch_id},
               else: {:error, {:invalid_input, :invalid_patch_id_output}}
 
@@ -738,7 +738,7 @@ defmodule Arbor.Actions.Git do
 
   defp aggregate_destination_match(destination_patches, aggregate_patch_id)
        when is_binary(aggregate_patch_id) do
-    case Enum.find(destination_patches, &(&1.patch_id == aggregate_patch_id)) do
+    case Enum.find(destination_patches, &(&1["patch_id"] == aggregate_patch_id)) do
       nil -> {:error, {:not_adopted, :aggregate_patch_not_found}}
       destination -> {:ok, destination}
     end
@@ -758,52 +758,69 @@ defmodule Arbor.Actions.Git do
          aggregate_destination
        ) do
     %{
-      method: "patch_equivalence",
-      base_commit: base,
-      candidate_commit: candidate,
-      destination_ref: destination_ref,
-      destination_commit: destination,
-      candidate_commit_count: candidate_count,
-      audit: %{
-        representation: representation,
-        candidate_range_count: candidate_count,
-        destination_range_count: destination_count,
-        matched_candidate_patch_count: matched_count,
-        candidate_patches: candidate_patches,
-        destination_patches: destination_patches,
-        aggregate_destination: aggregate_destination
+      "method" => "patch_equivalence",
+      "base_commit" => base,
+      "candidate_commit" => candidate,
+      "destination_ref" => destination_ref,
+      "destination_commit" => destination,
+      "candidate_commit_count" => candidate_count,
+      "audit" => %{
+        "representation" => representation,
+        "candidate_range_count" => candidate_count,
+        "destination_range_count" => destination_count,
+        "matched_candidate_patch_count" => matched_count,
+        "candidate_patches" => candidate_patches,
+        "destination_patches" => destination_patches,
+        "aggregate_destination" => aggregate_destination
       }
     }
   end
 
   defp proof_field(proof, key) do
-    case Map.fetch(proof, key) do
+    case Map.fetch(proof, Atom.to_string(key)) do
       {:ok, value} -> {:ok, value}
       :error -> {:error, {:invalid_input, {:missing_proof_field, key}}}
     end
   end
 
   defp proof_fields(proof) do
-    keys = [
-      :method,
-      :base_commit,
-      :candidate_commit,
-      :destination_ref,
-      :destination_commit,
-      :candidate_commit_count,
-      :audit
-    ]
+    keys = ~w(
+      method
+      base_commit
+      candidate_commit
+      destination_ref
+      destination_commit
+      candidate_commit_count
+      audit
+    )
 
     if MapSet.new(Map.keys(proof)) == MapSet.new(keys) and
-         is_binary(proof.method) and is_binary(proof.base_commit) and
-         is_binary(proof.candidate_commit) and is_binary(proof.destination_ref) and
-         is_binary(proof.destination_commit) and is_integer(proof.candidate_commit_count) and
-         proof.candidate_commit_count >= 0 and is_map(proof.audit) do
+         is_binary(proof["method"]) and is_binary(proof["base_commit"]) and
+         is_binary(proof["candidate_commit"]) and is_binary(proof["destination_ref"]) and
+         is_binary(proof["destination_commit"]) and
+         is_integer(proof["candidate_commit_count"]) and
+         proof["candidate_commit_count"] >= 0 and is_map(proof["audit"]) and
+         json_string_keyed?(proof) do
       {:ok, proof}
     else
       {:error, {:invalid_input, :invalid_adoption_proof}}
     end
   end
+
+  defp json_string_keyed?(value) when is_map(value) do
+    Enum.all?(value, fn {key, nested} ->
+      is_binary(key) and json_string_keyed?(nested)
+    end)
+  end
+
+  defp json_string_keyed?(value) when is_list(value),
+    do: Enum.all?(value, &json_string_keyed?/1)
+
+  defp json_string_keyed?(value)
+       when is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value),
+       do: true
+
+  defp json_string_keyed?(_value), do: false
 
   # Cleanup authority includes caller-captured filesystem and Git-registration
   # identity. Carrying both through this final destructive facade closes the
@@ -1022,6 +1039,34 @@ defmodule Arbor.Actions.Git do
   def archive_branch_evidence_ref(
         _repository_root,
         _branch,
+        _task_id,
+        _workspace_id,
+        _expected_oid
+      ),
+      do: {:error, :invalid_git_evidence_archive}
+
+  @doc false
+  @spec verify_archived_evidence_ref(String.t(), String.t(), String.t(), String.t()) ::
+          {:ok, %{hidden_ref: String.t()}} | {:error, term()}
+  def verify_archived_evidence_ref(repository_root, task_id, workspace_id, expected_oid)
+      when is_binary(repository_root) and is_binary(task_id) and is_binary(workspace_id) and
+             is_binary(expected_oid) do
+    expected_oid = expected_oid |> String.trim() |> String.downcase()
+
+    with :ok <- validate_full_oid(expected_oid),
+         :ok <- validate_identity_id(task_id, @max_task_id_bytes),
+         :ok <- validate_identity_id(workspace_id, @max_workspace_id_bytes),
+         {:ok, canonical_repo} <- authorized_root(repository_root),
+         :ok <- verify_commit_oid(canonical_repo, expected_oid),
+         hidden_ref = evidence_ref_for(task_id, workspace_id),
+         :ok <- validate_evidence_ref_name(hidden_ref),
+         :ok <- verify_evidence_ref(canonical_repo, hidden_ref, expected_oid) do
+      {:ok, %{hidden_ref: hidden_ref}}
+    end
+  end
+
+  def verify_archived_evidence_ref(
+        _repository_root,
         _task_id,
         _workspace_id,
         _expected_oid
