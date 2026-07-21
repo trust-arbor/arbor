@@ -49,6 +49,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_steer_retry_delay_ms 100
   @default_max_steer_retry_delay_ms 5_000
   @default_max_controls_per_task 100
+  @default_max_steer_retries 7
+  @default_max_steering_confirmations 5
+  @default_max_steering_replays 3
   @max_steering_message_bytes 4_000
 
   alias Arbor.Agent.Config
@@ -151,9 +154,15 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   The returned control is JSON-clean and has a stable `control_id` and
   monotonically increasing per-task `sequence`. Operational delivery failures
-  return `"deferred"` and are retried by the store; accepted controls are never
-  invoked again. If a task fails or is cancelled before accepted delivery can
-  be confirmed, the control enters the terminal `"delivery_unconfirmed"` state.
+  return `"deferred"` and are retried by the store; accepted (`{:ok, :queued,
+  mode}`) controls are later **confirmed** by calling `steer_task/3` again
+  with the exact original control. Only explicit delivered confirmation sets
+  `delivered_at`. Positive `:not_delivered` during confirmation clears accepted
+  ownership and triggers a bounded same-ID replay; `:delivery_unknown`/
+  `:cancelled` terminalize as `"delivery_unconfirmed"`. If a task fails or is
+  cancelled before an accepted control is confirmed delivered, the control
+  enters the terminal `"delivery_unconfirmed"` state. Confirmation/replay
+  bounds and FIFO ordering are enforced by the store.
   """
   @spec steer(task_id(), String.t(), keyword() | map()) ::
           {:ok, steering_control()} | {:error, term()}
@@ -212,6 +221,21 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
          Keyword.get(opts, :max_steer_retry_delay_ms, @default_max_steer_retry_delay_ms),
        max_controls_per_task:
          Keyword.get(opts, :max_controls_per_task, @default_max_controls_per_task),
+       max_steer_retries: Keyword.get(opts, :max_steer_retries, @default_max_steer_retries),
+       max_steering_confirmations:
+         Keyword.get(
+           opts,
+           :max_steering_confirmations,
+           @default_max_steering_confirmations
+         ),
+       max_steering_replays:
+         Keyword.get(opts, :max_steering_replays, @default_max_steering_replays),
+       steer_confirmation_delay_ms:
+         Keyword.get(
+           opts,
+           :steer_confirmation_delay_ms,
+           Keyword.get(opts, :steer_retry_delay_ms, @default_steer_retry_delay_ms)
+         ),
        # Arity-2: (agent_id, task_id) — task-scoped Session cancel bridge.
        cancel_turn: Keyword.get(opts, :cancel_turn, &default_cancel_turn/2),
        tasks: %{},
@@ -263,6 +287,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           controls: [],
           control_retries: %{},
           accepted_control_ids: MapSet.new(),
+          confirmation_retries: %{},
+          replay_counts: %{},
           cancel_turn: Keyword.get(opts, :cancel_turn)
         }
 
@@ -423,6 +449,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   def handle_info({:retry_steer, task_id, control_id}, state) do
     {:noreply, deliver_control(state, task_id, control_id)}
+  end
+
+  def handle_info({:confirm_steer, task_id, control_id}, state) do
+    {:noreply, confirm_control(state, task_id, control_id)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -802,9 +832,15 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       end
 
     case normalize_steering_delivery(result) do
-      {:accepted, status, mode} ->
+      {:accepted, "delivered", mode} ->
         state
-        |> accept_control(record.task_id, control["control_id"], status, mode)
+        |> accept_control(record.task_id, control["control_id"], "delivered", mode)
+        |> advance_mailbox(record.task_id)
+
+      {:accepted, "queued", mode} ->
+        state
+        |> accept_control(record.task_id, control["control_id"], "queued", mode)
+        |> maybe_schedule_confirmation(record.task_id, control["control_id"])
         |> advance_mailbox(record.task_id)
 
       :unsupported ->
@@ -819,37 +855,63 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
+  @delivery_modes [:native_tool_loop, :acp_native, :same_session_follow_up, :next_stage]
+
   defp normalize_steering_delivery({:ok, mode})
-       when mode in [:native_tool_loop, :acp_native, :same_session_follow_up, :next_stage],
+       when mode in @delivery_modes,
        do: {:accepted, "delivered", mode}
 
   defp normalize_steering_delivery({:ok, :queued, mode})
-       when mode in [:native_tool_loop, :acp_native, :same_session_follow_up, :next_stage],
+       when mode in @delivery_modes,
        do: {:accepted, "queued", mode}
 
   defp normalize_steering_delivery({:error, :unsupported}), do: :unsupported
   defp normalize_steering_delivery(:unsupported), do: :unsupported
-  defp normalize_steering_delivery({:error, :delivery_unknown}), do: :unsupported
-  defp normalize_steering_delivery({:error, :cancelled}), do: :unsupported
+
+  # Evidence atoms during initial delivery are retryable operational failures.
+  # They are never persisted as statuses; they drive deferred retries and,
+  # on exhaustion, terminalize as delivery_unconfirmed.
+  defp normalize_steering_delivery({:error, :not_delivered}),
+    do: {:deferred, "not_delivered"}
+
+  defp normalize_steering_delivery({:error, :delivery_unknown}),
+    do: {:deferred, "delivery_unknown"}
+
+  defp normalize_steering_delivery({:error, :cancelled}),
+    do: {:deferred, "cancelled"}
+
   defp normalize_steering_delivery(result), do: {:deferred, bounded_error(result)}
 
   defp defer_control(state, task_id, control_id, error) do
     record = Map.fetch!(state.tasks, task_id)
     attempts = Map.get(record.control_retries, control_id, 0) + 1
+    max_retries = Map.get(state, :max_steer_retries, @default_max_steer_retries)
 
-    state =
-      update_control(state, task_id, control_id, fn value ->
-        value |> Map.put("status", "deferred") |> Map.put("error", error)
+    if attempts <= max_retries do
+      state =
+        update_control(state, task_id, control_id, fn value ->
+          value |> Map.put("status", "deferred") |> Map.put("error", error)
+        end)
+        |> update_in([:tasks, task_id, :control_retries], &Map.put(&1, control_id, attempts))
+
+      Process.send_after(
+        self(),
+        {:retry_steer, task_id, control_id},
+        retry_delay_ms(state, attempts)
+      )
+
+      state
+    else
+      # Initial delivery retries exhausted: terminalize as delivery_unconfirmed.
+      state
+      |> update_control(task_id, control_id, fn value ->
+        value
+        |> Map.put("status", "delivery_unconfirmed")
+        |> Map.put("delivered_at", nil)
+        |> Map.put("error", "initial_delivery_retries_exhausted")
       end)
-      |> update_in([:tasks, task_id, :control_retries], &Map.put(&1, control_id, attempts))
-
-    Process.send_after(
-      self(),
-      {:retry_steer, task_id, control_id},
-      retry_delay_ms(state, attempts)
-    )
-
-    state
+      |> advance_mailbox(task_id)
+    end
   end
 
   defp retry_delay_ms(state, attempts) do
@@ -869,7 +931,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       )
       |> Map.put("error", nil)
     end)
-    |> update_in([:tasks, task_id, :accepted_control_ids], &MapSet.put(&1, control_id))
+    |> update_in([:tasks, task_id, :accepted_control_ids], fn
+      ids when status == "delivered" -> MapSet.delete(ids, control_id)
+      ids -> MapSet.put(ids, control_id)
+    end)
+    |> update_in([:tasks, task_id, :confirmation_retries], &Map.put(&1, control_id, 0))
   end
 
   defp advance_mailbox(state, task_id) do
@@ -884,6 +950,231 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         state
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Queued-confirmation lifecycle
+  # ---------------------------------------------------------------------------
+
+  defp maybe_schedule_confirmation(state, task_id, control_id) do
+    record = Map.fetch!(state.tasks, task_id)
+
+    if task_running?(record) and
+         MapSet.member?(record.accepted_control_ids, control_id) and
+         first_confirmable_control(record) == control_id do
+      schedule_confirmation(state, task_id, control_id, 0)
+    else
+      state
+    end
+  end
+
+  defp schedule_confirmation(state, task_id, control_id, attempts) do
+    delay = confirmation_delay_ms(state, attempts)
+
+    Process.send_after(
+      self(),
+      {:confirm_steer, task_id, control_id},
+      delay
+    )
+
+    state
+  end
+
+  defp confirmation_delay_ms(state, attempts) do
+    base = Map.get(state, :steer_confirmation_delay_ms, state.steer_retry_delay_ms)
+    exponent = min(max(attempts - 1, 0), 6)
+    min(base * Integer.pow(2, exponent), state.max_steer_retry_delay_ms)
+  end
+
+  # Stale confirmation timers are harmless: every guard below must hold for the
+  # confirmation to proceed. If any guard fails (task terminal, control
+  # resolved, not the earliest confirmable), the timer is a no-op.
+  defp confirm_control(state, task_id, control_id) do
+    with {:ok, record} <- Map.fetch(state.tasks, task_id),
+         true <- task_running?(record),
+         control when not is_nil(control) <- find_control(record, control_id),
+         true <- MapSet.member?(record.accepted_control_ids, control_id),
+         true <- first_confirmable_control(record) == control_id do
+      apply_confirmation(state, record, control)
+    else
+      _ -> state
+    end
+  end
+
+  defp apply_confirmation(state, record, control) do
+    result =
+      if record.context_mode == :json_clean and is_map(record.context) and
+           is_atom(record.executor) and Code.ensure_loaded?(record.executor) and
+           function_exported?(record.executor, :steer_task, 3) do
+        call_executor_callback(state, fn ->
+          record.executor.steer_task(record.agent_id, control, record.context)
+        end)
+      else
+        {:error, :unsupported}
+      end
+
+    case normalize_confirmation_delivery(result) do
+      {:confirmed_delivered, mode} ->
+        state
+        |> accept_control(record.task_id, control["control_id"], "delivered", mode)
+        |> advance_confirmation(record.task_id)
+
+      :still_queued ->
+        schedule_next_confirmation(state, record.task_id, control["control_id"])
+
+      {:confirm_deferred, error} ->
+        defer_confirmation(state, record.task_id, control["control_id"], error)
+
+      :positive_nondelivery ->
+        clear_accepted_and_replay(state, record.task_id, control["control_id"])
+
+      {:terminalize, error} ->
+        state
+        |> terminalize_as_unconfirmed(record.task_id, control["control_id"], error)
+        |> advance_confirmation(record.task_id)
+    end
+  end
+
+  defp normalize_confirmation_delivery(result) do
+    case result do
+      {:ok, mode} when mode in @delivery_modes ->
+        {:confirmed_delivered, mode}
+
+      {:ok, :queued, mode} when mode in @delivery_modes ->
+        :still_queued
+
+      {:error, :not_delivered} ->
+        :positive_nondelivery
+
+      {:error, :delivery_unknown} ->
+        {:terminalize, "delivery_unknown"}
+
+      {:error, :cancelled} ->
+        {:terminalize, "cancelled"}
+
+      {:error, :unsupported} ->
+        {:terminalize, "confirmation_unsupported"}
+
+      other ->
+        {:confirm_deferred, bounded_error(other)}
+    end
+  end
+
+  defp schedule_next_confirmation(state, task_id, control_id) do
+    record = Map.fetch!(state.tasks, task_id)
+    attempts = Map.get(record.confirmation_retries, control_id, 0) + 1
+
+    max_confirmations =
+      Map.get(state, :max_steering_confirmations, @default_max_steering_confirmations)
+
+    if attempts < max_confirmations do
+      state =
+        update_in(
+          state,
+          [:tasks, task_id, :confirmation_retries],
+          &Map.put(&1, control_id, attempts)
+        )
+
+      schedule_confirmation(state, task_id, control_id, attempts)
+    else
+      state
+      |> terminalize_as_unconfirmed(task_id, control_id, "confirmation_retries_exhausted")
+      |> advance_confirmation(task_id)
+    end
+  end
+
+  defp defer_confirmation(state, task_id, control_id, error) do
+    record = Map.fetch!(state.tasks, task_id)
+    attempts = Map.get(record.confirmation_retries, control_id, 0) + 1
+
+    max_confirmations =
+      Map.get(state, :max_steering_confirmations, @default_max_steering_confirmations)
+
+    state =
+      update_in(
+        state,
+        [:tasks, task_id, :confirmation_retries],
+        &Map.put(&1, control_id, attempts)
+      )
+
+    state = update_control(state, task_id, control_id, &Map.put(&1, "error", error))
+
+    if attempts < max_confirmations do
+      schedule_confirmation(state, task_id, control_id, attempts)
+    else
+      state
+      |> terminalize_as_unconfirmed(task_id, control_id, "confirmation_retries_exhausted")
+      |> advance_confirmation(task_id)
+    end
+  end
+
+  # Positive nondelivery: clear accepted ownership and re-deliver the exact
+  # same control (bounded by max_steering_replays). The replayed control
+  # re-enters the initial delivery path; if accepted again, a fresh
+  # confirmation cycle starts with reset confirmation_retries.
+  defp clear_accepted_and_replay(state, task_id, control_id) do
+    record = Map.fetch!(state.tasks, task_id)
+    replays = Map.get(record.replay_counts, control_id, 0) + 1
+    max_replays = Map.get(state, :max_steering_replays, @default_max_steering_replays)
+
+    if replays <= max_replays do
+      state =
+        state
+        |> update_in([:tasks, task_id, :accepted_control_ids], &MapSet.delete(&1, control_id))
+        |> update_in([:tasks, task_id, :replay_counts], &Map.put(&1, control_id, replays))
+        |> update_control(task_id, control_id, fn control ->
+          control
+          |> Map.put("error", nil)
+          |> Map.put("delivered_at", nil)
+        end)
+
+      # Re-deliver the exact same control (same control_id, same message, etc.)
+      deliver_control(state, task_id, control_id)
+    else
+      state
+      |> terminalize_as_unconfirmed(task_id, control_id, "replay_exhausted")
+      |> advance_confirmation(task_id)
+    end
+  end
+
+  defp terminalize_as_unconfirmed(state, task_id, control_id, error) do
+    update_control(state, task_id, control_id, fn control ->
+      control
+      |> Map.put("status", "delivery_unconfirmed")
+      |> Map.put("delivered_at", nil)
+      |> Map.put("error", error)
+    end)
+    |> update_in([:tasks, task_id, :accepted_control_ids], &MapSet.delete(&1, control_id))
+  end
+
+  defp advance_confirmation(state, task_id) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        case first_confirmable_control(record) do
+          nil ->
+            state
+
+          next_id ->
+            schedule_confirmation(state, task_id, next_id, 0)
+        end
+
+      :error ->
+        state
+    end
+  end
+
+  defp first_confirmable_control(record) do
+    record.controls
+    |> Enum.find(fn control ->
+      control["status"] == "queued" and
+        MapSet.member?(record.accepted_control_ids, control["control_id"])
+    end)
+    |> case do
+      nil -> nil
+      control -> control["control_id"]
+    end
+  end
+
+  defp task_running?(%{state: state}), do: state == :running
 
   defp update_control(state, task_id, control_id, fun) do
     update_in(state.tasks[task_id], fn record ->

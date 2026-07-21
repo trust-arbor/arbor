@@ -240,7 +240,12 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
 
     def steer_task(agent_id, control, context) do
-      send(recording_pid(), {:steer_task_called, agent_id, control, context, self()})
+      call_count = steer_call_count(control["control_id"])
+
+      send(
+        recording_pid(),
+        {:steer_task_called, agent_id, control, context, self()}
+      )
 
       case Application.get_env(:arbor_agent, :task_store_test_steer, :deliver) do
         :deliver ->
@@ -261,6 +266,29 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
           else
             {:error, :transport_down}
           end
+
+        :not_delivered ->
+          {:error, :not_delivered}
+
+        :delivery_unknown ->
+          {:error, :delivery_unknown}
+
+        :cancelled ->
+          {:error, :cancelled}
+
+        {:steer_fn, fun} when is_function(fun, 2) ->
+          fun.(control, call_count)
+
+        {:steer_fn, fun} when is_function(fun, 1) ->
+          fun.(call_count)
+      end
+    end
+
+    defp steer_call_count(control_id) do
+      try do
+        :ets.update_counter(:steer_call_counter, control_id, {2, 1}, {control_id, 0})
+      catch
+        :error, :badarg -> 0
       end
     end
 
@@ -935,6 +963,367 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert status.steering["last"]["status"] == "unsupported"
     assert status.steering["last"]["error"] == "task_terminal"
     assert status.steering["last"]["delivered_at"] == nil
+  end
+
+  # ---------------------------------------------------------------------------
+  # Queued-confirmation lifecycle
+  # ---------------------------------------------------------------------------
+
+  test "queued control is confirmed delivered by another executor call", %{
+    supervisor: supervisor
+  } do
+    fresh_steer_call_counter()
+
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn,
+       fn
+         1 -> {:ok, :queued, :next_stage}
+         _ -> {:ok, :next_stage}
+       end}
+    )
+
+    store = start_configured_steering_store(supervisor, steer_confirmation_delay_ms: 20)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "queue then confirm", name: store)
+    assert control["status"] == "queued"
+    assert control["delivered_at"] == nil
+
+    # Initial delivery call (count=1: queued), then confirmation call (count=2: delivered)
+    assert_receive {:steer_task_called, "agent_1", initial, _, _}
+    assert initial["control_id"] == control["control_id"]
+    assert_receive {:steer_task_called, "agent_1", confirmed, _, _}, 200
+    assert confirmed["control_id"] == control["control_id"]
+
+    assert_eventually(fn ->
+      updated = get_control(store, task_id, control["control_id"])
+      assert updated["status"] == "delivered"
+      assert updated["delivered_at"] != nil
+      assert updated["error"] == nil
+    end)
+
+    assert steer_call_count_for(control["control_id"]) >= 2
+  end
+
+  test "positive not_delivered during confirmation clears ownership and replays same id", %{
+    supervisor: supervisor
+  } do
+    fresh_steer_call_counter()
+
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn,
+       fn
+         1 -> {:ok, :queued, :next_stage}
+         2 -> {:error, :not_delivered}
+         3 -> {:ok, :queued, :next_stage}
+         _ -> {:ok, :next_stage}
+       end}
+    )
+
+    store = start_configured_steering_store(supervisor, steer_confirmation_delay_ms: 20)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "replay me", name: store)
+
+    assert_eventually(fn ->
+      updated = get_control(store, task_id, control["control_id"])
+
+      # After replay cycle (initial→accept→confirm not_delivered→replay→accept→confirm delivered)
+      assert updated["status"] == "delivered"
+      assert updated["delivered_at"] != nil
+    end)
+
+    count = steer_call_count_for(control["control_id"])
+    # call 1: initial accept, call 2: confirm not_delivered,
+    # call 3: replay accept, call 4: confirm delivered
+    assert count >= 4
+  end
+
+  test "delivery_unknown during confirmation terminalizes without replay", %{
+    supervisor: supervisor
+  } do
+    fresh_steer_call_counter()
+
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn,
+       fn
+         1 -> {:ok, :queued, :next_stage}
+         _ -> {:error, :delivery_unknown}
+       end}
+    )
+
+    store = start_configured_steering_store(supervisor, steer_confirmation_delay_ms: 20)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "unknown delivery", name: store)
+    assert control["status"] == "queued"
+
+    assert_eventually(fn ->
+      updated = get_control(store, task_id, control["control_id"])
+      assert updated["status"] == "delivery_unconfirmed"
+      assert updated["delivered_at"] == nil
+      assert updated["error"] == "delivery_unknown"
+    end)
+
+    # No further calls after terminalization
+    count_after_terminal = steer_call_count_for(control["control_id"])
+    Process.sleep(80)
+    assert steer_call_count_for(control["control_id"]) == count_after_terminal
+  end
+
+  test "cancelled during confirmation terminalizes with a distinct error", %{
+    supervisor: supervisor
+  } do
+    fresh_steer_call_counter()
+
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn,
+       fn
+         1 -> {:ok, :queued, :next_stage}
+         _ -> {:error, :cancelled}
+       end}
+    )
+
+    store = start_configured_steering_store(supervisor, steer_confirmation_delay_ms: 20)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "cancelled confirm", name: store)
+
+    assert_eventually(fn ->
+      updated = get_control(store, task_id, control["control_id"])
+      assert updated["status"] == "delivery_unconfirmed"
+      assert updated["error"] == "cancelled"
+      refute updated["error"] == "delivery_unknown"
+    end)
+  end
+
+  test "confirmation retries are bounded and exhaustion terminalizes delivery_unconfirmed", %{
+    supervisor: supervisor
+  } do
+    fresh_steer_call_counter()
+
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn, fn _ -> {:ok, :queued, :next_stage} end}
+    )
+
+    store =
+      start_configured_steering_store(supervisor,
+        steer_confirmation_delay_ms: 10,
+        max_steering_confirmations: 3
+      )
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "never confirms", name: store)
+
+    assert_eventually(fn ->
+      updated = get_control(store, task_id, control["control_id"])
+      assert updated["status"] == "delivery_unconfirmed"
+      assert updated["error"] == "confirmation_retries_exhausted"
+      assert updated["delivered_at"] == nil
+    end)
+
+    # 1 initial + 3 confirmations = 4 total calls; no more after exhaustion
+    count = steer_call_count_for(control["control_id"])
+    assert count == 4
+  end
+
+  test "positive-nondelivery replays are bounded and exhaustion terminalizes delivery_unconfirmed",
+       %{
+         supervisor: supervisor
+       } do
+    fresh_steer_call_counter()
+
+    # Odd calls (initial/replay delivery) accept; even calls (confirmation)
+    # report positive nondelivery. This cycles accept→confirm→replay.
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn,
+       fn call_count ->
+         if rem(call_count, 2) == 1 do
+           {:ok, :queued, :next_stage}
+         else
+           {:error, :not_delivered}
+         end
+       end}
+    )
+
+    store =
+      start_configured_steering_store(supervisor,
+        steer_confirmation_delay_ms: 10,
+        max_steering_replays: 2
+      )
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "bounded replay", name: store)
+
+    assert_eventually(fn ->
+      updated = get_control(store, task_id, control["control_id"])
+      assert updated["status"] == "delivery_unconfirmed"
+      assert updated["error"] == "replay_exhausted"
+      assert updated["delivered_at"] == nil
+    end)
+
+    # 1 init + 2 replay cycles (each: accept + confirm) + 1 confirm that
+    # triggers exhaustion = 6 calls. After exhaustion no further calls.
+    count = steer_call_count_for(control["control_id"])
+    assert count == 6
+  end
+
+  test "stale confirmation timer after cancellation is harmless", %{
+    supervisor: supervisor
+  } do
+    fresh_steer_call_counter()
+
+    Application.put_env(:arbor_agent, :task_store_test_steer, :queued)
+
+    store =
+      start_configured_steering_store(supervisor,
+        steer_confirmation_delay_ms: 5_000
+      )
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "cancel before confirm", name: store)
+    assert control["status"] == "queued"
+
+    # Cancel the task while the confirmation timer is still pending (5s delay).
+    assert {:ok, %{state: :cancelled}} = TaskStore.cancel(task_id, name: store)
+
+    assert_eventually(fn ->
+      updated = get_control(store, task_id, control["control_id"])
+      assert updated["status"] == "delivery_unconfirmed"
+      assert updated["error"] == "delivery_unconfirmed_task_cancelled"
+    end)
+
+    # Only the initial delivery call was made; no confirmation happened.
+    assert steer_call_count_for(control["control_id"]) == 1
+
+    # The store remains alive and responsive after the stale timer window.
+    assert Process.alive?(Process.whereis(store))
+    assert {:ok, _} = TaskStore.status(task_id, name: store)
+  end
+
+  test "two-control FIFO: only the earliest unresolved control is confirmed", %{
+    supervisor: supervisor
+  } do
+    fresh_steer_call_counter()
+
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn,
+       fn control, call_count ->
+         cond do
+           control["sequence"] == 1 and call_count == 1 ->
+             {:ok, :queued, :next_stage}
+
+           control["sequence"] == 1 and call_count < 4 ->
+             {:ok, :queued, :next_stage}
+
+           control["sequence"] == 1 ->
+             {:ok, :next_stage}
+
+           control["sequence"] == 2 and call_count == 1 ->
+             {:ok, :queued, :next_stage}
+
+           control["sequence"] == 2 ->
+             {:ok, :next_stage}
+
+           true ->
+             {:ok, :next_stage}
+         end
+       end}
+    )
+
+    store =
+      start_configured_steering_store(supervisor,
+        steer_confirmation_delay_ms: 20,
+        steer_retry_delay_ms: 20
+      )
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, first} = TaskStore.steer(task_id, "first", name: store)
+    assert first["sequence"] == 1
+    assert first["status"] == "queued"
+
+    assert {:ok, second} = TaskStore.steer(task_id, "second", name: store)
+    assert second["sequence"] == 2
+    assert second["status"] == "queued"
+
+    # While control 1 is still being confirmed (3 still-queued responses + 1 delivered),
+    # control 2 should receive only its initial delivery call (count == 1).
+    assert_eventually(fn ->
+      first_updated = get_control(store, task_id, first["control_id"])
+      assert first_updated["status"] == "delivered"
+    end)
+
+    # Control 2 was NOT confirmed while control 1 was unresolved.
+    second_count_while_blocked = steer_call_count_for(second["control_id"])
+    assert second_count_while_blocked == 1
+
+    # After control 1 resolves, control 2's confirmation starts.
+    assert_eventually(fn ->
+      second_updated = get_control(store, task_id, second["control_id"])
+      assert second_updated["status"] == "delivered"
+      assert second_updated["delivered_at"] != nil
+    end)
+
+    assert steer_call_count_for(second["control_id"]) >= 2
+    assert steer_call_count_for(first["control_id"]) >= 4
+  end
+
+  test "initial delivery retries are bounded and exhaustion terminalizes delivery_unconfirmed", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_steer, :defer)
+
+    store =
+      start_configured_steering_store(supervisor,
+        steer_retry_delay_ms: 10,
+        max_steer_retries: 3
+      )
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "always defers", name: store)
+
+    assert_eventually(fn ->
+      updated = get_control(store, task_id, control["control_id"])
+      assert updated["status"] == "delivery_unconfirmed"
+      assert updated["error"] == "initial_delivery_retries_exhausted"
+      assert updated["delivered_at"] == nil
+    end)
+
+    # After exhaustion, the control is terminal and the store never schedules
+    # another retry. Confirm the store is still responsive.
+    assert {:ok, _} = TaskStore.status(task_id, name: store)
   end
 
   test "security regression: pending-approval runner termination fails closed and cleans up once",
@@ -2163,6 +2552,36 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       end
   end
 
+  defp get_control(store, task_id, control_id) do
+    :sys.get_state(store).tasks[task_id].controls
+    |> Enum.find(&(&1["control_id"] == control_id))
+  end
+
+  defp fresh_steer_call_counter do
+    if :ets.whereis(:steer_call_counter) != :undefined do
+      :ets.delete(:steer_call_counter)
+    end
+
+    :ets.new(:steer_call_counter, [:set, :public, :named_table])
+
+    on_exit(fn ->
+      if :ets.whereis(:steer_call_counter) != :undefined do
+        :ets.delete(:steer_call_counter)
+      end
+    end)
+
+    :ok
+  end
+
+  defp steer_call_count_for(control_id) do
+    case :ets.lookup(:steer_call_counter, control_id) do
+      [{^control_id, count}] -> count
+      [] -> 0
+    end
+  rescue
+    ArgumentError -> 0
+  end
+
   # Closed scalar only — cleanup MFA/backends/supervisor are fixed at TaskStore start.
   defp cleanup_descriptor do
     %{
@@ -2225,7 +2644,11 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     store = Module.concat(__MODULE__, :"SteeringStore#{System.unique_integer([:positive])}")
     Application.put_env(:arbor_agent, :default_task_executor, SteeringExecutor)
 
-    start_supervised!({TaskStore, [name: store, task_supervisor: supervisor] ++ opts}, id: store)
+    final_opts =
+      [name: store, task_supervisor: supervisor, steer_confirmation_delay_ms: 10_000]
+      |> Keyword.merge(opts)
+
+    start_supervised!({TaskStore, final_opts}, id: store)
     store
   end
 
@@ -2236,7 +2659,11 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       "coding_change" => FinalizingExecutor
     })
 
-    start_supervised!({TaskStore, [name: store, task_supervisor: supervisor] ++ opts}, id: store)
+    final_opts =
+      [name: store, task_supervisor: supervisor, steer_confirmation_delay_ms: 10_000]
+      |> Keyword.merge(opts)
+
+    start_supervised!({TaskStore, final_opts}, id: store)
     store
   end
 

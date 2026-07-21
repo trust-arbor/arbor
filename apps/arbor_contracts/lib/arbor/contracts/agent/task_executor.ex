@@ -46,12 +46,59 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   Configured executors may also implement `steer_task/3`. TaskStore writes an
   ordered control record before calling it, then preserves that record across
   runner exits. A steering callback receives the exact JSON-clean control map
-  assigned by TaskStore and the original JSON-clean execution context. It may
-  report immediate delivery, accepted queued delivery, or terminal unsupported.
-  Queued acceptance transfers responsibility for later delivery to the executor;
-  a successful `run/3` return confirms all accepted controls have settled.
-  Operational errors are retained by TaskStore as deferred controls for bounded
-  retry. Explicit runner overrides report steering as unsupported.
+  assigned by TaskStore and the original JSON-clean execution context.
+
+  ## Persisted control statuses
+
+  Only these string statuses are ever persisted on a control record:
+  `"queued"`, `"deferred"`, `"delivered"`, `"delivery_unconfirmed"`, and
+  `"unsupported"`. The evidence atoms `:not_delivered`, `:delivery_unknown`,
+  and `:cancelled` are **never** stored as statuses — they drive transitions
+  inside TaskStore and then disappear.
+
+  ## Queued is acceptance only
+
+  `{:ok, :queued, mode}` means the executor has durably accepted responsibility
+  for later delivery. TaskStore confirms an accepted control by calling
+  `steer_task/3` again with the **exact original JSON-clean control**. Only an
+  explicit `{:ok, mode}` return from such a confirmation call sets
+  `delivered_at`. A successful `run/3` return does **not** manufacture
+  delivery — if the task finishes before an accepted control is confirmed
+  delivered, TaskStore terminalizes it as `"delivery_unconfirmed"`.
+
+  ## Confirmation evidence atoms
+
+  During confirmation of an accepted control the executor may return three
+  distinct evidence atoms (as `{:error, atom}`):
+
+  - `:not_delivered` — positive nondelivery. TaskStore clears accepted
+    ownership and triggers a **bounded same-ID replay** (re-delivery of the
+    exact same control) against the recovered/current session.
+  - `:delivery_unknown` — ambiguous delivery. TaskStore terminalizes the
+    control as `"delivery_unconfirmed"` with a bounded error and **never
+    replays**.
+  - `:cancelled` — explicit cancellation. Same terminalization as
+    `:delivery_unknown` with a distinct bounded error.
+
+  Any other operational error during confirmation is retried with the same
+    control up to a bounded confirmation budget; exhaustion also terminalizes
+    as `"delivery_unconfirmed"`.
+
+  ## FIFO
+
+  Initial callbacks may accept multiple controls in sequence, but only the
+  earliest unresolved (accepted, unconfirmed) control may be confirmed or
+  replayed. TaskStore schedules the next confirmation only after the current
+  one settles, and never spends later-control confirmation budget while an
+  earlier control is unresolved.
+
+  ## Bounds
+
+  TaskStore bounds initial operational retries, positive-nondelivery replays,
+  and queued confirmations independently. At most one active confirmation
+  timer exists per eligible control; stale timers are harmless no-ops.
+
+  Explicit runner overrides report steering as unsupported.
 
   Configured executors may implement `finalize_task/4` for mandatory terminal artifact retention.
   TaskStore calls it only after a successful configured
@@ -149,7 +196,14 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   @type steering_delivery_mode ::
           :native_tool_loop | :acp_native | :same_session_follow_up | :next_stage
 
-  @typedoc "Result of accepting a task steering control."
+  @typedoc """
+  Result of accepting or confirming a task steering control.
+
+  Evidence atoms `:not_delivered`, `:delivery_unknown`, and `:cancelled` are
+  valid error returns during confirmation. They are never persisted as control
+  statuses — TaskStore translates them into delivery/replay/terminalize
+  transitions. See `steer_task/3` for the full semantics.
+  """
   @type steering_result ::
           {:ok, steering_delivery_mode()}
           | {:ok, :queued, steering_delivery_mode()}
@@ -193,13 +247,30 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
 
   The control map contains only JSON values and always includes the stable
   `control_id`, `task_id`, `sequence`, `status`, `sender_id`, `message`, and
-  timestamp fields. Return `{:ok, mode}` once delivered, or
-  `{:ok, :queued, mode}` after the executor has durably accepted responsibility
-  for later delivery. Queued acceptance transfers responsibility to the executor,
-  so TaskStore does not invoke this callback again for that control; a successful
-  `run/3` return confirms accepted controls have settled. Return
-  `{:error, :unsupported}` when this executor cannot steer the task. Other errors
-  are treated as retryable operational failures by TaskStore.
+  timestamp fields.
+
+  ## Return values
+
+  - `{:ok, mode}` — delivered immediately. TaskStore sets `delivered_at`.
+  - `{:ok, :queued, mode}` — accepted only. TaskStore later **confirms** by
+    calling `steer_task/3` again with the exact original control. Queued
+    acceptance transfers responsibility to the executor; only an explicit
+    `{:ok, mode}` from a confirmation call sets `delivered_at`.
+  - `{:error, :unsupported}` — this executor cannot steer. Terminal.
+  - `{:error, :not_delivered}` — positive nondelivery. When returned while
+    confirming an accepted control, TaskStore clears accepted ownership and
+    triggers a bounded same-ID replay. When returned during initial delivery
+    it is treated as a retryable operational error.
+  - `{:error, :delivery_unknown}` — ambiguous delivery. While confirming an
+    accepted control, TaskStore terminalizes as `"delivery_unconfirmed"` and
+    never replays.
+  - `{:error, :cancelled}` — explicit cancellation. Same terminalization as
+    `:delivery_unknown` with a distinct bounded error.
+  - `{:error, term()}` — other operational errors (transport, timeout,
+    not-ready). Retained by TaskStore as deferred controls for bounded retry.
+
+  The same callback is used for both initial delivery and confirmation; the
+  executor receives the exact same JSON-clean control map in both cases.
   """
   @callback steer_task(agent_id(), steering_control(), execution_context()) :: steering_result()
 
