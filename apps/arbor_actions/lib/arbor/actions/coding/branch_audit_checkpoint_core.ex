@@ -4,7 +4,9 @@ defmodule Arbor.Actions.Coding.BranchAuditCheckpointCore do
 
   Checkpoints are observations only. They are never a source of mutation
   authority and their scope must match the current repository and proof policy
-  before an entry can be used.
+  before an entry can be used. Successful proof entries are unsigned progress
+  hints that must be live-revalidated before classification; only exactly bound
+  deterministic preserve entries may skip proof work.
   """
 
   alias Arbor.Actions.Coding.BranchAuditCore

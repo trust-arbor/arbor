@@ -266,6 +266,10 @@ This section is the always-loaded working set: 12 broad cross-task rules measuri
 <a id="applied-learning-checkpoint-proof-cache-boundaries-and-progress"></a>
 **Checkpointed historical proofs are observations, never mutation authority.** Bind every reusable result to the exact repository, destination ref/OID, branch ref/OID, and proof-policy version; persist only closed, sanitized statuses; retry transient failures; and make progress count cache hits, every retry, and budget-skipped targets independently of outcome success.
 
+<!-- applied-learning: unsigned-local-checkpoint-successes-are-revalidation-hints-only -->
+<a id="applied-learning-unsigned-local-checkpoint-successes-are-revalidation-hints-only"></a>
+**Unsigned local checkpoint successes are revalidation hints, not evidence.** Owner-only file mode provides confidentiality from other users but no authenticity against same-user tampering. A cached success must consume the normal proof budget and pass the live proof boundary again before classification; only exact-scope deterministic preserve outcomes may skip work (found 2026-07-21 reviewing historical branch-audit proof caching).
+
 
 <!-- applied-learning: anchor-manual-patches-with-unique-surrounding-context -->
 <a id="applied-learning-anchor-manual-patches-with-unique-surrounding-context"></a>

@@ -14,9 +14,9 @@ defmodule Mix.Tasks.Arbor.Coding.Branches do
   Audit output defaults to stdout. `--output` writes a new file without
   replacing an existing path, which keeps compiler and startup messages out of
   the machine-readable manifest. Add `--checkpoint PATH` to resume a dry-run:
-  verified proofs and deterministic preserve outcomes are reused only for the
-  exact repository, destination tip, branch tip, and proof-policy scope.
-  Transient failures are recorded for progress and retried on the next run.
+  cached successful proofs are progress hints and are live-revalidated under
+  the normal proof budget. Only exact-scope deterministic preserve outcomes are
+  reused without proof work. Transient failures are retried on the next run.
   With `--output`, the checkpoint defaults to `OUTPUT.checkpoint`.
   """
 

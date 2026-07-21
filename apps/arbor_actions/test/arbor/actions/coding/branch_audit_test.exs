@@ -4,46 +4,119 @@ defmodule Arbor.Actions.Coding.BranchAuditTest do
 
   alias Arbor.Actions
   alias Arbor.Actions.Coding.BranchAuditCheckpoint
+  alias Arbor.Actions.Coding.BranchAuditCheckpointCore, as: CheckpointCore
   alias Arbor.Actions.Coding.BranchAuditCore, as: Core
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
   @moduletag :fast
 
-  test "checkpoint proof hits skip the injected proof function and preserve the manifest", %{
+  test "SECURITY REGRESSION: forged cached success is live-revalidated before retirement", %{
     tmp_dir: tmp_dir
   } do
     repo = build_fixture(Path.join(tmp_dir, "repo"))
     checkpoint = Path.join(tmp_dir, "branch-audit.checkpoint")
+    progress = self()
 
-    proof_fun = fn _repo, branch, destination ->
-      {:ok,
-       %{
-         "method" => "ancestry",
-         "base_commit" => branch["oid"],
-         "candidate_commit" => branch["oid"],
-         "destination_ref" => destination["ref"],
-         "destination_commit" => destination["oid"],
-         "candidate_commit_count" => 0,
-         "audit" => %{"candidate_range_count" => 0}
-       }}
-    end
-
-    assert {:ok, first} =
+    assert {:ok, baseline} =
              Actions.audit_coding_branches(repo, "main",
-               checkpoint: checkpoint,
-               proof_fun: proof_fun
-             )
-
-    assert {:ok, second} =
-             Actions.audit_coding_branches(repo, "main",
-               checkpoint: checkpoint,
                proof_fun: fn _repo, _branch, _destination ->
-                 raise "cache miss"
+                 {:error, {:not_adopted, :live_observation}}
                end
              )
 
-    assert first["manifest_sha256"] == second["manifest_sha256"]
+    unique = Enum.find(baseline["branches"], &(&1["ref"] == "refs/heads/unique"))
+    forged = forged_ancestry_proof(unique, baseline["destination"])
+    write_verified_checkpoint!(checkpoint, baseline, [unique], forged)
+
+    assert {:ok, resumed} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               proof_fun: fn _repo, branch, _destination ->
+                 send(progress, {:proof_call, branch["ref"]})
+                 {:error, {:not_adopted, :fresh_live_truth}}
+               end,
+               progress: fn snapshot -> send(progress, {:security_progress, snapshot}) end
+             )
+
+    assert_received {:proof_call, "refs/heads/unique"}
+
+    resumed_unique = Enum.find(resumed["branches"], &(&1["ref"] == "refs/heads/unique"))
+    assert resumed_unique["class"] == "unique"
+    assert resumed_unique["action"] == "preserve"
+    refute Map.has_key?(resumed_unique, "proof")
+
+    final = final_progress(:security_progress)
+    assert final["completed"] == final["total"]
+    assert final["revalidated"] == 1
+    assert final["cache_hits"] == 0
+    assert final["retried"] == 0
+
+    assert {:ok, cache, :hit} = BranchAuditCheckpoint.load(checkpoint, checkpoint_scope(baseline))
+
+    unique_cache = Enum.find(cache["entries"], &(&1["ref"] == "refs/heads/unique"))
+    assert unique_cache["status"] == "deterministic_preserve"
+    assert unique_cache["failure"]["category"] == "not_adopted"
     assert (File.stat!(checkpoint).mode &&& 0o777) == 0o600
+  end
+
+  test "cached successes consume proof budget and exhausted hints are never manifest proof", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = build_two_unique_fixture(Path.join(tmp_dir, "repo"))
+    checkpoint = Path.join(tmp_dir, "branch-audit.checkpoint")
+    progress = self()
+
+    assert {:ok, baseline} =
+             Actions.audit_coding_branches(repo, "main",
+               proof_fun: fn _repo, _branch, _destination ->
+                 {:error, {:not_adopted, :live_observation}}
+               end
+             )
+
+    candidates =
+      Enum.filter(
+        baseline["branches"],
+        &(&1["ref"] in ["refs/heads/cache-a", "refs/heads/cache-b"])
+      )
+
+    [first | _rest] = candidates
+    forged = forged_ancestry_proof(first, baseline["destination"])
+    write_verified_checkpoint!(checkpoint, baseline, candidates, forged)
+
+    calls = :counters.new(1, [:atomics])
+
+    assert {:ok, resumed} =
+             Actions.audit_coding_branches(repo, "main",
+               checkpoint: checkpoint,
+               max_proof_attempts: 1,
+               proof_fun: fn _repo, _branch, _destination ->
+                 :counters.add(calls, 1, 1)
+                 {:error, {:not_adopted, :fresh_live_truth}}
+               end,
+               progress: fn snapshot -> send(progress, {:budgeted_revalidation, snapshot}) end
+             )
+
+    assert :counters.get(calls, 1) == 1
+
+    resumed_candidates =
+      Enum.filter(
+        resumed["branches"],
+        &(&1["ref"] in ["refs/heads/cache-a", "refs/heads/cache-b"])
+      )
+
+    assert Enum.all?(resumed_candidates, &(&1["action"] == "preserve"))
+    assert Enum.all?(resumed_candidates, &(not Map.has_key?(&1, "proof")))
+
+    assert Enum.sort(Enum.map(resumed_candidates, & &1["reason"])) ==
+             ["patch_not_represented_on_destination", "proof_budget_exhausted"]
+
+    final = final_progress(:budgeted_revalidation)
+    assert final["completed"] == 2
+    assert final["total"] == 2
+    assert final["revalidated"] == 1
+    assert final["skipped"] == 1
+    assert final["cache_hits"] == 0
+    assert final["retried"] == 0
   end
 
   test "exit 137 failures are checkpointed but retried on resume", %{tmp_dir: tmp_dir} do
@@ -535,6 +608,72 @@ defmodule Arbor.Actions.Coding.BranchAuditTest do
     checked_path = Path.join(Path.dirname(repo), "checked-worktree")
     git!(repo, ["worktree", "add", checked_path, "checked-out"])
     repo
+  end
+
+  defp build_two_unique_fixture(repo) do
+    create_git_repo(repo)
+    git!(repo, ["branch", "-m", "main"])
+
+    for branch <- ["cache-a", "cache-b"] do
+      git!(repo, ["checkout", "-b", branch, "main"])
+      add_commit(repo, "#{branch}.txt", "#{branch}\n", branch)
+      git!(repo, ["checkout", "main"])
+    end
+
+    repo
+  end
+
+  defp write_verified_checkpoint!(path, manifest, branches, proof) do
+    cache =
+      CheckpointCore.empty(manifest["repository"], manifest["destination"], %{})
+      |> then(fn cache ->
+        Enum.reduce(branches, cache, fn branch, current ->
+          branch_proof =
+            proof
+            |> Map.put("base_commit", branch["oid"])
+            |> Map.put("candidate_commit", branch["oid"])
+
+          {:ok, next} =
+            CheckpointCore.upsert(current, branch, "verified_proof", %{
+              "proof" => branch_proof
+            })
+
+          next
+        end)
+      end)
+
+    :ok = BranchAuditCheckpoint.write(path, cache)
+  end
+
+  defp forged_ancestry_proof(branch, destination) do
+    %{
+      "method" => "ancestry",
+      "base_commit" => branch["oid"],
+      "candidate_commit" => branch["oid"],
+      "destination_ref" => destination["ref"],
+      "destination_commit" => destination["oid"],
+      "candidate_commit_count" => 0,
+      "audit" => %{"candidate_range_count" => 0}
+    }
+  end
+
+  defp checkpoint_scope(manifest) do
+    %{
+      "policy_version" => CheckpointCore.policy_version(),
+      "repository" => manifest["repository"],
+      "destination" => manifest["destination"]
+    }
+  end
+
+  defp final_progress(tag) do
+    receive do
+      {^tag, snapshot} ->
+        if snapshot["completed"] == snapshot["total"],
+          do: snapshot,
+          else: final_progress(tag)
+    after
+      1_000 -> flunk("missing final #{tag} progress snapshot")
+    end
   end
 
   defp retention_marker(repo) do

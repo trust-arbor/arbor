@@ -4,7 +4,10 @@ defmodule Arbor.Actions.Coding.BranchAudit do
 
   All policy and manifest bytes are delegated to `BranchAuditCore`. This module
   only obtains bounded observations, invokes the existing Git proof/archive/CAS
-  primitives, and reports conservative residue.
+  primitives, and reports conservative residue. Cached successful proofs are
+  unsigned hints: resume always revalidates them through the live proof boundary
+  before they can affect classification. Exactly bound deterministic preserve
+  outcomes may be reused without another proof attempt.
   """
 
   alias Arbor.Actions.Coding.BranchAuditCore, as: Core
@@ -23,7 +26,7 @@ defmodule Arbor.Actions.Coding.BranchAudit do
   @checkpoint_cadence 16
   @sha256 ~r/\A[0-9a-f]{64}\z/
 
-  @doc "Bounded number of proof attempts between durable checkpoint writes."
+  @doc "Bounded number of live proof attempts, including retries and revalidations, between checkpoint writes."
   @spec checkpoint_cadence() :: pos_integer()
   def checkpoint_cadence, do: @checkpoint_cadence
 
@@ -276,6 +279,7 @@ defmodule Arbor.Actions.Coding.BranchAudit do
       "completed" => 0,
       "total" => total,
       "cache_hits" => 0,
+      "revalidated" => 0,
       "retried" => 0,
       "attempts" => 0,
       "skipped" => 0,
@@ -289,11 +293,6 @@ defmodule Arbor.Actions.Coding.BranchAudit do
         cached = Map.get(cached_entries, branch["ref"])
 
         case cached do
-          %{"status" => "verified_proof", "proof" => proof} ->
-            next_state = progress_state(state, :cache_hit, nil)
-            emit_progress(callback, next_state)
-            {:cont, {Map.put(results, branch["ref"], {:ok, proof}), current_cache, next_state}}
-
           %{"status" => "deterministic_preserve", "failure" => failure} ->
             next_state = progress_state(state, :cache_hit, failure)
             emit_progress(callback, next_state)
@@ -315,7 +314,7 @@ defmodule Arbor.Actions.Coding.BranchAudit do
               next_state =
                 progress_state(
                   state,
-                  if(cached == nil, do: :attempt, else: :retry),
+                  proof_attempt_kind(cached),
                   failure_for_result(normalized_result)
                 )
 
@@ -394,6 +393,10 @@ defmodule Arbor.Actions.Coding.BranchAudit do
   defp failure_for_result({:error, reason}), do: Core.proof_failure(reason)
   defp failure_for_result(_result), do: nil
 
+  defp proof_attempt_kind(%{"status" => "verified_proof"}), do: :revalidate
+  defp proof_attempt_kind(%{"status" => "transient_failure"}), do: :retry
+  defp proof_attempt_kind(_cached), do: :attempt
+
   defp progress_state(state, kind, nil) do
     next = Map.update!(state, "completed", &(&1 + 1))
 
@@ -405,6 +408,12 @@ defmodule Arbor.Actions.Coding.BranchAudit do
         next
         |> Map.update!("attempts", &(&1 + 1))
         |> Map.update!("retried", &(&1 + 1))
+        |> Map.update!("attempts_since_checkpoint", &(&1 + 1))
+
+      :revalidate ->
+        next
+        |> Map.update!("attempts", &(&1 + 1))
+        |> Map.update!("revalidated", &(&1 + 1))
         |> Map.update!("attempts_since_checkpoint", &(&1 + 1))
 
       :skipped ->
@@ -438,6 +447,7 @@ defmodule Arbor.Actions.Coding.BranchAudit do
       "completed" => state["completed"],
       "total" => state["total"],
       "cache_hits" => state["cache_hits"],
+      "revalidated" => state["revalidated"],
       "retried" => state["retried"],
       "skipped" => state["skipped"],
       "failure_categories" =>

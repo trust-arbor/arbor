@@ -1,5 +1,12 @@
 defmodule Arbor.Actions.Coding.BranchAuditCheckpoint do
-  @moduledoc "Secure atomic file boundary for branch-audit checkpoints."
+  @moduledoc """
+  Private atomic file boundary for branch-audit checkpoints.
+
+  Owner-only mode protects checkpoint contents from other users, but the file
+  is unsigned and does not authenticate successful proof data against its owner.
+  `BranchAudit` therefore revalidates every cached success through Git or the
+  injected proof boundary before classification.
+  """
 
   alias Arbor.Actions.Coding.BranchAuditCheckpointCore, as: Core
 
