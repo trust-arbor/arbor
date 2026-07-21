@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 494,
+  "entry_count": 495,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5966,8 +5966,21 @@
       "source_incident": "found 2026-07-21 during managed-branch lifecycle integration).",
       "content_sha256": "6c453404c010130045bdb6121c76ea6af3f1a5a6e62cf18803fb4416cb27887f",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 495,
+      "source_kind": "post-migration",
+      "slug": "aggregate-failure-excerpts-must-anchor-within-a-structured-failed-child",
+      "title": "Aggregate failure excerpts must anchor within a structured failed child.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-aggregate-failure-excerpts-must-anchor-within-a-structured-failed-child",
+      "source_date": "2026-07-21",
+      "source_incident": "found 2026-07-21 while recovering cross-app validation observability).",
+      "content_sha256": "ba0bebcbe88b98c67f271609abe534654a76a16ab61a7457b908d6c864b9837e",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 33
+  "post_migration_entry_count": 34
 }
