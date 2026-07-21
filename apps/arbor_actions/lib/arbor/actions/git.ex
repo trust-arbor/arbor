@@ -49,6 +49,9 @@ defmodule Arbor.Actions.Git do
   @storage_authority_key {__MODULE__, :storage_authority}
   @git_deadline_key {__MODULE__, :command_deadline_ms}
   @default_git_timeout_ms 30_000
+  @adoption_range_limit 256
+  @adoption_patch_bytes_limit 4 * 1024 * 1024
+  @adoption_patch_evidence_bytes_limit 32 * 1024 * 1024
 
   @typedoc false
   @type worktree_lstat_identity :: %{
@@ -171,6 +174,636 @@ defmodule Arbor.Actions.Git do
   end
 
   def execute(_path, _args), do: {:error, :invalid_git_execution}
+
+  @doc """
+  Compute bounded proof that a reviewed candidate commit was adopted by a
+  destination ref.
+
+  The base and candidate arguments must be full SHA-1 or SHA-256 commit OIDs.
+  The destination must be a ref name or `HEAD`, never a revision expression.
+  """
+  @spec compute_adoption_proof(String.t(), String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def compute_adoption_proof(repository_root, base_commit, candidate_commit, destination_ref)
+      when is_binary(repository_root) and is_binary(base_commit) and is_binary(candidate_commit) and
+             is_binary(destination_ref) do
+    with_command_deadline(@default_git_timeout_ms, fn ->
+      with {:ok, base} <- adoption_oid(base_commit),
+           {:ok, candidate} <- adoption_oid(candidate_commit),
+           :ok <- same_oid_format(base, candidate),
+           :ok <- adoption_destination_ref(destination_ref),
+           {:ok, base} <- resolve_adoption_commit(repository_root, base),
+           {:ok, candidate} <- resolve_adoption_commit(repository_root, candidate),
+           {:ok, destination} <- resolve_adoption_destination(repository_root, destination_ref),
+           :ok <- require_adoption_ancestor(repository_root, base, candidate, :candidate),
+           :ok <- require_adoption_ancestor(repository_root, base, destination, :destination),
+           {:ok, candidate_count} <- adoption_range_count(repository_root, base, candidate),
+           {:ok, destination_count} <- adoption_range_count(repository_root, base, destination),
+           :ok <- bound_adoption_range(:candidate, candidate_count),
+           :ok <- bound_adoption_range(:destination, destination_count) do
+        proof = %{
+          method: "ancestry",
+          base_commit: base,
+          candidate_commit: candidate,
+          destination_ref: destination_ref,
+          destination_commit: destination,
+          candidate_commit_count: candidate_count,
+          audit: %{
+            candidate_range_count: candidate_count,
+            destination_range_count: destination_count
+          }
+        }
+
+        case adoption_ancestor?(repository_root, candidate, destination) do
+          {:ok, true} ->
+            {:ok, proof}
+
+          {:ok, false} ->
+            compute_patch_adoption_proof(
+              repository_root,
+              base,
+              candidate,
+              destination_ref,
+              destination,
+              candidate_count,
+              destination_count
+            )
+
+          {:error, reason} ->
+            {:error, {:invalid_input, reason}}
+        end
+      end
+    end)
+  end
+
+  def compute_adoption_proof(_repository_root, _base_commit, _candidate_commit, _destination_ref),
+    do: {:error, {:invalid_input, :invalid_arguments}}
+
+  @doc """
+  Re-resolve and recompute an adoption proof, accepting it only when the
+  complete bounded proof is unchanged.
+  """
+  @spec verify_adoption_proof(String.t(), map()) :: :ok | {:error, term()}
+  def verify_adoption_proof(repository_root, proof)
+      when is_binary(repository_root) and is_map(proof) do
+    with {:ok, base} <- proof_field(proof, :base_commit),
+         {:ok, candidate} <- proof_field(proof, :candidate_commit),
+         {:ok, destination_ref} <- proof_field(proof, :destination_ref),
+         {:ok, expected} <- proof_fields(proof),
+         {:ok, actual} <-
+           compute_adoption_proof(repository_root, base, candidate, destination_ref) do
+      if actual == expected do
+        :ok
+      else
+        {:error, {:not_adopted, :proof_mismatch}}
+      end
+    else
+      {:error, {:invalid_input, _reason} = error} -> {:error, error}
+      {:error, {:not_adopted, _reason} = error} -> {:error, error}
+      {:error, reason} -> {:error, {:invalid_input, reason}}
+    end
+  end
+
+  def verify_adoption_proof(_repository_root, _proof),
+    do: {:error, {:invalid_input, :invalid_arguments}}
+
+  defp adoption_oid(oid) when is_binary(oid) do
+    if Regex.match?(~r/\A[0-9a-fA-F]{40}\z/, oid) or
+         Regex.match?(~r/\A[0-9a-fA-F]{64}\z/, oid) do
+      {:ok, String.downcase(oid)}
+    else
+      {:error, {:invalid_input, :oid_must_be_full_sha1_or_sha256}}
+    end
+  end
+
+  defp adoption_oid(_oid), do: {:error, {:invalid_input, :oid_must_be_full_sha1_or_sha256}}
+
+  defp same_oid_format(left, right) do
+    if byte_size(left) == byte_size(right),
+      do: :ok,
+      else: {:error, {:invalid_input, :mixed_oid_formats}}
+  end
+
+  defp adoption_destination_ref(ref) when is_binary(ref) do
+    with :ok <- validate_ref(ref),
+         false <- String.contains?(ref, ["~", "^"]) do
+      :ok
+    else
+      {:error, _reason} -> {:error, {:invalid_input, :invalid_destination_ref}}
+      true -> {:error, {:invalid_input, :destination_revision_expression}}
+    end
+  end
+
+  defp adoption_destination_ref(_ref),
+    do: {:error, {:invalid_input, :invalid_destination_ref}}
+
+  defp adoption_git(repository_root, args) do
+    case execute(repository_root, args) do
+      {:ok, %{exit_code: 0, stderr: ""} = result} ->
+        {:ok, result}
+
+      {:ok, %{exit_code: 0}} ->
+        {:error, {:invalid_input, :git_warning_output}}
+
+      {:ok, %{exit_code: exit_code}} ->
+        {:error, {:invalid_input, {:git_command_failed, exit_code}}}
+
+      {:error, reason} ->
+        {:error, {:invalid_input, reason}}
+    end
+  end
+
+  defp adoption_git_with_stdin(repository_root, args, stdin) do
+    case execute_with_stdin(repository_root, args, stdin) do
+      {:ok, %{exit_code: 0, stderr: ""} = result} ->
+        {:ok, result}
+
+      {:ok, %{exit_code: 0}} ->
+        {:error, {:invalid_input, :git_warning_output}}
+
+      {:ok, %{exit_code: exit_code}} ->
+        {:error, {:invalid_input, {:git_command_failed, exit_code}}}
+
+      {:error, reason} ->
+        {:error, {:invalid_input, reason}}
+    end
+  end
+
+  defp resolve_adoption_commit(repository_root, oid) do
+    case adoption_git(repository_root, [
+           "rev-parse",
+           "--verify",
+           "--end-of-options",
+           oid <> "^{commit}"
+         ]) do
+      {:ok, %{stdout: output}} ->
+        case exact_adoption_oid_output(output, byte_size(oid)) do
+          {:ok, ^oid} -> {:ok, oid}
+          {:ok, _other} -> {:error, {:invalid_input, :oid_not_exact}}
+          {:error, _reason} -> {:error, {:invalid_input, :invalid_commit_output}}
+        end
+
+      {:error, _reason} ->
+        {:error, {:invalid_input, :commit_oid_not_found}}
+    end
+  end
+
+  defp resolve_adoption_destination(repository_root, destination_ref) do
+    with {:ok, %{stdout: symbolic_output}} <-
+           adoption_git(
+             repository_root,
+             [
+               "rev-parse",
+               "--symbolic-full-name",
+               "--verify",
+               "--end-of-options",
+               destination_ref
+             ]
+           ),
+         {:ok, _symbolic_ref} <- parse_symbolic_destination(symbolic_output),
+         {:ok, %{stdout: oid_output}} <-
+           adoption_git(
+             repository_root,
+             [
+               "rev-parse",
+               "--verify",
+               "--end-of-options",
+               destination_ref <> "^{commit}"
+             ]
+           ),
+         {:ok, oid} <- exact_adoption_oid_output(oid_output, nil),
+         {:ok, oid} <- adoption_oid(oid) do
+      {:ok, oid}
+    else
+      {:error, _reason} -> {:error, {:invalid_input, :destination_ref_not_found}}
+    end
+  end
+
+  defp parse_symbolic_destination(output) do
+    case String.split(output, "\n", trim: true) do
+      ["HEAD"] -> {:ok, "HEAD"}
+      [<<"refs/", rest::binary>>] when rest != "" -> {:ok, "refs/" <> rest}
+      _other -> {:error, :invalid_symbolic_destination}
+    end
+  end
+
+  defp exact_adoption_oid_output(output, expected_bytes) when is_binary(output) do
+    case String.split(output, "\n", trim: true) do
+      [oid] when is_nil(expected_bytes) ->
+        if Regex.match?(~r/\A[0-9a-fA-F]{40}\z/, oid) or
+             Regex.match?(~r/\A[0-9a-fA-F]{64}\z/, oid) do
+          {:ok, String.downcase(oid)}
+        else
+          {:error, :invalid_oid_output}
+        end
+
+      [oid] when is_integer(expected_bytes) and byte_size(oid) == expected_bytes ->
+        if Regex.match?(~r/\A[0-9a-fA-F]+\z/, oid),
+          do: {:ok, String.downcase(oid)},
+          else: {:error, :invalid_oid_output}
+
+      _other ->
+        {:error, :invalid_oid_output}
+    end
+  end
+
+  defp require_adoption_ancestor(repository_root, base, tip, :candidate) do
+    case adoption_ancestor?(repository_root, base, tip) do
+      {:ok, true} -> :ok
+      {:ok, false} -> {:error, {:invalid_input, :base_not_ancestor_of_candidate}}
+      {:error, reason} -> {:error, {:invalid_input, reason}}
+    end
+  end
+
+  defp require_adoption_ancestor(repository_root, base, tip, :destination) do
+    case adoption_ancestor?(repository_root, base, tip) do
+      {:ok, true} -> :ok
+      {:ok, false} -> {:error, {:not_adopted, :base_not_ancestor_of_destination}}
+      {:error, reason} -> {:error, {:invalid_input, reason}}
+    end
+  end
+
+  defp adoption_ancestor?(repository_root, base, tip) do
+    case execute(repository_root, ["merge-base", "--is-ancestor", base, tip]) do
+      {:ok, %{exit_code: 0, stdout: "", stderr: ""}} -> {:ok, true}
+      {:ok, %{exit_code: 1, stdout: ""}} -> {:ok, false}
+      {:ok, %{exit_code: exit_code}} -> {:error, {:git_command_failed, exit_code}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp adoption_range_count(repository_root, base, tip) do
+    range = base <> ".." <> tip
+
+    case adoption_git(
+           repository_root,
+           [
+             "rev-list",
+             "--count",
+             "--max-count",
+             Integer.to_string(@adoption_range_limit + 1),
+             range
+           ]
+         ) do
+      {:ok, %{stdout: output}} ->
+        case String.split(output, "\n", trim: true) do
+          [count] ->
+            if Regex.match?(~r/\A[0-9]+\z/, count),
+              do: {:ok, String.to_integer(count)},
+              else: {:error, {:invalid_input, :invalid_range_count}}
+
+          _other ->
+            {:error, {:invalid_input, :invalid_range_count}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp bound_adoption_range(_role, count) when count <= @adoption_range_limit, do: :ok
+
+  defp bound_adoption_range(role, _count),
+    do: {:error, {:range_too_large, role, @adoption_range_limit}}
+
+  defp compute_patch_adoption_proof(
+         repository_root,
+         base,
+         candidate,
+         destination_ref,
+         destination,
+         candidate_count,
+         destination_count
+       ) do
+    with {:ok, candidate_commits} <-
+           adoption_commit_range(repository_root, base, candidate, :candidate, candidate_count),
+         {:ok, destination_commits} <-
+           adoption_commit_range(
+             repository_root,
+             base,
+             destination,
+             :destination,
+             destination_count
+           ),
+         {:ok, candidate_patches} <-
+           adoption_patch_evidence(repository_root, candidate_commits, true),
+         {:ok, destination_patches} <-
+           adoption_patch_evidence(repository_root, destination_commits, false) do
+      candidate_ids = Enum.map(candidate_patches, & &1.patch_id)
+      destination_ids = Enum.map(destination_patches, & &1.patch_id)
+
+      cond do
+        length(candidate_patches) != candidate_count ->
+          {:error, {:not_adopted, :candidate_contains_empty_commit}}
+
+        adoption_multiset_subset?(candidate_ids, destination_ids) ->
+          {:ok,
+           patch_adoption_proof(
+             "cherry_pick",
+             base,
+             candidate,
+             destination_ref,
+             destination,
+             candidate_count,
+             candidate_count,
+             destination_count,
+             candidate_patches,
+             destination_patches,
+             nil
+           )}
+
+        true ->
+          with {:ok, aggregate_patch_id} <-
+                 adoption_patch_id_for_diff(repository_root, base, candidate),
+               {:ok, aggregate_destination} <-
+                 aggregate_destination_match(destination_patches, aggregate_patch_id) do
+            {:ok,
+             patch_adoption_proof(
+               "squash",
+               base,
+               candidate,
+               destination_ref,
+               destination,
+               candidate_count,
+               0,
+               destination_count,
+               candidate_patches,
+               destination_patches,
+               aggregate_destination
+             )}
+          else
+            {:error, {:not_adopted, _reason} = error} -> {:error, error}
+            {:error, _reason} -> {:error, {:not_adopted, :patches_not_equivalent}}
+          end
+      end
+    end
+  end
+
+  defp adoption_commit_range(repository_root, base, tip, role, expected_count) do
+    range = base <> ".." <> tip
+
+    case adoption_git(
+           repository_root,
+           [
+             "rev-list",
+             "--reverse",
+             "--parents",
+             "--max-count",
+             Integer.to_string(@adoption_range_limit + 1),
+             range
+           ]
+         ) do
+      {:ok, %{stdout: output}} ->
+        parse_adoption_commits(output, role, byte_size(base), expected_count)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp parse_adoption_commits(output, role, oid_bytes, expected_count) do
+    lines = String.split(output, "\n", trim: true)
+
+    cond do
+      length(lines) != expected_count ->
+        {:error, {:invalid_input, :invalid_range_output}}
+
+      length(lines) > @adoption_range_limit ->
+        {:error, {:range_too_large, role, @adoption_range_limit}}
+
+      true ->
+        Enum.reduce_while(lines, {:ok, []}, fn line, {:ok, acc} ->
+          fields = String.split(line, " ", trim: true)
+
+          with [commit | parents] <- fields,
+               true <- byte_size(commit) == oid_bytes,
+               true <- Regex.match?(~r/\A[0-9a-f]+\z/, commit),
+               true <-
+                 Enum.all?(
+                   parents,
+                   &(byte_size(&1) == oid_bytes and Regex.match?(~r/\A[0-9a-f]+\z/, &1))
+                 ),
+               true <- parents != [],
+               true <- role != :candidate or length(parents) == 1 do
+            {:cont, {:ok, [{commit, length(parents)} | acc]}}
+          else
+            _ when role == :candidate ->
+              {:halt, {:error, {:not_adopted, :candidate_range_contains_merge}}}
+
+            _ ->
+              {:halt, {:error, {:invalid_input, :invalid_destination_range}}}
+          end
+        end)
+        |> case do
+          {:ok, commits} -> {:ok, Enum.reverse(commits)}
+          {:error, _reason} = error -> error
+        end
+    end
+  end
+
+  defp adoption_patch_evidence(repository_root, commits, candidate?) do
+    Enum.reduce_while(commits, {:ok, [], 0}, fn {commit, parent_count}, {:ok, acc, bytes} ->
+      if not candidate? and parent_count > 1 do
+        {:cont, {:ok, acc, bytes}}
+      else
+        case adoption_patch_id_for_commit(repository_root, commit) do
+          {:ok, nil, _patch_bytes} when candidate? ->
+            {:halt, {:error, {:not_adopted, :candidate_contains_empty_commit}}}
+
+          {:ok, nil, patch_bytes} ->
+            if bytes + patch_bytes <= @adoption_patch_evidence_bytes_limit do
+              {:cont, {:ok, acc, bytes + patch_bytes}}
+            else
+              {:halt,
+               {:error,
+                {:range_too_large, :patch_evidence_bytes, @adoption_patch_evidence_bytes_limit}}}
+            end
+
+          {:ok, patch_id, patch_bytes} ->
+            if bytes + patch_bytes <= @adoption_patch_evidence_bytes_limit do
+              {:cont, {:ok, [%{commit: commit, patch_id: patch_id} | acc], bytes + patch_bytes}}
+            else
+              {:halt,
+               {:error,
+                {:range_too_large, :patch_evidence_bytes, @adoption_patch_evidence_bytes_limit}}}
+            end
+
+          {:error, _reason} = error ->
+            {:halt, error}
+        end
+      end
+    end)
+    |> case do
+      {:ok, evidence, _bytes} -> {:ok, Enum.reverse(evidence)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp adoption_patch_id_for_commit(repository_root, commit) do
+    with {:ok, %{stdout: diff}} <-
+           adoption_git(
+             repository_root,
+             [
+               "show",
+               "--format=",
+               "--no-ext-diff",
+               "--no-textconv",
+               "--binary",
+               "--no-renames",
+               commit,
+               "--"
+             ]
+           ),
+         :ok <- bound_adoption_patch(diff),
+         {:ok, patch_id} <- adoption_patch_id(repository_root, diff) do
+      {:ok, patch_id, byte_size(diff)}
+    end
+  end
+
+  defp adoption_patch_id_for_diff(repository_root, base, candidate) do
+    with {:ok, %{stdout: diff}} <-
+           adoption_git(
+             repository_root,
+             [
+               "diff",
+               "--binary",
+               "--no-ext-diff",
+               "--no-textconv",
+               "--no-renames",
+               base,
+               candidate,
+               "--"
+             ]
+           ),
+         :ok <- bound_adoption_patch(diff),
+         {:ok, nil} <- adoption_patch_id(repository_root, diff) do
+      {:error, {:not_adopted, :empty_aggregate_patch}}
+    else
+      {:ok, patch_id} -> {:ok, patch_id}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp bound_adoption_patch(diff) when is_binary(diff) do
+    if byte_size(diff) <= @adoption_patch_bytes_limit,
+      do: :ok,
+      else: {:error, {:range_too_large, :patch_bytes, @adoption_patch_bytes_limit}}
+  end
+
+  defp bound_adoption_patch(_diff),
+    do: {:error, {:range_too_large, :patch_bytes, @adoption_patch_bytes_limit}}
+
+  defp adoption_patch_id(_repository_root, ""), do: {:ok, nil}
+
+  defp adoption_patch_id(repository_root, diff) do
+    case adoption_git_with_stdin(repository_root, ["patch-id", "--stable"], diff) do
+      {:ok, %{stdout: output}} -> parse_adoption_patch_id(output)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp parse_adoption_patch_id(output) do
+    case String.split(output, "\n", trim: true) do
+      [line] ->
+        case String.split(line, " ", trim: true) do
+          [patch_id, _commit] ->
+            if Regex.match?(~r/\A[0-9a-f]{40}\z/, patch_id),
+              do: {:ok, patch_id},
+              else: {:error, {:invalid_input, :invalid_patch_id_output}}
+
+          _other ->
+            {:error, {:invalid_input, :invalid_patch_id_output}}
+        end
+
+      [] ->
+        {:ok, nil}
+
+      _other ->
+        {:error, {:invalid_input, :invalid_patch_id_output}}
+    end
+  end
+
+  defp adoption_multiset_subset?(need, available) do
+    frequencies = Enum.frequencies(available)
+
+    Enum.reduce_while(need, frequencies, fn patch_id, remaining ->
+      case Map.get(remaining, patch_id, 0) do
+        count when count > 0 -> {:cont, Map.put(remaining, patch_id, count - 1)}
+        _ -> {:halt, :missing}
+      end
+    end) != :missing
+  end
+
+  defp aggregate_destination_match(_destination_patches, {:error, _reason} = error), do: error
+
+  defp aggregate_destination_match(destination_patches, aggregate_patch_id)
+       when is_binary(aggregate_patch_id) do
+    case Enum.find(destination_patches, &(&1.patch_id == aggregate_patch_id)) do
+      nil -> {:error, {:not_adopted, :aggregate_patch_not_found}}
+      destination -> {:ok, destination}
+    end
+  end
+
+  defp patch_adoption_proof(
+         representation,
+         base,
+         candidate,
+         destination_ref,
+         destination,
+         candidate_count,
+         matched_count,
+         destination_count,
+         candidate_patches,
+         destination_patches,
+         aggregate_destination
+       ) do
+    %{
+      method: "patch_equivalence",
+      base_commit: base,
+      candidate_commit: candidate,
+      destination_ref: destination_ref,
+      destination_commit: destination,
+      candidate_commit_count: candidate_count,
+      audit: %{
+        representation: representation,
+        candidate_range_count: candidate_count,
+        destination_range_count: destination_count,
+        matched_candidate_patch_count: matched_count,
+        candidate_patches: candidate_patches,
+        destination_patches: destination_patches,
+        aggregate_destination: aggregate_destination
+      }
+    }
+  end
+
+  defp proof_field(proof, key) do
+    case Map.fetch(proof, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, {:invalid_input, {:missing_proof_field, key}}}
+    end
+  end
+
+  defp proof_fields(proof) do
+    keys = [
+      :method,
+      :base_commit,
+      :candidate_commit,
+      :destination_ref,
+      :destination_commit,
+      :candidate_commit_count,
+      :audit
+    ]
+
+    if MapSet.new(Map.keys(proof)) == MapSet.new(keys) and
+         is_binary(proof.method) and is_binary(proof.base_commit) and
+         is_binary(proof.candidate_commit) and is_binary(proof.destination_ref) and
+         is_binary(proof.destination_commit) and is_integer(proof.candidate_commit_count) and
+         proof.candidate_commit_count >= 0 and is_map(proof.audit) do
+      {:ok, proof}
+    else
+      {:error, {:invalid_input, :invalid_adoption_proof}}
+    end
+  end
 
   # Cleanup authority includes caller-captured filesystem and Git-registration
   # identity. Carrying both through this final destructive facade closes the
@@ -1754,6 +2387,25 @@ defmodule Arbor.Actions.Git do
       sandbox: git_sandbox(),
       env: env
     )
+  end
+
+  defp execute_with_stdin(path, args, stdin) do
+    with :ok <- validate_git_args(args),
+         {:ok, authorized_root} <- authorized_root(path),
+         storage_roots <- storage_roots(authorized_root),
+         {:ok, storage_guard} <- validate_repository_storage(authorized_root, storage_roots),
+         :ok <- reject_configured_helpers(authorized_root),
+         :ok <- verify_storage_guard(storage_guard) do
+      env = Map.put(@git_env, "GIT_CEILING_DIRECTORIES", authorized_root)
+
+      Shell.execute_direct("git", @git_prefix ++ args,
+        cwd: authorized_root,
+        timeout: git_timeout(),
+        sandbox: git_sandbox(),
+        env: env,
+        stdin: stdin
+      )
+    end
   end
 
   defp with_command_deadline(timeout_ms, fun)
