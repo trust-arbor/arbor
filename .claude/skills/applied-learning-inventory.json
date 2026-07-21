@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 496,
+  "entry_count": 497,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5992,8 +5992,21 @@
       "source_incident": "found 2026-07-21 when branch-lifecycle validation mixed arbor_agent behavioral tests with arbor_commands benchmarks in batch 11/27).",
       "content_sha256": "46cd7bd3d612e1dc60db7db43587c1b1fb55bb1aa34bc5abe4ceeae2552e556f",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 497,
+      "source_kind": "post-migration",
+      "slug": "destructive-git-cas-success-requires-clean-output-and-authoritative-post-observation",
+      "title": "Destructive Git CAS success requires clean output and authoritative post-observation.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-destructive-git-cas-success-requires-clean-output-and-authoritative-post-observation",
+      "source_date": "2026-07-21",
+      "source_incident": "found 2026-07-21 while hardening managed branch deletion and hidden evidence-ref creation).",
+      "content_sha256": "0f6eeab4175ff4de071bfc0bb9f165968305df58e3eae40f39c7cce1328c46ac",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 35
+  "post_migration_entry_count": 36
 }
