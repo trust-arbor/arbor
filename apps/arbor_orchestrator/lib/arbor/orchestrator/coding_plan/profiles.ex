@@ -94,6 +94,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     open_recovery_worker
                     prep_release_mode_only
                     prep_release_mode_remove
+                    prep_release_mode_discard
                     prep_release_mode_retain
                     prep_review_delta_diff
                     prep_review_delta_files

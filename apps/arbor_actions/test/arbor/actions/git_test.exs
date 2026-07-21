@@ -156,6 +156,344 @@ defmodule Arbor.Actions.GitTest do
     end
   end
 
+  describe "delete_branch_ref" do
+    @tag :security_regression
+    test "security regression: retires a free branch at the expected OID only", %{
+      repo_path: repo_path
+    } do
+      branch = "test/delete-ref-ok"
+      head = git_rev_parse(repo_path, "HEAD")
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+
+      assert :ok = Git.delete_branch_ref(repo_path, branch, head)
+      assert :ok = Git.delete_branch_ref(repo_path, branch, head)
+      refute branch_exists?(repo_path, branch)
+    end
+
+    @tag :security_regression
+    test "security regression: expected-OID replacement race fails closed", %{
+      repo_path: repo_path,
+      tmp_dir: tmp_dir
+    } do
+      branch = "test/delete-ref-oid-race"
+      head = git_rev_parse(repo_path, "HEAD")
+      worktree_path = Path.join(tmp_dir, "oid-race-wt")
+      create_linked_worktree(repo_path, worktree_path, branch)
+
+      File.write!(Path.join(worktree_path, "moved.txt"), "moved\n")
+      {_, 0} = System.cmd("git", ["add", "moved.txt"], cd: worktree_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "advance tip"], cd: worktree_path)
+      new_tip = git_rev_parse(worktree_path, "HEAD")
+      refute new_tip == head
+
+      # Unregister the worktree checkout so the ref is free, then attempt
+      # deletion with the stale expected OID.
+      identity = worktree_removal_identity(repo_path, worktree_path)
+      assert :ok = Git.remove_worktree(repo_path, worktree_path, identity)
+
+      assert {:error, :branch_ref_oid_mismatch} =
+               Git.delete_branch_ref(repo_path, branch, head)
+
+      assert branch_exists?(repo_path, branch)
+      assert git_rev_parse(repo_path, branch) == new_tip
+    end
+
+    @tag :security_regression
+    test "security regression: checked-out branch is rejected", %{
+      repo_path: repo_path,
+      tmp_dir: tmp_dir
+    } do
+      branch = "test/delete-ref-checked-out"
+      head = git_rev_parse(repo_path, "HEAD")
+      worktree_path = Path.join(tmp_dir, "checked-out-wt")
+      create_linked_worktree(repo_path, worktree_path, branch)
+
+      assert {:error, :branch_checked_out} =
+               Git.delete_branch_ref(repo_path, branch, head)
+
+      assert branch_exists?(repo_path, branch)
+      assert File.dir?(worktree_path)
+    end
+
+    @tag :security_regression
+    test "security regression: exit-0 dirty update-ref output is rejected, not reclassified as success",
+         %{repo_path: repo_path} do
+      branch = "test/delete-ref-dirty-success"
+      head = git_rev_parse(repo_path, "HEAD")
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+
+      # One-shot process flag that APPENDS synthetic stderr to the real
+      # update-ref exit-0 result.  This can only force fail-closed — never
+      # force false success or alter a real failure.  Production builds do
+      # not compile this seam.
+      Process.put(
+        {Git, {:update_ref_delete, :dirty_output}},
+        {"", "warning: suspicious output\n"}
+      )
+
+      assert {:error, :git_update_ref_dirty_success} =
+               Git.delete_branch_ref(repo_path, branch, head)
+
+      # The exact eligible delete may already have happened before Git emitted
+      # the unexpected output. The critical contract is that it is not reported
+      # as a clean success; durable settlement can reconcile the exact ref.
+      refute branch_exists?(repo_path, branch)
+    end
+
+    @tag :security_regression
+    test "security regression: exit-0 dirty restore output is rejected on checkout-race CAS-restore",
+         %{repo_path: repo_path, tmp_dir: tmp_dir} do
+      branch = "test/delete-ref-restore-dirty"
+      head = git_rev_parse(repo_path, "HEAD")
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      race_worktree = Path.join(tmp_dir, "restore-dirty-worktree")
+
+      # Trigger the checkout race: a worktree checkout lands inside the
+      # precheck -> CAS-delete window so the CAS-restore path runs.
+      Process.put(
+        {Git, :pre_delete_branch_ref_hook},
+        fn _repo, br ->
+          {_, 0} = System.cmd("git", ["worktree", "add", race_worktree, br], cd: repo_path)
+        end
+      )
+
+      # Append synthetic stderr to the real CAS-restore exit-0 result.
+      Process.put({Git, {:update_ref_restore, :dirty_output}}, {"", "warning: dirty restore\n"})
+
+      assert {:error, :git_update_ref_restore_dirty_success} =
+               Git.delete_branch_ref(repo_path, branch, head)
+
+      # Branch is preserved — the dirty restore output surfaced explicit
+      # residue rather than silently accepting the restore.
+      assert {:ok, {:present, ^head}} = Git.observe_branch_ref(repo_path, branch)
+
+      _ = System.cmd("git", ["worktree", "remove", "--force", race_worktree], cd: repo_path)
+      _ = System.cmd("git", ["branch", "-D", branch], cd: repo_path)
+    end
+  end
+
+  describe "observe_branch_ref" do
+    @tag :security_regression
+    test "returns the present OID for a live branch", %{repo_path: repo_path} do
+      branch = "test/observe-present"
+      head = git_rev_parse(repo_path, "HEAD")
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+
+      assert {:ok, {:present, ^head}} = Git.observe_branch_ref(repo_path, branch)
+    end
+
+    @tag :security_regression
+    test "returns exact absence for a missing branch", %{repo_path: repo_path} do
+      assert {:ok, :absent} = Git.observe_branch_ref(repo_path, "test/observe-missing")
+    end
+
+    @tag :security_regression
+    test "security regression: corrupt ref is NOT absence (fail closed)", %{
+      repo_path: repo_path
+    } do
+      # A broken loose ref shares rev-parse's exit code with a genuinely absent
+      # ref; the only distinguishing signal is the broken-ref warning on
+      # stderr. Observation must surface an error rather than report absence,
+      # so settlement never treats a corrupt ref as already-retired.
+      corrupt_ref = Path.join([repo_path, ".git", "refs", "heads", "test", "observe-corrupt"])
+      File.mkdir_p!(Path.dirname(corrupt_ref))
+      File.write!(corrupt_ref, "NOT-A-VALID-OID\n")
+
+      assert {:error, _reason} = Git.observe_branch_ref(repo_path, "test/observe-corrupt")
+      refute match?({:ok, :absent}, Git.observe_branch_ref(repo_path, "test/observe-corrupt"))
+    end
+
+    @tag :security_regression
+    test "security regression: delete_branch_ref on a corrupt ref fails closed", %{
+      repo_path: repo_path
+    } do
+      head = git_rev_parse(repo_path, "HEAD")
+      corrupt_ref = Path.join([repo_path, ".git", "refs", "heads", "test", "delete-corrupt"])
+      File.mkdir_p!(Path.dirname(corrupt_ref))
+      File.write!(corrupt_ref, "NOT-A-VALID-OID\n")
+
+      # Must NOT return :ok (which would mean "idempotent absence") for a ref
+      # whose state git itself flagged as broken.
+      assert {:error, _reason} =
+               Git.delete_branch_ref(repo_path, "test/delete-corrupt", head)
+    end
+
+    @tag :security_regression
+    test "security regression: similarly prefixed but non-exact ref is absent (not ambiguous)", %{
+      repo_path: repo_path
+    } do
+      # When a branch "test/prefix-observe" exists, observing "test/prefix-observe-x"
+      # must NOT match it. With strict for-each-ref exact matching, the non-existent
+      # ref returns :absent — no ambiguity with the existing branch.
+      branch = "test/prefix-observe"
+      head = git_rev_parse(repo_path, "HEAD")
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+
+      # The actual branch must be observable
+      assert {:ok, {:present, ^head}} = Git.observe_branch_ref(repo_path, branch)
+
+      # Non-existent refs that share a prefix return :absent (for-each-ref exact match)
+      assert {:ok, :absent} = Git.observe_branch_ref(repo_path, "test/prefix-observe-x")
+      assert {:ok, :absent} = Git.observe_branch_ref(repo_path, "test/prefix")
+    end
+
+    @tag :security_regression
+    test "security regression: OID is returned lowercase regardless of git casing", %{
+      repo_path: repo_path
+    } do
+      branch = "test/observe-case"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+
+      assert {:ok, {:present, oid}} = Git.observe_branch_ref(repo_path, branch)
+      assert oid == String.downcase(oid)
+      assert String.match?(oid, ~r/\A[0-9a-f]{40}\z/)
+    end
+
+    @tag :security_regression
+    test "security regression: invalid arguments return typed error", %{repo_path: repo_path} do
+      assert {:error, _} = Git.observe_branch_ref(repo_path, "")
+      assert {:error, _} = Git.observe_branch_ref(repo_path, "HEAD")
+      assert {:error, _} = Git.observe_branch_ref(nil, "branch")
+    end
+
+    @tag :security_regression
+    test "security regression: checkout race between precheck and CAS delete restores the ref",
+         %{repo_path: repo_path, tmp_dir: tmp_dir} do
+      # The race window this boundary must close: a concurrent worktree checkout
+      # lands AFTER `reject_checked_out_branch` passes but BEFORE `update-ref -d`
+      # retires the ref. The precheck cannot see it, the CAS delete succeeds, and
+      # the post-delete probe must detect the orphaned checkout and CAS-restore
+      # the exact expected ref so it is not silently lost.
+      branch = "test/delete-checkout-race"
+      head = git_rev_parse(repo_path, "HEAD")
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      race_worktree = Path.join(tmp_dir, "race-worktree")
+
+      # Deterministic injection: check out the branch inside the race window.
+      Process.put(
+        {Git, :pre_delete_branch_ref_hook},
+        fn _repo, br ->
+          {_, 0} = System.cmd("git", ["worktree", "add", race_worktree, br], cd: repo_path)
+        end
+      )
+
+      assert {:error, :branch_checked_out_race} =
+               Git.delete_branch_ref(repo_path, branch, head)
+
+      # The exact expected ref is restored — never silently lost to the race.
+      assert {:ok, {:present, ^head}} = Git.observe_branch_ref(repo_path, branch)
+      assert git_rev_parse(repo_path, branch) == head
+
+      # The racing checkout is still registered; cleanup the worktree and ref.
+      assert File.dir?(race_worktree)
+      _ = System.cmd("git", ["worktree", "remove", "--force", race_worktree], cd: repo_path)
+      _ = System.cmd("git", ["branch", "-D", branch], cd: repo_path)
+    end
+
+    @tag :security_regression
+    test "security regression: restored ref with no surviving checkout reports checkout-lost, not successful race confirmation",
+         %{repo_path: repo_path, tmp_dir: tmp_dir} do
+      # Race-within-a-race: a worktree checkout lands inside the precheck->CAS
+      # delete window (triggering the CAS-restore path), then vanishes (e.g. a
+      # concurrent `worktree remove`) BEFORE confirm_race_restore re-probes the
+      # inventory. The ref is restored to the exact expected OID, but no
+      # worktree holds it. This MUST surface as :branch_ref_restore_checkout_lost
+      # (honest residue), NOT :ok (which would masquerade as a successfully
+      # confirmed race -> :branch_checked_out_race). Before the clause-order
+      # fix, {:ok, _path} shadowed {:ok, nil} and nil was silently treated as a
+      # surviving checkout, making the explicit checkout-lost branch dead.
+      branch = "test/restore-checkout-lost"
+      head = git_rev_parse(repo_path, "HEAD")
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      race_worktree = Path.join(tmp_dir, "restore-lost-worktree")
+
+      # Hook 1 (precheck -> CAS delete window): check out the branch so the
+      # post-delete probe sees ref-absent + worktree-present and enters the
+      # CAS-restore path.
+      Process.put(
+        {Git, :pre_delete_branch_ref_hook},
+        fn _repo, br ->
+          {_, 0} = System.cmd("git", ["worktree", "add", race_worktree, br], cd: repo_path)
+        end
+      )
+
+      # Hook 2 (CAS-restore -> confirm window): the racing checkout vanishes
+      # before confirm_race_restore re-probes the inventory. The ref was already
+      # restored to the exact OID, so confirm sees present-at-expected + nil
+      # worktree -> :branch_ref_restore_checkout_lost.
+      Process.put(
+        {Git, :pre_confirm_restore_hook},
+        fn _repo, _br ->
+          {_, 0} =
+            System.cmd("git", ["worktree", "remove", "--force", race_worktree], cd: repo_path)
+        end
+      )
+
+      assert {:error, :branch_ref_restore_checkout_lost} =
+               Git.delete_branch_ref(repo_path, branch, head)
+
+      # The exact expected ref is still present — restored, never silently lost
+      # when the checkout vanished. This is the honest-residue guarantee.
+      assert {:ok, {:present, ^head}} = Git.observe_branch_ref(repo_path, branch)
+      assert git_rev_parse(repo_path, branch) == head
+
+      # The racing checkout was removed by the confirm-window hook.
+      refute File.dir?(race_worktree)
+      _ = System.cmd("git", ["branch", "-D", branch], cd: repo_path)
+    end
+
+    @tag :security_regression
+    test "security regression: delete_branch_ref on a non-existent branch is idempotent",
+         %{repo_path: repo_path} do
+      head = git_rev_parse(repo_path, "HEAD")
+      assert :ok = Git.delete_branch_ref(repo_path, "test/delete-idempotent", head)
+    end
+
+    @tag :security_regression
+    test "security regression: SHA-256 repositories use 64-hex OIDs for observe, delete, and race-restore",
+         %{tmp_dir: tmp_dir} do
+      sha256_repo = Path.join(tmp_dir, "sha256-repo")
+
+      # Skip gracefully on Git builds without SHA-256 object format support;
+      # run the full regression where the local Git supports it.
+      if create_sha256_git_repo(sha256_repo) == :ok do
+        branch = "test/sha256-observe"
+        head = git_rev_parse(sha256_repo, "HEAD")
+        assert String.length(head) == 64
+        {_, 0} = System.cmd("git", ["branch", branch], cd: sha256_repo)
+
+        assert {:ok, {:present, ^head}} = Git.observe_branch_ref(sha256_repo, branch)
+        assert String.length(head) == 64
+
+        # Delete at the expected SHA-256 OID succeeds.
+        assert :ok = Git.delete_branch_ref(sha256_repo, branch, head)
+        assert {:ok, :absent} = Git.observe_branch_ref(sha256_repo, branch)
+
+        # Race-restore must derive a 64-char zero old-OID (not hardcoded 40).
+        {_, 0} = System.cmd("git", ["branch", branch], cd: sha256_repo)
+
+        race_worktree = Path.join(tmp_dir, "sha256-race-wt")
+
+        Process.put(
+          {Git, :pre_delete_branch_ref_hook},
+          fn _repo, br ->
+            {_, 0} = System.cmd("git", ["worktree", "add", race_worktree, br], cd: sha256_repo)
+          end
+        )
+
+        assert {:error, :branch_checked_out_race} =
+                 Git.delete_branch_ref(sha256_repo, branch, head)
+
+        # Ref restored to the exact SHA-256 OID — never silently lost.
+        assert {:ok, {:present, ^head}} = Git.observe_branch_ref(sha256_repo, branch)
+        assert git_rev_parse(sha256_repo, branch) == head
+
+        _ = System.cmd("git", ["worktree", "remove", "--force", race_worktree], cd: sha256_repo)
+        _ = System.cmd("git", ["branch", "-D", branch], cd: sha256_repo)
+      end
+    end
+  end
+
   defp worktree_removal_identity(repo_path, worktree_path) do
     {:ok, registration} = Git.worktree_registration(repo_path, worktree_path)
 
@@ -866,13 +1204,24 @@ defmodule Arbor.Actions.GitTest do
   end
 
   defp create_linked_worktree(repo_path, worktree_path, branch) do
-    assert {_output, 0} =
-             System.cmd(
-               "git",
-               ["worktree", "add", "-b", branch, worktree_path],
-               cd: repo_path,
-               stderr_to_stdout: true
-             )
+    # Try checking out an existing branch first; if it doesn't exist, create it.
+    {_output, exit_code} =
+      System.cmd(
+        "git",
+        ["worktree", "add", worktree_path, branch],
+        cd: repo_path,
+        stderr_to_stdout: true
+      )
+
+    if exit_code != 0 do
+      assert {_output, 0} =
+               System.cmd(
+                 "git",
+                 ["worktree", "add", "-b", branch, worktree_path],
+                 cd: repo_path,
+                 stderr_to_stdout: true
+               )
+    end
   end
 
   defp worktree_lstat_identity(path) do
@@ -880,6 +1229,28 @@ defmodule Arbor.Actions.GitTest do
     |> File.lstat!()
     |> Map.from_struct()
     |> Map.take([:type, :major_device, :minor_device, :inode])
+  end
+
+  # Create a SHA-256 repository for regression coverage. Returns :unsupported
+  # (after cleanup) when the local Git is not compiled with sha256 support so
+  # the caller can skip gracefully.
+  defp create_sha256_git_repo(path) do
+    File.mkdir_p!(path)
+
+    case System.cmd("git", ["init", "--object-format=sha256"], cd: path, stderr_to_stdout: true) do
+      {_output, 0} ->
+        {_, 0} = System.cmd("git", ["config", "user.email", "test@example.com"], cd: path)
+        {_, 0} = System.cmd("git", ["config", "user.name", "Test User"], cd: path)
+        readme = Path.join(path, "README.md")
+        File.write!(readme, "# SHA-256 Test\n")
+        {_, 0} = System.cmd("git", ["add", "README.md"], cd: path)
+        {_, 0} = System.cmd("git", ["commit", "-m", "Initial commit"], cd: path)
+        :ok
+
+      {_output, _exit} ->
+        File.rm_rf!(path)
+        :unsupported
+    end
   end
 
   # Boundary promised by expected_* bindings is before staging, not only before
@@ -903,5 +1274,22 @@ defmodule Arbor.Actions.GitTest do
     assert after_snap.head == snapshot.head
     assert after_snap.index == snapshot.index
     assert after_snap.status == snapshot.status
+  end
+
+  defp git_rev_parse(path, ref) do
+    {output, 0} = System.cmd("git", ["rev-parse", ref], cd: path, stderr_to_stdout: true)
+    String.trim(output)
+  end
+
+  defp branch_exists?(repo_path, branch) do
+    case System.cmd(
+           "git",
+           ["show-ref", "--verify", "--quiet", "refs/heads/#{branch}"],
+           cd: repo_path,
+           stderr_to_stdout: true
+         ) do
+      {_, 0} -> true
+      _ -> false
+    end
   end
 end

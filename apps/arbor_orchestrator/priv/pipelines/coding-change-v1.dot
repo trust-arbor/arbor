@@ -1388,6 +1388,15 @@ digraph CodingChangeV1 {
     output_key="mode"
   ]
 
+  // Terminal no-change / declined: discard owned worktree and retire the
+  // invocation-created branch when tip still equals the recorded base.
+  prep_release_mode_discard [
+    type="transform",
+    transform="constant",
+    expression="discard",
+    output_key="mode"
+  ]
+
   release_workspace [
     type="exec",
     target="action",
@@ -1751,13 +1760,15 @@ digraph CodingChangeV1 {
   status_pr_created -> close_worker
 
   // Shared cleanup tail (worker opened): close may fail; both outcomes make
-  // one deterministic decision. Retain on failures, remove aborted/no-change
-  // work, and let the reviewed plan decide successful handoff/publication.
+  // one deterministic decision. Retain on failures, discard no-change/declined
+  // residue (owned worktree + invocation-created branch at base), remove
+  // successful non-retained worktrees without branch deletion, and let the
+  // reviewed plan decide successful handoff/publication.
   close_worker -> route_release_mode [condition="outcome=success"]
   close_worker -> route_release_mode [condition="outcome=fail"]
 
-  route_release_mode -> prep_release_mode_remove [condition="context.status=declined"]
-  route_release_mode -> prep_release_mode_remove [condition="context.status=no_changes"]
+  route_release_mode -> prep_release_mode_discard [condition="context.status=declined"]
+  route_release_mode -> prep_release_mode_discard [condition="context.status=no_changes"]
 
   route_release_mode -> prep_release_mode_retain [condition="context.status=validation_failed"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=rework_exhausted"]
@@ -1784,4 +1795,5 @@ digraph CodingChangeV1 {
 
   prep_release_mode_retain -> release_workspace -> done
   prep_release_mode_remove -> release_workspace
+  prep_release_mode_discard -> release_workspace
 }

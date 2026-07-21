@@ -978,6 +978,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "expression" => "remove",
       "output_key" => "mode"
     },
+    "prep_release_mode_discard" => %{
+      "type" => "transform",
+      "transform" => "constant",
+      "expression" => "discard",
+      "output_key" => "mode"
+    },
     "prep_release_mode_retain" => %{
       "type" => "transform",
       "transform" => "constant",
@@ -1023,12 +1029,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     ],
     "prep_release_mode_only" => [{"release_workspace_only", nil}],
     "prep_release_mode_remove" => [{"release_workspace", nil}],
+    "prep_release_mode_discard" => [{"release_workspace", nil}],
     "prep_release_mode_retain" => [{"release_workspace", nil}],
     "release_workspace" => [{"done", nil}],
     "release_workspace_only" => [{"status_pipeline_error", nil}],
     "route_release_mode" => [
-      {"prep_release_mode_remove", "context.status=declined"},
-      {"prep_release_mode_remove", "context.status=no_changes"},
+      {"prep_release_mode_discard", "context.status=declined"},
+      {"prep_release_mode_discard", "context.status=no_changes"},
       {"prep_release_mode_retain", "context.status=approval_denied"},
       {"prep_release_mode_retain", "context.status=pipeline_error"},
       {"prep_release_mode_retain", "context.status=pr_failed"},

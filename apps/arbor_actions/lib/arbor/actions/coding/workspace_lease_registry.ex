@@ -120,13 +120,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   alias Arbor.Actions.Config
   alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore, as: BranchLifecycle
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: RetentionJournal
   alias Arbor.Actions.Git
   alias Arbor.Common.SafePath
   alias Arbor.Persistence
 
   @type ownership :: :owned | :reused
-  @type release_mode :: :retain | :remove
+  @type branch_provenance :: :created | :reused | :unknown
+  @type release_mode :: :retain | :remove | :discard
+  @type discard_phase :: :worktree | :branch
 
   # Owner-death retries are a liveness aid, never deletion authority. An
   # exhausted quarantine remains available to its exact task+principal for
@@ -165,6 +168,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           branch: String.t(),
           base_commit: String.t(),
           ownership: ownership(),
+          # Path ownership is not branch ownership. Branch deletion is gated
+          # solely by branch_provenance == :created plus tip/base equality.
+          branch_provenance: branch_provenance(),
           active: boolean(),
           cleanup_armed: boolean()
         }
@@ -180,12 +186,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           branch: String.t(),
           base_commit: String.t(),
           ownership: :owned,
-          # Hot lifecycle: :retained | :active_orphaned (same-BEAM active marker).
-          lifecycle: :retained | :active_orphaned,
+          branch_provenance: branch_provenance(),
+          # Hot lifecycle: :retained | :active_orphaned | :discarding.
+          lifecycle: :retained | :active_orphaned | :discarding,
+          # Present only while lifecycle is :discarding.
+          discard_phase: discard_phase() | nil,
           runtime_id: String.t(),
           target: tuple(),
-          lstat_identity: map(),
-          worktree_registration: map(),
+          lstat_identity: map() | nil,
+          worktree_registration: map() | nil,
           expiry_generation: reference(),
           expiry_ref: reference() | nil,
           expires_at: DateTime.t(),
@@ -329,7 +338,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   Modes:
   * `:retain` / `"retain"` - disarm cancellation cleanup and preserve the worktree
-  * `:remove` / `"remove"` - remove only invocation-owned worktrees; reused paths survive
+  * `:remove` / `"remove"` - remove only invocation-owned worktrees; reused paths
+    survive. Local branches are always preserved for review.
+  * `:discard` / `"discard"` - remove an invocation-owned worktree and retire the
+    local branch only when this invocation created that exact branch and its tip
+    still equals the recorded base. Crash-durable: intent is journaled before
+    destructive work. Reused/pre-existing branches and uncertain provenance fail
+    closed by preserving the ref.
 
   Idempotent: releasing an unknown/already-released id returns success.
   """
@@ -505,12 +520,25 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       branch: lease.branch,
       base_commit: lease.base_commit,
       ownership: ownership_string(lease.ownership),
+      branch_provenance: branch_provenance_string(Map.get(lease, :branch_provenance, :unknown)),
       active: lease.active == true
     }
 
-    case Map.get(lease, :expires_at) do
-      %DateTime{} = expires_at -> Map.put(view, :expires_at, DateTime.to_iso8601(expires_at))
-      _ -> view
+    view =
+      case Map.get(lease, :expires_at) do
+        %DateTime{} = expires_at -> Map.put(view, :expires_at, DateTime.to_iso8601(expires_at))
+        _ -> view
+      end
+
+    case Map.get(lease, :discard_phase) do
+      phase when phase in [:worktree, :branch] ->
+        Map.put(view, :discard_phase, Atom.to_string(phase))
+
+      phase when phase in ["worktree", "branch"] ->
+        Map.put(view, :discard_phase, phase)
+
+      _ ->
+        view
     end
   end
 
@@ -767,11 +795,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                   {:reply, {:error, :not_authorized}, state}
                 end
 
-              {:ok, retained} when mode == :remove ->
+              {:ok, retained} when mode in [:remove, :discard] ->
                 # Exact task+principal may force-settle retained leases (TTL
-                # evidence) without waiting for expiry. Retain mode remains
-                # idempotent success for non-orphaned retained entries.
-                release_retained_for_authorized_caller(state, retained, caller)
+                # evidence) without waiting for expiry. Discard also continues
+                # crash-durable branch retirement from a discarding marker.
+                # Retain mode remains idempotent success for non-orphaned
+                # retained entries.
+                release_retained_for_authorized_caller(state, retained, caller, mode)
 
               _ ->
                 {:reply, {:ok, already_released_view(workspace_id)}, state}
@@ -1090,14 +1120,60 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   # -- Internals ------------------------------------------------------
 
-  defp release_retained_for_authorized_caller(state, retained, caller) do
+  defp release_retained_for_authorized_caller(state, retained, caller, mode) do
     if principal_task_match?(retained, caller) do
-      case release_retained_for_settle(state, retained) do
+      result =
+        cond do
+          # Never downgrade an in-flight discard: retain/remove/discard all
+          # continue the crash-durable phases so settlement cannot silently
+          # reclassify a discarding marker as a plain remove/retain.
+          BranchLifecycle.discarding?(retained) ->
+            continue_discard_retained(state, retained)
+
+          mode == :discard ->
+            begin_discard_from_retained(state, retained)
+
+          true ->
+            release_retained_for_settle(state, retained)
+        end
+
+      case result do
         {:ok, result, state} -> {:reply, {:ok, result}, state}
         {:error, reason, state} -> {:reply, {:error, reason}, state}
       end
     else
       {:reply, {:error, :not_authorized}, state}
+    end
+  end
+
+  # Convert a retained durable marker to discarding/worktree before any
+  # destructive cleanup so crash/restart resumes discard rather than TTL remove.
+  defp begin_discard_from_retained(state, retained) do
+    discard_marker =
+      Map.merge(retained, %{
+        lifecycle: :discarding,
+        discard_phase: :worktree,
+        runtime_id: Map.get(retained, :runtime_id) || state.retention_runtime_id,
+        durable_lifecycle: "discarding",
+        branch_provenance: Map.get(retained, :branch_provenance, :unknown),
+        cleanup_failure: nil,
+        dormant: false
+      })
+
+    case persist_retained_marker(state, discard_marker) do
+      :ok ->
+        cancel_expiry(Map.get(retained, :expiry_ref))
+
+        discard_marker =
+          discard_marker
+          |> Map.put(:durable_lifecycle, nil)
+          |> Map.put(:expiry_ref, nil)
+
+        state = put_retained(state, discard_marker)
+        continue_discard_retained(state, discard_marker)
+
+      {:error, reason} ->
+        {:error, {:retention_journal_write_failed, reason}, state}
     end
   end
 
@@ -3426,8 +3502,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     owner_ref = Process.monitor(prepared.owner_pid)
 
     case run_create_worktree(prepared, capacity_mode == :no_new_marker) do
-      {:ok, worktree_path, ownership, base_commit} ->
-        case prepare_created_lease(prepared, owner_ref, worktree_path, ownership, base_commit) do
+      {:ok, worktree_path, ownership, base_commit, branch_provenance} ->
+        case prepare_created_lease(
+               prepared,
+               owner_ref,
+               worktree_path,
+               ownership,
+               base_commit,
+               branch_provenance
+             ) do
           {:ok, lease, created_identity} ->
             if Map.has_key?(state.leases, lease.workspace_id) do
               Process.demonitor(owner_ref, [:flush])
@@ -3518,8 +3601,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp prepare_created_lease(prepared, owner_ref, worktree_path, ownership, base_commit) do
+  defp prepare_created_lease(
+         prepared,
+         owner_ref,
+         worktree_path,
+         ownership,
+         base_commit,
+         branch_provenance
+       ) do
     with {:ok, ownership_atom} <- normalize_ownership(ownership),
+         {:ok, provenance_atom} <- normalize_branch_provenance(branch_provenance),
          :ok <- require_binary(worktree_path, :worktree_path),
          {:ok, canonical_worktree_path} <- canonical_existing_path(worktree_path),
          {:ok, created_identity} <-
@@ -3542,6 +3633,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             branch: prepared.branch,
             base_commit: base_commit,
             ownership: ownership_atom,
+            branch_provenance: provenance_atom,
             active: true,
             cleanup_armed: true
           }
@@ -3767,6 +3859,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       branch: lease.branch,
       base_commit: lease.base_commit,
       ownership: :owned,
+      branch_provenance: Map.get(lease, :branch_provenance, :unknown),
       lifecycle: :retained,
       runtime_id: state.retention_runtime_id,
       durable_lifecycle: "active",
@@ -3961,6 +4054,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         branch: refreshed_retained.branch,
         base_commit: refreshed_retained.base_commit,
         ownership: :owned,
+        branch_provenance: Map.get(refreshed_retained, :branch_provenance, :unknown),
         active: true,
         cleanup_armed: true,
         retention_marker_active: true,
@@ -4064,13 +4158,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       end
 
     try do
-      case prepared.create_worktree do
-        fun when is_function(fun, 3) ->
-          fun.(prepared.repo_path, prepared.branch, create_params)
+      result =
+        case prepared.create_worktree do
+          fun when is_function(fun, 3) ->
+            fun.(prepared.repo_path, prepared.branch, create_params)
 
-        _ ->
-          Workspace.create_worktree(prepared.repo_path, prepared.branch, create_params)
-      end
+          _ ->
+            Workspace.create_worktree(prepared.repo_path, prepared.branch, create_params)
+        end
+
+      normalize_create_worktree_result(result)
     rescue
       error ->
         {:error, {:create_worktree_raised, Exception.message(error)}}
@@ -4079,6 +4176,20 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         {:error, {:create_worktree_caught, kind, reason}}
     end
   end
+
+  # Accept both modern 5-tuples (with branch provenance) and legacy 4-tuples
+  # from test doubles / older injectors. Missing provenance fails closed as
+  # :unknown so discard never deletes the branch.
+  defp normalize_create_worktree_result({:ok, path, ownership, base_commit, provenance}),
+    do: {:ok, path, ownership, base_commit, provenance}
+
+  defp normalize_create_worktree_result({:ok, path, ownership, base_commit}),
+    do: {:ok, path, ownership, base_commit, :unknown}
+
+  defp normalize_create_worktree_result({:error, _} = error), do: error
+
+  defp normalize_create_worktree_result(other),
+    do: {:error, {:invalid_create_worktree_result, other}}
 
   # Post-create registration/finalization failed. Delete only when the callback
   # supplied a valid owned marker; unknown ownership is never deletion authority.
@@ -4261,25 +4372,52 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  defp release_orphaned_retained(state, retained, :discard) do
+    discard_marker =
+      Map.merge(retained, %{
+        lifecycle: :discarding,
+        discard_phase: :worktree,
+        runtime_id: state.retention_runtime_id,
+        durable_lifecycle: "discarding",
+        branch_provenance: Map.get(retained, :branch_provenance, :unknown)
+      })
+
+    case persist_retained_marker(state, discard_marker) do
+      :ok ->
+        state = put_retained(state, Map.put(discard_marker, :durable_lifecycle, nil))
+        continue_discard_retained(state, Map.put(discard_marker, :durable_lifecycle, nil))
+
+      {:error, reason} ->
+        {:error, {:retention_journal_write_failed, reason}, state}
+    end
+  end
+
   # Force-settle a hot retained/orphaned lease after exact task+principal auth.
   defp release_retained_for_settle(state, retained) do
-    if both_paths_positively_absent?(retained.repo_path, retained.worktree_path) do
-      settle_both_absent_retained(state, retained)
-    else
-      case remove_retained_now(state, retained) do
-        {:ok, state} ->
-          result =
-            retained
-            |> Map.put(:active, false)
-            |> public_view()
-            |> Map.put(:active, false)
-            |> Map.put(:status, "removed")
+    cond do
+      # Task settlement must continue an in-flight discard rather than treat it
+      # as a plain remove; any leftover marker makes settlement report residue.
+      BranchLifecycle.discarding?(retained) ->
+        continue_discard_retained(state, retained)
 
-          {:ok, result, state}
+      both_paths_positively_absent?(retained.repo_path, retained.worktree_path) ->
+        settle_both_absent_retained(state, retained)
 
-        {:error, reason, state} ->
-          {:error, reason, state}
-      end
+      true ->
+        case remove_retained_now(state, retained) do
+          {:ok, state} ->
+            result =
+              retained
+              |> Map.put(:active, false)
+              |> public_view()
+              |> Map.put(:active, false)
+              |> Map.put(:status, "removed")
+
+            {:ok, result, state}
+
+          {:error, reason, state} ->
+            {:error, reason, state}
+        end
     end
   end
 
@@ -4523,6 +4661,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           branch: lease.branch,
           base_commit: lease.base_commit,
           ownership: :owned,
+          branch_provenance: Map.get(lease, :branch_provenance, :unknown),
           lifecycle: :retained,
           runtime_id: state.retention_runtime_id,
           durable_lifecycle: "retained",
@@ -4583,8 +4722,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp do_release(
          state,
          %{ownership: :owned, owner_death_deletion_disabled: true} = lease,
-         :remove
-       ) do
+         mode
+       )
+       when mode in [:remove, :discard] do
     # Exact task+principal can resume a quarantine, but it cannot turn a path
     # that was never identity-pinned into force-delete authority. Reactivation
     # pins a stable filesystem + registration identity; removal must prove the
@@ -4592,7 +4732,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     with expected when is_map(expected) <- Map.get(lease, :owner_death_deletion_identity),
          {:ok, current} <- capture_quarantine_deletion_identity(lease),
          true <- current == expected do
-      do_release_after_identity_capture(state, lease)
+      if mode == :discard do
+        do_release_discard(state, lease)
+      else
+        do_release_after_identity_capture(state, lease)
+      end
     else
       _ ->
         {:error, :quarantine_identity_unavailable, state}
@@ -4600,6 +4744,50 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp do_release(state, lease, :remove), do: do_release_after_identity_capture(state, lease)
+
+  defp do_release(state, lease, :discard), do: do_release_discard(state, lease)
+
+  # Discard: journal intent before any destructive work, remove owned worktree,
+  # then retire the branch only when provenance is :created and tip still equals
+  # the recorded base. Uncertain provenance / tip mismatch fail closed.
+  defp do_release_discard(state, lease) when lease.ownership == :reused do
+    state = drop_lease(state, lease)
+    Process.demonitor(lease.owner_ref, [:flush])
+
+    result =
+      lease
+      |> public_view()
+      |> Map.put(:active, false)
+      |> Map.put(:status, "discarded")
+      |> Map.put(:branch_retired, false)
+      |> Map.put(:branch_preserved_reason, "reused_worktree")
+
+    {:ok, result, state}
+  end
+
+  defp do_release_discard(state, lease) when lease.ownership == :owned do
+    with {:ok, retained_like} <- retained_view_from_active_lease(state, lease) do
+      discard_marker =
+        retained_like
+        |> Map.put(:lifecycle, :discarding)
+        |> Map.put(:discard_phase, :worktree)
+        |> Map.put(:durable_lifecycle, "discarding")
+        |> Map.put(:branch_provenance, Map.get(lease, :branch_provenance, :unknown))
+
+      case persist_retained_marker(state, discard_marker) do
+        :ok ->
+          state = drop_lease(state, lease)
+          Process.demonitor(lease.owner_ref, [:flush])
+          state = put_retained(state, Map.put(discard_marker, :durable_lifecycle, nil))
+          continue_discard_retained(state, Map.put(discard_marker, :durable_lifecycle, nil))
+
+        {:error, reason} ->
+          {:error, {:retention_journal_write_failed, reason}, state}
+      end
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
 
   defp do_release_after_identity_capture(state, lease) do
     if lease.ownership == :owned do
@@ -4648,8 +4836,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                   {:ok, state}
 
                 {:error, reason} ->
-                  # Path is gone but marker remains — schedule bounded marker
-                  # deletion retries rather than immediately going dormant.
+                  # Path is gone but durable marker remains — schedule bounded
+                  # marker deletion retries.  When reservation also fails the
+                  # caller installs :active_orphaned residue.
                   state =
                     schedule_retained_retry(
                       state,
@@ -4686,6 +4875,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          branch: lease.branch,
          base_commit: lease.base_commit,
          ownership: :owned,
+         branch_provenance: Map.get(lease, :branch_provenance, :unknown),
          lifecycle: :retained,
          runtime_id: Map.get(lease, :retention_runtime_id, state.retention_runtime_id),
          durable_lifecycle: "active",
@@ -4703,6 +4893,406 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
        }}
     end
   end
+
+  # Continue crash-durable discard from a journaled marker. Never silently
+  # success when the worktree is gone but branch retirement still pending.
+  defp continue_discard_retained(state, retained) do
+    case BranchLifecycle.normalize_phase(Map.get(retained, :discard_phase, :worktree)) do
+      {:ok, :worktree} -> discard_worktree_phase(state, retained)
+      {:ok, :branch} -> discard_branch_phase(state, retained)
+      :invalid -> {:error, :invalid_discard_phase, state}
+    end
+  end
+
+  defp discard_worktree_phase(state, retained) do
+    worktree_absent? =
+      match?({:error, :enoent}, File.lstat(retained.worktree_path)) and
+        match?(
+          {:ok, :absent},
+          worktree_path_registration_presence(retained.repo_path, retained.worktree_path)
+        )
+
+    if worktree_absent? do
+      advance_discard_to_branch_phase(state, retained)
+    else
+      # Worktree cleanup is a destructive attempt: reserve before invoking the
+      # boundary so crash/restart cannot regain free attempts. Reservation
+      # failure performs no work and keeps the marker as evidence.
+      case reserve_cleanup_attempt(state, retained) do
+        {:ok, reserved, state2} ->
+          run_reserved_worktree_cleanup(state2, reserved)
+
+        {:error, :retries_exhausted, state2} ->
+          dormant_discard_marker(state2, retained, :cleanup_retries_exhausted)
+
+        {:error, _reason, state2} ->
+          # Reservation failed: no work performed. Keep the marker so restart
+          # resumes discard rather than declaring settlement.
+          {:error, :reservation_failed, state2}
+      end
+    end
+  end
+
+  defp run_reserved_worktree_cleanup(state, reserved) do
+    case invoke_retained_cleanup(state.retained_cleanup, reserved) do
+      :ok ->
+        verify_and_advance_worktree_cleanup(state, reserved)
+
+      {:error, reason} ->
+        # Schedule a retry on the already-reserved marker without a second
+        # reservation.
+        state = schedule_retry_after_failed_attempt(state, reserved, reason)
+        {:error, reason, state}
+    end
+  end
+
+  defp verify_and_advance_worktree_cleanup(state, reserved) do
+    case verify_retained_removed(reserved) do
+      :ok ->
+        advance_discard_to_branch_phase(state, reserved)
+
+      {:error, reason} ->
+        # Worktree destruction may be partial; keep the durable marker so
+        # restart resumes discard rather than declaring settlement.
+        state =
+          schedule_retry_after_failed_attempt(state, reserved, {:cleanup_unconfirmed, reason})
+
+        discard_pending_result(state, reserved, {:cleanup_unconfirmed, reason})
+    end
+  end
+
+  defp advance_discard_to_branch_phase(state, retained) do
+    branch_marker =
+      retained
+      |> BranchLifecycle.advance_to_branch_phase()
+      |> Map.put(:durable_lifecycle, "discarding")
+
+    case persist_retained_marker(state, branch_marker) do
+      :ok ->
+        cancel_expiry(Map.get(retained, :expiry_ref))
+        state = put_retained(state, Map.put(branch_marker, :durable_lifecycle, nil))
+        discard_branch_phase(state, Map.put(branch_marker, :durable_lifecycle, nil))
+
+      {:error, reason} ->
+        # Worktree is already gone; keep retrying from the worktree-phase
+        # marker so restart does not silently declare success.
+        state =
+          schedule_retry_after_failed_attempt(
+            state,
+            retained,
+            {:discard_phase_persist_failed, reason}
+          )
+
+        discard_pending_result(state, retained, {:discard_phase_persist_failed, reason})
+    end
+  end
+
+  # Branch-phase discard. The decision matrix lives in
+  # `WorkspaceBranchLifecycleCore`; this shell observes the ref, reserves retry
+  # budget before destructive attempts, and interprets decisions as effects.
+  defp discard_branch_phase(state, retained) do
+    limit = Map.get(state, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
+
+    provenance =
+      BranchLifecycle.normalize_provenance(Map.get(retained, :branch_provenance, :unknown))
+
+    observation =
+      case Git.observe_branch_ref(retained.repo_path, retained.branch) do
+        {:ok, result} -> result
+        {:error, reason} -> {:error, reason}
+      end
+
+    decision =
+      BranchLifecycle.branch_phase_decision(provenance, observation, retained.base_commit)
+
+    interpret_branch_decision(state, retained, decision, limit)
+  end
+
+  defp interpret_branch_decision(state, retained, {:settle_complete, opts}, _limit) do
+    settle_discard_complete(state, retained, Keyword.get(opts, :branch_retired, true), nil, false)
+  end
+
+  defp interpret_branch_decision(state, retained, {:settle_preserve_branch, reason}, _limit) do
+    # Reused/unknown provenance settles while preserving the pre-existing branch.
+    settle_discard_preserving_branch(state, retained, reason)
+  end
+
+  defp interpret_branch_decision(state, retained, {:dormant_preserve_branch, reason}, _limit) do
+    # Non-retryable (divergent tip / CAS mismatch): keep a dormant branch-phase
+    # marker, preserve the branch, and never claim settlement.
+    dormant_discard_marker(state, retained, reason)
+  end
+
+  defp interpret_branch_decision(state, retained, {:attempt_delete, expected_oid}, limit) do
+    # Destructive attempt: reserve before executing. Reservation failure does
+    # no work; exhaustion goes dormant with the branch preserved.
+    case reserve_cleanup_attempt(state, retained) do
+      {:ok, reserved, state2} ->
+        outcome = Git.delete_branch_ref(reserved.repo_path, reserved.branch, expected_oid)
+        interpret_delete_outcome(state2, reserved, outcome, limit)
+
+      {:error, :retries_exhausted, state2} ->
+        dormant_discard_marker(state2, retained, :retries_exhausted)
+
+      {:error, _reason, state2} ->
+        {:error, :reservation_failed, state2}
+    end
+  end
+
+  defp interpret_branch_decision(state, retained, {:retry_branch_phase, reason}, limit) do
+    # Retryable observation/delete error: reserve to bound retries, then either
+    # schedule a retry (no second reservation) or go dormant when exhausted.
+    case reserve_cleanup_attempt(state, retained) do
+      {:ok, reserved, state2} ->
+        interpret_retry_decision(state2, reserved, reason, limit)
+
+      {:error, :retries_exhausted, state2} ->
+        dormant_discard_marker(state2, retained, reason)
+
+      {:error, _reason, state2} ->
+        {:error, :reservation_failed, state2}
+    end
+  end
+
+  defp interpret_delete_outcome(state, reserved, outcome, limit) do
+    case BranchLifecycle.classify_delete_outcome(outcome) do
+      {:settle_complete, opts} ->
+        settle_discard_complete(
+          state,
+          reserved,
+          Keyword.get(opts, :branch_retired, true),
+          nil,
+          true
+        )
+
+      {:dormant_preserve_branch, reason} ->
+        dormant_discard_marker(state, reserved, reason)
+
+      {:retry_branch_phase, reason} ->
+        interpret_retry_decision(state, reserved, reason, limit)
+    end
+  end
+
+  defp interpret_retry_decision(state, reserved, reason, limit) do
+    retry_count = Map.get(reserved, :retry_count, 0)
+
+    case BranchLifecycle.resolve_retry({:retry_branch_phase, reason}, retry_count, limit) do
+      {:retry, reason} ->
+        # Schedule on the reserved marker without a second reservation.
+        state = schedule_retry_after_failed_attempt(state, reserved, reason)
+        discard_pending_result(state, reserved, reason)
+
+      {:dormant, reason} ->
+        dormant_discard_marker(state, reserved, reason)
+    end
+  end
+
+  defp discard_pending_result(state, retained, reason) do
+    result =
+      retained
+      |> Map.put(:active, false)
+      |> public_view()
+      |> Map.put(:active, false)
+      |> Map.put(:status, "discard_pending")
+      |> Map.put(:branch_retired, false)
+      |> Map.put(:cleanup_residue, true)
+      |> Map.put(:pending_reason, inspect(reason))
+
+    {:ok, result, state}
+  end
+
+  defp settle_discard_complete(state, retained, branch_retired?, preserve_reason, pre_reserved?) do
+    result =
+      retained
+      |> Map.put(:active, false)
+      |> public_view()
+      |> Map.put(:active, false)
+      |> Map.put(:branch_retired, branch_retired? == true)
+
+    result =
+      if is_nil(preserve_reason) do
+        result
+      else
+        Map.put(result, :branch_preserved_reason, safe_reason_string(preserve_reason))
+      end
+
+    case delete_retained_marker(state, retained) do
+      :ok ->
+        cancel_expiry(Map.get(retained, :expiry_ref))
+        {:ok, Map.put(result, :status, "discarded"), drop_retained(state, retained)}
+
+      {:error, reason} ->
+        # Branch/worktree settled; marker-delete failure must schedule on the
+        # retry budget.  Pre-reserved callers (interpret_delete_outcome after a
+        # successful branch delete) already hold a persisted reservation —
+        # schedule on it without incrementing again.  Unreserved callers
+        # (direct settle_complete / already-absent observation) reserve exactly
+        # once before scheduling.
+        marker_reason = {:marker_delete_failed, reason}
+
+        pending_result =
+          result
+          |> Map.put(:status, "discard_pending")
+          |> Map.put(:cleanup_residue, true)
+          |> Map.put(:pending_reason, inspect(marker_reason))
+
+        if pre_reserved? do
+          {:ok, pending_result,
+           schedule_retry_after_failed_attempt(state, retained, marker_reason)}
+        else
+          case reserve_cleanup_attempt(state, retained) do
+            {:ok, reserved, state2} ->
+              {:ok, pending_result,
+               schedule_retry_after_failed_attempt(state2, reserved, marker_reason)}
+
+            {:error, :retries_exhausted, state2} ->
+              dormant_discard_marker(state2, retained, marker_reason)
+
+            {:error, _persist_failure, state2} ->
+              {:ok, pending_result, state2}
+          end
+        end
+    end
+  end
+
+  # Reused/unknown provenance, or created+already-absent idempotent settle that
+  # preserves a pre-existing branch: drop the marker (the branch is not pending
+  # discard work) while exposing the preserved branch on the receipt. A non-owned
+  # preserved branch is not residue — there is no owned worktree and no lifecycle
+  # marker remaining, so the terminal disposition is complete discarded with
+  # branch_retired false. Marker delete failure keeps a dormant marker so
+  # settlement stays honest.
+  defp settle_discard_preserving_branch(state, retained, reason) do
+    case delete_retained_marker(state, retained) do
+      :ok ->
+        cancel_expiry(Map.get(retained, :expiry_ref))
+        state = drop_retained(state, retained)
+
+        result =
+          retained
+          |> Map.put(:active, false)
+          |> public_view()
+          |> Map.put(:active, false)
+          |> Map.put(:status, "discarded")
+          |> Map.put(:branch_retired, false)
+          |> Map.put(:branch_preserved_reason, safe_reason_string(reason))
+
+        {:ok, result, state}
+
+      {:error, delete_reason} ->
+        # Marker-delete failed on a reused/unknown branch. Reserve exactly
+        # once before scheduling — do NOT go dormant after one transient
+        # delete failure. Backend recovery will eventually remove the marker
+        # while preserving the reused branch; exhaustion goes dormant.
+        combined_reason = {reason, delete_reason}
+
+        pending_result =
+          retained
+          |> Map.put(:active, false)
+          |> public_view()
+          |> Map.put(:active, false)
+          |> Map.put(:status, "discard_pending")
+          |> Map.put(:branch_retired, false)
+          |> Map.put(:branch_preserved_reason, safe_reason_string(reason))
+          |> Map.put(:cleanup_residue, true)
+          |> Map.put(:pending_reason, inspect(combined_reason))
+
+        case reserve_cleanup_attempt(state, retained) do
+          {:ok, reserved, state2} ->
+            {:ok, pending_result,
+             schedule_retry_after_failed_attempt(state2, reserved, combined_reason)}
+
+          {:error, :retries_exhausted, state2} ->
+            dormant_discard_marker(state2, retained, combined_reason)
+
+          {:error, _persist_failure, state2} ->
+            {:ok, pending_result, state2}
+        end
+    end
+  end
+
+  # Non-retryable or exhausted outcome: preserve the branch and keep a DORMANT
+  # discarding marker. Do NOT delete the marker and do NOT claim settlement —
+  # the receipt reports a pending/dormant discard so callers and task settlement
+  # see residue. retry_count is forced to the configured limit so restart cannot
+  # regain destructive attempts.
+  #
+  # The marker preserves the original discard_phase (worktree or branch) from
+  # the retained marker. Worktree-phase exhaustion stays in worktree phase with
+  # its lstat_identity and worktree_registration evidence; only branch-phase
+  # operations produce a branch-phase dormant marker. This is honest: the
+  # evidence shows where discard stalled, not where we wish it had progressed.
+  defp dormant_discard_marker(state, retained, reason) do
+    limit = Map.get(state, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
+
+    forced_retry_count =
+      BranchLifecycle.force_exhausted(Map.get(retained, :retry_count, 0), limit)
+
+    # Preserve the current discard_phase; fall back to :branch only when the
+    # retained marker has no phase at all (shouldn't happen for discarding
+    # markers, but fail-closed to :branch for non-discarding callers).
+    retained_phase =
+      case BranchLifecycle.normalize_phase(Map.get(retained, :discard_phase)) do
+        {:ok, phase} -> phase
+        :invalid -> :branch
+      end
+
+    dormant =
+      retained
+      |> Map.put(:lifecycle, :discarding)
+      |> Map.put(:discard_phase, retained_phase)
+      |> Map.put(:dormant, true)
+      |> Map.put(:retry_count, forced_retry_count)
+      |> Map.put(:expiry_ref, nil)
+      |> Map.put(:cleanup_failure, {:discard_preserve_branch, reason})
+      |> Map.put(:durable_lifecycle, "discarding")
+
+    cancel_expiry(Map.get(retained, :expiry_ref))
+
+    # Persist dormancy before installing hot state. On failure, retain the
+    # prior durable evidence exactly — do NOT install the attempted dormant
+    # marker (not even annotated), which would claim an uncommitted transition.
+    # Degrade admission and arm no timer.
+    {state, hot_marker} =
+      case persist_retained_marker(state, dormant) do
+        :ok ->
+          state = put_retained(state, %{dormant | durable_lifecycle: nil})
+          {state, dormant}
+
+        {:error, persist_reason} ->
+          Logger.warning(
+            "workspace discard dormancy persist failed; journal degraded, no false dormant state",
+            workspace_id: retained.workspace_id,
+            detail: inspect(persist_reason)
+          )
+
+          state = degrade_retention_journal(state, {:durable_persist_failed, persist_reason})
+          {state, retained}
+      end
+
+    result =
+      hot_marker
+      |> Map.put(:active, false)
+      |> public_view()
+      |> Map.put(:status, "discard_pending")
+      |> Map.put(:branch_retired, false)
+      |> Map.put(:branch_preserved_reason, safe_reason_string(reason))
+      |> Map.put(:cleanup_residue, true)
+
+    {:ok, result, state}
+  end
+
+  # Receipt-formatting boundary for `branch_preserved_reason`. Discard decisions
+  # hand reasons through several shells (branch lifecycle core, retry resolver,
+  # marker-delete failure), and the reason can be a tuple such as
+  # `{:branch_retire_failed, inner}` or `{reason, delete_reason}`. String.Chars
+  # is not implemented for tuples, so `to_string/1` would crash the cleanup
+  # receipt path and silently drop the honest dormant/preserve signal the
+  # caller needs. Atoms and binaries keep their readable spelling; arbitrary
+  # terms fall back to `inspect/1` so the receipt is always a string.
+  defp safe_reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_reason_string(reason) when is_binary(reason), do: reason
+  defp safe_reason_string(reason), do: inspect(reason)
 
   defp drop_lease(state, lease) do
     cancel_owner_death_retry(lease)
@@ -4845,6 +5435,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           Map.get(retained, :lifecycle) == :active_orphaned ->
             # Same-BEAM active marker: never arm TTL deletion.
             state
+
+          Map.get(retained, :lifecycle) == :discarding ->
+            # Crash-durable discard continuation — never drop the marker as a
+            # plain worktree settle; branch retirement may still be pending.
+            case continue_discard_retained(state, retained) do
+              {:ok, _result, state2} -> state2
+              {:error, _reason, state2} -> state2
+            end
 
           System.monotonic_time(:millisecond) < retained.expires_at_ms ->
             reschedule_retained_expiry(state, retained)
@@ -4999,30 +5597,63 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         {:error, :orphaned_active_not_cleaned, state}
 
       retry_count >= limit ->
+        # Derive the lifecycle that represents the committed dormant state.
+        # A stale "active" durable_lifecycle from retained_view_from_active_lease
+        # must NOT carry through a dormant transition — restart hydration would
+        # misinterpret it as :active_orphaned and regain behavior.
+        durable_lifecycle =
+          case Map.get(retained, :lifecycle) do
+            :discarding -> "discarding"
+            "discarding" -> "discarding"
+            _ -> "retained"
+          end
+
         dormant =
           %{
             retained
             | dormant: true,
               expiry_ref: nil,
-              cleanup_failure: :cleanup_retries_exhausted
+              cleanup_failure: :cleanup_retries_exhausted,
+              durable_lifecycle: durable_lifecycle
           }
 
         cancel_expiry(Map.get(retained, :expiry_ref))
-        _ = persist_retained_marker(state, dormant)
 
         Logger.warning(
           "workspace retained cleanup retries exhausted; dormant evidence kept",
           workspace_id: retained.workspace_id
         )
 
-        {:error, :retries_exhausted, put_retained(state, dormant)}
+        # Persist dormancy before installing hot state so restart cannot regain
+        # attempts. On failure, degrade admission and retain the prior durable
+        # evidence exactly — never install the attempted dormant marker (not
+        # even annotated) over a stale journal, and arm no timer.
+        state =
+          case persist_retained_marker(state, dormant) do
+            :ok ->
+              put_retained(state, dormant)
+
+            {:error, persist_reason} ->
+              degrade_retention_journal(state, {:durable_persist_failed, persist_reason})
+          end
+
+        {:error, :retries_exhausted, state}
 
       true ->
+        # Preserve discarding lifecycle + discard_phase on every reservation so
+        # retry encoding does not fail closed as :discard_phase_not_allowed.
+        durable_lifecycle =
+          case Map.get(retained, :lifecycle) do
+            :discarding -> "discarding"
+            "discarding" -> "discarding"
+            _ -> "retained"
+          end
+
         reserved = %{
           retained
           | retry_count: retry_count + 1,
             dormant: false,
-            durable_lifecycle: "retained"
+            durable_lifecycle: durable_lifecycle
         }
 
         case persist_retained_marker(state, reserved) do
@@ -5034,25 +5665,17 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           {:error, reason} ->
             cancel_expiry(Map.get(retained, :expiry_ref))
 
-            dormant = %{
-              retained
-              | dormant: true,
-                expiry_ref: nil,
-                cleanup_failure: {:retry_reservation_failed, reason}
-            }
-
             Logger.warning(
               "workspace retained cleanup reservation failed; no attempt; journal poisoned",
               workspace_id: retained.workspace_id,
               detail: inspect(reason)
             )
 
-            # Keep dormant evidence in hot state; only degrade admission.
-            # (hydrate-time poison clears partial inventory; this path must not.)
+            # Retain the prior durable evidence; do not install the attempted
+            # dormant/reserved state. Admission is degraded so the journal is
+            # not trusted and no destructive attempt can proceed on restart.
             state =
-              state
-              |> put_retained(dormant)
-              |> degrade_retention_journal({:retry_reservation_failed, reason})
+              degrade_retention_journal(state, {:retry_reservation_failed, reason})
 
             {:error, :reservation_failed, state}
         end
@@ -5061,56 +5684,130 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   # After a reserved attempt fails, reschedule without incrementing again.
   # Restart still sees the pre-reserved retry_count.
+  #
+  # Durable ordering: the retry/dormant marker must persist BEFORE any timer is
+  # armed or matching hot state is installed. A persistence failure never
+  # installs the attempted transition (not even with a failure annotation) —
+  # doing so would make hot state claim a transition the journal never
+  # committed. Instead: cancel the old timer, arm no new timer, retain the
+  # prior durable/hot evidence exactly, and degrade admission so callers and
+  # restart cannot mistake a stale journal for authoritative.
   defp schedule_retry_after_failed_attempt(state, retained, reason) do
     limit = Map.get(state, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
     retry_count = Map.get(retained, :retry_count, 0)
 
-    if retry_count >= limit do
-      cancel_expiry(Map.get(retained, :expiry_ref))
+    durable_lifecycle =
+      case Map.get(retained, :lifecycle) do
+        :discarding -> "discarding"
+        "discarding" -> "discarding"
+        _ -> "retained"
+      end
 
+    if retry_count >= limit do
       dormant = %{
         retained
         | expiry_ref: nil,
           dormant: true,
           cleanup_failure: {:cleanup_retries_exhausted, reason},
-          durable_lifecycle: "retained"
+          durable_lifecycle: durable_lifecycle
       }
 
-      _ = persist_retained_marker(state, dormant)
-      put_retained(state, %{dormant | durable_lifecycle: nil})
+      case persist_retained_marker(state, dormant) do
+        :ok ->
+          cancel_expiry(Map.get(retained, :expiry_ref))
+          put_retained(state, %{dormant | durable_lifecycle: nil})
+
+        {:error, persist_reason} ->
+          Logger.warning(
+            "workspace retained dormancy persist failed; journal degraded, no fake timer",
+            workspace_id: retained.workspace_id,
+            detail: inspect(persist_reason)
+          )
+
+          # Retain the prior durable evidence; do not install the attempted
+          # dormant state. Admission is degraded so the journal is not trusted.
+          cancel_expiry(Map.get(retained, :expiry_ref))
+          degrade_retention_journal(state, {:durable_persist_failed, persist_reason})
+      end
     else
-      generation = make_ref()
       # retry_count is pre-reserved before the attempt. Preserve the original
       # backoff sequence: the first failed attempt waits one base interval,
       # then subsequent reserved attempts double from there.
       exponent = retry_count |> Kernel.-(1) |> max(0) |> min(5)
       delay = min(1_000 * Integer.pow(2, exponent), 60_000)
 
-      expiry_ref =
-        Process.send_after(self(), {:retained_expire, retained.target, generation}, delay)
-
-      next = %{
+      pending = %{
         retained
-        | expiry_generation: generation,
-          expiry_ref: expiry_ref,
+        | expiry_ref: nil,
           cleanup_failure: reason,
           dormant: false,
-          durable_lifecycle: "retained"
+          durable_lifecycle: durable_lifecycle
       }
 
-      _ = persist_retained_marker(state, next)
-      put_retained(state, %{next | durable_lifecycle: nil})
+      case persist_retained_marker(state, pending) do
+        :ok ->
+          cancel_expiry(Map.get(retained, :expiry_ref))
+
+          generation = make_ref()
+
+          expiry_ref =
+            Process.send_after(self(), {:retained_expire, retained.target, generation}, delay)
+
+          next = %{
+            pending
+            | expiry_generation: generation,
+              expiry_ref: expiry_ref
+          }
+
+          put_retained(state, %{next | durable_lifecycle: nil})
+
+        {:error, persist_reason} ->
+          Logger.warning(
+            "workspace retained retry persist failed; journal degraded, no fake timer",
+            workspace_id: retained.workspace_id,
+            detail: inspect(persist_reason)
+          )
+
+          # Retain the prior durable evidence; do not install the attempted
+          # pending state or arm a timer. Admission is degraded.
+          cancel_expiry(Map.get(retained, :expiry_ref))
+          degrade_retention_journal(state, {:durable_persist_failed, persist_reason})
+      end
     end
   end
 
   # Compatibility path used by active-lease marker-delete failure after path
-  # remove: pre-reserve then schedule.
+  # remove: pre-reserve then schedule.  Only an actual :reservation_failed
+  # (persist failed) may install :active_orphaned residue — the precise
+  # :retry_reservation_failed poison reason from reserve_cleanup_attempt is
+  # preserved.  Other committed outcomes (:retries_exhausted, :already_dormant,
+  # :orphaned_active_not_cleaned) have already committed their durable
+  # transition and must be preserved exactly.
   defp schedule_retained_retry(state, retained, reason) do
     case reserve_cleanup_attempt(state, retained) do
       {:ok, reserved, state2} ->
         schedule_retry_after_failed_attempt(state2, reserved, reason)
 
-      {:error, _why, state2} ->
+      {:error, :reservation_failed, state2} ->
+        # Persist failed: nothing was committed.  Preserve the last committed
+        # active lifecycle plus observed path absence with :active_orphaned.
+        # state2 already carries the precise :retry_reservation_failed poison
+        # reason — do not overwrite it.
+        orphaned =
+          retained
+          |> Map.put(:lifecycle, :active_orphaned)
+          |> Map.put(:durable_lifecycle, nil)
+          |> Map.put(:expiry_ref, nil)
+          |> Map.put(:dormant, false)
+          |> Map.put(:cleanup_failure, nil)
+          |> Map.put(:retry_count, Map.get(retained, :retry_count, 0))
+
+        put_retained(state2, orphaned)
+
+      {:error, _committed, state2} ->
+        # :retries_exhausted / :already_dormant / :orphaned_active_not_cleaned:
+        # reserve_cleanup_attempt already committed the durable transition
+        # (dormancy persist or admission degrade).  Preserve exactly.
         state2
     end
   end
@@ -5252,26 +5949,114 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp materialize_durable_record(record, state) do
-    if RetentionJournal.creating_record?(record) do
-      materialize_creation_blocker(record, state)
-    else
-      case settle_absent_orphaned_marker(record, state) do
-        {:ok, :settled, state2} ->
-          {:ok, :settled, state2}
+    cond do
+      RetentionJournal.creating_record?(record) ->
+        materialize_creation_blocker(record, state)
 
-        {:ok, :keep, state2} ->
-          case materialize_retained_from_durable(record, state2) do
-            {:ok, retained, state3} ->
-              {:ok, retained, state3}
+      RetentionJournal.discarding_record?(record) ->
+        materialize_discarding_from_durable(record, state)
 
-            {:error, reason} ->
-              {:error, {:materialize_failed, Map.get(record, :workspace_id), reason}}
-          end
+      true ->
+        case settle_absent_orphaned_marker(record, state) do
+          {:ok, :settled, state2} ->
+            {:ok, :settled, state2}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+          {:ok, :keep, state2} ->
+            case materialize_retained_from_durable(record, state2) do
+              {:ok, retained, state3} ->
+                {:ok, retained, state3}
+
+              {:error, reason} ->
+                {:error, {:materialize_failed, Map.get(record, :workspace_id), reason}}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
     end
+  end
+
+  # Crash/restart continuation for discard: rehydrate the durable marker and
+  # immediately continue from the recorded phase rather than declaring success.
+  defp materialize_discarding_from_durable(record, state) do
+    phase =
+      case Map.get(record, :discard_phase) do
+        "branch" -> :branch
+        "worktree" -> :worktree
+        other when other in [:branch, :worktree] -> other
+        _ -> :worktree
+      end
+
+    provenance =
+      BranchLifecycle.normalize_provenance(Map.get(record, :branch_provenance, "unknown"))
+
+    repo_path = canonical_path_or_expanded(record.repo_path)
+    worktree_path = canonical_path_or_expanded(record.worktree_path)
+
+    retry_count = Map.get(record, :retry_count, 0)
+
+    limit =
+      Map.get(state, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
+
+    {lstat, registration, identity_available?} =
+      case phase do
+        :branch ->
+          {nil, nil, true}
+
+        :worktree ->
+          case {hydrate_lstat_identity(record.lstat_identity),
+                hydrate_worktree_registration(record.worktree_registration)} do
+            {{:ok, l}, {:ok, r}} -> {l, r, true}
+            _ -> {nil, nil, false}
+          end
+      end
+
+    # Dormancy is derived from the durable retry budget so a restart cannot
+    # regain destructive attempts. Worktree-phase identity loss also keeps the
+    # marker dormant (residue is preserved, the branch is never deleted).
+    dormant? =
+      if phase == :worktree and not identity_available? do
+        true
+      else
+        BranchLifecycle.dormant_on_hydrate?(phase, retry_count, limit)
+      end
+
+    cleanup_failure =
+      cond do
+        phase == :worktree and not identity_available? -> :discard_identity_unavailable
+        dormant? -> :cleanup_retries_exhausted
+        true -> nil
+      end
+
+    retained = %{
+      workspace_id: record.workspace_id,
+      owner_pid: nil,
+      task_id: record.task_id,
+      principal_id: record.principal_id,
+      repo_path: repo_path,
+      worktree_path: worktree_path,
+      display_worktree_path: record.display_worktree_path,
+      branch: record.branch,
+      base_commit: record.base_commit,
+      ownership: :owned,
+      branch_provenance: provenance,
+      lifecycle: :discarding,
+      discard_phase: phase,
+      runtime_id: state.retention_runtime_id,
+      durable_lifecycle: nil,
+      target: target_key(repo_path, record.branch, worktree_path),
+      lstat_identity: lstat,
+      worktree_registration: registration,
+      expiry_generation: make_ref(),
+      expiry_ref: nil,
+      expires_at: DateTime.utc_now(),
+      expires_at_ms: System.monotonic_time(:millisecond),
+      retry_count: retry_count,
+      cleanup_failure: cleanup_failure,
+      dormant: dormant?
+    }
+
+    {:ok, retained, state}
   end
 
   defp materialize_creation_blocker(record, state) do
@@ -5383,6 +6168,17 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       cond do
         Map.get(retained, :lifecycle) == :creating ->
           put_creation_blocker(acc, retained)
+
+        Map.get(retained, :lifecycle) == :discarding and Map.get(retained, :dormant) != true ->
+          # Resume discard immediately after hydration; do not wait for TTL.
+          generation = make_ref()
+          retained = %{retained | expiry_generation: generation, expiry_ref: nil}
+          state2 = put_retained(acc, retained)
+          # Schedule a near-immediate retry so init stays non-blocking.
+          expiry_ref =
+            Process.send_after(self(), {:retained_expire, retained.target, generation}, 1)
+
+          put_retained(state2, %{retained | expiry_ref: expiry_ref})
 
         Map.get(retained, :dormant) == true ->
           put_retained(acc, retained)
@@ -5502,6 +6298,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       dormant? = retry_count >= limit and hot_lifecycle == :retained
 
+      provenance =
+        case Map.get(record, :branch_provenance, "unknown") do
+          "created" -> :created
+          "reused" -> :reused
+          "unknown" -> :unknown
+          other when other in [:created, :reused, :unknown] -> other
+          _ -> :unknown
+        end
+
       retained = %{
         workspace_id: record.workspace_id,
         # PIDs are never durable; restart reactivation requires task+principal.
@@ -5514,6 +6319,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         branch: record.branch,
         base_commit: record.base_commit,
         ownership: :owned,
+        branch_provenance: provenance,
         lifecycle: hot_lifecycle,
         runtime_id: state2.retention_runtime_id,
         durable_lifecycle: nil,
@@ -5600,6 +6406,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       branch: record.branch,
       base_commit: record.base_commit,
       ownership: :owned,
+      branch_provenance: Map.get(record, :branch_provenance, :unknown),
       lifecycle: :retained,
       runtime_id: state.retention_runtime_id,
       durable_lifecycle: durable_lifecycle,
@@ -5715,8 +6522,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           case Map.get(retained, :lifecycle, :retained) do
             :active_orphaned -> "active"
             :retained -> "retained"
+            :discarding -> "discarding"
+            :creating -> "creating"
             "active" -> "active"
             "retained" -> "retained"
+            "discarding" -> "discarding"
+            "creating" -> "creating"
             _ -> "retained"
           end
 
@@ -5724,26 +6535,36 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         Map.get(retained, :runtime_id) || Map.get(state, :retention_runtime_id) ||
           beam_retention_runtime_id()
 
+      encode_input = %{
+        workspace_id: retained.workspace_id,
+        task_id: retained.task_id,
+        principal_id: retained.principal_id,
+        repo_path: retained.repo_path,
+        worktree_path: retained.worktree_path,
+        display_worktree_path: Map.get(retained, :display_worktree_path, retained.worktree_path),
+        branch: retained.branch,
+        base_commit: retained.base_commit,
+        ownership: Map.get(retained, :ownership, :owned),
+        lifecycle: lifecycle,
+        runtime_id: runtime_id,
+        lstat_identity: retained.lstat_identity,
+        worktree_registration: retained.worktree_registration,
+        expires_at: retained.expires_at,
+        retry_count: Map.get(retained, :retry_count, 0),
+        branch_provenance: Map.get(retained, :branch_provenance, :unknown)
+      }
+
+      encode_input =
+        case Map.get(retained, :discard_phase) do
+          phase when phase in [:worktree, :branch, "worktree", "branch"] ->
+            Map.put(encode_input, :discard_phase, phase)
+
+          _ ->
+            encode_input
+        end
+
       with {:ok, key} <- RetentionJournal.record_key(retained.workspace_id),
-           {:ok, payload} <-
-             RetentionJournal.encode_record(%{
-               workspace_id: retained.workspace_id,
-               task_id: retained.task_id,
-               principal_id: retained.principal_id,
-               repo_path: retained.repo_path,
-               worktree_path: retained.worktree_path,
-               display_worktree_path:
-                 Map.get(retained, :display_worktree_path, retained.worktree_path),
-               branch: retained.branch,
-               base_commit: retained.base_commit,
-               ownership: Map.get(retained, :ownership, :owned),
-               lifecycle: lifecycle,
-               runtime_id: runtime_id,
-               lstat_identity: retained.lstat_identity,
-               worktree_registration: retained.worktree_registration,
-               expires_at: retained.expires_at,
-               retry_count: Map.get(retained, :retry_count, 0)
-             }),
+           {:ok, payload} <- RetentionJournal.encode_record(encode_input),
            :ok <- Persistence.put(journal.store_name, journal.backend, key, payload) do
         :ok
       else
@@ -5852,13 +6673,32 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp ownership_string(:reused), do: "reused"
   defp ownership_string(other) when is_binary(other), do: other
 
+  defp normalize_branch_provenance(:created), do: {:ok, :created}
+  defp normalize_branch_provenance(:reused), do: {:ok, :reused}
+  defp normalize_branch_provenance(:unknown), do: {:ok, :unknown}
+  defp normalize_branch_provenance("created"), do: {:ok, :created}
+  defp normalize_branch_provenance("reused"), do: {:ok, :reused}
+  defp normalize_branch_provenance("unknown"), do: {:ok, :unknown}
+  defp normalize_branch_provenance(nil), do: {:ok, :unknown}
+  defp normalize_branch_provenance(_), do: {:error, :invalid_branch_provenance}
+
+  defp branch_provenance_string(:created), do: "created"
+  defp branch_provenance_string(:reused), do: "reused"
+  defp branch_provenance_string(:unknown), do: "unknown"
+  defp branch_provenance_string(other) when is_binary(other), do: other
+  defp branch_provenance_string(_), do: "unknown"
+
   defp normalize_mode(:retain), do: {:ok, :retain}
   defp normalize_mode(:remove), do: {:ok, :remove}
+  defp normalize_mode(:discard), do: {:ok, :discard}
   defp normalize_mode("retain"), do: {:ok, :retain}
   defp normalize_mode("remove"), do: {:ok, :remove}
+  defp normalize_mode("discard"), do: {:ok, :discard}
 
   defp normalize_mode(other),
-    do: {:error, "release mode must be \"retain\" or \"remove\", got: #{inspect(other)}"}
+    do:
+      {:error,
+       "release mode must be \"retain\", \"remove\", or \"discard\", got: #{inspect(other)}"}
 
   defp normalize_id(id) when is_binary(id) do
     if String.trim(id) == "", do: nil, else: id

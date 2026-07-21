@@ -339,7 +339,15 @@ worker narrative or terminal JSON:
    Inspection fails closed on command, read, race, or configured bound errors.
    Initial no-op => `no_changes`. Rework no-op => `pipeline_error`
    (`worker_turn_no_progress`) so a prior candidate is not re-presented as
-   fresh work.
+   fresh work. Canonical terminal `no_changes` and `declined` release the
+   workspace in `discard` mode: an invocation-owned worktree is removed, and
+   the local branch is retired only when this invocation created that exact
+   branch and its tip still equals the recorded base. Reused/pre-existing
+   branches and uncertain provenance fail closed by preserving the ref. When
+   a retained lifecycle marker cannot be deleted (persistence residue), the
+   receipt reports `discard_pending` with `cleanup_residue`, never `discarded`.
+   A preserved pre-existing branch with a successfully deleted marker is not
+   residue — the terminal disposition is `discarded` with no `cleanup_residue`.
 4. Worker prompts still request one valid terminal JSON object so resumed
    older graph artifacts that parse prose do not enter protocol-repair loops.
    The current graph ignores that prose for control.

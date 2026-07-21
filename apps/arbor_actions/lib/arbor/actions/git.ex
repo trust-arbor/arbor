@@ -253,6 +253,82 @@ defmodule Arbor.Actions.Git do
   def worktree_for_branch(_repository_root, _branch),
     do: {:error, :invalid_git_worktree_lookup}
 
+  # Structured exact-ref observation for a local branch. This is the single
+  # locale-independent source of truth for branch settlement decisions. It
+  # distinguishes a present ref's OID from definitive absence and fails closed
+  # on every git error, corrupt ref, or malformed/warning output — a missing
+  # ref is reported only when git gives the canonical absent signal (exit 0
+  # with empty stdout from `for-each-ref` with an exact ref). Callers must
+  # never infer absence from a nonzero exit or from localized stderr/stdout
+  # text.
+  @doc false
+  @spec observe_branch_ref(String.t(), String.t()) ::
+          {:ok, {:present, String.t()} | :absent} | {:error, term()}
+  def observe_branch_ref(repository_root, branch)
+      when is_binary(repository_root) and is_binary(branch) do
+    with :ok <- validate_branch_name(branch),
+         {:ok, canonical_repo} <- authorized_root(repository_root) do
+      read_branch_ref_observation(canonical_repo, "refs/heads/" <> branch)
+    end
+  end
+
+  def observe_branch_ref(_repository_root, _branch),
+    do: {:error, :invalid_git_branch_observation}
+
+  # Atomically delete a local branch ref when it still points at `expected_oid`.
+  #
+  # Safety properties:
+  # * uses `git update-ref -d` with the expected old OID (never `branch -D`)
+  # * rejects branches currently checked out in any worktree (pre-delete check)
+  # * after a successful CAS delete, revalidates worktree registrations: if a
+  #   checkout race is observed (a new worktree checked out the branch between
+  #   the precheck and the delete, leaving the ref retired out from under a live
+  #   worktree HEAD), the exact expected ref is CAS-restored against absence and
+  #   an explicit `:branch_checked_out_race` error is returned. The restore
+  #   verifies the exact OID and the checkout state and never overwrites a
+  #   concurrent replacement ref. This is conservative detection/repair, not
+  #   full external atomicity.
+  # * verifies the ref is absent after a successful delete (post-delete check)
+  # * is idempotent when the ref is already absent
+  # * fails closed on expected-OID races (`:branch_ref_oid_mismatch`)
+  # * never parses localized update-ref text: after an `update-ref` failure it
+  #   re-reads the ref through `observe_branch_ref/2` and classifies absence as
+  #   idempotent success, a different OID as mismatch, and the same OID as an
+  #   operational failure.
+  @doc false
+  @spec delete_branch_ref(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def delete_branch_ref(repository_root, branch, expected_oid)
+      when is_binary(repository_root) and is_binary(branch) and is_binary(expected_oid) do
+    expected_oid = expected_oid |> String.trim() |> String.downcase()
+
+    with :ok <- validate_branch_name(branch),
+         :ok <- validate_full_oid(expected_oid),
+         {:ok, canonical_repo} <- authorized_root(repository_root) do
+      case observe_branch_ref(canonical_repo, branch) do
+        {:ok, :absent} ->
+          :ok
+
+        {:ok, {:present, ^expected_oid}} ->
+          with :ok <- reject_checked_out_branch(canonical_repo, branch),
+               :ok <- run_pre_delete_test_hook(canonical_repo, branch),
+               :ok <- execute_update_ref_delete(canonical_repo, branch, expected_oid) do
+            # Post-delete revalidation: verify absence AND check for a checkout
+            # race that occurred between the precheck and the CAS delete.
+            verify_after_delete(canonical_repo, branch, expected_oid)
+          end
+
+        {:ok, {:present, _other_oid}} ->
+          {:error, :branch_ref_oid_mismatch}
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
+  def delete_branch_ref(_repository_root, _branch, _expected_oid),
+    do: {:error, :invalid_git_branch_ref_delete}
+
   defp do_remove_worktree(repository_root, worktree_root, expected_identity) do
     with {:ok, canonical_repository} <- authorized_root(repository_root),
          {:ok, canonical_worktree} <- authorized_root(worktree_root),
@@ -265,6 +341,384 @@ defmodule Arbor.Actions.Git do
       with_storage_authority(canonical_repository, canonical_worktree, fn ->
         remove_bound_worktree(canonical_repository, canonical_worktree, expected_identity)
       end)
+    end
+  end
+
+  defp validate_full_oid(oid) when is_binary(oid) do
+    if Regex.match?(~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, oid) do
+      :ok
+    else
+      {:error, :invalid_git_oid}
+    end
+  end
+
+  defp validate_full_oid(_), do: {:error, :invalid_git_oid}
+
+  defp reject_checked_out_branch(repository_root, branch) do
+    case worktree_for_branch(repository_root, branch) do
+      {:ok, nil} -> :ok
+      {:ok, _path} -> {:error, :branch_checked_out}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Deterministic test injection points for the two checkout-race windows.
+  # Production builds compile unconditional no-ops, so callers cannot alter a
+  # security observation through a process-dictionary callback.
+  if Mix.env() == :test do
+    defp run_pre_delete_test_hook(repository_root, branch) do
+      case Process.delete({__MODULE__, :pre_delete_branch_ref_hook}) do
+        callback when is_function(callback, 2) ->
+          callback.(repository_root, branch)
+          :ok
+
+        _other ->
+          :ok
+      end
+    end
+
+    defp run_pre_confirm_restore_test_hook(repository_root, branch) do
+      case Process.delete({__MODULE__, :pre_confirm_restore_hook}) do
+        callback when is_function(callback, 2) ->
+          callback.(repository_root, branch)
+          :ok
+
+        _other ->
+          :ok
+      end
+    end
+  else
+    defp run_pre_delete_test_hook(_repository_root, _branch), do: :ok
+    defp run_pre_confirm_restore_test_hook(_repository_root, _branch), do: :ok
+  end
+
+  # Structured exact-ref observation via `for-each-ref` for locale-independent,
+  # fail-closed branch presence/absence detection. The command uses
+  # `--count=1` with exact ref matching (not a prefix glob) so that:
+  #
+  #   * exit 0 with empty stdout = definitive absence (single canonical signal)
+  #   * exit 0 with one line = the exact ref name and a valid OID
+  #   * exit 0 with >1 line = extra/duplicate records, rejected
+  #   * any nonzero exit = error (never absence)
+  #   * any stderr = warning, rejected
+  #   * malformed OID, truncated line, extra fields, wrong refname prefix = rejected
+  #
+  # Callers must never infer absence from a nonzero exit, from stderr text,
+  # from multiple records, or from a similarly-prefixed but non-exact ref.
+  defp read_branch_ref_observation(repository_root, full_ref) do
+    case execute(repository_root, [
+           "for-each-ref",
+           "--count=1",
+           "--format=%(refname) %(objectname)",
+           full_ref
+         ]) do
+      {:ok, %{exit_code: 0, stdout: stdout, stderr: stderr}} ->
+        trimmed_stderr = String.trim(stderr)
+        trimmed_stdout = String.trim(stdout)
+
+        cond do
+          trimmed_stderr != "" ->
+            {:error, {:git_branch_ref_warning, trimmed_stderr}}
+
+          trimmed_stdout == "" ->
+            {:ok, :absent}
+
+          true ->
+            parse_for_each_ref_output(trimmed_stdout, full_ref)
+        end
+
+      {:ok, result} ->
+        {:error,
+         {:git_for_each_ref_failed, Map.get(result, :exit_code),
+          Map.get(result, :stderr) || Map.get(result, :stdout)}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Parse exactly one record from for-each-ref output. The record must contain
+  # the exact full ref name (not a prefix match) followed by exactly one valid
+  # hex OID. Reject multiple records, wrong refnames, truncated or extra fields.
+  defp parse_for_each_ref_output(output, expected_ref) do
+    lines = String.split(output, "\n", trim: true)
+
+    case lines do
+      [line] ->
+        case String.split(line, " ", parts: 2) do
+          [^expected_ref, oid_candidate] ->
+            oid = String.downcase(String.trim(oid_candidate))
+
+            cond do
+              oid == "" ->
+                {:error, :git_branch_ref_empty_oid}
+
+              String.contains?(oid, " ") ->
+                {:error, :git_branch_ref_extra_fields}
+
+              match?(:ok, validate_full_oid(oid)) ->
+                {:ok, {:present, oid}}
+
+              true ->
+                {:error, :invalid_git_oid}
+            end
+
+          [other_ref, _] ->
+            # Similarly prefixed but non-exact ref (e.g. refs/heads/foo vs
+            # refs/heads/foobar).  This is a strict-exact observation; a
+            # non-exact match fails closed rather than silently treating it
+            # as absent.
+            {:error, {:git_branch_ref_non_exact_match, other_ref}}
+
+          _ ->
+            {:error, :git_branch_ref_malformed_output}
+        end
+
+      [] ->
+        {:error, :git_branch_ref_empty_oid}
+
+      _multiple ->
+        {:error, {:git_branch_ref_extra_records, length(lines)}}
+    end
+  end
+
+  # `git update-ref` produces no stdout/stderr on a clean success.  Exit 0
+  # with unexpected output must surface a stable explicit error rather than
+  # being reclassified as ordinary idempotent success.
+  defp clean_success?(%{exit_code: 0, stdout: "", stderr: ""}), do: true
+
+  defp clean_success?(_), do: false
+
+  # Test-build-only seam: a one-shot process flag can append synthetic
+  # stdout/stderr to the REAL update-ref result.  This can only force
+  # fail-closed (dirty output on an exit-0 result triggers the clean-success
+  # rejection); it can never force false success or alter a real failure.
+  # Production builds compile a no-op so the injection surface does not exist.
+  if Mix.env() == :test do
+    defp augment_dirty_output(result, tag) do
+      injection = Process.delete({__MODULE__, {tag, :dirty_output}})
+
+      case {result, injection} do
+        {{:ok, %{exit_code: 0, stdout: stdout, stderr: stderr} = command_result},
+         {extra_stdout, extra_stderr}}
+        when is_binary(stdout) and is_binary(stderr) and is_binary(extra_stdout) and
+               is_binary(extra_stderr) ->
+          {:ok,
+           %{
+             command_result
+             | stdout: stdout <> extra_stdout,
+               stderr: stderr <> extra_stderr
+           }}
+
+        _other ->
+          result
+      end
+    end
+  else
+    defp augment_dirty_output(result, _tag), do: result
+  end
+
+  # Run `git update-ref -d <ref> <expected_oid>` and classify the result without
+  # parsing localized stderr/stdout text. On a nonzero exit, re-read the ref
+  # through the structured observer: absence is idempotent success (the desired
+  # state was reached), a different OID is a CAS mismatch, and the same OID is
+  # an operational failure that callers may retry.
+  #
+  # Exit 0 with dirty output is rejected — `update-ref` on success is silent;
+  # unexpected output signals a malformed or warning state that must not be
+  # silently treated as success.
+  defp execute_update_ref_delete(repository_root, branch, expected_oid) do
+    ref = "refs/heads/" <> branch
+
+    result =
+      execute(repository_root, ["update-ref", "-d", ref, expected_oid])
+      |> augment_dirty_output(:update_ref_delete)
+
+    case result do
+      {:ok, %{exit_code: 0} = r} ->
+        if clean_success?(r),
+          do: :ok,
+          else: {:error, :git_update_ref_dirty_success}
+
+      {:ok, result} ->
+        classify_update_ref_failure(repository_root, branch, expected_oid, result)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp classify_update_ref_failure(repository_root, branch, expected_oid, result) do
+    case observe_branch_ref(repository_root, branch) do
+      {:ok, :absent} ->
+        :ok
+
+      {:ok, {:present, oid}} when oid == expected_oid ->
+        # Ref is unchanged after a failed update-ref: operational failure.
+        {:error, {:git_update_ref_delete_failed, Map.get(result, :exit_code), expected_oid}}
+
+      {:ok, {:present, _moved_oid}} ->
+        # The live OID no longer matches the expected CAS value.
+        {:error, :branch_ref_oid_mismatch}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # Post-delete verification: confirm the ref is absent AND detect a checkout
+  # race that occurred between the pre-delete check and the CAS delete. When
+  # a race is detected, the exact expected ref is CAS-restored and an explicit
+  # `:branch_checked_out_race` error is returned — the caller sees residue,
+  # never a false claim of deletion.
+  #
+  # This is conservative detection/repair, not full external atomicity. The
+  # window is: between `reject_checked_out_branch` and `update-ref -d`, a
+  # new worktree may have checked out the branch. The CAS restore ensures the
+  # ref is not silently lost.
+  defp verify_after_delete(repository_root, branch, expected_oid) do
+    case observe_branch_ref(repository_root, branch) do
+      {:ok, :absent} ->
+        # Ref absent after the CAS delete. Re-probe the worktree inventory: a
+        # checkout that landed between the precheck and the delete leaves a
+        # registered worktree whose HEAD now points at a retired ref. That is
+        # the race this boundary must close — CAS-restore the exact expected
+        # ref (compare-and-create against absence) so the branch is not
+        # silently lost, then surface explicit residue.
+        case worktree_for_branch(repository_root, branch) do
+          {:ok, nil} ->
+            :ok
+
+          {:ok, _path} ->
+            restore_and_report_checkout_race(repository_root, branch, expected_oid)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:ok, {:present, ^expected_oid}} ->
+        # The ref is still at the expected OID after delete — a checkout
+        # race CAS-restored it, or the delete silently failed. Verify the
+        # race by checking if the branch is now checked out.
+        case worktree_for_branch(repository_root, branch) do
+          {:ok, nil} ->
+            # Ref present but not checked out — operational failure.
+            {:error, :branch_ref_still_present}
+
+          {:ok, _path} ->
+            # Checkout race detected. The ref was restored by the race
+            # window. Report explicit race/residue.
+            {:error, :branch_checked_out_race}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:ok, {:present, _different_oid}} ->
+        # Ref points to a different OID after delete — something else moved
+        # it. This is an unexpected state; report as residue.
+        {:error, :branch_ref_oid_mismatch}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # CAS-restore `refs/heads/<branch>` to exactly `expected_oid` only if the ref
+  # is currently absent (zero oldvalue precondition), then verify the final
+  # ref state and the checkout. Never overwrites a concurrent replacement ref:
+  # a nonzero CAS exit means the ref is no longer absent, and the follow-up
+  # observation decides whether the existing value is acceptable or residue.
+  # The zero old-OID width is derived from `expected_oid` so SHA-1 (40 hex)
+  # and SHA-256 (64 hex) repositories are both handled correctly.
+  defp restore_and_report_checkout_race(repository_root, branch, expected_oid) do
+    ref = "refs/heads/" <> branch
+    zero = String.duplicate("0", String.length(expected_oid))
+
+    cas_outcome =
+      execute(repository_root, ["update-ref", ref, expected_oid, zero])
+      |> augment_dirty_output(:update_ref_restore)
+      |> case do
+        {:ok, %{exit_code: 0} = result} ->
+          if clean_success?(result),
+            do: :cas_succeeded,
+            else: :dirty_success
+
+        {:ok, result} ->
+          {:cas_precondition_failed, Map.get(result, :exit_code)}
+
+        {:error, reason} ->
+          {:restore_error, reason}
+      end
+
+    # Test seam: simulate the racing checkout vanishing (concurrent worktree
+    # remove) between the CAS-restore above and the confirm verification below.
+    # No-op in production.
+    :ok = run_pre_confirm_restore_test_hook(repository_root, branch)
+
+    case confirm_race_restore(repository_root, branch, expected_oid, cas_outcome) do
+      :ok ->
+        {:error, :branch_checked_out_race}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # Verify the post-restore ref state. The checkout that triggered the race is
+  # expected to still hold the branch; confirm both the exact OID and the
+  # registered worktree so callers see honest residue, never a silent loss.
+  #
+  # The nil-checkout case MUST come before the surviving-path catch-all: a nil
+  # worktree means the racing checkout vanished after the restore, which is
+  # explicit residue (:branch_ref_restore_checkout_lost), NOT a successful race
+  # confirmation. Matching {:ok, _path} first would shadow nil and silently
+  # treat a lost checkout as a surviving one.
+  defp confirm_race_restore(repository_root, branch, expected_oid, cas_outcome) do
+    case observe_branch_ref(repository_root, branch) do
+      {:ok, {:present, ^expected_oid}} ->
+        case worktree_for_branch(repository_root, branch) do
+          {:ok, nil} ->
+            # Ref restored but the checkout vanished — honest residue.
+            {:error, :branch_ref_restore_checkout_lost}
+
+          {:ok, _path} ->
+            if cas_outcome == :dirty_success,
+              do: {:error, :git_update_ref_restore_dirty_success},
+              else: :ok
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:ok, {:present, _other_oid}} ->
+        # A concurrent replacement ref exists — never overwritten.
+        {:error, :branch_ref_restore_ref_replaced}
+
+      {:ok, :absent} ->
+        case cas_outcome do
+          :cas_succeeded ->
+            # CAS reported success but the ref is absent — raced away again.
+            {:error, :branch_ref_restore_race}
+
+          {:cas_precondition_failed, _exit} ->
+            # Precondition failed and ref is absent — unexpected concurrent
+            # retirement. Surface as residue.
+            {:error, :branch_ref_restore_race}
+
+          :dirty_success ->
+            # CAS reported exit 0 with unexpected output — never silently
+            # accept; surface explicit residue.
+            {:error, :git_update_ref_restore_dirty_success}
+
+          {:restore_error, reason} ->
+            # The restore command itself errored and the ref is absent.
+            # Surface explicit residue rather than silently losing the ref.
+            {:error, {:branch_ref_restore_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:branch_ref_restore_failed, cas_outcome, reason}}
     end
   end
 

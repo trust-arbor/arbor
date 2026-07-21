@@ -13,9 +13,13 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   monotonic deadlines are reconstructed by the shell.
 
   Storage trust boundary for this slice: private same-UID `ARBOR_HOME` state
-  root plus an exact lifecycle/provenance pair: `creating`/`pending` or an
-  identity-bearing `active|retained`/`owned`. No HMAC/signing envelope is
-  required here.
+  root plus an exact lifecycle/provenance pair: `creating`/`pending`, an
+  identity-bearing `active|retained`/`owned`, or a discard-in-progress
+  `discarding`/`owned` marker. Optional `branch_provenance` records whether
+  the invocation created the branch (`created`), reused a pre-existing branch
+  (`reused`), or lacks evidence (`unknown`). Legacy markers without the field
+  hydrate as `unknown` and must preserve the branch. No HMAC/signing envelope
+  is required here.
   """
 
   @schema_version 1
@@ -53,9 +57,12 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
     retry_count
   )
 
+  # Optional closed keys. Missing branch_provenance hydrates as "unknown".
+  @optional_record_keys ~w(branch_provenance discard_phase)
+
   @lstat_keys ~w(type major_device minor_device inode)
   @registration_keys ~w(path head branch)
-  @allowed_lifecycles ~w(retained active creating)
+  @allowed_lifecycles ~w(retained active creating discarding)
 
   @type durable_record :: %{
           required(:schema_version) => pos_integer(),
@@ -73,7 +80,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
           required(:lstat_identity) => map() | nil,
           required(:worktree_registration) => map() | nil,
           required(:expires_at) => String.t(),
-          required(:retry_count) => non_neg_integer()
+          required(:retry_count) => non_neg_integer(),
+          required(:branch_provenance) => String.t(),
+          optional(:discard_phase) => String.t()
         }
 
   @type encode_input :: %{
@@ -91,7 +100,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
           optional(:display_worktree_path) => String.t(),
           optional(:ownership) => String.t() | atom(),
           optional(:lifecycle) => String.t() | atom(),
-          optional(:retry_count) => non_neg_integer()
+          optional(:retry_count) => non_neg_integer(),
+          optional(:branch_provenance) => String.t() | atom(),
+          optional(:discard_phase) => String.t() | atom()
         }
 
   @doc "Current durable schema version."
@@ -138,7 +149,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   Rejects reused ownership, blank required fields, oversized values, and
   non-scalar identity maps. Absolute UTC `expires_at` only. Lifecycle and
   provenance are a closed pair: `creating`/`pending` carries no identity;
-  `active|retained`/`owned` requires the complete identity.
+  `active|retained`/`owned` requires the complete identity;
+  `discarding`/`owned` carries identity while the worktree phase is pending
+  and drops identity once only branch retirement remains.
   """
   @spec encode_record(encode_input()) :: {:ok, durable_record()} | {:error, term()}
   def encode_record(input) when is_map(input) do
@@ -161,11 +174,21 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
            optional_or_default_path(input, :display_worktree_path, worktree_path),
          {:ok, branch} <- require_bounded_string(input, :branch, @max_branch_bytes),
          {:ok, base_commit} <- encode_base_commit(input, lifecycle),
-         {:ok, lstat} <- encode_lstat_for_lifecycle(input, lifecycle),
-         {:ok, registration} <- encode_registration_for_lifecycle(input, lifecycle),
+         {:ok, discard_phase} <- encode_discard_phase(input, lifecycle),
+         {:ok, lstat} <- encode_lstat_for_lifecycle(input, lifecycle, discard_phase),
+         {:ok, registration} <-
+           encode_registration_for_lifecycle(input, lifecycle, discard_phase),
          :ok <- reject_registration_path_mismatch(worktree_path, registration),
          :ok <-
-           validate_ownership_lifecycle(ownership, lifecycle, base_commit, lstat, registration),
+           validate_ownership_lifecycle(
+             ownership,
+             lifecycle,
+             base_commit,
+             lstat,
+             registration,
+             discard_phase
+           ),
+         {:ok, branch_provenance} <- encode_branch_provenance(input, lifecycle),
          {:ok, expires_at} <- encode_expires_at(Map.get(input, :expires_at)),
          {:ok, retry_count} <- encode_retry_count(Map.get(input, :retry_count, 0)) do
       record = %{
@@ -184,8 +207,16 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
         lstat_identity: lstat,
         worktree_registration: registration,
         expires_at: expires_at,
-        retry_count: retry_count
+        retry_count: retry_count,
+        branch_provenance: branch_provenance
       }
+
+      record =
+        if is_binary(discard_phase) do
+          Map.put(record, :discard_phase, discard_phase)
+        else
+          record
+        end
 
       with :ok <- assert_encode_budget(record) do
         {:ok, record}
@@ -205,7 +236,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   def decode_record(value) when is_map(value) do
     with :ok <- assert_decode_budget(value),
          {:ok, normalized} <- normalize_closed_map(value),
-         :ok <- require_exact_keys(normalized, @required_record_keys),
+         :ok <- require_closed_keys(normalized, @required_record_keys, @optional_record_keys),
          :ok <- require_schema_version(normalized),
          {:ok, ownership} <- decode_ownership(Map.get(normalized, "ownership")),
          {:ok, lifecycle} <- encode_lifecycle(Map.get(normalized, "lifecycle")),
@@ -226,32 +257,49 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
            require_bounded_string(normalized, "display_worktree_path", @max_path_bytes),
          {:ok, branch} <- require_bounded_string(normalized, "branch", @max_branch_bytes),
          {:ok, base_commit} <- encode_base_commit(normalized, lifecycle),
-         {:ok, lstat} <- encode_lstat_for_lifecycle(normalized, lifecycle),
-         {:ok, registration} <- encode_registration_for_lifecycle(normalized, lifecycle),
+         {:ok, discard_phase} <- encode_discard_phase(normalized, lifecycle),
+         {:ok, lstat} <- encode_lstat_for_lifecycle(normalized, lifecycle, discard_phase),
+         {:ok, registration} <-
+           encode_registration_for_lifecycle(normalized, lifecycle, discard_phase),
          :ok <- reject_registration_path_mismatch(worktree_path, registration),
          :ok <-
-           validate_ownership_lifecycle(ownership, lifecycle, base_commit, lstat, registration),
+           validate_ownership_lifecycle(
+             ownership,
+             lifecycle,
+             base_commit,
+             lstat,
+             registration,
+             discard_phase
+           ),
+         {:ok, branch_provenance} <- encode_branch_provenance(normalized, lifecycle),
          {:ok, expires_at} <- encode_expires_at(Map.get(normalized, "expires_at")),
          {:ok, retry_count} <- encode_retry_count(Map.get(normalized, "retry_count")) do
+      record = %{
+        schema_version: @schema_version,
+        workspace_id: workspace_id,
+        task_id: task_id,
+        principal_id: principal_id,
+        repo_path: repo_path,
+        worktree_path: worktree_path,
+        display_worktree_path: display_path,
+        branch: branch,
+        base_commit: base_commit,
+        ownership: ownership,
+        lifecycle: lifecycle,
+        runtime_id: runtime_id,
+        lstat_identity: lstat,
+        worktree_registration: registration,
+        expires_at: expires_at,
+        retry_count: retry_count,
+        branch_provenance: branch_provenance
+      }
+
       {:ok,
-       %{
-         schema_version: @schema_version,
-         workspace_id: workspace_id,
-         task_id: task_id,
-         principal_id: principal_id,
-         repo_path: repo_path,
-         worktree_path: worktree_path,
-         display_worktree_path: display_path,
-         branch: branch,
-         base_commit: base_commit,
-         ownership: ownership,
-         lifecycle: lifecycle,
-         runtime_id: runtime_id,
-         lstat_identity: lstat,
-         worktree_registration: registration,
-         expires_at: expires_at,
-         retry_count: retry_count
-       }}
+       if is_binary(discard_phase) do
+         Map.put(record, :discard_phase, discard_phase)
+       else
+         record
+       end}
     end
   end
 
@@ -382,6 +430,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   def creating_record?(%{ownership: "pending", lifecycle: "creating"}), do: true
   def creating_record?(_), do: false
 
+  @doc "True when a decoded record is an in-progress discard marker."
+  @spec discarding_record?(durable_record()) :: boolean()
+  def discarding_record?(%{ownership: "owned", lifecycle: "discarding"}), do: true
+  def discarding_record?(_), do: false
+
   @doc "True when a Persistence key is a retained-workspace marker key."
   @spec retained_key?(term()) :: boolean()
   def retained_key?(key) when is_binary(key) do
@@ -497,9 +550,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   defp encode_lifecycle(:retained), do: {:ok, "retained"}
   defp encode_lifecycle(:active), do: {:ok, "active"}
   defp encode_lifecycle(:creating), do: {:ok, "creating"}
+  defp encode_lifecycle(:discarding), do: {:ok, "discarding"}
   defp encode_lifecycle("retained"), do: {:ok, "retained"}
   defp encode_lifecycle("active"), do: {:ok, "active"}
   defp encode_lifecycle("creating"), do: {:ok, "creating"}
+  defp encode_lifecycle("discarding"), do: {:ok, "discarding"}
   defp encode_lifecycle(_), do: {:error, :invalid_lifecycle}
 
   defp encode_base_commit(input, "creating") do
@@ -513,37 +568,100 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   defp encode_base_commit(input, _lifecycle),
     do: require_bounded_string(input, :base_commit, @max_commit_bytes)
 
-  defp encode_lstat_for_lifecycle(input, "creating") do
+  defp encode_discard_phase(input, "discarding") do
+    case Map.get(input, :discard_phase) || Map.get(input, "discard_phase") do
+      phase when phase in [:worktree, "worktree"] -> {:ok, "worktree"}
+      phase when phase in [:branch, "branch"] -> {:ok, "branch"}
+      nil -> {:error, :missing_discard_phase}
+      _ -> {:error, :invalid_discard_phase}
+    end
+  end
+
+  defp encode_discard_phase(input, _lifecycle) do
+    case Map.get(input, :discard_phase) || Map.get(input, "discard_phase") do
+      nil -> {:ok, nil}
+      _ -> {:error, :discard_phase_not_allowed}
+    end
+  end
+
+  defp encode_branch_provenance(input, "creating") do
+    case Map.get(input, :branch_provenance) || Map.get(input, "branch_provenance") do
+      nil -> {:ok, "unknown"}
+      phase when phase in [:unknown, "unknown"] -> {:ok, "unknown"}
+      _ -> {:error, :creating_intent_has_branch_provenance}
+    end
+  end
+
+  defp encode_branch_provenance(input, _lifecycle) do
+    case Map.get(input, :branch_provenance) || Map.get(input, "branch_provenance") do
+      nil -> {:ok, "unknown"}
+      phase when phase in [:created, "created"] -> {:ok, "created"}
+      phase when phase in [:reused, "reused"] -> {:ok, "reused"}
+      phase when phase in [:unknown, "unknown"] -> {:ok, "unknown"}
+      _ -> {:error, :invalid_branch_provenance}
+    end
+  end
+
+  defp encode_lstat_for_lifecycle(input, "creating", _phase) do
     case Map.get(input, :lstat_identity) || Map.get(input, "lstat_identity") do
       nil -> {:ok, nil}
       _ -> {:error, :creating_intent_has_lstat_identity}
     end
   end
 
-  defp encode_lstat_for_lifecycle(input, _lifecycle),
+  defp encode_lstat_for_lifecycle(input, "discarding", "branch") do
+    case Map.get(input, :lstat_identity) || Map.get(input, "lstat_identity") do
+      nil -> {:ok, nil}
+      _ -> {:error, :discard_branch_phase_has_lstat_identity}
+    end
+  end
+
+  defp encode_lstat_for_lifecycle(input, _lifecycle, _phase),
     do: encode_lstat_identity(Map.get(input, :lstat_identity) || Map.get(input, "lstat_identity"))
 
-  defp encode_registration_for_lifecycle(input, "creating") do
+  defp encode_registration_for_lifecycle(input, "creating", _phase) do
     case Map.get(input, :worktree_registration) || Map.get(input, "worktree_registration") do
       nil -> {:ok, nil}
       _ -> {:error, :creating_intent_has_worktree_registration}
     end
   end
 
-  defp encode_registration_for_lifecycle(input, _lifecycle),
+  defp encode_registration_for_lifecycle(input, "discarding", "branch") do
+    case Map.get(input, :worktree_registration) || Map.get(input, "worktree_registration") do
+      nil -> {:ok, nil}
+      _ -> {:error, :discard_branch_phase_has_worktree_registration}
+    end
+  end
+
+  defp encode_registration_for_lifecycle(input, _lifecycle, _phase),
     do:
       encode_worktree_registration(
         Map.get(input, :worktree_registration) || Map.get(input, "worktree_registration")
       )
 
-  defp validate_ownership_lifecycle("pending", "creating", nil, nil, nil), do: :ok
+  defp validate_ownership_lifecycle("pending", "creating", nil, nil, nil, nil), do: :ok
 
-  defp validate_ownership_lifecycle("owned", lifecycle, base_commit, lstat, registration)
+  defp validate_ownership_lifecycle("owned", lifecycle, base_commit, lstat, registration, nil)
        when lifecycle in ["active", "retained"] and is_binary(base_commit) and
               is_map(lstat) and is_map(registration),
        do: :ok
 
-  defp validate_ownership_lifecycle(_, _, _, _, _),
+  defp validate_ownership_lifecycle(
+         "owned",
+         "discarding",
+         base_commit,
+         lstat,
+         registration,
+         "worktree"
+       )
+       when is_binary(base_commit) and is_map(lstat) and is_map(registration),
+       do: :ok
+
+  defp validate_ownership_lifecycle("owned", "discarding", base_commit, nil, nil, "branch")
+       when is_binary(base_commit),
+       do: :ok
+
+  defp validate_ownership_lifecycle(_, _, _, _, _, _),
     do: {:error, :invalid_ownership_lifecycle_pair}
 
   defp valid_ownership_lifecycle?(%{
@@ -564,6 +682,28 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
        })
        when lifecycle in ["active", "retained"] and is_binary(base_commit) and
               is_map(lstat) and is_map(registration),
+       do: true
+
+  defp valid_ownership_lifecycle?(%{
+         ownership: "owned",
+         lifecycle: "discarding",
+         base_commit: base_commit,
+         lstat_identity: lstat,
+         worktree_registration: registration,
+         discard_phase: "worktree"
+       })
+       when is_binary(base_commit) and is_map(lstat) and is_map(registration),
+       do: true
+
+  defp valid_ownership_lifecycle?(%{
+         ownership: "owned",
+         lifecycle: "discarding",
+         base_commit: base_commit,
+         lstat_identity: nil,
+         worktree_registration: nil,
+         discard_phase: "branch"
+       })
+       when is_binary(base_commit),
        do: true
 
   defp valid_ownership_lifecycle?(_), do: false
@@ -735,13 +875,24 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   # -- generic field helpers ------------------------------------------
 
   defp require_exact_keys(map, required) when is_map(map) do
+    require_closed_keys(map, required, [])
+  end
+
+  defp require_closed_keys(map, required, optional)
+       when is_map(map) and is_list(required) and is_list(optional) do
     keys = Map.keys(map) |> Enum.map(&to_string/1) |> MapSet.new()
     required_set = MapSet.new(required)
+    allowed = MapSet.union(required_set, MapSet.new(optional))
 
-    if keys == required_set do
-      :ok
-    else
-      {:error, :unexpected_retention_keys}
+    cond do
+      not MapSet.subset?(required_set, keys) ->
+        {:error, :unexpected_retention_keys}
+
+      not MapSet.subset?(keys, allowed) ->
+        {:error, :unexpected_retention_keys}
+
+      true ->
+        :ok
     end
   end
 

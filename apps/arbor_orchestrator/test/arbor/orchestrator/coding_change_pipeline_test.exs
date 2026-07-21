@@ -253,8 +253,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       end
     end
 
-    # Live Grok resume-against-new-worktree shape (task_187330). Used only when
-    # the fixture deliberately surfaces the failure without StartSession fallback.
+    # Resume-against-new-worktree error shape. Used only when the fixture
+    # deliberately surfaces the failure without StartSession fallback.
     @fs_not_found_wire_error %{
       "code" => -32_603,
       "data" => %{
@@ -1291,6 +1291,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert graph.nodes["commit_change"].attrs["context_keys"] ==
                "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid,prior_commit"
 
+      # No-change / declined terminals discard owned worktrees and retire
+      # invocation-created branches when tip still equals the recorded base.
+      assert graph.nodes["prep_release_mode_discard"]
+      assert graph.nodes["prep_release_mode_discard"].attrs["expression"] == "discard"
+      assert graph.nodes["prep_release_mode_discard"].attrs["output_key"] == "mode"
+
       refute Map.has_key?(graph.nodes, "adopt_head_commit")
       assert graph.nodes["route_commit_interaction"]
       assert graph.nodes["status_approval_denied"]
@@ -1360,8 +1366,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
   describe "terminal path fixtures" do
     for {scenario, status, overrides, retain_mode, remove_mode} <- [
-          {:no_changes, "no_changes", %{}, "remove", "remove"},
-          {:narrative_no_changes, "no_changes", %{}, "remove", "remove"},
+          # no_changes / declined always discard (branch retirement when eligible);
+          # retain_workspace only gates successful candidate outcomes.
+          {:no_changes, "no_changes", %{}, "discard", "discard"},
+          {:narrative_no_changes, "no_changes", %{}, "discard", "discard"},
           {:validation_failed, "validation_failed", %{}, "retain", "retain"},
           {:review_requires_rework, "rework_exhausted", %{}, "retain", "retain"},
           {:commit_approval_denied, "approval_denied", %{}, "retain", "retain"},
@@ -2098,9 +2106,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       # pending prompt; the recovered send succeeds without further mutation.
       # Post-turn inspection must compare against the ORIGINAL pre-turn
       # baseline, observe progress from the uncertain send, and route to
-      # validation/commit — never no_changes. Replaces two provider-only
-      # attempts (task_323715 xAI 403, task_324547 Codex skills-budget
-      # terminalization) with a deterministic end-to-end pipeline regression.
+      # validation/commit — never no_changes. Invariant is asserted
+      # deterministically without depending on any specific provider's
+      # transport-failure semantics.
       assert {{:ok, result}, calls} = run_fixture(:uncertain_send_recovery)
 
       assert result.context["status"] == "change_committed"

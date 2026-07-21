@@ -117,9 +117,12 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   @doc false
   # Create or reuse a worktree for `branch_name`.
-  # Returns `{:ok, path, ownership, base_commit}` where ownership is
-  # `:owned` (this invocation added the path) or `:reused` (pre-existing path
-  # or branch already checked out elsewhere).
+  # Returns `{:ok, path, ownership, base_commit, branch_provenance}` where:
+  # * ownership is `:owned` (this invocation added the path) or `:reused`
+  #   (pre-existing path or branch already checked out elsewhere). Path
+  #   ownership is **not** branch ownership.
+  # * branch_provenance is `:created` (this invocation created the branch),
+  #   `:reused` (branch already existed), or `:unknown` (incomplete evidence).
   #
   # Atomicity: if this invocation creates an owned worktree and a later
   # reset/clean step fails, the owned path and git worktree registration are
@@ -141,7 +144,7 @@ defmodule Arbor.Actions.Coding.Workspace do
         require_reused? = get_param(params, :require_reused) == true
 
         with {:ok, base_commit} <- rev_parse(repo_root, base_ref),
-             {:ok, path, ownership, reset?} <-
+             {:ok, path, ownership, reset?, branch_provenance} <-
                ensure_worktree(
                  repo_root,
                  branch_name,
@@ -160,7 +163,7 @@ defmodule Arbor.Actions.Coding.Workspace do
                  reset?,
                  owned_identity
                ) do
-          {:ok, path, ownership, base_commit}
+          {:ok, path, ownership, base_commit, branch_provenance}
         end
 
       {:error, reason} ->
@@ -1399,28 +1402,28 @@ defmodule Arbor.Actions.Coding.Workspace do
     end
   end
 
-  # Ownership is about the *path*, not the branch:
-  # - already-present path at our computed location -> :reused
-  # - branch already checked out at another worktree -> :reused
-  # - pre-existing branch, newly added path -> :owned (branch reuse is fine)
-  # - new branch + new path -> :owned
+  # Path ownership is independent of branch provenance:
+  # - already-present path at our computed location -> path :reused, branch :reused
+  # - branch already checked out at another worktree -> path :reused, branch :reused
+  # - pre-existing branch, newly added path -> path :owned, branch :reused
+  # - new branch + new path -> path :owned, branch :created
   # `reset?` is independent: reused worktrees / attached branches start clean.
   defp ensure_worktree(repo_root, branch_name, worktree_path, base_commit, require_reused?) do
     cond do
       File.dir?(worktree_path) ->
         with {:ok, path} <- ensure_existing_worktree_branch(worktree_path, branch_name) do
-          {:ok, path, :reused, true}
+          {:ok, path, :reused, true, :reused}
         end
 
       existing_path = worktree_for_branch(repo_root, branch_name) ->
-        {:ok, existing_path, :reused, true}
+        {:ok, existing_path, :reused, true, :reused}
 
       branch_exists?(repo_root, branch_name) ->
         if require_reused? do
           {:error, :reused_worktree_vanished}
         else
           with {:ok, path} <- add_existing_branch_worktree(repo_root, branch_name, worktree_path) do
-            {:ok, path, :owned, true}
+            {:ok, path, :owned, true, :reused}
           end
         end
 
@@ -1430,7 +1433,7 @@ defmodule Arbor.Actions.Coding.Workspace do
         else
           with {:ok, path} <-
                  add_new_branch_worktree(repo_root, branch_name, worktree_path, base_commit) do
-            {:ok, path, :owned, false}
+            {:ok, path, :owned, false, :created}
           end
         end
     end
@@ -1845,7 +1848,12 @@ defmodule Arbor.Actions.Coding.Workspace do
 
     Modes:
     * `retain` - disarm cancellation cleanup and preserve the worktree
-    * `remove` - remove only invocation-owned worktrees; reused paths survive
+    * `remove` - remove only invocation-owned worktrees; reused paths survive.
+      Reviewable local branches are always preserved.
+    * `discard` - remove an invocation-owned worktree and, only when this
+      invocation created the exact branch and its tip still equals the recorded
+      base, retire that local branch. Reused/pre-existing branches are never
+      deleted. Fail-closed when provenance or tip identity is uncertain.
 
     Authority is the live owner process, or matching non-empty `task_id` plus
     the same non-empty principal/agent id.
@@ -1853,7 +1861,7 @@ defmodule Arbor.Actions.Coding.Workspace do
 
     use Jido.Action,
       name: "coding_workspace_release",
-      description: "Release a coding workspace lease (retain or remove)",
+      description: "Release a coding workspace lease (retain, remove, or discard)",
       category: "coding",
       tags: ["coding", "workspace", "worktree", "lease"],
       schema: [
@@ -1865,7 +1873,7 @@ defmodule Arbor.Actions.Coding.Workspace do
         mode: [
           type: :string,
           default: "retain",
-          doc: "Release mode: \"retain\" (default) or \"remove\""
+          doc: "Release mode: \"retain\" (default), \"remove\", or \"discard\""
         ]
       ]
 

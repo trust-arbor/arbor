@@ -1949,12 +1949,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                    branch: branch,
                    worktree_base_dir: worktree_base,
                    create_worktree: fn repo_path, branch_name, params ->
-                     {:ok, path, :owned, _base_commit} =
+                     {:ok, path, :owned, _base_commit, provenance} =
                        Workspace.create_worktree(repo_path, branch_name, params)
+
+                     # A freshly created branch carries :created provenance.
+                     assert provenance == :created
 
                      # Real owned worktree exists; fail finalization after its
                      # ownership is known so cleanup is authorized.
-                     {:ok, path, :owned, nil}
+                     {:ok, path, :owned, nil, :created}
                    end
                  },
                  server: server
@@ -1993,7 +1996,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       worktree_path = Path.join(tmp_dir, Workspace.worktree_dir_name(branch))
       base_commit = git!(repo_root, ["rev-parse", "HEAD"])
 
-      assert {:ok, ^worktree_path, :owned, ^base_commit} =
+      assert {:ok, ^worktree_path, :owned, ^base_commit, :created} =
                Workspace.create_worktree(repo_root, branch, %{
                  worktree_base_dir: tmp_dir,
                  base_ref: base_commit

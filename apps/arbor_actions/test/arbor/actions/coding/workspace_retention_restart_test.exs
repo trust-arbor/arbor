@@ -2265,11 +2265,45 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       replace_journal_state(remove_server, %{status: :unsupported})
 
       assert {:ok, result} = release(remove_server, reactivated.workspace_id, :remove)
+
       assert result.status == "removed"
+
+      # Worktree path was deleted before the durable marker deletion/reservation
+      # failed.  Preserve truthful same-BEAM residue: active lifecycle plus
+      # observed path absence represented with :active_orphaned.
       refute File.dir?(reactivated.worktree_path)
       assert durable_marker?(store_name, backend, reactivated.workspace_id)
       assert journal_poisoned?(remove_server)
+
+      # The durable active marker survives in hot state as :active_orphaned;
+      # retained_count stays truthful without claiming an uncommitted
+      # retained/dormant transition.
       assert retained_count(remove_server) == 1
+
+      retained = retained_from_state(remove_server)
+      assert retained.lifecycle == :active_orphaned
+      assert retained.dormant == false
+      assert retained.cleanup_failure == nil
+      assert retained.retry_count == 0
+
+      # No live lease — the active lease was dropped before marker work.
+      assert active_count(remove_server) == 0
+
+      # No expiry timer was armed and no destructive retry scheduled.
+      assert retained.expiry_ref == nil
+
+      # Healthy restart reconciliation: a fresh registry with a healthy journal
+      # recognises the stale same-BEAM active marker whose worktree is gone and
+      # settles it cleanly — no poisoned admission, no leaked retained entry.
+      {store_name2, backend2} = {store_name, backend}
+      stop_registry(remove_server)
+
+      server2 = start_registry(60_000, retention_journal: {store_name2, backend2})
+
+      refute journal_poisoned?(server2)
+      refute durable_marker?(store_name2, backend2, reactivated.workspace_id)
+      assert retained_count(server2) == 0
+      assert active_count(server2) == 0
     end
 
     test "security regression: test env never starts the application-owned retention store" do
@@ -3538,11 +3572,20 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       assert_eventually(
         fn ->
           assert journal_poisoned?(server)
+
+          # A failed persistence write must NOT install an attempted
+          # dormant/pending transition in hot state.  The prior hot evidence
+          # remains truthful: dormant false, no uncommitted cleanup_failure.
           retained = retained_from_state(server)
-          assert retained.dormant == true
-          assert match?({:retry_reservation_failed, _}, retained.cleanup_failure)
+          assert retained.dormant == false
+          assert retained.cleanup_failure == nil
           # No cleanup attempt — path still present.
           assert File.dir?(path)
+
+          # The expiry timer was cancelled on reservation failure; armed no
+          # retry timer.  Admission is poisoned so no new acquire can proceed.
+          state = :sys.get_state(server_pid(server))
+          refute state.retention_journal.status == :ready
         end,
         100
       )
@@ -3598,6 +3641,135 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
         end,
         100
       )
+    end
+
+    test "security regression: limit-zero marker-delete exhaustion persists crash-durable dormancy, not :active_orphaned",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/limit-zero-marker-delete"
+      base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-lz-#{System.unique_integer([:positive])}"
+      principal_id = "agent-lz-#{System.unique_integer([:positive])}"
+
+      {store_name, backend} = start_controllable_store()
+
+      server =
+        start_registry(60_000,
+          retention_journal: {store_name, backend},
+          retained_cleanup_retry_limit: 0
+        )
+
+      assert {:ok, lease} =
+               acquire(server, repo, branch, tmp_dir, base,
+                 task_id: task_id,
+                 principal_id: principal_id
+               )
+
+      path = lease.worktree_path
+
+      # Active-lease :remove with marker-delete failure AND limit zero.
+      # reserve_cleanup_attempt must immediately commit dormancy
+      # (:retries_exhausted), NOT install :active_orphaned.  schedule_retained_retry
+      # must distinguish committed outcomes from actual :reservation_failed.
+      :ok = ControllableRetentionStore.set_mode(store_name, :fail_delete)
+      assert {:ok, _result} = release(server, lease.workspace_id, :remove)
+
+      retained = retained_from_state(server)
+      assert retained.dormant == true
+      assert retained.lifecycle == :retained
+      assert retained.cleanup_failure == :cleanup_retries_exhausted
+      refute retained.expiry_ref
+
+      # Durable marker reflects the committed dormant state: lifecycle "retained"
+      # (NOT "active" which would hydrate as :active_orphaned), retry_count at
+      # the configured limit.
+      {:ok, key} = Core.record_key(lease.workspace_id)
+      assert {:ok, durable} = Persistence.get(store_name, backend, key)
+      assert (Map.get(durable, :lifecycle) || Map.get(durable, "lifecycle")) == "retained"
+      assert (Map.get(durable, :retry_count) || Map.get(durable, "retry_count")) == 0
+
+      # Restart in the same runtime: the dormant state must be crash-durable.
+      # Hydration must NOT misinterpret the marker as :active_orphaned and
+      # regain behavior — dormant stays true, no timer, no destructive attempts.
+      stop_registry(server)
+
+      test_pid = self()
+
+      # Inject a retained_cleanup callback that signals if any destructive
+      # attempt is made after hydration. A dormant marker must never invoke it.
+      server2 =
+        start_registry(60_000,
+          retention_journal: {store_name, backend},
+          retained_cleanup_retry_limit: 0,
+          retained_cleanup: fn retained ->
+            send(test_pid, {:cleanup_attempted, retained.workspace_id})
+            {:error, :unexpected_cleanup}
+          end
+        )
+
+      retained2 = retained_from_state(server2)
+      assert retained2.dormant == true
+      assert retained2.lifecycle == :retained
+      assert retained2.cleanup_failure == :cleanup_retries_exhausted
+      assert retained2.retry_count == 0
+      refute retained2.expiry_ref
+
+      # Allow the hydration/scheduling window to elapse. A dormant marker must
+      # not arm a timer and must not invoke cleanup — refute any message.
+      Process.sleep(200)
+      refute_received {:cleanup_attempted, _}
+
+      # No destructive work occurred — the path was already removed by :remove.
+      refute File.dir?(path)
+      # Marker still durably present — dormant evidence was not cleaned up.
+      assert durable_marker?(store_name, backend, lease.workspace_id)
+
+      stop_registry(server2)
+    end
+
+    test "security regression: fail-put marker-delete reservation installs :active_orphaned with precise poison reason",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/fail-put-active-remove"
+      base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-fp-#{System.unique_integer([:positive])}"
+      principal_id = "agent-fp-#{System.unique_integer([:positive])}"
+
+      {store_name, backend} = start_controllable_store()
+
+      server =
+        start_registry(60_000,
+          retention_journal: {store_name, backend},
+          retained_cleanup_retry_limit: 3
+        )
+
+      assert {:ok, lease} =
+               acquire(server, repo, branch, tmp_dir, base,
+                 task_id: task_id,
+                 principal_id: principal_id
+               )
+
+      # Poison the journal to an unsupported state so BOTH delete_retained_marker
+      # and persist_retained_marker fail.  This triggers schedule_retained_retry
+      # → reserve_cleanup_attempt → :reservation_failed.
+      replace_journal_state(server, %{status: :unsupported})
+
+      assert {:ok, _result} = release(server, lease.workspace_id, :remove)
+
+      # Only :reservation_failed may install :active_orphaned.
+      retained = retained_from_state(server)
+      assert retained.lifecycle == :active_orphaned
+      assert retained.dormant == false
+      assert retained.cleanup_failure == nil
+      assert retained.expiry_ref == nil
+
+      # The precise poison reason from reserve_cleanup_attempt
+      # (:retry_reservation_failed) must be preserved — NOT overwritten with
+      # :marker_delete_failed.
+      state = :sys.get_state(server_pid(server))
+      assert match?(%{reason: {:retry_reservation_failed, _}}, state.retention_journal)
+
+      stop_registry(server)
     end
 
     test "genuinely persisted exhausted retry count hydrates dormant", %{tmp_dir: tmp_dir} do
