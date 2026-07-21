@@ -829,6 +829,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp normalize_steering_delivery({:error, :unsupported}), do: :unsupported
   defp normalize_steering_delivery(:unsupported), do: :unsupported
+  defp normalize_steering_delivery({:error, :delivery_unknown}), do: :unsupported
+  defp normalize_steering_delivery({:error, :cancelled}), do: :unsupported
   defp normalize_steering_delivery(result), do: {:deferred, bounded_error(result)}
 
   defp defer_control(state, task_id, control_id, error) do
@@ -942,9 +944,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp reconcile_accepted_control(%{state: :done} = record, control) do
     transition_terminal_control(record, control, %{
-      "status" => "delivered",
-      "delivered_at" => DateTime.to_iso8601(record.completed_at),
-      "error" => nil
+      "status" => "delivery_unconfirmed",
+      "delivered_at" => nil,
+      "error" => "delivery_unconfirmed_task_succeeded"
     })
   end
 

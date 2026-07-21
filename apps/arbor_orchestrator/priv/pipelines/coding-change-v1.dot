@@ -303,7 +303,10 @@ digraph CodingChangeV1 {
   ]
 
   // Recovery sends share the same inspect action under a distinct node so the
-  // baseline is refreshed without re-entering the implement edge.
+  // workspace existence is verified before each recovered send without re-entering
+  // the implement edge. The original baseline_fingerprint is preserved — recovery
+  // only inspects to confirm the workspace still exists, not to overwrite the
+  // baseline that a new validation/review/operator rework turn will refresh.
   capture_pre_turn_recovery [
     type="exec",
     target="action",
@@ -317,13 +320,6 @@ digraph CodingChangeV1 {
     type="branch",
     shape=diamond,
     fan_out="false"
-  ]
-
-  hoist_baseline_fingerprint_recovery [
-    type="transform",
-    transform="identity",
-    source_key="pre_turn.fingerprint",
-    output_key="baseline_fingerprint"
   ]
 
   implement [
@@ -1470,8 +1466,10 @@ digraph CodingChangeV1 {
   open_recovery_worker -> error_worker_recovery_reopen_failed [condition="outcome=fail"]
   hoist_recovery_worker_session_id -> hoist_recovery_worker_provider_session_id
   hoist_recovery_worker_provider_session_id -> route_recovery_continuity
-  // Re-fingerprint before every recovered send so progress is relative to the
-  // state immediately before that turn, not a stale pre-failure baseline.
+  // Verify workspace existence before every recovered send; the original
+  // baseline_fingerprint from capture_pre_turn_workspace is preserved so the
+  // post-send inspect correctly detects whether progress was made relative to
+  // the pre-implement snapshot.
   route_recovery_continuity -> capture_pre_turn_recovery [condition="context.worker.continuity=resumed"]
   route_recovery_continuity -> copy_recovery_pending_prompt [condition="context.worker.continuity=fresh_recovery"]
   route_recovery_continuity -> error_worker_recovery_continuity_invalid
@@ -1482,8 +1480,7 @@ digraph CodingChangeV1 {
   capture_pre_turn_recovery -> status_pipeline_error_then_close [condition="outcome=fail"]
   capture_pre_turn_recovery -> check_pre_turn_recovery_exists [condition="outcome=success"]
   check_pre_turn_recovery_exists -> error_workspace_missing [condition="context.pre_turn.exists!=true"]
-  check_pre_turn_recovery_exists -> hoist_baseline_fingerprint_recovery [condition="context.pre_turn.exists=true"]
-  hoist_baseline_fingerprint_recovery -> retry_recovered_send
+  check_pre_turn_recovery_exists -> retry_recovered_send [condition="context.pre_turn.exists=true"]
   retry_recovered_send -> error_worker_recovery_send_failed [condition="outcome=fail"]
   retry_recovered_send -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
 

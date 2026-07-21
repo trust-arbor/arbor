@@ -67,7 +67,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     error_workspace_missing
                     error_review_cycle_invalid
                     hoist_baseline_fingerprint
-                    hoist_baseline_fingerprint_recovery
                     hoist_review_cycle
                     hoist_review_disposition
                     hoist_review_finding_ledger
@@ -517,15 +516,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         }
       },
       %{
-        "node_id" => "hoist_baseline_fingerprint_recovery",
-        "attrs" => %{
-          "type" => "transform",
-          "transform" => "identity",
-          "source_key" => "pre_turn.fingerprint",
-          "output_key" => "baseline_fingerprint"
-        }
-      },
-      %{
         "node_id" => "hoist_recovery_prompt",
         "attrs" => %{
           "type" => "transform",
@@ -597,8 +587,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     ],
     "protected_writers" => %{
       "baseline_fingerprint" => [
-        "hoist_baseline_fingerprint",
-        "hoist_baseline_fingerprint_recovery"
+        "hoist_baseline_fingerprint"
       ],
       "session_id" => ["copy_worker_provider_session_id_to_session_id"],
       "worker_provider_session_id" => [
@@ -625,7 +614,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ],
       [
         "check_pre_turn_recovery_exists",
-        "hoist_baseline_fingerprint_recovery",
+        "retry_recovered_send",
         "context.pre_turn.exists=true"
       ],
       [
@@ -667,7 +656,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ["error_worker_recovery_summary_failed", "status_pipeline_error_then_close", nil],
       ["error_worker_send_recovery_exhausted", "status_pipeline_error_then_close", nil],
       ["error_worker_stale_close_failed", "status_pipeline_error_then_close", nil],
-      ["hoist_baseline_fingerprint_recovery", "retry_recovered_send", nil],
       ["hoist_recovery_prompt", "capture_pre_turn_recovery", nil],
       ["hoist_recovery_worker_provider_session_id", "route_recovery_continuity", nil],
       ["hoist_recovery_worker_session_id", "hoist_recovery_worker_provider_session_id", nil],

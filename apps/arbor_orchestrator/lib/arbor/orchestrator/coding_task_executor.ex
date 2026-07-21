@@ -589,6 +589,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
        when is_atom(status) or is_binary(status),
        do: {:error, {:not_ready, status}}
 
+  defp adapt_managed_control_result({:error, {:task_control_terminal, :not_delivered, _reason}}),
+    do: {:error, :not_delivered}
+
+  defp adapt_managed_control_result(
+         {:error, {:task_control_terminal, :delivery_unknown, _reason}}
+       ),
+       do: {:error, :delivery_unknown}
+
+  defp adapt_managed_control_result({:error, {:task_control_terminal, :cancelled, _reason}}),
+    do: {:error, :cancelled}
+
   defp adapt_managed_control_result({:error, {:task_control_terminal, status, _reason}})
        when status in [:not_delivered, :delivery_unknown, :cancelled],
        do: {:error, :unsupported}

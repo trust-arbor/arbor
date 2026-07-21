@@ -2795,17 +2795,40 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
             {:error, {:unsupported, :provider}},
             {:error, :ambiguous_task_control_session},
             {:error, :nonrecoverable},
-            {:error, {:non_recoverable, :closed}},
-            {:error,
-             {:task_control_terminal, :not_delivered, :provider_prompt_failed_before_delivery}},
-            {:error, {:task_control_terminal, :delivery_unknown, :provider_delivery_failed}},
-            {:error, {:task_control_terminal, :cancelled, :caller_cancelled}}
+            {:error, {:non_recoverable, :closed}}
           ] do
         Process.put(:coding_task_control_reply, managed_reply)
 
         assert {:error, :unsupported} =
                  CodingTaskExecutor.steer_task("agent_1", valid_control(), valid_context())
       end
+    end
+
+    test "terminal task control statuses preserve their distinction" do
+      Process.put(
+        :coding_task_control_reply,
+        {:error,
+         {:task_control_terminal, :not_delivered, :provider_prompt_failed_before_delivery}}
+      )
+
+      assert {:error, :not_delivered} =
+               CodingTaskExecutor.steer_task("agent_1", valid_control(), valid_context())
+
+      Process.put(
+        :coding_task_control_reply,
+        {:error, {:task_control_terminal, :delivery_unknown, :provider_delivery_failed}}
+      )
+
+      assert {:error, :delivery_unknown} =
+               CodingTaskExecutor.steer_task("agent_1", valid_control(), valid_context())
+
+      Process.put(
+        :coding_task_control_reply,
+        {:error, {:task_control_terminal, :cancelled, :caller_cancelled}}
+      )
+
+      assert {:error, :cancelled} =
+               CodingTaskExecutor.steer_task("agent_1", valid_control(), valid_context())
     end
 
     test "security regression: task and principal binding reject authority overrides" do
