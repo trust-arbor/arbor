@@ -17,9 +17,12 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   identity-bearing `active|retained`/`owned`, or a discard-in-progress
   `discarding`/`owned` marker. Optional `branch_provenance` records whether
   the invocation created the branch (`created`), reused a pre-existing branch
-  (`reused`), or lacks evidence (`unknown`). Legacy markers without the field
-  hydrate as `unknown` and must preserve the branch. No HMAC/signing envelope
-  is required here.
+  (`reused`), or lacks evidence (`unknown`). `discard_phase="archive"` binds
+  the exact terminal tip in `settlement_tip` while the worktree identity is
+  still present; `worktree` keeps that identity after archive proof, and
+  `branch` drops it after removal. Legacy markers without provenance hydrate as
+  `unknown` and must preserve the branch. No HMAC/signing envelope is required
+  here.
   """
 
   @schema_version 1
@@ -58,7 +61,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   )
 
   # Optional closed keys. Missing branch_provenance hydrates as "unknown".
-  @optional_record_keys ~w(branch_provenance discard_phase)
+  @optional_record_keys ~w(branch_provenance discard_phase settlement_tip)
 
   @lstat_keys ~w(type major_device minor_device inode)
   @registration_keys ~w(path head branch)
@@ -82,7 +85,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
           required(:expires_at) => String.t(),
           required(:retry_count) => non_neg_integer(),
           required(:branch_provenance) => String.t(),
-          optional(:discard_phase) => String.t()
+          optional(:discard_phase) => String.t(),
+          optional(:settlement_tip) => String.t()
         }
 
   @type encode_input :: %{
@@ -102,7 +106,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
           optional(:lifecycle) => String.t() | atom(),
           optional(:retry_count) => non_neg_integer(),
           optional(:branch_provenance) => String.t() | atom(),
-          optional(:discard_phase) => String.t() | atom()
+          optional(:discard_phase) => String.t() | atom(),
+          optional(:settlement_tip) => String.t()
         }
 
   @doc "Current durable schema version."
@@ -150,8 +155,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
   non-scalar identity maps. Absolute UTC `expires_at` only. Lifecycle and
   provenance are a closed pair: `creating`/`pending` carries no identity;
   `active|retained`/`owned` requires the complete identity;
-  `discarding`/`owned` carries identity while the worktree phase is pending
-  and drops identity once only branch retirement remains.
+  `discarding`/`owned` carries identity while archive/worktree phases are
+  pending and drops identity once only branch retirement remains.
   """
   @spec encode_record(encode_input()) :: {:ok, durable_record()} | {:error, term()}
   def encode_record(input) when is_map(input) do
@@ -175,6 +180,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
          {:ok, branch} <- require_bounded_string(input, :branch, @max_branch_bytes),
          {:ok, base_commit} <- encode_base_commit(input, lifecycle),
          {:ok, discard_phase} <- encode_discard_phase(input, lifecycle),
+         {:ok, settlement_tip} <- encode_settlement_tip(input, lifecycle, discard_phase),
          {:ok, lstat} <- encode_lstat_for_lifecycle(input, lifecycle, discard_phase),
          {:ok, registration} <-
            encode_registration_for_lifecycle(input, lifecycle, discard_phase),
@@ -214,6 +220,13 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
       record =
         if is_binary(discard_phase) do
           Map.put(record, :discard_phase, discard_phase)
+        else
+          record
+        end
+
+      record =
+        if is_binary(settlement_tip) do
+          Map.put(record, :settlement_tip, settlement_tip)
         else
           record
         end
@@ -258,6 +271,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
          {:ok, branch} <- require_bounded_string(normalized, "branch", @max_branch_bytes),
          {:ok, base_commit} <- encode_base_commit(normalized, lifecycle),
          {:ok, discard_phase} <- encode_discard_phase(normalized, lifecycle),
+         {:ok, settlement_tip} <-
+           encode_settlement_tip(normalized, lifecycle, discard_phase),
          {:ok, lstat} <- encode_lstat_for_lifecycle(normalized, lifecycle, discard_phase),
          {:ok, registration} <-
            encode_registration_for_lifecycle(normalized, lifecycle, discard_phase),
@@ -294,9 +309,16 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
         branch_provenance: branch_provenance
       }
 
+      record =
+        if is_binary(discard_phase) do
+          Map.put(record, :discard_phase, discard_phase)
+        else
+          record
+        end
+
       {:ok,
-       if is_binary(discard_phase) do
-         Map.put(record, :discard_phase, discard_phase)
+       if is_binary(settlement_tip) do
+         Map.put(record, :settlement_tip, settlement_tip)
        else
          record
        end}
@@ -570,6 +592,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
 
   defp encode_discard_phase(input, "discarding") do
     case Map.get(input, :discard_phase) || Map.get(input, "discard_phase") do
+      phase when phase in [:archive, "archive"] -> {:ok, "archive"}
       phase when phase in [:worktree, "worktree"] -> {:ok, "worktree"}
       phase when phase in [:branch, "branch"] -> {:ok, "branch"}
       nil -> {:error, :missing_discard_phase}
@@ -581,6 +604,29 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
     case Map.get(input, :discard_phase) || Map.get(input, "discard_phase") do
       nil -> {:ok, nil}
       _ -> {:error, :discard_phase_not_allowed}
+    end
+  end
+
+  defp encode_settlement_tip(input, "discarding", "archive") do
+    case Map.get(input, :settlement_tip) || Map.get(input, "settlement_tip") do
+      value when is_binary(value) -> require_bounded_binary(value, @max_commit_bytes)
+      _ -> {:error, :missing_settlement_tip}
+    end
+  end
+
+  defp encode_settlement_tip(input, "discarding", phase)
+       when phase in ["worktree", "branch"] do
+    case Map.get(input, :settlement_tip) || Map.get(input, "settlement_tip") do
+      nil -> {:ok, nil}
+      value when is_binary(value) -> require_bounded_binary(value, @max_commit_bytes)
+      _ -> {:error, :invalid_settlement_tip}
+    end
+  end
+
+  defp encode_settlement_tip(input, _lifecycle, _phase) do
+    case Map.get(input, :settlement_tip) || Map.get(input, "settlement_tip") do
+      nil -> {:ok, nil}
+      _ -> {:error, :settlement_tip_not_allowed}
     end
   end
 
@@ -652,9 +698,10 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
          base_commit,
          lstat,
          registration,
-         "worktree"
+         phase
        )
-       when is_binary(base_commit) and is_map(lstat) and is_map(registration),
+       when phase in ["archive", "worktree"] and is_binary(base_commit) and is_map(lstat) and
+              is_map(registration),
        do: :ok
 
   defp validate_ownership_lifecycle("owned", "discarding", base_commit, nil, nil, "branch")
@@ -690,9 +737,10 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionJournalCore do
          base_commit: base_commit,
          lstat_identity: lstat,
          worktree_registration: registration,
-         discard_phase: "worktree"
+         discard_phase: phase
        })
-       when is_binary(base_commit) and is_map(lstat) and is_map(registration),
+       when phase in ["archive", "worktree"] and is_binary(base_commit) and is_map(lstat) and
+              is_map(registration),
        do: true
 
   defp valid_ownership_lifecycle?(%{

@@ -384,6 +384,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       base = Path.join(tmp_dir, "worktrees")
       task_id = "task-race-#{System.unique_integer([:positive])}"
       principal_id = "agent-race-#{System.unique_integer([:positive])}"
+      parent = self()
 
       # Cleanup boundary: replace the path after outer validation would have
       # passed, then invoke the production identity-bound destroyer. The
@@ -393,7 +394,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
         File.rm_rf!(path)
         File.mkdir_p!(path)
         File.write!(Path.join(path, "survivor.txt"), "must-live\n")
-        WorkspaceLeaseRegistry.remove_owned_retained_worktree(retained)
+        result = WorkspaceLeaseRegistry.remove_owned_retained_worktree(retained)
+        send(parent, {:replacement_cleanup_result, result})
+        result
       end
 
       {store_name, backend} = start_journal_store()
@@ -418,6 +421,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       send(server_pid(server), {:retained_expire, target, generation})
 
       survivor = Path.join(path, "survivor.txt")
+
+      assert_receive {:replacement_cleanup_result, cleanup_result}, 5_000
+      assert {:error, _reason} = cleanup_result
 
       # Wait for the injected cleanup to materialize the survivor before reading.
       assert_eventually(
@@ -478,7 +484,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       assert durable_marker?(store_name, backend, lease.workspace_id)
     end
 
-    test "marker delete failure schedules retries before dormancy", %{tmp_dir: tmp_dir} do
+    test "missing worktree before archive preserves a dormant marker without rebinding", %{
+      tmp_dir: tmp_dir
+    } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       branch = "test/marker-delete-fail"
       base = Path.join(tmp_dir, "worktrees")
@@ -490,7 +498,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       server =
         start_registry(60_000,
           retention_journal: {store_name, backend},
-          retained_cleanup_retry_limit: 2
+          retained_cleanup_retry_limit: 1
         )
 
       assert {:ok, lease} =
@@ -502,8 +510,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       path = lease.worktree_path
       assert {:ok, _} = release(server, lease.workspace_id, :retain)
 
-      # Path settled; marker delete fails via injected store mode.
-      :ok = ControllableRetentionStore.set_mode(store_name, :fail_delete)
+      # The path disappears before archive intent is captured. The branch
+      # still exists, but expiry may not synthesize archive/delete authority
+      # after losing the bound worktree identity.
       _ = WorkspaceLeaseRegistry.remove_owned_retained_worktree(retained_from_state(server))
       refute File.dir?(path)
 
@@ -518,29 +527,23 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           assert retained_count(server) == 1
           refute File.dir?(path)
           retained = retained_from_state(server)
-          # Pre-reserved attempt count; not yet exhausted (limit 2).
           assert retained.retry_count == 1
-          assert retained.dormant == false
-          assert match?({:marker_delete_failed, _}, retained.cleanup_failure)
-        end,
-        50
-      )
-
-      # Second reserved attempt still fails delete → count 2, still schedulable or dormant
-      # depending on post-attempt limit check (count >= limit → dormant).
-      force_retained_expired(server)
-      {target2, generation2} = retained_target_and_generation(server)
-      send(server_pid(server), {:retained_expire, target2, generation2})
-
-      assert_eventually(
-        fn ->
-          retained = retained_from_state(server)
-          assert retained.retry_count == 2
+          assert retained.lifecycle == :retained
           assert retained.dormant == true
-          assert durable_marker?(store_name, backend, lease.workspace_id)
+
+          assert match?(
+                   {:cleanup_retries_exhausted,
+                    {:archive_capture_failed, :retained_identity_mismatch}},
+                   retained.cleanup_failure
+                 )
         end,
         50
       )
+
+      assert git!(repo, ["rev-parse", "--verify", "refs/heads/#{branch}"]) =~
+               ~r/^[0-9a-f]{40,64}$/
+
+      assert durable_marker?(store_name, backend, lease.workspace_id)
     end
 
     test "corrupt journal poisons registry and blocks fresh allocation", %{tmp_dir: tmp_dir} do
@@ -1012,7 +1015,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       assert durable_marker?(store_name, backend, workspace_id)
       assert File.exists?(Path.join(path, "survivor.txt"))
 
-      assert {:error, :retained_identity_mismatch} =
+      assert {:error, :workspace_discard_pending} =
                acquire(server2, repo, branch, tmp_dir, base,
                  workspace_id: workspace_id,
                  task_id: task_id,
@@ -2876,6 +2879,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       branch = "test/detached-registration-retained"
       base = Path.join(tmp_dir, "worktrees")
       parent = self()
+      task_id = "task-detached-registration-retained"
+      principal_id = "agent-detached-registration-retained"
       {store_name, backend} = start_controllable_store()
 
       server =
@@ -2889,7 +2894,12 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           end
         )
 
-      assert {:ok, lease} = acquire(server, repo, branch, tmp_dir, base)
+      assert {:ok, lease} =
+               acquire(server, repo, branch, tmp_dir, base,
+                 task_id: task_id,
+                 principal_id: principal_id
+               )
+
       assert {:ok, _} = release(server, lease.workspace_id, :retain)
 
       force_retained_expired(server)
@@ -3638,7 +3648,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           refute File.dir?(path)
           refute durable_marker?(store_name, backend, lease.workspace_id)
         end,
-        100
+        300
       )
     end
 
@@ -3832,14 +3842,17 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       assert is_nil(hydrated.expiry_ref)
       assert File.dir?(lease.worktree_path)
 
-      assert {:ok, rebound} =
+      assert {:error, :workspace_discard_pending} =
                acquire(server2, repo, branch, tmp_dir, base,
                  workspace_id: lease.workspace_id,
                  task_id: task_id,
                  principal_id: principal_id
                )
 
-      assert {:ok, _} = release(server2, rebound.workspace_id, :remove)
+      # Test hygiene after proving the terminal marker cannot be downgraded.
+      assert :ok = WorkspaceLeaseRegistry.remove_owned_retained_worktree(hydrated)
+      assert :ok = Persistence.delete(store_name, backend, key)
+      stop_registry(server2)
     end
   end
 

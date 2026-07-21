@@ -22,7 +22,9 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCoreTest do
   end
 
   describe "normalize_phase/1" do
-    test "accepts worktree and branch in atom and string form" do
+    test "accepts archive, worktree, and branch in atom and string form" do
+      assert Core.normalize_phase(:archive) == {:ok, :archive}
+      assert Core.normalize_phase("archive") == {:ok, :archive}
       assert Core.normalize_phase(:worktree) == {:ok, :worktree}
       assert Core.normalize_phase("branch") == {:ok, :branch}
       assert Core.normalize_phase(nil) == :invalid
@@ -64,11 +66,39 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCoreTest do
                {:retry_branch_phase, {:observation_failed, :git_rev_parse_ref_failed}}
     end
 
-    test "base_commit is normalized case-insensitively for the CAS compare" do
+    test "expected tip is normalized case-insensitively for the CAS compare" do
       upper = String.upcase(@base)
 
       assert Core.branch_phase_decision(:created, {:present, @base}, upper) ==
                {:attempt_delete, @base}
+    end
+  end
+
+  describe "begin_archive_phase/3" do
+    test "binds settlement tip without rewriting acquisition or worktree identity" do
+      marker = %{
+        lifecycle: :retained,
+        base_commit: @base,
+        lstat_identity: %{inode: 1},
+        worktree_registration: %{path: "p"},
+        retry_count: 2,
+        cleanup_failure: :capture_failed,
+        dormant: true
+      }
+
+      archived = Core.begin_archive_phase(marker, @other, "rt-current")
+
+      assert archived.lifecycle == :discarding
+      assert archived.discard_phase == :archive
+      assert archived.base_commit == @base
+      assert archived.settlement_tip == @other
+      assert archived.runtime_id == "rt-current"
+      assert archived.lstat_identity == %{inode: 1}
+      assert archived.worktree_registration == %{path: "p"}
+      assert archived.retry_count == 2
+      assert archived.cleanup_failure == nil
+      assert archived.dormant == false
+      assert archived.durable_lifecycle == "discarding"
     end
   end
 
@@ -115,6 +145,11 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCoreTest do
   end
 
   describe "dormant_on_hydrate?/3" do
+    test "archive phase is dormant once its independent budget is exhausted" do
+      assert Core.dormant_on_hydrate?(:archive, 8, 8) == true
+      assert Core.dormant_on_hydrate?(:archive, 0, 8) == false
+    end
+
     test "branch phase is dormant once budget is exhausted so restart cannot retry" do
       assert Core.dormant_on_hydrate?(:branch, 8, 8) == true
       assert Core.dormant_on_hydrate?(:branch, 9, 8) == true
@@ -137,6 +172,34 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCoreTest do
 
     test "unknown phase fails closed to dormant" do
       assert Core.dormant_on_hydrate?(:invalid, 0, 8) == true
+    end
+  end
+
+  describe "advance_archive_to_worktree_phase/1" do
+    test "preserves exact identity and resets the cleanup retry budget" do
+      marker = %{
+        lifecycle: :discarding,
+        discard_phase: :archive,
+        base_commit: @base,
+        settlement_tip: @other,
+        lstat_identity: %{inode: 1},
+        worktree_registration: %{path: "p"},
+        retry_count: 4,
+        cleanup_failure: :old,
+        dormant: true
+      }
+
+      advanced = Core.advance_archive_to_worktree_phase(marker)
+
+      assert advanced.lifecycle == :discarding
+      assert advanced.discard_phase == :worktree
+      assert advanced.base_commit == @base
+      assert advanced.settlement_tip == @other
+      assert advanced.lstat_identity == %{inode: 1}
+      assert advanced.worktree_registration == %{path: "p"}
+      assert advanced.retry_count == 0
+      assert advanced.cleanup_failure == nil
+      assert advanced.dormant == false
     end
   end
 

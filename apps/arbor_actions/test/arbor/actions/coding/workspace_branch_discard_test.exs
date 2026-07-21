@@ -95,10 +95,10 @@ end
 defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
   use Arbor.Actions.ActionCase, async: false
 
+  alias Arbor.Actions.Coding.DiscardFaultStore
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: Core
-  alias Arbor.Actions.Coding.DiscardFaultStore
   alias Arbor.Actions.Git
   alias Arbor.Persistence
 
@@ -1529,6 +1529,574 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
     end
   end
 
+  describe "retained expiry archive settlement" do
+    test "journal admits archive phase only with exact worktree identity" do
+      acquisition_base = "0123456789abcdef0123456789abcdef01234567"
+      settlement_tip = "fedcba9876543210fedcba9876543210fedcba98"
+
+      marker = %{
+        workspace_id: "ws_archive_phase_core",
+        task_id: "task_archive_phase_core",
+        principal_id: "agent_archive_phase_core",
+        repo_path: "/tmp/archive-phase-repo",
+        worktree_path: "/tmp/archive-phase-worktree",
+        display_worktree_path: "/tmp/archive-phase-worktree",
+        branch: "test/archive-phase-core",
+        base_commit: acquisition_base,
+        settlement_tip: settlement_tip,
+        ownership: :owned,
+        branch_provenance: :created,
+        lifecycle: :discarding,
+        discard_phase: :archive,
+        runtime_id: "rt_archive_phase_core",
+        lstat_identity: %{
+          type: :directory,
+          major_device: 1,
+          minor_device: 2,
+          inode: 3
+        },
+        worktree_registration: %{
+          path: "/tmp/archive-phase-worktree",
+          head: settlement_tip,
+          branch: "test/archive-phase-core"
+        },
+        expires_at: DateTime.utc_now(),
+        retry_count: 0
+      }
+
+      assert {:ok, encoded} = Core.encode_record(marker)
+      assert encoded.discard_phase == "archive"
+      assert encoded.base_commit == acquisition_base
+      assert encoded.settlement_tip == settlement_tip
+      assert {:ok, decoded} = Core.decode_record(encoded)
+      assert decoded.discard_phase == "archive"
+      assert decoded.base_commit == acquisition_base
+      assert decoded.settlement_tip == settlement_tip
+
+      assert {:error, :missing_settlement_tip} =
+               marker
+               |> Map.delete(:settlement_tip)
+               |> Core.encode_record()
+
+      assert {:error, :invalid_lstat_identity} =
+               marker
+               |> Map.put(:lstat_identity, nil)
+               |> Core.encode_record()
+    end
+
+    test "created branch archives its exact tip before worktree and branch retirement", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/expiry-archive-created"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-expiry-created-#{System.unique_integer([:positive])}"
+      principal_id = "agent-expiry-created"
+      parent = self()
+
+      archive = fn retained ->
+        result =
+          Git.archive_branch_evidence_ref(
+            retained.repo_path,
+            retained.branch,
+            retained.task_id,
+            retained.workspace_id,
+            retained.settlement_tip
+          )
+
+        send(
+          parent,
+          {:archive_result, result, retained.base_commit, retained.settlement_tip}
+        )
+
+        result
+      end
+
+      server = start_registry(retained_archive: archive)
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: branch,
+                   worktree_base_dir: worktree_base,
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      acquisition_base = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+      File.write!(Path.join(lease.worktree_path, "candidate.txt"), "candidate\n")
+      git!(lease.worktree_path, ["add", "candidate.txt"])
+      git!(lease.worktree_path, ["commit", "-m", "candidate"])
+      expected_tip = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:ok, _retained} =
+               WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      force_retained_expired(server)
+      {target, generation} = retained_target_and_generation(server)
+      send(Process.whereis(server), {:retained_expire, target, generation})
+
+      assert acquisition_base != expected_tip
+
+      assert_receive {:archive_result, archive_result, ^acquisition_base, ^expected_tip},
+                     2_000
+
+      assert {:ok, %{hidden_ref: hidden_ref}} = archive_result
+
+      assert_eventually(
+        fn ->
+          refute File.dir?(lease.worktree_path)
+          refute branch_exists?(repo, branch)
+          assert :sys.get_state(server).retained_by_id == %{}
+        end,
+        100
+      )
+
+      assert git!(repo, ["rev-parse", hidden_ref]) == expected_tip
+    end
+
+    test "reused and unknown branches are archived but preserved", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      expected_tip = git!(repo, ["rev-parse", "HEAD"])
+
+      for {provenance, label} <- [{:reused, "reused"}, {:unknown, "unknown"}] do
+        branch = "test/expiry-archive-#{label}"
+        worktree_base = Path.join(tmp_dir, "worktrees-#{label}")
+        worktree_path = expected_worktree_path(worktree_base, branch)
+        task_id = "task-expiry-#{label}-#{System.unique_integer([:positive])}"
+        principal_id = "agent-expiry-#{label}"
+
+        git!(repo, ["branch", branch])
+        git!(repo, ["worktree", "add", worktree_path, branch])
+        server = start_registry()
+
+        assert {:ok, lease} =
+                 WorkspaceLeaseRegistry.acquire(
+                   %{
+                     repo_path: repo,
+                     branch: branch,
+                     worktree_base_dir: worktree_base,
+                     task_id: task_id,
+                     principal_id: principal_id,
+                     create_worktree: fn _repo, _branch, _params ->
+                       case provenance do
+                         :reused -> {:ok, worktree_path, :owned, expected_tip, :reused}
+                         :unknown -> {:ok, worktree_path, :owned, expected_tip}
+                       end
+                     end
+                   },
+                   server: server
+                 )
+
+        assert {:ok, _retained} =
+                 WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{
+                   server: server,
+                   task_id: task_id,
+                   principal_id: principal_id
+                 })
+
+        force_retained_expired(server)
+        {target, generation} = retained_target_and_generation(server)
+        send(Process.whereis(server), {:retained_expire, target, generation})
+
+        assert_eventually(
+          fn ->
+            refute File.dir?(worktree_path)
+            assert branch_exists?(repo, branch)
+            assert git!(repo, ["rev-parse", branch]) == expected_tip
+            assert :sys.get_state(server).retained_by_id == %{}
+          end,
+          150
+        )
+
+        hidden_ref = evidence_ref_for(task_id, lease.workspace_id)
+        assert git!(repo, ["rev-parse", hidden_ref]) == expected_tip
+      end
+    end
+
+    test "archive failure preserves worktree and branch in a durable archive-phase marker", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/expiry-archive-failure"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-expiry-archive-failure"
+      principal_id = "agent-expiry-archive-failure"
+      parent = self()
+      {store_name, backend} = start_journal_store()
+
+      server =
+        start_registry(
+          retention_journal: {store_name, backend},
+          retained_cleanup_retry_limit: 1,
+          retained_archive: fn _retained -> {:error, :injected_archive_failure} end,
+          retained_cleanup: fn _retained ->
+            send(parent, :unexpected_expiry_cleanup)
+            :ok
+          end
+        )
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: branch,
+                   worktree_base_dir: worktree_base,
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      acquisition_base = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+      File.write!(Path.join(lease.worktree_path, "archive-failure.txt"), "candidate\n")
+      git!(lease.worktree_path, ["add", "archive-failure.txt"])
+      git!(lease.worktree_path, ["commit", "-m", "archive failure candidate"])
+      expected_tip = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:ok, _retained} =
+               WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      force_retained_expired(server)
+      {target, generation} = retained_target_and_generation(server)
+      send(Process.whereis(server), {:retained_expire, target, generation})
+
+      assert_eventually(
+        fn ->
+          retained = retained_record(server)
+          assert retained.lifecycle == :discarding
+          assert retained.discard_phase == :archive
+          assert retained.base_commit == acquisition_base
+          assert retained.settlement_tip == expected_tip
+          assert retained.dormant == true
+        end,
+        100
+      )
+
+      refute_received :unexpected_expiry_cleanup
+      assert File.dir?(lease.worktree_path)
+      assert branch_exists?(repo, branch)
+      refute ref_exists?(repo, evidence_ref_for(task_id, lease.workspace_id))
+
+      assert {:ok, key} = Core.record_key(lease.workspace_id)
+      assert {:ok, durable} = Persistence.get(store_name, backend, key)
+      assert (Map.get(durable, :lifecycle) || Map.get(durable, "lifecycle")) == "discarding"
+      assert (Map.get(durable, :discard_phase) || Map.get(durable, "discard_phase")) == "archive"
+
+      assert (Map.get(durable, :base_commit) || Map.get(durable, "base_commit")) ==
+               acquisition_base
+
+      assert (Map.get(durable, :settlement_tip) || Map.get(durable, "settlement_tip")) ==
+               expected_tip
+    end
+
+    test "tip movement after capture cannot be rebound or archived", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/expiry-archive-tip-race"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-expiry-tip-race"
+      principal_id = "agent-expiry-tip-race"
+      parent = self()
+      {store_name, backend} = start_journal_store()
+      expected_tip = git!(repo, ["rev-parse", "HEAD"])
+      File.write!(Path.join(repo, "replacement.txt"), "replacement\n")
+      git!(repo, ["add", "replacement.txt"])
+      git!(repo, ["commit", "-m", "replacement tip"])
+      replacement_tip = git!(repo, ["rev-parse", "HEAD"])
+
+      archive = fn retained ->
+        git!(repo, [
+          "update-ref",
+          "refs/heads/#{branch}",
+          replacement_tip,
+          retained.settlement_tip
+        ])
+
+        result =
+          Git.archive_branch_evidence_ref(
+            retained.repo_path,
+            retained.branch,
+            retained.task_id,
+            retained.workspace_id,
+            retained.settlement_tip
+          )
+
+        send(parent, {:tip_race_archive, result})
+        result
+      end
+
+      server =
+        start_registry(
+          retention_journal: {store_name, backend},
+          retained_cleanup_retry_limit: 1,
+          retained_archive: archive
+        )
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: branch,
+                   base_ref: expected_tip,
+                   worktree_base_dir: worktree_base,
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      assert git!(lease.worktree_path, ["rev-parse", "HEAD"]) == expected_tip
+
+      assert {:ok, _retained} =
+               WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      force_retained_expired(server)
+      {target, generation} = retained_target_and_generation(server)
+      send(Process.whereis(server), {:retained_expire, target, generation})
+
+      assert_receive {:tip_race_archive, {:error, :branch_ref_oid_mismatch}}, 2_000
+
+      assert_eventually(
+        fn ->
+          retained = retained_record(server)
+          assert retained.discard_phase == :archive
+          assert retained.settlement_tip == expected_tip
+          assert retained.dormant == true
+        end,
+        100
+      )
+
+      assert File.dir?(lease.worktree_path)
+      assert git!(repo, ["rev-parse", branch]) == replacement_tip
+      refute ref_exists?(repo, evidence_ref_for(task_id, lease.workspace_id))
+    end
+
+    test "restart after archive creation replays archive phase before cleanup", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/expiry-archive-restart"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-expiry-archive-restart"
+      principal_id = "agent-expiry-archive-restart"
+      {store_name, backend} = start_journal_store()
+      server = start_registry(retention_journal: {store_name, backend})
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: branch,
+                   worktree_base_dir: worktree_base,
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      assert {:ok, _retained} =
+               WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      retained = retained_record(server)
+      expected_tip = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:ok, %{hidden_ref: hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo,
+                 branch,
+                 task_id,
+                 lease.workspace_id,
+                 expected_tip
+               )
+
+      archive_marker =
+        Map.merge(retained, %{
+          settlement_tip: expected_tip,
+          lifecycle: :discarding,
+          discard_phase: :archive,
+          retry_count: 0
+        })
+
+      persist_marker!(store_name, backend, archive_marker)
+      stop_supervised(server)
+
+      server2 = start_registry(retention_journal: {store_name, backend})
+
+      assert_eventually(
+        fn ->
+          refute File.dir?(lease.worktree_path)
+          refute branch_exists?(repo, branch)
+          assert :sys.get_state(server2).retained_by_id == %{}
+
+          assert {:ok, key} = Core.record_key(lease.workspace_id)
+          assert {:error, :not_found} = Persistence.get(store_name, backend, key)
+        end,
+        300
+      )
+
+      assert git!(repo, ["rev-parse", hidden_ref]) == expected_tip
+    end
+
+    test "restart after worktree removal resumes branch retirement", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/expiry-worktree-restart"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-expiry-worktree-restart"
+      principal_id = "agent-expiry-worktree-restart"
+      {store_name, backend} = start_journal_store()
+      server = start_registry(retention_journal: {store_name, backend})
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: branch,
+                   worktree_base_dir: worktree_base,
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      assert {:ok, _retained} =
+               WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{
+                 server: server,
+                 task_id: task_id,
+                 principal_id: principal_id
+               })
+
+      retained = retained_record(server)
+      expected_tip = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:ok, %{hidden_ref: hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo,
+                 branch,
+                 task_id,
+                 lease.workspace_id,
+                 expected_tip
+               )
+
+      worktree_marker =
+        Map.merge(retained, %{
+          settlement_tip: expected_tip,
+          lifecycle: :discarding,
+          discard_phase: :worktree,
+          retry_count: 0
+        })
+
+      # Durable worktree phase precedes removal. Simulate a crash after the
+      # identity-checked remove but before the branch-phase marker is written.
+      persist_marker!(store_name, backend, worktree_marker)
+      assert :ok = WorkspaceLeaseRegistry.remove_owned_retained_worktree(retained)
+      refute File.dir?(lease.worktree_path)
+      assert branch_exists?(repo, branch)
+      stop_supervised(server)
+
+      server2 = start_registry(retention_journal: {store_name, backend})
+
+      assert_eventually(
+        fn ->
+          refute branch_exists?(repo, branch)
+          assert :sys.get_state(server2).retained_by_id == %{}
+
+          assert {:ok, key} = Core.record_key(lease.workspace_id)
+          assert {:error, :not_found} = Persistence.get(store_name, backend, key)
+        end,
+        300
+      )
+
+      assert git!(repo, ["rev-parse", hidden_ref]) == expected_tip
+    end
+
+    test "legacy retained record without task or provenance cannot gain cleanup authority", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/expiry-legacy-no-authority"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      {store_name, backend} = start_journal_store()
+      server = start_registry(retention_journal: {store_name, backend})
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: branch,
+                   worktree_base_dir: worktree_base
+                 },
+                 server: server
+               )
+
+      assert {:ok, _retained} =
+               WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, %{server: server})
+
+      assert {:ok, key} = Core.record_key(lease.workspace_id)
+      assert {:ok, durable} = Persistence.get(store_name, backend, key)
+
+      legacy =
+        durable
+        |> Map.delete(:branch_provenance)
+        |> Map.delete("branch_provenance")
+        |> Map.put(
+          :expires_at,
+          DateTime.utc_now() |> DateTime.add(-1, :second) |> DateTime.to_iso8601()
+        )
+
+      assert :ok = Persistence.put(store_name, backend, key, legacy)
+      stop_supervised(server)
+
+      server2 =
+        start_registry(
+          retention_journal: {store_name, backend},
+          retained_cleanup_retry_limit: 1
+        )
+
+      assert_eventually(
+        fn ->
+          retained = retained_record(server2)
+          assert retained.lifecycle == :discarding
+          assert retained.discard_phase == :archive
+          assert retained.branch_provenance == :unknown
+          assert retained.settlement_tip == git!(repo, ["rev-parse", branch])
+          assert retained.dormant == true
+        end,
+        200
+      )
+
+      assert File.dir?(lease.worktree_path)
+      assert branch_exists?(repo, branch)
+      assert {:ok, durable_after} = Persistence.get(store_name, backend, key)
+
+      assert (Map.get(durable_after, :discard_phase) ||
+                Map.get(durable_after, "discard_phase")) == "archive"
+
+      assert is_binary(
+               Map.get(durable_after, :settlement_tip) ||
+                 Map.get(durable_after, "settlement_tip")
+             )
+    end
+  end
+
   # -- helpers --------------------------------------------------------
 
   defp start_journal_store do
@@ -1556,6 +2124,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
       ]
       |> maybe_put(:retention_journal, Keyword.get(opts, :retention_journal))
+      |> maybe_put(:retained_archive, Keyword.get(opts, :retained_archive))
       |> maybe_put(:retained_cleanup, Keyword.get(opts, :retained_cleanup))
       |> maybe_put(
         :retained_cleanup_retry_limit,
@@ -1582,6 +2151,57 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
       {_, 0} -> true
       _ -> false
     end
+  end
+
+  defp ref_exists?(repo, full_ref) do
+    case System.cmd(
+           "git",
+           ["-C", repo, "show-ref", "--verify", "--quiet", full_ref],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} -> true
+      _ -> false
+    end
+  end
+
+  defp evidence_ref_for(task_id, workspace_id) do
+    workspace_digest = :crypto.hash(:sha256, workspace_id) |> Base.encode16(case: :lower)
+    task_digest = :crypto.hash(:sha256, task_id) |> Base.encode16(case: :lower)
+    "refs/arbor/evidence/#{workspace_digest}/#{task_digest}"
+  end
+
+  defp retained_record(server) do
+    [{_workspace_id, retained}] = Map.to_list(:sys.get_state(server).retained_by_id)
+    retained
+  end
+
+  defp persist_marker!(store_name, backend, marker) do
+    assert {:ok, payload} = Core.encode_record(marker)
+    assert {:ok, key} = Core.record_key(marker.workspace_id)
+    assert :ok = Persistence.put(store_name, backend, key, payload)
+  end
+
+  defp retained_target_and_generation(server) do
+    [{target, retained}] = Map.to_list(:sys.get_state(server).retained_by_target)
+    {target, retained.expiry_generation}
+  end
+
+  defp force_retained_expired(server) do
+    now = System.monotonic_time(:millisecond)
+
+    :sys.replace_state(server, fn state ->
+      retained_by_id =
+        Map.new(state.retained_by_id, fn {id, retained} ->
+          {id, %{retained | expires_at_ms: now - 1}}
+        end)
+
+      retained_by_target =
+        Map.new(state.retained_by_target, fn {target, retained} ->
+          {target, %{retained | expires_at_ms: now - 1}}
+        end)
+
+      %{state | retained_by_id: retained_by_id, retained_by_target: retained_by_target}
+    end)
   end
 
   defp assert_eventually(fun, attempts) when attempts > 0 do

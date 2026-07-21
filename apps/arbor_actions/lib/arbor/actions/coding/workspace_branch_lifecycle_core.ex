@@ -10,8 +10,12 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
 
   Closure rules this reducer owns:
 
+  * Retained expiry advances through `archive -> worktree -> branch`; archive
+    completion resets the worktree-cleanup retry budget but preserves the exact
+    captured tip and worktree identity.
   * Path ownership is not branch ownership. Branch retirement is gated solely
-    by `provenance == :created` plus tip/base equality.
+    by `provenance == :created` plus equality with the exact persisted deletion
+    authority.
   * Reused/unknown provenance never deletes a branch: settlement preserves the
     pre-existing ref and reports residue.
   * Created branches with a divergent tip or a CAS mismatch are not retryable
@@ -24,7 +28,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
   """
 
   @type provenance :: :created | :reused | :unknown
-  @type phase :: :worktree | :branch
+  @type phase :: :archive | :worktree | :branch
   @type ref_observation :: :absent | {:present, String.t()} | {:error, term()}
 
   # Branch is settled; marker may be dropped. `branch_retired` records
@@ -58,9 +62,9 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
 
   @doc "Normalize a discard phase from atom/string/nil."
   @spec normalize_phase(term()) :: {:ok, phase()} | :invalid
-  def normalize_phase(phase) when phase in [:worktree, :branch], do: {:ok, phase}
+  def normalize_phase(phase) when phase in [:archive, :worktree, :branch], do: {:ok, phase}
 
-  def normalize_phase(phase) when phase in ["worktree", "branch"],
+  def normalize_phase(phase) when phase in ["archive", "worktree", "branch"],
     do: {:ok, String.to_existing_atom(phase)}
 
   def normalize_phase(_), do: :invalid
@@ -69,12 +73,13 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
   Decide the branch-phase action from provenance and the structured exact-ref
   observation. Pure: the shell performs the git observation and passes it in.
 
-  `base_commit` is the recorded base OID the invocation expects the branch to
-  still point at before retirement is authorized.
+  `expected_tip` is the exact persisted OID the invocation expects the branch
+  to still point at before retirement is authorized. It is the acquisition base
+  for direct discard and the separately captured settlement tip for expiry.
   """
   @spec branch_phase_decision(provenance(), ref_observation(), String.t()) :: branch_decision()
-  def branch_phase_decision(provenance, observation, base_commit) do
-    expected = normalize_oid(base_commit)
+  def branch_phase_decision(provenance, observation, expected_tip) do
+    expected = normalize_oid(expected_tip)
 
     cond do
       provenance in [:reused, :unknown] ->
@@ -154,6 +159,10 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
       when is_integer(retry_count) and is_integer(limit),
       do: retry_count >= limit
 
+  def dormant_on_hydrate?(:archive, retry_count, limit)
+      when is_integer(retry_count) and is_integer(limit),
+      do: retry_count >= limit
+
   def dormant_on_hydrate?(:worktree, retry_count, limit)
       when is_integer(retry_count) and is_integer(limit),
       do: retry_count >= limit
@@ -170,6 +179,41 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
   def force_exhausted(retry_count, limit)
       when is_integer(retry_count) and is_integer(limit) and limit >= 0 do
     max(retry_count, limit)
+  end
+
+  @doc """
+  Bind retained expiry to an exact observed tip before any archive or cleanup
+  effect runs. The immutable acquisition base and worktree identity are carried
+  forward unchanged; the shell persists this marker before interpreting it.
+  """
+  @spec begin_archive_phase(map(), String.t(), String.t()) :: map()
+  def begin_archive_phase(retained, settlement_tip, runtime_id) when is_map(retained) do
+    Map.merge(retained, %{
+      settlement_tip: settlement_tip,
+      lifecycle: :discarding,
+      discard_phase: :archive,
+      runtime_id: runtime_id,
+      durable_lifecycle: "discarding",
+      cleanup_failure: nil,
+      dormant: false
+    })
+  end
+
+  @doc """
+  Advance an expiry settlement after its hidden evidence ref is confirmed.
+
+  The exact captured tip and worktree identity remain bound while the shell
+  moves into worktree cleanup. The shell persists this transition before it
+  removes the worktree.
+  """
+  @spec advance_archive_to_worktree_phase(map()) :: map()
+  def advance_archive_to_worktree_phase(retained) when is_map(retained) do
+    retained
+    |> Map.put(:lifecycle, :discarding)
+    |> Map.put(:discard_phase, :worktree)
+    |> Map.put(:retry_count, 0)
+    |> Map.put(:cleanup_failure, nil)
+    |> Map.put(:dormant, false)
   end
 
   @doc """

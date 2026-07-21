@@ -1819,6 +1819,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       repo_root = git!(repo, ["rev-parse", "--show-toplevel"])
       branch = "test/workspace-acquire-cancel"
       worktree_base = Path.join(tmp_dir, "worktrees")
+      task_id = "task-acquire-cancel-#{System.unique_integer([:positive])}"
+      principal_id = "agent-acquire-cancel"
       parent = self()
 
       # Private registry so the blocked create does not stall the shared app registry.
@@ -1851,6 +1853,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                 repo_path: repo_root,
                 branch: branch,
                 worktree_base_dir: worktree_base,
+                task_id: task_id,
+                principal_id: principal_id,
                 create_worktree: create_fun
               },
               server: server
@@ -1880,7 +1884,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           refute File.dir?(expected_path)
           assert map_size(:sys.get_state(server).retained_by_id) == 0
         end,
-        150
+        300
       )
 
       assert is_pid(registry_pid)

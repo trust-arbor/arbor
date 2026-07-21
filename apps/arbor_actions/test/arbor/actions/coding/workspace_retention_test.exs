@@ -1,10 +1,11 @@
 defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
   use Arbor.Actions.ActionCase, async: false
 
-  alias Arbor.Actions.Config
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: Core
+  alias Arbor.Actions.Config
+  alias Arbor.Actions.Git
 
   @moduletag :fast
   @owner_operation_timeout 10_000
@@ -57,8 +58,15 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     repo = create_git_repo(Path.join(tmp_dir, "repo"))
     # Config clamps TTL to a 1s minimum; give the eventual assertion headroom.
     server = start_registry(1_000)
+    task_id = "task-retention-expiry-#{System.unique_integer([:positive])}"
+    principal_id = "agent-retention-expiry"
 
-    assert {:ok, lease} = acquire(server, repo, "test/retention-expiry", tmp_dir)
+    assert {:ok, lease} =
+             acquire(server, repo, "test/retention-expiry", tmp_dir, nil,
+               task_id: task_id,
+               principal_id: principal_id
+             )
+
     path = lease.worktree_path
 
     assert {:ok, retained} = release(server, lease.workspace_id, :retain)
@@ -279,10 +287,25 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     branch = "test/owner-death-ttl-cleanup"
     base = Path.join(tmp_dir, "worktrees")
     # Config clamps TTL to a 1s minimum.
-    server = start_registry(1_000)
     parent = self()
     task_id = "task-ttl-#{System.unique_integer([:positive])}"
     principal_id = "agent-ttl-#{System.unique_integer([:positive])}"
+
+    archive = fn retained ->
+      result =
+        Git.archive_branch_evidence_ref(
+          retained.repo_path,
+          retained.branch,
+          retained.task_id,
+          retained.workspace_id,
+          retained.settlement_tip
+        )
+
+      send(parent, {:owner_death_archive, result})
+      result
+    end
+
+    server = start_registry(1_000, retained_archive: archive)
 
     owner =
       spawn(fn ->
@@ -311,10 +334,14 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
       100
     )
 
+    expected_tip = git!(repo, ["rev-parse", branch])
+
     # Force absolute deadline past and drive the same expire handler as the timer.
     force_retained_expired(server)
     {target, generation} = retained_target_and_generation(server)
     send(server_pid(server), {:retained_expire, target, generation})
+
+    assert_receive {:owner_death_archive, {:ok, %{hidden_ref: hidden_ref}}}, 2_000
 
     assert_eventually(
       fn ->
@@ -323,6 +350,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
       end,
       100
     )
+
+    assert git!(repo, ["rev-parse", hidden_ref]) == expected_tip
   end
 
   test "expiry cleanup failure retains and retries the exact record", %{tmp_dir: tmp_dir} do
@@ -340,8 +369,19 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     end
 
     server = start_registry(50, retained_cleanup: cleanup)
-    assert {:ok, lease} = acquire(server, repo, branch, tmp_dir, base)
+    task_id = "task-retained-retry-#{System.unique_integer([:positive])}"
+    principal_id = "agent-retained-retry"
+
+    assert {:ok, lease} =
+             acquire(server, repo, branch, tmp_dir, base,
+               task_id: task_id,
+               principal_id: principal_id
+             )
+
     assert {:ok, _} = release(server, lease.workspace_id, :retain)
+    force_retained_expired(server)
+    {target, generation} = retained_target_and_generation(server)
+    send(server_pid(server), {:retained_expire, target, generation})
     assert_receive {:cleanup_attempt, 1}, 2_000
     assert retained_count(server) == 1
     assert File.dir?(lease.worktree_path)
@@ -367,7 +407,13 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
   } do
     repo = create_git_repo(Path.join(tmp_dir, "repo"))
     server = start_registry(50, retained_cleanup: fn _retained -> throw(:cleanup_boom) end)
-    assert {:ok, lease} = acquire(server, repo, "test/throwing-cleanup", tmp_dir)
+
+    assert {:ok, lease} =
+             acquire(server, repo, "test/throwing-cleanup", tmp_dir, nil,
+               task_id: "task-throwing-cleanup",
+               principal_id: "agent-throwing-cleanup"
+             )
+
     assert {:ok, _} = release(server, lease.workspace_id, :retain)
 
     assert_eventually(fn -> assert retained_record(server).retry_count >= 1 end, 100)
@@ -633,7 +679,10 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
 
   defp server_pid(server), do: Process.whereis(server)
 
-  defp acquire(server, repo, branch, tmp_dir, base \\ nil, opts \\ []) do
+  defp acquire(server, repo, branch, tmp_dir, base),
+    do: acquire(server, repo, branch, tmp_dir, base, [])
+
+  defp acquire(server, repo, branch, tmp_dir, base, opts) do
     attrs =
       %{
         repo_path: repo,
