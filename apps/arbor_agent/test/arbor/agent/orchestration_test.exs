@@ -53,6 +53,7 @@ defmodule Arbor.Agent.OrchestrationTest do
       case {actor, resource_uri} do
         {"dispatch_owner", "arbor://agent/dispatch/agent_1"} -> {:ok, :authorized}
         {"dispatch_owner", "arbor://agent/task/steer/task_1"} -> {:ok, :authorized}
+        {"dispatch_owner", "arbor://agent/task/adopt/task_1"} -> {:ok, :authorized}
         _ -> {:error, :no_capability}
       end
     end
@@ -83,7 +84,13 @@ defmodule Arbor.Agent.OrchestrationTest do
         Map.put(capabilities, opts[:resource], opts[:principal])
       )
 
-      Process.put({__MODULE__, :capability_resources}, %{cap_id => opts[:resource]})
+      resources = Process.get({__MODULE__, :capability_resources}, %{})
+
+      Process.put(
+        {__MODULE__, :capability_resources},
+        Map.put(resources, cap_id, opts[:resource])
+      )
+
       {:ok, %{id: cap_id}}
     end
 
@@ -196,6 +203,15 @@ defmodule Arbor.Agent.OrchestrationTest do
       )
     end
 
+    def adopt(task_id, destination_ref, opts) do
+      send(self(), {:task_adopt, task_id, destination_ref, opts})
+
+      Process.get(
+        {__MODULE__, :adopt_result},
+        {:ok, %{result_type: :coding_change, payload: %{destination_ref: destination_ref}}}
+      )
+    end
+
     def cancel(task_id, opts) do
       send(self(), {:task_cancel, task_id, opts})
 
@@ -265,6 +281,7 @@ defmodule Arbor.Agent.OrchestrationTest do
     def cancel(task_id, _opts) do
       dispatch_opts = Process.get({__MODULE__, :dispatch_opts}, [])
       dispatch_opts[:steer_security_module].revoke(dispatch_opts[:steer_cap_id])
+      dispatch_opts[:adoption_security_module].revoke(dispatch_opts[:adoption_cap_id])
 
       {:ok,
        %{
@@ -543,6 +560,7 @@ defmodule Arbor.Agent.OrchestrationTest do
           {FakeTaskStore, :status_result},
           {FakeTaskStore, :result_result},
           {FakeTaskStore, :cancel_result},
+          {FakeTaskStore, :adopt_result},
           {DispatchScopedSecurity, :capabilities},
           {DispatchScopedSecurity, :capability_resources},
           {TerminalTaskStore, :dispatch_opts}
@@ -577,6 +595,9 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert_received {:grant, steer_grant_opts}
       assert steer_grant_opts[:resource] == "arbor://agent/task/steer/task_1"
 
+      assert_received {:grant, adoption_grant_opts}
+      assert adoption_grant_opts[:resource] == "arbor://agent/task/adopt/task_1"
+
       assert_received {:task_dispatch, "agent_1", "write a patch", opts}
       assert opts[:task_id] == "task_1"
       assert opts[:metadata] == %{ticket: "A-1"}
@@ -584,6 +605,8 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert opts[:approval_answer_security_module] == FakeSecurity
       assert opts[:steer_cap_id] == "cap_task_answer"
       assert opts[:steer_security_module] == FakeSecurity
+      assert opts[:adoption_cap_id] == "cap_task_answer"
+      assert opts[:adoption_security_module] == FakeSecurity
 
       descriptor = opts[:approval_cleanup_descriptor]
       assert is_map(descriptor)
@@ -652,6 +675,7 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert_received {:grant, grant_opts}
       assert grant_opts[:resource] == "arbor://approval/answer/task/task_1"
+      assert_received {:revoke, "cap_task_answer"}
       assert_received {:revoke, "cap_task_answer"}
       assert_received {:revoke, "cap_task_answer"}
       refute_received {:audit_dispatched, _, _, _, _}
@@ -1454,9 +1478,57 @@ defmodule Arbor.Agent.OrchestrationTest do
                Orchestration.cancel_task("task_1", Keyword.put(opts, :authorize?, false))
 
       assert_received {:scoped_revoke, _cap_id, "arbor://agent/task/steer/task_1"}
+      assert_received {:scoped_revoke, _cap_id, "arbor://agent/task/adopt/task_1"}
 
       assert {:error, {:unauthorized, :task_steer_required}} =
                Orchestration.steer_task("task_1", "redirect", opts)
+    end
+  end
+
+  describe "adopt_task_change/3" do
+    test "checks the terminal task status, authorizes the exact task scope, and adopts the result" do
+      assert {:ok, result} =
+               Orchestration.adopt_task_change(
+                 "task_1",
+                 " refs/heads/reviewed ",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity
+               )
+
+      assert result.payload.destination_ref == "refs/heads/reviewed"
+      assert_received {:task_status, "task_1", _opts}
+
+      assert_received {:authorize, "human_1", "arbor://agent/task/adopt/task_1", :execute,
+                       [verify_identity: false]}
+
+      assert_received {:task_adopt, "task_1", "refs/heads/reviewed", opts}
+      assert opts[:caller_id] == "human_1"
+    end
+
+    test "security regression: a different caller cannot adopt another task" do
+      assert {:error, {:unauthorized, :task_adoption_required}} =
+               Orchestration.adopt_task_change(
+                 "task_1",
+                 "refs/heads/reviewed",
+                 caller_id: "other_caller",
+                 task_store: FakeTaskStore,
+                 security_module: FakeTaskSteerSecurity
+               )
+
+      refute_received {:task_adopt, _, _, _}
+    end
+
+    test "rejects blank and oversized destination references before calling the store" do
+      opts = [caller_id: "human_1", task_store: FakeTaskStore, security_module: FakeSecurity]
+
+      assert {:error, :invalid_destination_ref} =
+               Orchestration.adopt_task_change("task_1", "   ", opts)
+
+      assert {:error, :invalid_destination_ref} =
+               Orchestration.adopt_task_change("task_1", String.duplicate("x", 257), opts)
+
+      refute_received {:task_adopt, _, _, _}
     end
   end
 

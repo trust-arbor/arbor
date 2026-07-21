@@ -8,7 +8,7 @@ defmodule Arbor.Gateway.MCP.Handler do
   - `arbor_help` — Get detailed schema/description for a specific action
   - `arbor_run` — Execute an action with parameters
   - `arbor_status` — Inspect agent, memory, and signal state
-  - orchestration tools — list/answer approvals and dispatch/poll async tasks
+  - orchestration tools — list/answer approvals and dispatch/poll/adopt async tasks
 
   Uses runtime bridges (`Code.ensure_loaded?` + `apply/3`) to call into
   arbor_actions, arbor_agent, arbor_memory, and arbor_signals without
@@ -381,6 +381,26 @@ defmodule Arbor.Gateway.MCP.Handler do
           },
           required: ["task_id", "message"]
         }
+      },
+      %{
+        name: "arbor_adopt_task_change",
+        description: "Adopt a successful terminal task change into a destination reference.",
+        inputSchema: %{
+          type: "object",
+          properties: %{
+            task_id: %{
+              type: "string",
+              description: "Task id returned by arbor_dispatch_task"
+            },
+            destination_ref: %{
+              type: "string",
+              minLength: 1,
+              maxLength: 256,
+              description: "Destination reference for the successful task change"
+            }
+          },
+          required: ["task_id", "destination_ref"]
+        }
       }
     ]
   end
@@ -470,6 +490,13 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   def handle_call_tool("arbor_steer_task", args, state) do
     case steer_task(args) do
+      {:ok, result} -> {:ok, json_content(result), state}
+      {:error, message} -> {:ok, error_content(message), state}
+    end
+  end
+
+  def handle_call_tool("arbor_adopt_task_change", args, state) do
+    case adopt_task_change(args) do
       {:ok, result} -> {:ok, json_content(result), state}
       {:error, message} -> {:ok, error_content(message), state}
     end
@@ -674,6 +701,23 @@ defmodule Arbor.Gateway.MCP.Handler do
              [caller_id: caller_id, target_stage: optional_string_arg(args, "target_stage")]
            ]) do
       {:ok, %{"ok" => true, "task_id" => task_id, "control" => control}}
+    else
+      {:error, reason} -> {:error, format_tool_error(reason)}
+      other -> {:error, format_tool_error(other)}
+    end
+  end
+
+  defp adopt_task_change(args) do
+    with {:ok, caller_id} <- require_authenticated("arbor_adopt_task_change"),
+         {:ok, task_id} <- required_string_arg(args, "task_id"),
+         {:ok, destination_ref} <- required_string_arg(args, "destination_ref"),
+         {:ok, result} <-
+           call_orchestration(:adopt_task_change, [
+             task_id,
+             destination_ref,
+             [caller_id: caller_id]
+           ]) do
+      {:ok, %{"ok" => true, "task_id" => task_id, "result" => result}}
     else
       {:error, reason} -> {:error, format_tool_error(reason)}
       other -> {:error, format_tool_error(other)}

@@ -343,6 +343,36 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       end
     end
 
+    def adopt_task(agent_id, result, request, context) do
+      send(recording_pid(), {:adopt_task_called, agent_id, result, request, context, self()})
+
+      case Application.get_env(:arbor_agent, :task_store_test_adopt, :success) do
+        :success ->
+          {:ok, Map.put(result, "adopted", request["destination_ref"])}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        :raise ->
+          raise "adopt_task boom"
+
+        :exit ->
+          exit(:adopt_task_exit)
+
+        :hang ->
+          receive do
+          after
+            30_000 -> {:error, :late_adoption}
+          end
+
+        :invalid ->
+          :ok
+
+        :non_json ->
+          {:ok, Map.put(result, "owner", self())}
+      end
+    end
+
     defp recording_pid do
       Application.fetch_env!(:arbor_agent, :task_store_test_pid)
     end
@@ -375,6 +405,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     original_cancel = Application.get_env(:arbor_agent, :task_store_test_cancel)
     original_steer = Application.get_env(:arbor_agent, :task_store_test_steer)
     original_finalize = Application.get_env(:arbor_agent, :task_store_test_finalize)
+    original_adopt = Application.get_env(:arbor_agent, :task_store_test_adopt)
     original_cleanup_behavior = Application.get_env(:arbor_agent, :lifecycle_cleanup_behavior)
 
     Application.put_env(:arbor_agent, :task_store_test_pid, self())
@@ -388,6 +419,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       restore_env(:task_store_test_cancel, original_cancel)
       restore_env(:task_store_test_steer, original_steer)
       restore_env(:task_store_test_finalize, original_finalize)
+      restore_env(:task_store_test_adopt, original_adopt)
       restore_env(:lifecycle_cleanup_behavior, original_cleanup_behavior)
     end)
 
@@ -599,6 +631,66 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       assert result.result_type == :coding_change
       assert result.raw["finalized"] == true
     end)
+  end
+
+  test "adoption receives the finalized raw result and revokes only its retained capability", %{
+    supervisor: supervisor
+  } do
+    store = start_finalizing_store(supervisor)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "adopt change"},
+               name: store,
+               task_id: "task_adopt_success",
+               adoption_cap_id: "cap_adoption",
+               adoption_capability_revoke: revoke_adoption_to(self())
+             )
+
+    assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
+    send(runner_pid, {:finish, {:ok, %{"status" => "no_changes", "branch" => "test/x"}}})
+
+    assert_eventually(fn -> assert {:ok, _} = TaskStore.result(task_id, name: store) end)
+
+    assert {:ok, adopted_result} = TaskStore.adopt(task_id, " refs/heads/reviewed ", name: store)
+    assert adopted_result.raw["finalized"] == true
+    assert adopted_result.raw["adopted"] == "refs/heads/reviewed"
+
+    assert_receive {:adopt_task_called, "agent_1", raw_result,
+                    %{"destination_ref" => "refs/heads/reviewed"}, %{"task_id" => ^task_id},
+                    _callback_pid}
+
+    assert raw_result["finalized"] == true
+    assert_receive {:revoke_adoption_capability, "cap_adoption"}
+    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == nil
+  end
+
+  test "adoption callback errors preserve the prior result for retry", %{supervisor: supervisor} do
+    Application.put_env(:arbor_agent, :task_store_test_adopt, {:error, :destination_busy})
+    store = start_finalizing_store(supervisor, executor_finalization_timeout_ms: 40)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "retry adoption"},
+               name: store,
+               task_id: "task_adopt_retry",
+               adoption_cap_id: "cap_adoption_retry",
+               adoption_capability_revoke: revoke_adoption_to(self())
+             )
+
+    assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
+    send(runner_pid, {:finish, {:ok, %{"status" => "no_changes"}}})
+    assert_eventually(fn -> assert {:ok, _} = TaskStore.result(task_id, name: store) end)
+
+    assert {:error, {:task_adoption_failed, ":destination_busy"}} =
+             TaskStore.adopt(task_id, "refs/heads/reviewed", name: store)
+
+    assert {:ok, prior_result} = TaskStore.result(task_id, name: store)
+    assert prior_result.raw["finalized"] == true
+    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adoption_retry"
+    refute_receive {:revoke_adoption_capability, _}
   end
 
   test "opted-in terminal finalization failures and timeouts fail the outer task", %{
@@ -2962,6 +3054,13 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   defp revoke_steer_to(test_pid) do
     fn capability_id ->
       send(test_pid, {:revoke_steer_capability, capability_id})
+      :ok
+    end
+  end
+
+  defp revoke_adoption_to(test_pid) do
+    fn capability_id ->
+      send(test_pid, {:revoke_adoption_capability, capability_id})
       :ok
     end
   end

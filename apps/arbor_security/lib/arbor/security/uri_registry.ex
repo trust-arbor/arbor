@@ -110,6 +110,7 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://agent/task/read",
     "arbor://agent/task/cancel",
     "arbor://agent/task/steer",
+    "arbor://agent/task/adopt",
 
     # Comms facade
     "arbor://comms/send",

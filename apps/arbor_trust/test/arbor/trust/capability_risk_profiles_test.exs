@@ -126,6 +126,7 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert ceilings["arbor://agent/spawn"] == :ask
       assert ceilings["arbor://agent/spawn_worker"] == :ask
       assert ceilings["arbor://agent/dispatch"] == :ask
+      assert ceilings["arbor://agent/task/adopt"] == :ask
       assert ceilings["arbor://consensus/admin"] == :ask
       assert ceilings["arbor://monitor/remediate"] == :ask
       assert ceilings["arbor://code/write"] == :ask
@@ -187,6 +188,7 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert thresholds["arbor://fs/read"] == 0
       assert thresholds["arbor://agent/dispatch"] == :never
       assert thresholds["arbor://agent/task/read"] == 0
+      assert thresholds["arbor://agent/task/adopt"] == 3
     end
 
     test "projects constraints, delegation, and approval defaults" do
@@ -206,6 +208,9 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
                :require_human
 
       assert CapabilityRiskProfiles.approval_defaults()["arbor://agent/task/read"] == :auto
+
+      assert CapabilityRiskProfiles.approval_defaults()["arbor://agent/task/adopt"] ==
+               :require_human
     end
 
     test "operator profile overrides flow through all projections" do

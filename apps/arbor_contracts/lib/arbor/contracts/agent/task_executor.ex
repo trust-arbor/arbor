@@ -130,6 +130,13 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   the outer task. The callback must preserve and return a JSON-clean result,
   and explicit runner overrides do not invoke this callback.
 
+  Configured executors may also implement `adopt_task/4` for post-terminal task adoption.
+  TaskStore invokes it only after a successful configured task is terminal. The adoption request is
+  a closed JSON object containing `destination_ref`; the callback must return the complete updated
+  JSON-clean executor result. Explicit runner overrides do not invoke this callback.
+  Queued steering controls transfer responsibility to the executor; acceptance transfers responsibility
+  until delivery is reconciled.
+
   ## Task kinds
 
   Plain string tasks and legacy maps with `input` / `prompt` / `message` /
@@ -321,8 +328,26 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
               execution_context()
             ) :: {:ok, result_payload()} | {:error, term()}
 
+  @doc """
+  Optionally adopt a successful terminal task into a destination reference.
+
+  TaskStore invokes this only for successful configured JSON-clean tasks, after
+  terminalization and any configured `finalize_task/4` callback. The adoption
+  request is a closed JSON object containing `destination_ref`. The callback
+  must return the complete updated JSON-clean executor result; partial patches,
+  structs, and non-JSON values are invalid. Explicit runner overrides do not
+  invoke this callback.
+  """
+  @callback adopt_task(
+              agent_id(),
+              result_payload(),
+              json_map(),
+              execution_context()
+            ) :: {:ok, result_payload()} | {:error, term()}
+
   @optional_callbacks task_status: 2,
                       cancel_task: 2,
                       steer_task: 3,
-                      finalize_task: 4
+                      finalize_task: 4,
+                      adopt_task: 4
 end

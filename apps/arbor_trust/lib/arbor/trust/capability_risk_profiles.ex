@@ -46,6 +46,8 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
     # authority and may spend model/tool budget, so it is explicitly granted.
     {"arbor://agent/dispatch", :arbor_agent, :high, :reversible, :process_spawn, :restricted,
      true, :require_human, false, :metered},
+    {"arbor://agent/task/adopt", :arbor_agent, :high, :reversible, :local_write, :confidential,
+     true, :require_human, true, :cheap},
     {"arbor://consensus/admin", :arbor_consensus, :critical, :irreversible, :governance,
      :restricted, false, :require_human, false, :cheap},
     # The authority to approve/deny agent operations. Holding it lets the caller

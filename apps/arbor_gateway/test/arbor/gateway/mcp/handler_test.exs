@@ -95,6 +95,11 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
          }}
       )
     end
+
+    def adopt_task_change(task_id, destination_ref, opts) do
+      send(self(), {:adopt_task_change, task_id, destination_ref, opts})
+      {:ok, %{result_type: :coding_change, payload: %{destination_ref: destination_ref}}}
+    end
   end
 
   setup do
@@ -190,12 +195,13 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   describe "handle_list_tools/2" do
     test "returns tools", %{state: state} do
       {:ok, tools, nil, _state} = Handler.handle_list_tools(nil, state)
-      assert length(tools) == 11
+      assert length(tools) == 12
 
       names = Enum.map(tools, & &1.name) |> Enum.sort()
 
       assert names == [
                "arbor_actions",
+               "arbor_adopt_task_change",
                "arbor_answer_approval",
                "arbor_cancel_task",
                "arbor_dispatch_task",
@@ -616,6 +622,39 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert_received {:steer_task, "task_1", "run tests", opts}
       assert opts[:caller_id] == "human_1"
       assert opts[:target_stage] == "validation"
+    end
+
+    test "adopt_task_change requires SignedRequest authentication", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_adopt_task_change",
+          %{"task_id" => "task_1", "destination_ref" => "refs/heads/reviewed"},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text =~ "SignedRequest authentication"
+    end
+
+    test "adopt_task_change calls orchestration with the authenticated caller", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_adopt_task_change",
+          %{"task_id" => "task_1", "destination_ref" => "refs/heads/reviewed"},
+          state
+        )
+
+      assert %{
+               "ok" => true,
+               "task_id" => "task_1",
+               "result" => %{"payload" => %{"destination_ref" => "refs/heads/reviewed"}}
+             } = Jason.decode!(text)
+
+      assert_received {:adopt_task_change, "task_1", "refs/heads/reviewed", opts}
+      assert opts[:caller_id] == "human_1"
     end
   end
 

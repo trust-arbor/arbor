@@ -33,6 +33,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   An opted-in `finalize_task/4` callback is different: TaskStore calls it after
   terminal steering reconciliation but before publishing success, and failure or
   timeout fails the outer task so required evidence is never silently omitted.
+
+  A configured executor may also implement `adopt_task/4`. Adoption is serialized
+  through this store and is eligible only for successful terminal JSON-clean tasks;
+  callback errors leave the prior result unchanged so callers can retry.
   """
 
   use GenServer
@@ -53,6 +57,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_max_steering_confirmations 5
   @default_max_steering_replays 3
   @max_steering_message_bytes 4_000
+  @max_destination_ref_bytes 256
 
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.TaskArtifacts
@@ -137,6 +142,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @spec result(task_id(), keyword() | map()) :: task_result()
   def result(task_id, opts \\ []) do
     GenServer.call(store_name(opts), {:result, task_id})
+  end
+
+  @doc "Adopt a successful terminal task into a bounded destination reference."
+  @spec adopt(task_id(), String.t(), keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def adopt(task_id, destination_ref, opts \\ []) do
+    GenServer.call(store_name(opts), {:adopt, task_id, destination_ref})
   end
 
   @doc "Cancel a running task."
@@ -295,6 +306,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           steer_cap_id: Keyword.get(opts, :steer_cap_id),
           steer_security_module: Keyword.get(opts, :steer_security_module, Arbor.Security),
           steer_capability_revoke: Keyword.get(opts, :steer_capability_revoke),
+          adoption_cap_id: Keyword.get(opts, :adoption_cap_id),
+          adoption_security_module: Keyword.get(opts, :adoption_security_module, Arbor.Security),
+          adoption_capability_revoke: Keyword.get(opts, :adoption_capability_revoke),
           # Closed scalar only — executable keys are never retained on the record.
           approval_cleanup_descriptor:
             normalize_approval_cleanup_descriptor(Keyword.get(opts, :approval_cleanup_descriptor)),
@@ -358,6 +372,23 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:adopt, task_id, destination_ref}, _from, state) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        case adopt_terminal_task(record, destination_ref, state) do
+          {:ok, updated_record} ->
+            next_state = put_in(state.tasks[task_id], updated_record)
+            {:reply, {:ok, updated_record.result}, next_state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
   end
 
   def handle_call({:cancel, task_id}, _from, state) do
@@ -499,8 +530,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             |> Map.merge(completion_fields(result, now))
             |> Map.put(:updated_at, now)
             |> maybe_reconcile_terminal_controls()
-            |> maybe_revoke_completed_task_capabilities()
             |> maybe_finalize_task_result(result, state)
+            |> maybe_revoke_completed_task_capabilities()
 
           {put_in(state.tasks[task_id], record),
            cleanup_job(task_id, descriptor, :task_termination)}
@@ -619,7 +650,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp maybe_revoke_completed_task_capabilities(%{state: state} = record)
        when state in [:done, :failed, :cancelled] do
-    revoke_task_capabilities(record)
+    case state do
+      :done -> revoke_non_adoption_task_capabilities(record)
+      _ -> revoke_task_capabilities(record)
+    end
   end
 
   defp maybe_revoke_completed_task_capabilities(record), do: record
@@ -1489,6 +1523,88 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     })
   end
 
+  defp adopt_terminal_task(
+         %{state: :done, context_mode: :json_clean} = record,
+         destination_ref,
+         state
+       ) do
+    module = Map.get(record, :executor)
+
+    cond do
+      not (is_atom(module) and Code.ensure_loaded?(module) and
+               function_exported?(module, :adopt_task, 4)) ->
+        {:error, :task_adoption_unsupported}
+
+      true ->
+        with {:ok, request} <- normalize_adoption_request(destination_ref),
+             {:ok, raw_result} <- finalized_raw_result(record),
+             callback_result <-
+               call_executor_callback(
+                 state,
+                 fn ->
+                   module.adopt_task(record.agent_id, raw_result, request, record.context)
+                 end,
+                 Map.get(
+                   state,
+                   :executor_finalization_timeout_ms,
+                   Config.executor_finalization_timeout_ms()
+                 )
+               ),
+             {:ok, updated_raw_result} <- normalize_adoption_callback(callback_result) do
+          updated_record =
+            record
+            |> Map.put(:result, normalize_result(updated_raw_result))
+            |> Map.put(:updated_at, DateTime.utc_now())
+            |> revoke_adoption_capability()
+
+          {:ok, updated_record}
+        else
+          {:error, reason} -> {:error, {:task_adoption_failed, bounded_error(reason)}}
+        end
+    end
+  end
+
+  defp adopt_terminal_task(%{state: state}, _destination_ref, _store_state)
+       when state != :done,
+       do: {:error, {:task_not_adoptable, state}}
+
+  defp adopt_terminal_task(_record, _destination_ref, _store_state),
+    do: {:error, :task_adoption_unsupported}
+
+  defp normalize_adoption_request(destination_ref)
+       when is_binary(destination_ref) and
+              byte_size(destination_ref) <= @max_destination_ref_bytes do
+    if String.trim(destination_ref) == "" do
+      {:error, :invalid_destination_ref}
+    else
+      canonicalize_and_roundtrip(%{"destination_ref" => String.trim(destination_ref)})
+    end
+  end
+
+  defp normalize_adoption_request(_destination_ref), do: {:error, :invalid_destination_ref}
+
+  defp finalized_raw_result(record) do
+    raw_result =
+      case record.result do
+        result when is_map(result) -> Map.get(result, :raw, Map.get(result, "raw"))
+        _ -> nil
+      end
+
+    if is_map(raw_result) and not is_struct(raw_result) do
+      canonicalize_and_roundtrip(raw_result)
+    else
+      {:error, :missing_executor_raw_result}
+    end
+  end
+
+  defp normalize_adoption_callback({:ok, updated_raw_result})
+       when is_map(updated_raw_result) and not is_struct(updated_raw_result) do
+    canonicalize_and_roundtrip(updated_raw_result)
+  end
+
+  defp normalize_adoption_callback({:error, reason}), do: {:error, reason}
+  defp normalize_adoption_callback(_other), do: {:error, :invalid_adoption_result}
+
   defp bounded_error(result) do
     result
     |> inspect(limit: 10, printable_limit: 160)
@@ -1586,6 +1702,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     record
     |> revoke_approval_answer_capability()
     |> revoke_steer_capability()
+    |> revoke_adoption_capability()
+  end
+
+  defp revoke_non_adoption_task_capabilities(record) do
+    record
+    |> revoke_approval_answer_capability()
+    |> revoke_steer_capability()
   end
 
   defp revoke_approval_answer_capability(%{approval_answer_revoke: revoke_fun} = record, cap_id)
@@ -1624,6 +1747,15 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp revoke_steer_capability(record), do: record
 
+  defp revoke_adoption_capability(%{adoption_cap_id: cap_id} = record)
+       when is_binary(cap_id) and cap_id != "" do
+    record
+    |> revoke_adoption_capability(cap_id)
+    |> Map.put(:adoption_cap_id, nil)
+  end
+
+  defp revoke_adoption_capability(record), do: record
+
   defp revoke_steer_capability(%{steer_capability_revoke: revoke_fun} = record, cap_id)
        when is_function(revoke_fun, 1) do
     revoke_fun.(cap_id)
@@ -1635,6 +1767,30 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp revoke_steer_capability(%{steer_security_module: module} = record, cap_id) do
+    if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :revoke, 1) do
+      apply(module, :revoke, [cap_id])
+    else
+      :ok
+    end
+
+    record
+  rescue
+    _ -> record
+  catch
+    :exit, _ -> record
+  end
+
+  defp revoke_adoption_capability(%{adoption_capability_revoke: revoke_fun} = record, cap_id)
+       when is_function(revoke_fun, 1) do
+    revoke_fun.(cap_id)
+    record
+  rescue
+    _ -> record
+  catch
+    :exit, _ -> record
+  end
+
+  defp revoke_adoption_capability(%{adoption_security_module: module} = record, cap_id) do
     if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :revoke, 1) do
       apply(module, :revoke, [cap_id])
     else
@@ -1834,6 +1990,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       completed
       |> Enum.take(excess)
       |> Enum.map(fn {id, _record} -> id end)
+
+    Enum.each(prune_ids, fn id ->
+      tasks
+      |> Map.fetch!(id)
+      |> revoke_task_capabilities()
+    end)
 
     update_in(state.tasks, &Map.drop(&1, prune_ids))
   end
