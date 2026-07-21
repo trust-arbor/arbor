@@ -291,3 +291,7 @@ collision test wrote its temporary profile into the real `~/.grok`).
 <!-- applied-learning: fail-closed-bulk-audits-still-need-closed-useful-error-categories -->
 <a id="applied-learning-fail-closed-bulk-audits-still-need-closed-useful-error-categories"></a>
 **Fail-closed bulk audits still need closed, useful error categories.** A generic sanitizer that accepts only atoms, binaries, and two-tuples can turn known bounded failures such as `{:range_too_large, :destination, 256}` or a killed Git storage check into `unknown`. Preserve explicitly recognized structural categories and safe numeric fields while retaining `unknown` for arbitrary payloads; otherwise a conservative manifest is secure but not reviewable or operable (found 2026-07-21 while inspecting the historical coding-branch audit).
+
+<!-- applied-learning: do-not-rely-on-posix-scalar-word-splitting-in-zsh -->
+<a id="applied-learning-do-not-rely-on-posix-scalar-word-splitting-in-zsh"></a>
+**Do not rely on POSIX scalar word splitting in zsh diagnostics.** With zsh's default options, `set -- $pair` preserves a scalar containing spaces as one argument rather than splitting it into positional parameters, so a comparison loop can report false mismatches against an empty path. Use an explicit array, `${=pair}` only when deliberate, or pass each path directly; verify harness failures before treating them as repository-state failures (found 2026-07-21 while proving historical branch-settlement set equality).
