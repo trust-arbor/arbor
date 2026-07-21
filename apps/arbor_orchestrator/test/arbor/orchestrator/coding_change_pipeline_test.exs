@@ -1289,7 +1289,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert graph.nodes["commit_change"].attrs["action"] == "coding_reviewed_commit"
 
       assert graph.nodes["commit_change"].attrs["context_keys"] ==
-               "path,message,workspace_dirty,head_commit,workspace_id"
+               "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid,prior_commit"
 
       refute Map.has_key?(graph.nodes, "adopt_head_commit")
       assert graph.nodes["route_commit_interaction"]
