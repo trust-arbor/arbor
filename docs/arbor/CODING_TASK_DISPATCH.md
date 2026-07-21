@@ -393,11 +393,12 @@ Run the read-only Phase 7 branch audit with:
 
 The audit is resumable. With `--output`, `--checkpoint` defaults to
 `OUTPUT.checkpoint`; the checkpoint is an atomic `0600` file bound to the
-exact repository, destination OID, branch OID, and proof-policy scope. Verified
-proofs and deterministic preserve outcomes may be reused only for that exact
-binding. Transient failures are retried, progress is reported, and checkpoint
-writes use a bounded cadence. Incomplete or uncertain proofs conservatively
-preserve the branch.
+exact repository, destination OID, branch OID, and proof-policy scope. Cached
+successful proofs are progress hints and must be live-revalidated within the
+normal proof budget before classification. Only exactly bound deterministic
+preserve outcomes may be reused without proof work. Transient failures are
+retried, progress is reported, and checkpoint writes use a bounded cadence.
+Incomplete or uncertain proofs conservatively preserve the branch.
 
 Git patch evidence is batched under the existing byte and deadline bounds. The
 exit-137 amplification was fixed without increasing the 30-second proof
