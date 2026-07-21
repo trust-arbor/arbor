@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 492,
+  "entry_count": 494,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5940,8 +5940,34 @@
       "source_incident": "found 2026-07-21 integrating managed-branch settlement with retained-workspace cleanup).",
       "content_sha256": "b7b480d62f6535f240db2c261804cbf117e52711add06106f4d531708fe46f0d",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 493,
+      "source_kind": "post-migration",
+      "slug": "cross-worktree-provider-resume-needs-provider-native-root-compatibility",
+      "title": "Cross-worktree provider resume needs provider-native root compatibility.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-cross-worktree-provider-resume-needs-provider-native-root-compatibility",
+      "source_date": "2026-07-21",
+      "source_incident": "found 2026-07-21 recovering task_737730 through task_921666 and task_953218).",
+      "content_sha256": "829bb8a46bf7c6b08fa419b5df14343046912d938d1447caeb26c3635e1a67f8",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 494,
+      "source_kind": "post-migration",
+      "slug": "requested-acp-model-metadata-is-a-claim-until-the-provider-confirms-it",
+      "title": "Requested ACP model metadata is a claim until the provider confirms it.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-requested-acp-model-metadata-is-a-claim-until-the-provider-confirms-it",
+      "source_date": "2026-07-21",
+      "source_incident": "found 2026-07-21 during managed-branch lifecycle integration).",
+      "content_sha256": "6c453404c010130045bdb6121c76ea6af3f1a5a6e62cf18803fb4416cb27887f",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 31
+  "post_migration_entry_count": 33
 }
