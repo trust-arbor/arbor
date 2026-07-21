@@ -997,6 +997,243 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert selection.test_paths == ["apps/alpha/test", "apps/beta/test", "apps/gamma/test"]
   end
 
+  @tag timeout: 15_000
+  test "failure-aware excerpt centers the first ExUnit failure block under multi-KB noise" do
+    # Regression: under head/tail-only windowing, a multi-KB ExUnit stream
+    # whose only failure block sits in the middle discarded the entire
+    # diagnostic — the resumed worker saw only seed output and the final
+    # "N tests, M failures" count, and had to rerun the suite to find the
+    # actual assertion. The failure-aware excerpt centers the byte budget
+    # on the first stable diagnostic anchor.
+    head_context =
+      "Running tests via mix...\n" <>
+        "Excluding tags: [:skip]\n" <>
+        "Including tags: [:focus]\n" <>
+        "Seed: 987654321\n" <>
+        "Max cases: 16\n"
+
+    passing_before =
+      Enum.map_join(1..300, fn i -> ". test passing line #{i} ok\n" end)
+
+    failure_block =
+      "\n\n" <>
+        "  1) test important widget computes correct total (MyApp.WidgetsTest)\n" <>
+        "     apps/my_app/test/widgets_test.exs:42:1\n" <>
+        "     code: assert Widget.total(:a, :b) == 42\n" <>
+        "     lhs:  41\n" <>
+        "     rhs:  42\n" <>
+        "     stacktrace:\n" <>
+        "       apps/my_app/lib/widgets.ex:88: MyApp.Widgets.total/2\n" <>
+        "       (elixir 1.19) lib/code.ex:430: Code.require_file/2\n"
+
+    passing_after =
+      Enum.map_join(1..200, fn i -> ". test trailing pass #{i} ok\n" end)
+
+    summary = "\n\n312 tests, 1 failure, 5 skipped\n"
+
+    raw = head_context <> passing_before <> failure_block <> passing_after <> summary
+
+    # Sanity: stream well over the 2 KB excerpt budget, and the failure
+    # anchor sits well outside both the old head and tail halves.
+    assert byte_size(raw) > Core.max_output_excerpt_bytes() * 5
+
+    {anchor_offset, _} = :binary.match(raw, "  1) test important widget")
+
+    old_half = div(Core.max_output_excerpt_bytes() - 17, 2)
+    assert anchor_offset > old_half
+    assert anchor_offset < byte_size(raw) - old_half
+
+    feedback =
+      Core.feedback_from_result(%{
+        exit_code: 1,
+        stdout: raw,
+        stderr: ""
+      })
+
+    excerpt = feedback["stdout_excerpt"]
+
+    # Exit code remains the sole pass/fail authority.
+    assert feedback["exit_code"] == 1
+    refute feedback["passed"]
+    assert feedback["stdout_truncated"]
+
+    # Raw hash covers the complete original bytes regardless of excerpt choice.
+    assert feedback["stdout_sha256"] ==
+             :crypto.hash(:sha256, raw) |> Base.encode16(case: :lower)
+
+    # Head window preserves ExUnit seed/concurrency context.
+    assert String.contains?(excerpt, "Seed: 987654321")
+    assert String.contains?(excerpt, "Max cases: 16")
+
+    # Middle window preserves the first numbered failure block and its
+    # assertion details — these were the bytes lost under head/tail-only.
+    assert String.contains?(excerpt, "1) test important widget computes correct total")
+    assert String.contains?(excerpt, "MyApp.WidgetsTest")
+    assert String.contains?(excerpt, "Widget.total(:a, :b) == 42")
+    assert String.contains?(excerpt, "lhs:  41")
+    assert String.contains?(excerpt, "rhs:  42")
+    assert String.contains?(excerpt, "apps/my_app/lib/widgets.ex:88")
+
+    # Tail window preserves the final summary line.
+    assert String.contains?(excerpt, "312 tests, 1 failure, 5 skipped")
+
+    # Omission markers between non-contiguous segments.
+    assert String.contains?(excerpt, "...[omitted]...")
+
+    # Valid UTF-8, JSON-safe, exact byte bound.
+    assert String.valid?(excerpt)
+    assert byte_size(excerpt) <= Core.max_output_excerpt_bytes()
+    assert {:ok, _} = Jason.encode(%{"body" => excerpt})
+  end
+
+  test "compilation-error and uncaught-exception anchors are also centered" do
+    # Mix compilation banner is a recognized anchor.
+    raw_compile =
+      "Compiling apps/foo/lib/foo.ex...\n" <>
+        String.duplicate("noise compile line\n", 300) <>
+        "== Compilation error in file apps/foo/lib/foo.ex ==\n" <>
+        "    ** (CompileError) apps/foo/lib/foo.ex:12: undefined function do_thing/0\n" <>
+        String.duplicate("trailing noise compile line\n", 200) <>
+        "\n\n** (Mix) Compile error\n"
+
+    fb_compile = Core.feedback_from_result(%{exit_code: 1, stdout: raw_compile, stderr: ""})
+
+    assert fb_compile["stdout_truncated"]
+    assert String.contains?(fb_compile["stdout_excerpt"], "== Compilation error")
+    assert String.contains?(fb_compile["stdout_excerpt"], "CompileError")
+    assert String.contains?(fb_compile["stdout_excerpt"], "do_thing/0")
+
+    # Uncaught exception heading is a recognized anchor.
+    raw_exc =
+      "Starting task...\n" <>
+        String.duplicate("noise exc line\n", 300) <>
+        "** (RuntimeError) boom widget failed unexpectedly\n" <>
+        "    (foo 0.1.0) lib/foo/runtime.ex:7: Foo.Runtime.run/1\n" <>
+        String.duplicate("trailing noise exc line\n", 200)
+
+    fb_exc = Core.feedback_from_result(%{exit_code: 1, stdout: raw_exc, stderr: ""})
+
+    assert fb_exc["stdout_truncated"]
+    assert String.contains?(fb_exc["stdout_excerpt"], "** (RuntimeError) boom widget failed")
+    assert String.contains?(fb_exc["stdout_excerpt"], "Foo.Runtime.run/1")
+
+    for fb <- [fb_compile, fb_exc] do
+      assert String.valid?(fb["stdout_excerpt"])
+      assert byte_size(fb["stdout_excerpt"]) <= Core.max_output_excerpt_bytes()
+    end
+  end
+
+  test "no diagnostic anchor falls back to the established head/tail window" do
+    # Large failure output without a stable anchor must still be bounded and
+    # use the original head/tail behavior; the failure-aware path does not
+    # invent diagnostics from localized prose.
+    raw =
+      "HEAD-LINE-START\n" <>
+        String.duplicate("noise line without anchor marker\n", 400) <>
+        "TAIL-LINE-END\n"
+
+    assert byte_size(raw) > Core.max_output_excerpt_bytes()
+
+    feedback =
+      Core.feedback_from_result(%{
+        exit_code: 1,
+        stdout: raw,
+        stderr: ""
+      })
+
+    excerpt = feedback["stdout_excerpt"]
+
+    assert feedback["stdout_truncated"]
+    assert String.contains?(excerpt, "HEAD-LINE-START")
+    assert String.contains?(excerpt, "TAIL-LINE-END")
+    assert String.contains?(excerpt, "...[omitted]...")
+    refute String.contains?(excerpt, "1) test")
+    assert String.valid?(excerpt)
+    assert byte_size(excerpt) <= Core.max_output_excerpt_bytes()
+  end
+
+  test "aggregate_test_check preserves a failed child diagnostic under successful sibling noise" do
+    # Many large successful siblings before and after a small failed child
+    # would crowd the failure out of a uniform head/tail window. The
+    # failure-aware aggregate centers the byte budget on the failed child's
+    # diagnostic so the resumed worker sees it without rerunning the suite.
+    success_body = String.duplicate("pass line ok\n", 200)
+
+    misleading_success_body =
+      String.duplicate("expected fixture output\n", 30) <>
+        "** (RuntimeError) expected exception fixture from a passing test\n" <>
+        String.duplicate("pass line after fixture\n", 120)
+
+    failed_body =
+      "  1) test important feature works (MyApp.FeatureTest)\n" <>
+        "     apps/my_app/test/feature_test.exs:7:1\n" <>
+        "     code: assert Feature.run() == :ok\n" <>
+        "     lhs:  :error\n" <>
+        "     rhs:  :ok\n" <>
+        "     stacktrace:\n" <>
+        "       apps/my_app/lib/feature.ex:30: MyApp.Feature.run/0\n"
+
+    success_a =
+      Core.classify_app_test_result("apps/alpha/test", %{
+        "exit_code" => 0,
+        "passed" => true,
+        "stdout_excerpt" => misleading_success_body,
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("a", 64),
+        "stderr_sha256" => String.duplicate("b", 64)
+      })
+
+    success_b =
+      Core.classify_app_test_result("apps/beta/test", %{
+        "exit_code" => 0,
+        "passed" => true,
+        "stdout_excerpt" => success_body,
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("c", 64),
+        "stderr_sha256" => String.duplicate("d", 64)
+      })
+
+    failed =
+      Core.classify_app_test_result("apps/gamma/test", %{
+        "exit_code" => 1,
+        "passed" => false,
+        "stdout_excerpt" => failed_body,
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("e", 64),
+        "stderr_sha256" => String.duplicate("f", 64)
+      })
+
+    aggregated = Core.aggregate_test_check([success_a, failed, success_b])
+
+    refute aggregated["passed"]
+    assert aggregated["reason"] == "tests_failed"
+    assert aggregated["exit_code"] == 1
+
+    excerpt = aggregated["stdout_excerpt"]
+
+    # Deterministic batch label retained.
+    assert String.contains?(excerpt, "[apps/gamma/test]")
+
+    # Failed child's diagnostic survives under successful-sibling noise.
+    assert String.contains?(excerpt, "1) test important feature works")
+    assert String.contains?(excerpt, "Feature.run() == :ok")
+    assert String.contains?(excerpt, "apps/my_app/lib/feature.ex:30")
+    refute String.contains?(excerpt, "expected exception fixture from a passing test")
+
+    # Aggregate byte ceiling, UTF-8 safety, and omission markers preserved.
+    assert byte_size(excerpt) <= Core.max_aggregate_excerpt()
+    assert String.valid?(excerpt)
+    assert aggregated["stdout_truncated"]
+    assert String.contains?(excerpt, "...[omitted]...")
+    assert {:ok, _} = Jason.encode(aggregated)
+  end
+
   defp signed_batch(paths, index, total) do
     digest =
       paths

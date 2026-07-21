@@ -67,6 +67,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # take this extra raw allowance so repair can complete a cut multi-byte char
   # without scanning the rest of the stream.
   @utf8_boundary_allowance 3
+  # Failure-aware excerpt: small head/tail windows preserve ExUnit seed and
+  # final summary; the bulk of the byte budget centers on the first stable
+  # diagnostic anchor so the resumed worker sees the actual assertion rather
+  # than rerunning the suite. Diagnostic detection only chooses which bytes
+  # to preserve; exit code remains the sole pass/fail authority.
+  @excerpt_head_share 8
+  @excerpt_anchor_lookback 64
+  # Byte-level anchors that recognize ExUnit's first numbered failure block,
+  # Mix compilation-error banners, and uncaught Mix/BEAM exception headings
+  # without parsing prose as pass/fail authority. Erlang's :re runs PCRE in
+  # byte mode on raw binaries, so invalid UTF-8 in the stream does not raise.
+  @diagnostic_anchor_pattern ~r/  [0-9]+\) [^\n]+\([A-Z][A-Za-z0-9_.]*\)|== Compilation error|\*\* \([A-Z][A-Za-z0-9_.]*\)/
 
   @root_wide_exact MapSet.new([
                      "mix.exs",
@@ -390,7 +402,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   Process streams are treated as arbitrary bytes: SHA-256 hashes the raw binary,
   excerpts are UTF-8-safe for Jason, and excerpt length is bounded by *bytes*
-  without splitting multi-byte codepoints.
+  without splitting multi-byte codepoints. For a nonzero exit, the excerpt is
+  failure-aware: a small head window, the first stable diagnostic anchor
+  centered in the bulk of the budget, and a small tail window — so a multi-KB
+  ExUnit stream no longer drops every failure block between head and tail.
   """
   @spec feedback_from_result(map()) :: map()
   def feedback_from_result(result) when is_map(result) do
@@ -398,8 +413,20 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     stderr = raw_stream(result, :stderr)
     exit_code = Map.get(result, :exit_code) || Map.get(result, "exit_code")
 
-    {stdout_excerpt, stdout_truncated} = bound_output_excerpt(stdout)
-    {stderr_excerpt, stderr_truncated} = bound_output_excerpt(stderr)
+    # Exit code is the sole pass/fail authority. For nonzero exits, prefer the
+    # failure-aware excerpt so the worker sees the diagnostic; otherwise use
+    # the established head/tail window. The two paths share UTF-8 repair and
+    # the byte ceiling, and the failure-aware path falls back to head/tail
+    # when no stable anchor is present.
+    {stdout_excerpt, stdout_truncated} =
+      if exit_code == 0,
+        do: bound_output_excerpt(stdout),
+        else: bound_failure_aware_excerpt(stdout)
+
+    {stderr_excerpt, stderr_truncated} =
+      if exit_code == 0,
+        do: bound_output_excerpt(stderr),
+        else: bound_failure_aware_excerpt(stderr)
 
     %{
       "exit_code" => exit_code,
@@ -966,24 +993,160 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   def bound_output_excerpt(_), do: {"", false}
 
+  # Failure-aware excerpt: small head + anchor-centered middle + small tail.
+  # Falls back to head/tail when no stable diagnostic anchor exists. The
+  # anchor is recognized from byte-level structure (ExUnit numbered failure
+  # block, Mix compilation banner, uncaught exception heading) — never from
+  # localized prose, which can mislead success/failure classification.
+  defp bound_failure_aware_excerpt(raw) when is_binary(raw) do
+    size = byte_size(raw)
+
+    if size <= @max_output_excerpt_bytes do
+      {replace_invalid_utf8(raw), false}
+    else
+      case find_first_diagnostic_anchor(raw) do
+        {:ok, anchor_start} ->
+          bound_failure_aware_excerpt(raw, anchor_start)
+
+        :none ->
+          bound_output_excerpt(raw)
+      end
+    end
+  end
+
+  defp bound_failure_aware_excerpt(_), do: {"", false}
+
+  defp bound_failure_aware_excerpt(raw, anchor_start)
+       when is_binary(raw) and is_integer(anchor_start) and anchor_start >= 0 do
+    size = byte_size(raw)
+
+    if size <= @max_output_excerpt_bytes do
+      {replace_invalid_utf8(raw), false}
+    else
+      {build_failure_centered_excerpt(raw, size, min(anchor_start, size)), true}
+    end
+  end
+
+  defp find_first_diagnostic_anchor(raw) when is_binary(raw) do
+    case Regex.run(@diagnostic_anchor_pattern, raw, return: :index) do
+      [{offset, _} | _] -> {:ok, offset}
+      _ -> :none
+    end
+  end
+
+  # Build the three-window excerpt around the first diagnostic anchor. The
+  # head/tail budgets each take 1/share of the post-marker content budget so
+  # ExUnit seed/concurrency and the final summary survive; the middle covers
+  # the anchor with a small lookback for preceding context. Provisioning two
+  # markers up front keeps the assembled excerpt under the byte ceiling no
+  # matter where the anchor lands.
+  defp build_failure_centered_excerpt(raw, size, anchor_start) do
+    marker = @excerpt_omission_marker
+    marker_bytes = byte_size(marker)
+    content_budget = @max_output_excerpt_bytes - 2 * marker_bytes
+
+    head_budget = div(content_budget, @excerpt_head_share)
+    tail_budget = div(content_budget, @excerpt_head_share)
+    middle_budget = content_budget - head_budget - tail_budget
+
+    lookback = min(@excerpt_anchor_lookback, div(middle_budget, @excerpt_head_share))
+    raw_middle_start = max(0, anchor_start - lookback)
+    middle_end = min(size, raw_middle_start + middle_budget)
+
+    # If the middle hit the stream end, slide its start backward to consume
+    # the remaining budget rather than leaving it unused.
+    middle_start =
+      if middle_end - raw_middle_start < middle_budget and raw_middle_start > 0 do
+        max(0, middle_end - middle_budget)
+      else
+        raw_middle_start
+      end
+
+    head_end = min(head_budget, middle_start)
+    tail_start = max(middle_end, size - tail_budget)
+
+    head_text =
+      if head_end > 0,
+        do: repair_raw_window_prefix(raw, head_end),
+        else: nil
+
+    middle_text = repair_raw_window_middle(raw, middle_start, middle_end - middle_start)
+
+    tail_text =
+      if tail_start < size,
+        do: repair_raw_window_middle(raw, tail_start, size - tail_start),
+        else: nil
+
+    # Emit a marker only where there is a real gap between non-empty segments,
+    # so contiguous windows do not advertise false omissions.
+    head_gap? = head_text != nil and middle_start > head_end
+    tail_gap? = tail_text != nil and tail_start > middle_end
+
+    parts = []
+    parts = if head_text != nil, do: [head_text | parts], else: parts
+    parts = if head_gap?, do: [marker | parts], else: parts
+    parts = [middle_text | parts]
+    parts = if tail_gap?, do: [marker | parts], else: parts
+    parts = if tail_text != nil, do: [tail_text | parts], else: parts
+
+    parts
+    |> Enum.reverse()
+    |> IO.iodata_to_binary()
+  end
+
   @doc false
   def json_safe_utf8(data) when is_binary(data), do: replace_invalid_utf8(data)
   def json_safe_utf8(_), do: ""
 
   defp bound_aggregate_excerpt(app_results, field) do
-    text =
+    chunks =
       app_results
       |> Enum.map(fn result ->
         body = json_safe_utf8(Map.get(result, field) || "")
         path = json_safe_utf8(result.path)
         "[" <> path <> "]\n" <> body
       end)
-      |> Enum.join("\n")
 
-    # Per-app bodies are already excerpt-bounded; re-use the same windowed
-    # head/tail path so aggregate re-bounding never walks the joined text as
-    # a full character list either.
-    bound_output_excerpt(text)
+    text = Enum.join(chunks, "\n")
+
+    # When any child failed, use the failure-aware excerpt so a failed
+    # child's diagnostic survives even when successful siblings fill the head
+    # and tail windows. Anchor selection is constrained to the first failed
+    # child: diagnostic-looking fixture/log text from a successful child must
+    # not displace the actual failure. Per-app bodies are already bounded.
+    case first_failed_aggregate_anchor(app_results, chunks, field) do
+      {:ok, anchor_start} -> bound_failure_aware_excerpt(text, anchor_start)
+      :none -> bound_output_excerpt(text)
+    end
+  end
+
+  defp first_failed_aggregate_anchor(app_results, chunks, field) do
+    app_results
+    |> Enum.zip(chunks)
+    |> Enum.reduce_while({0, nil}, fn {result, chunk}, {offset, fallback} ->
+      chunk_start = offset + if(offset == 0, do: 0, else: 1)
+      next_offset = chunk_start + byte_size(chunk)
+
+      if result.passed != true do
+        body = json_safe_utf8(Map.get(result, field) || "")
+        label_bytes = byte_size(chunk) - byte_size(body)
+
+        case find_first_diagnostic_anchor(body) do
+          {:ok, body_anchor} ->
+            {:halt, {:found, chunk_start + label_bytes + body_anchor}}
+
+          :none ->
+            {:cont, {next_offset, fallback || chunk_start}}
+        end
+      else
+        {:cont, {next_offset, fallback}}
+      end
+    end)
+    |> case do
+      {:found, anchor_start} -> {:ok, anchor_start}
+      {_offset, nil} -> :none
+      {_offset, fallback} -> {:ok, fallback}
+    end
   end
 
   defp aggregate_stream_hash(app_results, field) do
@@ -1079,6 +1242,31 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     |> replace_invalid_utf8()
     |> take_utf8_suffix_bytes(budget)
   end
+
+  # Repair an arbitrary interior window: used by the failure-aware excerpt's
+  # middle/tail segments. A partial char at the start boundary becomes a
+  # single U+FFFD; the suffix is then trimmed to the budget on a UTF-8
+  # boundary so the segment is always valid UTF-8 and never exceeds budget.
+  defp repair_raw_window_middle(raw, start_offset, length_budget)
+       when is_binary(raw) and is_integer(start_offset) and start_offset >= 0 and
+              is_integer(length_budget) and length_budget > 0 do
+    size = byte_size(raw)
+    start = min(start_offset, size)
+    available = size - start
+
+    if available <= 0 do
+      ""
+    else
+      take = min(available, length_budget + @utf8_boundary_allowance)
+
+      raw
+      |> binary_part(start, take)
+      |> replace_invalid_utf8()
+      |> take_utf8_prefix_bytes(length_budget)
+    end
+  end
+
+  defp repair_raw_window_middle(_raw, _start_offset, _length_budget), do: ""
 
   defp take_utf8_prefix_bytes(text, max_bytes)
        when is_binary(text) and is_integer(max_bytes) and max_bytes <= 0 do
