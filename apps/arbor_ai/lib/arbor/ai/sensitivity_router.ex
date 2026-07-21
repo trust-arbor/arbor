@@ -221,7 +221,8 @@ defmodule Arbor.AI.SensitivityRouter do
   - `:auto` → `:auto` (route silently)
 
   Per-agent overrides in `:sensitivity_routing_overrides` take precedence.
-  Falls back to `:warn` if the trust system is unavailable.
+  Falls back to `:gated` if the trust system is unavailable or returns an
+  invalid mode, preserving the fail-closed behavior for identified agents.
 
   ## Examples
 
@@ -377,12 +378,12 @@ defmodule Arbor.AI.SensitivityRouter do
       trust_mode = apply(Arbor.Trust, :effective_mode, [agent_id, @sensitivity_uri])
       trust_mode_to_routing(trust_mode)
     else
-      :warn
+      :gated
     end
   rescue
-    _ -> :warn
+    _ -> :gated
   catch
-    :exit, _ -> :warn
+    :exit, _ -> :gated
   end
 
   defp trust_effective_mode_available? do
@@ -395,7 +396,7 @@ defmodule Arbor.AI.SensitivityRouter do
   defp trust_mode_to_routing(:ask), do: :gated
   defp trust_mode_to_routing(:allow), do: :warn
   defp trust_mode_to_routing(:auto), do: :auto
-  defp trust_mode_to_routing(_), do: :warn
+  defp trust_mode_to_routing(_), do: :gated
 
   # arbor_signals is a direct dep — emit directly. rescue/catch stay so a
   # signal failure can never break routing.

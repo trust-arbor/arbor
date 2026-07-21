@@ -253,8 +253,9 @@ defmodule Arbor.AI.SensitivityRouterTest do
       assert :warn = SensitivityRouter.resolve_mode(123)
     end
 
-    test "returns :gated for unknown agent (fail closed via trust profile)" do
-      # Trust system available → effective_mode returns :ask for unknown agent → :gated
+    test "security regression: unknown agent fails closed to :gated" do
+      # Per-app tests also exercise the unavailable-trust fallback; umbrella
+      # tests exercise the unknown-principal :ask policy. Both must stay gated.
       assert :gated = SensitivityRouter.resolve_mode("unknown_agent")
     end
 
