@@ -304,6 +304,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :implement, n + 1)} end)
 
       case {scenario, n} do
+        {:uncertain_send_recovery, 0} ->
+          # Uncertain transport failure: the send may have executed on the
+          # worker. The workspace mutated before the transport error surfaced,
+          # so the owner-observed fingerprint changes even though implement
+          # returns an error. Mutation timing is tracked explicitly in fake
+          # state (not derived from send count) so a regression that overwrites
+          # the logical-turn baseline would be observed as no_changes. The
+          # recovered send (n=1) does not mutate further.
+          Agent.update(state, fn s -> %{s | mutations: s.mutations + 1} end)
+          {:error, "transport: send may have executed (uncertain)"}
+
         {scenario, 0}
         when scenario in [
                :recovery_resumed_success,
@@ -467,7 +478,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                 :recovery_reopen_failed,
                 :recovery_second_send_failed,
                 :recovery_continuity_new,
-                :recovery_continuity_unknown
+                :recovery_continuity_unknown,
+                :uncertain_send_recovery
               ] and n > 0 ->
                 "sess_2"
 
@@ -518,7 +530,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
             exists: true
           }
 
-          fingerprint = fixture_fingerprint(scenario, sends, post_turn?)
+          fingerprint =
+            fixture_fingerprint(scenario, sends, post_turn?, Agent.get(state, & &1.mutations))
 
           view =
             case scenario do
@@ -578,7 +591,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
     # Fingerprints are relative to completed ACP sends so pre-turn capture and
     # post-turn inspect share a stable owner-observed identity for each turn.
-    defp fixture_fingerprint(scenario, sends, post_turn?) do
+    # The uncertain-send scenario derives its fingerprint from explicit
+    # mutation timing (state.mutations) rather than send count, so a regression
+    # that re-captures the baseline mid-recovery is observable as no_changes.
+    defp fixture_fingerprint(scenario, sends, post_turn?, mutations) do
       case scenario do
         s when s in [:no_changes, :narrative_no_changes] ->
           "fp-clean"
@@ -591,6 +607,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
         :self_commit_adopt ->
           if post_turn? or sends > 0, do: "fp-self-commit", else: "fp-clean"
+
+        :uncertain_send_recovery ->
+          if mutations == 0, do: "fp-clean", else: "fp-uncertain-mutated-#{mutations}"
 
         :rework_no_progress ->
           cond do
@@ -1047,7 +1066,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   defp run_fixture(scenario, initial_overrides \\ %{}, dot_source \\ load_dot()) do
     {:ok, state} =
       Agent.start_link(fn ->
-        %{scenario: scenario, calls: [], counters: %{}}
+        %{scenario: scenario, calls: [], counters: %{}, mutations: 0}
       end)
 
     Process.put(:coding_change_fake_state, state)
@@ -2070,6 +2089,65 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert Enum.at(closes, 0) |> elem(1) |> Map.fetch!("return_to_pool") == false
       assert result.context["worker_provider_session_id"] == "sess_2"
       assert_closed_and_released(calls)
+    end
+
+    test "uncertain transport send mutates then resumed recovery preserves the original baseline" do
+      # Regression for uncertain ACP send recovery: the first send returns a
+      # transport failure but the workspace already mutated (the send may have
+      # executed). Recovery opens a replacement worker and retries the same
+      # pending prompt; the recovered send succeeds without further mutation.
+      # Post-turn inspection must compare against the ORIGINAL pre-turn
+      # baseline, observe progress from the uncertain send, and route to
+      # validation/commit — never no_changes. Replaces two provider-only
+      # attempts (task_323715 xAI 403, task_324547 Codex skills-budget
+      # terminalization) with a deterministic end-to-end pipeline regression.
+      assert {{:ok, result}, calls} = run_fixture(:uncertain_send_recovery)
+
+      assert result.context["status"] == "change_committed"
+      refute result.context["status"] == "no_changes"
+      assert result.context["worker_send_recovery_count"] == 1
+
+      starts = Enum.filter(calls, fn {name, _args} -> name == "acp_start_session" end)
+      sends = Enum.filter(calls, fn {name, _args} -> name == "acp_send_message" end)
+      closes = Enum.filter(calls, fn {name, _args} -> name == "acp_close_session" end)
+
+      # One bounded recovery: exactly two sends, two opens, two closes.
+      assert length(starts) == 2
+      assert length(sends) == 2
+      assert length(closes) == 2
+
+      # Resumed continuity retries the same pending prompt (byte-equal).
+      first_prompt = Enum.at(sends, 0) |> elem(1) |> Map.fetch!("prompt")
+      recovered_prompt = Enum.at(sends, 1) |> elem(1) |> Map.fetch!("prompt")
+      assert first_prompt == recovered_prompt
+
+      # The original logical-turn baseline (captured before the uncertain send)
+      # is preserved through recovery and is the value the post-turn owner
+      # inspection received. A regression that re-captured the baseline
+      # mid-recovery would overwrite this with the mutated fingerprint and the
+      # post-turn comparison would observe no progress → no_changes.
+      assert result.context["baseline_fingerprint"] == "fp-clean"
+
+      [post_turn_inspect_args] =
+        calls
+        |> Enum.filter(fn {name, args} ->
+          name == "coding_workspace_inspect" and
+            Map.has_key?(args, "baseline_fingerprint")
+        end)
+        |> Enum.map(&elem(&1, 1))
+
+      assert post_turn_inspect_args["baseline_fingerprint"] == "fp-clean"
+
+      # Explicit mutation timing: exactly one mutation (from the uncertain
+      # send). The recovered send performed no additional mutation — the
+      # recovery-time pre-turn capture and the post-turn inspect observe the
+      # same mutated fingerprint.
+      assert result.context["pre_turn.fingerprint"] == "fp-uncertain-mutated-1"
+      assert result.context["inspect.fingerprint"] == "fp-uncertain-mutated-1"
+
+      assert result.context["worker_provider_session_id"] == "sess_2"
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
     end
 
     test "fresh recovery summarizes the workspace and replaces the pending prompt" do
