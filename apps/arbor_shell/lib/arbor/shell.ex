@@ -439,6 +439,53 @@ defmodule Arbor.Shell do
     end
   end
 
+  @doc """
+  Start the minimal runtime required by `execute_direct/3` for offline operator tooling.
+
+  This does not start the `:arbor_shell` application or any Signals, Security,
+  container, or durable-journal children. The caller owns a newly returned
+  supervisor and must stop it when the operation completes. If a complete Shell
+  runtime is already present, `:already_started` is returned and must not be
+  stopped by the caller.
+  """
+  @spec start_direct_runtime(keyword()) ::
+          {:ok, pid() | :already_started} | {:error, term()}
+  def start_direct_runtime(opts \\ [])
+
+  def start_direct_runtime(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      startup_path = Keyword.get(opts, :startup_path, System.get_env("PATH", ""))
+
+      with true <- Keyword.keys(opts) -- [:startup_path] == [],
+           true <- is_binary(startup_path),
+           {:ok, _started} <- Application.ensure_all_started(:crypto) do
+        case {Process.whereis(ExecutablePolicy), Process.whereis(ExecutionRegistry)} do
+          {policy, registry} when is_pid(policy) and is_pid(registry) ->
+            {:ok, :already_started}
+
+          {nil, nil} ->
+            Supervisor.start_link(
+              [
+                {ExecutablePolicy, startup_path: startup_path},
+                {ExecutionRegistry, []}
+              ],
+              strategy: :rest_for_one
+            )
+
+          _partial ->
+            {:error, :incomplete_direct_runtime}
+        end
+      else
+        false -> {:error, :invalid_direct_runtime_options}
+        {:error, reason} -> {:error, {:direct_runtime_dependency_failed, reason}}
+      end
+    else
+      {:error, :invalid_direct_runtime_options}
+    end
+  end
+
+  def start_direct_runtime(_opts), do: {:error, :invalid_direct_runtime_options}
+
   @doc false
   @spec execute_prepared_authorized(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()}

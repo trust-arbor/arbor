@@ -205,6 +205,50 @@ defmodule Arbor.Actions do
   def settle_coding_branch_adoption(candidate, proof, opts \\ []),
     do: Arbor.Actions.Coding.Adoption.settle(candidate, proof, opts)
 
+  @doc "Decode a reviewed branch-audit manifest without accepting duplicate JSON keys."
+  @spec decode_coding_branch_manifest(binary()) :: {:ok, map()} | {:error, term()}
+  def decode_coding_branch_manifest(bytes) when is_binary(bytes),
+    do: Arbor.Actions.Coding.BranchAuditCore.decode_manifest_json(bytes)
+
+  def decode_coding_branch_manifest(_bytes), do: {:error, :invalid_branch_audit_json}
+
+  @doc "Encode a branch-audit manifest with its recursively sorted JSON key order."
+  @spec encode_coding_branch_manifest(map()) :: {:ok, binary()} | {:error, term()}
+  def encode_coding_branch_manifest(manifest) when is_map(manifest) do
+    case Arbor.Actions.Coding.BranchAuditCore.validate_manifest(manifest) do
+      {:ok, reviewed} -> {:ok, Arbor.Actions.Coding.BranchAuditCore.canonical_json(reviewed)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def encode_coding_branch_manifest(_manifest), do: {:error, :invalid_branch_audit_manifest}
+
+  @doc "Run the deterministic, non-destructive historical coding-branch audit."
+  @spec audit_coding_branches(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def audit_coding_branches(repo_path, destination \\ "main", opts \\ [])
+
+  def audit_coding_branches(repo_path, destination, opts)
+      when is_binary(repo_path) and is_binary(destination) and is_list(opts) do
+    Arbor.Actions.Coding.BranchAudit.audit(repo_path, destination, opts)
+  end
+
+  def audit_coding_branches(_repo_path, _destination, _opts),
+    do: {:error, :invalid_branch_audit_request}
+
+  @doc "Apply one exact reviewed branch-audit manifest after explicit digest review."
+  @spec settle_coding_branches(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def settle_coding_branches(manifest, expected_sha256, opts \\ [])
+
+  def settle_coding_branches(manifest, expected_sha256, opts)
+      when is_map(manifest) and is_binary(expected_sha256) and is_list(opts) do
+    Arbor.Actions.Coding.BranchAudit.settle(manifest, expected_sha256, opts)
+  end
+
+  def settle_coding_branches(_manifest, _expected_sha256, _opts),
+    do: {:error, :invalid_reviewed_branch_audit}
+
   @doc """
   Reviewed hard maximum for the cross-app aggregate sequential test-stage
   budget in milliseconds.

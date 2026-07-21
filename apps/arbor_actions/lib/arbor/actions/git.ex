@@ -266,6 +266,141 @@ defmodule Arbor.Actions.Git do
   def verify_adoption_proof(_repository_root, _proof),
     do: {:error, {:invalid_input, :invalid_arguments}}
 
+  @doc "Return the canonical repository path and identity-bound common Git directory."
+  @spec repository_identity(String.t()) :: {:ok, map()} | {:error, term()}
+  def repository_identity(repository_root) when is_binary(repository_root) do
+    with {:ok, authorized} <- authorized_root(repository_root),
+         {:ok, worktree} <- query_repository_path(authorized, "--show-toplevel"),
+         {:ok, common_dir} <- query_repository_path(authorized, "--git-common-dir") do
+      {:ok, %{"path" => worktree, "identity" => common_dir}}
+    end
+  end
+
+  def repository_identity(_repository_root), do: {:error, :invalid_git_repository}
+
+  @doc "List bounded local heads as exact full refs and full object IDs."
+  @spec list_local_branch_refs(String.t(), pos_integer()) ::
+          {:ok, [map()]} | {:error, term()}
+  def list_local_branch_refs(repository_root, max_entries)
+      when is_binary(repository_root) and is_integer(max_entries) and max_entries > 0 and
+             max_entries <= 4096 do
+    with {:ok, authorized} <- authorized_root(repository_root),
+         {:ok, result} <-
+           execute(
+             authorized,
+             [
+               "for-each-ref",
+               "--count=" <> Integer.to_string(max_entries + 1),
+               "--format=%(refname) %(objectname)",
+               "refs/heads"
+             ]
+           ),
+         {:ok, lines} <- strict_git_output(result),
+         {:ok, branches} <- parse_branch_inventory(lines, max_entries) do
+      {:ok, branches}
+    end
+  end
+
+  def list_local_branch_refs(_repository_root, _max_entries),
+    do: {:error, :invalid_git_branch_inventory}
+
+  @doc "List bounded local branch refs checked out by registered worktrees."
+  @spec checked_out_branch_refs(String.t(), pos_integer()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def checked_out_branch_refs(repository_root, max_entries)
+      when is_binary(repository_root) and is_integer(max_entries) and max_entries > 0 and
+             max_entries <= 4096 do
+    with {:ok, registrations} <- worktree_inventory(repository_root),
+         branches <-
+           registrations
+           |> Enum.flat_map(&(Map.get(&1, :branch, []) |> List.wrap()))
+           |> Enum.uniq()
+           |> Enum.sort(),
+         true <- length(branches) <= max_entries do
+      {:ok, Enum.map(branches, &("refs/heads/" <> &1))}
+    else
+      false -> {:error, :git_worktree_inventory_oversized}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def checked_out_branch_refs(_repository_root, _max_entries),
+    do: {:error, :invalid_git_worktree_inventory}
+
+  @doc "Derive and verify one common ancestor for two exact commit IDs."
+  @spec verified_common_ancestor(String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def verified_common_ancestor(repository_root, left_oid, right_oid)
+      when is_binary(repository_root) and is_binary(left_oid) and is_binary(right_oid) do
+    with :ok <- validate_full_oid(String.downcase(left_oid)),
+         :ok <- validate_full_oid(String.downcase(right_oid)),
+         {:ok, result} <- execute(repository_root, ["merge-base", "--all", left_oid, right_oid]),
+         {:ok, lines} <- strict_git_output(result),
+         [ancestor] <- String.split(lines, "\n", trim: true),
+         :ok <- validate_full_oid(ancestor),
+         {:ok, left_check} <-
+           execute(repository_root, ["merge-base", "--is-ancestor", ancestor, left_oid]),
+         :ok <- require_success(left_check),
+         {:ok, right_check} <-
+           execute(repository_root, ["merge-base", "--is-ancestor", ancestor, right_oid]),
+         :ok <- require_success(right_check) do
+      {:ok, String.downcase(ancestor)}
+    else
+      {:ok, %{exit_code: 1}} -> {:error, :no_common_ancestor}
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, :invalid_git_common_ancestor}
+    end
+  end
+
+  def verified_common_ancestor(_repository_root, _left_oid, _right_oid),
+    do: {:error, :invalid_git_common_ancestor}
+
+  defp strict_git_output(%{exit_code: 0, stdout: stdout, stderr: ""})
+       when is_binary(stdout) do
+    if String.valid?(stdout) and not String.contains?(stdout, ["\r", <<0>>]),
+      do: {:ok, String.trim_trailing(stdout, "\n")},
+      else: {:error, :invalid_git_output}
+  end
+
+  defp strict_git_output(%{exit_code: exit_code}),
+    do: {:error, {:git_command_failed, exit_code}}
+
+  defp strict_git_output(_result), do: {:error, :invalid_git_output}
+
+  defp parse_branch_inventory(output, max_entries) do
+    lines = String.split(output, "\n", trim: true)
+
+    if length(lines) > max_entries do
+      {:error, {:branch_inventory_overflow, max_entries}}
+    else
+      Enum.reduce_while(lines, {:ok, []}, fn line, {:ok, acc} ->
+        case String.split(line, " ", parts: 2) do
+          [ref, oid] when is_binary(ref) and is_binary(oid) ->
+            oid = String.downcase(String.trim(oid))
+
+            if String.starts_with?(ref, "refs/heads/") and ref != "refs/heads/" and
+                 match?(:ok, validate_full_oid(oid)) and
+                 not String.contains?(ref, ["..", "\\", <<0>>]) do
+              {:cont, {:ok, [%{"ref" => ref, "oid" => oid} | acc]}}
+            else
+              {:halt, {:error, :invalid_git_branch_inventory}}
+            end
+
+          _other ->
+            {:halt, {:error, :invalid_git_branch_inventory}}
+        end
+      end)
+      |> case do
+        {:ok, branches} -> {:ok, Enum.sort_by(branches, & &1["ref"])}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  defp require_success(%{exit_code: 0, stdout: "", stderr: ""}), do: :ok
+  defp require_success(%{exit_code: exit_code}), do: {:error, {:git_command_failed, exit_code}}
+  defp require_success(_), do: {:error, :invalid_git_output}
+
   defp adoption_oid(oid) when is_binary(oid) do
     if Regex.match?(~r/\A[0-9a-fA-F]{40}\z/, oid) or
          Regex.match?(~r/\A[0-9a-fA-F]{64}\z/, oid) do

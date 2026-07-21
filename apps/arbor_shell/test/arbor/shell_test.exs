@@ -3,6 +3,20 @@ defmodule Arbor.ShellTest do
 
   alias Arbor.Shell
 
+  describe "direct runtime" do
+    test "reuses the complete supervised runtime when it is already available" do
+      assert {:ok, :already_started} = Shell.start_direct_runtime()
+    end
+
+    test "rejects malformed or unknown runtime options" do
+      assert {:error, :invalid_direct_runtime_options} =
+               Shell.start_direct_runtime([{"startup_path", "/bin"}])
+
+      assert {:error, :invalid_direct_runtime_options} =
+               Shell.start_direct_runtime(unknown: true)
+    end
+  end
+
   describe "execute/2" do
     test "executes simple command" do
       {:ok, result} = Shell.execute("echo hello", sandbox: :none)

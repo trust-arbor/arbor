@@ -395,6 +395,32 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   def settle_task_workspaces(_task_id, _principal_id, _opts),
     do: {:error, :invalid_task_principal}
 
+  @doc """
+  Return a bounded, JSON-clean protection inventory for one canonical repository.
+
+  This is intentionally not an authorization lookup: it includes all active,
+  retained, orphaned, discarding, dormant, and pre-create durable blockers. The
+  caller receives only branch refs and reasons, never task or principal data.
+  """
+  @spec branch_protection_inventory(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def branch_protection_inventory(repo_path, opts \\ [])
+
+  def branch_protection_inventory(repo_path, opts)
+      when is_binary(repo_path) and is_list(opts) do
+    max_entries = Keyword.get(opts, :max_entries, RetentionJournal.max_records())
+
+    if is_integer(max_entries) and max_entries > 0 and
+         max_entries <= RetentionJournal.max_records() do
+      call({:branch_protection_inventory, Path.expand(repo_path), max_entries}, opts)
+    else
+      {:error, :retention_inventory_oversized}
+    end
+  end
+
+  def branch_protection_inventory(_repo_path, _opts),
+    do: {:error, :retention_inventory_unavailable}
+
   @doc false
   @spec acquire_validation_resource(String.t(), map() | keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -852,6 +878,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     case ensure_journal_inventory_known(state) do
       :ok ->
         settle_task_workspaces_reply(state, task_id, principal_id)
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:branch_protection_inventory, repo_path, max_entries}, _from, state) do
+    case ensure_journal_inventory_known(state) do
+      :ok ->
+        case build_branch_protection_inventory(state, repo_path, max_entries) do
+          {:ok, inventory} -> {:reply, {:ok, inventory}, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -3216,6 +3255,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp ensure_journal_inventory_known(%{retention_journal: %{status: :ready} = journal} = state) do
     with {:ok, records} <- load_durable_retained_records(journal),
+         :ok <- validate_protection_inventory_branches(records),
          :ok <- require_matching_durable_hot_ids(state, records) do
       :ok
     else
@@ -3247,6 +3287,80 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     else
       {:error, :retention_inventory_hot_state_mismatch}
     end
+  end
+
+  defp build_branch_protection_inventory(state, repo_path, max_entries) do
+    records =
+      Map.values(state.leases) ++
+        Map.values(state.retained_by_id) ++ Map.values(state.retention_blockers)
+
+    with :ok <- validate_protection_inventory_branches(records) do
+      do_build_branch_protection_inventory(state, repo_path, max_entries)
+    end
+  end
+
+  defp do_build_branch_protection_inventory(state, repo_path, max_entries) do
+    entries =
+      state.leases
+      |> Map.values()
+      |> Enum.filter(&(Path.expand(&1.repo_path) == repo_path))
+      |> Enum.map(&protection_inventory_entry(&1.branch, "active_workspace_ref"))
+
+    retained_entries =
+      state.retained_by_id
+      |> Map.values()
+      |> Enum.filter(&(Path.expand(&1.repo_path) == repo_path))
+      |> Enum.map(fn retained ->
+        reason =
+          case {Map.get(retained, :lifecycle), Map.get(retained, :dormant)} do
+            {:discarding, _} -> "discarding_workspace_ref"
+            {_, true} -> "dormant_workspace_ref"
+            {:active_orphaned, _} -> "active_orphaned_workspace_ref"
+            _ -> "retained_workspace_ref"
+          end
+
+        protection_inventory_entry(retained.branch, reason)
+      end)
+
+    blocker_entries =
+      state.retention_blockers
+      |> Map.values()
+      |> Enum.filter(&(Path.expand(Map.get(&1, :repo_path, "")) == repo_path))
+      |> Enum.map(&protection_inventory_entry(&1.branch, "dormant_workspace_ref"))
+
+    entries =
+      (entries ++ retained_entries ++ blocker_entries)
+      |> Enum.reduce_while({:ok, %{}}, fn
+        {:error, reason}, _acc -> {:halt, {:error, reason}}
+        entry, {:ok, acc} -> {:cont, {:ok, Map.put(acc, entry["ref"], entry)}}
+      end)
+
+    with {:ok, by_ref} <- entries,
+         inventory <- by_ref |> Map.values() |> Enum.sort_by(& &1["ref"]),
+         true <- length(inventory) <= max_entries do
+      {:ok, inventory}
+    else
+      false -> {:error, :retention_inventory_oversized}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp protection_inventory_entry(branch, reason) when is_binary(branch) do
+    case Git.validate_branch_name(branch) do
+      :ok -> %{"ref" => "refs/heads/" <> branch, "reason" => reason}
+      {:error, _reason} -> {:error, :invalid_retention_branch}
+    end
+  end
+
+  defp protection_inventory_entry(_branch, _reason), do: {:error, :invalid_retention_branch}
+
+  defp validate_protection_inventory_branches(records) when is_list(records) do
+    Enum.reduce_while(records, :ok, fn record, :ok ->
+      case Git.validate_branch_name(Map.get(record, :branch)) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} -> {:halt, {:error, :invalid_retention_branch}}
+      end
+    end)
   end
 
   defp require_available_creation_target(records, prepared) do
