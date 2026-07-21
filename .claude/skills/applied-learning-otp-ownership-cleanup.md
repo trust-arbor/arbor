@@ -257,3 +257,23 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 <!-- applied-learning: ephemeral-workspace-teardown-must-settle-task-scoped-pooled-sessions-first -->
 <a id="applied-learning-ephemeral-workspace-teardown-must-settle-task-scoped-pooled-sessions-first"></a>
 **Ephemeral workspace teardown must settle task-scoped pooled sessions first.** Returning a worker to the ACP pool is correct for normal same-task continuity, but a one-shot harness that deletes its worktree must atomically refuse busy sessions, track detached sessions until every process is confirmed down, and only then settle/remove workspace leases; otherwise a live process retains a stale cwd or a retry falsely reports no matches (found 2026-07-20 after the Phase 6 r10 benchmark).
+
+<!-- applied-learning: settle-every-task-owned-resource-through-one-durable-disposition-lifecycle -->
+<a id="applied-learning-settle-every-task-owned-resource-through-one-durable-disposition-lifecycle"></a>
+**Settle every task-owned resource through one durable disposition lifecycle.** Removing only an ephemeral worktree can leave its task-created branch, evidence ref, pooled session, approvals, or journal marker behind. Let the workflow choose policy (`discard`, `recover`, `publish`, or `adopt`), but make the owning registry persist intent before destructive effects and converge every bound resource after crashes. A terminal task is not settled until the full ownership set is settled (found 2026-07-20 auditing 490 coding branches after worktree cleanup).
+
+<!-- applied-learning: quiet-git-ref-probes-do-not-prove-exact-absence -->
+<a id="applied-learning-quiet-git-ref-probes-do-not-prove-exact-absence"></a>
+**Quiet Git ref probes do not prove exact absence.** `git rev-parse --verify --quiet` returns the same nonzero status for a missing ref and some corrupt or unreadable refs, while localized command text is not a stable error protocol. Observe an exact full ref through structured `for-each-ref` output, reject stderr/warnings and malformed records, and after a compare-and-delete failure re-read the ref: absent is an idempotent success, a different OID is a CAS mismatch, and the same OID is an operational failure (found 2026-07-20 hardening coding-branch discard settlement).
+
+<!-- applied-learning: spawned-development-tools-must-not-inherit-the-parent-mix-runtime -->
+<a id="applied-learning-spawned-development-tools-must-not-inherit-the-parent-mix-runtime"></a>
+**Spawned development tools must not inherit the parent Mix runtime.** An ACP coding CLI launched by the live `MIX_ENV=dev` Arbor node passed that variable to worker shell commands, so ordinary `./bin/mix test` booted dev configuration, collided with the live Gateway port, and attempted to claim the operator Apple-container journal. Scrub parent build/runtime selectors such as `MIX_ENV` at the process-spawn boundary while preserving explicit worker command overrides; test config cannot protect a test command that never entered the test environment (found 2026-07-20 during delegated branch-lifecycle validation).
+
+<!-- applied-learning: long-acp-tool-operations-must-publish-liveness-before-the-inactivity-deadline -->
+<a id="applied-learning-long-acp-tool-operations-must-publish-liveness-before-the-inactivity-deadline"></a>
+**Long ACP tool operations must publish liveness before the inactivity deadline.** Piping a broad test run through `grep | tail` buffered every progress byte, so Arbor correctly classified the ACP turn as inactive and recovered the same provider session while the valid test process was still running. Prefer focused suites below the deadline, stream bounded progress from long operations, or run broad validation under a separately supervised owner whose liveness and final result are explicit; a live child process that emits nothing through ACP is observationally indistinguishable from a stuck tool (found 2026-07-20 during branch-lifecycle validation).
+
+<!-- applied-learning: git-ref-cas-and-worktree-checkout-protection-are-distinct-invariants -->
+<a id="applied-learning-git-ref-cas-and-worktree-checkout-protection-are-distinct-invariants"></a>
+**Git ref CAS and worktree checkout protection are distinct invariants.** `git update-ref -d <ref> <expected-oid>` atomically rejects an OID replacement, but it will delete a branch currently checked out in another worktree; the porcelain `git branch -D` guard is not part of the plumbing command. Branch retirement therefore needs both exact-OID authority and explicit checked-out-worktree protection, with conservative postcondition/recovery handling for races between observation and deletion (verified 2026-07-20 while reviewing coding-branch discard settlement).

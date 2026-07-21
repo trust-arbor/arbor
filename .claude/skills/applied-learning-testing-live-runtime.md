@@ -381,3 +381,27 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 <!-- applied-learning: plain-beam-hot-loading-does-not-migrate-live-genserver-state -->
 <a id="applied-learning-plain-beam-hot-loading-does-not-migrate-live-genserver-state"></a>
 **Plain BEAM hot loading does not migrate live GenServer state.** `arbor.recompile` uses `:code.load_binary/3`; it does not invoke `code_change/3`. When a hot-reloaded module adds state keys, either reload through `:sys.change_code/4` or make reads and writes backward-compatible with pre-reload maps until the state is materialized; otherwise the first post-reload call crashes the server (found 2026-07-20 after adding AcpPool settlement tracking).
+
+<!-- applied-learning: serialize-mix-commands-within-each-worktree -->
+<a id="applied-learning-serialize-mix-commands-within-each-worktree"></a>
+**Serialize Mix commands within each worktree.** A worktree isolates source and runtime paths from the live checkout, but concurrent `./bin/mix` processes inside that same worktree still share `_build`, deps, compile locks, and application-level resources. Run focused suites one at a time; parallelize by giving each process its own worktree and runtime paths, never by launching concurrent Mix commands in one checkout (found 2026-07-20 during delegated branch-lifecycle validation).
+
+<!-- applied-learning: format-only-scoped-paths-in-an-inherited-or-dirty-worktree -->
+<a id="applied-learning-format-only-scoped-paths-in-an-inherited-or-dirty-worktree"></a>
+**Format only scoped paths in an inherited or dirty worktree.** Running umbrella-wide `mix format` can rewrite unrelated files whose formatting already drifted from the current formatter, turning a narrow task into noisy collateral churn. Run `./bin/mix format path ...` for intended files, then inspect `git diff --name-only` before staging; reserve a repository-wide format pass for an explicit cleanup task (found 2026-07-20 during steering-delivery implementation).
+
+<!-- applied-learning: fault-injection-stores-must-faithfully-perform-every-operation-they-report-as-successful -->
+<a id="applied-learning-fault-injection-stores-must-faithfully-perform-every-operation-they-report-as-successful"></a>
+**Fault-injection stores must faithfully perform every operation they report as successful.** A fail-after-N persistence double that returns `:ok` without storing the value creates an impossible durable state and invalidates crash-ordering regressions. Implement the normal success effect, arm failure counts relative to an explicit mode switch, and test the double's contract independently before relying on it to prove a state-machine invariant (found 2026-07-21 while validating discard-journal persistence failure).
+
+<!-- applied-learning: verify-that-an-exunit-line-filter-selected-the-intended-test -->
+<a id="applied-learning-verify-that-an-exunit-line-filter-selected-the-intended-test"></a>
+**Verify that an ExUnit line filter selected the intended test.** A `mix test file.exs:line` selector aimed at an `@tag`, comment, or nearby blank can resolve to the preceding test and produce a convincing but irrelevant pass. Point at the actual `test` declaration, then inspect the traced test name or distinctive fixture output before using the result as regression proof (found 2026-07-21 while proving the Git checkout-loss regression fails on the unfixed clause order).
+
+<!-- applied-learning: run-the-full-dot-contract-test-file-after-changing-packaged-graph-bindings -->
+<a id="applied-learning-run-the-full-dot-contract-test-file-after-changing-packaged-graph-bindings"></a>
+**Run the full DOT contract test file after changing packaged graph bindings.** A targeted end-to-end scenario can pass while a stale structural assertion elsewhere still encodes the previous context contract. After changing packaged DOT node attributes or `context_keys`, run the complete graph contract test file in addition to focused regressions; static graph-shape assertions are part of the contract and should move in the same slice (found 2026-07-21 while validating uncertain-send owner-baseline recovery).
+
+<!-- applied-learning: reproduce-a-suspected-runtime-failure-before-steering-a-security-fix -->
+<a id="applied-learning-reproduce-a-suspected-runtime-failure-before-steering-a-security-fix"></a>
+**Reproduce a suspected runtime failure before steering a security fix.** Standard-library behavior can differ from memory or intuition; a plausible fail-open claim is not evidence. Exercise the exact value on the project's pinned runtime before asking a delegated worker to add a security regression. A regression test must fail on the pre-fix code, and a correction sent after a same-session follow-up starts will queue behind that turn rather than preempt it (found 2026-07-21 after incorrectly assuming `String.trim/1` raises on invalid UTF-8 during evidence-ref review).
