@@ -570,6 +570,31 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         _ -> view
       end
 
+    view =
+      case {Map.get(lease, :retry_count), Map.get(lease, :cleanup_retry_limit)} do
+        {count, limit} when is_integer(count) and is_integer(limit) ->
+          view
+          |> Map.put(:cleanup_retry_count, count)
+          |> Map.put(:cleanup_retry_limit, limit)
+
+        _ ->
+          view
+      end
+
+    view =
+      if Map.has_key?(lease, :dormant),
+        do: Map.put(view, :cleanup_dormant, Map.get(lease, :dormant) == true),
+        else: view
+
+    view =
+      case Map.get(lease, :cleanup_failure) do
+        nil ->
+          view
+
+        reason ->
+          Map.put(view, :cleanup_failure_category, BranchLifecycle.failure_category(reason))
+      end
+
     case Map.get(lease, :discard_phase) do
       phase when phase in [:archive, :worktree, :branch] ->
         Map.put(view, :discard_phase, Atom.to_string(phase))
@@ -5386,6 +5411,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp discard_pending_result(state, retained, reason) do
+    limit = Map.get(state, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
+
     result =
       retained
       |> Map.put(:active, false)
@@ -5394,7 +5421,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       |> Map.put(:status, "discard_pending")
       |> Map.put(:branch_retired, false)
       |> Map.put(:cleanup_residue, true)
-      |> Map.put(:pending_reason, inspect(reason))
+      |> Map.put(:cleanup_failure_category, BranchLifecycle.failure_category(reason))
+      |> Map.put(:cleanup_retry_count, Map.get(retained, :retry_count, 0))
+      |> Map.put(:cleanup_retry_limit, limit)
+      |> Map.put(:cleanup_dormant, false)
 
     {:ok, result, state}
   end
@@ -5411,7 +5441,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       if is_nil(preserve_reason) do
         result
       else
-        Map.put(result, :branch_preserved_reason, safe_reason_string(preserve_reason))
+        Map.put(
+          result,
+          :branch_preserved_reason,
+          BranchLifecycle.preservation_reason(preserve_reason)
+        )
       end
 
     case delete_retained_marker(state, retained) do
@@ -5432,7 +5466,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           result
           |> Map.put(:status, "discard_pending")
           |> Map.put(:cleanup_residue, true)
-          |> Map.put(:pending_reason, inspect(marker_reason))
+          |> Map.put(:cleanup_failure_category, BranchLifecycle.failure_category(marker_reason))
+          |> Map.put(:cleanup_retry_count, Map.get(retained, :retry_count, 0))
+          |> Map.put(
+            :cleanup_retry_limit,
+            Map.get(state, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
+          )
+          |> Map.put(:cleanup_dormant, false)
 
         if pre_reserved? do
           {:ok, pending_result,
@@ -5473,7 +5513,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           |> Map.put(:active, false)
           |> Map.put(:status, "discarded")
           |> Map.put(:branch_retired, false)
-          |> Map.put(:branch_preserved_reason, safe_reason_string(reason))
+          |> Map.put(:branch_preserved_reason, BranchLifecycle.preservation_reason(reason))
 
         {:ok, result, state}
 
@@ -5491,9 +5531,18 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           |> Map.put(:active, false)
           |> Map.put(:status, "discard_pending")
           |> Map.put(:branch_retired, false)
-          |> Map.put(:branch_preserved_reason, safe_reason_string(reason))
+          |> Map.put(:branch_preserved_reason, BranchLifecycle.preservation_reason(reason))
           |> Map.put(:cleanup_residue, true)
-          |> Map.put(:pending_reason, inspect(combined_reason))
+          |> Map.put(
+            :cleanup_failure_category,
+            BranchLifecycle.failure_category({:marker_delete_failed, delete_reason})
+          )
+          |> Map.put(:cleanup_retry_count, Map.get(retained, :retry_count, 0))
+          |> Map.put(
+            :cleanup_retry_limit,
+            Map.get(state, :retained_cleanup_retry_limit, @default_retained_cleanup_retry_limit)
+          )
+          |> Map.put(:cleanup_dormant, false)
 
         case reserve_cleanup_attempt(state, retained) do
           {:ok, reserved, state2} ->
@@ -5574,23 +5623,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       |> public_view()
       |> Map.put(:status, "discard_pending")
       |> Map.put(:branch_retired, false)
-      |> Map.put(:branch_preserved_reason, safe_reason_string(reason))
+      |> Map.put(:branch_preserved_reason, BranchLifecycle.preservation_reason(reason))
       |> Map.put(:cleanup_residue, true)
+      |> Map.put(:cleanup_retry_count, forced_retry_count)
+      |> Map.put(:cleanup_retry_limit, limit)
+      |> Map.put(:cleanup_dormant, true)
 
     {:ok, result, state}
   end
-
-  # Receipt-formatting boundary for `branch_preserved_reason`. Discard decisions
-  # hand reasons through several shells (branch lifecycle core, retry resolver,
-  # marker-delete failure), and the reason can be a tuple such as
-  # `{:branch_retire_failed, inner}` or `{reason, delete_reason}`. String.Chars
-  # is not implemented for tuples, so `to_string/1` would crash the cleanup
-  # receipt path and silently drop the honest dormant/preserve signal the
-  # caller needs. Atoms and binaries keep their readable spelling; arbitrary
-  # terms fall back to `inspect/1` so the receipt is always a string.
-  defp safe_reason_string(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp safe_reason_string(reason) when is_binary(reason), do: reason
-  defp safe_reason_string(reason), do: inspect(reason)
 
   defp drop_lease(state, lease) do
     cancel_owner_death_retry(lease)

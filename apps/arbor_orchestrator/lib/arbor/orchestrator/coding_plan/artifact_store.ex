@@ -65,6 +65,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     workspace_expires_at
     evidence_ref
     published_commit
+    branch_lifecycle
     artifacts
   ))
 
@@ -84,7 +85,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   ))
 
   alias Arbor.Common.SafePath
-  alias Arbor.Contracts.Coding.TaskEvidenceDescriptor
+
+  alias Arbor.Contracts.Coding.{
+    BranchLifecycleDescriptor,
+    TaskEvidenceDescriptor,
+    WorkspaceReleaseDescriptor
+  }
+
   alias Arbor.Orchestrator.CodingPlan.TranscriptStore
 
   @typedoc "JSON-clean descriptor for an archived coding-plan compilation."
@@ -131,6 +138,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          :ok <- validate_terminal_task_id(task_id),
          :ok <- validate_json_object(result, :invalid_terminal_result),
          :ok <- validate_terminal_result(result),
+         {:ok, result} <- normalize_terminal_descriptors(result),
          {:ok, controls} <- normalize_terminal_controls(controls, task_id),
          {:ok, body} <- build_terminal_evidence(result, task_id, controls),
          {:ok, encoded} <- encode_canonical_json(body, :terminal_evidence),
@@ -297,13 +305,28 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          true <-
            MapSet.subset?(
              keys,
-             MapSet.union(required, MapSet.new(~w(acp_transcript workspace_release)))
+             MapSet.union(
+               required,
+               MapSet.new(~w(acp_transcript workspace_release branch_lifecycle))
+             )
            ),
          :ok <- validate_terminal_path(artifacts["coding_plan_path"]),
          :ok <- validate_terminal_path(artifacts["coding_pipeline_path"]),
          :ok <- validate_terminal_path(artifacts["compile_manifest_path"]),
          :ok <- validate_terminal_hash(artifacts["graph_hash"]),
-         :ok <- required_terminal_string(artifacts, "compiler_version") |> discard_value() do
+         :ok <- required_terminal_string(artifacts, "compiler_version") |> discard_value(),
+         :ok <-
+           validate_terminal_artifact_descriptor(
+             artifacts,
+             "workspace_release",
+             WorkspaceReleaseDescriptor
+           ),
+         :ok <-
+           validate_terminal_artifact_descriptor(
+             artifacts,
+             "branch_lifecycle",
+             BranchLifecycleDescriptor
+           ) do
       :ok
     else
       false -> {:error, {:invalid_terminal_artifacts, :fields}}
@@ -341,10 +364,144 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
 
   defp validate_terminal_optional_data(result) do
     with :ok <- validate_terminal_validation(Map.get(result, "validation")),
-         :ok <- validate_terminal_review(Map.get(result, "review")) do
+         :ok <- validate_terminal_review(Map.get(result, "review")),
+         :ok <-
+           validate_terminal_descriptor_field(
+             result,
+             "workspace_release",
+             WorkspaceReleaseDescriptor
+           ),
+         :ok <-
+           validate_terminal_descriptor_field(
+             result,
+             "branch_lifecycle",
+             BranchLifecycleDescriptor
+           ) do
       :ok
     end
   end
+
+  defp validate_terminal_artifact_descriptor(artifacts, key, contract) do
+    case Map.fetch(artifacts, key) do
+      :error ->
+        :ok
+
+      {:ok, value} ->
+        if contract.valid?(value), do: :ok, else: {:error, {:invalid_terminal_artifact, key}}
+    end
+  end
+
+  defp validate_terminal_descriptor_field(result, key, contract) do
+    case Map.fetch(result, key) do
+      :error ->
+        :ok
+
+      {:ok, value} ->
+        if contract.valid?(value), do: :ok, else: {:error, {:invalid_terminal_field, key}}
+    end
+  end
+
+  defp normalize_terminal_descriptors(result) do
+    with {:ok, workspace_release} <-
+           normalize_optional_terminal_descriptor(
+             result,
+             "workspace_release",
+             WorkspaceReleaseDescriptor
+           ),
+         {:ok, branch_lifecycle} <-
+           normalize_optional_terminal_descriptor(
+             result,
+             "branch_lifecycle",
+             BranchLifecycleDescriptor
+           ),
+         {:ok, artifacts} <-
+           normalize_terminal_artifacts(
+             Map.fetch!(result, "artifacts"),
+             workspace_release,
+             branch_lifecycle
+           ) do
+      {:ok,
+       result
+       |> maybe_put_terminal_descriptor("workspace_release", workspace_release)
+       |> maybe_put_terminal_descriptor("branch_lifecycle", branch_lifecycle)
+       |> Map.put("artifacts", artifacts)}
+    end
+  end
+
+  defp normalize_optional_terminal_descriptor(result, key, contract) do
+    case Map.fetch(result, key) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, value} ->
+        case contract.normalize(value) do
+          {:ok, normalized} -> {:ok, normalized}
+          {:error, reason} -> {:error, {:invalid_terminal_field, {key, reason}}}
+        end
+    end
+  end
+
+  defp normalize_terminal_artifacts(artifacts, workspace_release, branch_lifecycle) do
+    with {:ok, artifact_workspace_release} <-
+           normalize_optional_terminal_artifact(
+             artifacts,
+             "workspace_release",
+             workspace_release,
+             WorkspaceReleaseDescriptor
+           ),
+         {:ok, artifact_branch_lifecycle} <-
+           normalize_optional_terminal_artifact(
+             artifacts,
+             "branch_lifecycle",
+             branch_lifecycle,
+             BranchLifecycleDescriptor
+           ),
+         :ok <-
+           matching_terminal_descriptors(
+             workspace_release,
+             artifact_workspace_release,
+             "workspace_release"
+           ),
+         :ok <-
+           matching_terminal_descriptors(
+             branch_lifecycle,
+             artifact_branch_lifecycle,
+             "branch_lifecycle"
+           ) do
+      {:ok,
+       artifacts
+       |> maybe_put_terminal_descriptor("workspace_release", artifact_workspace_release)
+       |> maybe_put_terminal_descriptor("branch_lifecycle", artifact_branch_lifecycle)}
+    end
+  end
+
+  # Top-level lifecycle facts and artifact lifecycle facts must not diverge.
+  # The artifact fallback above makes a top-level-only descriptor canonical in
+  # the artifact map; an explicitly supplied artifact is compared after both
+  # values have been normalized by its contract.
+  defp matching_terminal_descriptors(top_level, artifact, _key) when top_level == artifact,
+    do: :ok
+
+  defp matching_terminal_descriptors(nil, _artifact, _key), do: :ok
+
+  defp matching_terminal_descriptors(_top_level, _artifact, key),
+    do: {:error, {:terminal_descriptor_mismatch, key}}
+
+  defp normalize_optional_terminal_artifact(artifacts, key, fallback, contract) do
+    case Map.fetch(artifacts, key) do
+      :error ->
+        {:ok, fallback}
+
+      {:ok, value} ->
+        case contract.normalize(value) do
+          {:ok, normalized} -> {:ok, normalized}
+          {:error, reason} -> {:error, {:invalid_terminal_artifact, {key, reason}}}
+        end
+    end
+  end
+
+  defp maybe_put_terminal_descriptor(map, _key, nil), do: map
+  defp maybe_put_terminal_descriptor(map, key, value), do: Map.put(map, key, value)
 
   defp validate_terminal_validation(nil), do: :ok
   defp validate_terminal_validation(value) when is_list(value), do: validate_json_value(value, [])
@@ -440,6 +597,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         "validation_outputs" => validation,
         "review_verdict" => review
       }
+      |> maybe_put_terminal_descriptor(
+        "workspace_release",
+        get_in(result, ["artifacts", "workspace_release"])
+      )
+      |> maybe_put_terminal_descriptor(
+        "branch_lifecycle",
+        get_in(result, ["artifacts", "branch_lifecycle"])
+      )
       |> maybe_put_terminal_candidate(result, task_id)
 
     {:ok, body}

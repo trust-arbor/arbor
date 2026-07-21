@@ -42,6 +42,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
                                    adoption_evidence
                                    task_evidence
                                    workspace_release
+                                   branch_lifecycle
                                  ))
   @coding_artifact_path_keys ~w(
     coding_plan_path
@@ -55,6 +56,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   alias Arbor.Contracts.Comms.ApprovalAnswer
 
   alias Arbor.Contracts.Coding.{
+    BranchLifecycleDescriptor,
     TaskEvidenceDescriptor,
     TranscriptDescriptor,
     WorkspaceReleaseDescriptor
@@ -76,32 +78,39 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     artifacts = coding_artifacts(raw)
     metrics = coding_metrics(raw)
 
-    %{
-      result_type: :coding_change,
-      payload:
+    case normalized_branch_lifecycle(raw, artifacts) do
+      {:ok, branch_lifecycle} ->
         %{
-          branch: value(raw, :branch),
-          branch_provenance: value(raw, :branch_provenance),
-          base_commit: value(raw, :base_commit),
-          commit: value(raw, :commit),
-          diff: value(raw, :diff),
-          files: files(raw),
-          report: report(raw, artifacts, metrics),
-          verdict: verdict(raw),
-          artifacts: artifacts,
-          metrics: metrics,
-          repo_path: value(raw, :repo_path),
-          worktree_path: value(raw, :worktree_path),
-          pr_url: value(raw, :pr_url),
-          evidence_ref: value(raw, :evidence_ref),
-          adoption: value(raw, :adoption),
-          worker_provider_session_id:
-            bounded_provider_session_id(value(raw, :worker_provider_session_id))
+          result_type: :coding_change,
+          payload:
+            %{
+              branch: value(raw, :branch),
+              branch_provenance: value(raw, :branch_provenance),
+              base_commit: value(raw, :base_commit),
+              commit: value(raw, :commit),
+              diff: value(raw, :diff),
+              files: files(raw),
+              report: report(raw, artifacts, metrics),
+              verdict: verdict(raw),
+              artifacts: artifacts,
+              metrics: metrics,
+              repo_path: value(raw, :repo_path),
+              worktree_path: value(raw, :worktree_path),
+              pr_url: value(raw, :pr_url),
+              evidence_ref: value(raw, :evidence_ref),
+              branch_lifecycle: branch_lifecycle,
+              adoption: value(raw, :adoption),
+              worker_provider_session_id:
+                bounded_provider_session_id(value(raw, :worker_provider_session_id))
+            }
+            |> reject_nil_values(),
+          raw: raw,
+          source: source(original)
         }
-        |> reject_nil_values(),
-      raw: raw,
-      source: source(original)
-    }
+
+      :error ->
+        generic_result(original)
+    end
   end
 
   defp generic_result(%{result_type: _type, payload: _payload} = result), do: result
@@ -455,6 +464,9 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   defp valid_optional_artifact_field?("workspace_release", value),
     do: WorkspaceReleaseDescriptor.valid?(value)
 
+  defp valid_optional_artifact_field?("branch_lifecycle", value),
+    do: BranchLifecycleDescriptor.valid?(value)
+
   defp valid_optional_artifact_field?(_key, _value), do: false
 
   defp normalize_coding_artifacts(artifacts) do
@@ -471,6 +483,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     |> normalize_optional_artifact("adoption_evidence", TaskEvidenceDescriptor)
     |> normalize_optional_artifact("task_evidence", TaskEvidenceDescriptor)
     |> normalize_optional_artifact("workspace_release", WorkspaceReleaseDescriptor)
+    |> normalize_optional_artifact("branch_lifecycle", BranchLifecycleDescriptor)
   end
 
   defp normalize_optional_artifact(artifacts, key, contract) do
@@ -483,6 +496,73 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
         artifacts
     end
   end
+
+  defp normalized_branch_lifecycle(raw, artifacts) do
+    with :ok <- validate_artifacts_source(value_presence(raw, :artifacts), artifacts),
+         {:ok, top_level} <- normalize_optional_lifecycle(value_presence(raw, :branch_lifecycle)),
+         {:ok, artifact} <-
+           normalize_optional_lifecycle(value_presence(artifacts, "branch_lifecycle")) do
+      case {top_level, artifact} do
+        {:absent, :absent} ->
+          {:ok, nil}
+
+        {:absent, {:present, descriptor}} ->
+          {:ok, descriptor}
+
+        # A top-level lifecycle is only a duplicate of the validated artifact
+        # descriptor. Without the artifact copy it is not independently trusted.
+        {{:present, _descriptor}, :absent} ->
+          :error
+
+        {{:present, top_descriptor}, {:present, artifact_descriptor}}
+        when top_descriptor == artifact_descriptor ->
+          # Artifacts are the canonical promoted source when both copies are
+          # present; equality is checked on their normalized closed maps.
+          {:ok, artifact_descriptor}
+
+        _ ->
+          :error
+      end
+    else
+      :error -> :error
+    end
+  end
+
+  defp validate_artifacts_source(:absent, _artifacts), do: :ok
+
+  defp validate_artifacts_source({:present, raw_artifacts}, artifacts) do
+    if lifecycle_artifact_present?(raw_artifacts) and not is_map(artifacts), do: :error, else: :ok
+  end
+
+  defp lifecycle_artifact_present?(artifacts) when is_map(artifacts) do
+    Map.has_key?(artifacts, :branch_lifecycle) or Map.has_key?(artifacts, "branch_lifecycle")
+  end
+
+  defp lifecycle_artifact_present?(_artifacts), do: false
+
+  defp normalize_optional_lifecycle(:absent), do: {:ok, :absent}
+
+  defp normalize_optional_lifecycle({:present, value}) do
+    case BranchLifecycleDescriptor.normalize(value) do
+      {:ok, descriptor} -> {:ok, {:present, descriptor}}
+      {:error, _reason} -> :error
+    end
+  end
+
+  defp value_presence(map, key) when is_map(map) do
+    case Map.fetch(map, key) do
+      {:ok, value} ->
+        {:present, value}
+
+      :error ->
+        case Map.fetch(map, to_string(key)) do
+          {:ok, value} -> {:present, value}
+          :error -> :absent
+        end
+    end
+  end
+
+  defp value_presence(_map, _key), do: :absent
 
   defp coding_metrics(raw) do
     case value(raw, :metrics) do

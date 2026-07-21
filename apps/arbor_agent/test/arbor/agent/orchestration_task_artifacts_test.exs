@@ -310,6 +310,81 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
            }
   end
 
+  test "promotes canonical branch lifecycle evidence and rejects disagreement" do
+    lifecycle = %{
+      "branch_status" => "pending",
+      "cleanup_status" => "retrying",
+      "cleanup_retry_count" => 1,
+      "cleanup_retry_limit" => 3,
+      "cleanup_failure_category" => "worktree_remove_failed",
+      "discard_phase" => "worktree"
+    }
+
+    matching = %{
+      "status" => "no_changes",
+      "artifacts" => coding_artifacts(%{"branch_lifecycle" => lifecycle})
+    }
+
+    matching_result = TaskArtifacts.normalize(matching)
+
+    assert matching_result.payload.branch_lifecycle == lifecycle
+    assert matching_result.payload.artifacts["branch_lifecycle"] == lifecycle
+
+    top_level_only = %{
+      "status" => "no_changes",
+      "branch_lifecycle" => lifecycle
+    }
+
+    assert TaskArtifacts.normalize(top_level_only) == %{
+             result_type: :value,
+             payload: %{value: top_level_only},
+             raw: top_level_only
+           }
+
+    mismatch = %{
+      "status" => "no_changes",
+      "branch_lifecycle" => %{"branch_status" => "retired", "cleanup_status" => "complete"},
+      "artifacts" => coding_artifacts(%{"branch_lifecycle" => lifecycle})
+    }
+
+    assert TaskArtifacts.normalize(mismatch) == %{
+             result_type: :value,
+             payload: %{value: mismatch},
+             raw: mismatch
+           }
+
+    bad = Map.put(lifecycle, "workspace_id", "authority")
+
+    malformed_candidate = %{
+      "status" => "no_changes",
+      "branch" => "agent/change",
+      "artifacts" => coding_artifacts(%{"branch_lifecycle" => bad})
+    }
+
+    assert TaskArtifacts.normalize(malformed_candidate) == %{
+             result_type: :value,
+             payload: %{value: malformed_candidate},
+             raw: malformed_candidate
+           }
+
+    assert TaskArtifacts.normalize(%{
+             "status" => "no_changes",
+             "artifacts" => coding_artifacts(%{"branch_lifecycle" => bad})
+           }) == %{
+             result_type: :value,
+             payload: %{
+               value: %{
+                 "status" => "no_changes",
+                 "artifacts" => coding_artifacts(%{"branch_lifecycle" => bad})
+               }
+             },
+             raw: %{
+               "status" => "no_changes",
+               "artifacts" => coding_artifacts(%{"branch_lifecycle" => bad})
+             }
+           }
+  end
+
   test "security regression: rejects hostile workspace release descriptors" do
     valid = %{"workspace_release_status" => "retained"}
 

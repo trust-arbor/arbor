@@ -27,9 +27,130 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
     dormancy from `retry_count >= limit`.
   """
 
+  alias Arbor.Contracts.Coding.BranchLifecycleDescriptor
+
   @type provenance :: :created | :reused | :unknown
   @type phase :: :archive | :worktree | :branch
   @type ref_observation :: :absent | {:present, String.t()} | {:error, term()}
+
+  @failure_categories %{
+    branch_checked_out: "branch_checked_out",
+    branch_checked_out_race: "branch_checked_out_race",
+    branch_ref_oid_mismatch: "branch_ref_oid_mismatch",
+    branch_tip_diverged: "branch_tip_diverged",
+    branch_provenance_not_created: "branch_provenance_not_created",
+    discard_identity_unavailable: "discard_identity_unavailable",
+    cleanup_retries_exhausted: "cleanup_retries_exhausted",
+    marker_delete_failed: "marker_delete_failed",
+    worktree_remove_failed: "worktree_remove_failed",
+    retention_identity_unavailable: "retention_identity_unavailable",
+    branch_observation_failed: "branch_observation_failed",
+    branch_retire_failed: "branch_retire_failed",
+    candidate_archive_failed: "candidate_archive_failed",
+    unknown: "cleanup_failed"
+  }
+
+  @doc """
+  Categorize a release result into closed branch lifecycle evidence.
+
+  The input may contain internal terms while it is still inside the Actions
+  boundary. The returned map is normalized JSON-clean evidence; arbitrary
+  terms are reduced to a category and are never inspected into the receipt.
+  """
+  @spec release_receipt(map(), non_neg_integer()) :: {:ok, map()} | :error
+  def release_receipt(result, retry_limit) when is_map(result) and is_integer(retry_limit) do
+    status = string_value(result, :status)
+
+    count =
+      bounded_count(Map.get(result, :cleanup_retry_count, Map.get(result, "cleanup_retry_count")))
+
+    limit =
+      bounded_limit(
+        Map.get(result, :cleanup_retry_limit, Map.get(result, "cleanup_retry_limit")),
+        retry_limit
+      )
+
+    dormant? = Map.get(result, :cleanup_dormant, Map.get(result, "cleanup_dormant")) == true
+
+    descriptor =
+      case status do
+        "discarded" ->
+          %{
+            branch_status:
+              if(boolean_value(result, :branch_retired), do: "retired", else: "preserved"),
+            cleanup_status: "complete",
+            branch_preserved_reason: preserve_reason(result),
+            evidence_ref: string_or_nil(result, :evidence_ref),
+            published_commit: string_or_nil(result, :published_commit)
+          }
+
+        "discard_pending" ->
+          %{
+            branch_status: "pending",
+            cleanup_status: if(dormant? or count >= limit, do: "dormant", else: "retrying"),
+            branch_preserved_reason: preserve_reason(result),
+            cleanup_retry_count: count,
+            cleanup_retry_limit: limit,
+            cleanup_failure_category:
+              failure_category(
+                Map.get(
+                  result,
+                  :cleanup_failure_category,
+                  Map.get(result, "cleanup_failure_category")
+                ) ||
+                  Map.get(result, :cleanup_failure, Map.get(result, "cleanup_failure")) ||
+                  Map.get(result, :pending_reason, Map.get(result, "pending_reason"))
+              ),
+            discard_phase:
+              normalize_phase_string(
+                Map.get(result, :discard_phase, Map.get(result, "discard_phase"))
+              ),
+            evidence_ref: string_or_nil(result, :evidence_ref),
+            published_commit: string_or_nil(result, :published_commit)
+          }
+
+        status when status in ["retained", "removed"] ->
+          %{
+            branch_status:
+              if(boolean_value(result, :branch_retired), do: "retired", else: "preserved"),
+            cleanup_status: "complete",
+            branch_preserved_reason: preserve_reason(result),
+            evidence_ref: string_or_nil(result, :evidence_ref),
+            published_commit: string_or_nil(result, :published_commit)
+          }
+
+        _ ->
+          nil
+      end
+
+    case descriptor && BranchLifecycleDescriptor.normalize(descriptor) do
+      {:ok, normalized} -> {:ok, normalized}
+      _ -> :error
+    end
+  end
+
+  def release_receipt(_result, _retry_limit), do: :error
+
+  @doc "Return a bounded categorical failure reason without exposing its term."
+  @spec failure_category(term()) :: String.t()
+  def failure_category(reason), do: failure_category_for(reason)
+
+  @doc "Return a bounded branch-preservation category without exposing a term."
+  @spec preservation_reason(term()) :: String.t()
+  def preservation_reason(reason) when is_binary(reason) do
+    if String.valid?(reason) and byte_size(reason) in 1..128 and
+         String.trim(reason) != "" and not String.contains?(reason, <<0>>) and
+         not String.match?(reason, ~r/[\x00-\x1F\x7F]/),
+       do: reason,
+       else: "branch_preserved"
+  end
+
+  def preservation_reason(:reused_worktree), do: "reused_worktree"
+  def preservation_reason(:branch_provenance_not_created), do: "branch_provenance_not_created"
+  def preservation_reason(:branch_tip_diverged), do: "branch_tip_diverged"
+  def preservation_reason(:branch_ref_oid_mismatch), do: "branch_ref_oid_mismatch"
+  def preservation_reason(:unknown_branch_provenance), do: "unknown_branch_provenance"
+  def preservation_reason(_), do: "branch_preserved"
 
   # Branch is settled; marker may be dropped. `branch_retired` records
   # whether this invocation retired the ref.
@@ -250,4 +371,54 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCore do
 
   defp observation_error({:error, reason}), do: {:observation_failed, reason}
   defp observation_error(other), do: {:observation_failed, other}
+
+  defp string_value(map, key), do: map |> Map.get(key) || Map.get(map, Atom.to_string(key))
+
+  defp string_or_nil(map, key),
+    do: if(is_binary(value = string_value(map, key)), do: value, else: nil)
+
+  defp boolean_value(map, key), do: string_value(map, key) == true
+  defp bounded_count(value) when is_integer(value) and value >= 0 and value <= 32, do: value
+  defp bounded_count(_), do: 0
+
+  defp bounded_limit(value, _fallback) when is_integer(value) and value > 0 and value <= 32,
+    do: value
+
+  defp bounded_limit(fallback, fallback), do: max(fallback, 1)
+  defp bounded_limit(_, fallback), do: max(fallback, 1)
+
+  defp preserve_reason(map) do
+    case string_value(map, :branch_preserved_reason) do
+      nil -> nil
+      value -> preservation_reason(value)
+    end
+  end
+
+  defp normalize_phase_string(value) when value in ["archive", "worktree", "branch"], do: value
+
+  defp normalize_phase_string(value) when value in [:archive, :worktree, :branch],
+    do: Atom.to_string(value)
+
+  defp normalize_phase_string(_), do: nil
+
+  defp failure_category_for(reason) when is_atom(reason),
+    do: Map.get(@failure_categories, reason, @failure_categories.unknown)
+
+  defp failure_category_for(reason) when is_binary(reason) do
+    if String.match?(reason, ~r/\A[a-z][a-z0-9_]{0,63}\z/),
+      do: reason,
+      else: @failure_categories.unknown
+  end
+
+  defp failure_category_for({tag, detail}) do
+    tag_category = failure_category_for(tag)
+    detail_category = failure_category_for(detail)
+    if detail_category == @failure_categories.unknown, do: tag_category, else: detail_category
+  end
+
+  defp failure_category_for({tag, first, second}) do
+    failure_category_for({tag, {first, second}})
+  end
+
+  defp failure_category_for(_), do: @failure_categories.unknown
 end

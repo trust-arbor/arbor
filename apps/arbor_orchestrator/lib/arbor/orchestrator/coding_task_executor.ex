@@ -55,6 +55,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   alias Arbor.Contracts.Coding.{
     Plan,
+    BranchLifecycleDescriptor,
     TaskEvidenceDescriptor,
     TranscriptDescriptor,
     WorkspaceReleaseDescriptor
@@ -237,9 +238,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     evidence_ref
     published_commit
     artifacts
+    branch_lifecycle
   ))
 
-  @finalize_artifact_optional_keys MapSet.new(~w(acp_transcript workspace_release))
+  @finalize_artifact_optional_keys MapSet.new(
+                                     ~w(acp_transcript workspace_release branch_lifecycle)
+                                   )
   @max_finalize_controls 100
   @max_finalize_task_id_bytes 512
 
@@ -486,15 +490,23 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            Arbor.Actions.settle_coding_branch_adoption(candidate, proof) do
       adoption = Map.merge(proof, settlement)
 
-      artifacts =
-        result
-        |> Map.fetch!("artifacts")
-        |> Map.put("adoption_evidence", adoption_descriptor)
+      case adoption_branch_lifecycle(result, adoption) do
+        {:ok, branch_lifecycle} ->
+          artifacts =
+            result
+            |> Map.fetch!("artifacts")
+            |> Map.put("adoption_evidence", adoption_descriptor)
+            |> Map.put("branch_lifecycle", branch_lifecycle)
 
-      {:ok,
-       result
-       |> Map.put("adoption", adoption)
-       |> Map.put("artifacts", artifacts)}
+          {:ok,
+           result
+           |> Map.put("adoption", adoption)
+           |> Map.put("branch_lifecycle", branch_lifecycle)
+           |> Map.put("artifacts", artifacts)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   rescue
     exception -> {:error, {:coding_task_adoption_error, Exception.message(exception)}}
@@ -885,7 +897,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            ),
          :ok <- validate_hash(Map.get(artifacts, "graph_hash"), "graph_hash"),
          :ok <-
-           validate_nonblank_binary(Map.get(artifacts, "compiler_version"), "compiler_version") do
+           validate_nonblank_binary(Map.get(artifacts, "compiler_version"), "compiler_version"),
+         :ok <-
+           validate_finalize_artifact_descriptor(
+             artifacts,
+             "workspace_release",
+             WorkspaceReleaseDescriptor
+           ),
+         :ok <-
+           validate_finalize_artifact_descriptor(
+             artifacts,
+             "branch_lifecycle",
+             BranchLifecycleDescriptor
+           ) do
       :ok
     else
       false -> {:error, {:invalid_finalize_artifacts, :fields}}
@@ -899,8 +923,55 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   defp validate_finalize_optional_data(result) do
     with :ok <- validate_finalize_json_field(result, "validation", &is_list/1),
-         :ok <- validate_finalize_json_field(result, "review", &is_map/1) do
+         :ok <- validate_finalize_json_field(result, "review", &is_map/1),
+         :ok <-
+           validate_finalize_descriptor_field(
+             result,
+             "branch_lifecycle",
+             BranchLifecycleDescriptor
+           ) do
       :ok
+    end
+  end
+
+  defp validate_finalize_artifact_descriptor(artifacts, key, contract) do
+    case Map.fetch(artifacts, key) do
+      :error ->
+        :ok
+
+      {:ok, value} ->
+        if contract.valid?(value), do: :ok, else: {:error, {:invalid_finalize_artifact, key}}
+    end
+  end
+
+  defp validate_finalize_descriptor_field(result, key, contract) do
+    case Map.fetch(result, key) do
+      :error ->
+        :ok
+
+      {:ok, value} ->
+        if contract.valid?(value), do: :ok, else: {:error, {:invalid_finalize_field, key}}
+    end
+  end
+
+  defp adoption_branch_lifecycle(result, adoption) do
+    branch_retired? = Map.get(adoption, "branch_retired") == true
+
+    attrs = %{
+      "branch_status" => if(branch_retired?, do: "retired", else: "preserved"),
+      "cleanup_status" => "complete",
+      "branch_preserved_reason" =>
+        if(branch_retired?,
+          do: nil,
+          else: Map.get(adoption, "branch_preserved_reason", "branch_preserved")
+        ),
+      "evidence_ref" => Map.get(adoption, "evidence_ref"),
+      "published_commit" => Map.get(result, "commit_hash")
+    }
+
+    case BranchLifecycleDescriptor.normalize(attrs) do
+      {:ok, descriptor} -> {:ok, descriptor}
+      {:error, reason} -> {:error, {:invalid_adoption_branch_lifecycle, reason}}
     end
   end
 
@@ -2501,6 +2572,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "workspace_id" => context_get(context, "workspace_id"),
       "evidence_ref" => metric_context_value(context, "release", "evidence_ref"),
       "published_commit" => metric_context_value(context, "release", "published_commit"),
+      "branch_lifecycle" => metric_context_value(context, "release", "branch_lifecycle"),
       "worker_session_id" => context_get(context, "worker_session_id"),
       "worker_provider_session_id" => context_get(context, "worker_provider_session_id"),
       "response_text" => extract_response_text(context),
@@ -2550,9 +2622,27 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
       release ->
         case WorkspaceReleaseDescriptor.normalize(release) do
-          {:ok, descriptor} -> Map.put(artifacts, "workspace_release", descriptor)
+          {:ok, descriptor} ->
+            artifacts
+            |> Map.put("workspace_release", descriptor)
+            |> attach_branch_lifecycle_artifact(result)
+
+          {:error, _reason} ->
+            artifacts
+        end
+    end
+  end
+
+  defp attach_branch_lifecycle_artifact(artifacts, result) do
+    case Map.get(result, "branch_lifecycle") do
+      lifecycle when is_map(lifecycle) ->
+        case BranchLifecycleDescriptor.normalize(lifecycle) do
+          {:ok, descriptor} -> Map.put(artifacts, "branch_lifecycle", descriptor)
           {:error, _reason} -> artifacts
         end
+
+      _ ->
+        artifacts
     end
   end
 
@@ -2623,6 +2713,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     %{}
     |> maybe_put_metric("workspace_release_status", status)
     |> maybe_put_metric("workspace_expires_at", workspace_release_expires_at(context, status))
+    |> maybe_put_branch_lifecycle(context)
+  end
+
+  defp maybe_put_branch_lifecycle(map, context) do
+    case BranchLifecycleDescriptor.normalize(
+           metric_context_value(context, "release", "branch_lifecycle")
+         ) do
+      {:ok, descriptor} -> Map.put(map, "branch_lifecycle", descriptor)
+      _ -> map
+    end
   end
 
   defp workspace_release_expires_at(context) do
@@ -2647,10 +2747,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   defp workspace_release_expires_at(_context, _status), do: nil
 
-  defp workspace_release_status(status) when status in ["retained", "removed"], do: status
+  defp workspace_release_status(status)
+       when status in ["retained", "removed", "discarded", "discard_pending"],
+       do: status
 
-  defp workspace_release_status(status) when status in [:retained, :removed],
-    do: Atom.to_string(status)
+  defp workspace_release_status(status)
+       when status in [:retained, :removed, :discarded, :discard_pending],
+       do: Atom.to_string(status)
 
   defp workspace_release_status(_status), do: nil
 

@@ -8,7 +8,7 @@ defmodule Arbor.Contracts.Coding.WorkspaceReleaseDescriptor do
 
   use TypedStruct
 
-  @statuses ~w(retained removed)
+  @statuses ~w(retained removed discarded discard_pending)
   @fields [:workspace_release_status, :workspace_expires_at]
   @max_fields 2
   @max_timestamp_bytes 64
@@ -120,7 +120,8 @@ defmodule Arbor.Contracts.Coding.WorkspaceReleaseDescriptor do
   defp normalize_status(status) when status in @statuses, do: {:ok, status}
   defp normalize_status(_status), do: {:error, {:invalid_field, "workspace_release_status"}}
 
-  defp optional_expiry(attrs, "removed") do
+  defp optional_expiry(attrs, status)
+       when status in ["removed", "discarded", "discard_pending"] do
     if Map.has_key?(attrs, :workspace_expires_at),
       do: {:error, {:invalid_field, "workspace_expires_at"}},
       else: {:ok, nil}

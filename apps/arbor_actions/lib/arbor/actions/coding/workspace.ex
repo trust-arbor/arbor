@@ -1892,7 +1892,19 @@ defmodule Arbor.Actions.Coding.Workspace do
 
     alias Arbor.Actions
     alias Arbor.Actions.Coding.Workspace
+    alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore
     alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+
+    @internal_release_reason_keys [
+      :pending_reason,
+      "pending_reason",
+      :cleanup_failure,
+      "cleanup_failure",
+      :failure_reason,
+      "failure_reason",
+      :reason,
+      "reason"
+    ]
 
     def taint_roles do
       %{
@@ -1921,12 +1933,19 @@ defmodule Arbor.Actions.Coding.Workspace do
              repo_path: repo_path
            }) do
         {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{
-            workspace_id: workspace_id,
-            status: result[:status] || result["status"]
-          })
+          case format_release_result(result) do
+            {:ok, result} ->
+              Actions.emit_completed(__MODULE__, %{
+                workspace_id: workspace_id,
+                status: result[:status] || result["status"]
+              })
 
-          {:ok, result}
+              {:ok, result}
+
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, reason}
+          end
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
@@ -1935,6 +1954,37 @@ defmodule Arbor.Actions.Coding.Workspace do
     end
 
     def run(_params, _context), do: {:error, "workspace_id is required"}
+
+    @doc false
+    @spec format_release_result(map()) :: {:ok, map()} | {:error, term()}
+    def format_release_result(result) when is_map(result) do
+      sanitized = scrub_internal_release_reasons(result)
+      status = release_status(sanitized)
+
+      case WorkspaceBranchLifecycleCore.release_receipt(sanitized, 8) do
+        {:ok, lifecycle} ->
+          {:ok, Map.put(sanitized, :branch_lifecycle, lifecycle)}
+
+        :error when status == "already_released" ->
+          {:ok, sanitized}
+
+        :error ->
+          {:error, {:invalid_release_receipt, status || "unknown"}}
+      end
+    end
+
+    def format_release_result(_result), do: {:error, {:invalid_release_receipt, "unknown"}}
+
+    defp scrub_internal_release_reasons(result),
+      do: Map.drop(result, @internal_release_reason_keys)
+
+    defp release_status(result) do
+      case Map.get(result, :status, Map.get(result, "status")) do
+        status when is_atom(status) -> Atom.to_string(status)
+        status when is_binary(status) -> status
+        _ -> nil
+      end
+    end
   end
 
   defmodule CommittedChange do

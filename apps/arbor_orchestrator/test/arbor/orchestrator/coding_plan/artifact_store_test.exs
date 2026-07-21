@@ -275,6 +275,61 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
            ]
   end
 
+  test "normalizes terminal lifecycle descriptors and rejects authority-bearing artifacts", %{
+    root: root
+  } do
+    File.mkdir_p!(root)
+    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+
+    lifecycle = %{
+      "branch_status" => "pending",
+      "cleanup_status" => "retrying",
+      "cleanup_retry_count" => 1,
+      "cleanup_retry_limit" => 3,
+      "cleanup_failure_category" => "worktree_remove_failed",
+      "discard_phase" => "worktree"
+    }
+
+    release = %{"workspace_release_status" => "discard_pending"}
+
+    result =
+      update_in(
+        terminal_result(root),
+        ["artifacts"],
+        &Map.merge(&1, %{
+          "workspace_release" => release,
+          "branch_lifecycle" => lifecycle
+        })
+      )
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, [])
+
+    evidence = descriptor["path"] |> File.read!() |> Jason.decode!()
+    assert evidence["workspace_release"] == release
+    assert evidence["branch_lifecycle"] == lifecycle
+
+    mismatched =
+      Map.put(result, "branch_lifecycle", %{
+        "branch_status" => "retired",
+        "cleanup_status" => "complete"
+      })
+
+    assert {:error, {:terminal_descriptor_mismatch, "branch_lifecycle"}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", mismatched, [])
+
+    for {key, bad} <- [
+          {"workspace_release",
+           %{"workspace_release_status" => "discard_pending", "workspace_id" => "authority"}},
+          {"branch_lifecycle", Map.put(lifecycle, "command", "git rm")}
+        ] do
+      invalid = update_in(terminal_result(root), ["artifacts"], &Map.put(&1, key, bad))
+
+      assert {:error, {:invalid_terminal_artifact, ^key}} =
+               ArtifactStore.archive_terminal_evidence(root, "task_coding_1", invalid, [])
+    end
+  end
+
   test "terminal evidence is deterministic and closed", %{root: root} do
     File.mkdir_p!(root)
     {:ok, root} = Arbor.Common.SafePath.resolve_real(root)

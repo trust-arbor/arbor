@@ -2270,6 +2270,33 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {:ok, _encoded} = Jason.encode(missing)
     end
 
+    test "attaches discarded lifecycle evidence from owner-observed release context" do
+      lifecycle = %{
+        "branch_status" => "pending",
+        "cleanup_status" => "retrying",
+        "cleanup_retry_count" => 1,
+        "cleanup_retry_limit" => 3,
+        "cleanup_failure_category" => "worktree_remove_failed",
+        "discard_phase" => "worktree"
+      }
+
+      assert {:ok, result} =
+               run_with_engine_result(%{
+                 "status" => "no_changes",
+                 "release.status" => "discard_pending",
+                 "release.branch_lifecycle" => lifecycle
+               })
+
+      assert result["workspace_release_status"] == "discard_pending"
+      assert result["branch_lifecycle"] == lifecycle
+
+      assert result["artifacts"]["workspace_release"] == %{
+               "workspace_release_status" => "discard_pending"
+             }
+
+      assert result["artifacts"]["branch_lifecycle"] == lifecycle
+    end
+
     test "wall clock includes runner latency and preserves Engine node timing" do
       Application.put_env(
         :arbor_orchestrator,
@@ -3122,6 +3149,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "rejects malformed controls and malformed store replies" do
       root = prepare_finalize_artifacts()
 
+      assert {:error, {:invalid_finalize_field, "branch_lifecycle"}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 Map.put(finalize_result(root), "branch_lifecycle", %{
+                   "branch_status" => "retired",
+                   "cleanup_status" => "complete",
+                   "command" => "git rm"
+                 }),
+                 [],
+                 valid_context()
+               )
+
       assert {:error, {:invalid_task_id, :control_character}} =
                CodingTaskExecutor.finalize_task(
                  "agent_1",
@@ -3210,6 +3249,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert adopted["adoption"]["status"] == "adopted"
       assert adopted["adoption"]["method"] == "ancestry"
       assert adopted["adoption"]["branch_retired"] == true
+
+      assert adopted["branch_lifecycle"] == %{
+               "branch_status" => "retired",
+               "cleanup_status" => "complete",
+               "evidence_ref" => adopted["adoption"]["evidence_ref"],
+               "published_commit" => fixture.candidate_commit
+             }
+
+      assert adopted["artifacts"]["branch_lifecycle"] == adopted["branch_lifecycle"]
       refute branch_exists?(fixture.repo, fixture.branch)
 
       descriptor = adopted["artifacts"]["adoption_evidence"]

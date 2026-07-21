@@ -215,6 +215,27 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
   end
 
   describe "discard release mode" do
+    test "security regression: malformed lifecycle receipt fails closed without raw reasons" do
+      result = %{
+        status: "discard_pending",
+        pending_reason: {:backend, "/private/secret"},
+        cleanup_failure: {:internal, "/private/secret"}
+      }
+
+      assert Workspace.Release.format_release_result(result) ==
+               {:error, {:invalid_release_receipt, "discard_pending"}}
+    end
+
+    test "already released remains lifecycle-less after internal reason scrubbing" do
+      assert {:ok, result} =
+               Workspace.Release.format_release_result(%{
+                 status: "already_released",
+                 pending_reason: {:backend, "/private/secret"}
+               })
+
+      assert result == %{status: "already_released"}
+    end
+
     test "created no-change branch is removed with the owned worktree", %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       branch = "test/discard-created-no-change"
@@ -1375,17 +1396,13 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
       assert discarded.branch_retired == false
       assert discarded.cleanup_residue == true
 
-      # branch_preserved_reason carries the provenance invariant only — the
-      # branch was not created by this invocation.  The marker-delete tuple
-      # is surfaced in pending_reason so an operator can diagnose the
-      # transient backend failure.  A regression that called to_string/1 on
-      # the tuple would have raised before reaching this line.
+      # The receipt carries only bounded categories. Raw marker/delete terms
+      # and backend details never cross the Actions boundary.
       assert is_binary(discarded.branch_preserved_reason)
       assert discarded.branch_preserved_reason =~ "branch_provenance_not_created"
-
-      assert is_binary(discarded.pending_reason)
-      assert discarded.pending_reason =~ "branch_provenance_not_created"
-      assert discarded.pending_reason =~ "injected_delete_failure"
+      assert discarded.cleanup_failure_category == "marker_delete_failed"
+      refute Map.has_key?(discarded, :pending_reason)
+      refute Map.has_key?(discarded, :cleanup_failure)
 
       # Marker remains durably present — settlement stays honest.
       assert {:ok, key} = Core.record_key(lease.workspace_id)

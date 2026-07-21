@@ -32,6 +32,69 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchLifecycleCoreTest do
     end
   end
 
+  describe "release_receipt/2" do
+    test "projects discarded and discard_pending outcomes without raw terms" do
+      assert {:ok, discarded} =
+               Core.release_receipt(
+                 %{
+                   status: "discarded",
+                   branch_retired: false,
+                   branch_preserved_reason: :branch_tip_diverged,
+                   cleanup_failure: {:secret, self()}
+                 },
+                 3
+               )
+
+      assert discarded["branch_status"] == "preserved"
+      assert discarded["cleanup_status"] == "complete"
+      assert discarded["branch_preserved_reason"] == "branch_tip_diverged"
+      refute inspect(discarded) =~ "secret"
+      refute inspect(discarded) =~ inspect(self())
+
+      assert {:ok, pending} =
+               Core.release_receipt(
+                 %{
+                   status: "discard_pending",
+                   cleanup_retry_count: 1,
+                   cleanup_retry_limit: 3,
+                   cleanup_dormant: false,
+                   cleanup_failure: {:worktree_remove_failed, "/private/path"},
+                   discard_phase: :worktree
+                 },
+                 3
+               )
+
+      assert pending == %{
+               "branch_status" => "pending",
+               "cleanup_status" => "retrying",
+               "cleanup_retry_count" => 1,
+               "cleanup_retry_limit" => 3,
+               "cleanup_failure_category" => "worktree_remove_failed",
+               "discard_phase" => "worktree"
+             }
+
+      refute inspect(pending) =~ "/private/path"
+    end
+
+    test "dormant receipts require exhausted retry evidence" do
+      assert {:ok, receipt} =
+               Core.release_receipt(
+                 %{
+                   status: "discard_pending",
+                   cleanup_retry_count: 3,
+                   cleanup_retry_limit: 3,
+                   cleanup_dormant: true,
+                   cleanup_failure_category: "cleanup_retries_exhausted",
+                   discard_phase: "branch"
+                 },
+                 3
+               )
+
+      assert receipt["cleanup_status"] == "dormant"
+      assert receipt["cleanup_failure_category"] == "cleanup_retries_exhausted"
+    end
+  end
+
   describe "branch_phase_decision/3 decision matrix" do
     test "reused provenance never selects delete" do
       assert Core.branch_phase_decision(:reused, {:present, @base}, @base) ==

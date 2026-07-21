@@ -295,3 +295,11 @@ collision test wrote its temporary profile into the real `~/.grok`).
 <!-- applied-learning: do-not-rely-on-posix-scalar-word-splitting-in-zsh -->
 <a id="applied-learning-do-not-rely-on-posix-scalar-word-splitting-in-zsh"></a>
 **Do not rely on POSIX scalar word splitting in zsh diagnostics.** With zsh's default options, `set -- $pair` preserves a scalar containing spaces as one argument rather than splitting it into positional parameters, so a comparison loop can report false mismatches against an empty path. Use an explicit array, `${=pair}` only when deliberate, or pass each path directly; verify harness failures before treating them as repository-state failures (found 2026-07-21 while proving historical branch-settlement set equality).
+
+<!-- applied-learning: stage-owned-paths-and-reconcile-duplicate-terminal-evidence -->
+<a id="applied-learning-stage-owned-paths-and-reconcile-duplicate-terminal-evidence"></a>
+**Stage only explicitly owned paths, and reconcile duplicate terminal evidence.** In a shared
+worktree, unrelated workers may modify adjacent files or introduce compile failures; never use
+`git add -A` or broad staging. When one fact is represented at both a top-level result and an
+artifact boundary, normalize both through the same closed contract and reject disagreement
+instead of committing contradictory evidence (found 2026-07-21 during Phase 7A lifecycle work).

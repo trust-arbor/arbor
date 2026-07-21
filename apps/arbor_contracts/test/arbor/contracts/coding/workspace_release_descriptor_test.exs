@@ -19,6 +19,11 @@ defmodule Arbor.Contracts.Coding.WorkspaceReleaseDescriptorTest do
 
     assert {:ok, %{"workspace_release_status" => "removed"}} =
              WorkspaceReleaseDescriptor.normalize(%{"workspace_release_status" => "removed"})
+
+    for status <- ["discarded", "discard_pending"] do
+      assert {:ok, %{"workspace_release_status" => ^status}} =
+               WorkspaceReleaseDescriptor.normalize(%{"workspace_release_status" => status})
+    end
   end
 
   test "requires the enum status and permits expiry only for retained workspaces" do
