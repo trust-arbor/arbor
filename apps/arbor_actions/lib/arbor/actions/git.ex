@@ -329,6 +329,282 @@ defmodule Arbor.Actions.Git do
   def delete_branch_ref(_repository_root, _branch, _expected_oid),
     do: {:error, :invalid_git_branch_ref_delete}
 
+  # Identity-bound hidden evidence-ref archive for the managed coding branch
+  # lifecycle.
+  #
+  # Archives an exact local branch tip to a deterministic Arbor-owned hidden
+  # ref outside refs/heads/, keyed by exact nonblank bounded task_id and
+  # workspace_id. The caller cannot reach arbitrary refs — only the computed
+  # evidence ref for these inputs is mutated, and only via compare-and-create
+  # against absence.
+  #
+  # Semantics:
+  # * before first creation: require the local branch to exist at expected_oid
+  # * create with CAS against absence (`update-ref <hidden> <oid> <zero>`);
+  #   never overwrite an existing ref
+  # * idempotent replay: if the evidence ref already exists at expected_oid,
+  #   succeed even if the temporary local branch has since disappeared
+  # * if the evidence ref exists at another OID: stable mismatch error
+  # * if neither branch nor archive proves expected_oid: fail
+  # * SHA-1 (40 hex) and SHA-256 (64 hex) OIDs are both supported; the zero
+  #   old-OID width is derived from expected_oid
+  # * the OID must resolve to a commit object (cat-file -t)
+  # * the exact hidden ref is verified after creation; warnings or malformed
+  #   git output fail closed
+  @evidence_ref_namespace "refs/arbor/evidence"
+  # Distinct durable-lifecycle bounds so every admitted record remains
+  # archivable: task_id up to 256 bytes, workspace_id up to 128 bytes. These
+  # match the existing durable lifecycle limits rather than a single arbitrary
+  # ceiling; the raw opaque bytes are preserved for digest derivation after
+  # nonblank/UTF-8/NUL validation (no trimming or normalization).
+  @max_task_id_bytes 256
+  @max_workspace_id_bytes 128
+
+  @doc false
+  @spec archive_branch_evidence_ref(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t()
+        ) :: {:ok, %{hidden_ref: String.t()}} | {:error, term()}
+  def archive_branch_evidence_ref(repository_root, branch, task_id, workspace_id, expected_oid)
+      when is_binary(repository_root) and is_binary(branch) and is_binary(task_id) and
+             is_binary(workspace_id) and is_binary(expected_oid) do
+    expected_oid = expected_oid |> String.trim() |> String.downcase()
+
+    with :ok <- validate_branch_name(branch),
+         :ok <- validate_full_oid(expected_oid),
+         :ok <- validate_identity_id(task_id, @max_task_id_bytes),
+         :ok <- validate_identity_id(workspace_id, @max_workspace_id_bytes),
+         {:ok, canonical_repo} <- authorized_root(repository_root),
+         :ok <- verify_commit_oid(canonical_repo, expected_oid),
+         hidden_ref = evidence_ref_for(task_id, workspace_id),
+         :ok <- validate_evidence_ref_name(hidden_ref),
+         {:ok, archive_state} <- read_branch_ref_observation(canonical_repo, hidden_ref) do
+      archive_branch_evidence(canonical_repo, branch, expected_oid, hidden_ref, archive_state)
+    end
+  end
+
+  def archive_branch_evidence_ref(
+        _repository_root,
+        _branch,
+        _task_id,
+        _workspace_id,
+        _expected_oid
+      ),
+      do: {:error, :invalid_git_evidence_archive}
+
+  # Validate an identity-bound ID against its distinct durable-lifecycle byte
+  # limit. The raw opaque bytes are preserved for digest derivation (no
+  # trimming/normalization of the value itself); only nonblank/UTF-8/NUL and
+  # the bound-specific byte ceiling are enforced.
+  defp validate_identity_id(value, max_bytes) when is_binary(value) and is_integer(max_bytes) do
+    cond do
+      String.trim(value) == "" ->
+        {:error, :invalid_git_evidence_identity}
+
+      not String.valid?(value) ->
+        {:error, :invalid_git_evidence_identity}
+
+      String.contains?(value, <<0>>) ->
+        {:error, :invalid_git_evidence_identity}
+
+      byte_size(value) > max_bytes ->
+        {:error, :invalid_git_evidence_identity}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_identity_id(_value, _max_bytes), do: {:error, :invalid_git_evidence_identity}
+
+  # Deterministic, caller-proof hidden-ref path. Components are SHA-256 hex of
+  # the raw task_id / workspace_id so caller text cannot escape the namespace,
+  # alias another identity, or violate git ref component rules.
+  defp evidence_ref_for(task_id, workspace_id) do
+    task_digest = evidence_digest(task_id)
+    workspace_digest = evidence_digest(workspace_id)
+
+    "#{@evidence_ref_namespace}/#{workspace_digest}/#{task_digest}"
+  end
+
+  defp evidence_digest(value) do
+    :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+  end
+
+  # Belt-and-suspenders: confirm the computed ref stays inside the Arbor
+  # evidence namespace with exactly two 64-hex digest components. The digest
+  # derivation already guarantees this; the structural check guards against
+  # future refactors that might break the invariant.
+  defp validate_evidence_ref_name(ref) do
+    namespace_prefix = @evidence_ref_namespace <> "/"
+    components = String.split(ref, "/")
+
+    with true <- String.starts_with?(ref, namespace_prefix),
+         false <- String.contains?(ref, ["..", "//", "\\", <<0>>]),
+         ["refs", "arbor", "evidence", workspace_digest, task_digest] <- components,
+         true <- byte_size(workspace_digest) == 64,
+         true <- byte_size(task_digest) == 64,
+         true <- Regex.match?(~r/\A[0-9a-f]{64}\z/, workspace_digest),
+         true <- Regex.match?(~r/\A[0-9a-f]{64}\z/, task_digest) do
+      :ok
+    else
+      _other -> {:error, {:invalid_git_evidence_ref, ref}}
+    end
+  end
+
+  # Confirm the OID resolves to a commit object via structured cat-file output.
+  # Exit 0 with exactly "commit" on stdout (trimmed) and no stderr is the sole
+  # acceptance signal; any warning, different type, or nonzero exit fails closed.
+  defp verify_commit_oid(repository_root, oid) do
+    case execute(repository_root, ["cat-file", "-t", oid]) do
+      {:ok, %{exit_code: 0, stdout: stdout, stderr: stderr}} ->
+        trimmed_stderr = String.trim(stderr)
+        trimmed_stdout = String.trim(stdout)
+
+        cond do
+          trimmed_stderr != "" ->
+            {:error, {:git_evidence_oid_warning, trimmed_stderr}}
+
+          trimmed_stdout != "commit" ->
+            {:error, {:git_evidence_oid_not_commit, trimmed_stdout}}
+
+          true ->
+            :ok
+        end
+
+      {:ok, result} ->
+        {:error, {:git_evidence_oid_lookup_failed, Map.get(result, :exit_code)}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp archive_branch_evidence(
+         repository_root,
+         branch,
+         expected_oid,
+         hidden_ref,
+         archive_state
+       ) do
+    case archive_state do
+      {:present, ^expected_oid} ->
+        # Idempotent replay: the archive already proves the expected OID.
+        # Succeed without re-verifying the local branch — the proof is durable
+        # and the temporary branch may have already been retired.
+        {:ok, %{hidden_ref: hidden_ref}}
+
+      {:present, _other_oid} ->
+        # The archive exists at a different OID — never overwrite.
+        {:error, :evidence_ref_oid_mismatch}
+
+      :absent ->
+        with :ok <- require_branch_at_oid(repository_root, branch, expected_oid),
+             :ok <- run_pre_evidence_cas_test_hook(repository_root, hidden_ref, expected_oid),
+             :ok <- create_evidence_ref_cas(repository_root, hidden_ref, expected_oid),
+             :ok <- verify_evidence_ref(repository_root, hidden_ref, expected_oid) do
+          {:ok, %{hidden_ref: hidden_ref}}
+        end
+    end
+  end
+
+  defp require_branch_at_oid(repository_root, branch, expected_oid) do
+    case observe_branch_ref(repository_root, branch) do
+      {:ok, {:present, ^expected_oid}} ->
+        :ok
+
+      {:ok, {:present, _other_oid}} ->
+        {:error, :branch_ref_oid_mismatch}
+
+      {:ok, :absent} ->
+        {:error, :branch_ref_absent}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # Deterministic test injection point precisely between the branch-at-OID
+  # precheck and the CAS-create. Production builds compile an unconditional
+  # no-op so callers cannot alter a security observation through the process
+  # dictionary.
+  if Mix.env() == :test do
+    defp run_pre_evidence_cas_test_hook(repository_root, hidden_ref, expected_oid) do
+      case Process.delete({__MODULE__, :pre_evidence_cas_hook}) do
+        callback when is_function(callback, 3) ->
+          callback.(repository_root, hidden_ref, expected_oid)
+          :ok
+
+        _other ->
+          :ok
+      end
+    end
+  else
+    defp run_pre_evidence_cas_test_hook(_repository_root, _hidden_ref, _expected_oid), do: :ok
+  end
+
+  # Compare-and-create the hidden evidence ref against absence. The zero
+  # old-OID width is derived from expected_oid so SHA-1 (40 hex) and SHA-256
+  # (64 hex) repositories are both handled. A nonzero exit means the ref is no
+  # longer absent; classify without overwriting.
+  defp create_evidence_ref_cas(repository_root, hidden_ref, expected_oid) do
+    zero = String.duplicate("0", String.length(expected_oid))
+
+    repository_root
+    |> execute(["update-ref", hidden_ref, expected_oid, zero])
+    |> augment_dirty_output(:update_ref_evidence)
+    |> case do
+      {:ok, %{exit_code: 0} = result} ->
+        if clean_success?(result),
+          do: :ok,
+          else: {:error, :git_evidence_create_dirty_success}
+
+      {:ok, result} ->
+        classify_evidence_cas_failure(repository_root, hidden_ref, expected_oid, result)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp classify_evidence_cas_failure(repository_root, hidden_ref, expected_oid, result) do
+    case read_branch_ref_observation(repository_root, hidden_ref) do
+      {:ok, {:present, ^expected_oid}} ->
+        # A concurrent writer archived the same OID. Idempotent success.
+        :ok
+
+      {:ok, {:present, _other_oid}} ->
+        # A concurrent writer archived a different OID — never replaced.
+        {:error, :evidence_ref_oid_mismatch}
+
+      {:ok, :absent} ->
+        # Precondition failed and the ref is still absent — operational failure.
+        {:error, {:git_evidence_create_failed, Map.get(result, :exit_code)}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp verify_evidence_ref(repository_root, hidden_ref, expected_oid) do
+    case read_branch_ref_observation(repository_root, hidden_ref) do
+      {:ok, {:present, ^expected_oid}} ->
+        :ok
+
+      {:ok, {:present, _other_oid}} ->
+        {:error, :evidence_ref_oid_mismatch}
+
+      {:ok, :absent} ->
+        {:error, :evidence_ref_lost_after_create}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
   defp do_remove_worktree(repository_root, worktree_root, expected_identity) do
     with {:ok, canonical_repository} <- authorized_root(repository_root),
          {:ok, canonical_worktree} <- authorized_root(worktree_root),

@@ -503,6 +503,510 @@ defmodule Arbor.Actions.GitTest do
     }
   end
 
+  describe "archive_branch_evidence_ref" do
+    @tag :security_regression
+    test "security regression: hidden ref is outside refs/heads and invisible to git branch", %{
+      repo_path: repo_path
+    } do
+      branch = "test/evidence-outside-heads"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      head = git_rev_parse(repo_path, branch)
+
+      assert {:ok, %{hidden_ref: hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-invisible",
+                 "ws-invisible",
+                 head
+               )
+
+      refute String.starts_with?(hidden_ref, "refs/heads/")
+      assert String.starts_with?(hidden_ref, "refs/arbor/evidence/")
+
+      # git branch --list only shows refs/heads/* — the evidence ref must not appear.
+      {branch_listing, 0} = System.cmd("git", ["branch", "--list"], cd: repo_path)
+      refute branch_listing =~ hidden_ref
+      refute branch_listing =~ "arbor"
+
+      # The evidence ref exists and resolves to the archived OID.
+      assert git_rev_parse(repo_path, hidden_ref) == head
+    end
+
+    @tag :security_regression
+    test "security regression: first create archives the branch tip at the expected OID", %{
+      repo_path: repo_path
+    } do
+      branch = "test/evidence-first-create"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      head = git_rev_parse(repo_path, branch)
+
+      assert {:ok, %{hidden_ref: hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-first",
+                 "ws-first",
+                 head
+               )
+
+      assert {:ok, {:present, ^head}} = observe_hidden_ref(repo_path, hidden_ref)
+    end
+
+    @tag :security_regression
+    test "security regression: exit-0 evidence CAS with unexpected output is not clean success",
+         %{
+           repo_path: repo_path
+         } do
+      branch = "test/evidence-dirty-success"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      head = git_rev_parse(repo_path, branch)
+
+      Process.put(
+        {Git, {:update_ref_evidence, :dirty_output}},
+        {"", "warning: suspicious evidence output\n"}
+      )
+
+      assert {:error, :git_evidence_create_dirty_success} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-dirty-success",
+                 "ws-dirty-success",
+                 head
+               )
+
+      hidden_ref = evidence_ref_path("task-dirty-success", "ws-dirty-success")
+
+      # The compare-and-create may already have happened before Git emitted
+      # unexpected output. The facade must report residue, while the exact ref
+      # remains available for authoritative retry reconciliation.
+      assert {:ok, {:present, ^head}} = observe_hidden_ref(repo_path, hidden_ref)
+
+      assert {:ok, %{hidden_ref: ^hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-dirty-success",
+                 "ws-dirty-success",
+                 head
+               )
+    end
+
+    @tag :security_regression
+    test "security regression: idempotent replay after local branch removal", %{
+      repo_path: repo_path
+    } do
+      branch = "test/evidence-idempotent-replay"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      head = git_rev_parse(repo_path, branch)
+
+      assert {:ok, %{hidden_ref: hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-replay",
+                 "ws-replay",
+                 head
+               )
+
+      # Retire the local branch — the proof must survive without it.
+      {_, 0} = System.cmd("git", ["branch", "-D", branch], cd: repo_path)
+      refute branch_exists?(repo_path, branch)
+
+      # Replay: succeed even though the branch is gone.
+      assert {:ok, %{hidden_ref: ^hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-replay",
+                 "ws-replay",
+                 head
+               )
+
+      assert {:ok, {:present, ^head}} = observe_hidden_ref(repo_path, hidden_ref)
+    end
+
+    @tag :security_regression
+    test "security regression: preexisting evidence at same OID is idempotent success", %{
+      repo_path: repo_path
+    } do
+      branch = "test/evidence-preexisting-same"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      head = git_rev_parse(repo_path, branch)
+
+      assert {:ok, %{hidden_ref: hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-preexist-same",
+                 "ws-preexist-same",
+                 head
+               )
+
+      # Second call with the same inputs — branch still at head, archive still at head.
+      assert {:ok, %{hidden_ref: ^hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-preexist-same",
+                 "ws-preexist-same",
+                 head
+               )
+
+      assert {:ok, {:present, ^head}} = observe_hidden_ref(repo_path, hidden_ref)
+    end
+
+    @tag :security_regression
+    test "security regression: preexisting evidence at different OID is rejected without overwrite",
+         %{repo_path: repo_path} do
+      branch = "test/evidence-preexisting-different"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      head1 = git_rev_parse(repo_path, branch)
+
+      assert {:ok, %{hidden_ref: hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-preexist-diff",
+                 "ws-preexist-diff",
+                 head1
+               )
+
+      # Advance the default branch to a new commit.
+      File.write!(Path.join(repo_path, "advance.txt"), "advance\n")
+      {_, 0} = System.cmd("git", ["add", "advance.txt"], cd: repo_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "advance"], cd: repo_path)
+      head2 = git_rev_parse(repo_path, "HEAD")
+      refute head1 == head2
+
+      # Re-point the branch to the new tip, then attempt to archive at head2.
+      {_, 0} = System.cmd("git", ["branch", "-f", branch, head2], cd: repo_path)
+
+      assert {:error, :evidence_ref_oid_mismatch} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-preexist-diff",
+                 "ws-preexist-diff",
+                 head2
+               )
+
+      # The original archive is untouched.
+      assert {:ok, {:present, ^head1}} = observe_hidden_ref(repo_path, hidden_ref)
+    end
+
+    @tag :security_regression
+    test "security regression: branch-tip mismatch fails before archiving", %{
+      repo_path: repo_path
+    } do
+      initial = git_rev_parse(repo_path, "HEAD")
+
+      create_file(repo_path, "more.txt", "content")
+      {_, 0} = System.cmd("git", ["add", "more.txt"], cd: repo_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "more"], cd: repo_path)
+      advanced = git_rev_parse(repo_path, "HEAD")
+
+      branch = "test/evidence-branch-mismatch"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      assert git_rev_parse(repo_path, branch) == advanced
+
+      # expected_oid is the initial commit (valid, exists), but branch is at advanced.
+      assert {:error, :branch_ref_oid_mismatch} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-mismatch",
+                 "ws-mismatch",
+                 initial
+               )
+
+      # No archive was created.
+      assert {:ok, :absent} =
+               observe_hidden_ref(repo_path, evidence_ref_path("task-mismatch", "ws-mismatch"))
+    end
+
+    @tag :security_regression
+    test "security regression: missing branch plus missing archive fails closed", %{
+      repo_path: repo_path
+    } do
+      head = git_rev_parse(repo_path, "HEAD")
+
+      assert {:error, :branch_ref_absent} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 "test/missing-branch-no-archive",
+                 "task-missing",
+                 "ws-missing",
+                 head
+               )
+
+      assert {:ok, :absent} =
+               observe_hidden_ref(repo_path, evidence_ref_path("task-missing", "ws-missing"))
+    end
+
+    @tag :security_regression
+    test "security regression: invalid IDs, branches, and OIDs return typed errors", %{
+      repo_path: repo_path
+    } do
+      head = git_rev_parse(repo_path, "HEAD")
+      branch = "test/evidence-invalid-args"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+
+      # Blank task_id
+      assert {:error, :invalid_git_evidence_identity} =
+               Git.archive_branch_evidence_ref(repo_path, branch, "  ", "ws", head)
+
+      # Blank workspace_id
+      assert {:error, :invalid_git_evidence_identity} =
+               Git.archive_branch_evidence_ref(repo_path, branch, "task", "", head)
+
+      # Oversized task_id (above 256-byte durable-lifecycle bound)
+      oversized_task = String.duplicate("x", 257)
+
+      assert {:error, :invalid_git_evidence_identity} =
+               Git.archive_branch_evidence_ref(repo_path, branch, oversized_task, "ws", head)
+
+      # Oversized workspace_id (above 128-byte durable-lifecycle bound)
+      oversized_workspace = String.duplicate("w", 129)
+
+      assert {:error, :invalid_git_evidence_identity} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task",
+                 oversized_workspace,
+                 head
+               )
+
+      # Invalid OID
+      assert {:error, :invalid_git_oid} =
+               Git.archive_branch_evidence_ref(repo_path, branch, "task", "ws", "not-an-oid")
+
+      # Malformed branch
+      assert {:error, {:invalid_git_branch, _}} =
+               Git.archive_branch_evidence_ref(repo_path, "HEAD", "task", "ws", head)
+    end
+
+    @tag :security_regression
+    test "security regression: distinct ID byte limits accept exact maxima and reject one byte above",
+         %{
+           repo_path: repo_path
+         } do
+      head = git_rev_parse(repo_path, "HEAD")
+      branch = "test/evidence-id-boundaries"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+
+      # task_id at exactly 256 bytes is admitted.
+      max_task = String.duplicate("t", 256)
+
+      assert {:ok, %{hidden_ref: task_ref}} =
+               Git.archive_branch_evidence_ref(repo_path, branch, max_task, "ws-bound", head)
+
+      expected_task_digest = evidence_sha256(max_task)
+      expected_ws_digest = evidence_sha256("ws-bound")
+      assert task_ref == "refs/arbor/evidence/#{expected_ws_digest}/#{expected_task_digest}"
+
+      # One byte above the task_id maximum is rejected.
+      over_task = String.duplicate("t", 257)
+
+      assert {:error, :invalid_git_evidence_identity} =
+               Git.archive_branch_evidence_ref(repo_path, branch, over_task, "ws-bound", head)
+
+      # workspace_id at exactly 128 bytes is admitted.
+      max_workspace = String.duplicate("W", 128)
+
+      assert {:ok, %{hidden_ref: ws_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-bound",
+                 max_workspace,
+                 head
+               )
+
+      expected_task_digest_2 = evidence_sha256("task-bound")
+      expected_ws_digest_2 = evidence_sha256(max_workspace)
+
+      assert ws_ref == "refs/arbor/evidence/#{expected_ws_digest_2}/#{expected_task_digest_2}"
+
+      # One byte above the workspace_id maximum is rejected.
+      over_workspace = String.duplicate("W", 129)
+
+      assert {:error, :invalid_git_evidence_identity} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-bound",
+                 over_workspace,
+                 head
+               )
+    end
+
+    @tag :security_regression
+    test "security regression: exact namespace determinism for task_id and workspace_id", %{
+      repo_path: repo_path
+    } do
+      branch = "test/evidence-determinism"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      head = git_rev_parse(repo_path, branch)
+
+      assert {:ok, %{hidden_ref: ref_a}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-determinism",
+                 "ws-determinism",
+                 head
+               )
+
+      expected_task = evidence_sha256("task-determinism")
+      expected_ws = evidence_sha256("ws-determinism")
+
+      assert ref_a == "refs/arbor/evidence/#{expected_ws}/#{expected_task}"
+
+      # Same inputs → same ref.
+      assert {:ok, %{hidden_ref: ref_b}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-determinism",
+                 "ws-determinism",
+                 head
+               )
+
+      assert ref_a == ref_b
+
+      # Different task_id → different ref.
+      assert {:ok, %{hidden_ref: ref_c}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-other",
+                 "ws-determinism",
+                 head
+               )
+
+      refute ref_a == ref_c
+    end
+
+    @tag :security_regression
+    test "security regression: concurrent compare-and-create cannot replace another writer", %{
+      repo_path: repo_path
+    } do
+      branch = "test/evidence-concurrent-cas"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+      head_a = git_rev_parse(repo_path, branch)
+
+      # Pre-archive so we learn the hidden_ref path.
+      assert {:ok, %{hidden_ref: hidden_ref}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-concurrent",
+                 "ws-concurrent",
+                 head_a
+               )
+
+      # Remove the evidence ref so the observe step sees absence, then inject
+      # a concurrent writer inside the observe->CAS window.
+      {_, 0} = System.cmd("git", ["update-ref", "-d", hidden_ref], cd: repo_path)
+      assert {:ok, :absent} = observe_hidden_ref(repo_path, hidden_ref)
+
+      # Create a second commit to serve as the "other writer's" OID.
+      File.write!(Path.join(repo_path, "other.txt"), "other\n")
+      {_, 0} = System.cmd("git", ["add", "other.txt"], cd: repo_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "other writer"], cd: repo_path)
+      head_b = git_rev_parse(repo_path, "HEAD")
+      refute head_a == head_b
+
+      # Hook: between the branch precheck and the CAS-create, a concurrent
+      # writer archives a different OID. The CAS must fail (not replace).
+      Process.put(
+        {Git, :pre_evidence_cas_hook},
+        fn _repo, ref, _oid ->
+          {_, 0} = System.cmd("git", ["update-ref", ref, head_b], cd: repo_path)
+        end
+      )
+
+      # Re-point branch to head_a so the precheck passes; the hook will land
+      # head_b at the hidden ref before the CAS-create runs.
+      {_, 0} = System.cmd("git", ["branch", "-f", branch, head_a], cd: repo_path)
+
+      assert {:error, :evidence_ref_oid_mismatch} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-concurrent",
+                 "ws-concurrent",
+                 head_a
+               )
+
+      # The concurrent writer's OID is untouched — CAS did not replace it.
+      assert {:ok, {:present, ^head_b}} = observe_hidden_ref(repo_path, hidden_ref)
+    end
+
+    @tag :security_regression
+    test "security regression: non-commit OID is rejected", %{
+      repo_path: repo_path
+    } do
+      branch = "test/evidence-non-commit"
+      {_, 0} = System.cmd("git", ["branch", branch], cd: repo_path)
+
+      # Resolve the tree OID of HEAD — valid object, but not a commit.
+      {tree_oid, 0} = System.cmd("git", ["rev-parse", "HEAD^{tree}"], cd: repo_path)
+      tree_oid = String.trim(tree_oid)
+
+      assert {:error, {:git_evidence_oid_not_commit, _}} =
+               Git.archive_branch_evidence_ref(
+                 repo_path,
+                 branch,
+                 "task-tree",
+                 "ws-tree",
+                 tree_oid
+               )
+    end
+
+    @tag :security_regression
+    test "security regression: SHA-256 repositories are exercised when supported", %{
+      tmp_dir: tmp_dir
+    } do
+      sha256_repo = Path.join(tmp_dir, "sha256-evidence-repo")
+
+      # Skip gracefully on Git builds without SHA-256 object format support.
+      if create_sha256_git_repo(sha256_repo) == :ok do
+        branch = "test/sha256-evidence"
+        {_, 0} = System.cmd("git", ["branch", branch], cd: sha256_repo)
+        head = git_rev_parse(sha256_repo, branch)
+        assert String.length(head) == 64
+
+        assert {:ok, %{hidden_ref: hidden_ref}} =
+                 Git.archive_branch_evidence_ref(
+                   sha256_repo,
+                   branch,
+                   "task-sha256",
+                   "ws-sha256",
+                   head
+                 )
+
+        assert {:ok, {:present, ^head}} = observe_hidden_ref(sha256_repo, hidden_ref)
+        assert git_rev_parse(sha256_repo, hidden_ref) == head
+
+        # Idempotent replay after branch removal.
+        {_, 0} = System.cmd("git", ["branch", "-D", branch], cd: sha256_repo)
+
+        assert {:ok, %{hidden_ref: ^hidden_ref}} =
+                 Git.archive_branch_evidence_ref(
+                   sha256_repo,
+                   branch,
+                   "task-sha256",
+                   "ws-sha256",
+                   head
+                 )
+      end
+    end
+  end
+
   describe "Status" do
     test "returns clean status for clean repo", %{repo_path: repo_path} do
       assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
@@ -1291,5 +1795,37 @@ defmodule Arbor.Actions.GitTest do
       {_, 0} -> true
       _ -> false
     end
+  end
+
+  # Independent structured observer for hidden evidence refs (not refs/heads).
+  # Uses for-each-ref exact-ref match, same contract as the production observer
+  # but bypasses the facade so tests have a trusted independent probe.
+  defp observe_hidden_ref(repo_path, hidden_ref) do
+    {output, 0} =
+      System.cmd(
+        "git",
+        ["for-each-ref", "--count=1", "--format=%(refname) %(objectname)", hidden_ref],
+        cd: repo_path,
+        stderr_to_stdout: true
+      )
+
+    case String.trim(output) do
+      "" ->
+        {:ok, :absent}
+
+      line ->
+        [^hidden_ref, oid] = String.split(line, " ", parts: 2)
+        {:ok, {:present, String.downcase(oid)}}
+    end
+  end
+
+  defp evidence_ref_path(task_id, workspace_id) do
+    task_digest = evidence_sha256(task_id)
+    workspace_digest = evidence_sha256(workspace_id)
+    "refs/arbor/evidence/#{workspace_digest}/#{task_digest}"
+  end
+
+  defp evidence_sha256(value) do
+    :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
   end
 end
