@@ -156,13 +156,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   monotonically increasing per-task `sequence`. Operational delivery failures
   return `"deferred"` and are retried by the store; accepted (`{:ok, :queued,
   mode}`) controls are later **confirmed** by calling `steer_task/3` again
-  with the exact original control. Only explicit delivered confirmation sets
-  `delivered_at`. Positive `:not_delivered` during confirmation clears accepted
-  ownership and triggers a bounded same-ID replay; `:delivery_unknown`/
-  `:cancelled` terminalize as `"delivery_unconfirmed"`. If a task fails or is
-  cancelled before an accepted control is confirmed delivered, the control
-  enters the terminal `"delivery_unconfirmed"` state. Confirmation/replay
-  bounds and FIFO ordering are enforced by the store.
+  with the same control (stable `control_id` and immutable steering payload;
+  bookkeeping fields such as `status`/`error`/`delivered_at` may differ).
+  Only explicit delivered confirmation sets `delivered_at`. Positive
+  `:not_delivered` during confirmation clears accepted ownership and
+  triggers a bounded same-ID replay; `:delivery_unknown`/`:cancelled`
+  terminalize immediately as `"delivery_unconfirmed"` whether returned during
+  initial delivery, confirmation, or replay. If a task fails or is cancelled
+  before an accepted control is confirmed delivered, the control enters the
+  terminal `"delivery_unconfirmed"` state. Initial delivery, confirmation,
+  and replay budgets are independent; FIFO ordering is enforced by the store.
   """
   @spec steer(task_id(), String.t(), keyword() | map()) ::
           {:ok, steering_control()} | {:error, term()}
@@ -448,7 +451,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   def handle_info({:retry_steer, task_id, control_id}, state) do
-    {:noreply, deliver_control(state, task_id, control_id)}
+    state = deliver_control(state, task_id, control_id)
+    {:noreply, advance_confirmation_after_delivery(state, task_id, control_id)}
   end
 
   def handle_info({:confirm_steer, task_id, control_id}, state) do
@@ -850,6 +854,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         end)
         |> advance_mailbox(record.task_id)
 
+      {:terminalize, error} ->
+        state
+        |> terminalize_as_unconfirmed(record.task_id, control["control_id"], error)
+        |> advance_mailbox(record.task_id)
+
       {:deferred, error} ->
         defer_control(state, record.task_id, control["control_id"], error)
     end
@@ -868,17 +877,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp normalize_steering_delivery({:error, :unsupported}), do: :unsupported
   defp normalize_steering_delivery(:unsupported), do: :unsupported
 
-  # Evidence atoms during initial delivery are retryable operational failures.
-  # They are never persisted as statuses; they drive deferred retries and,
-  # on exhaustion, terminalize as delivery_unconfirmed.
+  # :not_delivered is a retryable operational failure during initial delivery
+  # (and replay delivery, which uses the same path): the executor positively
+  # asserts the control was not delivered, so retrying is safe.
   defp normalize_steering_delivery({:error, :not_delivered}),
     do: {:deferred, "not_delivered"}
 
+  # :delivery_unknown and :cancelled are unsafe to retry or replay: the
+  # executor may have already acted or explicitly halted, so re-delivery
+  # risks duplicates or contradicts an explicit stop. Terminalize immediately
+  # as delivery_unconfirmed with a bounded diagnostic error. Only explicit
+  # :not_delivered may enter the confirmation/retry path.
   defp normalize_steering_delivery({:error, :delivery_unknown}),
-    do: {:deferred, "delivery_unknown"}
+    do: {:terminalize, "delivery_unknown"}
 
   defp normalize_steering_delivery({:error, :cancelled}),
-    do: {:deferred, "cancelled"}
+    do: {:terminalize, "cancelled"}
 
   defp normalize_steering_delivery(result), do: {:deferred, bounded_error(result)}
 
@@ -1128,7 +1142,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         end)
 
       # Re-deliver the exact same control (same control_id, same message, etc.)
-      deliver_control(state, task_id, control_id)
+      state = deliver_control(state, task_id, control_id)
+      advance_confirmation_after_delivery(state, task_id, control_id)
     else
       state
       |> terminalize_as_unconfirmed(task_id, control_id, "replay_exhausted")
@@ -1162,16 +1177,48 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
-  defp first_confirmable_control(record) do
-    record.controls
-    |> Enum.find(fn control ->
-      control["status"] == "queued" and
-        MapSet.member?(record.accepted_control_ids, control["control_id"])
-    end)
-    |> case do
-      nil -> nil
-      control -> control["control_id"]
+  # After a replay or deferred-retry delivery settles, advance confirmation to
+  # the next eligible accepted control so it is not stranded behind a terminal
+  # or in-flight predecessor. If the just-delivered control re-accepted as
+  # queued, maybe_schedule_confirmation already scheduled its confirmation and
+  # we must not create a duplicate timer (which would double-spend confirmation
+  # budget on a :still_queued cycle).
+  defp advance_confirmation_after_delivery(state, task_id, control_id) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        control = find_control(record, control_id)
+
+        if (control && control["status"] == "queued") and
+             MapSet.member?(record.accepted_control_ids, control_id) do
+          state
+        else
+          advance_confirmation(state, task_id)
+        end
+
+      :error ->
+        state
     end
+  end
+
+  # FIFO gate: the earliest queued+accepted control is confirmable only if
+  # no earlier control is still in flight (deferred or queued-but-unaccepted).
+  # An in-flight predecessor blocks confirmation of later accepted controls
+  # so their confirmation budget is not spent out of order, and so a replayed
+  # predecessor that re-defers does not strand its successors.
+  defp first_confirmable_control(record) do
+    Enum.reduce_while(record.controls, nil, fn control, _acc ->
+      cond do
+        control["status"] == "queued" and
+            MapSet.member?(record.accepted_control_ids, control["control_id"]) ->
+          {:halt, control["control_id"]}
+
+        control["status"] in ["deferred", "queued"] ->
+          {:halt, nil}
+
+        true ->
+          {:cont, nil}
+      end
+    end)
   end
 
   defp task_running?(%{state: state}), do: state == :running

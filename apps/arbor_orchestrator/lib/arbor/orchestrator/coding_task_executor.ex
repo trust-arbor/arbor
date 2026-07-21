@@ -37,10 +37,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   persisted control's exact task id to the execution context, embeds the user
   correction as bounded JSON data in a same-session instruction, and resolves
   the active session only through the public managed ACP task/principal facade.
-  The same callback is used for initial delivery and for confirmation of a
-  queued acceptance; the evidence atoms `:not_delivered`, `:delivery_unknown`,
-  and `:cancelled` are preserved distinctly for TaskStore's confirmation
-  lifecycle (replay vs. terminalize) and are never persisted as control statuses.
+  The same callback is used for initial delivery, confirmation, and replay.
+  The `control_id` and steering payload (`message`, `sender_id`,
+  `target_stage`, `sequence`) are stable across all calls for the same
+  control; only bookkeeping fields (`status`, `delivery_mode`, `delivered_at`,
+  `error`) may differ between calls. The evidence atoms `:not_delivered`,
+  `:delivery_unknown`, and `:cancelled` are preserved distinctly for
+  TaskStore's delivery lifecycle (retry vs. replay vs. terminalize) and are
+  never persisted as control statuses. `:not_delivered` is retryable/replayable;
+  `:delivery_unknown` and `:cancelled` terminalize immediately as
+  `"delivery_unconfirmed"` regardless of phase.
   """
 
   @behaviour Arbor.Contracts.Agent.TaskExecutor
@@ -376,19 +382,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   is resolved only by the context-bound task id and callback `agent_id`; worker
   handles, PIDs, and caller-provided principal overrides are rejected.
 
-  TaskStore calls this same callback for both initial delivery and
-  confirmation of a previously accepted (`{:ok, :queued, mode}`) control.
-  The executor receives the exact same JSON-clean control map in both cases.
+  TaskStore calls this same callback for initial delivery, confirmation, and
+  replay. The `control_id` and steering payload (`message`, `sender_id`,
+  `target_stage`, `sequence`) are stable across all calls for the same
+  control; only bookkeeping fields (`status`, `delivery_mode`, `delivered_at`,
+  `error`) may differ between calls.
 
-  ## Return values and confirmation semantics
+  ## Return values and delivery semantics
 
   - `{:ok, mode}` — delivered immediately. TaskStore sets `delivered_at`.
   - `{:ok, :queued, mode}` — accepted only. TaskStore confirms by calling
-    `steer_task/3` again with the exact original control.
+    `steer_task/3` again with the same control.
   - `{:error, :not_delivered}` — positive nondelivery. During confirmation,
     TaskStore clears accepted ownership and triggers a bounded same-ID replay.
-  - `{:error, :delivery_unknown}` — ambiguous. During confirmation, TaskStore
-    terminalizes the control as `"delivery_unconfirmed"` and never replays.
+    During initial delivery or replay delivery it is retryable (bounded by the
+    initial delivery budget).
+  - `{:error, :delivery_unknown}` — ambiguous. Unsafe to retry or replay.
+    TaskStore terminalizes the control as `"delivery_unconfirmed"` regardless
+    of phase (initial delivery, confirmation, or replay).
   - `{:error, :cancelled}` — explicit cancellation. Same terminalization as
     `:delivery_unknown` with a distinct bounded error.
   - `{:error, :unsupported}` — terminal. This executor cannot steer.
