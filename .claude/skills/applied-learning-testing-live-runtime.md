@@ -421,3 +421,7 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 <!-- applied-learning: per-app-and-umbrella-tests-can-exercise-different-optional-runtime-branches -->
 <a id="applied-learning-per-app-and-umbrella-tests-can-exercise-different-optional-runtime-branches"></a>
 **Per-app and umbrella tests can exercise different optional-runtime branches.** A focused app test may run before an optional module is loaded and validate the fallback, while an umbrella run loads the module and validates the real integration. Make the fallback at least as restrictive as the integrated policy, test loaded and unavailable paths deliberately, and do not treat two green runs as evidence that they traversed the same branch (found 2026-07-21 when `SensitivityRouter` returned `:warn` without `Arbor.Trust` in the per-app suite but `:gated` through unknown-principal trust policy in the umbrella).
+
+<!-- applied-learning: in-zsh-path-is-the-array-form-of-path -->
+<a id="applied-learning-in-zsh-path-is-the-array-form-of-path"></a>
+**In zsh, `path` is the array form of `PATH`.** Assigning `path=...` as an ordinary loop variable rewrites command lookup for the current shell, so later commands fail with `command not found`. Use a neutral name such as `wt`, `target_path`, or `candidate` when iterating over filesystem paths (found 2026-07-21 while verifying accepted worktrees before lifecycle cleanup).

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 498,
+  "entry_count": 499,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6018,8 +6018,21 @@
       "source_incident": "found 2026-07-21 while validating SensitivityRouter in focused and umbrella test environments).",
       "content_sha256": "b85004b49f07d4b9aaaeaf93839a9657dcf8886ecd275f43608eb1d52061031a",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 499,
+      "source_kind": "post-migration",
+      "slug": "in-zsh-path-is-the-array-form-of-path",
+      "title": "In zsh, `path` is the array form of `PATH`.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-in-zsh-path-is-the-array-form-of-path",
+      "source_date": "2026-07-21",
+      "source_incident": "found 2026-07-21 while verifying accepted worktrees before lifecycle cleanup).",
+      "content_sha256": "bd03e553adf72addf1b33612fd055f0408a6fd813984748945bd4ab61cf9cee8",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 37
+  "post_migration_entry_count": 38
 }
