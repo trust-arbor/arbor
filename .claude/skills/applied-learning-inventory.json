@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 497,
+  "entry_count": 498,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6005,8 +6005,21 @@
       "source_incident": "found 2026-07-21 while hardening managed branch deletion and hidden evidence-ref creation).",
       "content_sha256": "0f6eeab4175ff4de071bfc0bb9f165968305df58e3eae40f39c7cce1328c46ac",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 498,
+      "source_kind": "post-migration",
+      "slug": "per-app-and-umbrella-tests-can-exercise-different-optional-runtime-branches",
+      "title": "Per-app and umbrella tests can exercise different optional-runtime branches.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-per-app-and-umbrella-tests-can-exercise-different-optional-runtime-branches",
+      "source_date": "2026-07-21",
+      "source_incident": "found 2026-07-21 while validating SensitivityRouter in focused and umbrella test environments).",
+      "content_sha256": "b85004b49f07d4b9aaaeaf93839a9657dcf8886ecd275f43608eb1d52061031a",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 36
+  "post_migration_entry_count": 37
 }
