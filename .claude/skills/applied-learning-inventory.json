@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 491,
+  "entry_count": 492,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5927,8 +5927,21 @@
       "source_incident": "found 2026-07-21 when cross-app validation reported 489 tests and 2 failures but omitted both failure blocks).",
       "content_sha256": "b1d416965d779bfa81bae9f42995258b5d32c77cf295faae563747c3145792af",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 492,
+      "source_kind": "post-migration",
+      "slug": "a-failed-durable-transition-must-preserve-truthful-residue-even-without-a-prior-hot-record",
+      "title": "A failed durable transition must preserve truthful residue even without a prior hot record.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-a-failed-durable-transition-must-preserve-truthful-residue-even-without-a-prior-hot-record",
+      "source_date": "2026-07-21",
+      "source_incident": "found 2026-07-21 integrating managed-branch settlement with retained-workspace cleanup).",
+      "content_sha256": "b7b480d62f6535f240db2c261804cbf117e52711add06106f4d531708fe46f0d",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 30
+  "post_migration_entry_count": 31
 }
