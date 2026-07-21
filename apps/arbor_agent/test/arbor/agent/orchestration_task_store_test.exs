@@ -1618,6 +1618,76 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     refute_receive {:steer_task_called, _, _, _, _}, 100
   end
 
+  test "hot-state upgrade: legacy records missing confirmation keys stay alive and do not manufacture ACKs",
+       %{supervisor: supervisor} do
+    store = start_configured_steering_store(supervisor, steer_confirmation_delay_ms: 10_000)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :queued)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+
+    assert_receive {:steering_executor_started, runner_pid, "agent_1", "work", _}
+
+    # Create a real accepted queued control with full post-upgrade machinery.
+    assert {:ok, first} = TaskStore.steer(task_id, "legacy queued", name: store)
+    assert first["status"] == "queued"
+    assert first["delivered_at"] == nil
+    assert first["message"] == "legacy queued"
+
+    # Model a pre-upgrade record: deliberately remove only the new
+    # confirmation/replay keys, keeping accepted_control_ids intact.
+    :sys.replace_state(store, fn state ->
+      update_in(state.tasks[task_id], fn record ->
+        record
+        |> Map.delete(:confirmation_retries)
+        |> Map.delete(:replay_counts)
+      end)
+    end)
+
+    # Steering a new control must not crash; it triggers lazy normalization
+    # that materializes missing maps and terminalizes the legacy accepted
+    # queued control.
+    Application.put_env(:arbor_agent, :task_store_test_steer, :deliver)
+
+    assert {:ok, second} = TaskStore.steer(task_id, "post-upgrade deliver", name: store)
+    assert second["status"] == "delivered"
+    assert second["delivered_at"] != nil
+
+    # The legacy accepted queued control is terminalized, NOT delivered.
+    first_updated = get_control(store, task_id, first["control_id"])
+    assert first_updated["status"] == "delivery_unconfirmed"
+    assert first_updated["error"] == "legacy_upgrade_unconfirmed"
+    assert first_updated["delivered_at"] == nil
+    assert first_updated["control_id"] == first["control_id"]
+    assert first_updated["message"] == "legacy queued"
+
+    # Store is still alive and responsive.
+    assert Process.alive?(Process.whereis(store))
+    assert {:ok, _} = TaskStore.status(task_id, name: store)
+
+    # Terminal reconciliation also stays alive and preserves payloads.
+    send(runner_pid, {:finish, {:ok, %{}}})
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :done
+    end)
+
+    # No control manufactured an ACK from the legacy accepted state; IDs and
+    # payloads survive the upgrade and terminal reconciliation.
+    final_first = get_control(store, task_id, first["control_id"])
+    final_second = get_control(store, task_id, second["control_id"])
+
+    assert final_first["status"] == "delivery_unconfirmed"
+    assert final_first["delivered_at"] == nil
+    assert final_first["control_id"] == first["control_id"]
+    assert final_first["message"] == "legacy queued"
+
+    assert final_second["status"] == "delivered"
+    assert final_second["delivered_at"] != nil
+    assert final_second["control_id"] == second["control_id"]
+    assert final_second["message"] == "post-upgrade deliver"
+  end
+
   test "security regression: pending-approval runner termination fails closed and cleans up once",
        %{store: store} do
     descriptor = cleanup_descriptor()

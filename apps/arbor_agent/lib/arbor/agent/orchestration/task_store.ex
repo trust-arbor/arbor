@@ -166,6 +166,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   before an accepted control is confirmed delivered, the control enters the
   terminal `"delivery_unconfirmed"` state. Initial delivery, confirmation,
   and replay budgets are independent; FIFO ordering is enforced by the store.
+
+  ## Hot-state upgrade compatibility
+
+  A TaskStore process whose code was hot-loaded while tasks with accepted
+  queued controls were in flight holds records that predate the
+  confirmation/replay machinery. The store lazily normalizes such records at
+  the delivery/confirmation/terminal-reconciliation boundary: missing
+  bookkeeping maps are materialized as empty, and legacy accepted queued
+  controls are terminalized as `"delivery_unconfirmed"` with the bounded
+  diagnostic `"legacy_upgrade_unconfirmed"` so they cannot block FIFO or
+  manufacture delivery.
   """
   @spec steer(task_id(), String.t(), keyword() | map()) ::
           {:ok, steering_control()} | {:error, term()}
@@ -405,6 +416,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   def handle_call({:steer, task_id, message, opts}, _from, state) do
+    state = ensure_task_record_shape(state, task_id)
+
     with {:ok, message} <- validate_steering_message(message),
          {:ok, record} <- Map.fetch(state.tasks, task_id),
          :ok <- ensure_control_capacity(record, state) do
@@ -451,11 +464,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   def handle_info({:retry_steer, task_id, control_id}, state) do
+    state = ensure_task_record_shape(state, task_id)
     state = deliver_control(state, task_id, control_id)
     {:noreply, advance_confirmation_after_delivery(state, task_id, control_id)}
   end
 
   def handle_info({:confirm_steer, task_id, control_id}, state) do
+    state = ensure_task_record_shape(state, task_id)
     {:noreply, confirm_control(state, task_id, control_id)}
   end
 
@@ -746,6 +761,75 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       :ok
     else
       {:error, :too_many_steering_controls}
+    end
+  end
+
+  # Fail-closed lazy normalization for running task records hot-loaded from a
+  # pre-upgrade code revision. A TaskStore process whose code was replaced
+  # while tasks were in flight can hold records created by the old code, which
+  # lack :confirmation_retries / :replay_counts (and in older revisions,
+  # :accepted_control_ids / :control_retries / :controls). The first
+  # post-upgrade delivery/confirmation/terminal-reconciliation work would
+  # crash on the missing keys (KeyError / BadMapError). This materializes the
+  # maps with empty defaults so FIFO and budgets are not weakened, and
+  # terminalizes any legacy accepted queued controls as delivery_unconfirmed
+  # with a bounded explicit diagnostic so they cannot block later controls
+  # indefinitely or manufacture a delivery ACK.
+  defp ensure_task_record_shape(state, task_id) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        normalized = ensure_record_shape(record)
+
+        if normalized == record do
+          state
+        else
+          put_in(state.tasks[task_id], normalized)
+        end
+
+      :error ->
+        state
+    end
+  end
+
+  defp ensure_record_shape(record) do
+    pre_upgrade = not Map.has_key?(record, :confirmation_retries)
+
+    record =
+      record
+      |> Map.put_new(:controls, [])
+      |> Map.put_new(:control_retries, %{})
+      |> Map.put_new(:accepted_control_ids, MapSet.new())
+      |> Map.put_new(:confirmation_retries, %{})
+      |> Map.put_new(:replay_counts, %{})
+
+    if pre_upgrade and record.state == :running do
+      terminalize_legacy_accepted_controls(record)
+    else
+      record
+    end
+  end
+
+  defp terminalize_legacy_accepted_controls(record) do
+    accepted_ids = record.accepted_control_ids
+
+    if MapSet.size(accepted_ids) == 0 do
+      record
+    else
+      controls =
+        Enum.map(record.controls, fn control ->
+          if MapSet.member?(accepted_ids, control["control_id"]) and
+               control["status"] == "queued" do
+            transition_terminal_control(record, control, %{
+              "status" => "delivery_unconfirmed",
+              "delivered_at" => nil,
+              "error" => "legacy_upgrade_unconfirmed"
+            })
+          else
+            control
+          end
+        end)
+
+      %{record | controls: controls, accepted_control_ids: MapSet.new()}
     end
   end
 
@@ -1261,6 +1345,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp deliverable_control?(_record, _control), do: false
 
   defp reconcile_terminal_controls(record) do
+    record = ensure_record_shape(record)
+
     controls =
       Enum.map(record.controls, fn
         %{"status" => "deferred"} = control ->

@@ -111,6 +111,16 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   active confirmation timer is scheduled per eligible control; stale timers
   are harmless no-ops (guarded by task_running + accepted + FIFO).
 
+  ## Hot-state upgrade compatibility
+
+  A TaskStore process whose code was hot-loaded while tasks with accepted
+  queued controls were in flight holds records that predate the
+  confirmation/replay machinery. TaskStore lazily normalizes such records:
+  missing bookkeeping maps are materialized as empty, and legacy accepted
+  queued controls are terminalized as `"delivery_unconfirmed"` with the
+  bounded diagnostic `"legacy_upgrade_unconfirmed"` so they cannot block
+  FIFO indefinitely or manufacture a delivery ACK.
+
   Explicit runner overrides report steering as unsupported.
 
   Configured executors may implement `finalize_task/4` for mandatory terminal artifact retention.
