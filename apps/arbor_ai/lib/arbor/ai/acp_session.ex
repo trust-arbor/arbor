@@ -19,6 +19,22 @@ defmodule Arbor.AI.AcpSession do
       {:ok, _info} = AcpSession.create_session(session, cwd: "/path/to/project")
       {:ok, result} = AcpSession.send_message(session, "Fix the auth bug")
 
+  ## Requested model confirmation
+
+  When `:model` is set, session creation, load, and reconnect remain unready
+  until `session/set_config_option` confirms that exact value in a canonical
+  string-keyed response:
+
+      %{"configOptions" => [%{"id" => "model", "currentValue" => model}]}
+
+  The model option's id and current value are bounded strings. Sibling options
+  also require bounded string ids but may use non-string ACP scalar values, such
+  as the Claude adapter's boolean `fast` option. Rejection, mismatch, malformed
+  data, or an unconfirmed model fails closed. A reconnect confirmation failure
+  leaves the session in `:error` with `client`, `client_monitor`, `session_id`,
+  and `last_session_id` cleared. Omitting `:model` preserves the provider's
+  default selection without issuing this request.
+
   ## Streaming
 
   Pass `:stream_callback` to receive streaming updates:
@@ -53,6 +69,7 @@ defmodule Arbor.AI.AcpSession do
   @default_close_timeout_ms 5_000
   @stream_callback_timeout_ms 5_000
   @default_transcript_sink_timeout_ms 5_000
+  @default_model_confirm_retries 3
   @max_transcript_sink_timeout_ms 30_000
   @task_control_timeout_ms 5_000
   @max_task_control_message_bytes 16_384
@@ -477,14 +494,34 @@ defmodule Arbor.AI.AcpSession do
           :ok ->
             session_id = Map.get(session_info, "sessionId") || Map.get(session_info, :session_id)
 
-            new_state = %{
-              state
-              | session_id: session_id,
-                last_session_id: session_id,
-                status: :ready
-            }
+            case select_and_confirm_model(state.client, session_id, state.model, opts) do
+              :ok ->
+                new_state = %{
+                  state
+                  | session_id: session_id,
+                    last_session_id: session_id,
+                    status: :ready
+                }
 
-            {:reply, {:ok, session_info}, new_state}
+                {:reply, {:ok, session_info}, new_state}
+
+              {:error, reason} ->
+                reason = Arbor.LLM.sanitize_external_reason(reason)
+
+                Logger.warning(
+                  "AcpSession create_session model selection failed: " <>
+                    Arbor.LLM.inspect_external_reason(reason)
+                )
+
+                error_state = %{state | status: :error, session_id: nil, last_session_id: nil}
+
+                emit_signal(:acp_session_error, error_state, %{
+                  error: reason,
+                  phase: :model_selection
+                })
+
+                {:reply, {:error, {:model_selection_failed, reason}}, error_state}
+            end
 
           {:error, reason} ->
             {:reply, {:error, reason}, state}
@@ -522,15 +559,35 @@ defmodule Arbor.AI.AcpSession do
       {:ok, session_info} ->
         case {validate_acp_result(session_info, :session), Arbor.AI.Timeout.ensure_active(opts)} do
           {:ok, :ok} ->
-            new_state = %{
-              state
-              | session_id: session_id,
-                last_session_id: session_id,
-                status: :ready
-            }
+            case select_and_confirm_model(state.client, session_id, state.model, opts) do
+              :ok ->
+                new_state = %{
+                  state
+                  | session_id: session_id,
+                    last_session_id: session_id,
+                    status: :ready
+                }
 
-            emit_signal(:acp_session_started, new_state, %{resumed: true})
-            {:reply, {:ok, session_info}, new_state}
+                emit_signal(:acp_session_started, new_state, %{resumed: true})
+                {:reply, {:ok, session_info}, new_state}
+
+              {:error, reason} ->
+                reason = Arbor.LLM.sanitize_external_reason(reason)
+
+                Logger.warning(
+                  "AcpSession resume_session model selection failed: " <>
+                    Arbor.LLM.inspect_external_reason(reason)
+                )
+
+                error_state = %{state | status: :error, session_id: nil, last_session_id: nil}
+
+                emit_signal(:acp_session_error, error_state, %{
+                  error: reason,
+                  phase: :model_selection
+                })
+
+                {:reply, {:error, {:model_selection_failed, reason}}, error_state}
+            end
 
           {_validation, {:error, reason}} ->
             {:reply, {:error, reason}, state}
@@ -657,10 +714,23 @@ defmodule Arbor.AI.AcpSession do
         {:noreply, new_state}
 
       :error ->
+        # Reconnect failed (model confirmation, client start, attach, …). The
+        # session is unrecoverable: the prior client is dead and the reconnect
+        # candidate was either never started or already terminated by
+        # maybe_reconnect/1. Clear every identity field so callers cannot
+        # mistake this state for a resumable session — the terminal state is
+        # exactly status :error with client/client_monitor/session_id/
+        # last_session_id all nil.
         new_state =
           state
           |> settle_pending_task_controls(:not_delivered, :provider_client_lost)
-          |> Map.merge(%{status: :error, client: nil, client_monitor: nil})
+          |> Map.merge(%{
+            status: :error,
+            client: nil,
+            client_monitor: nil,
+            session_id: nil,
+            last_session_id: nil
+          })
 
         {:noreply, new_state}
     end
@@ -1407,15 +1477,41 @@ defmodule Arbor.AI.AcpSession do
       {:ok, client} ->
         case attach_client(client) do
           {:ok, client_monitor} ->
-            {:ok,
-             %{
-               state
-               | client: client,
-                 client_monitor: client_monitor,
-                 session_id: state.last_session_id,
-                 status: :ready,
-                 reconnect_attempted: true
-             }}
+            case select_and_confirm_model(
+                   client,
+                   state.last_session_id,
+                   state.model,
+                   internal_reconnect_opts()
+                 ) do
+              :ok ->
+                {:ok,
+                 %{
+                   state
+                   | client: client,
+                     client_monitor: client_monitor,
+                     session_id: state.last_session_id,
+                     status: :ready,
+                     reconnect_attempted: true
+                 }}
+
+              {:error, reason} ->
+                Logger.warning(
+                  "AcpSession reconnect model selection failed: " <>
+                    Arbor.LLM.inspect_external_reason(reason)
+                )
+
+                # Close the new monitor lifecycle before killing the client so
+                # no orphan {:DOWN, ^client_monitor, ...} remains in the
+                # mailbox. The DOWN handler's clauses require state.client ==
+                # pid, which the caller's :error branch has just nulled, so an
+                # orphan would otherwise fall through to the catch-all and log
+                # noise. [:flush] drops any DOWN already emitted and disarms
+                # the monitor for the kill below.
+                Process.demonitor(client_monitor, [:flush])
+
+                terminate_client(client)
+                :error
+            end
 
           {:error, _reason} ->
             terminate_client(client)
@@ -3111,7 +3207,7 @@ defmodule Arbor.AI.AcpSession do
       {:ok, info} ->
         sid = Map.get(info, "sessionId") || Map.get(info, :session_id)
 
-        with :ok <- maybe_select_model(state.client, sid, state.model, opts) do
+        with :ok <- select_and_confirm_model(state.client, sid, state.model, opts) do
           {:ok, %{state | session_id: sid, last_session_id: sid}}
         end
 
@@ -3208,10 +3304,241 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
-  # Best-effort model selection for router agents (e.g. opencode) that expose a
-  # "model" config option via session/set_config_option. Agents that pick their
-  # model another way reject this, which we ignore. Without it, opencode runs on
-  # an unselected default and returns an empty turn.
+  @doc false
+  @spec select_and_confirm_model(pid(), String.t() | nil, String.t() | nil, keyword()) ::
+          :ok | {:error, term()}
+  def select_and_confirm_model(_client, _sid, model, _opts) when is_nil(model), do: :ok
+
+  def select_and_confirm_model(client, sid, model, opts) do
+    select_and_confirm_model(client, sid, model, opts, @default_model_confirm_retries)
+  end
+
+  @spec select_and_confirm_model(pid(), String.t(), String.t(), keyword(), non_neg_integer()) ::
+          :ok | {:error, term()}
+  defp select_and_confirm_model(client, sid, model, opts, remaining_retries) do
+    case validate_model_string(model) do
+      :ok ->
+        do_select_and_confirm_model(client, sid, model, opts, remaining_retries)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp do_select_and_confirm_model(client, sid, model, opts, remaining_retries) do
+    case pre_rpc_deadline_check(opts) do
+      :ok ->
+        case OwnedOperation.run(
+               fn ->
+                 # credo:disable-for-next-line Credo.Check.Refactor.Apply
+                 apply(acp_client_module(), :set_config_option, [client, sid, "model", model])
+               end,
+               opts,
+               :timeout
+             ) do
+          {:error, :timeout} ->
+            {:error, :model_selection_timeout}
+
+          {:error, reason} ->
+            {:error, {:model_selection_rejected, Arbor.LLM.sanitize_external_reason(reason)}}
+
+          response ->
+            case verify_model_response(response, model) do
+              :ok ->
+                :ok
+
+              {:error, :model_option_not_available} when remaining_retries > 0 ->
+                case retry_delay_ms(opts) do
+                  {:ok, 0} ->
+                    {:error, {:model_not_confirmed, :deadline_exceeded_before_retry}}
+
+                  {:error, _reason} = error ->
+                    error
+
+                  {:ok, wait_ms} when is_integer(wait_ms) and wait_ms > 0 ->
+                    Process.sleep(wait_ms)
+                    do_select_and_confirm_model(client, sid, model, opts, remaining_retries - 1)
+                end
+
+              {:error, :model_option_not_available} ->
+                {:error, {:model_not_confirmed, :option_unavailable_after_retries}}
+
+              {:error, _reason} = error ->
+                error
+            end
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp pre_rpc_deadline_check(opts) do
+    case Arbor.AI.Timeout.deadline(opts) do
+      {:ok, :infinity} ->
+        :ok
+
+      {:ok, deadline} ->
+        now = System.monotonic_time(:millisecond)
+        if now < deadline, do: :ok, else: {:error, :deadline_exceeded}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp retry_delay_ms(opts) do
+    case Arbor.AI.Timeout.deadline(opts) do
+      {:ok, :infinity} ->
+        {:ok, 50}
+
+      {:ok, deadline} ->
+        remaining = deadline - System.monotonic_time(:millisecond)
+        {:ok, min(50, max(remaining, 0))}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # Verify the ACP session/set_config_option response confirms the requested model.
+  # Only the canonical {:ok, string-keyed response} is accepted.
+  # Validate the full response tree with bounded budgets before traversal.
+  # Bounded traversal with scalar size validation; reject oversized/malformed data.
+
+  @response_budget [
+    max_bytes: 64_000,
+    max_nodes: 200,
+    max_depth: 8,
+    max_map_keys: 50,
+    max_list_items: 50,
+    max_string_bytes: 1024
+  ]
+
+  @max_option_scalar_bytes 256
+  @max_config_options 20
+
+  defp verify_model_response({:ok, inner}, model) when is_map(inner) do
+    case Arbor.LLM.validate_decoded_term(inner, @response_budget) do
+      :ok ->
+        verify_model_response_inner(inner, model)
+
+      {:error, _reason} ->
+        {:error, {:model_not_confirmed, :response_exceeds_budget}}
+    end
+  end
+
+  defp verify_model_response({:ok, _}, _model) do
+    {:error, {:model_not_confirmed, :missing_config_options}}
+  end
+
+  defp verify_model_response(_, _model) do
+    {:error, {:model_not_confirmed, :missing_config_options}}
+  end
+
+  defp verify_model_response_inner(%{"configOptions" => options}, model)
+       when is_list(options) and is_binary(model) and byte_size(model) > 0 do
+    # After bounded_find_model_option returns the unique model option, enforce
+    # the model-specific contract: currentValue must be a bounded string. Other
+    # options (e.g. Claude SDK's boolean "fast") may carry non-string scalars,
+    # so the walk only requires every option to have a bounded string id.
+    case bounded_find_model_option(options, 0) do
+      {:ok, %{"currentValue" => value}} when is_binary(value) ->
+        if byte_size(value) > @max_option_scalar_bytes do
+          {:error, {:model_not_confirmed, :oversized_option_scalar}}
+        else
+          if value == model, do: :ok, else: {:error, :model_mismatch}
+        end
+
+      {:ok, %{"currentValue" => _non_string}} ->
+        # The unique model option must carry a string currentValue.
+        {:error, {:model_not_confirmed, :missing_current_value}}
+
+      {:ok, _no_current_value} ->
+        {:error, {:model_not_confirmed, :missing_current_value}}
+
+      {:error, _reason} = error ->
+        error
+
+      :not_found ->
+        {:error, :model_option_not_available}
+    end
+  end
+
+  defp verify_model_response_inner(%{"configOptions" => options}, _model)
+       when not is_list(options) do
+    {:error, {:model_not_confirmed, :invalid_config_options_shape}}
+  end
+
+  defp verify_model_response_inner(_, _model) do
+    {:error, {:model_not_confirmed, :missing_config_options}}
+  end
+
+  # Bounded traversal: find exactly one model option, reject oversized scalars,
+  # and bail early if more than @max_config_options are seen.
+  defp bounded_find_model_option([], _count), do: :not_found
+
+  defp bounded_find_model_option([%{} = opt | rest], count) when count < @max_config_options do
+    with :ok <- validate_option_scalars(opt) do
+      if model_option?(opt) do
+        case bounded_find_model_option(rest, count + 1) do
+          :not_found -> {:ok, opt}
+          {:ok, _duplicate} -> {:error, {:model_not_confirmed, :ambiguous_model_options}}
+          {:error, _} = error -> error
+        end
+      else
+        bounded_find_model_option(rest, count + 1)
+      end
+    end
+  end
+
+  defp bounded_find_model_option([_ | _], @max_config_options) do
+    {:error, {:model_not_confirmed, :config_options_too_many}}
+  end
+
+  defp bounded_find_model_option([_ | _], _count) do
+    {:error, {:model_not_confirmed, :invalid_option_shape}}
+  end
+
+  defp bounded_find_model_option(other, _count) when other != [] do
+    {:error, {:model_not_confirmed, :improper_list}}
+  end
+
+  # Every scanned option must carry a bounded string id (ACP canonical key).
+  # The currentValue contract is option-specific: only the unique id == "model"
+  # option requires a bounded string currentValue (validated after the walk in
+  # verify_model_response_inner/2). Other options — e.g. the ex_mcp Claude SDK
+  # mapper's boolean "fast" flag — legitimately carry non-string currentValue
+  # scalars, so we do not reject them here.
+  defp validate_option_scalars(%{"id" => id}) when is_binary(id) do
+    if byte_size(id) <= @max_option_scalar_bytes do
+      :ok
+    else
+      {:error, {:model_not_confirmed, :oversized_option_scalar}}
+    end
+  end
+
+  defp validate_option_scalars(%{}), do: {:error, {:model_not_confirmed, :invalid_option_shape}}
+  defp validate_option_scalars(_), do: {:error, {:model_not_confirmed, :invalid_option_shape}}
+
+  # Identify the model option by the "id" key (canonical ACP protocol).
+  defp model_option?(%{"id" => "model"}), do: true
+  defp model_option?(_), do: false
+
+  # Validate the requested model string before any provider RPC.
+  # Must be a valid UTF-8 binary, 1–256 bytes, nonblank, no NUL or control characters.
+  defp validate_model_string(model)
+       when is_binary(model) and byte_size(model) > 0 and byte_size(model) <= 256 do
+    if String.valid?(model) and String.trim(model) != "" and
+         not Regex.match?(~r/[\x00-\x1F\x7F]/, model) do
+      :ok
+    else
+      {:error, {:model_not_confirmed, :invalid_requested_model}}
+    end
+  end
+
+  defp validate_model_string(_), do: {:error, {:model_not_confirmed, :invalid_requested_model}}
+
   defp maybe_put_kw(kw, _key, nil), do: kw
   defp maybe_put_kw(kw, key, value), do: Keyword.put(kw, key, value)
 
@@ -3236,22 +3563,6 @@ defmodule Arbor.AI.AcpSession do
 
       _ ->
         client_opts
-    end
-  end
-
-  defp maybe_select_model(_client, _sid, model, _opts) when model in [nil, ""], do: :ok
-
-  defp maybe_select_model(client, sid, model, opts) do
-    case OwnedOperation.run(
-           fn ->
-             # credo:disable-for-next-line Credo.Check.Refactor.Apply
-             apply(acp_client_module(), :set_config_option, [client, sid, "model", model])
-           end,
-           opts,
-           :timeout
-         ) do
-      {:error, :timeout} -> {:error, :timeout}
-      _result -> :ok
     end
   end
 

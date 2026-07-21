@@ -390,7 +390,7 @@ defmodule Arbor.AI.AcpSession.Config do
     # Forward non-adapter opts. NOTE: :env/:args are intentionally absent — they
     # are static-config-only for native agents (above), so a caller can't inject
     # launch env/flags into a spawned coding agent. Per-launch model selection is
-    # handled at the ACP layer (AcpSession.maybe_select_model/3), not here.
+    # handled at the ACP layer (AcpSession.select_and_confirm_model/4), not here.
     forward_keys = [:model, :system_prompt, :cwd, :timeout, :name, :event_listener]
 
     Enum.reduce(forward_keys, base, fn key, acc ->

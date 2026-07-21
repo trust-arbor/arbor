@@ -1911,4 +1911,1150 @@ defmodule Arbor.AI.AcpSessionTest do
       assert state.permission_timeout_ms == 7_777
     end
   end
+
+  describe "select_and_confirm_model — ACP model selection regression" do
+    # Configurable fake ACP client for model selection tests.
+    # The :model_response option controls what set_config_option returns.
+    # Each call to set_config_option pops from a queue (model_responses list),
+    # falling back to :model_response_default when the queue is exhausted.
+    defmodule ModelSelectClient do
+      @moduledoc false
+
+      def start_link(opts), do: Agent.start_link(fn -> opts end)
+
+      def new_session(_client, _cwd, _opts),
+        do: {:ok, %{"sessionId" => "model-select-session"}}
+
+      def load_session(_client, session_id, _cwd, _opts),
+        do: {:ok, %{"sessionId" => session_id}}
+
+      def set_config_option(client, _session_id, _key, _value) do
+        Agent.get_and_update(client, fn s ->
+          count = Keyword.get(s, :set_config_option_count, 0) + 1
+          s = Keyword.put(s, :set_config_option_count, count)
+
+          {result, s} =
+            case Keyword.get(s, :model_responses, []) do
+              [next | rest] -> {next, Keyword.put(s, :model_responses, rest)}
+              [] -> {Keyword.get(s, :model_response_default, :ok), s}
+            end
+
+          {result, s}
+        end)
+        |> case do
+          {:raise, exception} -> raise exception
+          {:exit, reason} -> exit(reason)
+          {:throw, value} -> throw(value)
+          other -> other
+        end
+      end
+
+      def set_config_option_count(client) do
+        Agent.get(client, &Keyword.get(&1, :set_config_option_count, 0))
+      end
+
+      def cancel(_client, _session_id), do: :ok
+
+      def disconnect(client) do
+        Agent.stop(client, :normal)
+        :ok
+      end
+
+      def prompt(_client, _session_id, _content, _opts),
+        do: {:ok, %{"text" => "ok"}}
+    end
+
+    defp model_confirmed_response(model) do
+      {:ok, %{"configOptions" => [%{"id" => "model", "currentValue" => model}]}}
+    end
+
+    defp install_model_select_client(opts) do
+      original_client = Application.get_env(:arbor_ai, :acp_client_module)
+      Application.put_env(:arbor_ai, :acp_client_module, ModelSelectClient)
+
+      on_exit(fn ->
+        restore_env(:acp_client_module, original_client)
+      end)
+
+      opts
+    end
+
+    defp start_model_session(model, client_opts \\ []) do
+      client_opts =
+        Keyword.merge(
+          [model_response_default: model_confirmed_response(model)],
+          client_opts
+        )
+
+      client_opts = install_model_select_client(client_opts)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: model,
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      session
+    end
+
+    defp poll_reconnect_ready(session, old_client, attempts \\ 50)
+
+    defp poll_reconnect_ready(_session, _old_client, 0) do
+      flunk("reconnect did not complete after 50 attempts")
+    end
+
+    defp poll_reconnect_ready(session, old_client, attempts) do
+      Process.sleep(20)
+      st = :sys.get_state(session)
+
+      if st.status == :ready and st.client != old_client,
+        do: :ok,
+        else: poll_reconnect_ready(session, old_client, attempts - 1)
+    end
+
+    # Read the GenServer state directly because the public status does not
+    # expose client_monitor or last_session_id atomically. Wait for status
+    # :error with client, client_monitor, session_id and last_session_id all nil.
+    # Do not catch exits or accept :recovery_required / :ready, and flunk on
+    # exhaustion so the test cannot silently succeed.
+    defp poll_reconnect_terminal(session, attempts \\ 50)
+
+    defp poll_reconnect_terminal(_session, 0) do
+      flunk("reconnect did not reach exact terminal :error state after 50 attempts")
+    end
+
+    defp poll_reconnect_terminal(session, attempts) do
+      Process.sleep(20)
+      st = :sys.get_state(session)
+
+      if reconnect_terminal_error?(st) do
+        :ok
+      else
+        poll_reconnect_terminal(session, attempts - 1)
+      end
+    end
+
+    defp reconnect_terminal_error?(st) do
+      st.status == :error and
+        is_nil(st.client) and
+        is_nil(st.client_monitor) and
+        is_nil(st.session_id) and
+        is_nil(st.last_session_id)
+    end
+
+    test "exact model confirmation succeeds" do
+      session = start_model_session("zai-coding-plan/glm-5.2")
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+      assert %{status: :ready, model: "zai-coding-plan/glm-5.2"} = AcpSession.status(session)
+    end
+
+    test "no model preserves provider-default behavior (no RPC)" do
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+      assert %{status: :ready, model: nil} = AcpSession.status(session)
+
+      assert {:ok, _info} = AcpSession.create_session(session, timeout: 1_000)
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "confirmed mismatch fails closed" do
+      # Provider returns a different model than requested
+      mismatch_response =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "provider-default-model"}
+           ]
+         }}
+
+      session =
+        start_model_session("requested-model", model_responses: [mismatch_response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      # create_session triggers model verification → mismatch → error
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "explicit rejection from provider fails closed" do
+      session =
+        start_model_session("unsupported-model", model_responses: [{:error, :not_supported}])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "malformed response (non-list configOptions) fails closed" do
+      malformed = {:ok, %{"configOptions" => "not-a-list"}}
+
+      session =
+        start_model_session("any-model", model_responses: [malformed])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "duplicate model options in configOptions fails closed" do
+      duplicate =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "model-a"},
+             %{"id" => "model", "currentValue" => "model-b"}
+           ]
+         }}
+
+      session =
+        start_model_session("model-a", model_responses: [duplicate])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "non-string currentValue on sibling option is accepted (Claude SDK fast flag)" do
+      # The ex_mcp Claude SDK mapper emits a boolean "fast" configOption with a
+      # boolean currentValue alongside the canonical "model" option. The walk
+      # must only require a bounded string currentValue on the unique model
+      # option; sibling options may legitimately carry non-string scalars.
+      response =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "fast", "currentValue" => true},
+             %{"id" => "model", "currentValue" => "claude-sonnet-4"},
+             %{"id" => "effort", "currentValue" => "default"}
+           ]
+         }}
+
+      session =
+        start_model_session("claude-sonnet-4", model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:ok, _info} = AcpSession.create_session(session, timeout: 1_000)
+      assert %{status: :ready, model: "claude-sonnet-4"} = AcpSession.status(session)
+    end
+
+    test "non-string currentValue on the model option fails closed" do
+      # The model option specifically must carry a bounded string currentValue;
+      # a boolean there is rejected.
+      response =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "fast", "currentValue" => true},
+             %{"id" => "model", "currentValue" => true}
+           ]
+         }}
+
+      session =
+        start_model_session("any-model", model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, {:model_not_confirmed, :missing_current_value}}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "missing currentValue on the model option fails closed" do
+      response =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "fast", "currentValue" => true},
+             %{"id" => "model"}
+           ]
+         }}
+
+      session =
+        start_model_session("any-model", model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, {:model_not_confirmed, :missing_current_value}}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "option with missing id fails closed" do
+      # The bounded walk requires every scanned option to carry a bounded string
+      # id; an option missing the id field entirely is rejected.
+      response =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"currentValue" => true},
+             %{"id" => "model", "currentValue" => "any-model"}
+           ]
+         }}
+
+      session =
+        start_model_session("any-model", model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "missing configOptions key fails closed" do
+      session =
+        start_model_session("any-model", model_responses: [{:ok, %{"unexpected" => "shape"}}])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "transient missing option then success (bounded retry)" do
+      # First call: option not available; second call: confirmed
+      session =
+        start_model_session("retry-model",
+          model_responses: [
+            {:ok, %{"configOptions" => []}},
+            model_confirmed_response("retry-model")
+          ]
+        )
+
+      assert :ok = AcpSession.await_ready(session, timeout: 2_000)
+      assert %{status: :ready, model: "retry-model"} = AcpSession.status(session)
+
+      # create_session should succeed after retry confirms the model
+      assert {:ok, _info} = AcpSession.create_session(session, timeout: 2_000)
+    end
+
+    test "bounded missing-option exhaustion fails closed" do
+      # Always return empty configOptions — should exhaust retries
+      # Need 4+ entries: 3 retries + 1 more so the default confirmed response is never reached
+      session =
+        start_model_session("exhaust-model",
+          model_responses: [
+            {:ok, %{"configOptions" => []}},
+            {:ok, %{"configOptions" => []}},
+            {:ok, %{"configOptions" => []}},
+            {:ok, %{"configOptions" => []}}
+          ]
+        )
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 2_000)
+    end
+
+    test "timeout from set_config_option fails closed" do
+      session =
+        start_model_session("timeout-model", model_responses: [{:error, :timeout}])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "explicit create_session verifies model" do
+      confirmed = model_confirmed_response("explicit-model")
+      install_model_select_client(model_response_default: confirmed)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "explicit-model",
+          client_opts: [test_pid: self(), model_response_default: confirmed]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:ok, _info} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "lazy creation (send_message) verifies model" do
+      session = start_model_session("lazy-model")
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      # send_message triggers ensure_session → lazy creation → model verification
+      assert {:ok, _result} =
+               AcpSession.send_message(session, "hello", timeout: 5_000)
+    end
+
+    test "resume_session verifies model" do
+      confirmed = model_confirmed_response("resume-model")
+      install_model_select_client(model_response_default: confirmed)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "resume-model",
+          client_opts: [test_pid: self(), model_response_default: confirmed]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:ok, _info} =
+               AcpSession.resume_session(session, "resume-session-id", timeout: 1_000)
+
+      assert %{status: :ready, session_id: "resume-session-id"} = AcpSession.status(session)
+    end
+
+    test "reconnect verifies model" do
+      confirmed = model_confirmed_response("reconnect-model")
+      install_model_select_client(model_response_default: confirmed)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "reconnect-model",
+          client_opts: [test_pid: self(), model_response_default: confirmed]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      # Create a session first so there's a session_id to reconnect.
+      assert {:ok, _info} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      assert is_binary(state.session_id)
+
+      # Kill the client to trigger DOWN → maybe_reconnect.
+      first_client = state.client
+      assert is_pid(first_client)
+      Process.exit(first_client, :kill)
+
+      # The reconnect path reuses state.opts[:client_opts], which still carries
+      # the confirmed response, so the new client reaches :ready.
+      poll_reconnect_ready(session, first_client)
+
+      final_state = :sys.get_state(session)
+      assert final_state.status == :ready
+      assert final_state.reconnect_attempted == true
+      assert final_state.client != nil
+      assert final_state.client != first_client
+
+      # The new client confirmed the model exactly once during reconnect.
+      assert ModelSelectClient.set_config_option_count(final_state.client) == 1
+    end
+
+    test "model mismatch in resume fails closed" do
+      mismatch =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "wrong-model"}
+           ]
+         }}
+
+      install_model_select_client(model_responses: [mismatch])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "requested-model",
+          client_opts: [test_pid: self(), model_responses: [mismatch]]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.resume_session(session, "some-session", timeout: 1_000)
+    end
+
+    test "model mismatch in create_session fails closed" do
+      mismatch =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "wrong-model"}
+           ]
+         }}
+
+      install_model_select_client(model_responses: [mismatch])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "requested-model",
+          client_opts: [test_pid: self(), model_responses: [mismatch]]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "exact confirmation makes exactly one set_config_option call" do
+      session = start_model_session("count-model")
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:ok, _info} = AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 1
+    end
+
+    test "transient retry makes exactly two set_config_option calls" do
+      session =
+        start_model_session("retry-count-model",
+          model_responses: [
+            {:ok, %{"configOptions" => []}},
+            model_confirmed_response("retry-count-model")
+          ]
+        )
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:ok, _info} = AcpSession.create_session(session, timeout: 2_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 2
+    end
+
+    test "exhausted retries makes N+1 set_config_option calls (initial + N retries)" do
+      max_retries = 3
+
+      responses =
+        for _ <- 1..(max_retries + 1),
+            do: {:ok, %{"configOptions" => []}}
+
+      session = start_model_session("exhaust-count-model", model_responses: responses)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 3_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+
+      # 1 initial + max_retries retries = max_retries + 1
+      assert ModelSelectClient.set_config_option_count(client) == max_retries + 1
+    end
+
+    test "resume model failure transitions to :error and clears session_id" do
+      mismatch =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "wrong-model"}
+           ]
+         }}
+
+      install_model_select_client(model_responses: [mismatch])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "requested-model",
+          client_opts: [test_pid: self(), model_responses: [mismatch]]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      :sys.replace_state(session, fn s -> %{s | last_session_id: "prior-session"} end)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.resume_session(session, "new-session", timeout: 1_000)
+
+      status = AcpSession.status(session)
+      assert status.status == :error
+      assert status.session_id == nil
+    end
+
+    test "send_message blocked after create_session model failure" do
+      mismatch =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "wrong-model"}
+           ]
+         }}
+
+      session =
+        start_model_session("create-fail-send", model_responses: [mismatch])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      # Session is now in :error — session_id and last_session_id are cleared,
+      # send_message is blocked.
+      state = :sys.get_state(session)
+      assert state.status == :error
+      assert state.session_id == nil
+      assert state.last_session_id == nil
+
+      assert {:error, {:not_ready, :error}} =
+               AcpSession.send_message(session, "hello", timeout: 1_000)
+    end
+
+    test "send_message after resume model failure returns error" do
+      mismatch =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "wrong-model"}
+           ]
+         }}
+
+      install_model_select_client(model_responses: [mismatch])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "requested-model",
+          client_opts: [test_pid: self(), model_responses: [mismatch]]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.resume_session(session, "some-session", timeout: 1_000)
+
+      # Session is now in :error — send_message should fail
+      assert {:error, {:not_ready, :error}} =
+               AcpSession.send_message(session, "hello", timeout: 1_000)
+    end
+
+    test "oversized option id scalar fails closed" do
+      oversized_id = String.duplicate("x", 300)
+
+      response =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => oversized_id, "currentValue" => "some-model"}
+           ]
+         }}
+
+      session =
+        start_model_session("any-model", model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "oversized option currentValue scalar fails closed" do
+      oversized_value = String.duplicate("y", 300)
+
+      response =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => oversized_value}
+           ]
+         }}
+
+      session =
+        start_model_session("any-model", model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "expired deadline prevents any post-deadline RPC" do
+      session = start_model_session("deadline-model")
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      # Verify pre_rpc_deadline_check rejects expired deadlines at the unit level.
+      # The public create_session path recomputes deadlines via start_deadline,
+      # so we test the check directly by calling select_and_confirm_model with
+      # opts that carry an already-expired :deadline_ms.
+      expired_opts = [deadline_ms: System.monotonic_time(:millisecond) - 1000]
+      state = :sys.get_state(session)
+      sid = state.session_id || "test-session"
+      client = state.client
+
+      result = AcpSession.select_and_confirm_model(client, sid, "deadline-model", expired_opts)
+
+      assert {:error, :deadline_exceeded} = result
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "invalid model string (non-binary) fails before RPC" do
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: :not_a_string,
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "oversized model string (257 bytes) fails before RPC" do
+      oversized_model = String.duplicate("x", 257)
+
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: oversized_model,
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "atom-key config response is rejected (canonical string-key only)" do
+      # Atom-key response is NOT the canonical format and must be rejected.
+      atom_response = %{configOptions: [%{id: :model, currentValue: "any-model"}]}
+
+      install_model_select_client(model_responses: [atom_response])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "any-model",
+          client_opts: [test_pid: self(), model_responses: [atom_response]]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      # create_session calls set_config_option, gets atom response,
+      # verify_model_response rejects it (no "configOptions" key in map).
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "improper list in configOptions fails closed" do
+      # Build a response with an improper tail: [head | non_list].
+      response = {:ok, %{"configOptions" => [%{"id" => "model"} | "not-a-list"]}}
+      session = start_model_session("improper-model", model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 1
+    end
+
+    test "deeply nested configOptions exceeds budget" do
+      # Build a deeply nested map that exceeds max_depth=8.
+      deep_value =
+        Enum.reduce(1..20, "leaf", fn _i, acc -> %{"nested" => acc} end)
+
+      response =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "any-model", "meta" => deep_value}
+           ]
+         }}
+
+      session = start_model_session("deep-model", model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+    end
+
+    test "empty string model is rejected (not no-op)" do
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "",
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "blank model string (whitespace only) fails before RPC" do
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "   ",
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "model string with NUL byte fails before RPC" do
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "model\0hidden",
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "model string with tab byte fails before RPC" do
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "model\x09tab",
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "model string with newline byte fails before RPC" do
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "model\x0Anl",
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "model string with DEL byte fails before RPC" do
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "model\x7Fdel",
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "model string with invalid UTF-8 fails before RPC" do
+      client_opts = install_model_select_client(client_opts: [])
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "model\xFF\xFE",
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, _reason}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      client = state.client
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "invalid deadline error propagates without wrapping through retry path" do
+      # Exercise the public AcpSession.select_and_confirm_model/4 API directly
+      # with an invalid deadline value. Timeout.deadline/1 returns
+      # {:error, :invalid_deadline}, which pre_rpc_deadline_check/1 must surface
+      # verbatim (no {:model_selection_failed, _} wrapping) and before any RPC.
+      # send_message does NOT reselect a model on existing sessions, so the
+      # public model-selection entrypoint is the only path that exercises the
+      # retry helper's pre-RPC deadline guard.
+      session = start_model_session("deadline-model")
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      state = :sys.get_state(session)
+      sid = state.session_id || "test-session"
+      client = state.client
+
+      opts = [deadline_ms: :not_a_number]
+
+      result = AcpSession.select_and_confirm_model(client, sid, "deadline-model", opts)
+
+      assert {:error, :invalid_deadline} = result
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "reconnect success reaches ready with model confirmation on new client" do
+      confirmed = model_confirmed_response("reconnect-model")
+      install_model_select_client(model_response_default: confirmed)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "reconnect-model",
+          client_opts: [test_pid: self(), model_response_default: confirmed]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:ok, _info} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      # Establish last_session_id so maybe_reconnect will attempt a reconnect.
+      :sys.replace_state(session, fn s -> %{s | last_session_id: "reconnect-target"} end)
+
+      state = :sys.get_state(session)
+      first_client = state.client
+      assert is_pid(first_client)
+
+      # Kill the client to trigger DOWN → maybe_reconnect
+      Process.exit(first_client, :kill)
+
+      # Poll until reconnect completes (deterministic — no broad sleep).
+      poll_reconnect_ready(session, first_client)
+
+      final_state = :sys.get_state(session)
+      assert final_state.status == :ready
+      assert final_state.client != nil
+      assert final_state.client != first_client
+      assert final_state.reconnect_attempted == true
+
+      new_client = final_state.client
+      assert ModelSelectClient.set_config_option_count(new_client) == 1
+    end
+
+    test "reconnect mismatch terminates client and session is unusable" do
+      confirmed = model_confirmed_response("reconnect-mismatch-model")
+
+      # Initial session uses a client that confirms the model.
+      install_model_select_client(model_response_default: confirmed)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "reconnect-mismatch-model",
+          client_opts: [test_pid: self(), model_response_default: confirmed]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:ok, _info} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      # Establish last_session_id so maybe_reconnect will attempt a reconnect.
+      :sys.replace_state(session, fn s -> %{s | last_session_id: "reconnect-target"} end)
+
+      state = :sys.get_state(session)
+      first_client = state.client
+      assert is_pid(first_client)
+
+      # The reconnect path reads the client_opts stored in state.opts, NOT the
+      # process dictionary / app env at the time the DOWN fires. Reinstalling
+      # the fake client module above does not alter what the new client returns.
+      # Mutate state.opts[:client_opts] directly so the reconnect's
+      # start_acp_client receives the mismatch response.
+      mismatch =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "wrong-model"}
+           ]
+         }}
+
+      :sys.replace_state(session, fn s ->
+        new_opts =
+          Keyword.update(s.opts, :client_opts, [], fn co ->
+            Keyword.put(co, :model_response_default, mismatch)
+          end)
+
+        %{s | opts: new_opts}
+      end)
+
+      # Kill the client to trigger DOWN → maybe_reconnect.
+      Process.exit(first_client, :kill)
+
+      # Poll until reconnect reaches the exact terminal :error state.
+      poll_reconnect_terminal(session)
+
+      final_state = :sys.get_state(session)
+      assert final_state.status == :error
+      assert final_state.session_id == nil
+      assert final_state.last_session_id == nil
+      assert final_state.client == nil
+      assert final_state.client_monitor == nil
+
+      # Session is broken: send_message is blocked.
+      assert {:error, {:not_ready, :error}} =
+               AcpSession.send_message(session, "hello", timeout: 1_000)
+    end
+
+    test "reconnect mismatch demonitors the failed new client (no orphan DOWN)" do
+      # The reconnect path attaches a fresh client monitor before running
+      # select_and_confirm_model/4. If model confirmation fails, the
+      # new monitor must be demonitored with [:flush] before terminate_client/1
+      # so no {:DOWN, ^new_monitor, ...} remains in the mailbox. Otherwise the
+      # DOWN arrives after the error branch has nilled state.client and falls
+      # through to the catch-all handle_info, surfacing as an "unexpected
+      # message" debug log. This test proves the lifecycle is closed.
+      previous_level = Logger.level()
+      Logger.configure(level: :debug)
+
+      on_exit(fn ->
+        Logger.configure(level: previous_level)
+      end)
+
+      confirmed = model_confirmed_response("reconnect-orphan-model")
+
+      install_model_select_client(model_response_default: confirmed)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          model: "reconnect-orphan-model",
+          client_opts: [test_pid: self(), model_response_default: confirmed]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:ok, _info} = AcpSession.create_session(session, timeout: 1_000)
+
+      :sys.replace_state(session, fn s -> %{s | last_session_id: "reconnect-target"} end)
+
+      state = :sys.get_state(session)
+      first_client = state.client
+
+      mismatch =
+        {:ok,
+         %{
+           "configOptions" => [
+             %{"id" => "model", "currentValue" => "wrong-model"}
+           ]
+         }}
+
+      :sys.replace_state(session, fn s ->
+        new_opts =
+          Keyword.update(s.opts, :client_opts, [], fn co ->
+            Keyword.put(co, :model_response_default, mismatch)
+          end)
+
+        %{s | opts: new_opts}
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Process.exit(first_client, :kill)
+
+          poll_reconnect_terminal(session)
+
+          # Give any orphan DOWN a generous window to arrive and (without the
+          # fix) be logged by the catch-all handler.
+          Process.sleep(100)
+        end)
+
+      final_state = :sys.get_state(session)
+      assert final_state.status == :error
+      assert final_state.client == nil
+      assert final_state.client_monitor == nil
+      assert final_state.session_id == nil
+      assert final_state.last_session_id == nil
+
+      refute log =~ "unexpected message",
+             "orphan DOWN reached the catch-all handler:\n#{log}"
+    end
+  end
 end

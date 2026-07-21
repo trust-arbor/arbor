@@ -18,6 +18,13 @@ defmodule Arbor.AI.LLM.Adapter.AcpTest do
     def load_session(_client, session_id, _cwd, _opts),
       do: {:ok, %{"sessionId" => session_id}}
 
+    # Honor the new ACP model-confirmation contract: return a configOptions
+    # envelope echoing the requested model so create_session's
+    # select_and_confirm_model/4 verification succeeds. The test exercises a
+    # prompt-level timeout, not a model-selection failure.
+    def set_config_option(_client, _session_id, "model", value),
+      do: {:ok, %{"configOptions" => [%{"id" => "model", "currentValue" => value}]}}
+
     def set_config_option(_client, _session_id, _key, _value), do: :ok
 
     def prompt(client, _session_id, _content, _opts) do
