@@ -354,6 +354,55 @@ worker narrative or terminal JSON:
 5. The shared `STATUS: declined` contract remains on the legacy direct
    `coding_produce_reviewable_change` path only.
 
+### Terminal workspace and branch evidence
+
+Terminal results retain the closed `artifacts.workspace_release` descriptor.
+Its `workspace_release_status` is one of `retained`, `removed`, `discarded`,
+or `discard_pending`. The closed, authority-free
+`artifacts.branch_lifecycle` descriptor reports:
+
+- `branch_status`: `preserved`, `retired`, or `pending`
+- `cleanup_status`: `complete`, `retrying`, or `dormant`
+- the exact cleanup retry count and limit, categorical failure (when any),
+  and discard phase (when applicable)
+- optional `evidence_ref` and `published_commit`
+
+The artifact is canonical. Any compatibility duplicate at the top level must
+agree with the corresponding artifact exactly. These descriptors expose no
+raw failures, commands, workspace/task/principal identifiers, or mutation
+authority. Adoption proof remains in immutable adoption/task evidence;
+lifecycle evidence links only closed references and never becomes authority to
+adopt, publish, or retry.
+
+The read-only action
+`coding_workspace_lifecycle_status` is available at
+`arbor://action/coding/workspace/status`. It returns aggregate counts and
+retry summaries, with categorical failures sorted deterministically, plus
+journal status: `complete`, `degraded`, or `disabled`. It never returns IDs,
+principals, paths, refs/OIDs, PIDs, commands, raw failures, or mutation
+authority. The action remains available when the journal is degraded.
+
+### Resumable branch audit
+
+Run the read-only Phase 7 branch audit with:
+
+```bash
+./bin/mix arbor.coding.branches --repo /path/to/repo --destination main \
+  --output /tmp/branch-audit.json --checkpoint /tmp/branch-audit.checkpoint
+```
+
+The audit is resumable. With `--output`, `--checkpoint` defaults to
+`OUTPUT.checkpoint`; the checkpoint is an atomic `0600` file bound to the
+exact repository, destination OID, branch OID, and proof-policy scope. Verified
+proofs and deterministic preserve outcomes may be reused only for that exact
+binding. Transient failures are retried, progress is reported, and checkpoint
+writes use a bounded cadence. Incomplete or uncertain proofs conservatively
+preserve the branch.
+
+Git patch evidence is batched under the existing byte and deadline bounds. The
+exit-137 amplification was fixed without increasing the 30-second proof
+deadline.
+
 ### ACP transcript artifact
 
 When the coding executor binds its trusted transcript sink, `AcpSession`
