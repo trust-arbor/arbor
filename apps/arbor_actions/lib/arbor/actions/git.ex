@@ -162,18 +162,22 @@ defmodule Arbor.Actions.Git do
   @unsafe_config_pattern "^(include\\.|includeif\\.|filter\\..*\\.(clean|smudge|process)$|diff\\..*\\.(command|textconv)$|diff\\.external$|merge\\..*\\.driver$|credential\\.helper$|core\\.(attributesfile|editor|excludesfile|hookspath|fsmonitor|pager|sshcommand)$|pager\\.|interactive\\.difffilter$|maintenance\\.|submodule\\..*\\.update$|commit\\.gpgsign$|gpg\\.program$|sequence\\.editor$)"
 
   @doc false
-  def execute(path, args) when is_binary(path) and is_list(args) do
+  def execute(path, args) when is_binary(path) and is_list(args),
+    do: execute_with_options(path, args, nil)
+
+  def execute(_path, _args), do: {:error, :invalid_git_execution}
+
+  defp execute_with_options(path, args, max_output_bytes)
+       when is_binary(path) and is_list(args) do
     with :ok <- validate_git_args(args),
          {:ok, authorized_root} <- authorized_root(path),
          storage_roots <- storage_roots(authorized_root),
          {:ok, storage_guard} <- validate_repository_storage(authorized_root, storage_roots),
          :ok <- reject_configured_helpers(authorized_root),
          :ok <- verify_storage_guard(storage_guard) do
-      execute_without_audit(authorized_root, args)
+      execute_without_audit(authorized_root, args, max_output_bytes)
     end
   end
-
-  def execute(_path, _args), do: {:error, :invalid_git_execution}
 
   @doc """
   Compute bounded proof that a reviewed candidate commit was adopted by a
@@ -447,8 +451,8 @@ defmodule Arbor.Actions.Git do
     end
   end
 
-  defp adoption_git_with_stdin(repository_root, args, stdin) do
-    case execute_with_stdin(repository_root, args, stdin) do
+  defp adoption_git_with_stdin(repository_root, args, stdin, max_output_bytes \\ nil) do
+    case execute_with_stdin(repository_root, args, stdin, max_output_bytes) do
       {:ok, %{exit_code: 0, stderr: ""} = result} ->
         {:ok, result}
 
@@ -736,62 +740,273 @@ defmodule Arbor.Actions.Git do
   end
 
   defp adoption_patch_evidence(repository_root, commits, candidate?) do
-    Enum.reduce_while(commits, {:ok, [], 0}, fn {commit, parent_count}, {:ok, acc, bytes} ->
-      if not candidate? and parent_count > 1 do
-        {:cont, {:ok, acc, bytes}}
-      else
-        case adoption_patch_id_for_commit(repository_root, commit) do
-          {:ok, nil, _patch_bytes} when candidate? ->
-            {:halt, {:error, {:not_adopted, :candidate_contains_empty_commit}}}
+    eligible_commits =
+      Enum.filter(commits, fn {_commit, parent_count} ->
+        candidate? or parent_count == 1
+      end)
 
-          {:ok, nil, patch_bytes} ->
-            if bytes + patch_bytes <= @adoption_patch_evidence_bytes_limit do
-              {:cont, {:ok, acc, bytes + patch_bytes}}
-            else
-              {:halt,
-               {:error,
-                {:range_too_large, :patch_evidence_bytes, @adoption_patch_evidence_bytes_limit}}}
-            end
+    with {:ok, evidence, bytes} <-
+           adoption_patch_evidence_batches(repository_root, eligible_commits, candidate?, [], 0),
+         true <- bytes <= @adoption_patch_evidence_bytes_limit do
+      {:ok, evidence}
+    else
+      false ->
+        {:error, {:range_too_large, :patch_evidence_bytes, @adoption_patch_evidence_bytes_limit}}
 
-          {:ok, patch_id, patch_bytes} ->
-            if bytes + patch_bytes <= @adoption_patch_evidence_bytes_limit do
-              evidence = %{"commit" => commit, "patch_id" => patch_id}
-              {:cont, {:ok, [evidence | acc], bytes + patch_bytes}}
-            else
-              {:halt,
-               {:error,
-                {:range_too_large, :patch_evidence_bytes, @adoption_patch_evidence_bytes_limit}}}
-            end
+      {:error, _reason} = error ->
+        error
+    end
+  end
 
-          {:error, _reason} = error ->
-            {:halt, error}
+  defp adoption_patch_evidence_batches(_repository_root, [], _candidate?, evidence, bytes),
+    do: {:ok, evidence, bytes}
+
+  defp adoption_patch_evidence_batches(repository_root, commits, candidate?, evidence, bytes) do
+    with {:ok, batch_evidence, batch_bytes} <-
+           adoption_patch_evidence_batch(repository_root, commits, candidate?),
+         total_bytes = bytes + batch_bytes,
+         true <- total_bytes <= @adoption_patch_evidence_bytes_limit do
+      adoption_patch_evidence_batches(
+        repository_root,
+        [],
+        candidate?,
+        evidence ++ batch_evidence,
+        total_bytes
+      )
+    else
+      false ->
+        {:error, {:range_too_large, :patch_evidence_bytes, @adoption_patch_evidence_bytes_limit}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # The range count bounds the initial argv to 256 commits. Small histories fit
+  # in one audited command; a Shell output-limit result splits that bounded list
+  # until each retry is below the retained-output ceiling.
+  defp adoption_patch_evidence_batch(repository_root, commits, candidate?) do
+    commit_oids = Enum.map(commits, &elem(&1, 0))
+
+    case adoption_batch_show(repository_root, commit_oids) do
+      {:ok, %{stdout: output}} ->
+        with {:ok, patches} <- parse_adoption_batch_show(output, commit_oids),
+             :ok <- bound_adoption_batch_patches(patches),
+             {:ok, patch_ids} <- adoption_batch_patch_ids(repository_root, output),
+             {:ok, evidence} <- adoption_batch_evidence(patches, patch_ids, candidate?) do
+          {:ok, evidence, Enum.reduce(patches, 0, &(byte_size(elem(&1, 1)) + &2))}
         end
+
+      {:error, :output_limit} when length(commit_oids) > 1 ->
+        {left, right} = Enum.split(commits, div(length(commits), 2))
+
+        with {:ok, left_evidence, left_bytes} <-
+               adoption_patch_evidence_batch(repository_root, left, candidate?),
+             {:ok, right_evidence, right_bytes} <-
+               adoption_patch_evidence_batch(repository_root, right, candidate?) do
+          {:ok, left_evidence ++ right_evidence, left_bytes + right_bytes}
+        end
+
+      {:error, :output_limit} ->
+        {:error, {:range_too_large, :patch_bytes, @adoption_patch_bytes_limit}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp adoption_batch_show(repository_root, commits) do
+    args =
+      [
+        "show",
+        "--format=commit %H",
+        "--binary",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames"
+      ] ++ commits ++ ["--"]
+
+    case execute_with_options(repository_root, args, Shell.max_output_bytes_limit()) do
+      {:ok, %{output_limit_exceeded: true}} ->
+        {:error, :output_limit}
+
+      {:ok, %{exit_code: 0, stderr: ""} = result} ->
+        {:ok, result}
+
+      {:ok, %{exit_code: 0}} ->
+        {:error, {:invalid_input, :git_warning_output}}
+
+      {:ok, %{exit_code: exit_code}} ->
+        {:error, {:invalid_input, {:git_command_failed, exit_code}}}
+
+      {:error, reason} ->
+        {:error, {:invalid_input, reason}}
+    end
+  end
+
+  defp parse_adoption_batch_show(output, expected_commits)
+       when is_binary(output) and is_list(expected_commits) and expected_commits != [] do
+    if byte_size(output) > 0 and :binary.last(output) == ?\n do
+      lines = :binary.split(output, "\n", [:global])
+
+      {line_entries, _offset} =
+        Enum.map_reduce(lines, 0, fn line, offset ->
+          {{line, offset}, offset + byte_size(line) + 1}
+        end)
+
+      with {:ok, headers} <- adoption_batch_headers(line_entries, byte_size(hd(expected_commits))),
+           true <- Enum.map(headers, &elem(&1, 0)) == expected_commits,
+           true <- elem(hd(headers), 1) == 0 do
+        headers
+        |> Enum.with_index()
+        |> Enum.reduce_while({:ok, []}, fn {{commit, header_offset}, index}, {:ok, patches} ->
+          patch_start =
+            header_offset + byte_size("commit ") + byte_size(hd(expected_commits)) + 1
+
+          patch_end =
+            case Enum.at(headers, index + 1) do
+              {_next_commit, next_offset} -> next_offset
+              nil -> byte_size(output)
+            end
+
+          patch_with_separator = binary_part(output, patch_start, patch_end - patch_start)
+
+          case patch_with_separator do
+            <<>> ->
+              {:cont, {:ok, [{commit, <<>>} | patches]}}
+
+            <<?\n, patch::binary>> ->
+              {:cont, {:ok, [{commit, patch} | patches]}}
+
+            _other ->
+              {:halt, {:error, {:invalid_input, :invalid_patch_evidence_output}}}
+          end
+        end)
+        |> case do
+          {:ok, patches} -> {:ok, Enum.reverse(patches)}
+          {:error, _reason} = error -> error
+        end
+      else
+        false -> {:error, {:invalid_input, :invalid_patch_evidence_output}}
+        {:error, _reason} = error -> error
+      end
+    else
+      {:error, {:invalid_input, :invalid_patch_evidence_output}}
+    end
+  end
+
+  defp parse_adoption_batch_show(_output, _expected_commits),
+    do: {:error, {:invalid_input, :invalid_patch_evidence_output}}
+
+  defp adoption_batch_headers(line_entries, oid_bytes) do
+    Enum.reduce_while(line_entries, {:ok, []}, fn {line, offset}, {:ok, headers} ->
+      if byte_size(line) >= byte_size("commit ") and
+           binary_part(line, 0, byte_size("commit ")) == "commit " do
+        oid = binary_part(line, byte_size("commit "), byte_size(line) - byte_size("commit "))
+
+        if byte_size(oid) == oid_bytes and Regex.match?(~r/\A[0-9a-f]+\z/, oid) do
+          {:cont, {:ok, [{oid, offset} | headers]}}
+        else
+          {:halt, {:error, {:invalid_input, :invalid_patch_evidence_output}}}
+        end
+      else
+        {:cont, {:ok, headers}}
       end
     end)
     |> case do
-      {:ok, evidence, _bytes} -> {:ok, Enum.reverse(evidence)}
+      {:ok, headers} when headers != [] -> {:ok, Enum.reverse(headers)}
+      {:ok, []} -> {:error, {:invalid_input, :invalid_patch_evidence_output}}
       {:error, _reason} = error -> error
     end
   end
 
-  defp adoption_patch_id_for_commit(repository_root, commit) do
-    with {:ok, %{stdout: diff}} <-
-           adoption_git(
-             repository_root,
-             [
-               "show",
-               "--format=",
-               "--no-ext-diff",
-               "--no-textconv",
-               "--binary",
-               "--no-renames",
-               commit,
-               "--"
-             ]
-           ),
-         :ok <- bound_adoption_patch(diff),
-         {:ok, patch_id} <- adoption_patch_id(repository_root, diff) do
-      {:ok, patch_id, byte_size(diff)}
+  defp bound_adoption_batch_patches(patches) do
+    Enum.reduce_while(patches, :ok, fn {_commit, patch}, :ok ->
+      case bound_adoption_patch(patch) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp adoption_batch_patch_ids(repository_root, output) do
+    case adoption_git_with_stdin(
+           repository_root,
+           ["patch-id", "--stable"],
+           output,
+           Shell.max_output_bytes_limit()
+         ) do
+      {:ok, %{stdout: patch_id_output}} -> parse_adoption_batch_patch_ids(patch_id_output)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp parse_adoption_batch_patch_ids(<<>>), do: {:ok, []}
+
+  defp parse_adoption_batch_patch_ids(output) when is_binary(output) do
+    lines = :binary.split(output, "\n", [:global])
+
+    if length(lines) > 1 and List.last(lines) == "" do
+      lines
+      |> Enum.drop(-1)
+      |> Enum.reduce_while({:ok, []}, fn line, {:ok, acc} ->
+        case :binary.split(line, " ", [:global]) do
+          [patch_id, commit] ->
+            valid_patch_id? =
+              byte_size(patch_id) in [40, 64] and
+                Regex.match?(~r/\A[0-9a-f]+\z/, patch_id)
+
+            if valid_patch_id? and byte_size(commit) in [40, 64] and
+                 Regex.match?(~r/\A[0-9a-f]+\z/, commit) do
+              {:cont, {:ok, [{patch_id, commit} | acc]}}
+            else
+              {:halt, {:error, {:invalid_input, :invalid_patch_id_output}}}
+            end
+
+          _other ->
+            {:halt, {:error, {:invalid_input, :invalid_patch_id_output}}}
+        end
+      end)
+      |> case do
+        {:ok, patch_ids} -> {:ok, Enum.reverse(patch_ids)}
+        {:error, _reason} = error -> error
+      end
+    else
+      {:error, {:invalid_input, :invalid_patch_id_output}}
+    end
+  end
+
+  defp parse_adoption_batch_patch_ids(_output),
+    do: {:error, {:invalid_input, :invalid_patch_id_output}}
+
+  defp adoption_batch_evidence(patches, patch_ids, candidate?) do
+    if candidate? and Enum.any?(patches, &(elem(&1, 1) == <<>>)) do
+      {:error, {:not_adopted, :candidate_contains_empty_commit}}
+    else
+      adoption_batch_evidence_nonempty(patches, patch_ids)
+    end
+  end
+
+  defp adoption_batch_evidence_nonempty(patches, patch_ids) do
+    expected_patch_ids =
+      Enum.filter(patches, &(elem(&1, 1) != <<>>))
+      |> Enum.map(&elem(&1, 0))
+
+    actual_patch_ids = Enum.map(patch_ids, &elem(&1, 1))
+
+    if actual_patch_ids == expected_patch_ids do
+      patch_id_by_commit = Map.new(patch_ids, fn {patch_id, commit} -> {commit, patch_id} end)
+
+      {:ok,
+       patches
+       |> Enum.flat_map(fn {commit, _patch} ->
+         case Map.fetch(patch_id_by_commit, commit) do
+           {:ok, patch_id} -> [%{"commit" => commit, "patch_id" => patch_id}]
+           :error -> []
+         end
+       end)}
+    else
+      {:error, {:invalid_input, :invalid_patch_id_output}}
     end
   end
 
@@ -2558,18 +2773,17 @@ defmodule Arbor.Actions.Git do
     end
   end
 
-  defp execute_without_audit(path, args) do
+  defp execute_without_audit(path, args, max_output_bytes \\ nil) do
     env = Map.put(@git_env, "GIT_CEILING_DIRECTORIES", path)
 
-    Shell.execute_direct("git", @git_prefix ++ args,
-      cwd: path,
-      timeout: git_timeout(),
-      sandbox: git_sandbox(),
-      env: env
-    )
+    shell_options =
+      [cwd: path, timeout: git_timeout(), sandbox: git_sandbox(), env: env]
+      |> put_max_output_bytes(max_output_bytes)
+
+    Shell.execute_direct("git", @git_prefix ++ args, shell_options)
   end
 
-  defp execute_with_stdin(path, args, stdin) do
+  defp execute_with_stdin(path, args, stdin, max_output_bytes) do
     with :ok <- validate_git_args(args),
          {:ok, authorized_root} <- authorized_root(path),
          storage_roots <- storage_roots(authorized_root),
@@ -2578,15 +2792,25 @@ defmodule Arbor.Actions.Git do
          :ok <- verify_storage_guard(storage_guard) do
       env = Map.put(@git_env, "GIT_CEILING_DIRECTORIES", authorized_root)
 
-      Shell.execute_direct("git", @git_prefix ++ args,
-        cwd: authorized_root,
-        timeout: git_timeout(),
-        sandbox: git_sandbox(),
-        env: env,
-        stdin: stdin
-      )
+      shell_options =
+        [
+          cwd: authorized_root,
+          timeout: git_timeout(),
+          sandbox: git_sandbox(),
+          env: env,
+          stdin: stdin
+        ]
+        |> put_max_output_bytes(max_output_bytes)
+
+      Shell.execute_direct("git", @git_prefix ++ args, shell_options)
     end
   end
+
+  defp put_max_output_bytes(options, max_output_bytes)
+       when is_integer(max_output_bytes) and max_output_bytes > 0,
+       do: Keyword.put(options, :max_output_bytes, max_output_bytes)
+
+  defp put_max_output_bytes(options, _max_output_bytes), do: options
 
   defp with_command_deadline(timeout_ms, fun)
        when is_integer(timeout_ms) and timeout_ms > 0 and is_function(fun, 0) do

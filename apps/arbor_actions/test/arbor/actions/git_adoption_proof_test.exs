@@ -51,6 +51,7 @@ defmodule Arbor.Actions.GitAdoptionProofTest do
     assert proof["audit"]["representation"] == "cherry_pick"
     assert proof["candidate_commit_count"] == 2
     assert length(proof["audit"]["candidate_patches"]) == 2
+    assert Enum.map(proof["audit"]["candidate_patches"], & &1["commit"]) == [first, second]
     assert :ok = Git.verify_adoption_proof(repo, proof)
   end
 
@@ -75,6 +76,35 @@ defmodule Arbor.Actions.GitAdoptionProofTest do
     assert :ok = Git.verify_adoption_proof(repo, proof)
   end
 
+  test "completes adoption proof within the existing deadline for a large destination history", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = new_repo(tmp_dir)
+    base = git_oid!(repo, ["rev-parse", "HEAD"])
+    git!(repo, ["branch", "candidate"])
+    git!(repo, ["branch", "destination"])
+
+    git!(repo, ["checkout", "candidate"])
+    first = commit!(repo, "first.txt", "first\n", "first")
+    second = commit!(repo, "second.txt", "second\n", "second")
+    candidate = git_oid!(repo, ["rev-parse", "candidate"])
+
+    git!(repo, ["checkout", "destination"])
+
+    for index <- 1..184 do
+      git!(repo, ["commit", "--allow-empty", "-m", "destination-#{index}"])
+    end
+
+    git!(repo, ["cherry-pick", first, second])
+
+    assert {:ok, proof} = Git.compute_adoption_proof(repo, base, candidate, "destination")
+    assert proof["method"] == "patch_equivalence"
+    assert proof["audit"]["representation"] == "cherry_pick"
+    assert proof["candidate_commit_count"] == 2
+    assert length(proof["audit"]["destination_patches"]) == 2
+    assert :ok = Git.verify_adoption_proof(repo, proof)
+  end
+
   test "rejects partial patch representation", %{tmp_dir: tmp_dir} do
     repo = new_repo(tmp_dir)
     base = git_oid!(repo, ["rev-parse", "HEAD"])
@@ -90,6 +120,18 @@ defmodule Arbor.Actions.GitAdoptionProofTest do
 
     assert {:error, {:not_adopted, _reason}} =
              Git.compute_adoption_proof(repo, base, candidate, "destination")
+  end
+
+  test "rejects an empty candidate commit in patch evidence", %{tmp_dir: tmp_dir} do
+    repo = new_repo(tmp_dir)
+    base = git_oid!(repo, ["rev-parse", "HEAD"])
+    git!(repo, ["checkout", "-b", "candidate"])
+    git!(repo, ["commit", "--allow-empty", "-m", "empty-candidate"])
+    candidate = git_oid!(repo, ["rev-parse", "HEAD"])
+    git!(repo, ["checkout", "main"])
+
+    assert {:error, {:not_adopted, :candidate_contains_empty_commit}} =
+             Git.compute_adoption_proof(repo, base, candidate, "main")
   end
 
   test "rejects a merge-containing candidate patch proof", %{tmp_dir: tmp_dir} do
