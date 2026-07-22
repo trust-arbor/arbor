@@ -7,13 +7,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     Compilation,
     Normalizer,
     ReadinessCore,
+    ReadinessLiveCore,
     WorkspaceScope
   }
 
   alias Arbor.Orchestrator.Config
 
   @compiler_options [:template_path, :template_source, :action_catalog]
-
   @doc false
   @spec prepare(term(), keyword()) ::
           {:ok, Plan.t(), Compilation.t()} | {:error, term()}
@@ -40,7 +40,25 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
     case normalize_observation_time(observed_at) do
       {:ok, observed_at} ->
-        check_with_time(plan_or_attrs, opts, observed_at, plan_digest)
+        case Keyword.get(opts, :mode, :static) do
+          mode when mode in [:static, :live] ->
+            check_with_time(plan_or_attrs, opts, observed_at, plan_digest, mode)
+
+          _unknown_mode ->
+            ReadinessCore.report(
+              plan_digest,
+              observed_at,
+              [
+                blocked(
+                  "readiness_mode",
+                  "mode_invalid",
+                  observed_at,
+                  "The readiness observation mode is invalid.",
+                  "Use the supported static or live readiness mode."
+                )
+              ]
+            )
+        end
 
       {:error, _reason} ->
         ReadinessCore.report(
@@ -61,11 +79,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   def check(plan_or_attrs, _opts), do: check(plan_or_attrs, [])
 
-  defp check_with_time(plan_or_attrs, opts, observed_at, invalid_digest) do
+  defp check_with_time(plan_or_attrs, opts, observed_at, invalid_digest, mode) do
     case normalize_plan(plan_or_attrs) do
       {:ok, plan} ->
         requested_plan_digest = ReadinessCore.plan_digest(Plan.to_map(plan))
-        check_plan(plan, requested_plan_digest, opts, observed_at)
+        check_plan(plan, requested_plan_digest, opts, observed_at, mode)
 
       {:error, reason} ->
         ReadinessCore.report(
@@ -84,39 +102,355 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     end
   end
 
-  defp check_plan(plan, requested_plan_digest, opts, observed_at) do
+  defp check_plan(plan, requested_plan_digest, opts, observed_at, mode) do
     with {:ok, canonical_plan, _compilation} <- prepare(plan, opts) do
       plan_digest = ReadinessCore.plan_digest(Plan.to_map(canonical_plan))
 
-      diagnostics =
-        [
-          passed("plan_schema", "plan_valid", observed_at, "The coding plan is valid."),
-          passed(
-            "trusted_roots",
-            "roots_valid",
-            observed_at,
-            "Trusted repo and worktree roots are valid."
-          ),
-          passed(
-            "compiler",
-            "compilation_valid",
-            observed_at,
-            "The reviewed plan compiled successfully."
-          ),
-          passed(
-            "provenance",
-            "provenance_valid",
-            observed_at,
-            "Compilation provenance is internally consistent."
-          )
-        ] ++ static_dynamic_diagnostics(observed_at)
+      base_diagnostics = immutable_diagnostics(observed_at)
 
-      ReadinessCore.report(plan_digest, observed_at, diagnostics)
+      case mode do
+        :static ->
+          ReadinessCore.report(
+            plan_digest,
+            observed_at,
+            base_diagnostics ++ static_dynamic_diagnostics(observed_at)
+          )
+
+        :live ->
+          live_report(plan_digest, canonical_plan, opts, observed_at, base_diagnostics)
+      end
     else
       {:error, reason} ->
         blocked_report(requested_plan_digest, observed_at, reason)
     end
   end
+
+  defp immutable_diagnostics(observed_at) do
+    [
+      passed("plan_schema", "plan_valid", observed_at, "The coding plan is valid."),
+      passed(
+        "trusted_roots",
+        "roots_valid",
+        observed_at,
+        "Trusted repo and worktree roots are valid."
+      ),
+      passed(
+        "compiler",
+        "compilation_valid",
+        observed_at,
+        "The reviewed plan compiled successfully."
+      ),
+      passed(
+        "provenance",
+        "provenance_valid",
+        observed_at,
+        "Compilation provenance is internally consistent."
+      )
+    ]
+  end
+
+  defp live_report(plan_digest, plan, opts, observed_at, base_diagnostics) do
+    observed_datetime = parse_datetime!(observed_at)
+    expires_at = ReadinessLiveCore.expiry(observed_datetime, nil)
+
+    case live_diagnostics(plan, opts, observed_at, observed_datetime, expires_at) do
+      {:ok, diagnostics, expires_at} ->
+        ReadinessCore.report(
+          plan_digest,
+          observed_at,
+          base_diagnostics ++ diagnostics,
+          expires_at: iso_datetime(expires_at)
+        )
+
+      {:blocked, diagnostic, expires_at} ->
+        ReadinessCore.report(
+          plan_digest,
+          observed_at,
+          base_diagnostics ++ [diagnostic],
+          expires_at: iso_datetime(expires_at)
+        )
+    end
+  end
+
+  defp live_diagnostics(plan, opts, observed_at, observed_datetime, expires_at) do
+    with {:ok, security_diagnostic} <- observe_security(opts, observed_at),
+         {:ok, acp_diagnostic, provider_expiry} <-
+           observe_acp(plan, opts, observed_at, observed_datetime),
+         {:ok, toolchain_diagnostic} <- observe_toolchain(opts, observed_at),
+         {:ok, capacity_diagnostic} <- observe_capacity(opts, observed_at) do
+      {:ok, [security_diagnostic, acp_diagnostic, toolchain_diagnostic, capacity_diagnostic],
+       earlier_expiry(expires_at, provider_expiry)}
+    else
+      {:blocked, diagnostic} -> {:blocked, diagnostic, expires_at}
+    end
+  end
+
+  defp observe_security(opts, observed_at) do
+    agent_id = Keyword.get(opts, :agent_id)
+
+    cond do
+      not valid_agent_id?(agent_id) ->
+        {:blocked,
+         blocked(
+           "security_authority",
+           "agent_id_invalid",
+           observed_at,
+           "The live readiness agent identity is invalid.",
+           "Provide a non-empty agent identity in the agent_ namespace."
+         )}
+
+      safe_observer(opts, :security_available?, [], &Config.security_available?/0) != {:ok, true} ->
+        {:blocked,
+         blocked(
+           "security_authority",
+           "security_authority_unavailable",
+           observed_at,
+           "The live security authority is unavailable.",
+           "Restore the security authority before dispatch."
+         )}
+
+      safe_observer(opts, :signing_key_status, [agent_id], &Arbor.Security.signing_key_status/1) !=
+          {:ok, {:ok, :available}} ->
+        {:blocked,
+         blocked(
+           "security_authority",
+           "signing_key_unavailable",
+           observed_at,
+           "The live agent signing key is unavailable.",
+           "Restore the agent signing key before dispatch."
+         )}
+
+      true ->
+        {:ok,
+         passed(
+           "security_authority",
+           "security_authority_available",
+           observed_at,
+           "The live security authority and agent signing key are available."
+         )}
+    end
+  end
+
+  defp observe_acp(plan, opts, observed_at, observed_datetime) do
+    provider = plan.worker["provider"]
+    requested_model = plan.worker["model"]
+
+    result =
+      safe_observer(
+        opts,
+        :acp_provider_readiness,
+        [provider, requested_model],
+        &Arbor.AI.acp_provider_readiness/2
+      )
+
+    case result do
+      {:ok, envelope} ->
+        case ReadinessLiveCore.acp(envelope, provider, requested_model, observed_datetime) do
+          {:ok, :passed, digest, provider_expiry} ->
+            {:ok,
+             passed_with_evidence(
+               "acp_health",
+               "acp_health_available",
+               observed_at,
+               "The ACP provider and requested model are available.",
+               digest
+             ), provider_expiry}
+
+          {:ok, :degraded, digest, provider_expiry} ->
+            {:ok,
+             degraded_with_evidence(
+               "acp_health",
+               "acp_health_degraded",
+               observed_at,
+               "ACP provider evidence is degraded and authentication remains unconfirmed.",
+               digest
+             ), provider_expiry}
+
+          {:error, :model_mismatch} ->
+            {:blocked,
+             blocked(
+               "acp_health",
+               "acp_model_mismatch",
+               observed_at,
+               "The ACP provider model does not match the coding plan.",
+               "Use the provider model bound to the reviewed coding plan."
+             )}
+
+          {:error, :missing_executable} ->
+            {:blocked,
+             blocked(
+               "acp_health",
+               "acp_executable_unavailable",
+               observed_at,
+               "The ACP provider executable is unavailable.",
+               "Restore the reviewed ACP provider executable before dispatch."
+             )}
+
+          {:error, :unavailable} ->
+            {:blocked,
+             blocked(
+               "acp_health",
+               "acp_unavailable",
+               observed_at,
+               "The ACP provider is unavailable for the coding plan.",
+               "Restore provider availability and retry live readiness."
+             )}
+
+          {:error, :malformed} ->
+            {:blocked,
+             blocked(
+               "acp_health",
+               "acp_evidence_invalid",
+               observed_at,
+               "The ACP readiness evidence is malformed.",
+               "Return a canonical provider observation and matching digest."
+             )}
+        end
+
+      _ ->
+        {:blocked,
+         blocked(
+           "acp_health",
+           "acp_evidence_invalid",
+           observed_at,
+           "The ACP readiness observation is unavailable.",
+           "Restore the ACP readiness observer and retry live readiness."
+         )}
+    end
+  end
+
+  defp observe_toolchain(opts, observed_at) do
+    case safe_observer(
+           opts,
+           :coding_toolchain_identity,
+           [],
+           &Arbor.Actions.coding_toolchain_identity/0
+         ) do
+      {:ok, {:ok, identity}} ->
+        case ReadinessLiveCore.toolchain(identity) do
+          {:ok, evidence_ref} ->
+            {:ok,
+             passed_with_evidence(
+               "toolchain_identity",
+               "toolchain_identity_available",
+               observed_at,
+               "The reviewed Mix and runtime toolchain identity is available.",
+               evidence_ref
+             )}
+
+          {:error, :malformed} ->
+            {:blocked,
+             blocked(
+               "toolchain_identity",
+               "toolchain_identity_invalid",
+               observed_at,
+               "The toolchain identity evidence is malformed.",
+               "Return the bounded reviewed toolchain identity."
+             )}
+        end
+
+      _ ->
+        {:blocked,
+         blocked(
+           "toolchain_identity",
+           "toolchain_identity_unavailable",
+           observed_at,
+           "The coding toolchain identity is unavailable.",
+           "Restore the reviewed Mix and runtime toolchain before dispatch."
+         )}
+    end
+  end
+
+  defp observe_capacity(opts, observed_at) do
+    case safe_observer(opts, :validation_capacity_observer, [], fn -> :unavailable end) do
+      {:ok, :available} ->
+        {:ok,
+         passed(
+           "validation_capacity",
+           "validation_capacity_available",
+           observed_at,
+           "Validation capacity is available."
+         )}
+
+      {:ok, :degraded} ->
+        {:ok,
+         unavailable(
+           "validation_capacity",
+           "validation_capacity_degraded",
+           observed_at,
+           "Validation capacity evidence is degraded.",
+           "Confirm validation capacity before dispatch."
+         )}
+
+      _ ->
+        {:ok,
+         unavailable(
+           "validation_capacity",
+           "validation_capacity_unavailable",
+           observed_at,
+           "No authoritative validation capacity observer is available.",
+           "Confirm validation capacity before dispatch."
+         )}
+    end
+  end
+
+  defp safe_observer(opts, key, args, default) do
+    observer = Keyword.get(opts, key, default)
+
+    if is_function(observer, length(args)) do
+      try do
+        {:ok, apply(observer, args)}
+      rescue
+        _ -> {:error, :observer_failed}
+      catch
+        _, _ -> {:error, :observer_failed}
+      end
+    else
+      {:error, :observer_invalid}
+    end
+  end
+
+  defp valid_agent_id?(agent_id) when is_binary(agent_id) and byte_size(agent_id) <= 256 do
+    byte_size(agent_id) > 6 and String.valid?(agent_id) and
+      not String.contains?(agent_id, <<0>>) and String.starts_with?(agent_id, "agent_")
+  end
+
+  defp valid_agent_id?(_agent_id), do: false
+
+  defp earlier_expiry(first, second) do
+    if DateTime.compare(first, second) == :lt, do: first, else: second
+  end
+
+  defp parse_datetime!(value) do
+    {:ok, datetime, _offset} = DateTime.from_iso8601(value)
+    datetime
+  end
+
+  defp iso_datetime(datetime), do: DateTime.to_iso8601(datetime, :extended)
+
+  defp passed_with_evidence(gate_id, code, observed_at, message, evidence_ref),
+    do:
+      ReadinessCore.diagnostic(
+        gate_id,
+        "preflight",
+        "passed",
+        code,
+        observed_at,
+        message,
+        evidence_ref
+      )
+
+  defp degraded_with_evidence(gate_id, code, observed_at, message, evidence_ref),
+    do:
+      ReadinessCore.diagnostic(
+        gate_id,
+        "preflight",
+        "degraded",
+        code,
+        observed_at,
+        message,
+        evidence_ref
+      )
 
   defp configured_roots(opts, :repo) do
     case Keyword.fetch(opts, :repo_roots) do
