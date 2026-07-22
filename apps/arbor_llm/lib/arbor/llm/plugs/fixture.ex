@@ -59,6 +59,13 @@ defmodule Arbor.LLM.Plugs.Fixture do
   @fixture_schema_version 2
   @legacy_fixture_schema_version 1
   @max_response_string_bytes 1_048_576
+  @max_response_content_parts 100_000
+  @max_response_tool_calls 100_000
+  @max_response_text_bytes 1_048_576
+  @max_response_reasoning_bytes 1_048_576
+  @max_response_tool_bytes 1_048_576
+  @max_response_argument_nodes 100_000
+  @max_response_argument_depth 32
   @max_usage_token 1_000_000_000
   @max_usage_cost 1_000_000.0
   @usage_fields [
@@ -340,9 +347,8 @@ defmodule Arbor.LLM.Plugs.Fixture do
     do: {:ok, %{"outcome" => "raw", "raw" => Arbor.LLM.inspect_external_reason(other)}, other}
 
   defp serialize_req_llm_response(%ReqLLM.Response{} = response) do
-    with {:ok, text} <- response_text(response),
-         {:ok, thinking} <- response_thinking(response),
-         {:ok, tool_calls} <- response_tool_calls(response),
+    with {:ok, text, thinking} <- response_content_and_thinking(response.message),
+         {:ok, tool_calls} <- response_tool_calls(response.message),
          {:ok, finish_reason} <- serialize_finish_reason(response.finish_reason),
          {:ok, usage} <- serialize_usage(response.usage) do
       {:ok,
@@ -357,69 +363,213 @@ defmodule Arbor.LLM.Plugs.Fixture do
     end
   end
 
-  defp response_text(%ReqLLM.Response{} = response) do
-    response
-    |> ReqLLM.Response.text()
-    |> bounded_response_string(:text)
-  rescue
-    _ -> {:error, {:complete_response_invalid, :text}}
-  end
+  # This mirrors the adapter's two response accessors without invoking
+  # `ReqLLM.Response.text/1` or building unbounded intermediate lists.
+  defp response_content_and_thinking(nil), do: {:ok, "", []}
 
-  defp response_thinking(%ReqLLM.Response{message: %ReqLLM.Message{} = message}) do
-    reasoning_details = reasoning_detail_texts(message.reasoning_details)
-
-    thinking =
-      if reasoning_details == [],
-        do: thinking_part_texts(message.content),
-        else: reasoning_details
-
-    bounded_response_strings(thinking, :thinking)
-  end
-
-  defp response_thinking(%ReqLLM.Response{message: nil}), do: {:ok, []}
-
-  defp response_tool_calls(%ReqLLM.Response{message: %ReqLLM.Message{} = message}) do
-    tool_calls = message.tool_calls || []
-
-    if is_list(tool_calls) do
-      Enum.reduce_while(tool_calls, {:ok, []}, fn tool_call, {:ok, acc} ->
-        case serialize_tool_call(tool_call) do
-          {:ok, value} -> {:cont, {:ok, [value | acc]}}
-          {:error, _reason} = error -> {:halt, error}
-        end
-      end)
-      |> case do
-        {:ok, values} -> {:ok, Enum.reverse(values)}
-        {:error, _reason} = error -> error
-      end
-    else
-      {:error, {:complete_response_invalid, :tool_calls}}
+  defp response_content_and_thinking(%ReqLLM.Message{} = message) do
+    with {:ok, text, content_thinking} <- extract_content_parts(message.content),
+         {:ok, reasoning_details} <- extract_reasoning_details(message.reasoning_details) do
+      thinking = if reasoning_details == [], do: content_thinking, else: reasoning_details
+      {:ok, text, thinking}
     end
   end
 
-  defp response_tool_calls(%ReqLLM.Response{message: nil}), do: {:ok, []}
+  defp response_content_and_thinking(_message),
+    do: {:error, {:complete_response_invalid, :message}}
 
-  defp reasoning_detail_texts(details) when is_list(details) do
-    details
-    |> Enum.map(fn
-      %ReqLLM.Message.ReasoningDetails{text: text} -> text
-      _ -> nil
-    end)
-    |> Enum.filter(&is_binary/1)
+  defp extract_content_parts(parts) when is_list(parts) do
+    do_extract_content_parts(parts, 0, [], 0, [], 0)
   end
 
-  defp reasoning_detail_texts(_details), do: []
+  defp extract_content_parts(_parts),
+    do: {:error, {:complete_response_invalid, :content}}
 
-  defp thinking_part_texts(parts) when is_list(parts) do
-    parts
-    |> Enum.map(fn
-      %ReqLLM.Message.ContentPart{type: :thinking, text: text} -> text
-      _ -> nil
-    end)
-    |> Enum.filter(&is_binary/1)
+  defp do_extract_content_parts([], _count, text_acc, _text_bytes, thinking_acc, _thinking_bytes) do
+    {:ok, IO.iodata_to_binary(Enum.reverse(text_acc)), Enum.reverse(thinking_acc)}
   end
 
-  defp thinking_part_texts(_parts), do: []
+  defp do_extract_content_parts(
+         _parts,
+         count,
+         _text_acc,
+         _text_bytes,
+         _thinking_acc,
+         _thinking_bytes
+       )
+       when count >= @max_response_content_parts,
+       do: {:error, {:complete_response_limit_exceeded, :content_parts}}
+
+  defp do_extract_content_parts(
+         [part | rest],
+         count,
+         text_acc,
+         text_bytes,
+         thinking_acc,
+         thinking_bytes
+       ) do
+    next_count = count + 1
+
+    case part do
+      %ReqLLM.Message.ContentPart{type: :text, text: text}
+      when is_binary(text) ->
+        with {:ok, text_bytes} <-
+               add_response_bytes(text, text_bytes, @max_response_text_bytes, :text),
+             {:ok, _} <- bounded_response_string(text, :text),
+             {:ok, text_acc} <- valid_response_iolist(text, text_acc) do
+          do_extract_content_parts(
+            rest,
+            next_count,
+            text_acc,
+            text_bytes,
+            thinking_acc,
+            thinking_bytes
+          )
+        end
+
+      %ReqLLM.Message.ContentPart{type: :thinking, text: nil} ->
+        do_extract_content_parts(
+          rest,
+          next_count,
+          text_acc,
+          text_bytes,
+          thinking_acc,
+          thinking_bytes
+        )
+
+      %ReqLLM.Message.ContentPart{type: :thinking, text: text}
+      when is_binary(text) ->
+        with {:ok, thinking_bytes} <-
+               add_response_bytes(
+                 text,
+                 thinking_bytes,
+                 @max_response_reasoning_bytes,
+                 :thinking
+               ),
+             {:ok, _} <- bounded_response_string(text, :thinking) do
+          do_extract_content_parts(
+            rest,
+            next_count,
+            text_acc,
+            text_bytes,
+            [text | thinking_acc],
+            thinking_bytes
+          )
+        end
+
+      %ReqLLM.Message.ContentPart{type: type}
+      when type in [:image_url, :image, :file] ->
+        do_extract_content_parts(
+          rest,
+          next_count,
+          text_acc,
+          text_bytes,
+          thinking_acc,
+          thinking_bytes
+        )
+
+      _invalid ->
+        {:error, {:complete_response_invalid, :content_part}}
+    end
+  end
+
+  defp do_extract_content_parts(
+         _improper,
+         _count,
+         _text_acc,
+         _text_bytes,
+         _thinking_acc,
+         _thinking_bytes
+       ),
+       do: {:error, {:complete_response_invalid, :content}}
+
+  defp extract_reasoning_details(nil), do: {:ok, []}
+
+  defp extract_reasoning_details(details) when is_list(details) do
+    do_extract_reasoning_details(details, 0, [], 0, false)
+  end
+
+  defp extract_reasoning_details(_details),
+    do: {:error, {:complete_response_invalid, :reasoning_details}}
+
+  defp do_extract_reasoning_details([], _count, _acc, _bytes, false), do: {:ok, []}
+
+  defp do_extract_reasoning_details([], _count, acc, _bytes, true),
+    do: {:ok, Enum.reverse(acc)}
+
+  defp do_extract_reasoning_details(_details, count, _acc, _bytes, _has_content)
+       when count >= @max_response_content_parts,
+       do: {:error, {:complete_response_limit_exceeded, :reasoning_details}}
+
+  defp do_extract_reasoning_details([detail | rest], count, acc, bytes, has_content?) do
+    case detail do
+      %ReqLLM.Message.ReasoningDetails{text: nil} ->
+        do_extract_reasoning_details(rest, count + 1, acc, bytes, has_content?)
+
+      %ReqLLM.Message.ReasoningDetails{text: text}
+      when is_binary(text) ->
+        with {:ok, bytes} <-
+               add_response_bytes(text, bytes, @max_response_reasoning_bytes, :reasoning_details),
+             {:ok, _} <- bounded_response_string(text, :thinking) do
+          do_extract_reasoning_details(
+            rest,
+            count + 1,
+            [text | acc],
+            bytes,
+            has_content? or text != ""
+          )
+        end
+
+      _invalid ->
+        {:error, {:complete_response_invalid, :reasoning_detail}}
+    end
+  end
+
+  defp do_extract_reasoning_details(_improper, _count, _acc, _bytes, _has_content),
+    do: {:error, {:complete_response_invalid, :reasoning_details}}
+
+  defp response_tool_calls(nil), do: {:ok, []}
+
+  defp response_tool_calls(%ReqLLM.Message{} = message) do
+    calls = message.tool_calls || []
+
+    if is_list(calls),
+      do: do_serialize_tool_calls(calls, 0, [], 0),
+      else: {:error, {:complete_response_invalid, :tool_calls}}
+  end
+
+  defp response_tool_calls(_message),
+    do: {:error, {:complete_response_invalid, :tool_calls}}
+
+  defp do_serialize_tool_calls([], _count, acc, _bytes),
+    do: {:ok, Enum.reverse(acc)}
+
+  defp do_serialize_tool_calls(_calls, count, _acc, _bytes)
+       when count >= @max_response_tool_calls,
+       do: {:error, {:complete_response_limit_exceeded, :tool_calls}}
+
+  defp do_serialize_tool_calls([tool_call | rest], count, acc, bytes) do
+    with {:ok, serialized, call_bytes} <- serialize_tool_call(tool_call),
+         {:ok, bytes} <-
+           add_response_bytes(call_bytes, bytes, @max_response_tool_bytes, :tool_calls) do
+      do_serialize_tool_calls(rest, count + 1, [serialized | acc], bytes)
+    end
+  end
+
+  defp do_serialize_tool_calls(_improper, _count, _acc, _bytes),
+    do: {:error, {:complete_response_invalid, :tool_calls}}
+
+  defp add_response_bytes(value, bytes, maximum, field) when is_binary(value),
+    do: add_response_bytes(byte_size(value), bytes, maximum, field)
+
+  defp add_response_bytes(value, bytes, maximum, field)
+       when is_integer(value) and value >= 0 do
+    if bytes <= maximum - value,
+      do: {:ok, bytes + value},
+      else: {:error, {:complete_response_limit_exceeded, field}}
+  end
+
+  defp valid_response_iolist(value, acc) when is_binary(value), do: {:ok, [value | acc]}
 
   defp serialize_tool_call(%ReqLLM.ToolCall{id: id, function: function})
        when is_map(function) do
@@ -451,13 +601,104 @@ defmodule Arbor.LLM.Plugs.Fixture do
        when is_binary(id) and is_binary(name) and not is_nil(arguments) do
     with {:ok, id} <- bounded_response_string(id, :tool_call_id),
          {:ok, name} <- bounded_response_string(name, :tool_call_name),
-         {:ok, arguments} <- json_safe(arguments) do
-      {:ok, %{"id" => id, "name" => name, "arguments" => arguments}}
+         {:ok, arguments, argument_bytes} <- bounded_json_value(arguments) do
+      call_bytes = byte_size(id) + byte_size(name) + argument_bytes
+      {:ok, %{"id" => id, "name" => name, "arguments" => arguments}, call_bytes}
     end
   end
 
   defp serialize_tool_call_fields(_id, _name, _arguments),
     do: {:error, {:complete_response_invalid, :tool_call_fields}}
+
+  defp bounded_json_value(value) do
+    case bounded_json_value(value, %{nodes: 0, bytes: 0, depth: 0}) do
+      {:ok, json_value, %{bytes: bytes}} -> {:ok, json_value, bytes}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp bounded_json_value(value, state)
+       when is_binary(value) or is_integer(value) or is_float(value) or is_boolean(value) or
+              is_nil(value) do
+    with {:ok, state} <- bounded_json_node(state, scalar_bytes(value)) do
+      {:ok, value, state}
+    end
+  end
+
+  defp bounded_json_value(value, state) when is_atom(value) do
+    bounded_json_value(Atom.to_string(value), state)
+  end
+
+  defp bounded_json_value(value, state) when is_list(value) do
+    if state.depth >= @max_response_argument_depth do
+      {:error, {:complete_response_limit_exceeded, :tool_call_arguments}}
+    else
+      bounded_json_list(value, [], %{state | depth: state.depth + 1}, 0)
+    end
+  end
+
+  defp bounded_json_value(value, state) when is_map(value) do
+    if state.depth >= @max_response_argument_depth do
+      {:error, {:complete_response_limit_exceeded, :tool_call_arguments}}
+    else
+      bounded_json_map(:maps.iterator(value), %{}, %{state | depth: state.depth + 1})
+    end
+  end
+
+  defp bounded_json_value(_value, _state),
+    do: {:error, {:complete_response_invalid, :tool_call_arguments}}
+
+  defp bounded_json_list([], acc, state, _count),
+    do: {:ok, Enum.reverse(acc), %{state | depth: state.depth - 1}}
+
+  defp bounded_json_list([head | tail], acc, state, count)
+       when count < @max_response_argument_nodes do
+    with {:ok, value, state} <- bounded_json_value(head, state) do
+      bounded_json_list(tail, [value | acc], state, count + 1)
+    end
+  end
+
+  defp bounded_json_list(_improper, _acc, _state, _count),
+    do: {:error, {:complete_response_limit_exceeded, :tool_call_arguments}}
+
+  defp bounded_json_map(iterator, acc, state) do
+    case :maps.next(iterator) do
+      :none ->
+        {:ok, acc, %{state | depth: state.depth - 1}}
+
+      {key, value, next} ->
+        with {:ok, key} <- bounded_json_key(key),
+             {:ok, state} <- bounded_json_node(state, byte_size(key)),
+             true <- not Map.has_key?(acc, key) or {:error, {:duplicate_json_key, key}},
+             {:ok, value, state} <- bounded_json_value(value, state) do
+          bounded_json_map(next, Map.put(acc, key, value), state)
+        end
+    end
+  end
+
+  defp bounded_json_key(:__struct__), do: {:ok, "__external_struct__"}
+  defp bounded_json_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
+  defp bounded_json_key(key) when is_binary(key), do: {:ok, key}
+  defp bounded_json_key(_key), do: {:error, :string_or_atom_fixture_key_required}
+
+  defp bounded_json_node(%{nodes: nodes} = state, bytes)
+       when nodes < @max_response_argument_nodes and bytes >= 0 do
+    if state.bytes <= @max_response_tool_bytes - bytes do
+      {:ok, %{state | nodes: nodes + 1, bytes: state.bytes + bytes}}
+    else
+      {:error, {:complete_response_limit_exceeded, :tool_call_arguments}}
+    end
+  end
+
+  defp bounded_json_node(_state, _bytes),
+    do: {:error, {:complete_response_limit_exceeded, :tool_call_arguments}}
+
+  defp scalar_bytes(value) when is_binary(value), do: byte_size(value)
+  defp scalar_bytes(value) when is_integer(value), do: byte_size(Integer.to_string(value))
+  defp scalar_bytes(value) when is_float(value), do: byte_size(Float.to_string(value))
+  defp scalar_bytes(true), do: 4
+  defp scalar_bytes(false), do: 5
+  defp scalar_bytes(nil), do: 4
 
   defp serialize_finish_reason(nil), do: {:ok, nil}
 
@@ -555,19 +796,6 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   defp bounded_response_string(_value, field),
     do: {:error, {:complete_response_invalid, field}}
-
-  defp bounded_response_strings(values, field) when is_list(values) do
-    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
-      case bounded_response_string(value, field) do
-        {:ok, value} -> {:cont, {:ok, [value | acc]}}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, values} -> {:ok, Enum.reverse(values)}
-      {:error, _reason} = error -> error
-    end
-  end
 
   defp serialize_stream_event(%StreamEvent{type: type, data: data}) do
     %{
@@ -814,7 +1042,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
          {:ok, thinking} <- deserialize_response_strings(value["thinking"], :thinking),
          {:ok, tool_calls} <- deserialize_req_llm_tool_calls(value["tool_calls"]),
          {:ok, finish_reason} <- deserialize_finish_reason(value["finish_reason"]),
-         usage when is_map(usage) <- deserialize_usage(value["usage"]) do
+         usage when is_map(usage) <- deserialize_usage(value["usage"], :v2) do
       {:ok, build_req_llm_response(text, thinking, tool_calls, finish_reason, usage)}
     else
       {:error, reason} -> {:invalid_fixture_shape, reason}
@@ -837,7 +1065,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
          {:ok, content} <- add_legacy_reasoning(content, reasoning_content),
          {:ok, content} <- add_legacy_text(content, text),
          {:ok, finish_reason} <- deserialize_legacy_finish_reason(finish_reason),
-         usage when is_map(usage) <- deserialize_usage(Map.get(json, "usage", %{})) do
+         usage when is_map(usage) <- deserialize_usage(Map.get(json, "usage", %{}), :legacy) do
       {:ok, build_req_llm_response(text, content, tool_calls, finish_reason, usage, true)}
     else
       :invalid_usage -> {:invalid_fixture_shape, :legacy_usage_required}
@@ -1063,25 +1291,43 @@ defmodule Arbor.LLM.Plugs.Fixture do
   defp stream_data_key("reason"), do: :reason
   defp stream_data_key(key), do: key
 
-  defp deserialize_usage(usage) when is_map(usage) do
-    Enum.reduce_while(@usage_fields, %{}, fn {wire_key, atom_key}, acc ->
-      case Map.fetch(usage, wire_key) do
-        :error ->
-          {:cont, acc}
+  defp deserialize_usage(usage) when is_map(usage), do: deserialize_usage(usage, :legacy)
+  defp deserialize_usage(_usage), do: :invalid_usage
 
-        {:ok, nil} ->
-          {:cont, acc}
+  defp deserialize_usage(usage, mode) when is_map(usage) and mode in [:v2, :legacy] do
+    with :ok <- validate_usage_keys(usage, mode) do
+      Enum.reduce_while(@usage_fields, %{}, fn {wire_key, atom_key}, acc ->
+        case Map.fetch(usage, wire_key) do
+          :error ->
+            {:cont, acc}
 
-        {:ok, value} ->
-          case bounded_usage_value(atom_key, value) do
-            {:ok, value} -> {:cont, Map.put(acc, atom_key, value)}
-            :error -> {:halt, :invalid_usage}
-          end
-      end
-    end)
+          {:ok, nil} ->
+            {:cont, acc}
+
+          {:ok, value} ->
+            case bounded_usage_value(atom_key, value) do
+              {:ok, value} -> {:cont, Map.put(acc, atom_key, value)}
+              :error -> {:halt, :invalid_usage}
+            end
+        end
+      end)
+    else
+      :invalid_usage -> :invalid_usage
+    end
   end
 
-  defp deserialize_usage(_usage), do: :invalid_usage
+  defp deserialize_usage(_usage, _mode), do: :invalid_usage
+
+  defp validate_usage_keys(_usage, :legacy), do: :ok
+
+  defp validate_usage_keys(usage, :v2) do
+    allowed = Enum.map(@usage_fields, &elem(&1, 0))
+
+    if Enum.all?(Map.keys(usage), &is_binary/1) and
+         Enum.all?(Map.keys(usage), &(&1 in allowed)),
+       do: :ok,
+       else: :invalid_usage
+  end
 
   defp validate_replay(
          %Call{operation: op, request: {_model, texts, _opts}},

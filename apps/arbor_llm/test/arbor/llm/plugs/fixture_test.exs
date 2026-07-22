@@ -261,6 +261,24 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       refute File.read!(Fixture.path_for(call)) =~ "provider-internal"
     end
 
+    test "preserves thinking-part fallback when reasoning details are empty" do
+      call = Call.new(:complete, {"openai:empty-reasoning-details", [], []})
+
+      response =
+        req_response("answer",
+          content: [
+            ReqLLM.Message.ContentPart.thinking("fallback reasoning"),
+            ReqLLM.Message.ContentPart.text("answer")
+          ],
+          reasoning_details: [%ReqLLM.Message.ReasoningDetails{text: ""}]
+        )
+
+      :ok = Fixture.save(call, {:ok, response})
+      {:ok, {:ok, replayed}, _recorded_at} = Fixture.load(call)
+
+      assert ReqLLM.Response.thinking(replayed) == "fallback reasoning"
+    end
+
     test "loads legacy v1 Arbor response wire shape into ReqLLM" do
       call = Call.new(:complete, {"openai:gpt-4o-mini", [], []})
 
@@ -334,6 +352,77 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
 
       assert inspect(reason) =~ "req_llm_response_required"
       refute File.exists?(Fixture.path_for(call))
+    end
+
+    test "rejects unknown keys in v2 usage" do
+      call = Call.new(:complete, {"openai:v2-usage", [], []})
+
+      write_fixture(
+        call,
+        %{
+          "outcome" => "ok",
+          "value" => %{
+            "response_kind" => "req_llm",
+            "text" => "answer",
+            "thinking" => [],
+            "tool_calls" => [],
+            "finish_reason" => "stop",
+            "usage" => %{"input_tokens" => 1, "provider_secret" => 2}
+          }
+        },
+        2
+      )
+
+      assert {:error, {:invalid_fixture, _reason}} = Fixture.load(call)
+    end
+
+    test "rejects oversized and count-excess complete response collections without publication" do
+      cases = [
+        {
+          "oversized text",
+          req_response("",
+            content: [ReqLLM.Message.ContentPart.text(String.duplicate("x", 1_048_577))]
+          )
+        },
+        {
+          "content count",
+          req_response("", content: List.duplicate(ReqLLM.Message.ContentPart.text("x"), 100_001))
+        },
+        {
+          "reasoning count",
+          req_response("",
+            content: [],
+            reasoning_details: List.duplicate(reasoning_detail(), 100_001)
+          )
+        },
+        {
+          "tool call count",
+          req_response("", content: [], tool_calls: List.duplicate(tool_call(), 100_001))
+        }
+      ]
+
+      Enum.each(cases, fn {label, response} ->
+        call = Call.new(:complete, {"openai:bounded-#{label}", [], []})
+
+        assert {:error, reason} = Fixture.save(call, {:ok, response})
+        assert inspect(reason) =~ "complete_response", label
+        refute File.exists?(Fixture.path_for(call))
+      end)
+    end
+
+    test "fails closed for nil or malformed live content and reasoning details" do
+      malformed = [
+        req_response("", content: nil),
+        req_response("", content: [%{type: :text, text: "answer"}]),
+        req_response("", content: [], reasoning_details: "not-a-list"),
+        req_response("", content: [], reasoning_details: [%{text: "not-a-struct"}])
+      ]
+
+      Enum.each(Enum.with_index(malformed), fn {response, index} ->
+        call = Call.new(:complete, {"openai:malformed-#{index}", [], []})
+        assert {:error, _reason} = Fixture.save(call, {:ok, response})
+        refute File.exists?(Fixture.path_for(call))
+      end)
     end
 
     test "round-trips an :error result" do
@@ -740,6 +829,14 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       provider_meta: %{"provider_secret" => "must-not-persist"},
       error: nil
     }
+  end
+
+  defp reasoning_detail do
+    %ReqLLM.Message.ReasoningDetails{text: "reasoning"}
+  end
+
+  defp tool_call do
+    ReqLLM.ToolCall.new("call", "lookup", "{}")
   end
 
   defp write_fixture(call, response, schema_version \\ nil) do
