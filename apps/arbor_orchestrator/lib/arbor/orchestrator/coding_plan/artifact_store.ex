@@ -12,6 +12,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @manifest_filename "coding-compile-manifest.json"
   @terminal_evidence_filename "coding-terminal-evidence.json"
   @adoption_evidence_prefix "coding-adoption-evidence-"
+  @reconciliation_directory "coding-reconciliation"
+  @max_reconciliation_bytes 1_048_576
   @max_terminal_evidence_bytes 1_048_576
   @max_terminal_controls 100
   @max_terminal_task_id_bytes 512
@@ -74,6 +76,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
 
   alias Arbor.Contracts.Coding.{
     BranchLifecycleDescriptor,
+    ReconciliationManifest,
     TaskEvidenceDescriptor,
     ValidationCapacityHandoff,
     WorkspaceReleaseDescriptor
@@ -193,6 +196,329 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @doc "Validate the exact public ACP transcript descriptor schema."
   @spec valid_transcript_descriptor?(term()) :: boolean()
   def valid_transcript_descriptor?(descriptor), do: TranscriptStore.valid_descriptor?(descriptor)
+
+  @doc "Persist one immutable, digest-addressed reconciliation envelope.
+
+  The manifest digest addresses the reconciliation decision. The returned
+  envelope digest binds the complete persisted bytes, including persistence
+  time and supplementary evidence. A different envelope at the same manifest
+  path is an intentional immutable conflict.
+  "
+  @spec archive_reconciliation_manifest(String.t(), map(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def archive_reconciliation_manifest(root, scope, envelope) do
+    with {:ok, root} <- normalize_root(root),
+         :ok <- validate_json_object(scope, :invalid_reconciliation_scope),
+         {:ok, envelope} <- normalize_reconciliation_envelope(envelope),
+         :ok <- reconciliation_scope_matches?(scope, envelope["manifest"]["scope"]),
+         {:ok, encoded} <- encode_reconciliation_json(envelope),
+         true <- byte_size(encoded) <= @max_reconciliation_bytes,
+         :ok <- create_root(root),
+         {:ok, scope_digest} <- reconciliation_scope_digest(scope),
+         envelope_sha256 <- sha256(encoded),
+         path <- reconciliation_manifest_path(root, scope_digest, envelope["manifest_sha256"]),
+         :ok <- ensure_reconciliation_directories(root, path),
+         :ok <- validate_reconciliation_path(root, path),
+         :ok <- immutable_write(path, encoded, root),
+         :ok <-
+           verify_reconciliation_file(
+             path,
+             encoded,
+             envelope["manifest_sha256"],
+             envelope_sha256,
+             scope_digest
+           ) do
+      {:ok,
+       %{
+         "reconciliation_manifest_path" => path,
+         "manifest_sha256" => envelope["manifest_sha256"],
+         "envelope_sha256" => envelope_sha256,
+         "scope_sha256" => scope_digest,
+         "byte_size" => byte_size(encoded)
+       }}
+    else
+      false -> {:error, {:reconciliation_manifest_too_large, @max_reconciliation_bytes}}
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_reconciliation_manifest}
+    end
+  rescue
+    _exception -> {:error, :reconciliation_manifest_error}
+  catch
+    _kind, _reason -> {:error, :reconciliation_manifest_throw}
+  end
+
+  @doc "Read and re-verify an immutable reconciliation envelope by scope and digest."
+  @spec read_reconciliation_manifest(String.t(), map(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def read_reconciliation_manifest(root, scope, manifest_sha256)
+      when is_binary(manifest_sha256),
+      do: read_reconciliation_manifest(root, scope, manifest_sha256, nil)
+
+  def read_reconciliation_manifest(_root, _scope, _manifest_sha256),
+    do: {:error, :invalid_reconciliation_manifest_digest}
+
+  @doc "Read an envelope and optionally bind its complete persisted bytes."
+  @spec read_reconciliation_manifest(String.t(), map(), String.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def read_reconciliation_manifest(root, scope, manifest_sha256, expected_envelope_sha256)
+      when is_binary(manifest_sha256) do
+    with {:ok, root} <- normalize_root(root),
+         :ok <- validate_json_object(scope, :invalid_reconciliation_scope),
+         :ok <- validate_sha256(manifest_sha256, :manifest_sha256),
+         :ok <- validate_optional_sha256(expected_envelope_sha256, :envelope_sha256),
+         {:ok, scope_digest} <- reconciliation_scope_digest(scope),
+         path <- reconciliation_manifest_path(root, scope_digest, manifest_sha256),
+         {:ok, encoded} <- File.read(path),
+         {:ok, envelope} <- decode_reconciliation_envelope(encoded),
+         :ok <-
+           verify_reconciliation_file(
+             path,
+             encoded,
+             manifest_sha256,
+             expected_envelope_sha256 || sha256(encoded),
+             scope_digest
+           ) do
+      {:ok, envelope}
+    else
+      {:error, :enoent} -> {:error, :reconciliation_manifest_not_found}
+      {:error, _reason} = error -> error
+      _other -> {:error, :reconciliation_manifest_verification_failed}
+    end
+  end
+
+  def read_reconciliation_manifest(_root, _scope, _manifest_sha256, _expected_envelope_sha256),
+    do: {:error, :invalid_reconciliation_manifest_digest}
+
+  defp normalize_reconciliation_envelope(envelope)
+       when is_map(envelope) and not is_struct(envelope) do
+    with :ok <- validate_json_object(envelope, :invalid_reconciliation_envelope),
+         :ok <- exact_reconciliation_envelope_keys(envelope),
+         1 <- envelope["schema_version"],
+         {:ok, manifest} <- ReconciliationManifest.normalize(envelope["manifest"]),
+         {:ok, manifest_sha256} <- ReconciliationManifest.digest(manifest),
+         :ok <- validate_sha256(envelope["manifest_sha256"], :manifest_sha256),
+         true <- manifest_sha256 == envelope["manifest_sha256"],
+         {:ok, persisted_at} <- normalize_persisted_at(envelope["persisted_at"]),
+         {:ok, supplementary} <- normalize_supplementary(envelope["supplementary_evidence"]) do
+      {:ok,
+       %{
+         "schema_version" => 1,
+         "manifest" => manifest,
+         "manifest_sha256" => manifest_sha256,
+         "persisted_at" => persisted_at,
+         "supplementary_evidence" => supplementary
+       }}
+    else
+      false -> {:error, :reconciliation_manifest_digest_mismatch}
+      _ -> {:error, :invalid_reconciliation_envelope}
+    end
+  end
+
+  defp normalize_reconciliation_envelope(_envelope),
+    do: {:error, :invalid_reconciliation_envelope}
+
+  defp decode_reconciliation_envelope(encoded) when is_binary(encoded) do
+    with {:ok, decoded} <- Jason.decode(encoded),
+         {:ok, envelope} <- normalize_reconciliation_envelope(decoded) do
+      {:ok, envelope}
+    else
+      _ -> {:error, :invalid_reconciliation_envelope}
+    end
+  end
+
+  defp encode_reconciliation_json(value) do
+    case Jason.encode(canonicalize_json(value), pretty: true) do
+      {:ok, encoded} -> {:ok, encoded}
+      _ -> {:error, :invalid_reconciliation_manifest}
+    end
+  rescue
+    _ -> {:error, :invalid_reconciliation_manifest}
+  catch
+    _, _ -> {:error, :invalid_reconciliation_manifest}
+  end
+
+  defp exact_reconciliation_envelope_keys(envelope) do
+    if Enum.sort(Map.keys(envelope)) ==
+         ~w(manifest manifest_sha256 persisted_at schema_version supplementary_evidence),
+       do: :ok,
+       else: {:error, :invalid_reconciliation_envelope}
+  end
+
+  defp normalize_persisted_at(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} ->
+        {:ok, DateTime.to_iso8601(DateTime.shift_zone!(datetime, "Etc/UTC"), :extended)}
+
+      _ ->
+        {:error, :invalid_persisted_at}
+    end
+  end
+
+  defp normalize_persisted_at(_value), do: {:error, :invalid_persisted_at}
+
+  defp normalize_supplementary(value) when is_map(value) and not is_struct(value) do
+    if validate_json_object(value, :invalid_supplementary_evidence) == :ok,
+      do: {:ok, value},
+      else: {:error, :invalid_supplementary_evidence}
+  end
+
+  defp normalize_supplementary(_value), do: {:error, :invalid_supplementary_evidence}
+
+  defp reconciliation_scope_digest(scope) do
+    case Jason.encode(canonicalize_json(scope)) do
+      {:ok, encoded} -> {:ok, sha256(encoded)}
+      {:error, reason} -> {:error, {:invalid_reconciliation_scope, reason}}
+    end
+  end
+
+  defp reconciliation_scope_matches?(scope, scope), do: :ok
+
+  defp reconciliation_scope_matches?(_scope, _manifest_scope),
+    do: {:error, :reconciliation_scope_mismatch}
+
+  defp validate_reconciliation_path(root, path) do
+    with {:ok, _lexical} <- SafePath.resolve_within(path, root),
+         {:ok, real_root} <- SafePath.resolve_real(root),
+         {:ok, real_parent} <- SafePath.resolve_real(Path.dirname(path)),
+         true <- SafePath.within?(real_parent, real_root) do
+      :ok
+    else
+      _ -> {:error, :reconciliation_manifest_path_escape}
+    end
+  end
+
+  defp ensure_reconciliation_directories(root, path) do
+    reconciliation_root = Path.join(root, @reconciliation_directory)
+    scope_root = Path.dirname(path)
+
+    with :ok <- ensure_directory(root),
+         :ok <- ensure_directory(reconciliation_root),
+         :ok <- ensure_directory(scope_root) do
+      :ok
+    end
+  end
+
+  defp ensure_directory(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} ->
+        :ok
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :reconciliation_manifest_symlink}
+
+      {:ok, _other} ->
+        {:error, :invalid_reconciliation_manifest_directory}
+
+      {:error, :enoent} ->
+        case File.mkdir(path) do
+          :ok -> ensure_directory(path)
+          {:error, :eexist} -> ensure_directory(path)
+          {:error, reason} -> {:error, {:create_reconciliation_directory_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:reconciliation_manifest_unavailable, reason}}
+    end
+  end
+
+  defp reconciliation_manifest_path(root, scope_digest, manifest_sha256) do
+    Path.join([
+      root,
+      @reconciliation_directory,
+      "scope-" <> scope_digest,
+      "manifest-" <> manifest_sha256 <> ".json"
+    ])
+  end
+
+  defp immutable_write(path, content, root) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        immutable_atomic_write(path, content, root)
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        with true <- Bitwise.band(mode, 0o777) == 0o600,
+             {:ok, existing} <- File.read(path),
+             true <- existing == content do
+          :ok
+        else
+          false -> {:error, :reconciliation_manifest_conflict}
+          {:error, reason} -> {:error, {:reconciliation_manifest_unreadable, reason}}
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :reconciliation_manifest_symlink}
+
+      {:ok, _other} ->
+        {:error, :invalid_reconciliation_manifest_file}
+
+      {:error, reason} ->
+        {:error, {:reconciliation_manifest_unavailable, reason}}
+    end
+  end
+
+  defp immutable_atomic_write(path, content, root) do
+    temporary_path = temporary_path(path)
+
+    try do
+      with :ok <- validate_reconciliation_path(root, path),
+           :ok <- validate_existing_reconciliation_directory(Path.dirname(path)),
+           :ok <- write_secure_temp(temporary_path, content),
+           :ok <- File.ln(temporary_path, path) do
+        :ok
+      else
+        {:error, :eexist} -> immutable_write(path, content, root)
+        {:error, reason} -> {:error, {:write_reconciliation_manifest_failed, reason}}
+      end
+    after
+      File.rm(temporary_path)
+    end
+  end
+
+  defp verify_reconciliation_file(
+         path,
+         expected_encoded,
+         expected_digest,
+         expected_envelope_digest,
+         scope_digest
+       ) do
+    with {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(path),
+         true <- Bitwise.band(mode, 0o777) == 0o600,
+         {:ok, encoded} <- File.read(path),
+         true <- encoded == expected_encoded,
+         true <- sha256(encoded) == expected_envelope_digest,
+         {:ok, envelope} <- decode_reconciliation_envelope(encoded),
+         true <- envelope["manifest_sha256"] == expected_digest,
+         {:ok, actual_scope_digest} <- reconciliation_scope_digest(envelope["manifest"]["scope"]),
+         true <- actual_scope_digest == scope_digest do
+      :ok
+    else
+      false -> {:error, :reconciliation_manifest_verification_failed}
+      {:error, reason} -> {:error, {:reconciliation_manifest_verification_failed, reason}}
+      _ -> {:error, :reconciliation_manifest_verification_failed}
+    end
+  end
+
+  defp validate_existing_reconciliation_directory(path) do
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(path),
+         {:ok, real_path} <- SafePath.resolve_real(path),
+         true <- File.dir?(real_path) do
+      :ok
+    else
+      {:error, :enoent} -> {:error, :reconciliation_manifest_directory_missing}
+      {:error, _reason} -> {:error, :reconciliation_manifest_directory_unavailable}
+      _ -> {:error, :invalid_reconciliation_manifest_directory}
+    end
+  end
+
+  defp validate_sha256(value, _field)
+       when is_binary(value) and byte_size(value) == 64 do
+    if Regex.match?(~r/\A[0-9a-f]{64}\z/, value), do: :ok, else: {:error, :invalid_sha256}
+  end
+
+  defp validate_sha256(_value, field), do: {:error, {:invalid_sha256, field}}
+
+  defp validate_optional_sha256(nil, _field), do: :ok
+  defp validate_optional_sha256(value, field), do: validate_sha256(value, field)
 
   defp normalize_root(root) when is_binary(root) do
     cond do

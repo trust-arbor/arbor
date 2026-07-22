@@ -112,6 +112,10 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://agent/task/steer",
     "arbor://agent/task/adopt",
 
+    # Coding reconciliation is read-only in this slice. Apply authority is
+    # intentionally absent until source-owned CAS identities exist.
+    "arbor://coding/reconciliation/read",
+
     # Comms facade
     "arbor://comms/send",
     "arbor://comms/poll",

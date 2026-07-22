@@ -254,6 +254,12 @@ defmodule Arbor.Orchestrator.Config do
   @default_coding_pipeline_runner Arbor.Orchestrator
   @default_coding_plan_compiler Arbor.Orchestrator.CodingPlan.Compiler
   @default_coding_plan_artifact_store Arbor.Orchestrator.CodingPlan.ArtifactStore
+  @default_coding_reconciliation_task_facade Arbor.Agent.Orchestration
+  @default_coding_reconciliation_resource_facade Arbor.Actions
+  @default_coding_reconciliation_acp_facade Arbor.AI
+  @default_coding_reconciliation_approval_facade Arbor.Agent.Orchestration
+  @default_coding_reconciliation_artifact_store Arbor.Orchestrator.CodingPlan.ArtifactStore
+  @default_coding_reconciliation_observer nil
   @default_coding_readiness_observer_module nil
   @default_coding_readiness_acp_module Arbor.AI
   @default_coding_readiness_actions_module Arbor.Actions
@@ -361,6 +367,72 @@ defmodule Arbor.Orchestrator.Config do
       :coding_plan_artifact_store,
       @default_coding_plan_artifact_store
     )
+  end
+
+  @doc "Trusted public facade used to read coding reconciliation task evidence."
+  @spec coding_reconciliation_task_facade() :: module()
+  def coding_reconciliation_task_facade do
+    Application.get_env(
+      @app,
+      :coding_reconciliation_task_facade,
+      @default_coding_reconciliation_task_facade
+    )
+  end
+
+  @doc "Trusted public facade used to read coding workspace-resource evidence."
+  @spec coding_reconciliation_resource_facade() :: module()
+  def coding_reconciliation_resource_facade do
+    Application.get_env(
+      @app,
+      :coding_reconciliation_resource_facade,
+      @default_coding_reconciliation_resource_facade
+    )
+  end
+
+  @doc "Trusted public facade used to read managed ACP evidence."
+  @spec coding_reconciliation_acp_facade() :: module()
+  def coding_reconciliation_acp_facade do
+    Application.get_env(
+      @app,
+      :coding_reconciliation_acp_facade,
+      @default_coding_reconciliation_acp_facade
+    )
+  end
+
+  @doc "Trusted public facade used to read pending-approval evidence."
+  @spec coding_reconciliation_approval_facade() :: module()
+  def coding_reconciliation_approval_facade do
+    Application.get_env(
+      @app,
+      :coding_reconciliation_approval_facade,
+      @default_coding_reconciliation_approval_facade
+    )
+  end
+
+  @doc "Artifact store used for immutable reconciliation envelopes."
+  @spec coding_reconciliation_artifact_store() :: module()
+  def coding_reconciliation_artifact_store do
+    Application.get_env(
+      @app,
+      :coding_reconciliation_artifact_store,
+      @default_coding_reconciliation_artifact_store
+    )
+  end
+
+  @doc "Trusted test seam for bounded reconciliation observations."
+  @spec coding_reconciliation_observer_module() :: module() | nil
+  def coding_reconciliation_observer_module do
+    Application.get_env(
+      @app,
+      :coding_reconciliation_observer_module,
+      @default_coding_reconciliation_observer
+    )
+  end
+
+  @doc "Trusted clock seam for deterministic reconciliation tests."
+  @spec coding_reconciliation_clock() :: (-> term()) | module() | nil
+  def coding_reconciliation_clock do
+    Application.get_env(@app, :coding_reconciliation_clock, nil)
   end
 
   @doc """

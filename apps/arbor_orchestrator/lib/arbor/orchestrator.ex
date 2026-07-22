@@ -52,6 +52,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
   alias Arbor.Orchestrator.CodingPlan.Profiles
   alias Arbor.Orchestrator.CodingPlan.Readiness
+  alias Arbor.Orchestrator.CodingPlan.Reconciliation
   alias Arbor.Orchestrator.CodingPlan.SemanticPreflight
   alias Arbor.Orchestrator.CodingTaskExecutor
   alias Arbor.Orchestrator.Config
@@ -386,6 +387,12 @@ defmodule Arbor.Orchestrator do
       |> Keyword.put_new(:observed_at, DateTime.utc_now() |> DateTime.to_iso8601(:extended))
 
     Readiness.check(plan_or_attrs, opts)
+  end
+
+  @doc "Run an authorized, read-only coding-resource reconciliation dry-run."
+  @spec reconcile_coding_resources(keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def reconcile_coding_resources(opts \\ []) do
+    Reconciliation.dry_run(opts)
   end
 
   @doc """

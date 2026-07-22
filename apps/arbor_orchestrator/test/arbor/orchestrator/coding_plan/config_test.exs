@@ -11,7 +11,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ConfigTest do
   defmodule InjectedArtifactStore do
   end
 
-  @keys [:coding_plan_compiler, :coding_plan_artifact_store]
+  @keys [
+    :coding_plan_compiler,
+    :coding_plan_artifact_store,
+    :coding_reconciliation_observer_module,
+    :coding_reconciliation_clock
+  ]
 
   setup do
     previous = Map.new(@keys, &{&1, Application.fetch_env(:arbor_orchestrator, &1)})
@@ -46,5 +51,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ConfigTest do
 
     assert Config.coding_plan_compiler() == InjectedCompiler
     assert Config.coding_plan_artifact_store() == InjectedArtifactStore
+  end
+
+  test "reconciliation observation and clock seams are not public data options" do
+    refute is_map(Config.coding_reconciliation_observer_module())
+    assert Config.coding_reconciliation_clock() == nil
   end
 end
