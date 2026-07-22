@@ -142,6 +142,18 @@ the current reviewed set is `default`, `security_regression`, `contract_change`,
 <a id="applied-learning-the-coding-plan-data-contract-is-broader-than-the-executable-v1-feature-set"></a>
 **The Coding Plan data contract is broader than the executable v1 feature set.** `Arbor.Contracts.Coding.Plan.new/1` can normalize optional policy fields that the current compiler intentionally rejects as `{:unsupported_v1_feature, field}`. Before dispatching live work, use only the executable profile subset (or run a compile probe); in particular, leave `rework.stop_conditions` empty until the compiler implements it. A preflight rejection before workspace acquisition is safe to correct and redispatch (found 2026-07-11 when terminal-approval cleanup was rejected before worker startup).
 
+<!-- applied-learning: normalized-coding-profile-ids-are-not-proof-that-the-profile-is-executable -->
+<a id="applied-learning-normalized-coding-profile-ids-are-not-proof-that-the-profile-is-executable"></a>
+**Normalized Coding Plan profile ids are not proof that a profile is executable.**
+The plan contract accepts discovery ids such as `contract_change`, but the
+compiler must still find a reviewed executable profile and every promised
+enforcement action. Probe compilation or `Profiles.fetch_executable/1` before
+dispatch. On 2026-07-22, a bounded contract-only delegation failed before
+workspace acquisition with `profile_not_executable` because no registered
+action yet enforced CONTRACT_RULES preflight and consumer/API compatibility;
+redispatching under `default` was honest only because the task independently
+required focused contract tests and did not claim the missing specialized gate.
+
 <!-- applied-learning: private-per-dispatch-options-must-not-select-executable-cleanup-code -->
 <a id="applied-learning-private-per-dispatch-options-must-not-select-executable-cleanup-code"></a>
 **Private per-dispatch options must not select executable cleanup code.** A caller that can reach a low-level task store directly can supply an arbitrary MFA even when the facade normally constructs that option. Fix stable lifecycle code at the store's trusted initialization boundary (with an explicit test-only seam if needed), and let per-task descriptors carry data only. Launch deferred work with module/function/args APIs rather than storing or spawning anonymous closures (found 2026-07-11 when council review rejected the first terminal-approval cleanup implementation).
