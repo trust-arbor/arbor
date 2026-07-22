@@ -150,6 +150,102 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
   end
 
+  defmodule ReadinessObservers do
+    @moduledoc false
+
+    alias Arbor.Contracts.LLM.ProviderObservation
+
+    def security_available?,
+      do:
+        Process.get(
+          {:coding_executor_readiness, :security_available},
+          Arbor.Orchestrator.Config.security_available?()
+        )
+
+    def signing_key_status(_agent_id) do
+      case Process.get(:coding_executor_signing_key) do
+        :missing -> {:error, :no_signing_key}
+        _ -> Process.get({:coding_executor_readiness, :signing_key_status}, {:ok, :available})
+      end
+    end
+
+    def acp_provider_readiness(provider, model) do
+      case Process.get({:coding_executor_readiness, :acp_provider_readiness}) do
+        nil ->
+          now = DateTime.utc_now()
+          observed_at = DateTime.to_iso8601(now, :extended)
+          expires_at = DateTime.to_iso8601(DateTime.add(now, 20, :second), :extended)
+
+          {:ok, observation} =
+            ProviderObservation.normalize(%{
+              provider: provider,
+              source: "acp_provider_readiness",
+              runtime: "acp",
+              observed_at: observed_at,
+              expires_at: expires_at,
+              availability: "degraded",
+              auth_health: "unknown",
+              model_catalog_membership: "unknown",
+              quota_state: "unknown",
+              subscription_capacity_state: "unknown",
+              requested_model_id: model,
+              launch_bound_model_id: model
+            })
+
+          {:ok, digest} = ProviderObservation.digest(observation)
+          %{"observation" => observation, "digest" => digest}
+
+        observer when is_function(observer, 2) ->
+          observer.(provider, model)
+
+        value ->
+          value
+      end
+    end
+
+    def coding_toolchain_identity do
+      case Process.get({:coding_executor_readiness, :toolchain_identity}) do
+        nil -> toolchain_identity()
+        observer when is_function(observer, 0) -> observer.()
+        value -> value
+      end
+    end
+
+    def validation_capacity_observer do
+      Process.get({:coding_executor_readiness, :validation_capacity}, :unavailable)
+    end
+
+    defp toolchain_identity do
+      base = %{
+        "schema_version" => 1,
+        "platform" => "unix:test",
+        "architecture" => "test",
+        "otp_release" => "28",
+        "elixir_version" => "1.19.5",
+        "mix_wrapper_path" => "/reviewed/bin/mix",
+        "runtime_roots" => %{
+          "erlang_root" => "/runtime/erlang",
+          "elixir_root" => "/runtime/elixir"
+        }
+      }
+
+      {:ok, Map.put(base, "identity_digest", sha256(canonical_json(base)))}
+    end
+
+    defp canonical_json(value) when is_map(value) do
+      value
+      |> Enum.sort_by(fn {key, _value} -> key end)
+      |> Enum.map(fn {key, nested} -> [Jason.encode!(key), ":", canonical_json(nested)] end)
+      |> then(&["{", Enum.intersperse(&1, ","), "}"])
+    end
+
+    defp canonical_json(value) when is_list(value),
+      do: ["[", Enum.intersperse(Enum.map(value, &canonical_json/1), ","), "]"]
+
+    defp canonical_json(value), do: Jason.encode!(value)
+    defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+  end
+
   defmodule ObservedArtifactStore do
     @moduledoc false
 
@@ -541,6 +637,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       coding_plan_compiler: Application.get_env(:arbor_orchestrator, :coding_plan_compiler),
       coding_plan_artifact_store:
         Application.get_env(:arbor_orchestrator, :coding_plan_artifact_store),
+      coding_readiness_observer_module:
+        Application.get_env(:arbor_orchestrator, :coding_readiness_observer_module),
       coding_repo_roots: Application.get_env(:arbor_orchestrator, :coding_repo_roots),
       coding_worktree_roots: Application.get_env(:arbor_orchestrator, :coding_worktree_roots),
       pipeline_status_module: Application.get_env(:arbor_orchestrator, :pipeline_status_module),
@@ -562,6 +660,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, CapturingRunner)
     Application.put_env(:arbor_orchestrator, :coding_plan_compiler, FakeCompiler)
     Application.put_env(:arbor_orchestrator, :coding_plan_artifact_store, FakeArtifactStore)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_readiness_observer_module,
+      ReadinessObservers
+    )
+
     Application.put_env(:arbor_orchestrator, :pipeline_status_module, FakePipelineStatus)
     Application.put_env(:arbor_orchestrator, :coding_task_control_facade, FakeTaskControlFacade)
     Application.put_env(:arbor_orchestrator, :security_module, FakeSecurity)
@@ -623,6 +728,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Process.delete(:coding_abandoned_runs)
     Process.delete(:coding_task_control_calls)
     Process.delete(:coding_task_control_reply)
+
+    for key <- [
+          :security_available,
+          :signing_key_status,
+          :acp_provider_readiness,
+          :toolchain_identity,
+          :validation_capacity
+        ] do
+      Process.delete({:coding_executor_readiness, key})
+    end
+
     Application.delete_env(:arbor_orchestrator, :coding_executor_runner_reply)
     Application.delete_env(:arbor_orchestrator, :coding_executor_final_context)
     Application.delete_env(:arbor_orchestrator, :coding_auth_reply)
@@ -634,6 +750,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       restore(:coding_approval_timeout_ms, originals.coding_approval_timeout_ms)
       restore(:coding_plan_compiler, originals.coding_plan_compiler)
       restore(:coding_plan_artifact_store, originals.coding_plan_artifact_store)
+      restore(:coding_readiness_observer_module, originals.coding_readiness_observer_module)
       restore(:coding_repo_roots, originals.coding_repo_roots)
       restore(:coding_worktree_roots, originals.coding_worktree_roots)
       restore(:pipeline_status_module, originals.pipeline_status_module)
@@ -1258,7 +1375,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           },
           "worker" => %{
             "provider" => "grok",
-            "model" => "grok-code-fast",
+            "model" => "grok-4.5",
             "permission_mode" => "deny"
           },
           "review_profile" => "human_required",
@@ -1276,7 +1393,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       iv = opts[:initial_values]
       assert opts[:timeout] == 120_000
       assert iv["acp_agent"] == "grok"
-      assert iv["model"] == "grok-code-fast"
+      assert iv["model"] == "grok-4.5"
       refute Map.has_key?(iv, "permission_mode")
       assert iv["inactivity_timeout_ms"] == 45_000
       assert iv["open_pr"] == "true"
@@ -1305,6 +1422,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute_receive {:coding_executor_captured_run, _path, _opts}
       assert Process.get(:coding_executor_last_run) == nil
       refute File.exists?(Config.coding_pipeline_logs_root())
+    end
+
+    test "prepares the exact compilation once before archive and runner" do
+      Application.put_env(:arbor_orchestrator, :coding_plan_compiler, ObservedCompiler)
+
+      assert {:ok, _result} = CodingTaskExecutor.run("agent_once", valid_task(), valid_context())
+
+      assert_receive :coding_plan_compiler_called
+      refute_receive :coding_plan_compiler_called
     end
 
     test "rejects mixed direct/legacy shapes and task-supplied authority" do
@@ -1954,7 +2080,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       Application.put_env(:arbor_orchestrator, :security_available_override, false)
       Application.put_env(:arbor_orchestrator, :security_required, false)
 
-      assert {:error, :security_unavailable} =
+      assert {:error,
+              {:coding_readiness_blocked, "security_authority", "security_authority_unavailable"}} =
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       assert Process.get(:coding_executor_last_run) == nil
@@ -1963,7 +2090,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "missing signing key fails closed" do
       Process.put(:coding_executor_signing_key, :missing)
 
-      assert {:error, :no_signing_key} =
+      assert {:error,
+              {:coding_readiness_blocked, "security_authority", "signing_key_unavailable"}} =
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       assert Process.get(:coding_executor_last_run) == nil
@@ -1985,12 +2113,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "invalid compiler module and malformed compiler replies fail closed" do
       Application.put_env(:arbor_orchestrator, :coding_plan_compiler, "not-a-module")
 
-      assert {:error, :coding_plan_compiler_unavailable} =
+      assert {:error, {:coding_plan_compiler_unavailable, "not-a-module"}} =
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       Application.put_env(:arbor_orchestrator, :coding_plan_compiler, InvalidCompilerReply)
 
-      assert {:error, :invalid_coding_plan_compiler_reply} =
+      assert {:error, {:invalid_compilation_field, "compilation"}} =
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       refute_receive {:coding_executor_captured_run, _path, _opts}
@@ -2003,8 +2131,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         MismatchedManifestCompiler
       )
 
-      assert {:error,
-              {:invalid_coding_plan_compiler_reply, {:manifest_mismatch, "plan_fingerprint"}}} =
+      assert {:error, {:compilation_field_mismatch, "manifest.plan_fingerprint"}} =
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       Application.put_env(
@@ -2013,8 +2140,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         RedirectingInitialValuesCompiler
       )
 
-      assert {:error,
-              {:invalid_coding_plan_compiler_reply, {:initial_value_mismatch, "repo_path"}}} =
+      assert {:error, {:compilation_field_mismatch, "initial_values"}} =
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       refute_receive {:coding_executor_captured_run, _path, _opts}
@@ -2032,9 +2158,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         {:put, "coding_plan_work_packet_digest", "sha256:" <> String.duplicate("0", 64)}
       )
 
-      assert {:error,
-              {:invalid_coding_plan_compiler_reply,
-               {:compilation_field_mismatch, "initial_values"}}} =
+      assert {:error, {:compilation_field_mismatch, "initial_values"}} =
                CodingTaskExecutor.run("agent_1", valid_v2_direct_task(), valid_context())
 
       refute_receive {:coding_executor_captured_run, _path, _opts}
@@ -2078,9 +2202,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         OutsideWorktreeCreatingRunner
       )
 
-      assert {:error,
-              {:invalid_coding_plan_compiler_reply,
-               {:initial_value_mismatch, "worktree_base_dir"}}} =
+      assert {:error, {:compilation_field_mismatch, "initial_values"}} =
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       refute File.exists?(marker)
@@ -2115,7 +2237,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       for {task, operation, key, value} <- cases do
         Process.put(:coding_executor_initial_value_mutation, {operation, key, value})
 
-        assert {:error, {:invalid_coding_plan_compiler_reply, {:initial_value_mismatch, ^key}}} =
+        assert {:error, {:compilation_field_mismatch, "initial_values"}} =
                  CodingTaskExecutor.run("agent_1", task, valid_context())
       end
 

@@ -73,8 +73,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     Normalizer,
     OutcomeMapper,
     Profiles,
-    SemanticPreflight,
-    WorkspaceScope
+    Readiness,
+    SemanticPreflight
   }
 
   alias Arbor.Orchestrator.Dot.Parser
@@ -167,35 +167,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     identity_private_key
   ))
 
-  @forbidden_initial_value_keys MapSet.new(~w(
-    action_executor
-    actions_executor
-    agent_id
-    approval_timeout_ms
-    artifacts
-    authorization
-    authorizer
-    capabilities
-    coding_pipeline_path
-    compile_manifest_path
-    coding_plan_path
-    engine
-    engine_module
-    graph
-    graph_path
-    identity
-    identity_private_key
-    pipeline_path
-    private_key
-    session.agent_id
-    session.caller_id
-    session.metadata
-    session.task_id
-    signer
-    signing_key
-    task_id
-  ))
-
   @artifact_descriptor_keys MapSet.new(~w(
     coding_plan_path
     coding_pipeline_path
@@ -284,25 +255,33 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     with :ok <- validate_agent_id(agent_id),
          {:ok, exec_ctx} <- validate_context(context),
          {:ok, plan} <- Normalizer.normalize_task(task),
-         :ok <- require_security_available(),
-         {:ok, plan} <- normalize_workspace_scope(plan),
          {:ok, template_path} <- resolve_template_path(),
+         {:ok, canonical_plan, compilation} <-
+           Readiness.prepare(plan, template_path: template_path),
+         {:ok, readiness_report} <-
+           Readiness.check_prepared(
+             canonical_plan,
+             compilation,
+             mode: :live,
+             agent_id: agent_id,
+             observed_at: DateTime.utc_now()
+           ),
+         :ok <- admit_readiness(readiness_report),
          {:ok, security} <- security_facade(),
          {:ok, authority} <- acquire_signing_authority(security, agent_id) do
       try do
-        with {:ok, compilation} <- compile_plan(plan, template_path),
-             {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
-             {:ok, artifacts} <- archive_compilation(logs_root, plan, compilation),
+        with {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
+             {:ok, artifacts} <- archive_compilation(logs_root, canonical_plan, compilation),
              {:ok, {pinned_action_bindings, pinned_handler_bindings}} <-
                verify_execution_boundary(
                  Map.fetch!(artifacts, "coding_pipeline_path"),
-                 plan,
+                 canonical_plan,
                  compilation
                ),
              {:ok, opts} <-
                build_engine_opts(
                  agent_id,
-                 plan,
+                 canonical_plan,
                  compilation,
                  exec_ctx,
                  authority,
@@ -319,8 +298,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                adapt_result(
                  engine_result,
                  started_at,
-                 Map.fetch!(plan.worker, "provider"),
-                 Map.get(plan.worker, "model")
+                 Map.fetch!(canonical_plan.worker, "provider"),
+                 Map.get(canonical_plan.worker, "model")
                ),
              release_artifacts = attach_workspace_release_artifact(artifacts, result),
              {:ok, public_artifacts} <-
@@ -1354,35 +1333,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # Identity / graph / engine opts
   # ===========================================================================
 
-  # Workspace roots are input scope, not authorization. Both configured roots
-  # and caller-supplied paths must already exist so realpath can resolve every
-  # symlink before the segment-aware containment check.
-  defp normalize_workspace_scope(%Plan{} = plan) do
-    with {:ok, configured_repo_roots} <- Config.coding_repo_roots(),
-         {:ok, configured_worktree_roots} <- Config.coding_worktree_roots() do
-      WorkspaceScope.normalize(plan, configured_repo_roots, configured_worktree_roots)
+  defp admit_readiness(%{"status" => status}) when status in ["ready", "degraded"],
+    do: :ok
+
+  defp admit_readiness(%{"status" => "blocked", "diagnostics" => diagnostics})
+       when is_list(diagnostics) do
+    case Enum.find(diagnostics, &(&1["decision"] == "blocked")) do
+      %{"gate_id" => gate_id, "code" => code}
+      when is_binary(gate_id) and is_binary(code) and byte_size(gate_id) <= 128 and
+             byte_size(code) <= 128 ->
+        {:error, {:coding_readiness_blocked, gate_id, code}}
+
+      _ ->
+        {:error, {:coding_readiness_blocked, "readiness", "report_invalid"}}
     end
   end
 
-  # `resolve_within/2` compares whole path segments (a root `/repos/app` does
-  # not contain `/repos/app-evil`). Both values have already been realpathed.
-  defp contained_in?(root, path) do
-    case SafePath.resolve_within(path, root) do
-      {:ok, ^path} -> true
-      _ -> false
-    end
-  end
-
-  # Production coding executor always fails closed when security is down —
-  # before any runner (including injected test doubles) is invoked, and
-  # regardless of the global standalone security_required? escape hatch.
-  defp require_security_available do
-    if Config.security_available?() do
-      :ok
-    else
-      {:error, :security_unavailable}
-    end
-  end
+  defp admit_readiness(_report),
+    do: {:error, {:coding_readiness_blocked, "readiness", "report_invalid"}}
 
   defp resolve_template_path do
     path = Config.coding_pipeline_path()
@@ -1396,95 +1364,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
       true ->
         {:error, {:coding_pipeline_unavailable, path}}
-    end
-  end
-
-  defp compile_plan(%Plan{} = plan, template_path) do
-    compiler = Config.coding_plan_compiler()
-
-    cond do
-      not is_atom(compiler) ->
-        {:error, :coding_plan_compiler_unavailable}
-
-      not Code.ensure_loaded?(compiler) ->
-        {:error, :coding_plan_compiler_unavailable}
-
-      not function_exported?(compiler, :compile, 2) ->
-        {:error, :coding_plan_compiler_unavailable}
-
-      true ->
-        invoke_compiler(compiler, plan, template_path)
-    end
-  end
-
-  defp invoke_compiler(compiler, plan, template_path) do
-    case compiler.compile(plan, template_path: template_path) do
-      {:ok, %Compilation{} = compilation} ->
-        validate_compilation(compilation, plan)
-
-      {:error, _reason} = error ->
-        error
-
-      _other ->
-        {:error, :invalid_coding_plan_compiler_reply}
-    end
-  rescue
-    error -> {:error, {:coding_plan_compile_error, Exception.message(error)}}
-  catch
-    :exit, reason -> {:error, {:coding_plan_compile_exit, reason}}
-    kind, reason -> {:error, {:coding_plan_compile_throw, {kind, reason}}}
-  end
-
-  defp validate_compilation(%Compilation{} = compilation, %Plan{} = plan) do
-    with :ok <- validate_compilation_plan(compilation.plan_map, plan),
-         :ok <- validate_nonblank_binary(compilation.dot_source, :dot_source),
-         :ok <- validate_hash(compilation.graph_hash, :graph_hash),
-         :ok <- validate_dot_hash(compilation.dot_source, compilation.graph_hash),
-         :ok <- validate_nonblank_binary(compilation.compiler_version, :compiler_version),
-         :ok <- validate_nonblank_binary(compilation.template_version, :template_version),
-         :ok <- validate_hash(compilation.plan_fingerprint, :plan_fingerprint),
-         :ok <- validate_hash(compilation.action_catalog_digest, :action_catalog_digest),
-         :ok <-
-           validate_hash(compilation.execution_manifest_digest, :execution_manifest_digest),
-         :ok <- validate_json_object(compilation.execution_manifest, :execution_manifest),
-         :ok <-
-           ExecutionManifest.validate(
-             compilation.execution_manifest,
-             compilation.execution_manifest_digest,
-             compilation.graph_hash
-           ),
-         :ok <- validate_json_object(compilation.initial_values, :initial_values),
-         :ok <-
-           reject_forbidden_keys(
-             compilation.initial_values,
-             @forbidden_initial_value_keys,
-             :forbidden_compilation_initial_value
-           ),
-         :ok <- validate_core_initial_values(compilation.initial_values, plan),
-         :ok <- validate_json_object(compilation.manifest, :manifest),
-         :ok <- validate_compilation_manifest(compilation, plan),
-         :ok <- validate_compilation_contract(compilation, plan) do
-      {:ok, compilation}
-    else
-      {:error, reason} -> {:error, {:invalid_coding_plan_compiler_reply, reason}}
-    end
-  end
-
-  defp validate_compilation_contract(compilation, plan) do
-    case Compilation.validate(compilation, plan) do
-      {:ok, ^compilation} -> :ok
-      {:error, reason} -> {:error, reason}
-      _other -> {:error, :invalid_compilation_contract_reply}
-    end
-  end
-
-  defp validate_compilation_plan(plan_map, plan) do
-    with :ok <- validate_json_object(plan_map, :plan_map),
-         true <- plan_map == Plan.to_map(plan) do
-      :ok
-    else
-      false -> {:error, :plan_map_mismatch}
-      {:error, _reason} = error -> error
     end
   end
 
@@ -1507,90 +1386,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp validate_dot_hash(dot_source, graph_hash) do
-    if sha256(dot_source) == graph_hash,
-      do: :ok,
-      else: {:error, :graph_hash_mismatch}
-  end
-
-  defp validate_core_initial_values(initial_values, plan) do
-    required = %{
-      "task" => plan.task,
-      "repo_path" => plan.repo_root,
-      "acp_agent" => plan.worker["provider"],
-      "base_ref" => plan.base_ref,
-      "timeout" => plan.budgets["wall_clock_ms"],
-      "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
-      "open_pr" => bool_string(plan.output["draft_pr"]),
-      "retain_workspace" => bool_string(plan.output["retain_workspace"]),
-      "submit_review" => bool_string(plan.review_profile != "none")
-    }
-
-    optional = %{
-      "branch_name" => plan.workspace_policy["branch_name"],
-      "model" => plan.worker["model"],
-      "test_paths" => expected_test_paths(plan),
-      "worktree_base_dir" => plan.workspace_policy["worktree_base_dir"]
-    }
-
-    with :ok <- validate_present_initial_values(initial_values, required),
-         :ok <- validate_optional_initial_values(initial_values, optional) do
-      :ok
+  # `resolve_within/2` compares whole path segments after both values have
+  # been realpathed.
+  defp contained_in?(root, path) do
+    case SafePath.resolve_within(path, root) do
+      {:ok, ^path} -> true
+      _ -> false
     end
   end
-
-  defp validate_present_initial_values(initial_values, expected) do
-    case Enum.find(expected, fn {key, value} ->
-           not Map.has_key?(initial_values, key) or Map.fetch!(initial_values, key) != value
-         end) do
-      nil -> :ok
-      {key, _value} -> {:error, {:initial_value_mismatch, key}}
-    end
-  end
-
-  defp validate_optional_initial_values(initial_values, expected) do
-    case Enum.find(expected, fn
-           {key, nil} ->
-             Map.has_key?(initial_values, key)
-
-           {key, value} ->
-             not Map.has_key?(initial_values, key) or Map.fetch!(initial_values, key) != value
-         end) do
-      nil -> :ok
-      {key, _value} -> {:error, {:initial_value_mismatch, key}}
-    end
-  end
-
-  defp expected_test_paths(%Plan{validation_profile: "security_regression"} = plan),
-    do: plan.requested_paths
-
-  defp expected_test_paths(_plan), do: nil
-
-  defp validate_compilation_manifest(compilation, plan) do
-    manifest = compilation.manifest
-
-    expected = %{
-      "graph_hash" => compilation.graph_hash,
-      "compiler_version" => compilation.compiler_version,
-      "template_version" => compilation.template_version,
-      "plan_fingerprint" => compilation.plan_fingerprint,
-      "action_catalog_digest" => compilation.action_catalog_digest,
-      "execution_manifest" => compilation.execution_manifest,
-      "execution_manifest_digest" => compilation.execution_manifest_digest,
-      "plan_version" => plan.version,
-      "task_class" => plan.task_class,
-      "validation_profile" => plan.validation_profile,
-      "review_profile" => plan.review_profile
-    }
-
-    case Enum.find(expected, fn {key, value} -> Map.get(manifest, key) != value end) do
-      nil -> :ok
-      {key, _value} -> {:error, {:manifest_mismatch, key}}
-    end
-  end
-
-  defp bool_string(true), do: "true"
-  defp bool_string(false), do: "false"
 
   defp archive_compilation(root, %Plan{} = plan, %Compilation{} = compilation) do
     store = Config.coding_plan_artifact_store()

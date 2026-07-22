@@ -79,6 +79,67 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   def check(plan_or_attrs, _opts), do: check(plan_or_attrs, [])
 
+  @doc false
+  @spec check_prepared(Plan.t(), Compilation.t(), keyword()) :: {:ok, map()}
+  def check_prepared(%Plan{} = plan, %Compilation{} = compilation, opts) when is_list(opts) do
+    observed_at = Keyword.get(opts, :observed_at)
+    plan_digest = ReadinessCore.plan_digest(Plan.to_map(plan))
+
+    case normalize_observation_time(observed_at) do
+      {:ok, observed_at} ->
+        case Keyword.get(opts, :mode, :static) do
+          mode when mode in [:static, :live] ->
+            check_prepared_with_time(plan, compilation, opts, observed_at, plan_digest, mode)
+
+          _unknown_mode ->
+            ReadinessCore.report(
+              plan_digest,
+              observed_at,
+              [
+                blocked(
+                  "readiness_mode",
+                  "mode_invalid",
+                  observed_at,
+                  "The readiness observation mode is invalid.",
+                  "Use the supported static or live readiness mode."
+                )
+              ]
+            )
+        end
+
+      {:error, _reason} ->
+        ReadinessCore.report(
+          plan_digest,
+          fallback_observed_at(observed_at),
+          [
+            blocked(
+              "plan_schema",
+              "invalid_observation_time",
+              fallback_observed_at(observed_at),
+              "The readiness observation time is invalid.",
+              "Provide an ISO-8601 UTC observation timestamp."
+            )
+          ]
+        )
+    end
+  end
+
+  def check_prepared(_plan, _compilation, _opts),
+    do:
+      ReadinessCore.report(
+        invalid_plan_digest(),
+        "1970-01-01T00:00:00.000Z",
+        [
+          blocked(
+            "provenance",
+            "prepared_compilation_invalid",
+            "1970-01-01T00:00:00.000Z",
+            "The prepared coding compilation is invalid.",
+            "Provide the exact validated compilation for the canonical plan."
+          )
+        ]
+      )
+
   defp check_with_time(plan_or_attrs, opts, observed_at, invalid_digest, mode) do
     case normalize_plan(plan_or_attrs) do
       {:ok, plan} ->
@@ -103,25 +164,40 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
   end
 
   defp check_plan(plan, requested_plan_digest, opts, observed_at, mode) do
-    with {:ok, canonical_plan, _compilation} <- prepare(plan, opts) do
-      plan_digest = ReadinessCore.plan_digest(Plan.to_map(canonical_plan))
-
-      base_diagnostics = immutable_diagnostics(observed_at)
-
-      case mode do
-        :static ->
-          ReadinessCore.report(
-            plan_digest,
-            observed_at,
-            base_diagnostics ++ static_dynamic_diagnostics(observed_at)
-          )
-
-        :live ->
-          live_report(plan_digest, canonical_plan, opts, observed_at, base_diagnostics)
-      end
+    with {:ok, canonical_plan, compilation} <- prepare(plan, opts) do
+      check_prepared_with_time(
+        canonical_plan,
+        compilation,
+        opts,
+        observed_at,
+        ReadinessCore.plan_digest(Plan.to_map(canonical_plan)),
+        mode
+      )
     else
       {:error, reason} ->
         blocked_report(requested_plan_digest, observed_at, reason)
+    end
+  end
+
+  defp check_prepared_with_time(plan, compilation, opts, observed_at, plan_digest, mode) do
+    case Compilation.validate(compilation, plan) do
+      {:ok, ^compilation} ->
+        base_diagnostics = immutable_diagnostics(observed_at)
+
+        case mode do
+          :static ->
+            ReadinessCore.report(
+              plan_digest,
+              observed_at,
+              base_diagnostics ++ static_dynamic_diagnostics(observed_at)
+            )
+
+          :live ->
+            live_report(plan_digest, plan, opts, observed_at, base_diagnostics)
+        end
+
+      {:error, reason} ->
+        blocked_report(plan_digest, observed_at, {:prepared_compilation_invalid, reason})
     end
   end
 
@@ -199,7 +275,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
            "Provide a non-empty agent identity in the agent_ namespace."
          )}
 
-      safe_observer(opts, :security_available?, [], &Config.security_available?/0) != {:ok, true} ->
+      safe_observer(:security_available?, [], &Config.security_available?/0) != {:ok, true} ->
         {:blocked,
          blocked(
            "security_authority",
@@ -209,8 +285,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
            "Restore the security authority before dispatch."
          )}
 
-      safe_observer(opts, :signing_key_status, [agent_id], &Arbor.Security.signing_key_status/1) !=
-          {:ok, {:ok, :available}} ->
+      safe_observer(
+        :signing_key_status,
+        [agent_id],
+        fn value ->
+          apply(Config.coding_readiness_security_module(), :signing_key_status, [value])
+        end
+      ) != {:ok, {:ok, :available}} ->
         {:blocked,
          blocked(
            "security_authority",
@@ -231,16 +312,21 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     end
   end
 
-  defp observe_acp(plan, opts, observed_at, observed_datetime) do
+  defp observe_acp(plan, _opts, observed_at, observed_datetime) do
     provider = plan.worker["provider"]
     requested_model = plan.worker["model"]
 
     result =
       safe_observer(
-        opts,
         :acp_provider_readiness,
         [provider, requested_model],
-        &Arbor.AI.acp_provider_readiness/2
+        fn provider_value, model_value ->
+          apply(
+            Config.coding_readiness_acp_module(),
+            :acp_provider_readiness,
+            [provider_value, model_value]
+          )
+        end
       )
 
     case result do
@@ -339,12 +425,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     end
   end
 
-  defp observe_toolchain(opts, observed_at) do
+  defp observe_toolchain(_opts, observed_at) do
     case safe_observer(
-           opts,
            :coding_toolchain_identity,
            [],
-           &Arbor.Actions.coding_toolchain_identity/0
+           fn ->
+             apply(Config.coding_readiness_actions_module(), :coding_toolchain_identity, [])
+           end
          ) do
       {:ok, {:ok, identity}} ->
         case ReadinessLiveCore.toolchain(identity) do
@@ -381,8 +468,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     end
   end
 
-  defp observe_capacity(opts, observed_at) do
-    case safe_observer(opts, :validation_capacity_observer, [], fn -> :unavailable end) do
+  defp observe_capacity(_opts, observed_at) do
+    case safe_observer(:validation_capacity_observer, [], fn -> :unavailable end) do
       {:ok, :available} ->
         {:ok,
          passed(
@@ -414,19 +501,33 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     end
   end
 
-  defp safe_observer(opts, key, args, default) do
-    observer = Keyword.get(opts, key, default)
+  defp safe_observer(key, args, default) do
+    observer =
+      case Config.coding_readiness_observer_module() do
+        module when is_atom(module) ->
+          if Code.ensure_loaded?(module) and function_exported?(module, key, length(args)),
+            do: {:module, module},
+            else: {:function, default}
 
-    if is_function(observer, length(args)) do
-      try do
-        {:ok, apply(observer, args)}
-      rescue
-        _ -> {:error, :observer_failed}
-      catch
-        _, _ -> {:error, :observer_failed}
+        _ ->
+          {:function, default}
       end
-    else
-      {:error, :observer_invalid}
+
+    try do
+      case observer do
+        {:module, module} ->
+          {:ok, apply(module, key, args)}
+
+        {:function, function} when is_function(function, length(args)) ->
+          {:ok, apply(function, args)}
+
+        _ ->
+          {:error, :observer_invalid}
+      end
+    rescue
+      _ -> {:error, :observer_failed}
+    catch
+      _, _ -> {:error, :observer_failed}
     end
   end
 
@@ -639,6 +740,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   defp failure_diagnostic({:invalid_compilation_field, _field}),
     do: provenance_failure("compilation_invalid")
+
+  defp failure_diagnostic({:prepared_compilation_invalid, _reason}),
+    do: provenance_failure("prepared_compilation_invalid")
 
   defp failure_diagnostic({:forbidden_compilation_key, _scope, _key}),
     do: provenance_failure("provenance_forbidden")

@@ -254,6 +254,10 @@ defmodule Arbor.Orchestrator.Config do
   @default_coding_pipeline_runner Arbor.Orchestrator
   @default_coding_plan_compiler Arbor.Orchestrator.CodingPlan.Compiler
   @default_coding_plan_artifact_store Arbor.Orchestrator.CodingPlan.ArtifactStore
+  @default_coding_readiness_observer_module nil
+  @default_coding_readiness_acp_module Arbor.AI
+  @default_coding_readiness_actions_module Arbor.Actions
+  @default_coding_readiness_security_module Arbor.Security
   @default_pipeline_status_module Arbor.Orchestrator.PipelineStatus
   @default_coding_task_control_facade Arbor.AI
   @default_coding_approval_timeout_ms 300_000
@@ -356,6 +360,49 @@ defmodule Arbor.Orchestrator.Config do
       @app,
       :coding_plan_artifact_store,
       @default_coding_plan_artifact_store
+    )
+  end
+
+  @doc """
+  Trusted test seam for live coding-readiness observers.
+
+  Production leaves this unset, which keeps readiness observers bound to the
+  public Arbor facades. Tests may provide one code-owned module implementing
+  the observer callbacks; task, context, and public readiness options cannot
+  select it.
+  """
+  @spec coding_readiness_observer_module() :: module() | nil
+  def coding_readiness_observer_module do
+    Application.get_env(
+      @app,
+      :coding_readiness_observer_module,
+      @default_coding_readiness_observer_module
+    )
+  end
+
+  @doc false
+  @spec coding_readiness_acp_module() :: module()
+  def coding_readiness_acp_module do
+    Application.get_env(@app, :coding_readiness_acp_module, @default_coding_readiness_acp_module)
+  end
+
+  @doc false
+  @spec coding_readiness_actions_module() :: module()
+  def coding_readiness_actions_module do
+    Application.get_env(
+      @app,
+      :coding_readiness_actions_module,
+      @default_coding_readiness_actions_module
+    )
+  end
+
+  @doc false
+  @spec coding_readiness_security_module() :: module()
+  def coding_readiness_security_module do
+    Application.get_env(
+      @app,
+      :coding_readiness_security_module,
+      @default_coding_readiness_security_module
     )
   end
 

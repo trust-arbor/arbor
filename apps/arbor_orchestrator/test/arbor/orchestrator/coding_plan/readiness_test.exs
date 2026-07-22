@@ -1,5 +1,5 @@
 defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Coding.Plan
   alias Arbor.Contracts.LLM.ProviderObservation
@@ -14,6 +14,26 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
   @moduletag :fast
 
   @observed_at "2026-07-22T12:00:00.000Z"
+
+  defmodule TestObservers do
+    @moduledoc false
+
+    def security_available?, do: invoke(:security_available?, [])
+    def signing_key_status(agent_id), do: invoke(:signing_key_status, [agent_id])
+
+    def acp_provider_readiness(provider, model),
+      do: invoke(:acp_provider_readiness, [provider, model])
+
+    def coding_toolchain_identity, do: invoke(:coding_toolchain_identity, [])
+    def validation_capacity_observer, do: invoke(:validation_capacity_observer, [])
+
+    defp invoke(key, args) do
+      case Process.get({:readiness_observer, key}) do
+        function when is_function(function, length(args)) -> apply(function, args)
+        value -> value
+      end
+    end
+  end
 
   @action_modules [
     Arbor.Actions.Acp.StartSession,
@@ -49,6 +69,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
   end
 
   setup do
+    original_observer_module =
+      Application.get_env(:arbor_orchestrator, :coding_readiness_observer_module)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_readiness_observer_module,
+      TestObservers
+    )
+
     root = Path.join(System.tmp_dir!(), "readiness-#{System.unique_integer([:positive])}")
     repo = Path.join(root, "repo")
     worktrees = Path.join(root, "worktrees")
@@ -56,7 +85,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     File.mkdir_p!(worktrees)
     {"", 0} = System.cmd("git", ["init", "--quiet", repo])
 
-    on_exit(fn -> File.rm_rf!(root) end)
+    on_exit(fn ->
+      File.rm_rf!(root)
+
+      case original_observer_module do
+        nil ->
+          Application.delete_env(:arbor_orchestrator, :coding_readiness_observer_module)
+
+        module ->
+          Application.put_env(:arbor_orchestrator, :coding_readiness_observer_module, module)
+      end
+    end)
+
     {:ok, repo: repo, worktrees: worktrees}
   end
 
@@ -303,6 +343,24 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
              Arbor.Orchestrator.CodingPlan.Compilation.validate(compilation, canonical_plan)
   end
 
+  test "prepared readiness rejects a compilation that no longer matches the canonical plan",
+       ctx do
+    assert {:ok, canonical_plan, compilation} =
+             Readiness.prepare(plan(ctx.repo), readiness_opts(ctx))
+
+    mismatched = %{compilation | plan_map: Map.put(compilation.plan_map, "task", "redirected")}
+
+    assert {:ok, report} =
+             Readiness.check_prepared(
+               canonical_plan,
+               mismatched,
+               readiness_opts(ctx) |> Keyword.put(:mode, :live)
+             )
+
+    assert report["status"] == "blocked"
+    assert blocked_code(report) == "prepared_compilation_invalid"
+  end
+
   test "invalid plan is blocked with exactly one primary diagnostic", ctx do
     assert {:ok, report} =
              Readiness.check(
@@ -421,18 +479,46 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
   end
 
   defp live_opts(ctx, overrides \\ []) do
+    Process.put(
+      {:readiness_observer, :security_available?},
+      Keyword.get(overrides, :security_available?, true)
+    )
+
+    Process.put(
+      {:readiness_observer, :signing_key_status},
+      Keyword.get(overrides, :signing_key_status, fn _ -> {:ok, :available} end)
+    )
+
+    Process.put(
+      {:readiness_observer, :acp_provider_readiness},
+      Keyword.get(overrides, :acp_provider_readiness, fn provider, model ->
+        acp_envelope(provider: provider, model: model)
+      end)
+    )
+
+    Process.put(
+      {:readiness_observer, :coding_toolchain_identity},
+      Keyword.get(overrides, :coding_toolchain_identity, fn -> {:ok, toolchain_identity()} end)
+    )
+
+    Process.put(
+      {:readiness_observer, :validation_capacity_observer},
+      Keyword.get(overrides, :validation_capacity_observer, :unavailable)
+    )
+
     readiness_opts(ctx)
     |> Keyword.merge(
       mode: :live,
-      agent_id: "agent_readiness_test",
-      security_available?: fn -> true end,
-      signing_key_status: fn _agent_id -> {:ok, :available} end,
-      acp_provider_readiness: fn provider, model ->
-        acp_envelope(provider: provider, model: model)
-      end,
-      coding_toolchain_identity: fn -> {:ok, toolchain_identity()} end
+      agent_id: "agent_readiness_test"
     )
     |> Keyword.merge(overrides)
+    |> Keyword.drop([
+      :security_available?,
+      :signing_key_status,
+      :acp_provider_readiness,
+      :coding_toolchain_identity,
+      :validation_capacity_observer
+    ])
   end
 
   defp acp_envelope(opts) do

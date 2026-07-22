@@ -369,13 +369,13 @@ defmodule Arbor.Orchestrator do
   end
 
   @doc """
-  Check static coding-plan readiness without creating a workspace or contacting
-  ACP/security services.
+  Check coding-plan readiness without creating a workspace. Static mode checks
+  immutable prerequisites; live mode additionally observes the exact agent's
+  security authority, ACP provider/model, toolchain, and validation capacity.
 
-  The returned JSON-clean report is `ready` only for a future live mode. Static
-  checks that pass immutable prerequisites return `degraded` with explicit
-  unavailable diagnostics for live security, ACP, toolchain, and capacity facts.
-  Use `:observed_at` in tests for deterministic reports.
+  Static checks that pass immutable prerequisites return `degraded` with
+  explicit unavailable diagnostics for live facts. Use `:observed_at` in tests
+  for deterministic reports.
   """
   @spec check_coding_readiness(Plan.t() | map() | keyword(), keyword()) ::
           {:ok, map()}
