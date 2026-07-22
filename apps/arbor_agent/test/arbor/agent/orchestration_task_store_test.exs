@@ -457,6 +457,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert status.state == :running
     assert status.current_step == "running"
     assert status.metadata == %{ticket: "A-1"}
+    refute Map.has_key?(status, :outcome)
 
     assert {:error, :not_ready} = TaskStore.result(task_id, name: store)
 
@@ -473,11 +474,69 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       assert {:ok, result} = TaskStore.result(task_id, name: store)
       assert result.result_type == :test
       assert result.payload.ok == true
+      refute Map.has_key?(status, :outcome)
     end)
 
     assert_receive {:revoke_approval_answer_capability, "cap_task_1"}
     assert_receive {:revoke_steer_capability, "cap_task_steer_1"}
     assert_receive {:revoke_adoption_capability, "cap_task_adopt_1"}
+  end
+
+  test "done status projects the exact outcome from the normalized coding result", %{store: store} do
+    outcome = task_outcome()
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do coding work",
+               name: store,
+               test_pid: self()
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do coding work", _opts}
+
+    raw = %{
+      "status" => "change_committed",
+      "branch" => "agent/change",
+      "worktree_path" => "/tmp/ws",
+      "outcome" => outcome
+    }
+
+    send(runner_pid, {:finish, {:ok, raw}})
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :done
+      assert status.outcome === outcome
+
+      assert {:ok, result} = TaskStore.result(task_id, name: store)
+      assert result.payload.outcome === outcome
+      assert result.payload.report.outcome === outcome
+      assert result.raw === raw
+    end)
+  end
+
+  test "failed pipeline error status extracts outcome without changing the error tuple", %{
+    store: store
+  } do
+    outcome = task_outcome()
+    detail = %{"status" => "pipeline_error", "error" => "worker_failed", "outcome" => outcome}
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do coding work",
+               name: store,
+               test_pid: self()
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do coding work", _opts}
+    send(runner_pid, {:finish, {:error, {:pipeline_error, detail}}})
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :failed
+      assert status.outcome === outcome
+
+      assert {:error, {:failed, {:pipeline_error, ^detail}}} =
+               TaskStore.result(task_id, name: store)
+    end)
   end
 
   test "steering mailbox preserves order and delivers configured controls once", %{
@@ -590,6 +649,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     supervisor: supervisor
   } do
     store = start_finalizing_store(supervisor)
+    outcome = task_outcome()
 
     assert {:ok, task_id} =
              TaskStore.dispatch(
@@ -609,13 +669,27 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_receive {:finalizing_steer_called, "agent_1", queued_control, _, _}
     assert queued_control["control_id"] == control["control_id"]
 
-    send(runner_pid, {:finish, {:ok, %{"status" => "no_changes", "branch" => "test/x"}}})
+    send(
+      runner_pid,
+      {:finish,
+       {:ok,
+        %{
+          "status" => "no_changes",
+          "branch" => "test/x",
+          "outcome" => outcome
+        }}}
+    )
 
     assert_receive {:finalize_task_called, "agent_1", original_result, [final_control], context,
                     _callback_pid},
                    1_000
 
-    assert original_result == %{"status" => "no_changes", "branch" => "test/x"}
+    assert original_result == %{
+             "status" => "no_changes",
+             "branch" => "test/x",
+             "outcome" => outcome
+           }
+
     assert context == %{"task_id" => task_id}
     assert final_control["control_id"] == control["control_id"]
     assert final_control["status"] == "delivery_unconfirmed"
@@ -633,6 +707,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       assert {:ok, result} = TaskStore.result(task_id, name: store)
       assert result.result_type == :coding_change
       assert result.raw["finalized"] == true
+      assert result.raw["outcome"] === outcome
+      assert result.payload.outcome === outcome
     end)
   end
 
@@ -640,6 +716,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     supervisor: supervisor
   } do
     store = start_finalizing_store(supervisor)
+    outcome = task_outcome()
 
     assert {:ok, task_id} =
              TaskStore.dispatch(
@@ -652,7 +729,17 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              )
 
     assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
-    send(runner_pid, {:finish, {:ok, %{"status" => "no_changes", "branch" => "test/x"}}})
+
+    send(
+      runner_pid,
+      {:finish,
+       {:ok,
+        %{
+          "status" => "no_changes",
+          "branch" => "test/x",
+          "outcome" => outcome
+        }}}
+    )
 
     assert_eventually(fn -> assert {:ok, _} = TaskStore.result(task_id, name: store) end)
     refute_receive {:revoke_adoption_capability, "cap_adoption"}
@@ -660,6 +747,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert {:ok, adopted_result} = TaskStore.adopt(task_id, " refs/heads/reviewed ", name: store)
     assert adopted_result.raw["finalized"] == true
     assert adopted_result.raw["adopted"] == "refs/heads/reviewed"
+    assert adopted_result.raw["outcome"] === outcome
+    assert adopted_result.payload.outcome === outcome
 
     assert_receive {:adopt_task_called, "agent_1", raw_result,
                     %{"destination_ref" => "refs/heads/reviewed"}, %{"task_id" => ^task_id},
@@ -3107,6 +3196,18 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       send(test_pid, {:revoke_adoption_capability, capability_id})
       :ok
     end
+  end
+
+  defp task_outcome do
+    %{
+      "version" => 1,
+      "disposition" => "succeeded",
+      "code" => "implemented",
+      "phase" => "worker_turn",
+      "origin" => "worker",
+      "retry" => "none",
+      "message" => "completed"
+    }
   end
 
   defp subscribe_to_task_steering_transitions(task_id) do

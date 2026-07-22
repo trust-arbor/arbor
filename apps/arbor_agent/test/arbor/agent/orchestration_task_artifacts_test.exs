@@ -22,6 +22,69 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
     assert result.payload.verdict.recommendation == :keep
   end
 
+  test "projects the exact canonical outcome into payload and report" do
+    outcome = task_outcome()
+
+    raw = %{
+      "status" => "change_committed",
+      "branch" => "agent/change",
+      "worktree_path" => "/tmp/ws",
+      "outcome" => outcome
+    }
+
+    result = TaskArtifacts.normalize(raw)
+
+    assert result.result_type == :coding_change
+    assert result.payload.outcome === outcome
+    assert result.payload.report.outcome === outcome
+    assert result.raw === raw
+    assert TaskArtifacts.extract_outcome(result) == {:ok, outcome}
+  end
+
+  test "malformed or noncanonical outcomes fail closed from coding promotion" do
+    outcome = task_outcome()
+
+    for malformed <- [
+          Map.put(outcome, "diagnostic_refs", []),
+          Map.put(outcome, :code, outcome["code"]),
+          Map.put(outcome, "code", 42)
+        ] do
+      raw = %{
+        "status" => "change_committed",
+        "branch" => "agent/change",
+        "worktree_path" => "/tmp/ws",
+        "outcome" => malformed
+      }
+
+      assert TaskArtifacts.normalize(raw) == %{
+               result_type: :value,
+               payload: %{value: raw},
+               raw: raw
+             }
+
+      assert TaskArtifacts.extract_outcome(raw) == :error
+    end
+  end
+
+  test "legacy coding results and prose do not infer an outcome" do
+    legacy = %{
+      "status" => "change_committed",
+      "branch" => "agent/change",
+      "worktree_path" => "/tmp/ws"
+    }
+
+    legacy_result = TaskArtifacts.normalize(legacy)
+    assert legacy_result.result_type == :coding_change
+    refute Map.has_key?(legacy_result.payload, :outcome)
+    refute Map.has_key?(legacy_result.payload.report, :outcome)
+
+    prose = Map.put(legacy, "response_text", "The outcome was succeeded and the change is done.")
+    prose_result = TaskArtifacts.normalize(prose)
+    assert prose_result.result_type == :coding_change
+    refute Map.has_key?(prose_result.payload, :outcome)
+    assert TaskArtifacts.extract_outcome(prose) == :error
+  end
+
   test "projects a bounded provider session id through successful coding payload and report" do
     raw = %{
       "status" => "change_committed",
@@ -575,5 +638,17 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
       },
       overrides
     )
+  end
+
+  defp task_outcome do
+    %{
+      "version" => 1,
+      "disposition" => "succeeded",
+      "code" => "implemented",
+      "phase" => "worker_turn",
+      "origin" => "worker",
+      "retry" => "none",
+      "message" => "completed"
+    }
   end
 end

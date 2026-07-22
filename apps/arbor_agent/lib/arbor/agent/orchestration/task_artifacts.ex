@@ -52,13 +52,29 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   )
   @lowercase_sha256 ~r/\A[0-9a-f]{64}\z/
   @max_metrics_depth 16
+  @max_outcome_depth 6
   @max_provider_session_id_length 200
+  @outcome_container_keys [
+    :payload,
+    "payload",
+    :report,
+    "report",
+    :raw,
+    "raw",
+    :result,
+    "result",
+    :error,
+    "error",
+    :detail,
+    "detail"
+  ]
 
   alias Arbor.Contracts.Comms.ApprovalAnswer
 
   alias Arbor.Contracts.Coding.{
     BranchLifecycleDescriptor,
     TaskEvidenceDescriptor,
+    TaskOutcome,
     TranscriptDescriptor,
     WorkspaceReleaseDescriptor
   }
@@ -68,14 +84,27 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   def normalize(result) do
     case find_coding_result(result) do
       {:ok, coding_result} ->
-        coding_change_result(coding_result, result)
+        case coding_outcome(coding_result) do
+          {:ok, outcome} -> coding_change_result(coding_result, result, outcome)
+          :absent -> coding_change_result(coding_result, result, nil)
+          :invalid -> generic_result(result)
+        end
 
       :error ->
         generic_result(result)
     end
   end
 
-  defp coding_change_result(raw, original) do
+  @doc "Extract an exact canonical TaskOutcome from structured task data."
+  @spec extract_outcome(term()) :: {:ok, map()} | :error
+  def extract_outcome(term) do
+    case find_outcome(term, 0) do
+      {:ok, outcome} -> {:ok, outcome}
+      _ -> :error
+    end
+  end
+
+  defp coding_change_result(raw, original, outcome) do
     artifacts = coding_artifacts(raw)
     metrics = coding_metrics(raw)
 
@@ -91,7 +120,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
               commit: value(raw, :commit),
               diff: value(raw, :diff),
               files: files(raw),
-              report: report(raw, artifacts, metrics),
+              report: report(raw, artifacts, metrics, outcome),
               verdict: verdict(raw),
               artifacts: artifacts,
               metrics: metrics,
@@ -101,6 +130,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
               evidence_ref: value(raw, :evidence_ref),
               branch_lifecycle: branch_lifecycle,
               adoption: value(raw, :adoption),
+              outcome: outcome,
               worker_provider_session_id:
                 bounded_provider_session_id(value(raw, :worker_provider_session_id))
             }
@@ -300,7 +330,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
   defp normalize_files(_files), do: []
 
-  defp report(raw, artifacts, metrics) do
+  defp report(raw, artifacts, metrics, outcome) do
     review = value(raw, :review)
 
     %{
@@ -317,6 +347,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       blast_radius: value(raw, :blast_radius) || value(review, :blast_radius),
       artifacts: artifacts,
       metrics: metrics,
+      outcome: outcome,
       error: value(raw, :error) || value(raw, :review_error),
       # Stable, bounded operator-approval scalars only (never raw metadata maps).
       approval_request_id: bounded_approval_request_id(value(raw, :approval_request_id)),
@@ -402,6 +433,96 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     else
       :error
     end
+  end
+
+  defp coding_outcome(map) when is_map(map) do
+    case outcome_presence(map) do
+      :absent -> :absent
+      {:present, value} -> validate_canonical_outcome(value)
+      :conflict -> :invalid
+    end
+  end
+
+  defp coding_outcome(_term), do: :absent
+
+  defp validate_canonical_outcome(outcome) when is_map(outcome) and not is_struct(outcome) do
+    with true <- Enum.all?(Map.keys(outcome), &is_binary/1),
+         {:ok, typed} <- TaskOutcome.new(outcome),
+         canonical = TaskOutcome.to_map(typed),
+         true <- canonical == outcome do
+      {:ok, canonical}
+    else
+      _ -> :invalid
+    end
+  end
+
+  defp validate_canonical_outcome(_outcome), do: :invalid
+
+  defp outcome_presence(map) when is_map(map) do
+    keys = Enum.filter([:outcome, "outcome"], &Map.has_key?(map, &1))
+
+    case keys do
+      [] -> :absent
+      [:outcome] -> {:present, Map.fetch!(map, :outcome)}
+      ["outcome"] -> {:present, Map.fetch!(map, "outcome")}
+      _ -> :conflict
+    end
+  end
+
+  defp find_outcome(_term, depth) when depth > @max_outcome_depth, do: :absent
+
+  defp find_outcome(%{} = map, depth) do
+    case outcome_presence(map) do
+      :absent ->
+        find_in_outcome_containers(map, depth)
+
+      {:present, value} ->
+        case validate_canonical_outcome(value) do
+          {:ok, _outcome} = valid -> valid
+          :invalid -> :invalid
+        end
+
+      :conflict ->
+        :invalid
+    end
+  end
+
+  defp find_outcome(tuple, depth) when is_tuple(tuple) do
+    tuple
+    |> Tuple.to_list()
+    |> find_in_outcome_containers(depth)
+  end
+
+  defp find_outcome(_term, _depth), do: :absent
+
+  defp find_in_outcome_containers(container, depth) when is_map(container) do
+    @outcome_container_keys
+    |> Enum.flat_map(&container_values(container, &1))
+    |> find_outcome_values(depth + 1)
+  end
+
+  defp find_in_outcome_containers(values, depth) when is_list(values),
+    do: find_outcome_values(values, depth + 1)
+
+  defp find_outcome_values([], _depth), do: :absent
+
+  defp find_outcome_values([value | rest], depth) do
+    case find_outcome(value, depth) do
+      {:ok, _outcome} = valid -> valid
+      :invalid -> :invalid
+      :absent -> find_outcome_values(rest, depth)
+    end
+  end
+
+  defp container_values(map, key) do
+    atom_value = if is_atom(key), do: Map.fetch(map, key), else: :error
+    string_value = Map.fetch(map, to_string(key))
+
+    [atom_value, string_value]
+    |> Enum.flat_map(fn
+      {:ok, value} -> [value]
+      :error -> []
+    end)
   end
 
   defp value(term, key, default \\ nil)

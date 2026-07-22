@@ -70,6 +70,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @type state_name :: :running | :waiting_approval | :done | :failed | :cancelled
 
   @type task_status :: %{
+          optional(:outcome) => map(),
           task_id: task_id(),
           agent_id: String.t(),
           state: state_name(),
@@ -1944,7 +1945,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp status_view(record) do
-    %{
+    status = %{
       task_id: record.task_id,
       agent_id: record.agent_id,
       state: record.state,
@@ -1956,7 +1957,20 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       metadata: record.metadata,
       steering: steering_summary(record)
     }
+
+    case status_outcome(record) do
+      {:ok, outcome} -> Map.put(status, :outcome, outcome)
+      :error -> status
+    end
   end
+
+  defp status_outcome(%{state: :done, result: result}),
+    do: TaskArtifacts.extract_outcome(result)
+
+  defp status_outcome(%{state: :failed, error: error}),
+    do: TaskArtifacts.extract_outcome(error)
+
+  defp status_outcome(_record), do: :error
 
   defp steering_summary(record) do
     controls = Map.get(record, :controls, [])
