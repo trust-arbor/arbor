@@ -262,15 +262,6 @@ This section is the always-loaded working set: 12 broad cross-task rules measuri
 <a id="applied-learning-always-search-for-all-occurrences-before-using-replace-all-true"></a>
 **Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.
 
-<!-- applied-learning: checkpoint-proof-cache-boundaries-and-progress -->
-<a id="applied-learning-checkpoint-proof-cache-boundaries-and-progress"></a>
-**Checkpointed historical proofs are observations, never mutation authority.** Bind every reusable result to the exact repository, destination ref/OID, branch ref/OID, and proof-policy version; persist only closed, sanitized statuses; retry transient failures; and make progress count cache hits, every retry, and budget-skipped targets independently of outcome success.
-
-<!-- applied-learning: unsigned-local-checkpoint-successes-are-revalidation-hints-only -->
-<a id="applied-learning-unsigned-local-checkpoint-successes-are-revalidation-hints-only"></a>
-**Unsigned local checkpoint successes are revalidation hints, not evidence.** Owner-only file mode provides confidentiality from other users but no authenticity against same-user tampering. A cached success must consume the normal proof budget and pass the live proof boundary again before classification; only exact-scope deterministic preserve outcomes may skip work (found 2026-07-21 reviewing historical branch-audit proof caching).
-
-
 <!-- applied-learning: anchor-manual-patches-with-unique-surrounding-context -->
 <a id="applied-learning-anchor-manual-patches-with-unique-surrounding-context"></a>
 **Anchor manual patches with unique surrounding context.** A one-line `apply_patch` hunk can silently match an earlier identical line in the same file; include the enclosing test/function or nearby setup statements, then inspect the resulting location before proceeding (found 2026-07-15 while isolating a coordinator timer test).
@@ -319,13 +310,6 @@ This section is the always-loaded working set: 12 broad cross-task rules measuri
 <!-- applied-learning: uri-prefix-checks-must-be-segment-aware-never-raw-string-starts-with-2 -->
 <a id="applied-learning-uri-prefix-checks-must-be-segment-aware-never-raw-string-starts-with-2"></a>
 **URI prefix checks must be segment-aware, never raw `String.starts_with?/2`.** A registry prefix like `arbor://action` raw-matches the retired plural namespace `arbor://actions/execute/...`; `arbor://fs/read` raw-matches `arbor://fs/reader/...`. That is the same footgun class as trust prefix-vs-glob, but at the namespace boundary. Use `Arbor.Contracts.Security.CapabilityUri.prefix_match?/2` for registry-style prefix checks so matching happens on parsed URI segments (found 2026-07-07 during Ring B/B1: `UriRegistry` accepted retired plural action URIs because of a raw prefix match).
-
-**Opaque identifiers interpolated into capability URIs must not become URI syntax.** A caller-supplied task id such as `**` can turn an intended exact grant like `arbor://agent/task/adopt/<task-id>` into a recursive wildcard capability. Before constructing a scoped capability URI, either encode/digest the opaque id into one safe segment or enforce a bounded single-segment alphabet; reject `/`, `*`, traversal segments, whitespace/control bytes, and invalid UTF-8 before any grant occurs (found 2026-07-21 while reviewing post-terminal coding-task adoption).
-
-<!-- applied-learning: idempotent-side-effects-must-reconstruct-their-full-durable-receipt -->
-<a id="applied-learning-idempotent-side-effects-must-reconstruct-their-full-durable-receipt"></a>
-**Idempotent side effects must reconstruct their full durable receipt.** An Engine retry can occur after an action's external side effects succeed but before its result is checkpointed. Returning a generic `already_released` response is not enough when downstream logic needs immutable evidence from the original response. Reconstruct the receipt only from durable state and reverify it before reporting success; for workspace publication, the retry carries the repo root and succeeds only when the deterministic task/workspace hidden ref still points to the exact candidate OID. Normalize failed replay proofs so the recovery path does not become a repository-state oracle (found 2026-07-21 while reviewing candidate publication crash replay).
-
 
 <!-- applied-learning: conserve-the-local-agent-s-tokens-for-planning-design-delegation-and-review -->
 <a id="applied-learning-conserve-the-local-agent-s-tokens-for-planning-design-delegation-and-review"></a>

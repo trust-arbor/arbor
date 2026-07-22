@@ -12,8 +12,15 @@ path) require the stdio signing proxy, not bare HTTP/Bearer. See
 
 The current OAuth coding worker is **Grok 4.5** (`worker.provider: "grok"`,
 `worker.model: "grok-4.5"`). Do not select `grok-code-fast`; it is not the
-reviewed coding model for this path. Arbor launches each worker with a private,
-ephemeral runtime/config home rather than the live Arbor home. When the
+reviewed coding model for this path. Grok does not implement ACP's dynamic
+`session/set_config_option` method, so Arbor binds the model in the reviewed
+launch command and independently attests the exact `--model grok-4.5` argument
+before launch and reconnect. A different explicit Grok model fails before the
+CLI starts; Arbor does not treat `Method not found` as successful model
+selection.
+
+Arbor launches each worker with a private, ephemeral runtime/config home rather
+than the live Arbor home. When the
 isolated Grok home is first created, Arbor stages only the bounded OAuth
 `auth.json` credential into it, preserves mode `0600`, and removes the runtime
 home at session cleanup. Authentication staging is not a general-purpose copy

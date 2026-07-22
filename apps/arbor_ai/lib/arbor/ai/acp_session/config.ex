@@ -70,6 +70,8 @@ defmodule Arbor.AI.AcpSession.Config do
 
   # Grok's agent profile is bound by RuntimeHome after this trusted static
   # command is resolved. `--deny Bash(*)` remains defense-in-depth for aliases.
+  @grok_launch_model "grok-4.5"
+
   @grok_strict_command [
     "grok",
     "--sandbox",
@@ -84,7 +86,7 @@ defmodule Arbor.AI.AcpSession.Config do
     "agent",
     "--no-leader",
     "--model",
-    "grok-4.5",
+    @grok_launch_model,
     "stdio"
   ]
 
@@ -173,7 +175,8 @@ defmodule Arbor.AI.AcpSession.Config do
       end
 
     with {:ok, provider_config} <- config,
-         {:ok, provider_config} <- enforce_grok_command_policy(provider, provider_config) do
+         {:ok, provider_config} <- enforce_grok_command_policy(provider, provider_config),
+         :ok <- validate_requested_model(provider, Keyword.get(opts, :model)) do
       opts = maybe_inject_alternate_endpoint(provider, opts)
       {:ok, merge_opts(provider_config, opts)}
     else
@@ -190,6 +193,17 @@ defmodule Arbor.AI.AcpSession.Config do
 
   defp enforce_grok_command_policy(_provider, provider_config),
     do: {:ok, provider_config}
+
+  @doc false
+  @spec validate_requested_model(atom(), term()) :: :ok | {:error, :invalid_grok_model}
+  def validate_requested_model(:grok, model) when model in [nil, @grok_launch_model], do: :ok
+  def validate_requested_model(:grok, _model), do: {:error, :invalid_grok_model}
+  def validate_requested_model(_provider, _model), do: :ok
+
+  @doc false
+  @spec model_selection_strategy(atom()) :: :dynamic | {:launch_bound, String.t()}
+  def model_selection_strategy(:grok), do: {:launch_bound, @grok_launch_model}
+  def model_selection_strategy(_provider), do: :dynamic
 
   # When the Claude CLI is pointed at an OpenAI/Anthropic-compatible endpoint
   # that ISN'T api.anthropic.com (e.g. an Ollama server serving the Anthropic

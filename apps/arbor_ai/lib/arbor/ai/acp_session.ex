@@ -21,9 +21,9 @@ defmodule Arbor.AI.AcpSession do
 
   ## Requested model confirmation
 
-  When `:model` is set, session creation, load, and reconnect remain unready
-  until `session/set_config_option` confirms that exact value in a canonical
-  string-keyed response:
+  When `:model` is set for a dynamically selectable provider, session creation,
+  load, and reconnect remain unready until `session/set_config_option` confirms
+  that exact value in a canonical string-keyed response:
 
       %{"configOptions" => [%{"id" => "model", "currentValue" => model}]}
 
@@ -32,8 +32,14 @@ defmodule Arbor.AI.AcpSession do
   as the Claude adapter's boolean `fast` option. Rejection, mismatch, malformed
   data, or an unconfirmed model fails closed. A reconnect confirmation failure
   leaves the session in `:error` with `client`, `client_monitor`, `session_id`,
-  and `last_session_id` cleared. Omitting `:model` preserves the provider's
-  default selection without issuing this request.
+  and `last_session_id` cleared.
+
+  Grok is launch-bound instead: its sandbox attests the exact reviewed
+  `--model grok-4.5` command before every launch and reconnect, and Grok's ACP
+  server does not implement dynamic config mutation. That exact requested model
+  therefore skips the unsupported RPC; any other requested Grok model fails
+  closed. Omitting `:model` avoids the RPC and uses the provider's configured
+  selection, which remains the attested launch-bound model for Grok.
 
   ## Streaming
 
@@ -354,8 +360,10 @@ defmodule Arbor.AI.AcpSession do
     # the client instead of vanishing without terminate/2.
     Process.flag(:trap_exit, true)
 
-    with {:ok, mcp_servers} <- normalize_bound_mcp_servers(Keyword.get(opts, :mcp_servers)) do
-      provider = Keyword.fetch!(opts, :provider)
+    provider = Keyword.fetch!(opts, :provider)
+
+    with {:ok, mcp_servers} <- normalize_bound_mcp_servers(Keyword.get(opts, :mcp_servers)),
+         :ok <- Config.validate_requested_model(provider, Keyword.get(opts, :model)) do
       {owner, owner_monitor} = monitor_owner(Keyword.get(opts, :owner))
 
       state = %__MODULE__{
@@ -582,7 +590,13 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp create_session_with_id(session_info, session_id, opts, state) do
-    case select_and_confirm_model(state.client, session_id, state.model, opts) do
+    case select_and_confirm_provider_model(
+           state.provider,
+           state.client,
+           session_id,
+           state.model,
+           opts
+         ) do
       :ok ->
         new_state = %{
           state
@@ -631,7 +645,13 @@ defmodule Arbor.AI.AcpSession do
         case {validate_resume_session_response(session_info, session_id),
               Arbor.AI.Timeout.ensure_active(opts)} do
           {:ok, :ok} ->
-            case select_and_confirm_model(state.client, session_id, state.model, opts) do
+            case select_and_confirm_provider_model(
+                   state.provider,
+                   state.client,
+                   session_id,
+                   state.model,
+                   opts
+                 ) do
               :ok ->
                 new_state = %{
                   state
@@ -1549,7 +1569,8 @@ defmodule Arbor.AI.AcpSession do
       {:ok, client} ->
         case attach_client(client) do
           {:ok, client_monitor} ->
-            case select_and_confirm_model(
+            case select_and_confirm_provider_model(
+                   state.provider,
                    client,
                    state.last_session_id,
                    state.model,
@@ -3285,7 +3306,14 @@ defmodule Arbor.AI.AcpSession do
     case result do
       {:ok, info} ->
         with {:ok, sid} <- provider_session_id(info),
-             :ok <- select_and_confirm_model(state.client, sid, state.model, opts) do
+             :ok <-
+               select_and_confirm_provider_model(
+                 state.provider,
+                 state.client,
+                 sid,
+                 state.model,
+                 opts
+               ) do
           {:ok, %{state | session_id: sid, last_session_id: sid}}
         end
 
@@ -3433,6 +3461,19 @@ defmodule Arbor.AI.AcpSession do
   def select_and_confirm_model(client, sid, model, opts) do
     select_and_confirm_model(client, sid, model, opts, @default_model_confirm_retries)
   end
+
+  defp select_and_confirm_provider_model(provider, client, sid, model, opts) do
+    case Config.model_selection_strategy(provider) do
+      {:launch_bound, launch_model} -> confirm_launch_bound_model(model, launch_model)
+      :dynamic -> select_and_confirm_model(client, sid, model, opts)
+    end
+  end
+
+  defp confirm_launch_bound_model(nil, _launch_model), do: :ok
+  defp confirm_launch_bound_model(model, model), do: :ok
+
+  defp confirm_launch_bound_model(_requested_model, _launch_model),
+    do: {:error, {:model_not_confirmed, :launch_bound_model_mismatch}}
 
   @spec select_and_confirm_model(pid(), String.t(), String.t(), keyword(), non_neg_integer()) ::
           :ok | {:error, term()}

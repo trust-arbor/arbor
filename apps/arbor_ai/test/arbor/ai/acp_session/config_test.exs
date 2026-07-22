@@ -91,6 +91,14 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
       refute "--tools" in command
     end
 
+    test "accepts only the exact launch-bound Grok model" do
+      assert {:ok, opts} = Config.resolve(:grok, model: "grok-4.5")
+      assert Keyword.fetch!(opts, :model) == "grok-4.5"
+
+      assert {:error, :invalid_grok_model} =
+               Config.resolve(:grok, model: "grok-code-fast")
+    end
+
     test "rejects app-level :grok overrides that change the strict command" do
       prior = Application.get_env(:arbor_ai, :acp_providers)
 

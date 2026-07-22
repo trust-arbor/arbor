@@ -117,7 +117,14 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       result
     end
 
-    def set_config_option(_client, _session_id, _key, _value), do: :ok
+    def set_config_option(client, session_id, key, value) do
+      send_signal(
+        test_pid(client),
+        {:grok_client_set_config_option, client, session_id, key, value}
+      )
+
+      {:error, %{"code" => -32601, "message" => "Method not found"}}
+    end
 
     def cancel(_client, _session_id), do: :ok
 
@@ -935,7 +942,26 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
   end
 
   describe "AcpSession integration" do
-    test "startup sends exact :cd and clears profile before create_session" do
+    test "security regression: a mismatched launch-bound model fails before client startup" do
+      Process.flag(:trap_exit, true)
+      install_client_module(ProbeAcpClient)
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+
+      assert {:error, :invalid_grok_model} =
+               AcpSession.start_link(
+                 provider: :grok,
+                 model: "grok-code-fast",
+                 workspace: {:directory, worktree_root},
+                 client_opts: probe_client_opts(test_pid: self()),
+                 grok_sandbox_authority: authority,
+                 timeout: 2_000
+               )
+
+      refute_receive {:grok_client_started, _, _}
+    end
+
+    test "security regression: launch-bound model skips unsupported config RPC" do
       install_client_module(ProbeAcpClient)
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
@@ -943,6 +969,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:ok, session} =
                AcpSession.start_link(
                  provider: :grok,
+                 model: "grok-4.5",
                  workspace: {:directory, worktree_root},
                  client_opts:
                    probe_client_opts(
@@ -965,6 +992,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert Enum.at(Keyword.get(started_opts, :command), 2) == expected_profile
       refute File.exists?(project_profile_path(worktree_root))
       assert {:ok, _session_info} = AcpSession.create_session(session)
+      refute_receive {:grok_client_set_config_option, _, _, _, _}
 
       assert :ok = AcpSession.close(session)
     end

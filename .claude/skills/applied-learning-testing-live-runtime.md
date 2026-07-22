@@ -437,3 +437,11 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 <!-- applied-learning: compile-and-test-in-the-same-mix-env -->
 <a id="applied-learning-compile-and-test-in-the-same-mix-env"></a>
 **Compile and test in the same `MIX_ENV`.** A focused `MIX_ENV=test mix test --no-compile` can execute stale test-environment BEAMs after a default-environment compile. Compile the touched app with `MIX_ENV=test` before a no-compile focused rerun, especially when another process shares the umbrella build directory (found 2026-07-21 while validating ACP managed-session regressions).
+
+<!-- applied-learning: never-mutate-a-live-retention-journal-from-a-second-beam -->
+<a id="applied-learning-never-mutate-a-live-retention-journal-from-a-second-beam"></a>
+**Never mutate a live workspace-retention journal from a second BEAM.** The durable store intentionally enforces a single-writer inventory snapshot while the lease registry holds corresponding hot state. Offline cleanup that shares `ARBOR_HOME` can delete markers out of band, poison the store with `snapshot_mismatch`, and leave the registry stale. Use the live owner APIs; if reconciliation is required, first prove there are no active leases, repair the durable inventory, then restart both supervised store and registry so they rehydrate the same snapshot. Do not weaken drift detection to mask split ownership (found 2026-07-21 after out-of-band retained-workspace cleanup blocked subsequent coding-task acquisition).
+
+<!-- applied-learning: negative-start-link-tests-must-trap-linked-init-failures -->
+<a id="applied-learning-negative-start-link-tests-must-trap-linked-init-failures"></a>
+**Negative `start_link` tests must trap linked init failures.** A GenServer that rejects configuration from `init/1` can propagate the stop reason over the new process link before an assertion observes the public `{:error, reason}` result. In the test process, enable `Process.flag(:trap_exit, true)`, assert the exact returned error, and separately assert that no child side effect began; do not weaken the production fail-closed init path to make the test easier (found 2026-07-21 while proving a mismatched launch-bound Grok model never starts the ACP client).

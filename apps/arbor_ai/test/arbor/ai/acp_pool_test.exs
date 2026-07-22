@@ -95,7 +95,16 @@ defmodule Arbor.AI.AcpPoolTest do
       {:ok, %{"sessionId" => session_id}}
     end
 
-    def set_config_option(_client, _session_id, _key, _value), do: :ok
+    def set_config_option(client, session_id, key, value) do
+      opts = Agent.get(client, & &1)
+
+      if is_pid(opts[:test_pid]) do
+        send(opts[:test_pid], {:grok_pool_set_config_option, session_id, key, value})
+      end
+
+      {:error, %{"code" => -32601, "message" => "Method not found"}}
+    end
+
     def cancel(_client, _session_id), do: :ok
     def prompt(_client, _session_id, _content, _opts), do: {:ok, %{"text" => "ok"}}
 
@@ -304,7 +313,7 @@ defmodule Arbor.AI.AcpPoolTest do
       assert {:ok, _} = AcpPool.checkout(:test_b, client_opts: @test_client_opts)
     end
 
-    test "security regression: grok checkout adopts authority to the pool process" do
+    test "security regression: pooled Grok lazily uses its attested launch model" do
       create_temporary_workspace_isolation!()
 
       original_client_module = Application.get_env(:arbor_ai, :acp_client_module)
@@ -325,6 +334,7 @@ defmodule Arbor.AI.AcpPoolTest do
       assert {:ok, session} =
                AcpPool.checkout(
                  :grok,
+                 model: "grok-4.5",
                  workspace: {:directory, worktree_root},
                  client_opts: probe_client_opts(test_pid: self(), _skip_connect: false),
                  grok_sandbox_authority: authority
@@ -340,6 +350,11 @@ defmodule Arbor.AI.AcpPoolTest do
       assert transferred_authority.owner == pool_pid
       assert transferred_authority.reference != authority.reference
       assert transferred_authority.owner != self()
+
+      assert {:ok, %{"text" => "ok"}} =
+               AcpSession.send_message(session, "verify launch-bound model", timeout: 1_000)
+
+      refute_receive {:grok_pool_set_config_option, _, _, _}
 
       :ok = AcpPool.checkin(session)
       :ok = AcpPool.close_session(session)
