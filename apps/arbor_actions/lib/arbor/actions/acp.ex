@@ -230,6 +230,9 @@ defmodule Arbor.Actions.Acp do
   def format_error(:invalid_fallback_to_fresh_on_resume_unavailable),
     do: "fallback_to_fresh_on_resume_unavailable must be true, false, \"true\", or \"false\""
 
+  def format_error(:invalid_failure_mode),
+    do: "failure_mode must be omitted, \"error\", or \"delivery_receipt\""
+
   def format_error(reason) when is_binary(reason), do: reason
   def format_error(reason), do: "ACP error: #{inspect(reason)}"
 
@@ -787,6 +790,7 @@ defmodule Arbor.Actions.Acp do
     | `prompt` | string | yes | The coding prompt to send |
     | `timeout` | integer | no | Optional hard wall-clock timeout in ms |
     | `inactivity_timeout_ms` | integer | no | Silence window before aborting the prompt |
+    | `failure_mode` | string | no | `error` (default) or `delivery_receipt` |
     """
 
     use Jido.Action,
@@ -815,6 +819,10 @@ defmodule Arbor.Actions.Acp do
         inactivity_timeout_ms: [
           type: :non_neg_integer,
           doc: "Silence window before aborting the in-flight prompt"
+        ],
+        failure_mode: [
+          type: :string,
+          doc: "Failure behavior: error (default) or delivery_receipt"
         ]
       ]
 
@@ -825,6 +833,7 @@ defmodule Arbor.Actions.Acp do
         worker_session_id: :control,
         session_pid: :control,
         prompt: {:control, requires: [:prompt_injection]},
+        failure_mode: :control,
         timeout: :data,
         inactivity_timeout_ms: :data
       }
@@ -836,17 +845,26 @@ defmodule Arbor.Actions.Acp do
     def egress_tier(_params, _context), do: :external_peer
 
     @impl true
+    def on_before_validate_params(params) do
+      case normalize_failure_mode(params) do
+        {:ok, _mode} -> {:ok, params}
+        {:error, reason} -> {:error, Acp.format_error(reason)}
+      end
+    end
+
+    @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, context) do
-      with :ok <- Acp.require_acp!(),
+      with {:ok, failure_mode} <- normalize_failure_mode(params),
+           :ok <- Acp.require_acp!(),
            {:ok, target} <- Acp.resolve_session_target(params),
            {:ok, transcript_opts} <- Acp.transcript_capture_opts(context) do
         case target do
           {:worker, worker_session_id} ->
-            do_managed_send(worker_session_id, params, context, transcript_opts)
+            do_managed_send(worker_session_id, params, context, transcript_opts, failure_mode)
 
           {:pid, pid} ->
-            do_legacy_send(pid, params, transcript_opts)
+            do_legacy_send(pid, params, transcript_opts, failure_mode)
         end
       else
         {:error, reason} -> {:error, Acp.format_error(reason)}
@@ -857,7 +875,7 @@ defmodule Arbor.Actions.Acp do
       :exit, reason -> {:error, Acp.format_error(reason)}
     end
 
-    defp do_managed_send(worker_session_id, params, context, transcript_opts) do
+    defp do_managed_send(worker_session_id, params, context, transcript_opts, failure_mode) do
       prompt = get_param(params, :prompt)
 
       opts =
@@ -877,21 +895,29 @@ defmodule Arbor.Actions.Acp do
           # Cumulative usage is authoritative from owner-bound managed status when
           # present; raw response top-level usage is only a fallback. Do not parse
           # provider-specific `_meta` here — AcpSession already accumulated it.
-          project_send_result(response, transcript_opts, %{
-            text: map_get(response, :text) || map_get(response, "text") || "",
-            stop_reason: normalize_stop_reason(response),
-            session_id: provider_session_id(response, status),
-            context_pressure:
-              map_get(status, :context_pressure) || map_get(status, "context_pressure") || false,
-            usage: project_managed_usage(status, response)
-          })
+          project_send_result(
+            response,
+            transcript_opts,
+            maybe_add_delivery_status(
+              %{
+                text: map_get(response, :text) || map_get(response, "text") || "",
+                stop_reason: normalize_stop_reason(response),
+                session_id: provider_session_id(response, status),
+                context_pressure:
+                  map_get(status, :context_pressure) ||
+                    map_get(status, "context_pressure") || false,
+                usage: project_managed_usage(status, response)
+              },
+              failure_mode
+            )
+          )
 
         {:error, reason} ->
-          {:error, Acp.format_error(reason)}
+          format_send_error(reason, failure_mode)
       end
     end
 
-    defp do_legacy_send(pid, params, transcript_opts) do
+    defp do_legacy_send(pid, params, transcript_opts, failure_mode) do
       opts =
         []
         |> maybe_add(:timeout, get_param(params, :timeout))
@@ -901,16 +927,70 @@ defmodule Arbor.Actions.Acp do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Acp.ai_module(), :acp_send_message, [pid, get_param(params, :prompt), opts]) do
         {:ok, response} ->
-          project_send_result(response, transcript_opts, %{
-            text: map_get(response, :text) || map_get(response, "text") || "",
-            stop_reason: normalize_stop_reason(response),
-            session_id: map_get(response, :session_id) || map_get(response, "session_id") || "",
-            context_pressure: Acp.check_context_pressure(pid),
-            usage: plain_usage_map(response) || %{}
-          })
+          project_send_result(
+            response,
+            transcript_opts,
+            maybe_add_delivery_status(
+              %{
+                text: map_get(response, :text) || map_get(response, "text") || "",
+                stop_reason: normalize_stop_reason(response),
+                session_id:
+                  map_get(response, :session_id) || map_get(response, "session_id") || "",
+                context_pressure: Acp.check_context_pressure(pid),
+                usage: plain_usage_map(response) || %{}
+              },
+              failure_mode
+            )
+          )
 
         {:error, reason} ->
+          format_send_error(reason, failure_mode)
+      end
+    end
+
+    defp format_send_error(reason, :delivery_receipt) do
+      case Arbor.Actions.Acp.DeliveryFailure.classify(reason) do
+        {:provider_account_exhausted, http_status} ->
+          {:ok,
+           %{
+             delivery_status: "provider_account_exhausted",
+             failure_reason:
+               "ACP provider account credits exhausted or monthly spending limit reached (HTTP #{http_status})",
+             text: "",
+             stop_reason: "",
+             session_id: "",
+             context_pressure: false,
+             usage: %{}
+           }}
+
+        :other ->
           {:error, Acp.format_error(reason)}
+      end
+    end
+
+    defp format_send_error(reason, :error), do: {:error, Acp.format_error(reason)}
+
+    defp maybe_add_delivery_status(base, :delivery_receipt),
+      do: Map.put(base, :delivery_status, "delivered")
+
+    defp maybe_add_delivery_status(base, :error), do: base
+
+    defp normalize_failure_mode(params) when is_map(params) do
+      case failure_mode_param(params) do
+        :missing -> {:ok, :error}
+        "error" -> {:ok, :error}
+        "delivery_receipt" -> {:ok, :delivery_receipt}
+        _ -> {:error, :invalid_failure_mode}
+      end
+    end
+
+    defp normalize_failure_mode(_params), do: {:error, :invalid_failure_mode}
+
+    defp failure_mode_param(params) do
+      cond do
+        Map.has_key?(params, :failure_mode) -> Map.fetch!(params, :failure_mode)
+        Map.has_key?(params, "failure_mode") -> Map.fetch!(params, "failure_mode")
+        true -> :missing
       end
     end
 

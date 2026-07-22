@@ -525,6 +525,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            "context_keys",
            "worker_session_id,prompt,timeout,inactivity_timeout_ms"
          )
+         |> Map.put("param.failure_mode", "delivery_receipt")
          |> Map.put("max_retries", "0")}
       end
     end)

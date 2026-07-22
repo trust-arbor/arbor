@@ -38,6 +38,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     capture_pre_turn_workspace
                     check_pre_turn_recovery_exists
                     check_pre_turn_workspace_exists
+                    check_worker_delivery_status
                     check_operator_rework_category_budget
                     check_operator_rework_total_budget
                     check_review_category_budget
@@ -55,6 +56,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     check_worker_status_session_id
                     coding_workspace_recovery_summary
                     done
+                    error_worker_provider_account_exhausted
                     error_worker_provider_session_missing
                     error_worker_recovery_continuity_invalid
                     error_worker_recovery_reopen_failed
@@ -74,6 +76,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_recovery_worker_provider_session_id
                     hoist_recovery_worker_session_id
                     hoist_turn_progressed
+                    hoist_worker_failure_reason
                     hoist_workspace_fingerprint
                     hoist_expected_workspace_fingerprint
                     hoist_expected_tree_oid
@@ -415,6 +418,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "attrs" => %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}
       },
       %{
+        "node_id" => "check_worker_delivery_status",
+        "attrs" => %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}
+      },
+      %{
         "node_id" => "check_worker_send_recovery_budget",
         "attrs" => %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}
       },
@@ -461,6 +468,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
           "transform" => "identity",
           "source_key" => "worker_provider_session_id",
           "output_key" => "session_id"
+        }
+      },
+      %{
+        "node_id" => "error_worker_provider_account_exhausted",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "constant",
+          "expression" => "worker_provider_account_exhausted",
+          "output_key" => "error"
         }
       },
       %{
@@ -554,12 +570,33 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         }
       },
       %{
+        "node_id" => "hoist_worker_failure_reason",
+        "attrs" => %{
+          "type" => "transform",
+          "transform" => "identity",
+          "source_key" => "worker_msg.failure_reason",
+          "output_key" => "worker_failure_reason"
+        }
+      },
+      %{
         "node_id" => "hoist_worker_provider_session_id_from_status",
         "attrs" => %{
           "type" => "transform",
           "transform" => "identity",
           "source_key" => "worker_status.session_id",
           "output_key" => "worker_provider_session_id"
+        }
+      },
+      %{
+        "node_id" => "implement",
+        "attrs" => %{
+          "type" => "exec",
+          "target" => "action",
+          "action" => "acp_send_message",
+          "context_keys" => "worker_session_id,prompt,timeout,inactivity_timeout_ms",
+          "param.failure_mode" => "delivery_receipt",
+          "output_prefix" => "worker_msg",
+          "max_retries" => "0"
         }
       },
       %{
@@ -587,6 +624,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
           "target" => "action",
           "action" => "acp_send_message",
           "context_keys" => "worker_session_id,prompt,timeout,inactivity_timeout_ms",
+          "param.failure_mode" => "delivery_receipt",
           "output_prefix" => "worker_msg",
           "max_retries" => "0"
         }
@@ -601,6 +639,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "hoist_baseline_fingerprint"
       ],
       "session_id" => ["copy_worker_provider_session_id_to_session_id"],
+      "worker_failure_reason" => ["hoist_worker_failure_reason"],
       "worker_provider_session_id" => [
         "hoist_recovery_worker_provider_session_id",
         "hoist_worker_provider_session_id",
@@ -635,6 +674,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ],
       ["check_recovery_provider_id", "error_worker_provider_session_missing", nil],
       [
+        "check_worker_delivery_status",
+        "hoist_worker_failure_reason",
+        "context.worker_msg.delivery_status=provider_account_exhausted"
+      ],
+      [
+        "check_worker_delivery_status",
+        "hoist_worker_provider_session_id_from_message",
+        nil
+      ],
+      [
         "check_worker_send_recovery_budget",
         "error_worker_send_recovery_exhausted",
         "context.worker_send_recovery_count>=1"
@@ -660,6 +709,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ["coding_workspace_recovery_summary", "hoist_recovery_prompt", "outcome=success"],
       ["copy_recovery_pending_prompt", "coding_workspace_recovery_summary", nil],
       ["copy_worker_provider_session_id_to_session_id", "close_stale_worker", nil],
+      ["error_worker_provider_account_exhausted", "status_pipeline_error_then_close", nil],
       ["error_worker_provider_session_missing", "status_pipeline_error_then_close", nil],
       ["error_worker_recovery_continuity_invalid", "status_pipeline_error_then_close", nil],
       ["error_worker_recovery_reopen_failed", "status_pipeline_error_then_close", nil],
@@ -670,17 +720,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ["hoist_recovery_prompt", "capture_pre_turn_recovery", nil],
       ["hoist_recovery_worker_provider_session_id", "route_recovery_continuity", nil],
       ["hoist_recovery_worker_session_id", "hoist_recovery_worker_provider_session_id", nil],
+      ["hoist_worker_failure_reason", "error_worker_provider_account_exhausted", nil],
+      ["implement", "check_worker_delivery_status", "outcome=success"],
       ["implement", "check_worker_send_recovery_budget", "outcome=fail"],
-      ["implement", "hoist_worker_provider_session_id_from_message", "outcome=success"],
       ["inc_worker_send_recovery_count", "acp_session_status", nil],
       ["open_recovery_worker", "error_worker_recovery_reopen_failed", "outcome=fail"],
       ["open_recovery_worker", "hoist_recovery_worker_session_id", "outcome=success"],
-      ["retry_recovered_send", "error_worker_recovery_send_failed", "outcome=fail"],
       [
         "retry_recovered_send",
-        "hoist_worker_provider_session_id_from_message",
+        "check_worker_delivery_status",
         "outcome=success"
       ],
+      ["retry_recovered_send", "error_worker_recovery_send_failed", "outcome=fail"],
       [
         "route_recovery_continuity",
         "capture_pre_turn_recovery",

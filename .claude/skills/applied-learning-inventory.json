@@ -5847,7 +5847,7 @@
       "anchor": "applied-learning-treat-provider-account-exhaustion-errors-as-deterministic-routing-failures-not-transport-retries",
       "source_date": "2026-07-21",
       "source_incident": "found 2026-07-21 when Grok 4.5 task_323715 exhausted both initial and recovery sends against the same xAI team limit).",
-      "content_sha256": "910ae32188b1bba780e56eadfdd815dc3e2c92597a486d02b15b5dd3bf1cd43f",
+      "content_sha256": "fb9396c65999580df908f8f90db38c2f515506f91585c60c154aa3d8c7543446",
       "always_loaded": false
     },
     {

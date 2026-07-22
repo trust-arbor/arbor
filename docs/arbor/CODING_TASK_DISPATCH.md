@@ -323,6 +323,18 @@ The Engine projection is capped at 32 failed nodes, 256-byte node ids, and
 entry and revalidates that bound. Raw action output, arbitrary outcome terms,
 and unrelated node failures are not copied into the task result.
 
+Provider account exhaustion is terminal for the current route, not evidence of
+an uncertain ACP send. The compiled graph requests `delivery_receipt` mode on
+both worker-send nodes. `acp_send_message` reports
+`worker_provider_account_exhausted` only for a JSON-RPC `-32603` error with a
+nested HTTP `402` or `403` and bounded provider text explicitly identifying
+exhausted credits or a monthly spending limit. The graph preserves a stable,
+bounded `failure_reason`, closes the worker, and settles the workspace without
+opening a replacement session. Timeouts, disconnects, generic permission
+failures, malformed payloads, and unrecognized provider errors retain the
+existing error path and one-shot uncertain-send recovery. Callers that omit
+`failure_mode` retain the original `{:error, reason}` action contract.
+
 `validation_capacity_exceeded` is a distinct infrastructure handoff, not a
 worker validation failure. It means the complete exact-file batch plan cannot
 fit the reviewed aggregate validation budget, either before the first child or

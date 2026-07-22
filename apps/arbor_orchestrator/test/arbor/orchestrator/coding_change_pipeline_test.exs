@@ -264,6 +264,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       "message" => "Path not found."
     }
 
+    @provider_account_exhausted_reason "ACP provider account credits exhausted or monthly spending limit reached (HTTP 403)"
+
     defp initial_resume_start_response(scenario, args) do
       session_id = Map.get(args, "session_id") || Map.get(args, :session_id)
       fallback = Map.get(args, "fallback_to_fresh_on_resume_unavailable")
@@ -325,11 +327,18 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                :recovery_status_empty_no_id,
                :recovery_close_failed,
                :recovery_reopen_failed,
+               :recovery_provider_account_exhausted,
                :recovery_second_send_failed,
                :recovery_continuity_new,
                :recovery_continuity_unknown
              ] ->
           {:error, "initial send failed"}
+
+        {:provider_account_exhausted, _} ->
+          provider_account_exhausted_receipt()
+
+        {:recovery_provider_account_exhausted, 1} ->
+          provider_account_exhausted_receipt()
 
         {:recovery_second_send_failed, 1} ->
           {:error, "recovered send failed"}
@@ -496,12 +505,26 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
           {:ok,
            %{
+             delivery_status: "delivered",
              text: text,
              stop_reason: stop_reason,
              session_id: response_session_id,
              usage: %{}
            }}
       end
+    end
+
+    defp provider_account_exhausted_receipt do
+      {:ok,
+       %{
+         delivery_status: "provider_account_exhausted",
+         failure_reason: @provider_account_exhausted_reason,
+         text: "",
+         stop_reason: "",
+         session_id: "",
+         context_pressure: false,
+         usage: %{}
+       }}
     end
 
     defp inspect_response(scenario, counters, state, args) do
@@ -2019,6 +2042,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert dot =~ "acp_session_status"
       assert dot =~ "retry_recovered_send"
       assert dot =~ "worker_provider_session_id"
+      assert dot =~ "param.failure_mode=\"delivery_receipt\""
     end
 
     test "initial open_worker FS_NOT_FOUND with fallback proceeds as fresh_recovery" do
@@ -2082,6 +2106,28 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       # open_worker failed before a managed handle existed; release still runs.
       assert called?(calls, "coding_workspace_release")
       refute called?(calls, "acp_close_session")
+    end
+
+    test "provider account exhaustion terminates without session recovery" do
+      assert {{:ok, result}, calls} = run_fixture(:provider_account_exhausted)
+
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_provider_account_exhausted"
+
+      assert result.context["worker_failure_reason"] ==
+               "ACP provider account credits exhausted or monthly spending limit reached (HTTP 403)"
+
+      assert result.context["worker_send_recovery_count"] == "0"
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_send_message" end)) == 1
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_start_session" end)) == 1
+      refute called?(calls, "acp_session_status")
+
+      assert {"acp_send_message", send_args} =
+               Enum.find(calls, fn {name, _args} -> name == "acp_send_message" end)
+
+      assert send_args["failure_mode"] == "delivery_receipt"
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
     end
 
     test "send failure resumes the current prompt once on a replacement worker" do
@@ -2252,6 +2298,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert {{:ok, result}, calls} = run_fixture(:recovery_second_send_failed)
       assert result.context["status"] == "pipeline_error"
       assert result.context["error"] == "worker_recovery_send_failed"
+      assert result.context["worker_send_recovery_count"] == 1
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_send_message" end)) == 2
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_session_status" end)) == 1
+      assert length(Enum.filter(calls, fn {name, _} -> name == "acp_start_session" end)) == 2
+      assert_closed_and_released(calls)
+    end
+
+    test "provider account exhaustion after recovery terminates without another recovery" do
+      assert {{:ok, result}, calls} = run_fixture(:recovery_provider_account_exhausted)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_provider_account_exhausted"
       assert result.context["worker_send_recovery_count"] == 1
       assert length(Enum.filter(calls, fn {name, _} -> name == "acp_send_message" end)) == 2
       assert length(Enum.filter(calls, fn {name, _} -> name == "acp_session_status" end)) == 1

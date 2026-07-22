@@ -927,6 +927,30 @@ defmodule Arbor.Actions.AcpTest do
                })
     end
 
+    test "rejects an unknown failure mode before calling the AI facade" do
+      install_fake_ai()
+
+      assert {:error, error} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_invalid_failure_mode",
+                   prompt: "continue",
+                   failure_mode: "unknown"
+                 },
+                 %{}
+               )
+
+      assert error =~ "failure_mode must be"
+      refute_received {:managed_send, _, _, _}
+
+      assert {:error, _} =
+               Acp.SendMessage.validate_params(%{
+                 worker_session_id: "acp_worker_invalid_failure_mode",
+                 prompt: "continue",
+                 failure_mode: "unknown"
+               })
+    end
+
     test "generates tool schema" do
       tool = Acp.SendMessage.to_tool()
       assert is_map(tool)
@@ -985,6 +1009,183 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(opts, :timeout) == 30_000
       # worker_session_id wins over live session_pid; no legacy PID path is used.
       refute_received {:legacy_send, _, _, _}
+    end
+
+    test "delivery receipt classifies the exact sanitized provider account exhaustion shape" do
+      install_fake_ai()
+
+      reason = %{
+        "code" => -32_603,
+        "data" => %{
+          "http_status" => 403,
+          "message" =>
+            {:truncated_binary,
+             "API error ... has either used all available credits or reached its monthly spending limit ...",
+             268}
+        },
+        "message" => "Internal error"
+      }
+
+      :persistent_term.put({FakeAI, :send_result}, {:error, reason})
+
+      assert {:ok, receipt} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_credits",
+                   prompt: "continue",
+                   failure_mode: "delivery_receipt"
+                 },
+                 %{}
+               )
+
+      assert receipt.delivery_status == "provider_account_exhausted"
+
+      assert receipt.failure_reason ==
+               "ACP provider account credits exhausted or monthly spending limit reached (HTTP 403)"
+
+      assert receipt.text == ""
+      assert receipt.stop_reason == ""
+      assert receipt.session_id == ""
+      assert receipt.context_pressure == false
+      assert receipt.usage == %{}
+      assert {:ok, _json} = Jason.encode(receipt)
+    end
+
+    test "delivery receipt uses HTTP 402 and applies consistently to the legacy path" do
+      install_fake_ai()
+      session = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(session, :kill) end)
+
+      reason = %{
+        code: -32_603,
+        data: %{
+          http_status: 402,
+          message: "The provider reached its monthly spending limit."
+        },
+        message: "Internal error"
+      }
+
+      :persistent_term.put({FakeAI, :send_result}, {:error, reason})
+
+      assert {:ok, receipt} =
+               Acp.SendMessage.run(
+                 %{session_pid: session, prompt: "continue", failure_mode: "delivery_receipt"},
+                 %{}
+               )
+
+      assert receipt.delivery_status == "provider_account_exhausted"
+      assert receipt.failure_reason =~ "(HTTP 402)"
+      assert receipt.text == ""
+      assert receipt.usage == %{}
+      assert_receive {:legacy_send, ^session, "continue", _opts}
+    end
+
+    test "ordinary permission-denied 403 stays an error in delivery receipt mode" do
+      install_fake_ai()
+
+      reason = %{
+        "code" => -32_603,
+        "data" => %{"http_status" => 403, "message" => "permission denied"},
+        "message" => "Internal error"
+      }
+
+      :persistent_term.put({FakeAI, :send_result}, {:error, reason})
+
+      assert {:error, error} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_permission",
+                   prompt: "continue",
+                   failure_mode: "delivery_receipt"
+                 },
+                 %{}
+               )
+
+      assert error == Acp.format_error(reason)
+    end
+
+    test "invalid UTF-8 provider detail stays an error in delivery receipt mode" do
+      install_fake_ai()
+
+      reason = %{
+        "code" => -32_603,
+        "data" => %{"http_status" => 403, "message" => <<0xFF>>},
+        "message" => "Internal error"
+      }
+
+      :persistent_term.put({FakeAI, :send_result}, {:error, reason})
+
+      assert {:error, error} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_invalid_utf8",
+                   prompt: "continue",
+                   failure_mode: "delivery_receipt"
+                 },
+                 %{}
+               )
+
+      assert error == Acp.format_error(reason)
+    end
+
+    test "timeout stays an error in delivery receipt mode" do
+      install_fake_ai()
+      :persistent_term.put({FakeAI, :send_result}, {:error, :timeout})
+
+      assert {:error, error} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_timeout",
+                   prompt: "continue",
+                   failure_mode: "delivery_receipt"
+                 },
+                 %{}
+               )
+
+      assert error == Acp.format_error(:timeout)
+    end
+
+    test "omitted failure mode preserves the existing error result" do
+      install_fake_ai()
+      reason = {:transport_error, :closed}
+      :persistent_term.put({FakeAI, :send_result}, {:error, reason})
+
+      assert {:error, error} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_default_error", prompt: "continue"},
+                 %{}
+               )
+
+      assert error == Acp.format_error(reason)
+    end
+
+    test "successful managed and legacy sends add delivered in receipt mode" do
+      install_fake_ai()
+
+      assert {:ok, managed} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_delivered",
+                   prompt: "continue",
+                   failure_mode: "delivery_receipt"
+                 },
+                 %{}
+               )
+
+      assert managed.delivery_status == "delivered"
+      assert managed.text == "echo:continue"
+
+      session = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(session, :kill) end)
+
+      assert {:ok, legacy} =
+               Acp.SendMessage.run(
+                 %{session_pid: session, prompt: "continue", failure_mode: "delivery_receipt"},
+                 %{}
+               )
+
+      assert legacy.delivery_status == "delivered"
+      assert legacy.text == "legacy"
     end
 
     test "threads trusted MFA capture metadata and projects only its closed descriptor" do

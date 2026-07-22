@@ -1281,7 +1281,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       graph
       | edges:
           Enum.map(graph.edges, fn edge ->
-            if edge.from == "implement" and
+            if edge.from == "check_worker_delivery_status" and
                  edge.to == "hoist_worker_provider_session_id_from_message" do
               %{edge | to: "inspect_workspace"}
             else
@@ -1539,6 +1539,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       update_in(
         graph.nodes["close_stale_worker"].attrs,
         &Map.put(&1, "param.return_to_pool", true)
+      ),
+      update_in(
+        graph.nodes["implement"].attrs,
+        &Map.delete(&1, "param.failure_mode")
       ),
       %{
         graph

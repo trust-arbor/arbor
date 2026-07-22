@@ -2753,6 +2753,40 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert detail["failure_reason"] == provider_failure
     end
 
+    test "pipeline_error projects the stable worker provider account exhaustion reason" do
+      stable_reason = "worker provider account exhausted"
+
+      assert {:error, {:pipeline_error, detail}} =
+               run_with_context(%{
+                 "status" => "pipeline_error",
+                 "error" => "worker_provider_account_exhausted",
+                 "worker_failure_reason" => stable_reason
+               })
+
+      assert detail["error"] == "worker_provider_account_exhausted"
+      assert detail["failure_reason"] == stable_reason
+    end
+
+    test "pipeline_error omits invalid worker provider account exhaustion reasons" do
+      for reason <- [
+            "",
+            "   ",
+            42,
+            <<0xFF>>,
+            String.duplicate("x", 513)
+          ] do
+        assert {:error, {:pipeline_error, detail}} =
+                 run_with_context(%{
+                   "status" => "pipeline_error",
+                   "error" => "worker_provider_account_exhausted",
+                   "worker_failure_reason" => reason
+                 })
+
+        assert detail["error"] == "worker_provider_account_exhausted"
+        refute Map.has_key?(detail, "failure_reason")
+      end
+    end
+
     test "pipeline_error rejects unrelated, nonbinary, and oversized Engine failures" do
       context = %{
         "status" => "pipeline_error",

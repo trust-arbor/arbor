@@ -2678,6 +2678,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     |> Map.merge(workspace_release_projection(context))
     |> reject_nil_values()
     |> maybe_put_pipeline_failure_reason(context_get(context, "error"), engine_result)
+    |> maybe_put_worker_provider_account_exhausted_reason(
+      context_get(context, "error"),
+      context
+    )
   end
 
   defp maybe_put_pipeline_failure_reason(detail, error_code, engine_result) do
@@ -2694,6 +2698,30 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       _other -> detail
     end
   end
+
+  defp maybe_put_worker_provider_account_exhausted_reason(
+         detail,
+         "worker_provider_account_exhausted",
+         context
+       ) do
+    reason = context_get(context, "worker_failure_reason")
+
+    if is_binary(reason) and byte_size(reason) in 1..@max_pipeline_failure_reason_bytes and
+         String.valid?(reason) and String.trim(reason) != "" do
+      case RunLifecycleAdapter.bound_failure_reason(reason) do
+        bounded when is_binary(bounded) and bounded != "" ->
+          Map.put(detail, "failure_reason", bounded)
+
+        _other ->
+          detail
+      end
+    else
+      detail
+    end
+  end
+
+  defp maybe_put_worker_provider_account_exhausted_reason(detail, _error_code, _context),
+    do: detail
 
   defp attach_workspace_release_artifact(artifacts, result) do
     case Map.take(result, ["workspace_release_status", "workspace_expires_at"]) do

@@ -327,6 +327,7 @@ digraph CodingChangeV1 {
     target="action",
     action="acp_send_message",
     context_keys="worker_session_id,prompt",
+    param.failure_mode="delivery_receipt",
     output_prefix="worker_msg",
     max_retries="0"
   ]
@@ -340,6 +341,22 @@ digraph CodingChangeV1 {
     type="branch",
     shape=diamond,
     fan_out="false"
+  ]
+
+  // Deterministic provider rejections are successful delivery-attempt
+  // receipts, not uncertain transport failures. Route them before session
+  // recovery so replacing the worker cannot repeat an account-level failure.
+  check_worker_delivery_status [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  hoist_worker_failure_reason [
+    type="transform",
+    transform="identity",
+    source_key="worker_msg.failure_reason",
+    output_key="worker_failure_reason"
   ]
 
   // One-shot send recovery. The current prompt remains in `prompt` until a
@@ -463,6 +480,7 @@ digraph CodingChangeV1 {
     target="action",
     action="acp_send_message",
     context_keys="worker_session_id,prompt,timeout,inactivity_timeout_ms",
+    param.failure_mode="delivery_receipt",
     output_prefix="worker_msg",
     max_retries="0"
   ]
@@ -1322,6 +1340,13 @@ digraph CodingChangeV1 {
     output_key="error"
   ]
 
+  error_worker_provider_account_exhausted [
+    type="transform",
+    transform="constant",
+    expression="worker_provider_account_exhausted",
+    output_key="error"
+  ]
+
   error_worker_stale_close_failed [
     type="transform",
     transform="constant",
@@ -1517,9 +1542,10 @@ digraph CodingChangeV1 {
   check_pre_turn_recovery_exists -> error_workspace_missing [condition="context.pre_turn.exists!=true"]
   check_pre_turn_recovery_exists -> retry_recovered_send [condition="context.pre_turn.exists=true"]
   retry_recovered_send -> error_worker_recovery_send_failed [condition="outcome=fail"]
-  retry_recovered_send -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
+  retry_recovered_send -> check_worker_delivery_status [condition="outcome=success"]
 
   // Every recovery terminal uses the existing close/release tail.
+  error_worker_provider_account_exhausted -> status_pipeline_error_then_close
   error_worker_send_recovery_exhausted -> status_pipeline_error_then_close
   error_worker_provider_session_missing -> status_pipeline_error_then_close
   error_worker_stale_close_failed -> status_pipeline_error_then_close
@@ -1535,7 +1561,10 @@ digraph CodingChangeV1 {
   // Owner-observed outcome: successful turns require trusted end_turn, then
   // inspect the workspace. Worker prose never gates validation/review/commit
   // vs no_changes.
-  implement -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
+  implement -> check_worker_delivery_status [condition="outcome=success"]
+  check_worker_delivery_status -> hoist_worker_failure_reason [condition="context.worker_msg.delivery_status=provider_account_exhausted"]
+  check_worker_delivery_status -> hoist_worker_provider_session_id_from_message
+  hoist_worker_failure_reason -> error_worker_provider_account_exhausted
   hoist_worker_provider_session_id_from_message -> check_worker_stop_reason
   check_worker_stop_reason -> inspect_workspace [condition="context.worker_msg.stop_reason=end_turn"]
   check_worker_stop_reason -> error_worker_stop_reason_not_end_turn
