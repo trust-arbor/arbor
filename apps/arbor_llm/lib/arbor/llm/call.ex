@@ -16,12 +16,10 @@ defmodule Arbor.LLM.Call do
     * `result` — set by `Plugs.Dispatch` (or short-circuited by
       `Plugs.Replay`). The pipeline finishes when the caller
       extracts this field.
-    * `halted` — set by any plug that wants the rest of the
-      pipeline to pass through unchanged. The `use Arbor.LLM.Plug`
-      macro inserts a halted-passthrough clause at the top of every
-      plug, so once a plug sets `halted: true`, subsequent plugs are
-      effectively no-ops (still called, but they just return the
-      call as-is).
+    * `halted` — set by any plug that wants later mutating plugs to
+      leave the call unchanged. Each plug decides explicitly whether a
+      halted call is a no-op; observability plugs may intentionally run
+      after a short-circuit.
     * `metadata` — pipeline-shared state: timestamps, fixture
       provenance, traces, etc. Use this for cross-cutting info that
       multiple plugs need to see.

@@ -142,17 +142,37 @@ end
 
 The current `Arbor.LLM.Adapter.ReqLLM` uses the dynamic shape so test environments can swap pipelines without touching the adapter.
 
+The pipeline boundary carries upstream result types. In particular, a live
+completion is `{:ok, %ReqLLM.Response{}}`; conversion to
+`%Arbor.LLM.Response{}` happens only after the pipeline returns. Record/replay
+fixtures must serialize that real typed boundary and reconstruct a minimal
+`%ReqLLM.Response{}` on replay. A test plug returning an already-normalized
+Arbor response does not exercise production record/replay and can hide a
+broken fixture contract.
+
 ## Conventional pipelines
 
 | Context | Pipeline |
 |---|---|
-| Production default | `[Dispatch]` |
+| Production default | `[ResponseLimit, Dispatch, RateLimitBackoff, Usage]` |
 | Test replay | `[Replay, Dispatch, StalenessWarn]` |
 | Recording new fixtures | `[Replay, Dispatch, Record, StalenessWarn]` |
-| Cost-tracked production (future) | `[Dispatch, CostTracker, Telemetry]` |
-| Throttled production (future) | `[Throttle, Dispatch, CostTracker, Telemetry]` |
+| Replay with usage protection | `[Replay, Dispatch, Usage]` (`Usage` skips halted replay) |
 
 The order matters: `Replay` before `Dispatch` so a fixture short-circuits the real call; `Throttle` before `Dispatch` so it can refuse the call before it costs anything; `CostTracker` and `Telemetry` after `Dispatch` so they see the result.
+
+## Applied learning
+
+**Exercise fixtures at the production typed boundary (2026-07-22).** Record
+and replay the value the pipeline actually sees, then let the normal adapter
+conversion run. Normalized test doubles can make both recording and replay
+look correct while live calls are serialized as an opaque raw outcome.
+
+**Usage belongs to the authoritative completion owner (2026-07-22).** An
+eager streaming completion may account final usage after assembly and boundary
+validation. A lazy stream can be partially consumed, abandoned, or cancelled,
+so it needs an explicit normal-completion contract before it can emit terminal
+usage; do not infer billing from an intermediate metadata chunk.
 
 ## Anti-patterns
 
