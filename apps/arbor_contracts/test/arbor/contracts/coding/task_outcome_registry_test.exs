@@ -45,6 +45,35 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
            )
   end
 
+  test "parity keeps legacy cancelled distinct from canonical outer task_cancelled" do
+    assert TaskOutcomeRegistry.parity_terminal_statuses() == ~w(
+             approval_denied
+             cancelled
+             change_committed
+             declined
+             human_review_required
+             no_changes
+             pr_created
+             pr_failed
+             review_failed
+             review_rejected
+             review_requires_rework
+             rework_exhausted
+             validation_capacity_exceeded
+             validation_failed
+           )
+
+    assert Enum.all?(
+             TaskOutcomeRegistry.parity_terminal_statuses(),
+             &TaskOutcomeRegistry.parity_terminal_status?/1
+           )
+
+    assert TaskOutcomeRegistry.parity_terminal_status?("cancelled")
+    refute TaskOutcomeRegistry.terminal_status?("cancelled")
+    assert TaskOutcomeRegistry.registered_code?("task_cancelled")
+    refute TaskOutcomeRegistry.parity_terminal_status?("task_cancelled")
+  end
+
   test "every registered code builds a valid TaskOutcome with its declared spec" do
     for code <- TaskOutcomeRegistry.registered_codes() do
       assert {:ok, spec} = TaskOutcomeRegistry.lookup(code)

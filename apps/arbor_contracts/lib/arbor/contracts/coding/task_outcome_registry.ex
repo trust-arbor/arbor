@@ -23,6 +23,26 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     validation_failed
   )
 
+  # Coding parity still accepts the legacy report status `cancelled`. The
+  # canonical outer TaskOutcome code is `task_cancelled`, which is intentionally
+  # not a parity terminal status.
+  @parity_terminal_statuses ~w(
+    approval_denied
+    cancelled
+    change_committed
+    declined
+    human_review_required
+    no_changes
+    pr_created
+    pr_failed
+    review_failed
+    review_rejected
+    review_requires_rework
+    rework_exhausted
+    validation_capacity_exceeded
+    validation_failed
+  )
+
   @pipeline_error_codes ~w(
     pipeline_error
     committed_change_materialization_failed
@@ -275,6 +295,10 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
   @spec terminal_statuses() :: [String.t()]
   def terminal_statuses, do: @terminal_statuses
 
+  @doc "Return coding parity terminal statuses in their historical order."
+  @spec parity_terminal_statuses() :: [String.t()]
+  def parity_terminal_statuses, do: @parity_terminal_statuses
+
   @doc "Return coding result statuses recognized by compatibility parsers."
   @spec coding_result_statuses() :: [String.t()]
   def coding_result_statuses, do: @terminal_statuses ++ ["pipeline_error"]
@@ -306,8 +330,14 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
   @spec lookup(term()) :: {:ok, map()} | :error
   def lookup(code), do: spec(code)
 
+  @doc "Whether a status is a canonical coding TaskOutcome terminal status."
   @spec terminal_status?(term()) :: boolean()
   def terminal_status?(status), do: is_binary(status) and status in @terminal_statuses
+
+  @doc "Whether a status is accepted by the legacy-compatible coding parity projection."
+  @spec parity_terminal_status?(term()) :: boolean()
+  def parity_terminal_status?(status),
+    do: is_binary(status) and status in @parity_terminal_statuses
 
   @spec coding_result_status?(term()) :: boolean()
   def coding_result_status?(status), do: is_binary(status) and status in coding_result_statuses()

@@ -1,4 +1,5 @@
 defmodule Arbor.Commands.CodingParity do
+  alias Arbor.Contracts.Coding.TaskOutcomeRegistry
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
   @moduledoc """
@@ -10,12 +11,8 @@ defmodule Arbor.Commands.CodingParity do
   alias Arbor.Contracts.Comms.ApprovalAnswer
 
   @schema "arbor.coding_parity.projection.v1"
-  @statuses ~w(
-    approval_denied cancelled change_committed declined human_review_required
-    no_changes pr_created pr_failed review_failed review_rejected
-    review_requires_rework rework_exhausted validation_capacity_exceeded
-    validation_failed
-  )
+  # This subset is narrower than the parity terminal status registry: these
+  # statuses intentionally do not require validation evidence.
   @no_validation_statuses ~w(cancelled declined no_changes)
   # Opaque approval IDs/notes remain projected as artifacts when present but are
   # excluded from deterministic comparison (moduledoc: opaque IDs excluded).
@@ -159,7 +156,7 @@ defmodule Arbor.Commands.CodingParity do
       end
 
     with {:ok, status} <- token(value, "terminal_status"),
-         true <- status in @statuses,
+         true <- TaskOutcomeRegistry.parity_terminal_status?(status),
          :ok <- capacity_status_consistency(sources, status) do
       {:ok, status}
     else

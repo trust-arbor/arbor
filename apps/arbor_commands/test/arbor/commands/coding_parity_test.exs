@@ -4,10 +4,30 @@ defmodule Arbor.Commands.CodingParityTest do
   @moduletag :fast
 
   alias Arbor.Commands.CodingParity
+  alias Arbor.Contracts.Coding.TaskOutcomeRegistry
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
   @tree_a String.duplicate("a", 40)
   @tree_b String.duplicate("b", 40)
+
+  test "preserves legacy cancelled boundary instead of accepting canonical task_cancelled" do
+    legacy_cancelled =
+      legacy_result()
+      |> put_in([:payload, :report, :status], :cancelled)
+      |> put_in([:payload, :report, :canonical_status], "cancelled")
+
+    assert {:ok, projection} = CodingParity.project(legacy_cancelled, legacy_observations())
+    assert projection["semantic"]["terminal_status"] == "cancelled"
+    assert TaskOutcomeRegistry.registered_code?("task_cancelled")
+
+    canonical_outer =
+      legacy_result()
+      |> put_in([:payload, :report, :status], "task_cancelled")
+      |> put_in([:payload, :report, :canonical_status], "task_cancelled")
+
+    assert {:error, %{"reason" => "unknown_terminal_status"}} =
+             CodingParity.project(canonical_outer, legacy_observations())
+  end
 
   test "different volatile execution details preserve semantic parity" do
     assert {:ok, legacy} = CodingParity.project(legacy_result(), legacy_observations())
