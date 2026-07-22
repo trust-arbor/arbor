@@ -75,7 +75,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "repo_path" => Map.get(iv, "repo_path"),
         "worktree_path" => "/tmp/ws_test",
         "workspace_id" => "ws_1",
-        "worker_session_id" => "worker_1"
+        "worker_session_id" => "worker_1",
+        "worker" => %{
+          "worker_session_id" => "worker_1",
+          "provider" => Map.get(iv, "acp_agent", "codex"),
+          "model" => Map.get(iv, "model", "default")
+        },
+        "worker_status" => %{
+          "worker_session_id" => "worker_1",
+          "provider" => Map.get(iv, "acp_agent", "codex"),
+          "model" => Map.get(iv, "model", "default"),
+          "session_id" => "provider_session_1"
+        },
+        "worker_provider_session_id" => "provider_session_1",
+        "worker_msg" => %{
+          "delivery_status" => "delivered",
+          "stop_reason" => "end_turn",
+          "session_id" => "provider_session_1"
+        }
       }
     end
   end
@@ -359,7 +376,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
              "repo_path" => opts[:initial_values]["repo_path"],
              "worktree_path" => "/tmp/ws_reload",
              "workspace_id" => "ws_reload",
-             "worker_session_id" => "worker_reload"
+             "worker_session_id" => "worker_reload",
+             "worker_provider_session_id" => "provider_session_reload",
+             "worker" => %{
+               "worker_session_id" => "worker_reload",
+               "provider" => "codex",
+               "model" => "default"
+             },
+             "worker_status" => %{
+               "worker_session_id" => "worker_reload",
+               "provider" => "codex",
+               "model" => "default",
+               "session_id" => "provider_session_reload"
+             },
+             "worker_msg" => %{
+               "delivery_status" => "delivered",
+               "stop_reason" => "end_turn",
+               "session_id" => "provider_session_reload"
+             }
            },
            completed_nodes: [],
            final_outcome: nil,
@@ -694,6 +728,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     %{
       "status" => "change_committed",
       "canonical_status" => "change_committed",
+      "outcome" => %{
+        "version" => 1,
+        "disposition" => "succeeded",
+        "code" => "change_committed",
+        "phase" => "commit",
+        "origin" => "arbor",
+        "retry" => "none"
+      },
       "response_text" => "kept result field",
       "workspace_release_status" => "retained",
       "workspace_expires_at" => "2026-07-21T12:00:00Z",
@@ -2124,7 +2166,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   describe "final context mapping" do
     defp run_with_context(context) do
-      Application.put_env(:arbor_orchestrator, :coding_executor_final_context, context)
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_final_context,
+        Map.merge(completed_turn_context(), context)
+      )
+
       CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
     end
 
@@ -2133,7 +2180,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         Map.merge(
           %{
             run_id: "task_coding_1",
-            context: context,
+            context: Map.merge(completed_turn_context(), context),
             completed_nodes: [],
             final_outcome: nil,
             taint: %{},
@@ -2149,6 +2196,29 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       )
 
       CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+    end
+
+    defp completed_turn_context do
+      %{
+        "worker_session_id" => "worker_1",
+        "worker_provider_session_id" => "provider_session_1",
+        "worker" => %{
+          "worker_session_id" => "worker_1",
+          "provider" => "codex",
+          "model" => "default"
+        },
+        "worker_status" => %{
+          "worker_session_id" => "worker_1",
+          "provider" => "codex",
+          "model" => "default",
+          "session_id" => "provider_session_1"
+        },
+        "worker_msg" => %{
+          "delivery_status" => "delivered",
+          "stop_reason" => "end_turn",
+          "session_id" => "provider_session_1"
+        }
+      }
     end
 
     test "change_committed maps commit_hash and opaque handles" do
@@ -2183,6 +2253,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["worker_session_id"] == "w_1"
       assert result["worker_provider_session_id"] == "provider-session-1"
       assert result["worker_provider"] == "codex"
+      assert result["outcome"]["code"] == "change_committed"
       assert result["files"] == ["lib/a.ex"]
       assert result["acp_agent"] == "codex"
       refute Map.has_key?(result, :__struct__)
@@ -2349,7 +2420,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           {:ok,
            %{
              run_id: Keyword.fetch!(opts, :run_id),
-             context: %{"status" => "change_committed", "worktree_path" => "/tmp/ws"},
+             context:
+               Map.merge(completed_turn_context(), %{
+                 "status" => "change_committed",
+                 "worktree_path" => "/tmp/ws"
+               }),
              completed_nodes: ["start", "validate", "done"],
              final_outcome: nil,
              taint: %{},
@@ -2564,6 +2639,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                "status" => "validation_failed",
                "worktree_path" => "/tmp/ws",
                "validation" => [%{"passed" => false}],
+               "worker_session_id" => "worker_transcript",
+               "worker_provider_session_id" => "provider-session",
+               "worker" => %{"provider" => "codex", "model" => "default"},
+               "worker_status" => %{
+                 "provider" => "codex",
+                 "model" => "default",
+                 "session_id" => "provider-session"
+               },
+               "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"},
                "exec.implement.transcript" => descriptor
              },
              completed_nodes: ["worker_message", "validate"],
@@ -2618,6 +2702,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
              run_id: Keyword.fetch!(opts, :run_id),
              context: %{
                "status" => "validation_failed",
+               "worker_session_id" => "worker_transcript",
+               "worker_provider_session_id" => "provider-session",
+               "worker" => %{"provider" => "codex", "model" => "default"},
+               "worker_status" => %{
+                 "provider" => "codex",
+                 "model" => "default",
+                 "session_id" => "provider-session"
+               },
+               "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"},
                "exec.implement.transcript" => descriptor
              },
              completed_nodes: ["worker_message", "validate"],
@@ -2664,6 +2757,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
              run_id: Keyword.fetch!(opts, :run_id),
              context: %{
                "status" => "validation_failed",
+               "worker_session_id" => "worker_transcript",
+               "worker_provider_session_id" => "provider-session",
+               "worker" => %{"provider" => "codex", "model" => "default"},
+               "worker_status" => %{
+                 "provider" => "codex",
+                 "model" => "default",
+                 "session_id" => "provider-session"
+               },
+               "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"},
                "exec.implement.transcript" => descriptor
              },
              completed_nodes: ["worker_message", "validate"],
@@ -2723,6 +2825,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert detail["worker_provider"] == "codex"
       assert detail["worker_session_id"] == "closed-worker-handle"
       assert detail["worker_provider_session_id"] == "provider-session-failure-1"
+      assert detail["outcome"]["code"] == "invalid_terminal_evidence"
 
       assert {:error, :missing_terminal_status} = run_with_context(%{"branch" => "b1"})
 
@@ -2895,7 +2998,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
              Arbor.Security.uri_registered?(@unknown_action_prefix)}
           )
 
-          {:ok, %{context: %{"status" => "change_committed"}}}
+          {:ok, %{context: Map.put(completed_turn_context(), "status", "change_committed")}}
         end)
 
         assert {:ok, _result} =
@@ -3181,6 +3284,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   # ---------------------------------------------------------------------------
 
   describe "finalize_task" do
+    test "rejects a caller-forged inconsistent outcome" do
+      root = prepare_finalize_artifacts()
+      forged = Map.put(finalize_result(root), "outcome", terminal_outcome("validation_failed"))
+
+      assert {:error, {:invalid_finalize_result, :outcome}} =
+               CodingTaskExecutor.finalize_task("agent_1", forged, [], valid_context())
+    end
+
     test "requires complete CrossApp capacity evidence and rejects status mismatches" do
       root = prepare_finalize_artifacts()
 
@@ -3188,6 +3299,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         finalize_result(root)
         |> Map.put("status", "validation_capacity_exceeded")
         |> Map.put("canonical_status", "validation_capacity_exceeded")
+        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
         |> Map.put("validation", [%{"reason" => "validation_capacity_exceeded"}])
 
       assert {:error, {:invalid_finalize_result, :capacity_handoff}} =
@@ -3197,6 +3309,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         finalize_result(root)
         |> Map.put("status", "validation_capacity_exceeded")
         |> Map.put("canonical_status", "validation_capacity_exceeded")
+        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
         |> Map.put("validation", capacity_validation_fixture())
 
       assert {:ok, _finalized} =
@@ -3206,6 +3319,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         valid
         |> Map.put("status", "validation_failed")
         |> Map.put("canonical_status", "validation_failed")
+        |> Map.put("outcome", terminal_outcome("validation_failed"))
 
       assert {:error, {:invalid_finalize_result, :capacity_evidence_mismatch}} =
                CodingTaskExecutor.finalize_task("agent_1", mismatched, [], valid_context())
@@ -3352,6 +3466,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  valid_context()
                )
     end
+  end
+
+  defp terminal_outcome(status) do
+    {:ok, outcome} =
+      Arbor.Orchestrator.CodingPlan.OutcomeMapper.map_terminal(status, %{
+        "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"}
+      })
+
+    outcome
   end
 
   describe "adopt_task" do

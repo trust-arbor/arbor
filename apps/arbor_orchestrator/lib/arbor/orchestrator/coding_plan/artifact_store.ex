@@ -60,6 +60,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     approval_note
     acp_agent
     worker_provider
+    outcome
     metrics
     workspace_release_status
     workspace_expires_at
@@ -67,22 +68,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     published_commit
     branch_lifecycle
     artifacts
-  ))
-
-  @terminal_statuses MapSet.new(~w(
-    approval_denied
-    change_committed
-    declined
-    human_review_required
-    no_changes
-    pr_created
-    pr_failed
-    review_failed
-    review_rejected
-    review_requires_rework
-    rework_exhausted
-    validation_capacity_exceeded
-    validation_failed
   ))
 
   alias Arbor.Common.SafePath
@@ -95,6 +80,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   }
 
   alias Arbor.Orchestrator.CodingPlan.TranscriptStore
+  alias Arbor.Orchestrator.CodingPlan.OutcomeMapper
 
   @typedoc "JSON-clean descriptor for an archived coding-plan compilation."
   @type descriptor :: %{required(String.t()) => String.t()}
@@ -257,14 +243,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     do: {:error, {:invalid_terminal_task_id, :invalid_value}}
 
   defp validate_terminal_result(result) do
-    required = MapSet.new(~w(status canonical_status artifacts))
+    required = MapSet.new(~w(status canonical_status outcome artifacts))
 
     with :ok <- validate_terminal_keys(result, @terminal_result_keys, :terminal_result),
          true <- MapSet.subset?(required, Map.keys(result) |> MapSet.new()),
          {:ok, _status} <- required_terminal_string(result, "status"),
          {:ok, canonical_status} <- required_terminal_string(result, "canonical_status"),
-         true <- MapSet.member?(@terminal_statuses, Map.fetch!(result, "status")),
-         true <- MapSet.member?(@terminal_statuses, canonical_status),
+         true <- OutcomeMapper.terminal_status?(Map.fetch!(result, "status")),
+         true <- OutcomeMapper.terminal_status?(canonical_status),
+         true <-
+           OutcomeMapper.compatible_with_status?(Map.fetch!(result, "outcome"), canonical_status),
          :ok <- validate_terminal_artifacts(Map.fetch!(result, "artifacts")),
          :ok <- validate_terminal_optional_data(result),
          :ok <- validate_terminal_capacity_consistency(result) do
@@ -660,6 +648,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         "task_id" => task_id,
         "terminal_status" => Map.fetch!(result, "status"),
         "canonical_status" => Map.fetch!(result, "canonical_status"),
+        "outcome" => Map.fetch!(result, "outcome"),
         "compiled_workflow" => Map.take(artifacts, ~w(
          coding_plan_path
          coding_pipeline_path

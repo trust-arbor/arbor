@@ -71,6 +71,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     Compilation,
     ExecutionManifest,
     Normalizer,
+    OutcomeMapper,
     Profiles,
     SemanticPreflight
   }
@@ -233,6 +234,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     approval_note
     acp_agent
     worker_provider
+    outcome
     metrics
     workspace_release_status
     workspace_expires_at
@@ -247,22 +249,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                                    )
   @max_finalize_controls 100
   @max_finalize_task_id_bytes 512
-
-  @success_statuses MapSet.new(~w(
-    approval_denied
-    change_committed
-    declined
-    human_review_required
-    no_changes
-    pr_created
-    pr_failed
-    review_failed
-    review_rejected
-    review_requires_rework
-    rework_exhausted
-    validation_capacity_exceeded
-    validation_failed
-  ))
 
   @adoptable_statuses MapSet.new(~w(change_committed human_review_required pr_created))
   @adoption_request_keys MapSet.new(~w(destination_ref))
@@ -329,7 +315,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              {:ok, engine_result} <-
                invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
              {:ok, result} <-
-               adapt_result(engine_result, started_at, Map.fetch!(plan.worker, "provider")),
+               adapt_result(
+                 engine_result,
+                 started_at,
+                 Map.fetch!(plan.worker, "provider"),
+                 Map.get(plan.worker, "model")
+               ),
              release_artifacts = attach_workspace_release_artifact(artifacts, result),
              {:ok, public_artifacts} <-
                attach_transcript_artifact(
@@ -852,8 +843,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          :ok <- reject_unknown_keys(result, @finalize_result_keys, :unknown_result_key),
          {:ok, _status} <- require_nonblank(result, "status"),
          {:ok, canonical_status} <- require_nonblank(result, "canonical_status"),
-         true <- MapSet.member?(@success_statuses, Map.fetch!(result, "status")),
-         true <- MapSet.member?(@success_statuses, canonical_status),
+         true <- OutcomeMapper.terminal_status?(Map.fetch!(result, "status")),
+         true <- OutcomeMapper.terminal_status?(canonical_status),
+         :ok <- validate_finalize_outcome(result, canonical_status),
          :ok <- validate_finalize_artifacts(Map.get(result, "artifacts")),
          :ok <- validate_finalize_optional_data(result),
          :ok <- validate_finalize_capacity_consistency(result) do
@@ -866,6 +858,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp validate_finalize_result(_result), do: {:error, :invalid_finalize_result}
+
+  defp validate_finalize_outcome(result, canonical_status) do
+    outcome = Map.get(result, "outcome")
+
+    if OutcomeMapper.compatible_with_status?(outcome, canonical_status),
+      do: :ok,
+      else: {:error, {:invalid_finalize_result, :outcome}}
+  end
 
   defp normalize_finalize_result(result) do
     with :ok <- validate_finalize_result(result),
@@ -2242,24 +2242,32 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # Result adapter
   # ===========================================================================
 
-  defp adapt_result(%{context: context} = engine_result, started_at, acp_agent)
+  defp adapt_result(%{context: context} = engine_result, started_at, acp_agent, requested_model)
        when is_map(context) do
-    adapt_engine_result(context, engine_result, started_at, acp_agent)
+    adapt_engine_result(context, engine_result, started_at, acp_agent, requested_model)
   end
 
-  defp adapt_result(%{"context" => context} = engine_result, started_at, acp_agent)
+  defp adapt_result(
+         %{"context" => context} = engine_result,
+         started_at,
+         acp_agent,
+         requested_model
+       )
        when is_map(context) do
-    adapt_engine_result(context, engine_result, started_at, acp_agent)
+    adapt_engine_result(context, engine_result, started_at, acp_agent, requested_model)
   end
 
-  defp adapt_result({:ok, result}, started_at, acp_agent),
-    do: adapt_result(result, started_at, acp_agent)
+  defp adapt_result({:ok, result}, started_at, acp_agent, requested_model),
+    do: adapt_result(result, started_at, acp_agent, requested_model)
 
-  defp adapt_result({:error, _} = error, _started_at, _acp_agent), do: error
-  defp adapt_result(_other, _started_at, _acp_agent), do: {:error, :invalid_engine_result}
+  defp adapt_result({:error, _} = error, _started_at, _acp_agent, _requested_model), do: error
 
-  defp adapt_engine_result(context, engine_result, started_at, acp_agent) do
-    with {:ok, payload} <- adapt_context(context, engine_result, acp_agent) do
+  defp adapt_result(_other, _started_at, _acp_agent, _requested_model),
+    do: {:error, :invalid_engine_result}
+
+  defp adapt_engine_result(context, engine_result, started_at, acp_agent, requested_model) do
+    with {:ok, payload} <-
+           adapt_context(context, engine_result, acp_agent, requested_model) do
       wall_clock_ms = max(System.monotonic_time(:millisecond) - started_at, 0)
 
       {:ok,
@@ -2270,7 +2278,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp adapt_context(context, engine_result, worker_provider) when is_map(context) do
+  defp adapt_context(context, engine_result, worker_provider, requested_model)
+       when is_map(context) do
     clean = json_clean_map(context)
     status = context_get(clean, "status")
     legacy = context_get(clean, "legacy_status")
@@ -2280,16 +2289,29 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         {:error, :missing_terminal_status}
 
       status == "pipeline_error" ->
-        {:error, {:pipeline_error, pipeline_error_detail(clean, engine_result, worker_provider)}}
+        {:error,
+         {:pipeline_error,
+          pipeline_error_detail(clean, engine_result, worker_provider, requested_model)}}
 
-      not MapSet.member?(@success_statuses, status) ->
+      not OutcomeMapper.terminal_status?(status) ->
         {:error, {:unknown_terminal_status, status}}
 
       true ->
-        {:ok,
-         clean
-         |> build_coding_payload(status, legacy)
-         |> maybe_put_validation_failure(engine_result)}
+        with {:ok, outcome} <-
+               OutcomeMapper.map_terminal(
+                 status,
+                 clean,
+                 requested_model: requested_model,
+                 worker_provider: worker_provider
+               ) do
+          {:ok,
+           clean
+           |> build_coding_payload(status, legacy)
+           |> Map.put("outcome", outcome)
+           |> maybe_put_validation_failure(engine_result)}
+        else
+          {:error, outcome} -> {:error, {:invalid_terminal_evidence, outcome}}
+        end
     end
   end
 
@@ -2666,14 +2688,23 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     |> reject_nil_values()
   end
 
-  defp pipeline_error_detail(context, engine_result, worker_provider) do
+  defp pipeline_error_detail(context, engine_result, worker_provider, requested_model) do
+    {:ok, outcome} =
+      OutcomeMapper.map_pipeline_error(
+        context_get(context, "error"),
+        context,
+        requested_model: requested_model,
+        worker_provider: worker_provider
+      )
+
     %{
       "status" => "pipeline_error",
       "error" => context_get(context, "error"),
       "workspace_id" => context_get(context, "workspace_id"),
       "worker_provider" => worker_provider,
       "worker_session_id" => context_get(context, "worker_session_id"),
-      "worker_provider_session_id" => context_get(context, "worker_provider_session_id")
+      "worker_provider_session_id" => context_get(context, "worker_provider_session_id"),
+      "outcome" => outcome
     }
     |> Map.merge(workspace_release_projection(context))
     |> reject_nil_values()

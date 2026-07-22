@@ -243,6 +243,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              "task_id" => "task_coding_1",
              "terminal_status" => "change_committed",
              "canonical_status" => "change_committed",
+             "outcome" => %{
+               "version" => 1,
+               "disposition" => "succeeded",
+               "code" => "change_committed",
+               "phase" => "commit",
+               "origin" => "arbor",
+               "retry" => "none"
+             },
              "compiled_workflow" => %{
                "coding_plan_path" => Path.join(canonical_root, "coding-plan.json"),
                "coding_pipeline_path" => Path.join(canonical_root, "coding-pipeline.dot"),
@@ -283,6 +291,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       terminal_result(root)
       |> Map.put("status", "validation_capacity_exceeded")
       |> Map.put("canonical_status", "validation_capacity_exceeded")
+      |> Map.put(
+        "outcome",
+        terminal_outcome(
+          "validation_capacity_exceeded",
+          "requires_input",
+          "validation",
+          "validator",
+          "same_session"
+        )
+      )
       |> Map.put("validation", capacity_validation())
 
     assert {:ok, _descriptor} =
@@ -296,6 +314,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       terminal_result(root)
       |> Map.put("status", "validation_capacity_exceeded")
       |> Map.put("canonical_status", "validation_capacity_exceeded")
+      |> Map.put(
+        "outcome",
+        terminal_outcome(
+          "validation_capacity_exceeded",
+          "requires_input",
+          "validation",
+          "validator",
+          "same_session"
+        )
+      )
       |> Map.put("validation", capacity_validation(343))
 
     assert {:ok, _descriptor} =
@@ -314,6 +342,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       result
       |> Map.put("status", "validation_capacity_exceeded")
       |> Map.put("canonical_status", "validation_capacity_exceeded")
+      |> Map.put(
+        "outcome",
+        terminal_outcome(
+          "validation_capacity_exceeded",
+          "requires_input",
+          "validation",
+          "validator",
+          "same_session"
+        )
+      )
       |> Map.put("validation", [%{"reason" => "validation_capacity_exceeded"}])
 
     assert {:error, {:invalid_terminal_result, :capacity_handoff}} =
@@ -324,6 +362,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       |> Map.put("validation", capacity_validation())
       |> Map.put("status", "validation_failed")
       |> Map.put("canonical_status", "validation_failed")
+      |> Map.put(
+        "outcome",
+        terminal_outcome("validation_failed", "failed", "validation", "validator", "same_session")
+      )
 
     assert {:error, {:invalid_terminal_result, :capacity_evidence_mismatch}} =
              ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity", mismatched, [])
@@ -409,11 +451,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
     evidence = Jason.decode!(first_bytes)
     assert Map.keys(evidence) |> MapSet.new() == MapSet.new(~w(
-             schema_version
-             task_id
-             terminal_status
-             canonical_status
-             compiled_workflow
+               schema_version
+               task_id
+               terminal_status
+               canonical_status
+               outcome
+               compiled_workflow
              steering_history
              validation_outputs
              review_verdict
@@ -570,6 +613,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
                []
              )
 
+    forged_outcome =
+      Map.put(result, "outcome", Map.put(result["outcome"], "code", "validation_failed"))
+
+    assert {:error, {:invalid_terminal_result, :not_successful}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", forged_outcome, [])
+
     oversized = Map.put(result, "validation", [String.duplicate("x", 1_048_576)])
 
     assert {:error, {:terminal_evidence_too_large, 1_048_576}} =
@@ -621,6 +670,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     %{
       "status" => "change_committed",
       "canonical_status" => "change_committed",
+      "outcome" => %{
+        "version" => 1,
+        "disposition" => "succeeded",
+        "code" => "change_committed",
+        "phase" => "commit",
+        "origin" => "arbor",
+        "retry" => "none"
+      },
       "validation" => [%{"command" => "mix test", "passed" => true}],
       "review" => %{
         "recommendation" => "approve",
@@ -645,6 +702,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
         "graph_hash" => String.duplicate("a", 64),
         "compiler_version" => "coding-plan-1"
       }
+    }
+  end
+
+  defp terminal_outcome(code, disposition, phase, origin, retry) do
+    %{
+      "version" => 1,
+      "disposition" => disposition,
+      "code" => code,
+      "phase" => phase,
+      "origin" => origin,
+      "retry" => retry
     }
   end
 
