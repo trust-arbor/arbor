@@ -1756,7 +1756,8 @@ defmodule Arbor.Actions.Coding.Workspace do
     `head_commit`, `changed_from_base` (dirty OR HEAD differs from the acquired
     `base_commit`), a bounded `fingerprint`, and `turn_progressed` when a
     `baseline_fingerprint` is supplied. When `include_committable_tree` is true,
-    also returns the exact tree OID that `git add -A` would commit. PID/ref/function
+    also returns the exact tree OID that `git add -A` would commit and the UTC
+    timestamp captured immediately after that binding succeeds. PID/ref/function
     data stay private.
     """
 
@@ -1860,7 +1861,12 @@ defmodule Arbor.Actions.Coding.Workspace do
       case MixAction.committable_tree_binding(map_value(view, :worktree_path)) do
         {:ok, %{tree_oid: oid}} when is_binary(oid) ->
           if Regex.match?(@git_oid_regex, oid) do
-            {:ok, Map.put(view, :committable_tree_oid, oid)}
+            observed_at = DateTime.utc_now() |> DateTime.to_iso8601(:extended)
+
+            {:ok,
+             view
+             |> Map.put(:committable_tree_oid, oid)
+             |> Map.put(:committable_tree_observed_at, observed_at)}
           else
             {:error, :committable_tree_binding_failed}
           end

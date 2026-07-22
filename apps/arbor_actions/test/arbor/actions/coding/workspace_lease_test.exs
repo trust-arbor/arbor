@@ -228,6 +228,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                Workspace.Inspect.run(%{workspace_id: lease.workspace_id}, %{})
 
       refute Map.has_key?(ordinary, :committable_tree_oid)
+      refute Map.has_key?(ordinary, :committable_tree_observed_at)
 
       assert {:ok, baseline} =
                Workspace.Inspect.run(
@@ -237,6 +238,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
       assert baseline.committable_tree_oid ==
                git!(lease.worktree_path, ["rev-parse", "HEAD^{tree}"])
+
+      assert {:ok, baseline_observed_at, 0} =
+               DateTime.from_iso8601(baseline.committable_tree_observed_at)
+
+      assert baseline_observed_at.time_zone == "Etc/UTC"
 
       File.write!(Path.join(lease.worktree_path, "README.md"), "unstaged change\n")
 
@@ -315,6 +321,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
       assert ordinary.exists == false
       refute Map.has_key?(ordinary, :committable_tree_oid)
+      refute Map.has_key?(ordinary, :committable_tree_observed_at)
 
       assert {:ok, direct_string_input} =
                Workspace.Inspect.run(
@@ -324,6 +331,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
       assert direct_string_input.exists == false
       refute Map.has_key?(direct_string_input, :committable_tree_oid)
+      refute Map.has_key?(direct_string_input, :committable_tree_observed_at)
 
       assert {:error, :committable_tree_binding_failed} =
                Workspace.Inspect.run(

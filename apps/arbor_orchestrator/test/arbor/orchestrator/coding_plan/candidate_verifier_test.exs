@@ -14,7 +14,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
   @workspace_id "workspace-candidate-verification"
   @attestation_id "review-attestation-001"
   @worktree "/tmp/arbor-candidate-worktree"
-  @observed_at "2026-07-22T14:30:00Z"
+  @tree_observed_at "2026-07-22T14:30:00Z"
   @sha1 String.duplicate("a", 40)
   @sha256 String.duplicate("b", 64)
   @head String.duplicate("c", 40)
@@ -63,6 +63,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
       assert report["status"] == "blocked"
       assert report["profile"] == profile_id
       assert report["candidate_ref"] == "git-tree:" <> @sha1
+      assert report["observed_at"] == @tree_observed_at
       refute Map.has_key?(report, "raw_secret")
 
       approval_timeout_ms =
@@ -107,6 +108,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
 
     assert report["status"] == "blocked"
     assert report["candidate_ref"] == "git-tree:" <> @sha1
+    assert report["observed_at"] == @tree_observed_at
 
     assert Enum.all?(
              report["diagnostics"],
@@ -161,8 +163,6 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
        :invalid_caller_id},
       {valid_candidate, Keyword.put(valid_opts(authority), :signing_authority, nil),
        :invalid_signing_authority},
-      {valid_candidate, Keyword.put(valid_opts(authority), :observed_at, "not-a-timestamp"),
-       :invalid_observed_at},
       {valid_candidate, valid_opts(authority!("agent_someone_else")),
        :signing_authority_principal_mismatch}
     ]
@@ -175,10 +175,41 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
     assert calls() == []
   end
 
+  test "security regression: caller timestamp injection is rejected before execution and action timestamp is used" do
+    program = program!("default")
+    authority = authority!()
+
+    assert {:error, :invalid_options} =
+             Arbor.Orchestrator.verify_coding_candidate(
+               candidate(program),
+               valid_opts(authority) ++ [observed_at: "2000-01-01T00:00:00Z"]
+             )
+
+    assert calls() == []
+
+    set_responses([{:ok, inspection()}, {:ok, default_result(@sha1)}])
+
+    assert {:ok, report} =
+             Arbor.Orchestrator.verify_coding_candidate(
+               candidate(program),
+               valid_opts(authority)
+             )
+
+    assert report["observed_at"] == @tree_observed_at
+  end
+
   test "inspection errors, stale workspaces, and malformed owner evidence fail closed" do
     malformed_inspections = [
       {:error, "credential=must-not-leak"},
       {:ok, Map.delete(inspection(), :committable_tree_oid)},
+      {:ok, Map.delete(inspection(), :committable_tree_observed_at)},
+      {:ok, %{inspection() | committable_tree_observed_at: "not-a-timestamp"}},
+      {:ok,
+       Map.put(
+         inspection(),
+         "committable_tree_observed_at",
+         @tree_observed_at
+       )},
       {:ok, %{inspection() | exists: false}},
       {:ok, %{inspection() | workspace_id: "workspace-other"}},
       {:ok, Map.delete(inspection(), :workspace_id)},
@@ -299,8 +330,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
       agent_id: @agent_id,
       caller_id: @caller_id,
       task_id: @task_id,
-      signing_authority: authority,
-      observed_at: @observed_at
+      signing_authority: authority
     ]
   end
 
@@ -329,6 +359,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
       exists: true,
       workspace_id: @workspace_id,
       committable_tree_oid: @sha1,
+      committable_tree_observed_at: @tree_observed_at,
       worktree_path: @worktree
     }
   end

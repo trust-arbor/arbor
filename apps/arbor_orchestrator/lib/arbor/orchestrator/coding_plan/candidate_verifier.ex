@@ -8,7 +8,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
   @inspect_action "coding_workspace_inspect"
   @max_id_bytes 256
   @max_path_bytes 4_096
-  @allowed_option_keys [:agent_id, :caller_id, :observed_at, :signing_authority, :task_id]
+  @allowed_option_keys [:agent_id, :caller_id, :signing_authority, :task_id]
 
   @type verification_error ::
           :candidate_verification_failed
@@ -16,7 +16,6 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
           | :invalid_agent_id
           | :invalid_caller_id
           | :invalid_candidate
-          | :invalid_observed_at
           | :invalid_options
           | :invalid_review_attestation_id
           | :invalid_signing_authority
@@ -33,7 +32,6 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
   def verify(candidate, opts) do
     with {:ok, candidate} <- normalize_candidate(candidate),
          {:ok, auth} <- normalize_options(opts),
-         {:ok, observed_at} <- observed_at(auth.observed_at),
          {:ok, inspect_workdir} <- inspection_workdir(),
          {:ok, executor} <- actions_executor(),
          approval_timeout_ms =
@@ -51,7 +49,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
              executor_opts,
              :workspace_inspection_failed
            ),
-         {:ok, observed_tree_oid, worktree_path} <-
+         {:ok, observed_tree_oid, tree_observed_at, worktree_path} <-
            inspected_workspace(inspection, candidate.workspace_id),
          validator_params = validator_params(candidate, worktree_path),
          {:ok, action_result} <-
@@ -63,7 +61,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
              executor_opts,
              :validator_execution_failed
            ) do
-      verify_report(candidate.program, observed_tree_oid, action_result, observed_at)
+      verify_report(candidate.program, observed_tree_oid, action_result, tree_observed_at)
     end
   rescue
     _exception -> {:error, :candidate_verification_failed}
@@ -156,8 +154,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
            agent_id: agent_id,
            caller_id: caller_id,
            task_id: task_id,
-           signing_authority: authority,
-           observed_at: Keyword.get(opts, :observed_at)
+           signing_authority: authority
          }}
       end
     else
@@ -177,14 +174,6 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
       do: :ok,
       else: {:error, :signing_authority_principal_mismatch}
   end
-
-  defp observed_at(nil) do
-    DateTime.utc_now()
-    |> DateTime.to_iso8601(:extended)
-    |> normalize_timestamp()
-  end
-
-  defp observed_at(value), do: normalize_timestamp(value)
 
   defp normalize_timestamp(value) when is_binary(value) and byte_size(value) <= 64 do
     with {:ok, datetime, _offset} <- DateTime.from_iso8601(value),
@@ -255,9 +244,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
          {:ok, ^expected_workspace_id} <- inspect_value(inspection, :workspace_id),
          {:ok, tree_oid} <- inspect_value(inspection, :committable_tree_oid),
          true <- valid_oid?(tree_oid),
+         {:ok, tree_observed_at} <-
+           inspect_value(inspection, :committable_tree_observed_at),
+         {:ok, tree_observed_at} <- normalize_timestamp(tree_observed_at),
          {:ok, worktree_path} <- inspect_value(inspection, :worktree_path),
          true <- valid_absolute_path?(worktree_path) do
-      {:ok, tree_oid, worktree_path}
+      {:ok, tree_oid, tree_observed_at, worktree_path}
     else
       _other -> {:error, :workspace_inspection_failed}
     end
