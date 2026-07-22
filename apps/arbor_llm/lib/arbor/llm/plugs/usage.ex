@@ -1,24 +1,23 @@
 defmodule Arbor.LLM.Plugs.Usage do
   @moduledoc """
   Emits one bounded `[:arbor, :llm, :usage]` observation for a final,
-  non-streaming ReqLLM operation.
+  non-streaming ReqLLM operation, or for an eagerly completed streaming
+  operation after its final Arbor response has passed the response boundary.
 
   Only canonical evidence from `%ReqLLM.Response{}` and Arbor's bounded
   embedding result tuple is considered authoritative. The plug never emits
   prompts, responses, provider metadata, headers, errors, or arbitrary terms.
 
-  Deferred blockers intentionally left outside this slice:
-
-    * streaming completion accounting, because the plug sees a lazy stream
-      before terminal usage exists;
-    * the production ReqLLM record/replay fixture shape mismatch, where the
-      fixture serializes `Arbor.LLM.Response` while the live pipeline sees
-      `ReqLLM.Response`.
+  Lazy `stream/2` remains intentionally unaccounted for: it can be partially
+  consumed or abandoned before terminal usage exists. Only
+  `complete_streaming/3`, which eagerly consumes a bounded stream and returns a
+  validated final response, uses the streaming finalizer.
   """
 
   use Arbor.LLM.Plug
 
   alias Arbor.LLM.Call
+  alias Arbor.LLM.Response
 
   @max_token_count 1_000_000_000
   @max_cost_usd 1_000_000.0
@@ -37,23 +36,11 @@ defmodule Arbor.LLM.Plugs.Usage do
       {measurements, usage_status} = extract_usage(operation, result)
       {provider, model} = model_identity(operation, call.request)
 
-      emit(
-        %{
-          count: 1,
-          input: measurements.input,
-          output: measurements.output,
-          total: measurements.total,
-          cached: measurements.cached
-        }
-        |> maybe_put_cost(measurements),
-        %{
-          event_id: event_id,
-          source: :req_llm,
-          operation: operation,
-          provider: provider,
-          model: model,
-          usage_status: usage_status
-        }
+      emit_usage(
+        measurements,
+        %{event_id: event_id, provider: provider, model: model},
+        operation,
+        usage_status
       )
 
       Call.put_metadata(call, %{event_id: event_id, usage_emitted: true})
@@ -66,11 +53,90 @@ defmodule Arbor.LLM.Plugs.Usage do
 
   def call(%Call{} = call), do: call
 
+  @doc false
+  @spec streaming_provenance(Call.t()) :: map()
+  def streaming_provenance(%Call{halted: halted, metadata: metadata, request: request}) do
+    {provider, model} = model_identity(:complete, request)
+
+    %{
+      event_id: bounded_event_id(Map.get(metadata, :event_id, new_event_id())),
+      provider: provider,
+      model: model,
+      halted?: halted,
+      replayed?: halted or replayed?(metadata),
+      usage_finalized?: false
+    }
+  end
+
+  @doc """
+  Finalize usage for an eagerly consumed streaming response.
+
+  The caller must invoke this only after the final translated response has
+  passed `Arbor.LLM.Boundary.completion/2`. Missing or invalid usage is not an
+  observation. The returned bounded state prevents repeated finalization from
+  emitting a second event.
+  """
+  @spec finalize_streaming(Response.t(), map()) :: map()
+  def finalize_streaming(%Response{usage: usage}, provenance) when is_map(provenance) do
+    cond do
+      Map.get(provenance, :usage_finalized?, false) ->
+        provenance
+
+      Map.get(provenance, :halted?, false) or Map.get(provenance, :replayed?, false) ->
+        Map.put(provenance, :usage_finalized?, true)
+
+      true ->
+        finalized = Map.put(provenance, :usage_finalized?, true)
+
+        case usage do
+          usage when is_map(usage) and map_size(usage) > 0 ->
+            case normalize_usage(:complete, usage) do
+              {measurements, :authoritative} ->
+                emit_usage(measurements, provenance, :complete)
+                Map.put(finalized, :usage_emitted?, true)
+
+              _ ->
+                finalized
+            end
+
+          _ ->
+            finalized
+        end
+    end
+  rescue
+    _ -> provenance
+  catch
+    _, _ -> provenance
+  end
+
+  def finalize_streaming(_response, provenance) when is_map(provenance), do: provenance
+
   defp extract_usage(operation, result) do
     case usage_map(operation, result) do
       {:ok, usage} -> normalize_usage(operation, usage)
       :missing -> {empty_measurements(), :missing}
     end
+  end
+
+  defp emit_usage(measurements, provenance, operation, usage_status \\ :authoritative) do
+    emit(
+      %{
+        count: 1,
+        input: measurements.input,
+        output: measurements.output,
+        total: measurements.total,
+        cached: measurements.cached
+      }
+      |> maybe_put_cost(measurements),
+      %{
+        event_id: bounded_event_id(Map.get(provenance, :event_id, new_event_id())),
+        source: :req_llm,
+        operation: operation,
+        provider: safe_string(Map.get(provenance, :provider, "unknown")),
+        model: safe_string(Map.get(provenance, :model, "unknown")),
+        usage_status: usage_status
+      }
+    )
   end
 
   defp usage_map(:complete, {:ok, %ReqLLM.Response{stream?: false} = response}) do
@@ -199,6 +265,10 @@ defmodule Arbor.LLM.Plugs.Usage do
   end
 
   defp model_identity(_model_spec), do: {"unknown", "unknown"}
+
+  defp replayed?(metadata) do
+    Map.has_key?(metadata, :replayed_from)
+  end
 
   defp safe_provider(provider) when is_atom(provider), do: safe_string(Atom.to_string(provider))
   defp safe_provider(provider) when is_binary(provider), do: safe_string(provider)

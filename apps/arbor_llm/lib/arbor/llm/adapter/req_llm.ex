@@ -64,6 +64,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   alias Arbor.LLM.Call
   alias Arbor.LLM.Pipeline
   alias Arbor.LLM.ProviderRegistry
+  alias Arbor.LLM.Plugs.Usage
   alias Arbor.LLM.Request
   alias Arbor.LLM.Response
   alias Arbor.LLM.RequestTimeoutError
@@ -186,7 +187,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
-        fn -> do_complete_streaming(request, callback, opts) |> Boundary.completion(opts) end,
+        fn -> complete_streaming_result(request, callback, opts) end,
         receipt,
         RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
       )
@@ -195,6 +196,23 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def complete_streaming(_request, _callback, _opts),
     do: {:error, :invalid_req_llm_streaming_request}
+
+  defp complete_streaming_result(request, callback, opts) do
+    case do_complete_streaming(request, callback, opts) do
+      {:ok, response, provenance} ->
+        case Boundary.completion({:ok, response}, opts) do
+          {:ok, accepted} = result ->
+            _ = Usage.finalize_streaming(accepted, provenance)
+            result
+
+          {:error, _reason} = error ->
+            error
+        end
+
+      result ->
+        Boundary.completion(result, opts)
+    end
+  end
 
   defp do_complete_streaming(request, callback, opts) do
     # Accumulate the thinking deltas: ReqLLM's process_stream forwards them to
@@ -208,8 +226,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     with {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
          {:ok, req_opts} <- validated_stream_opts(request, opts),
+         pipeline_call = run_pipeline_call(:stream, {model_spec, messages, req_opts}),
          {:ok, %BoundedStream{} = stream_response} <-
-           call_req_llm_stream(model_spec, messages, req_opts),
+           pipeline_call.result,
          {:ok, %ReqLLM.Response{} = resp} <-
            BoundedStream.process(stream_response,
              on_result: fn text ->
@@ -230,7 +249,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
           translated
         end
 
-      {:ok, translated}
+      {:ok, translated, Usage.streaming_provenance(pipeline_call)}
     end
   end
 
@@ -937,10 +956,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # so tests can swap in record-only, replay-only, or transparent
   # variants without touching the adapter.
   defp run_pipeline(operation, request) do
+    run_pipeline_call(operation, request) |> Map.fetch!(:result)
+  end
+
+  defp run_pipeline_call(operation, request) do
     operation
     |> Call.new(request)
     |> Pipeline.through(pipeline())
-    |> Map.fetch!(:result)
   end
 
   defp pipeline do

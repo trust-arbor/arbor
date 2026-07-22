@@ -96,6 +96,66 @@ defmodule Arbor.LLM.Plugs.UsageTest do
     refute_receive {:usage_event, @event, _, _}, 50
   end
 
+  test "streaming finalizer emits only authoritative usage and preserves event id" do
+    event_id = "stream-event-123"
+    call = build_call(:stream, {:ok, :bounded_stream}) |> Call.put_metadata(%{event_id: event_id})
+    response = arbor_response(%{input_tokens: 4, output_tokens: 3, total_tokens: 7})
+
+    state = Usage.finalize_streaming(response, Usage.streaming_provenance(call))
+
+    assert_receive {:usage_event, @event, %{input: 4, output: 3, total: 7}, metadata}
+
+    assert metadata == %{
+             event_id: event_id,
+             source: :req_llm,
+             operation: :complete,
+             provider: "openai",
+             model: "gpt-4",
+             usage_status: :authoritative
+           }
+
+    assert state.usage_finalized?
+    assert state.usage_emitted?
+
+    Usage.finalize_streaming(response, state)
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "streaming finalizer emits nothing for missing or invalid usage" do
+    for usage <- [%{}, %{input_tokens: "not-a-count"}, %{input_tokens: -1, output_tokens: 1}] do
+      state = Usage.streaming_provenance(build_call(:stream, {:ok, :bounded_stream}))
+      Usage.finalize_streaming(arbor_response(usage), state)
+      refute_receive {:usage_event, @event, _, _}, 50
+    end
+  end
+
+  test "streaming finalizer emits nothing for halted or replayed provenance" do
+    halted =
+      build_call(:stream, {:ok, :bounded_stream})
+      |> Call.halt()
+      |> Usage.streaming_provenance()
+
+    replayed =
+      build_call(:stream, {:ok, :bounded_stream})
+      |> Call.put_metadata(%{replayed_from: "bounded-fixture"})
+      |> Usage.streaming_provenance()
+
+    response = arbor_response(%{input_tokens: 4, output_tokens: 3, total_tokens: 7})
+    Usage.finalize_streaming(response, halted)
+    Usage.finalize_streaming(response, replayed)
+
+    refute_receive {:usage_event, @event, _, _}, 50
+
+    live_after_invalid =
+      build_call(:stream, {:ok, :bounded_stream})
+      |> Call.put_metadata(%{fixture_invalid: true})
+      |> Usage.streaming_provenance()
+
+    refute live_after_invalid.replayed?
+    Usage.finalize_streaming(response, live_after_invalid)
+    assert_receive {:usage_event, @event, %{input: 4, output: 3, total: 7}, _}
+  end
+
   test "calling the final plug twice emits once for the stamped invocation" do
     call = build_call(:complete, {:ok, response(%{input_tokens: 2, output_tokens: 3})})
     Usage.call(call) |> Usage.call()
@@ -153,5 +213,9 @@ defmodule Arbor.LLM.Plugs.UsageTest do
       provider_meta: %{},
       error: nil
     }
+  end
+
+  defp arbor_response(usage) do
+    %Arbor.LLM.Response{text: "answer", usage: usage}
   end
 end
