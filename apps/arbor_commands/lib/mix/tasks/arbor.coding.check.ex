@@ -6,7 +6,7 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
 
       mix arbor.coding.check --plan path/to/plan.json
       mix arbor.coding.check --plan path/to/plan.json --static --json
-      mix arbor.coding.check --plan path/to/plan.json --live
+      mix arbor.coding.check --plan path/to/plan.json --live --agent-id agent_...
 
   Without an explicit mode, a reachable Arbor node is preferred. If no node is
   reachable, the task performs the non-mutating local checks instead.
@@ -21,6 +21,7 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
 
   @max_plan_bytes 256_000
   @max_path_bytes 4_096
+  @max_agent_id_bytes 256
   @rpc_timeout_ms 5_000
   @max_human_diagnostics 6
   @human_text_bytes 160
@@ -82,7 +83,7 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
   defp execute_with_cli(args, runtime_opts) do
     with {:ok, cli} <- parse_args(args),
          {:ok, plan_input} <- read_plan(cli.plan),
-         {:ok, report} <- check(plan_input, cli.mode, runtime_opts),
+         {:ok, report} <- check(plan_input, cli.mode, cli.agent_id, runtime_opts),
          {:ok, report} <- normalize_report(report) do
       {:ok, report, cli}
     else
@@ -96,7 +97,13 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
     {opts, positional, invalid} =
       OptionParser.parse(args,
         aliases: [p: :plan, s: :static, l: :live],
-        strict: [plan: :string, static: :boolean, live: :boolean, json: :boolean]
+        strict: [
+          plan: :string,
+          static: :boolean,
+          live: :boolean,
+          agent_id: :string,
+          json: :boolean
+        ]
       )
 
     static = Keyword.get(opts, :static, false)
@@ -116,17 +123,23 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
         command_error("plan", "required")
 
       true ->
-        {:ok,
-         %{
-           plan: opts[:plan],
-           mode:
-             cond do
-               static -> :static
-               live -> :live
-               true -> :auto
-             end,
-           json: Keyword.get(opts, :json, false)
-         }}
+        mode =
+          cond do
+            static -> :static
+            live -> :live
+            true -> :auto
+          end
+
+        with {:ok, agent_id} <- validate_agent_id_option(opts[:agent_id]),
+             :ok <- require_live_agent_id(mode, agent_id) do
+          {:ok,
+           %{
+             plan: opts[:plan],
+             mode: mode,
+             agent_id: agent_id,
+             json: Keyword.get(opts, :json, false)
+           }}
+        end
     end
   end
 
@@ -183,47 +196,52 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
 
   defp decode_plan(_decoded), do: command_error("plan", "expected_object")
 
-  defp check(plan_input, mode, runtime_opts) do
+  defp check(plan_input, mode, agent_id, runtime_opts) do
     case plan_input do
       {:invalid, raw_plan} ->
         if mode == :live,
-          do: check_live(raw_plan, runtime_opts),
-          else: invoke_check(raw_plan, :static, runtime_opts)
+          do: check_live(raw_plan, agent_id, runtime_opts),
+          else: invoke_check(raw_plan, :static, agent_id, runtime_opts)
 
       {:valid, plan} ->
         case mode do
-          :static -> invoke_check(plan, :static, runtime_opts)
-          :live -> check_live(plan, runtime_opts)
-          :auto -> check_auto(plan, runtime_opts)
+          :static -> invoke_check(plan, :static, agent_id, runtime_opts)
+          :live -> check_live(plan, agent_id, runtime_opts)
+          :auto -> check_auto(plan, agent_id, runtime_opts)
         end
     end
   end
 
-  defp check_auto(plan, runtime_opts) do
+  defp check_auto(plan, agent_id, runtime_opts) do
     case discover_target(runtime_opts) do
-      {:ok, target} -> invoke_remote(target, plan, runtime_opts)
-      :unavailable -> invoke_check(plan, :static, runtime_opts)
+      {:ok, target} ->
+        with :ok <- require_live_agent_id(:live, agent_id) do
+          invoke_remote(target, plan, agent_id, runtime_opts)
+        end
+
+      :unavailable ->
+        invoke_check(plan, :static, agent_id, runtime_opts)
     end
   end
 
-  defp check_live(plan, runtime_opts) do
+  defp check_live(plan, agent_id, runtime_opts) do
     case discover_target(runtime_opts) do
-      {:ok, target} -> invoke_remote(target, plan, runtime_opts)
+      {:ok, target} -> invoke_remote(target, plan, agent_id, runtime_opts)
       :unavailable -> command_error("live", "target_unavailable_start_server_or_use_static")
     end
   end
 
-  defp invoke_check(plan, mode, runtime_opts) do
+  defp invoke_check(plan, mode, agent_id, runtime_opts) do
     checker =
       Keyword.get(runtime_opts, :readiness_checker, &Arbor.Orchestrator.check_coding_readiness/2)
 
-    readiness_opts = readiness_opts(mode, runtime_opts)
+    readiness_opts = readiness_opts(mode, agent_id, runtime_opts)
 
     safe_invoke(fn -> checker.(plan, readiness_opts) end, :local)
   end
 
-  defp invoke_remote(target, plan, runtime_opts) do
-    readiness_opts = readiness_opts(:live, runtime_opts)
+  defp invoke_remote(target, plan, agent_id, runtime_opts) do
+    readiness_opts = readiness_opts(:live, agent_id, runtime_opts)
 
     rpc_call =
       Keyword.get(runtime_opts, :rpc_call, fn node, module, function, args, timeout ->
@@ -244,9 +262,33 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
     )
   end
 
-  defp readiness_opts(mode, runtime_opts) when mode in [:static, :live] do
-    [mode: mode] ++ Keyword.take(runtime_opts, @readiness_runtime_options)
+  defp readiness_opts(mode, agent_id, runtime_opts) when mode in [:static, :live] do
+    agent_opts = if is_binary(agent_id), do: [agent_id: agent_id], else: []
+
+    [mode: mode] ++ agent_opts ++ Keyword.take(runtime_opts, @readiness_runtime_options)
   end
+
+  defp validate_agent_id_option(nil), do: {:ok, nil}
+
+  defp validate_agent_id_option(agent_id) when is_binary(agent_id) do
+    if valid_agent_id?(agent_id), do: {:ok, agent_id}, else: command_error("agent_id", "invalid")
+  end
+
+  defp validate_agent_id_option(_agent_id), do: command_error("agent_id", "invalid")
+
+  defp require_live_agent_id(:live, nil), do: command_error("agent_id", "required")
+  defp require_live_agent_id(:live, _agent_id), do: :ok
+  defp require_live_agent_id(_mode, _agent_id), do: :ok
+
+  defp valid_agent_id?(agent_id) do
+    byte_size(agent_id) > 6 and byte_size(agent_id) <= @max_agent_id_bytes and
+      String.valid?(agent_id) and String.starts_with?(agent_id, "agent_") and
+      String.trim(agent_id) != "" and not has_control_byte?(agent_id)
+  end
+
+  defp has_control_byte?(<<>>), do: false
+  defp has_control_byte?(<<byte, _rest::binary>>) when byte <= 0x1F or byte == 0x7F, do: true
+  defp has_control_byte?(<<_byte, rest::binary>>), do: has_control_byte?(rest)
 
   defp discover_target(runtime_opts) do
     ensure_distribution =

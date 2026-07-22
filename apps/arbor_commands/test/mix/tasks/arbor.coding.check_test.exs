@@ -7,6 +7,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
   @moduletag :fast
 
   @observed_at "2026-07-22T12:00:00Z"
+  @agent_id "agent_operator_readiness_test"
 
   test "rejects conflicting modes before reading the plan" do
     assert {:error, error} = Check.execute(["--plan", "missing.json", "--static", "--live"])
@@ -92,12 +93,59 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
 
     assert {:error, error} =
              Check.execute(
-               ["--plan", path, "--live", "--json"],
+               ["--plan", path, "--live", "--agent-id", @agent_id, "--json"],
                ensure_distribution: fn -> :ok end,
                server_running?: fn -> false end
              )
 
     assert error == command_error("live", "target_unavailable_start_server_or_use_static")
+  end
+
+  test "live mode requires an agent identity before attempting RPC" do
+    path = write_plan!(Plan.to_map(valid_plan!()))
+    on_exit(fn -> File.rm(path) end)
+
+    rpc = fn _target, _module, _function, _args, _timeout ->
+      send(self(), :rpc_called)
+      {:ok, report("ready", "live_checks_passed")}
+    end
+
+    assert {:error, error} =
+             Check.execute(
+               ["--plan", path, "--live"],
+               server_running?: fn -> true end,
+               rpc_call: rpc
+             )
+
+    assert error == command_error("agent_id", "required")
+    refute_received :rpc_called
+  end
+
+  test "invalid agent identities are rejected before attempting RPC" do
+    path = write_plan!(Plan.to_map(valid_plan!()))
+    on_exit(fn -> File.rm(path) end)
+
+    rpc = fn _target, _module, _function, _args, _timeout ->
+      send(self(), :rpc_called)
+      {:ok, report("ready", "live_checks_passed")}
+    end
+
+    for invalid_agent_id <- [
+          "agent_valid\n",
+          "agent_valid" <> <<0>>,
+          "agent_" <> String.duplicate("x", 251)
+        ] do
+      assert {:error, error} =
+               Check.execute(
+                 ["--plan", path, "--live", "--agent-id", invalid_agent_id],
+                 server_running?: fn -> true end,
+                 rpc_call: rpc
+               )
+
+      assert error == command_error("agent_id", "invalid")
+    end
+
+    refute_received :rpc_called
   end
 
   test "explicit live mode passes code-owned live mode over RPC" do
@@ -113,7 +161,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
 
     assert {:ok, result} =
              Check.execute(
-               ["--plan", path, "--live"],
+               ["--plan", path, "--live", "--agent-id", @agent_id],
                ensure_distribution: fn -> :ok end,
                server_running?: fn -> true end,
                target_node: fn -> :arbor_test@localhost end,
@@ -123,8 +171,8 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
              )
 
     assert_receive {:rpc_called, :arbor_test@localhost, Arbor.Orchestrator,
-                    :check_coding_readiness, _plan, [mode: :live, observed_at: @observed_at],
-                    5_000}
+                    :check_coding_readiness, _plan,
+                    [mode: :live, agent_id: @agent_id, observed_at: @observed_at], 5_000}
 
     assert result["status"] == "ready"
   end
@@ -142,7 +190,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
 
     assert {:ok, result} =
              Check.execute(
-               ["--plan", path],
+               ["--plan", path, "--agent-id", @agent_id],
                ensure_distribution: fn -> :ok end,
                server_running?: fn -> true end,
                target_node: fn -> :arbor_test@localhost end,
@@ -152,8 +200,8 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
              )
 
     assert_receive {:rpc_called, :arbor_test@localhost, Arbor.Orchestrator,
-                    :check_coding_readiness, plan, [mode: :live, observed_at: @observed_at],
-                    5_000}
+                    :check_coding_readiness, plan,
+                    [mode: :live, agent_id: @agent_id, observed_at: @observed_at], 5_000}
 
     assert plan["repo_root"] == valid_plan!().repo_root
     assert result["status"] == "ready"
@@ -181,6 +229,47 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
              )
 
     assert_receive {:readiness_called, _plan, [mode: :static, observed_at: @observed_at]}
+    assert result["status"] == "degraded"
+  end
+
+  test "auto mode requires an agent identity when a live target is available" do
+    path = write_plan!(Plan.to_map(valid_plan!()))
+    on_exit(fn -> File.rm(path) end)
+
+    rpc = fn _target, _module, _function, _args, _timeout ->
+      send(self(), :rpc_called)
+      {:ok, report("ready", "live_checks_passed")}
+    end
+
+    assert {:error, error} =
+             Check.execute(
+               ["--plan", path],
+               ensure_distribution: fn -> :ok end,
+               server_running?: fn -> true end,
+               target_node: fn -> :arbor_test@localhost end,
+               rpc_call: rpc
+             )
+
+    assert error == command_error("agent_id", "required")
+    refute_received :rpc_called
+  end
+
+  test "static mode accepts and forwards a valid agent identity" do
+    path = write_plan!(Plan.to_map(valid_plan!()))
+    on_exit(fn -> File.rm(path) end)
+
+    checker = fn _plan, opts ->
+      assert opts == [mode: :static, agent_id: @agent_id, observed_at: @observed_at]
+      {:ok, report("degraded", "acp_health_unavailable")}
+    end
+
+    assert {:ok, result} =
+             Check.execute(
+               ["--plan", path, "--static", "--agent-id", @agent_id],
+               readiness_checker: checker,
+               observed_at: @observed_at
+             )
+
     assert result["status"] == "degraded"
   end
 
@@ -213,6 +302,20 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
 
     assert output ==
              ~s({"error":"invalid_arbor_coding_check_command","field":"plan","reason":"not_found"}\n)
+  end
+
+  test "missing live identity has canonical JSON error bytes" do
+    path = write_plan!(Plan.to_map(valid_plan!()))
+    on_exit(fn -> File.rm(path) end)
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert catch_exit(Check.run(["--plan", path, "--live", "--json"])) ==
+                 {:shutdown, 1}
+      end)
+
+    assert output ==
+             ~s({"error":"invalid_arbor_coding_check_command","field":"agent_id","reason":"required"}\n)
   end
 
   defp valid_plan! do
