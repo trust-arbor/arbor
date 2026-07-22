@@ -46,7 +46,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
         ReadinessCore.report(
           plan_digest,
           fallback_observed_at(observed_at),
-          "blocked",
           [
             blocked(
               "plan_schema",
@@ -72,7 +71,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
         ReadinessCore.report(
           invalid_digest,
           observed_at,
-          "blocked",
           [
             blocked(
               "plan_schema",
@@ -113,7 +111,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
           )
         ] ++ static_dynamic_diagnostics(observed_at)
 
-      ReadinessCore.report(plan_digest, observed_at, "degraded", diagnostics)
+      ReadinessCore.report(plan_digest, observed_at, diagnostics)
     else
       {:error, reason} ->
         blocked_report(requested_plan_digest, observed_at, reason)
@@ -159,7 +157,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     ReadinessCore.report(
       plan_digest,
       observed_at,
-      "blocked",
       [blocked(gate_id, code, observed_at, message, remediation)]
     )
   end

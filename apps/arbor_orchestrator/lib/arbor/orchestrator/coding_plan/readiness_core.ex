@@ -11,14 +11,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessCore do
   end
 
   @doc false
-  def report(plan_digest, observed_at, status, diagnostics) do
+  def report(plan_digest, observed_at, diagnostics, opts \\ []) do
     {:ok, report} =
       ReadinessReport.new(%{
         version: ReadinessReport.schema_version(),
-        status: status,
+        status: readiness_status(diagnostics),
         plan_digest: plan_digest,
         observed_at: observed_at,
-        diagnostics: Enum.map(diagnostics, &Diagnostic.to_map/1)
+        diagnostics: Enum.map(diagnostics, &Diagnostic.to_map/1),
+        expires_at: Keyword.get(opts, :expires_at)
       })
 
     {:ok, ReadinessReport.to_map(report)}
@@ -43,6 +44,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessCore do
 
   @doc false
   def sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+
+  defp readiness_status(diagnostics) do
+    decisions = Enum.map(diagnostics, & &1.decision)
+
+    cond do
+      "blocked" in decisions -> "blocked"
+      Enum.any?(decisions, &(&1 in ["degraded", "unavailable"])) -> "degraded"
+      true -> "ready"
+    end
+  end
 
   defp canonical_json(value) when is_map(value) do
     value
