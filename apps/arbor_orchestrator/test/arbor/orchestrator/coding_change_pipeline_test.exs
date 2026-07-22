@@ -1312,6 +1312,42 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       validate = graph.nodes["validate"]
       assert validate.attrs["action"] == "mix_compile"
 
+      capture = graph.nodes["capture_validation_workspace"]
+
+      assert capture.attrs == %{
+               "type" => "exec",
+               "target" => "action",
+               "action" => "coding_workspace_inspect",
+               "context_keys" => "workspace_id",
+               "param.include_committable_tree" => "true",
+               "output_prefix" => "validation_workspace",
+               "max_retries" => "0"
+             }
+
+      assert graph.nodes["hoist_validation_candidate_tree_oid"].attrs["source_key"] ==
+               "validation_workspace.committable_tree_oid"
+
+      assert graph.nodes["hoist_validation_observed_at"].attrs["source_key"] ==
+               "validation_workspace.committable_tree_observed_at"
+
+      assert Enum.any?(
+               graph.edges,
+               &(&1.from == "prep_validation_path" and
+                   &1.to == "capture_validation_workspace" and &1.attrs == %{})
+             )
+
+      assert Enum.any?(
+               graph.edges,
+               &(&1.from == "hoist_review_attestation_id" and
+                   &1.to == "capture_validation_workspace" and &1.attrs == %{})
+             )
+
+      assert Enum.any?(
+               graph.edges,
+               &(&1.from == "hoist_validation_observed_at" and &1.to == "validate" and
+                   &1.attrs["condition"] == "outcome=success")
+             )
+
       # Commit path uses reviewed top-level action + operator interaction routing
       assert graph.nodes["commit_change"]
       refute Map.has_key?(graph.nodes["commit_change"].attrs, "project_interaction_control")

@@ -39,6 +39,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     mandatory_gate_nodes
     publication_nodes
     validation_gate
+    validation_observation_gate
     validation_result_gate
     post_validation_commit_routing
     committed_change_routing
@@ -379,6 +380,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
              :ok <- require_string_list(policy, "mandatory_gate_nodes"),
              :ok <- require_string_list(policy, "publication_nodes"),
              :ok <- require_nonempty_string(policy, "validation_gate"),
+             :ok <- require_nonempty_string(policy, "validation_observation_gate"),
              :ok <- require_nonempty_string(policy, "validation_result_gate"),
              :ok <- require_nonempty_string(policy, "post_validation_commit_routing"),
              :ok <- require_nonempty_string(policy, "committed_change_routing"),
@@ -658,14 +660,16 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {:ok,
        %{
          "node_attrs" => node_attrs,
+         "protected_prefix_writers" => protected_prefix_writers,
          "protected_writers" => protected_writers,
          "edges" => edges
        }}
-      when is_list(node_attrs) and is_map(protected_writers) and is_list(edges) ->
+      when is_list(node_attrs) and is_map(protected_prefix_writers) and
+             is_map(protected_writers) and is_list(edges) ->
         with :ok <- require_worker_recovery_node_attrs(node_attrs),
-             :ok <- require_worker_recovery_writers(protected_writers),
-             :ok <- require_worker_recovery_edges(edges) do
-          :ok
+             :ok <- require_worker_recovery_writers(protected_prefix_writers),
+             :ok <- require_worker_recovery_writers(protected_writers) do
+          require_worker_recovery_edges(edges)
         end
 
       _other ->
@@ -2135,6 +2139,29 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       end)
 
     errors =
+      Enum.reduce(
+        convergence["protected_prefix_writers"],
+        errors,
+        fn {context_prefix, expected_nodes}, acc ->
+          actual_nodes = writer_nodes(graph, "output_prefix", context_prefix)
+
+          if actual_nodes == expected_nodes do
+            acc
+          else
+            [
+              error("review_convergence_writer_violation", nil, %{
+                "attribute" => "output_prefix",
+                "context_key" => context_prefix,
+                "expected_nodes" => expected_nodes,
+                "actual_nodes" => actual_nodes
+              })
+              | acc
+            ]
+          end
+        end
+      )
+
+    errors =
       Enum.reduce(convergence["protected_writers"], errors, fn {context_key, expected_nodes},
                                                                acc ->
         actual_nodes = writer_nodes(graph, "output_key", context_key)
@@ -2144,6 +2171,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         else
           [
             error("review_convergence_writer_violation", nil, %{
+              "attribute" => "output_key",
               "context_key" => context_key,
               "expected_nodes" => expected_nodes,
               "actual_nodes" => actual_nodes
@@ -2847,6 +2875,30 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "source_key" => "review.review_attestation_id",
          "output_key" => "review_attestation_id"
        }},
+      {"capture_validation_workspace",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_workspace_inspect",
+         "context_keys" => "workspace_id",
+         "param.include_committable_tree" => "true",
+         "output_prefix" => "validation_workspace",
+         "max_retries" => "0"
+       }},
+      {"hoist_validation_candidate_tree_oid",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "validation_workspace.committable_tree_oid",
+         "output_key" => "validation_candidate_tree_oid"
+       }},
+      {"hoist_validation_observed_at",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "validation_workspace.committable_tree_observed_at",
+         "output_key" => "validation_observed_at"
+       }},
       {"validate",
        %{
          "type" => "exec",
@@ -2955,12 +3007,22 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp check_security_protected_writers(errors, graph) do
     expected = [
+      {"output_key", "coding_plan_validation_program", []},
+      {"output_prefix", "coding_plan_validation_program", []},
       {"output_key", "workspace_id", ["hoist_workspace_id"]},
       {"output_key", "test_paths", []},
       {"output_key", "validation_profile", ["prep_review_validation_profile"]},
       {"output_prefix", "review", ["review_change"]},
       {"output_key", "review.review_attestation_id", []},
       {"output_key", "review_attestation_id", ["hoist_review_attestation_id"]},
+      {"output_key", "validation", []},
+      {"output_prefix", "validation", ["validate"]},
+      {"output_key", "validation_candidate_tree_oid", ["hoist_validation_candidate_tree_oid"]},
+      {"output_prefix", "validation_candidate_tree_oid", []},
+      {"output_key", "validation_observed_at", ["hoist_validation_observed_at"]},
+      {"output_prefix", "validation_observed_at", []},
+      {"output_key", "validation_workspace", []},
+      {"output_prefix", "validation_workspace", ["capture_validation_workspace"]},
       {"output_key", "prior_reviewed_commit",
        ["remember_review_reviewed_commit", "remember_validation_reviewed_commit"]},
       {"output_key", "fresh_rework_commit", ["compare_security_rework_commit"]},
@@ -3062,7 +3124,22 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {"error_review_tier_invalid", nil}
        ]},
       {"remember_review_reviewed_commit", [{"check_review_category_budget", nil}]},
-      {"hoist_review_attestation_id", [{"validate", nil}]},
+      {"hoist_review_attestation_id", [{"capture_validation_workspace", nil}]},
+      {"capture_validation_workspace",
+       [
+         {"hoist_validation_candidate_tree_oid", "outcome=success"},
+         {"status_pipeline_error_then_close", "outcome=fail"}
+       ]},
+      {"hoist_validation_candidate_tree_oid",
+       [
+         {"hoist_validation_observed_at", "outcome=success"},
+         {"status_pipeline_error_then_close", "outcome=fail"}
+       ]},
+      {"hoist_validation_observed_at",
+       [
+         {"status_pipeline_error_then_close", "outcome=fail"},
+         {"validate", "outcome=success"}
+       ]},
       {"validate",
        [
          {"status_validation_failed", "outcome=fail"},
@@ -3150,6 +3227,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           review_profile
         )
         |> check_worker_continuity_dominance(reachable, dominators)
+        |> check_validation_rework_observation_dominance(graph, policy)
         |> check_security_rework_dominance(graph, policy)
     end
   end
@@ -3402,6 +3480,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   defp check_default_dominance(errors, policy, dominators, reachable, review_profile) do
+    validation_observation = policy["validation_observation_gate"]
     validation_gate = policy["validation_gate"]
     validation_result_gate = policy["validation_result_gate"]
     post_validation = policy["post_validation_commit_routing"]
@@ -3421,6 +3500,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     # route_after_commit as a direct proof for the changed success path.
     errors =
       errors
+      |> require_dominates(
+        validation_observation,
+        validation_gate,
+        reachable,
+        dominators,
+        "validation_observation"
+      )
       |> require_dominates(
         validation_gate,
         validation_result_gate,
@@ -3505,6 +3591,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     review_gate = policy["review_gate"]
     review_routing = policy["review_routing_gate"]
     attestation_source = policy["attestation_source"]
+    validation_observation = policy["validation_observation_gate"]
     validator = policy["validation_gate"]
     validator_result = policy["validation_result_gate"]
     post_validation_check = policy["post_validation_exact_head_check"]
@@ -3516,7 +3603,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {committed_material, review_gate, "committed_material"},
       {review_gate, review_routing, "review"},
       {review_routing, attestation_source, "review_routing"},
-      {attestation_source, validator, "review_attestation"},
+      {attestation_source, validation_observation, "review_attestation"},
+      {validation_observation, validator, "validation_observation"},
       {validator, validator_result, "validation"},
       {validator_result, post_validation_check, "validation_result"},
       {post_validation_check, post_validation_routing, "post_validation_exact_head"}
@@ -3588,7 +3676,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {policy["committed_material_gate"], policy["review_gate"], "fresh_review"},
       {policy["review_gate"], policy["review_routing_gate"], "fresh_review_routing"},
       {policy["review_routing_gate"], policy["attestation_source"], "fresh_attestation"},
-      {policy["attestation_source"], policy["validation_gate"], "fresh_validation"},
+      {policy["attestation_source"], policy["validation_observation_gate"],
+       "fresh_validation_observation"},
+      {policy["validation_observation_gate"], policy["validation_gate"], "fresh_validation"},
       {policy["validation_gate"], policy["validation_result_gate"], "fresh_validation_result"},
       {policy["validation_result_gate"], policy["post_validation_exact_head_check"],
        "fresh_post_validation_exact_head"},
@@ -3676,6 +3766,42 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   defp check_security_rework_dominance(errors, _graph, _policy), do: errors
+
+  defp check_validation_rework_observation_dominance(errors, graph, policy) do
+    rework_graph =
+      if policy["validation_profile"] == "security_regression" do
+        security_rework_graph(graph)
+      else
+        graph
+      end
+
+    validation_entry =
+      if policy["validation_profile"] == "security_regression" do
+        "snapshot_validation_prior_commit"
+      else
+        "inc_validation_rework_count"
+      end
+
+    entries = [
+      {"inc_operator_rework_count", "operator_rework"},
+      {"snapshot_review_prior_commit", "review_rework"},
+      {validation_entry, "validation_rework"}
+    ]
+
+    Enum.reduce(entries, errors, fn {entry, rework_kind}, acc ->
+      reachable = reachable_from(rework_graph, entry)
+      dominators = compute_dominators(rework_graph, entry, reachable)
+
+      require_dominates(
+        acc,
+        policy["validation_observation_gate"],
+        policy["validation_gate"],
+        reachable,
+        dominators,
+        "#{rework_kind}.fresh_validation_observation"
+      )
+    end)
+  end
 
   defp security_rework_graph(graph) do
     edges =

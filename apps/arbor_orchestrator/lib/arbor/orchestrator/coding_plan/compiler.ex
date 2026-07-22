@@ -149,7 +149,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, {execution_manifest, execution_manifest_digest}} <-
            ExecutionManifest.build(compiled_graph, action_catalog, graph_hash),
          :ok <- Profiles.validate_execution_manifest(profile, execution_manifest) do
-      initial_values = build_initial_values(plan, plan_fingerprint, action_catalog["digest"])
+      initial_values =
+        build_initial_values(
+          plan,
+          validation_program,
+          plan_fingerprint,
+          action_catalog["digest"]
+        )
 
       manifest =
         build_manifest(
@@ -621,7 +627,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            end) do
       # adopt_head_commit was removed: clean self-commit adoption is performed
       # inside coding_reviewed_commit so rework cannot bypass a fresh gate.
-      remove_replaced_status_node(graph, "prep_validation_path", "validate")
+      remove_replaced_status_node(
+        graph,
+        "prep_validation_path",
+        "capture_validation_workspace"
+      )
     end
   end
 
@@ -1507,7 +1517,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp diagnostic_edge(nil), do: nil
   defp diagnostic_edge({from, to}), do: [from, to]
 
-  defp build_initial_values(plan, plan_fingerprint, catalog_digest) do
+  defp build_initial_values(plan, validation_program, plan_fingerprint, catalog_digest) do
     submit_review = plan.review_profile != "none"
 
     %{
@@ -1520,6 +1530,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "submit_review" => bool_string(submit_review),
       "timeout" => plan.budgets["wall_clock_ms"],
       "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
+      "coding_plan_validation_program" => validation_program,
       @graph_metadata_keys.compiler_version => @compiler_version,
       @graph_metadata_keys.template_version => Profiles.template_version(),
       @graph_metadata_keys.plan_version => plan.version,

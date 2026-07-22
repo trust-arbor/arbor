@@ -125,7 +125,33 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
       assert {:ok, compilation} = compile(plan, ctx)
       assert node_attrs(parse!(compilation.dot_source), "validate") == expected_attrs
+
+      assert compilation.initial_values["coding_plan_validation_program"] == program
     end
+  end
+
+  test "compilation validation rejects missing or graph-divergent validation descriptors", ctx do
+    plan = plan!()
+    assert {:ok, compilation} = compile(plan, ctx)
+
+    missing = %{
+      compilation
+      | initial_values: Map.delete(compilation.initial_values, "coding_plan_validation_program")
+    }
+
+    assert {:error, {:invalid_compilation_field, "initial_values"}} =
+             Compilation.validate(missing, plan)
+
+    divergent =
+      put_in(
+        compilation.initial_values["coding_plan_validation_program"]["static_parameters"][
+          "timeout"
+        ],
+        1
+      )
+
+    assert {:error, {:invalid_compilation_field, "initial_values"}} =
+             Compilation.validate(%{compilation | initial_values: divergent}, plan)
   end
 
   test "version 2 binds the validated work packet digest in graph, inputs, and manifest", ctx do
@@ -263,8 +289,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "hoist_workspace_fingerprint")["output_key"] ==
              "workspace_fingerprint"
 
-    # Inspect stays fingerprint-only; tree binding comes from validation.
-    refute Map.has_key?(graph.nodes, "hoist_committable_tree_oid")
+    refute Map.has_key?(node_attrs(graph, "inspect_workspace"), "param.include_committable_tree")
+    assert_validation_capture_topology(graph, "prep_validation_path")
 
     assert node_attrs(graph, "hoist_expected_workspace_fingerprint")["source_key"] ==
              "workspace_fingerprint"
@@ -344,6 +370,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert edge_target(graph, "route_turn_progress", "context.turn_progressed=true") ==
              "prep_commit_path"
+
+    refute Map.has_key?(graph.nodes, "prep_validation_path")
+    assert_validation_capture_topology(graph, "hoist_review_attestation_id")
   end
 
   test "default profile retains mandatory validation and binding review", ctx do
@@ -725,6 +754,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["param.test_stage_timeout"] == 900_000
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
+    assert_validation_capture_topology(graph, "prep_validation_path")
 
     assert Map.has_key?(graph.nodes, "status_validation_capacity_exceeded")
 
@@ -1357,6 +1387,53 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph.edges
     |> Enum.find(&(&1.from == from and &1.attrs["condition"] == condition))
     |> Map.fetch!(:to)
+  end
+
+  defp assert_validation_capture_topology(graph, predecessor) do
+    capture = node_attrs(graph, "capture_validation_workspace")
+
+    assert capture == %{
+             "type" => "exec",
+             "target" => "action",
+             "action" => "coding_workspace_inspect",
+             "context_keys" => "workspace_id",
+             "param.include_committable_tree" => "true",
+             "output_prefix" => "validation_workspace",
+             "max_retries" => "0"
+           }
+
+    assert node_attrs(graph, "hoist_validation_candidate_tree_oid") == %{
+             "type" => "transform",
+             "transform" => "identity",
+             "source_key" => "validation_workspace.committable_tree_oid",
+             "output_key" => "validation_candidate_tree_oid"
+           }
+
+    assert node_attrs(graph, "hoist_validation_observed_at") == %{
+             "type" => "transform",
+             "transform" => "identity",
+             "source_key" => "validation_workspace.committable_tree_observed_at",
+             "output_key" => "validation_observed_at"
+           }
+
+    assert edge_target(graph, predecessor, nil) == "capture_validation_workspace"
+
+    assert edge_target(graph, "capture_validation_workspace", "outcome=fail") ==
+             "status_pipeline_error_then_close"
+
+    assert edge_target(graph, "capture_validation_workspace", "outcome=success") ==
+             "hoist_validation_candidate_tree_oid"
+
+    assert edge_target(graph, "hoist_validation_candidate_tree_oid", "outcome=fail") ==
+             "status_pipeline_error_then_close"
+
+    assert edge_target(graph, "hoist_validation_candidate_tree_oid", "outcome=success") ==
+             "hoist_validation_observed_at"
+
+    assert edge_target(graph, "hoist_validation_observed_at", "outcome=fail") ==
+             "status_pipeline_error_then_close"
+
+    assert edge_target(graph, "hoist_validation_observed_at", "outcome=success") == "validate"
   end
 
   defp submit_review_false_edge?(edge) do

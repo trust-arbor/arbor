@@ -87,6 +87,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert "validate" in policy["mandatory_gate_nodes"]
       assert "review_change" == policy["review_gate"]
       assert "check_validation_passed" == policy["validation_result_gate"]
+      assert "capture_validation_workspace" == policy["validation_observation_gate"]
       assert "route_review" == policy["review_routing_gate"]
       assert policy["allowed_handlers"] == Enum.sort(policy["allowed_handlers"])
 
@@ -227,6 +228,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                Profiles.validation_timeout(drifted_source, 900_000)
 
       for node <- ~w[
+            capture_validation_workspace
+            hoist_validation_candidate_tree_oid
+            hoist_validation_observed_at
             inspect_workspace
             check_validation_passed
             check_validation_total_budget

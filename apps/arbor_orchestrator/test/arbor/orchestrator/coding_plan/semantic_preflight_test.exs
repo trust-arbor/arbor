@@ -92,6 +92,122 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              )
   end
 
+  test "validation observation bindings and protected writers fail closed", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      update_in(
+        graph.nodes["capture_validation_workspace"].attrs,
+        &Map.put(&1, "param.include_committable_tree", "false")
+      ),
+      update_in(
+        graph.nodes["hoist_validation_candidate_tree_oid"].attrs,
+        &Map.put(&1, "source_key", "inspect.committable_tree_oid")
+      ),
+      update_in(
+        graph.nodes["hoist_validation_observed_at"].attrs,
+        &Map.put(&1, "source_key", "inspect.committable_tree_observed_at")
+      ),
+      update_in(
+        graph.nodes["prep_review_intent"].attrs,
+        &Map.put(&1, "output_key", "validation_candidate_tree_oid")
+      ),
+      update_in(
+        graph.nodes["prep_review_intent"].attrs,
+        &Map.put(&1, "output_key", "validation_observed_at")
+      )
+    ]
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding")
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] in [
+                 "review_convergence_node_mismatch",
+                 "review_convergence_writer_violation"
+               ]
+             end)
+    end
+  end
+
+  test "compiler and terminal evidence reject duplicate and cross-attribute writers", ctx do
+    cases = [
+      {plan!(), "default"},
+      {security_plan!(), "security_regression"}
+    ]
+
+    mutations = [
+      {"output_key", "coding_plan_validation_program"},
+      {"output_prefix", "coding_plan_validation_program"},
+      {"output_key", "validation"},
+      {"output_prefix", "validation"},
+      {"output_key", "validation_workspace"},
+      {"output_prefix", "validation_workspace"},
+      {"output_prefix", "validation_candidate_tree_oid"},
+      {"output_prefix", "validation_observed_at"}
+    ]
+
+    for {plan, profile_id} <- cases do
+      assert {:ok, compilation} = compile(plan, ctx)
+      graph = compiled_graph!(compilation.dot_source)
+      assert {:ok, profile} = Profiles.fetch_executable(profile_id)
+
+      for {attribute, context_key} <- mutations do
+        mutated =
+          update_in(
+            graph.nodes["classify_profile"].attrs,
+            &Map.put(&1, attribute, context_key)
+          )
+
+        assert {:error, {:semantic_preflight_failed, errors}} =
+                 preflight(mutated, profile["semantic_policy"], review_profile: "binding")
+
+        assert Enum.any?(errors, fn error ->
+                 error["code"] == "review_convergence_writer_violation" and
+                   error["detail"]["attribute"] == attribute and
+                   error["detail"]["context_key"] == context_key
+               end),
+               "expected #{attribute}=#{context_key} to fail, got: #{inspect(errors)}"
+      end
+    end
+  end
+
+  test "validation and review rework cannot bypass a fresh validation capture", ctx do
+    cases = [
+      {plan!(), "default"},
+      {plan!(%{"validation_profile" => "cross_app"}), "cross_app"},
+      {security_plan!(), "security_regression"}
+    ]
+
+    for {plan, profile_id} <- cases do
+      assert {:ok, compilation} = compile(plan, ctx)
+      graph = compiled_graph!(compilation.dot_source)
+      assert {:ok, profile} = Profiles.fetch_executable(profile_id)
+
+      for {source, kind} <- [
+            {"build_operator_rework_prompt", "operator_rework"},
+            {"build_review_rework_prompt", "review_rework"},
+            {"build_validation_rework_prompt", "validation_rework"}
+          ] do
+        bypassed = add_edge(graph, source, "validate", "context.capture_bypass=true")
+
+        assert {:error, {:semantic_preflight_failed, errors}} =
+                 preflight(bypassed, profile["semantic_policy"], review_profile: "binding")
+
+        assert Enum.any?(errors, fn error ->
+                 error["code"] == "dominance_violation" and
+                   error["node_id"] == "validate" and
+                   error["detail"]["kind"] == "#{kind}.fresh_validation_observation" and
+                   error["detail"]["required_dominator"] == "capture_validation_workspace"
+               end),
+               "expected #{profile_id} #{kind} capture failure, got: #{inspect(errors)}"
+      end
+    end
+  end
+
   test "security regression: every total gate is bound to the plan max_cycles", ctx do
     for {plan, profile_name} <- [
           {plan!(%{"rework" => %{"max_cycles" => 1}}), "default"},
@@ -401,6 +517,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         &Map.put(&1, "source_key", "forged.review_attestation_id")
       ),
       update_in(
+        graph.nodes["capture_validation_workspace"].attrs,
+        &Map.put(&1, "param.include_committable_tree", "false")
+      ),
+      update_in(
+        graph.nodes["prep_review_intent"].attrs,
+        &Map.put(&1, "output_key", "validation_observed_at")
+      ),
+      update_in(
         graph.nodes["prep_review_intent"].attrs,
         &Map.put(&1, "output_key", "review_attestation_id")
       ),
@@ -421,6 +545,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       assert Enum.any?(errors, fn err ->
                err["code"] in [
                  "forbidden_action",
+                 "review_convergence_node_mismatch",
+                 "review_convergence_writer_violation",
                  "security_binding_mismatch",
                  "security_protected_writer_violation",
                  "security_validator_parameter_violation"
@@ -441,6 +567,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       {"review", "load_committed_change", "route_review"},
       {"review_routing", "review_change", "hoist_review_attestation_id"},
       {"review_attestation", "route_review", "validate"},
+      {"validation_observation", "hoist_review_attestation_id", "validate"},
       {"validation", "hoist_review_attestation_id", "check_validation_passed"},
       {"validation_result", "validate", "post_validation_committed_change"},
       {"post_validation_exact_head", "check_validation_passed", "route_validated_review"},
@@ -489,7 +616,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("security_regression")
 
     bypasses = [
-      {"build_validation_rework_prompt", "validate", "validation_rework.fresh_validation"},
+      {"build_validation_rework_prompt", "validate",
+       "validation_rework.fresh_validation_observation"},
+      {"build_review_rework_prompt", "validate", "review_rework.fresh_validation_observation"},
       {"build_review_rework_prompt", "status_change_committed",
        "review_rework.fresh_post_validation_routing_terminal"}
     ]

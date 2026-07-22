@@ -576,6 +576,30 @@ digraph CodingChangeV1 {
     output_key="path"
   ]
 
+  capture_validation_workspace [
+    type="exec",
+    target="action",
+    action="coding_workspace_inspect",
+    context_keys="workspace_id",
+    param.include_committable_tree="true",
+    output_prefix="validation_workspace",
+    max_retries="0"
+  ]
+
+  hoist_validation_candidate_tree_oid [
+    type="transform",
+    transform="identity",
+    source_key="validation_workspace.committable_tree_oid",
+    output_key="validation_candidate_tree_oid"
+  ]
+
+  hoist_validation_observed_at [
+    type="transform",
+    transform="identity",
+    source_key="validation_workspace.committable_tree_observed_at",
+    output_key="validation_observed_at"
+  ]
+
   validate [
     type="exec",
     target="action",
@@ -1601,7 +1625,7 @@ digraph CodingChangeV1 {
   route_security_attested_auto -> hoist_review_attestation_id [condition="context.review.review_attestation_id!=\"\""]
   // Intentional fallback: missing auto-proceed authority must fail closed.
   route_security_attested_auto -> error_review_tier_invalid
-  hoist_review_attestation_id -> validate
+  hoist_review_attestation_id -> capture_validation_workspace
   post_validation_expected_commit -> post_validation_committed_change
   post_validation_committed_change -> error_post_validation_committed_change [condition="outcome=fail"]
   error_post_validation_committed_change -> status_validation_failed
@@ -1629,8 +1653,16 @@ digraph CodingChangeV1 {
   route_no_progress -> status_no_changes [condition="context.total_rework_count<1"]
   status_no_changes -> close_worker
 
-  // Progress this turn -> validate
-  prep_validation_path -> validate
+  // Every validation attempt observes the committable tree immediately before
+  // invoking the validator. Capture and projection failures fail closed through
+  // the existing pipeline-error cleanup path.
+  prep_validation_path -> capture_validation_workspace
+  capture_validation_workspace -> status_pipeline_error_then_close [condition="outcome=fail"]
+  capture_validation_workspace -> hoist_validation_candidate_tree_oid [condition="outcome=success"]
+  hoist_validation_candidate_tree_oid -> status_pipeline_error_then_close [condition="outcome=fail"]
+  hoist_validation_candidate_tree_oid -> hoist_validation_observed_at [condition="outcome=success"]
+  hoist_validation_observed_at -> status_pipeline_error_then_close [condition="outcome=fail"]
+  hoist_validation_observed_at -> validate [condition="outcome=success"]
 
   // Hard validation action error (not soft passed=false)
   validate -> status_validation_failed [condition="outcome=fail"]

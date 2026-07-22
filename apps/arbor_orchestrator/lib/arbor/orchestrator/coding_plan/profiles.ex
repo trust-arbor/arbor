@@ -38,6 +38,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     acquire_workspace
                     capture_pre_turn_recovery
                     capture_pre_turn_workspace
+                    capture_validation_workspace
                     check_pre_turn_recovery_exists
                     check_pre_turn_workspace_exists
                     check_worker_delivery_status
@@ -78,6 +79,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_recovery_worker_provider_session_id
                     hoist_recovery_worker_session_id
                     hoist_turn_progressed
+                    hoist_validation_candidate_tree_oid
+                    hoist_validation_observed_at
                     hoist_worker_failure_reason
                     hoist_workspace_fingerprint
                     hoist_expected_workspace_fingerprint
@@ -181,7 +184,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @optional_reviewed_actions ["git_pr"]
 
   @mandatory_gate_nodes Enum.sort(~w[
+                          capture_validation_workspace
                           validate
+                          hoist_validation_candidate_tree_oid
+                          hoist_validation_observed_at
                           check_validation_passed
                           commit_change
                           route_after_commit
@@ -1151,6 +1157,40 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                  |> Enum.sort_by(& &1["node_id"])
 
   @review_convergence_node_attrs (@rework_budget_node_attrs ++ @review_convergence_node_attrs)
+                                 |> Kernel.++([
+                                   %{
+                                     "node_id" => "capture_validation_workspace",
+                                     "attrs" => %{
+                                       "type" => "exec",
+                                       "target" => "action",
+                                       "action" => "coding_workspace_inspect",
+                                       "context_keys" => "workspace_id",
+                                       "param.include_committable_tree" => "true",
+                                       "output_prefix" => "validation_workspace",
+                                       "max_retries" => "0"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "hoist_validation_candidate_tree_oid",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" =>
+                                         "validation_workspace.committable_tree_oid",
+                                       "output_key" => "validation_candidate_tree_oid"
+                                     }
+                                   },
+                                   %{
+                                     "node_id" => "hoist_validation_observed_at",
+                                     "attrs" => %{
+                                       "type" => "transform",
+                                       "transform" => "identity",
+                                       "source_key" =>
+                                         "validation_workspace.committable_tree_observed_at",
+                                       "output_key" => "validation_observed_at"
+                                     }
+                                   }
+                                 ])
                                  |> Enum.sort_by(& &1["node_id"])
 
   @rework_budget_edges [
@@ -1227,6 +1267,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @review_convergence_edges [
                               [
+                                "capture_validation_workspace",
+                                "hoist_validation_candidate_tree_oid",
+                                "outcome=success"
+                              ],
+                              [
+                                "capture_validation_workspace",
+                                "status_pipeline_error_then_close",
+                                "outcome=fail"
+                              ],
+                              [
                                 "check_review_category_budget",
                                 "check_review_total_budget",
                                 "context.review_rework_count<2"
@@ -1248,6 +1298,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                               ["prep_review_delta_diff", "prep_review_delta_files", nil],
                               ["prep_review_delta_files", "prep_review_delta_ranges", nil],
                               ["prep_review_delta_ranges", "route_prepared_review", nil],
+                              [
+                                "prep_validation_path",
+                                "capture_validation_workspace",
+                                nil
+                              ],
                               ["review_change", "error_council_review", "outcome=fail"],
                               [
                                 "review_change",
@@ -1300,6 +1355,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                 "snapshot_review_prior_commit",
                                 "snapshot_review_prior_candidate_commit",
                                 nil
+                              ],
+                              [
+                                "hoist_validation_candidate_tree_oid",
+                                "hoist_validation_observed_at",
+                                "outcome=success"
+                              ],
+                              [
+                                "hoist_validation_candidate_tree_oid",
+                                "status_pipeline_error_then_close",
+                                "outcome=fail"
+                              ],
+                              [
+                                "hoist_validation_observed_at",
+                                "status_pipeline_error_then_close",
+                                "outcome=fail"
+                              ],
+                              [
+                                "hoist_validation_observed_at",
+                                "validate",
+                                "outcome=success"
                               ]
                             ]
                             |> Enum.sort()
@@ -1309,7 +1384,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @review_convergence_policy %{
     "node_attrs" => @review_convergence_node_attrs,
+    "protected_prefix_writers" => %{
+      "coding_plan_validation_program" => [],
+      "validation" => ["validate"],
+      "validation_candidate_tree_oid" => [],
+      "validation_observed_at" => [],
+      "validation_workspace" => ["capture_validation_workspace"]
+    },
     "protected_writers" => %{
+      "coding_plan_validation_program" => [],
       "delta_diff" => ["init_delta_diff", "prep_review_delta_diff"],
       "delta_files" => ["init_delta_files", "prep_review_delta_files"],
       "delta_ranges" => ["init_delta_ranges", "prep_review_delta_ranges"],
@@ -1340,7 +1423,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "validation_rework_count" => [
         "inc_validation_rework_count",
         "init_validation_rework_count"
-      ]
+      ],
+      "validation" => [],
+      "validation_candidate_tree_oid" => ["hoist_validation_candidate_tree_oid"],
+      "validation_observed_at" => ["hoist_validation_observed_at"],
+      "validation_workspace" => []
     },
     "edges" => @review_convergence_edges
   }
@@ -1385,7 +1472,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         }
       ])
       |> Enum.sort_by(& &1["node_id"]),
+    "protected_prefix_writers" => %{
+      "coding_plan_validation_program" => [],
+      "validation" => ["validate"],
+      "validation_candidate_tree_oid" => [],
+      "validation_observed_at" => [],
+      "validation_workspace" => ["capture_validation_workspace"]
+    },
     "protected_writers" => %{
+      "coding_plan_validation_program" => [],
       "delta_diff" => ["init_delta_diff", "prep_review_delta_diff"],
       "delta_files" => ["init_delta_files", "prep_review_delta_files"],
       "delta_ranges" => ["init_delta_ranges", "prep_review_delta_ranges"],
@@ -1428,12 +1523,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "validation_rework_count" => [
         "inc_validation_rework_count",
         "init_validation_rework_count"
-      ]
+      ],
+      "validation" => [],
+      "validation_candidate_tree_oid" => ["hoist_validation_candidate_tree_oid"],
+      "validation_observed_at" => ["hoist_validation_observed_at"],
+      "validation_workspace" => []
     },
     "edges" =>
       @review_convergence_edges
-      |> Enum.reject(&(&1 == ["route_prepared_review", "review_change", nil]))
+      |> Enum.reject(fn edge ->
+        edge == ["route_prepared_review", "review_change", nil] or
+          edge == ["prep_validation_path", "capture_validation_workspace", nil]
+      end)
       |> Kernel.++([
+        ["hoist_review_attestation_id", "capture_validation_workspace", nil],
         ["inc_validation_review_cycle", "inc_validation_rework_count", nil],
         ["prep_review_validation_profile", "review_change", nil],
         ["route_prepared_review", "prep_review_validation_profile", nil],
@@ -1454,9 +1557,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @default_action_placements Enum.sort_by(
                                [
                                  %{
+                                   "node_id" => "capture_validation_workspace",
+                                   "action" => "coding_workspace_inspect",
+                                   "required_dominators" => ["prep_validation_path"],
+                                   "review_required_dominators" => [],
+                                   "required_dominator_sets" => []
+                                 },
+                                 %{
                                    "node_id" => "validate",
                                    "action" => "mix_compile",
-                                   "required_dominators" => ["inspect_workspace"],
+                                   "required_dominators" => [
+                                     "capture_validation_workspace",
+                                     "hoist_validation_candidate_tree_oid",
+                                     "hoist_validation_observed_at"
+                                   ],
                                    "review_required_dominators" => [],
                                    "required_dominator_sets" => []
                                  }
@@ -1472,8 +1586,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                      "action" => "coding_cross_app_validate",
                                      "required_dominators" => [
                                        "acquire_workspace",
-                                       "inspect_workspace"
+                                       "capture_validation_workspace",
+                                       "hoist_validation_candidate_tree_oid",
+                                       "hoist_validation_observed_at"
                                      ],
+                                     "review_required_dominators" => [],
+                                     "required_dominator_sets" => []
+                                   },
+                                   %{
+                                     "node_id" => "capture_validation_workspace",
+                                     "action" => "coding_workspace_inspect",
+                                     "required_dominators" => ["prep_validation_path"],
                                      "review_required_dominators" => [],
                                      "required_dominator_sets" => []
                                    }
@@ -1486,6 +1609,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   # validate/check_validation_passed to dominate commit_change.
   @security_action_placements Enum.sort_by(
                                 [
+                                  %{
+                                    "node_id" => "capture_validation_workspace",
+                                    "action" => "coding_workspace_inspect",
+                                    "required_dominators" => [
+                                      "commit_change",
+                                      "hoist_review_attestation_id",
+                                      "review_change"
+                                    ],
+                                    "review_required_dominators" => [],
+                                    "required_dominator_sets" => []
+                                  },
                                   %{
                                     "node_id" => "commit_change",
                                     "action" => "coding_reviewed_commit",
@@ -1508,7 +1642,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                     "node_id" => "validate",
                                     "action" => "coding_security_regression_validate",
                                     "required_dominators" => [
+                                      "capture_validation_workspace",
                                       "hoist_review_attestation_id",
+                                      "hoist_validation_candidate_tree_oid",
+                                      "hoist_validation_observed_at",
                                       "load_committed_change",
                                       "review_change",
                                       "route_review"
@@ -1531,6 +1668,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "mandatory_gate_nodes" => @mandatory_gate_nodes,
     "publication_nodes" => @publication_nodes,
     "validation_gate" => "validate",
+    "validation_observation_gate" => "capture_validation_workspace",
     "validation_result_gate" => "check_validation_passed",
     "post_validation_commit_routing" => "route_after_commit",
     "committed_change_routing" => "route_after_commit",

@@ -4,7 +4,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   use TypedStruct
 
   alias Arbor.Contracts.Coding.Plan
-  alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
+  alias Arbor.Orchestrator.CodingPlan.{ExecutionManifest, ValidationProgram}
   alias Arbor.Orchestrator.Dot.Parser
 
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
@@ -152,33 +152,53 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   defp validate_json_object(_value, field), do: invalid(field)
 
   defp validate_initial_values(compilation, plan) do
-    expected =
-      %{
-        "task" => plan.task,
-        "repo_path" => plan.repo_root,
-        "base_ref" => plan.base_ref,
-        "acp_agent" => plan.worker["provider"],
-        "open_pr" => bool_string(plan.output["draft_pr"]),
-        "retain_workspace" => bool_string(plan.output["retain_workspace"]),
-        "submit_review" => bool_string(plan.review_profile != "none"),
-        "timeout" => plan.budgets["wall_clock_ms"],
-        "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
-        "coding_plan_compiler_version" => compilation.compiler_version,
-        "coding_plan_template_version" => compilation.template_version,
-        "coding_plan_version" => plan.version,
-        "coding_plan_fingerprint" => compilation.plan_fingerprint,
-        "coding_plan_task_class" => plan.task_class,
-        "coding_plan_validation_profile" => plan.validation_profile,
-        "coding_plan_review_profile" => plan.review_profile,
-        "coding_plan_action_catalog_digest" => compilation.action_catalog_digest
-      }
-      |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
-      |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
-      |> maybe_put("model", plan.worker["model"])
-      |> maybe_put_initial_work_packet_digest(plan)
-      |> maybe_put_test_paths(plan)
+    with {:ok, validation_program} <- validation_program(compilation, plan) do
+      expected =
+        %{
+          "task" => plan.task,
+          "repo_path" => plan.repo_root,
+          "base_ref" => plan.base_ref,
+          "acp_agent" => plan.worker["provider"],
+          "open_pr" => bool_string(plan.output["draft_pr"]),
+          "retain_workspace" => bool_string(plan.output["retain_workspace"]),
+          "submit_review" => bool_string(plan.review_profile != "none"),
+          "timeout" => plan.budgets["wall_clock_ms"],
+          "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
+          "coding_plan_validation_program" => validation_program,
+          "coding_plan_compiler_version" => compilation.compiler_version,
+          "coding_plan_template_version" => compilation.template_version,
+          "coding_plan_version" => plan.version,
+          "coding_plan_fingerprint" => compilation.plan_fingerprint,
+          "coding_plan_task_class" => plan.task_class,
+          "coding_plan_validation_profile" => plan.validation_profile,
+          "coding_plan_review_profile" => plan.review_profile,
+          "coding_plan_action_catalog_digest" => compilation.action_catalog_digest
+        }
+        |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
+        |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
+        |> maybe_put("model", plan.worker["model"])
+        |> maybe_put_initial_work_packet_digest(plan)
+        |> maybe_put_test_paths(plan)
 
-    require_equal(compilation.initial_values, expected, "initial_values")
+      require_equal(compilation.initial_values, expected, "initial_values")
+    end
+  end
+
+  defp validation_program(compilation, plan) do
+    with {:ok, program} <-
+           Map.fetch(compilation.initial_values, "coding_plan_validation_program"),
+         :ok <- ValidationProgram.validate(program),
+         :ok <- require_equal(program["profile_id"], plan.validation_profile, "initial_values"),
+         {:ok, graph} <- parse_graph(compilation.dot_source),
+         {:ok, validate_node} <- Map.fetch(graph.nodes, "validate"),
+         {:ok, projected_attrs} <- ValidationProgram.project_onto(program, validate_node.attrs),
+         :ok <- require_equal(projected_attrs, validate_node.attrs, "initial_values") do
+      {:ok, program}
+    else
+      :error -> invalid("initial_values")
+      {:error, :invalid_validation_program} -> invalid("initial_values")
+      {:error, _reason} = error -> error
+    end
   end
 
   defp validate_manifest(compilation, plan) do
