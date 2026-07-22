@@ -51,6 +51,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.CodingPlan.Compilation
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
   alias Arbor.Orchestrator.CodingPlan.Profiles
+  alias Arbor.Orchestrator.CodingPlan.Readiness
   alias Arbor.Orchestrator.CodingPlan.SemanticPreflight
   alias Arbor.Orchestrator.CodingTaskExecutor
   alias Arbor.Orchestrator.Config
@@ -365,6 +366,24 @@ defmodule Arbor.Orchestrator do
          {:ok, reply} <- invoke_coding_plan_compiler(compiler, plan, template_path) do
       validate_coding_plan_compiler_reply(reply, plan)
     end
+  end
+
+  @doc """
+  Check static coding-plan readiness without creating a workspace or contacting
+  ACP/security services.
+
+  The returned JSON-clean report is `ready` only for a future live mode. Static
+  checks that pass immutable prerequisites return `degraded` with explicit
+  unavailable diagnostics for live security, ACP, toolchain, and capacity facts.
+  Use `:observed_at` in tests for deterministic reports.
+  """
+  @spec check_coding_readiness(Plan.t() | map() | keyword(), keyword()) ::
+          {:ok, map()}
+  def check_coding_readiness(plan_or_attrs, opts \\ []) when is_list(opts) do
+    opts =
+      Keyword.put_new(opts, :observed_at, DateTime.utc_now() |> DateTime.to_iso8601(:extended))
+
+    Readiness.check(plan_or_attrs, opts)
   end
 
   @doc """
