@@ -74,6 +74,7 @@ defmodule Arbor.Actions do
   """
 
   alias Arbor.Actions.Coding.{Workspace, WorkspaceLeaseRegistry}
+  alias Arbor.Actions.Coding.ToolchainIdentityCore
   alias Arbor.Actions.Egress
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
@@ -203,6 +204,124 @@ defmodule Arbor.Actions do
 
   def coding_workspace_lifecycle_status(_opts),
     do: {:error, :invalid_lifecycle_status_options}
+
+  @doc "Return the bounded identity of the reviewed Mix and loaded BEAM toolchain."
+  @spec coding_toolchain_identity() ::
+          {:ok, %{required(String.t()) => term()}}
+          | {:error,
+             :mix_wrapper_unavailable | :runtime_roots_unavailable | :invalid_toolchain_identity}
+  def coding_toolchain_identity do
+    with {:ok, wrapper_path} <- observe_mix_wrapper(),
+         {:ok, runtime_roots} <- observe_runtime_roots(),
+         {:ok, {platform, architecture}} <- observe_platform(),
+         {:ok, otp_release} <- observe_otp_release(),
+         {:ok, elixir_version} <- observe_elixir_version(),
+         {:ok, identity} <-
+           ToolchainIdentityCore.new(%{
+             "schema_version" => ToolchainIdentityCore.schema_version(),
+             "platform" => platform,
+             "architecture" => architecture,
+             "otp_release" => otp_release,
+             "elixir_version" => elixir_version,
+             "mix_wrapper_path" => wrapper_path,
+             "runtime_roots" => runtime_roots
+           }) do
+      {:ok, identity}
+    else
+      {:error, reason}
+      when reason in [
+             :mix_wrapper_unavailable,
+             :runtime_roots_unavailable,
+             :invalid_toolchain_identity
+           ] ->
+        {:error, reason}
+
+      _ ->
+        {:error, :invalid_toolchain_identity}
+    end
+  end
+
+  defp observe_mix_wrapper do
+    try do
+      case Arbor.Actions.Mix.resolve_mix_wrapper() do
+        {:ok, path} when is_binary(path) -> {:ok, path}
+        {:error, _reason} -> {:error, :mix_wrapper_unavailable}
+        _other -> {:error, :invalid_toolchain_identity}
+      end
+    rescue
+      _ -> {:error, :mix_wrapper_unavailable}
+    catch
+      _, _ -> {:error, :mix_wrapper_unavailable}
+    end
+  end
+
+  defp observe_runtime_roots do
+    try do
+      case Arbor.Actions.Mix.runtime_roots() do
+        {:ok, %{erlang_root: erlang_root, elixir_root: elixir_root} = roots}
+        when map_size(roots) == 2 and is_binary(erlang_root) and is_binary(elixir_root) ->
+          {:ok,
+           %{
+             "erlang_root" => erlang_root,
+             "elixir_root" => elixir_root
+           }}
+
+        {:error, _reason} ->
+          {:error, :runtime_roots_unavailable}
+
+        _other ->
+          {:error, :invalid_toolchain_identity}
+      end
+    rescue
+      _ -> {:error, :runtime_roots_unavailable}
+    catch
+      _, _ -> {:error, :runtime_roots_unavailable}
+    end
+  end
+
+  defp observe_platform do
+    try do
+      case {:os.type(), :erlang.system_info(:system_architecture)} do
+        {{platform, name}, architecture}
+        when is_atom(platform) and is_atom(name) and is_list(architecture) ->
+          {:ok,
+           {Atom.to_string(platform) <> ":" <> Atom.to_string(name), List.to_string(architecture)}}
+
+        _other ->
+          {:error, :invalid_toolchain_identity}
+      end
+    rescue
+      _ -> {:error, :invalid_toolchain_identity}
+    catch
+      _, _ -> {:error, :invalid_toolchain_identity}
+    end
+  end
+
+  defp observe_otp_release do
+    try do
+      case :erlang.system_info(:otp_release) do
+        release when is_list(release) -> {:ok, List.to_string(release)}
+        _other -> {:error, :invalid_toolchain_identity}
+      end
+    rescue
+      _ -> {:error, :invalid_toolchain_identity}
+    catch
+      _, _ -> {:error, :invalid_toolchain_identity}
+    end
+  end
+
+  defp observe_elixir_version do
+    try do
+      case System.version() do
+        version when is_binary(version) -> {:ok, version}
+        _other -> {:error, :invalid_toolchain_identity}
+      end
+    rescue
+      _ -> {:error, :invalid_toolchain_identity}
+    catch
+      _, _ -> {:error, :invalid_toolchain_identity}
+    end
+  end
 
   @doc "Compute bounded proof that a published coding candidate reached a destination ref."
   @spec prove_coding_branch_adoption(map(), String.t()) :: {:ok, map()} | {:error, term()}
