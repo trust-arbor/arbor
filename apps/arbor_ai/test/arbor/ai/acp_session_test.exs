@@ -88,19 +88,25 @@ defmodule Arbor.AI.AcpSessionTest do
       send(state.opts[:test_pid], {:fake_new_session, cwd})
       send(state.opts[:test_pid], {:fake_new_session_opts, opts})
 
-      case state.opts[:new_session_mode] do
-        :stall ->
-          send(state.opts[:test_pid], {:fake_new_session_stalled, self()})
-          Process.sleep(:infinity)
+      case Keyword.fetch(state.opts, :new_session_result) do
+        {:ok, result} ->
+          result
 
-        :throw ->
-          throw({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
+        :error ->
+          case state.opts[:new_session_mode] do
+            :stall ->
+              send(state.opts[:test_pid], {:fake_new_session_stalled, self()})
+              Process.sleep(:infinity)
 
-        :exit ->
-          exit({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
+            :throw ->
+              throw({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
 
-        _other ->
-          {:ok, %{"sessionId" => "fake-session"}}
+            :exit ->
+              exit({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
+
+            _other ->
+              {:ok, %{"sessionId" => "fake-session"}}
+          end
       end
     end
 
@@ -114,7 +120,10 @@ defmodule Arbor.AI.AcpSessionTest do
           Process.sleep(:infinity)
 
         _other ->
-          {:ok, %{"sessionId" => session_id}}
+          case Keyword.fetch(state.opts, :resume_result) do
+            {:ok, result} -> result
+            :error -> {:ok, %{"sessionId" => session_id}}
+          end
       end
     end
 
@@ -223,8 +232,11 @@ defmodule Arbor.AI.AcpSessionTest do
   defp restore_env(key, nil), do: Application.delete_env(:arbor_ai, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_ai, key, value)
 
-  defp start_fake_progress_session do
-    AcpSession.start_link(provider: :test, client_opts: [test_pid: self()])
+  defp start_fake_progress_session(opts \\ []) do
+    AcpSession.start_link(
+      provider: :test,
+      client_opts: Keyword.put(opts, :test_pid, self())
+    )
   end
 
   test "security regression: ACP subprocesses cannot inherit the live Arbor home" do
@@ -755,6 +767,122 @@ defmodule Arbor.AI.AcpSessionTest do
       ref = Process.monitor(session)
       assert :ok = AcpSession.close(session)
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
+    end
+
+    test "security regression: create rejects missing provider session identity" do
+      for response <- [
+            {:ok, %{}},
+            {:ok, nil},
+            {:ok, %{"sessionId" => nil}},
+            {:ok, %{"sessionId" => "   "}},
+            {:ok, %{"sessionId" => "  valid-session  "}}
+          ] do
+        install_fake_progress_client(100)
+        {:ok, session} = start_fake_progress_session(new_session_result: response)
+
+        case response do
+          {:ok, %{"sessionId" => "  valid-session  "}} ->
+            assert {:ok, %{"sessionId" => "  valid-session  "}} =
+                     AcpSession.create_session(session, timeout: 1_000)
+
+            assert %{status: :ready, session_id: "  valid-session  "} = AcpSession.status(session)
+
+          _invalid ->
+            assert {:error, {:invalid_provider_session_id, _reason}} =
+                     AcpSession.create_session(session, timeout: 1_000)
+
+            assert %{status: :error, session_id: nil} = AcpSession.status(session)
+        end
+
+        assert :ok = AcpSession.close(session)
+      end
+    end
+
+    test "security regression: pooled first send rejects malformed lazy creation before prompt dispatch" do
+      install_fake_progress_client(100)
+      {:ok, session} = start_fake_progress_session(new_session_result: {:ok, %{}})
+
+      assert {:error, {:invalid_provider_session_id, :missing}} =
+               AcpSession.send_message(session, "must-not-dispatch", timeout: 1_000)
+
+      refute_receive {:fake_prompt_started, _worker, "must-not-dispatch", _opts}, 100
+      assert %{status: :error, session_id: nil} = AcpSession.status(session)
+      assert :ok = AcpSession.close(session)
+    end
+
+    test "security regression: provider identity validation preserves exact bytes" do
+      valid_ids = ["  valid-session  ", "é/session", <<"valid-", 0xC3, 0xA9, "-id">>]
+
+      for id <- valid_ids do
+        assert {:ok, ^id} = AcpSession.validate_provider_session_id(id)
+      end
+
+      invalid_ids = [
+        {nil, :missing},
+        {"", :blank},
+        {"   ", :blank},
+        {:not_binary, :must_be_string},
+        {<<"invalid", 0xFF>>, :invalid_utf8},
+        {"id" <> <<0>> <> "tail", :nul_byte},
+        {"id\n-tail", :control_character},
+        {"id" <> <<0xC2, 0x85>>, :control_character},
+        {String.duplicate("x", 513), :too_long}
+      ]
+
+      for {id, reason} <- invalid_ids do
+        assert {:error, {:invalid_provider_session_id, ^reason}} =
+                 AcpSession.validate_provider_session_id(id)
+      end
+    end
+
+    test "security regression: resume uses requested identity when response omits it" do
+      install_fake_progress_client(100)
+      {:ok, session} = start_fake_progress_session(resume_result: {:ok, %{}})
+
+      assert {:ok, %{}} = AcpSession.resume_session(session, "requested-id", timeout: 1_000)
+      assert %{status: :ready, session_id: "requested-id"} = AcpSession.status(session)
+      assert :ok = AcpSession.close(session)
+    end
+
+    test "security regression: resume accepts matching aliases and rejects mismatches" do
+      for {response, expected} <- [
+            {{:ok, %{"sessionId" => "requested-id"}}, %{"sessionId" => "requested-id"}},
+            {{:ok, %{:session_id => "requested-id"}}, %{:session_id => "requested-id"}}
+          ] do
+        install_fake_progress_client(100)
+        {:ok, session} = start_fake_progress_session(resume_result: response)
+
+        assert {:ok, ^expected} =
+                 AcpSession.resume_session(session, "requested-id", timeout: 1_000)
+
+        assert %{status: :ready, session_id: "requested-id"} = AcpSession.status(session)
+        assert :ok = AcpSession.close(session)
+      end
+
+      install_fake_progress_client(100)
+
+      {:ok, session} =
+        start_fake_progress_session(resume_result: {:ok, %{"sessionId" => "other-id"}})
+
+      assert {:error, :provider_session_id_mismatch} =
+               AcpSession.resume_session(session, "requested-id", timeout: 1_000)
+
+      assert %{status: :error, session_id: nil} = AcpSession.status(session)
+      assert :ok = AcpSession.close(session)
+    end
+
+    test "security regression: malformed resume request preserves a healthy state" do
+      install_fake_progress_client(100)
+      {:ok, session} = start_fake_progress_session()
+      assert {:ok, _} = AcpSession.create_session(session, timeout: 1_000)
+      before = AcpSession.status(session)
+
+      assert {:error, {:invalid_provider_session_id, :blank}} =
+               AcpSession.resume_session(session, "  ", timeout: 1_000)
+
+      assert AcpSession.status(session) == before
+      refute_receive {:fake_load_session_opts, _opts}, 100
+      assert :ok = AcpSession.close(session)
     end
   end
 

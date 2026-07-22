@@ -368,6 +368,70 @@ defmodule Arbor.Actions.AcpTest do
       assert error =~ "invalid_worker_session_handle"
     end
 
+    test "security regression: nonpooled start cannot publish a ready worker without provider identity" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :start_result},
+        {:ok,
+         %{
+           worker_session_id: "acp_worker_missing_provider_id",
+           session_id: nil,
+           provider: "claude",
+           model: "default",
+           status: "ready",
+           pooled: false
+         }}
+      )
+
+      assert {:error, error} =
+               Acp.StartSession.run(
+                 %{provider: "claude", cwd: "/ws", use_pool: false},
+                 %{agent_id: "agent_start", task_id: "task_start"}
+               )
+
+      assert error =~ "invalid_provider_session_id"
+    end
+
+    test "security regression: only a lazy pooled start may omit provider identity" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :start_result},
+        {:ok,
+         %{
+           worker_session_id: "acp_worker_lazy_pool",
+           session_id: nil,
+           provider: "claude",
+           model: "default",
+           status: "ready",
+           pooled: true
+         }}
+      )
+
+      assert {:ok, lazy} =
+               Acp.StartSession.run(
+                 %{provider: "claude", cwd: "/ws", use_pool: true},
+                 %{agent_id: "agent_start", task_id: "task_start"}
+               )
+
+      assert lazy.session_id == ""
+      assert lazy.continuity == "new"
+
+      assert {:error, error} =
+               Acp.StartSession.run(
+                 %{
+                   provider: "claude",
+                   cwd: "/ws",
+                   use_pool: true,
+                   session_id: "provider-session-resume-1"
+                 },
+                 %{agent_id: "agent_start", task_id: "task_start"}
+               )
+
+      assert error =~ "invalid_provider_session_id"
+    end
+
     test "security regression: public StartSession forwards AuthContext/agent_id and task_id to managed start" do
       install_fake_ai()
 

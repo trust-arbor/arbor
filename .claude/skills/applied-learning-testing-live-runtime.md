@@ -433,3 +433,7 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 <!-- applied-learning: in-zsh-path-is-the-array-form-of-path -->
 <a id="applied-learning-in-zsh-path-is-the-array-form-of-path"></a>
 **In zsh, `path` is the array form of `PATH`.** Assigning `path=...` as an ordinary loop variable rewrites command lookup for the current shell, so later commands fail with `command not found`. Use a neutral name such as `wt`, `target_path`, or `candidate` when iterating over filesystem paths (found 2026-07-21 while verifying accepted worktrees before lifecycle cleanup).
+
+<!-- applied-learning: compile-and-test-in-the-same-mix-env -->
+<a id="applied-learning-compile-and-test-in-the-same-mix-env"></a>
+**Compile and test in the same `MIX_ENV`.** A focused `MIX_ENV=test mix test --no-compile` can execute stale test-environment BEAMs after a default-environment compile. Compile the touched app with `MIX_ENV=test` before a no-compile focused rerun, especially when another process shares the umbrella build directory (found 2026-07-21 while validating ACP managed-session regressions).

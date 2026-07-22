@@ -37,7 +37,8 @@ defmodule Arbor.AI.AcpManaged do
     opts = strip_caller_owner_opts(opts)
 
     with {:ok, opts, _timeout} <-
-           Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms) do
+           Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms),
+         :ok <- validate_resume_option(opts) do
       use_pool? = Keyword.get(opts, :use_pool) || Keyword.get(opts, :pooled) || false
 
       if use_pool? do
@@ -201,22 +202,33 @@ defmodule Arbor.AI.AcpManaged do
     try do
       case create_or_resume(session_mod, session_pid, opts) do
         {:ok, session_info} ->
-          register_attrs = %{
-            session_pid: session_pid,
-            session_module: session_mod,
-            provider: provider,
-            model: Keyword.get(opts, :model),
-            session_id: extract_provider_session_id(session_info),
-            status: "ready",
-            pooled: false,
-            return_to_pool: false,
-            task_id: Keyword.get(opts, :task_id),
-            principal_id: Keyword.get(opts, :principal_id) || Keyword.get(opts, :agent_id)
-          }
+          case provider_session_id_for_start(session_info, opts) do
+            {:ok, provider_session_id} ->
+              register_attrs = %{
+                session_pid: session_pid,
+                session_module: session_mod,
+                provider: provider,
+                model: Keyword.get(opts, :model),
+                session_id: provider_session_id,
+                status: "ready",
+                pooled: false,
+                return_to_pool: false,
+                task_id: Keyword.get(opts, :task_id),
+                principal_id: Keyword.get(opts, :principal_id) || Keyword.get(opts, :agent_id)
+              }
 
-          case register_before_deadline(register_attrs, opts) do
-            {:ok, view} ->
-              {:ok, view}
+              case register_before_deadline(register_attrs, opts) do
+                {:ok, view} ->
+                  {:ok, view}
+
+                {:error, reason} ->
+                  cleanup_failed_start(session_mod, session_pid, supervisor,
+                    pooled?: false,
+                    deadline_opts: opts
+                  )
+
+                  {:error, reason}
+              end
 
             {:error, reason} ->
               cleanup_failed_start(session_mod, session_pid, supervisor,
@@ -322,7 +334,17 @@ defmodule Arbor.AI.AcpManaged do
          opts,
          return_to_pool
        ) do
-    cleanup_opts = [pooled?: true, return_to_pool: return_to_pool, deadline_opts: opts]
+    continuity =
+      if Keyword.has_key?(opts, :session_id) or Keyword.get(opts, :create_session, false),
+        do: :provider_session,
+        else: :pooled_pre_session
+
+    cleanup_opts = [
+      pooled?: true,
+      return_to_pool: return_to_pool,
+      continuity: continuity,
+      deadline_opts: opts
+    ]
 
     try do
       case maybe_create_or_resume_pooled(session_mod, session_pid, opts) do
@@ -335,7 +357,8 @@ defmodule Arbor.AI.AcpManaged do
             opts,
             return_to_pool,
             %{},
-            cleanup_opts
+            cleanup_opts,
+            allow_missing_identity: true
           )
 
         {:ok, session_info} ->
@@ -377,29 +400,50 @@ defmodule Arbor.AI.AcpManaged do
          opts,
          return_to_pool,
          session_info,
-         cleanup_opts
+         cleanup_opts,
+         registration_opts \\ []
        ) do
-    register_attrs = %{
-      session_pid: session_pid,
-      session_module: session_mod,
-      pool_module: pool_mod,
-      provider: provider,
-      model: Keyword.get(opts, :model),
-      session_id: extract_provider_session_id(session_info),
-      status: "ready",
-      pooled: true,
-      return_to_pool: return_to_pool,
-      task_id: Keyword.get(opts, :task_id),
-      principal_id: Keyword.get(opts, :principal_id) || Keyword.get(opts, :agent_id)
-    }
+    session_id_result =
+      if Keyword.get(registration_opts, :allow_missing_identity, false) do
+        {:ok, nil}
+      else
+        provider_session_id_for_start(session_info, opts)
+      end
 
-    case register_before_deadline(register_attrs, opts) do
-      {:ok, view} ->
-        {:ok, view}
+    case session_id_result do
+      {:ok, provider_session_id} ->
+        register_attrs = %{
+          session_pid: session_pid,
+          session_module: session_mod,
+          pool_module: pool_mod,
+          provider: provider,
+          model: Keyword.get(opts, :model),
+          session_id: provider_session_id,
+          status: "ready",
+          pooled: true,
+          return_to_pool: return_to_pool,
+          task_id: Keyword.get(opts, :task_id),
+          principal_id: Keyword.get(opts, :principal_id) || Keyword.get(opts, :agent_id)
+        }
+
+        case register_before_deadline(register_attrs, opts) do
+          {:ok, view} ->
+            {:ok, view}
+
+          {:error, reason} ->
+            cleanup_failed_start(session_mod, session_pid, pool_mod, cleanup_opts)
+            {:error, reason}
+        end
 
       {:error, reason} ->
-        cleanup_failed_start(session_mod, session_pid, pool_mod, cleanup_opts)
-        {:error, reason}
+        cleanup_failed_start(
+          session_mod,
+          session_pid,
+          pool_mod,
+          Keyword.put(cleanup_opts, :continuity, :provider_session)
+        )
+
+        {:error, Arbor.LLM.sanitize_external_reason(reason)}
     end
   end
 
@@ -408,11 +452,18 @@ defmodule Arbor.AI.AcpManaged do
     with {:ok, phase_opts} <- session_phase_opts(opts) do
       OwnedOperation.run(
         fn ->
-          case Keyword.get(opts, :session_id) do
-            sid when is_binary(sid) and sid != "" ->
-              session_mod.resume_session(session_pid, sid, phase_opts)
+          case Keyword.fetch(opts, :session_id) do
+            {:ok, sid} ->
+              with {:ok, sid} <- AcpSession.validate_provider_session_id(sid),
+                   result <- session_mod.resume_session(session_pid, sid, phase_opts),
+                   {:ok, info} <- normalize_session_result(result),
+                   :ok <- AcpSession.validate_resume_session_response(info, sid) do
+                {:ok, info}
+              else
+                {:error, reason} -> {:error, reason}
+              end
 
-            _ ->
+            :error ->
               session_mod.create_session(session_pid, phase_opts)
           end
         end,
@@ -426,11 +477,20 @@ defmodule Arbor.AI.AcpManaged do
   # Pooled path: explicit resume or create_session: true must succeed or fail.
   # :skip is only valid when neither was requested.
   defp maybe_create_or_resume_pooled(session_mod, session_pid, opts) do
-    case Keyword.get(opts, :session_id) do
-      sid when is_binary(sid) and sid != "" ->
+    case Keyword.fetch(opts, :session_id) do
+      {:ok, sid} ->
         with {:ok, phase_opts} <- session_phase_opts(opts) do
           OwnedOperation.run(
-            fn -> session_mod.resume_session(session_pid, sid, phase_opts) end,
+            fn ->
+              with {:ok, sid} <- AcpSession.validate_provider_session_id(sid),
+                   result <- session_mod.resume_session(session_pid, sid, phase_opts),
+                   {:ok, info} <- normalize_session_result(result),
+                   :ok <- AcpSession.validate_resume_session_response(info, sid) do
+                {:ok, info}
+              else
+                {:error, reason} -> {:error, reason}
+              end
+            end,
             phase_opts,
             :timeout
           )
@@ -487,8 +547,11 @@ defmodule Arbor.AI.AcpManaged do
   defp cleanup_failed_start(session_mod, session_pid, pool_or_sup, opts) do
     pooled? = Keyword.get(opts, :pooled?, false)
     return_to_pool? = Keyword.get(opts, :return_to_pool, true)
+    continuity = Keyword.get(opts, :continuity, :provider_session)
     deadline_opts = Keyword.get(opts, :deadline_opts, expired_cleanup_opts())
-    return_to_pool? = pooled? and return_to_pool? and is_atom(pool_or_sup)
+
+    return_to_pool? =
+      pooled? and return_to_pool? and continuity == :pooled_pre_session and is_atom(pool_or_sup)
 
     result =
       OwnedOperation.run(
@@ -557,6 +620,26 @@ defmodule Arbor.AI.AcpManaged do
   end
 
   # -- Helpers --------------------------------------------------------
+
+  defp validate_resume_option(opts) do
+    case Keyword.fetch(opts, :session_id) do
+      :error ->
+        :ok
+
+      {:ok, session_id} ->
+        case AcpSession.validate_provider_session_id(session_id) do
+          {:ok, _session_id} -> :ok
+          {:error, _reason} = error -> error
+        end
+    end
+  end
+
+  defp provider_session_id_for_start(session_info, opts) do
+    case Keyword.fetch(opts, :session_id) do
+      {:ok, session_id} -> AcpSession.validate_provider_session_id(session_id)
+      :error -> AcpSession.provider_session_id(session_info)
+    end
+  end
 
   defp strip_caller_owner_opts(opts) when is_list(opts) do
     Enum.reject(opts, fn
@@ -672,15 +755,6 @@ defmodule Arbor.AI.AcpManaged do
       true -> :__missing__
     end
   end
-
-  defp extract_provider_session_id(info) when is_map(info) do
-    Map.get(info, "sessionId") ||
-      Map.get(info, :sessionId) ||
-      Map.get(info, "session_id") ||
-      Map.get(info, :session_id)
-  end
-
-  defp extract_provider_session_id(_), do: nil
 
   defp provider_to_string(nil), do: nil
   defp provider_to_string(p) when is_atom(p), do: Atom.to_string(p)

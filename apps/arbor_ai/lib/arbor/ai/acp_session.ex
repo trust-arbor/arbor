@@ -78,6 +78,8 @@ defmodule Arbor.AI.AcpSession do
   @max_task_control_reason_bytes 200
   @max_task_control_history 256
   @max_queued_task_controls 64
+  @max_provider_session_id_bytes 512
+  @provider_session_id_aliases ["sessionId", :sessionId, "session_id", :session_id]
   @callback_cleanup_timeout_ms 250
   @task_control_stream_id "agent:task_steering"
   @terminal_task_control_statuses [
@@ -238,6 +240,62 @@ defmodule Arbor.AI.AcpSession do
   @spec status(GenServer.server()) :: map()
   def status(session) do
     GenServer.call(session, :status)
+  end
+
+  @doc false
+  @spec provider_session_id(term()) :: {:ok, String.t()} | {:error, term()}
+  def provider_session_id(info) when is_map(info) do
+    case present_alias_values(info, @provider_session_id_aliases) do
+      [] ->
+        {:error, {:invalid_provider_session_id, :missing}}
+
+      values ->
+        with {:ok, ids} <- validate_provider_session_id_aliases(values),
+             :ok <- require_same_provider_session_id(ids) do
+          {:ok, hd(ids)}
+        end
+    end
+  end
+
+  def provider_session_id(_info), do: {:error, {:invalid_provider_session_id, :missing}}
+
+  @doc false
+  @spec validate_provider_session_id(term()) :: {:ok, String.t()} | {:error, term()}
+  def validate_provider_session_id(nil), do: {:error, {:invalid_provider_session_id, :missing}}
+
+  def validate_provider_session_id(id) when is_binary(id) do
+    cond do
+      byte_size(id) > @max_provider_session_id_bytes ->
+        {:error, {:invalid_provider_session_id, :too_long}}
+
+      not String.valid?(id) ->
+        {:error, {:invalid_provider_session_id, :invalid_utf8}}
+
+      String.trim(id) == "" ->
+        {:error, {:invalid_provider_session_id, :blank}}
+
+      String.contains?(id, <<0>>) ->
+        {:error, {:invalid_provider_session_id, :nul_byte}}
+
+      Enum.any?(String.to_charlist(id), &control_codepoint?/1) ->
+        {:error, {:invalid_provider_session_id, :control_character}}
+
+      true ->
+        {:ok, id}
+    end
+  end
+
+  def validate_provider_session_id(_id),
+    do: {:error, {:invalid_provider_session_id, :must_be_string}}
+
+  @doc false
+  @spec validate_resume_session_response(term(), term()) :: :ok | {:error, term()}
+  def validate_resume_session_response(info, requested_id) do
+    with {:ok, requested_id} <- validate_provider_session_id(requested_id),
+         :ok <- validate_acp_result(info, :session),
+         :ok <- validate_resume_identity_aliases(info, requested_id) do
+      :ok
+    end
   end
 
   @doc """
@@ -417,7 +475,10 @@ defmodule Arbor.AI.AcpSession do
 
   def handle_call({:resume_session, session_id, opts}, _from, state) do
     with :ok <- Arbor.AI.Timeout.ensure_active(opts) do
-      do_resume_session(session_id, opts, state)
+      case validate_provider_session_id(session_id) do
+        {:ok, session_id} -> do_resume_session(session_id, opts, state)
+        {:error, reason} -> {:reply, {:error, reason}, state}
+      end
     else
       {:error, :timeout} -> {:reply, {:error, :timeout}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -492,35 +553,14 @@ defmodule Arbor.AI.AcpSession do
       {:ok, session_info} ->
         case Arbor.AI.Timeout.ensure_active(opts) do
           :ok ->
-            session_id = Map.get(session_info, "sessionId") || Map.get(session_info, :session_id)
-
-            case select_and_confirm_model(state.client, session_id, state.model, opts) do
-              :ok ->
-                new_state = %{
-                  state
-                  | session_id: session_id,
-                    last_session_id: session_id,
-                    status: :ready
-                }
-
-                {:reply, {:ok, session_info}, new_state}
+            case provider_session_id(session_info) do
+              {:ok, session_id} ->
+                create_session_with_id(session_info, session_id, opts, state)
 
               {:error, reason} ->
-                reason = Arbor.LLM.sanitize_external_reason(reason)
-
-                Logger.warning(
-                  "AcpSession create_session model selection failed: " <>
-                    Arbor.LLM.inspect_external_reason(reason)
-                )
-
-                error_state = %{state | status: :error, session_id: nil, last_session_id: nil}
-
-                emit_signal(:acp_session_error, error_state, %{
-                  error: reason,
-                  phase: :model_selection
-                })
-
-                {:reply, {:error, {:model_selection_failed, reason}}, error_state}
+                new_state = %{state | status: :error, session_id: nil, last_session_id: nil}
+                emit_signal(:acp_session_error, new_state, %{error: reason, phase: :create})
+                {:reply, {:error, reason}, new_state}
             end
 
           {:error, reason} ->
@@ -541,6 +581,37 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
+  defp create_session_with_id(session_info, session_id, opts, state) do
+    case select_and_confirm_model(state.client, session_id, state.model, opts) do
+      :ok ->
+        new_state = %{
+          state
+          | session_id: session_id,
+            last_session_id: session_id,
+            status: :ready
+        }
+
+        {:reply, {:ok, session_info}, new_state}
+
+      {:error, reason} ->
+        reason = Arbor.LLM.sanitize_external_reason(reason)
+
+        Logger.warning(
+          "AcpSession create_session model selection failed: " <>
+            Arbor.LLM.inspect_external_reason(reason)
+        )
+
+        error_state = %{state | status: :error, session_id: nil, last_session_id: nil}
+
+        emit_signal(:acp_session_error, error_state, %{
+          error: reason,
+          phase: :model_selection
+        })
+
+        {:reply, {:error, {:model_selection_failed, reason}}, error_state}
+    end
+  end
+
   defp do_resume_session(session_id, opts, state) do
     cwd = resolve_cwd(opts, state.opts, state.workspace)
     opts = bind_mcp_servers(opts, state.mcp_servers)
@@ -557,7 +628,8 @@ defmodule Arbor.AI.AcpSession do
 
     case result do
       {:ok, session_info} ->
-        case {validate_acp_result(session_info, :session), Arbor.AI.Timeout.ensure_active(opts)} do
+        case {validate_resume_session_response(session_info, session_id),
+              Arbor.AI.Timeout.ensure_active(opts)} do
           {:ok, :ok} ->
             case select_and_confirm_model(state.client, session_id, state.model, opts) do
               :ok ->
@@ -589,10 +661,10 @@ defmodule Arbor.AI.AcpSession do
                 {:reply, {:error, {:model_selection_failed, reason}}, error_state}
             end
 
-          {_validation, {:error, reason}} ->
-            {:reply, {:error, reason}, state}
-
           {{:error, reason}, _deadline} ->
+            resume_identity_failure(reason, state)
+
+          {:ok, {:error, reason}} ->
             {:reply, {:error, reason}, state}
         end
 
@@ -1535,8 +1607,15 @@ defmodule Arbor.AI.AcpSession do
              cwd,
              lifecycle_opts
            ]) do
-        {:ok, _session_info} ->
-          {:ok, client}
+        {:ok, session_info} ->
+          case validate_resume_session_response(session_info, state.last_session_id) do
+            :ok ->
+              {:ok, client}
+
+            {:error, _reason} ->
+              terminate_client(client)
+              :error
+          end
 
         _error ->
           terminate_client(client)
@@ -2276,9 +2355,9 @@ defmodule Arbor.AI.AcpSession do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     case apply(acp_client_module(), :new_session, [client, cwd, opts]) do
       {:ok, session_info} ->
-        case validate_acp_result(session_info, :session) do
-          :ok -> {:ok, session_info}
-          {:error, reason} -> {:error, reason}
+        with {:ok, _session_id} <- provider_session_id(session_info),
+             :ok <- validate_acp_result(session_info, :session) do
+          {:ok, session_info}
         end
 
       {:error, reason} ->
@@ -3205,9 +3284,8 @@ defmodule Arbor.AI.AcpSession do
 
     case result do
       {:ok, info} ->
-        sid = Map.get(info, "sessionId") || Map.get(info, :session_id)
-
-        with :ok <- select_and_confirm_model(state.client, sid, state.model, opts) do
+        with {:ok, sid} <- provider_session_id(info),
+             :ok <- select_and_confirm_model(state.client, sid, state.model, opts) do
           {:ok, %{state | session_id: sid, last_session_id: sid}}
         end
 
@@ -3235,6 +3313,49 @@ defmodule Arbor.AI.AcpSession do
 
   defp validate_acp_result(_result, kind),
     do: {:error, {:invalid_acp_result, kind, :map_required}}
+
+  defp validate_provider_session_id_aliases(values) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, ids} ->
+      case validate_provider_session_id(value) do
+        {:ok, id} -> {:cont, {:ok, [id | ids]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp require_same_provider_session_id([_id]), do: :ok
+
+  defp require_same_provider_session_id(ids) do
+    if Enum.uniq(ids) |> length() == 1,
+      do: :ok,
+      else: {:error, :provider_session_id_mismatch}
+  end
+
+  defp validate_resume_identity_aliases(info, requested_id) do
+    case present_alias_values(info, @provider_session_id_aliases) do
+      [] ->
+        :ok
+
+      values ->
+        with {:ok, ids} <- validate_provider_session_id_aliases(values),
+             :ok <- require_same_provider_session_id(ids),
+             true <- Enum.all?(ids, &(&1 == requested_id)) do
+          :ok
+        else
+          false -> {:error, :provider_session_id_mismatch}
+          {:error, _reason} = error -> error
+        end
+    end
+  end
+
+  defp control_codepoint?(codepoint),
+    do: codepoint < 0x20 or codepoint == 0x7F or codepoint in 0x80..0x9F
+
+  defp resume_identity_failure(reason, state) do
+    error_state = %{state | status: :error, session_id: nil, last_session_id: nil}
+    emit_signal(:acp_session_error, error_state, %{error: reason, phase: :resume})
+    {:reply, {:error, reason}, error_state}
+  end
 
   defp validate_acp_text(result) do
     validate_alias_values(

@@ -83,8 +83,10 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
          test_pid: test_pid,
          agent_id: agent_id,
          create_mode: Keyword.get(opts, :create_mode, :ok),
+         create_session_result: Keyword.get(opts, :create_session_result, :default),
          create_delay_ms: Keyword.get(opts, :create_delay_ms, 0),
          resume_mode: Keyword.get(opts, :resume_mode, :ok),
+         resume_session_result: Keyword.get(opts, :resume_session_result, :default),
          status_mode: Keyword.get(opts, :status_mode, :ok),
          close_mode: Keyword.get(opts, :close_mode, :ok),
          # Backward-compatible flag used by older tests
@@ -117,7 +119,14 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
         :ok ->
           sid = "prov_" <> Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
           state = %{state | session_id: sid, status: :ready}
-          {:reply, {:ok, %{"sessionId" => sid}}, state}
+
+          result =
+            case state.create_session_result do
+              :default -> %{"sessionId" => sid}
+              custom -> custom
+            end
+
+          {:reply, {:ok, result}, state}
 
         :error ->
           {:reply, {:error, :create_failed}, %{state | status: :error}}
@@ -137,7 +146,14 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
       case state.resume_mode do
         :ok ->
           state = %{state | session_id: session_id, status: :ready}
-          {:reply, {:ok, %{"sessionId" => session_id}}, state}
+
+          result =
+            case state.resume_session_result do
+              :default -> %{"sessionId" => session_id}
+              custom -> custom
+            end
+
+          {:reply, {:ok, result}, state}
 
         :error ->
           {:reply, {:error, :resume_failed}, %{state | status: :error}}
@@ -926,6 +942,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
                )
 
       assert meta.pooled == true
+      assert meta.session_id == nil
       assert_receive {:fake_init, session_pid, ^agent_id, init_opts}, 1_000
       assert Keyword.get(init_opts, :agent_id) == agent_id
 
@@ -963,6 +980,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
                )
 
       assert meta.pooled == true
+      assert meta.session_id == "provider_resume_should_not_reach_pool"
 
       assert_receive {:pool_checkout_opts, :test, checkout_opts, _caller}, 1_000
       # Task scope must reach the pool for SessionProfile matching
@@ -1256,6 +1274,34 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
       assert_supervisor_empty(ctx.supervisor)
     end
 
+    test "security regression: nonpooled start rejects missing provider identity", ctx do
+      for response <- [
+            %{},
+            nil,
+            %{"sessionId" => nil},
+            %{"sessionId" => "   "},
+            %{"sessionId" => :not_binary},
+            %{"sessionId" => <<"bad", 0xFF>>},
+            %{"sessionId" => "id" <> <<0>>},
+            %{"sessionId" => "id\t"},
+            %{"sessionId" => String.duplicate("x", 513)}
+          ] do
+        assert {:error, {:invalid_provider_session_id, _reason}} =
+                 start_managed([create_session_result: response], ctx)
+
+        assert_supervisor_empty(ctx.supervisor)
+      end
+
+      assert {:ok, meta} =
+               start_managed(
+                 [create_session_result: %{"sessionId" => "  valid-id  "}],
+                 ctx
+               )
+
+      assert meta.session_id == "  valid-id  "
+      assert meta.status == "ready"
+    end
+
     test "create raise cleans temporary child and returns error", ctx do
       # GenServer.call converts handle_call raises into caller exits.
       assert {:error, {:managed_start_exit, _}} =
@@ -1287,7 +1333,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
   end
 
   describe "pooled init failure cleanup" do
-    test "pooled resume failure does not register and checks in the checkout", ctx do
+    test "pooled resume failure does not register and hard-closes the checkout", ctx do
       start_fake_pool(session_opts: [resume_mode: :error])
 
       assert {:error, :resume_failed} =
@@ -1302,7 +1348,8 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
                )
 
       assert_receive {:pool_checkout, session_pid, _}, 1_000
-      assert_receive {:pool_checkin, ^session_pid}, 1_000
+      assert_receive {:pool_close_session, ^session_pid}, 1_000
+      refute_receive {:pool_checkin, ^session_pid}, 100
 
       assert FakePool.status().checked_out == 0
       assert FakePool.status().total == 0
@@ -1311,7 +1358,111 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
                SessionRegistry.resolve("acp_worker_missing", server: ctx.registry)
     end
 
-    test "pooled explicit create failure does not register and checks in", ctx do
+    test "security regression: explicit pooled resume malformed identity is hard-evicted", ctx do
+      start_fake_pool(session_opts: [resume_session_result: %{"sessionId" => "  "}])
+
+      assert {:error, {:invalid_provider_session_id, :blank}} =
+               start_managed(
+                 [
+                   use_pool: true,
+                   pool_module: FakePool,
+                   return_to_pool: true,
+                   session_id: "resume_missing"
+                 ],
+                 ctx
+               )
+
+      assert_receive {:pool_checkout, session_pid, _}, 1_000
+      assert_receive {:pool_close_session, ^session_pid}, 1_000
+      refute_receive {:pool_checkin, ^session_pid}, 100
+
+      assert_eventually(fn ->
+        assert FakePool.status().checked_out == 0
+        assert FakePool.status().total == 0
+        refute Process.alive?(session_pid)
+      end)
+    end
+
+    test "security regression: explicit pooled create missing identity is hard-evicted", ctx do
+      start_fake_pool(
+        session_opts: [
+          skip_pool_precreate: true,
+          create_session_result: %{}
+        ]
+      )
+
+      assert {:error, {:invalid_provider_session_id, :missing}} =
+               start_managed(
+                 [
+                   use_pool: true,
+                   pool_module: FakePool,
+                   return_to_pool: true,
+                   create_session: true
+                 ],
+                 ctx
+               )
+
+      assert_receive {:pool_checkout, session_pid, _}, 1_000
+      assert_receive {:pool_close_session, ^session_pid}, 1_000
+      refute_receive {:pool_checkin, ^session_pid}, 100
+
+      assert_eventually(fn ->
+        assert FakePool.status().checked_out == 0
+        assert FakePool.status().total == 0
+        refute Process.alive?(session_pid)
+      end)
+    end
+
+    test "security regression: generic managed resume rejects a mismatched response ID", ctx do
+      start_fake_pool(session_opts: [resume_session_result: %{"sessionId" => "other-id"}])
+
+      assert {:error, :provider_session_id_mismatch} =
+               start_managed(
+                 [
+                   use_pool: true,
+                   pool_module: FakePool,
+                   session_id: "requested-id"
+                 ],
+                 ctx
+               )
+
+      assert_receive {:pool_checkout, session_pid, _}, 1_000
+      assert_receive {:pool_close_session, ^session_pid}, 1_000
+      refute_receive {:pool_checkin, ^session_pid}, 100
+    end
+
+    test "security regression: generic managed resume uses requested ID for an empty response",
+         ctx do
+      start_fake_pool(session_opts: [resume_session_result: %{}])
+
+      assert {:ok, meta} =
+               start_managed(
+                 [
+                   use_pool: true,
+                   pool_module: FakePool,
+                   session_id: "requested-id"
+                 ],
+                 ctx
+               )
+
+      assert meta.session_id == "requested-id"
+
+      assert {:ok, _closed} =
+               AI.acp_managed_close_session(meta.worker_session_id, server: ctx.registry)
+    end
+
+    test "security regression: malformed managed resume request fails before pool checkout",
+         ctx do
+      start_fake_pool()
+
+      assert {:error, {:invalid_provider_session_id, :blank}} =
+               start_managed([use_pool: true, pool_module: FakePool, session_id: "  "], ctx)
+
+      refute_receive {:pool_checkout, _session_pid, _caller}, 100
+      assert FakePool.status().total == 0
+    end
+
+    test "pooled explicit create failure does not register and hard-closes", ctx do
       # Skip pool precreate so the explicit create_session is the one that fails.
       start_fake_pool(
         session_opts: [create_mode: :error, skip_pool_precreate: true, fail_create: true]
@@ -1331,7 +1482,8 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
                )
 
       assert_receive {:pool_checkout, session_pid, _}, 1_000
-      assert_receive {:pool_checkin, ^session_pid}, 1_000
+      assert_receive {:pool_close_session, ^session_pid}, 1_000
+      refute_receive {:pool_checkin, ^session_pid}, 100
 
       assert FakePool.status().checked_out == 0
       assert FakePool.status().total == 0
@@ -1353,13 +1505,13 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
 
       assert_receive {:pool_checkout, session_pid, _}, 1_000
 
-      # Cleanup checkin runs after the raise; session death may also fire.
+      # Hard cleanup runs after the raise; session death may also fire.
       receive do
-        {:pool_checkin, ^session_pid} -> :ok
+        {:pool_close_session, ^session_pid} -> :ok
         {:pool_session_died, ^session_pid, _} -> :ok
       after
         1_000 ->
-          flunk("expected pool checkin or session-death cleanup for #{inspect(session_pid)}")
+          flunk("expected pool close or session-death cleanup for #{inspect(session_pid)}")
       end
 
       assert_eventually(fn ->

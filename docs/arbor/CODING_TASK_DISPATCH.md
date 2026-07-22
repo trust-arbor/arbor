@@ -304,12 +304,28 @@ longer usable after the workflow closes it. To resume later, copy
 authorization again. Provider-session continuity does not currently reuse the
 retained Git worktree automatically.
 
+A nonpooled start, explicit resume, or fresh-recovery start must return a
+bounded, nonblank provider session ID. The only valid empty provider ID is the
+intentional pre-session handle returned by a new pooled worker before its first
+prompt lazily creates the provider session.
+
 For a canonical `validation_failed` result, the public `error` field may contain
 the exact bounded binary failure reason emitted by the `validate` Engine node.
 The Engine projection is capped at 32 failed nodes, 256-byte node ids, and
 512-byte UTF-8 reasons; the coding facade consumes only the exact `validate`
 entry and revalidates that bound. Raw action output, arbitrary outcome terms,
 and unrelated node failures are not copied into the task result.
+
+`validation_capacity_exceeded` is a distinct infrastructure handoff, not a
+worker validation failure. It means the complete exact-file batch plan cannot
+fit the reviewed aggregate validation budget, either before the first child or
+after completed children consume the remaining budget. The workflow bypasses
+validation and total rework counters, closes the worker, and retains the
+workspace. `validation[0].test.capacity_handoff` is a closed, bounded descriptor
+whose ordered batch labels and SHA-256 digests bind the exact unstarted
+inventory without copying raw paths into the terminal artifact; an authorized
+operator or CI job can reconstruct those paths from the retained workspace and
+verify the digest chain.
 
 ## Default execution path
 

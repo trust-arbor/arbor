@@ -107,3 +107,16 @@ perspective calls through `Arbor.Consensus.LLMBridge`).
 <!-- applied-learning: streamed-function-call-arguments-are-not-terminal-json-until-the-protocol-says-the-item-is-done -->
 <a id="applied-learning-streamed-function-call-arguments-are-not-terminal-json-until-the-protocol-says-the-item-is-done"></a>
 **Streamed function-call arguments are not terminal JSON until the protocol says the item is done.** xAI Responses emits valid `response.output_item.added` events whose in-progress function call has `arguments: ""`. Apply bounded JSON decoding to the event envelope, but validate and charge embedded tool-argument JSON only on the terminal `response.output_item.done` item. A generic recursive detector for every map containing `name` and `arguments` will reject legitimate intermediate events as malformed (found 2026-07-20 reproducing the xAI council reviewer failure against the raw SSE stream).
+
+<!-- applied-learning: a-local-acp-worker-handle-is-not-provider-continuity-identity -->
+<a id="applied-learning-a-local-acp-worker-handle-is-not-provider-continuity-identity"></a>
+**A local ACP worker handle is not provider continuity identity.** A provider process and
+Arbor-managed worker can both exist even when `session/new` returned no usable
+`sessionId`; accepting that state defers the real protocol error until resume/recovery and
+makes pool configuration look responsible. Preserve an intentional pooled pre-session
+handle, but after actual creation require a bounded, nonblank provider session ID before
+registering or publishing the worker as ready. For resume, the validated requested ID is
+the continuity authority because a valid load response may omit it; any response alias that
+is present must match exactly. Provider IDs are opaque: validate their bounds and shape but
+never trim or otherwise rewrite their bytes (found 2026-07-21 after two Grok 4.5 coding
+tasks failed with `worker_provider_session_id_missing`).

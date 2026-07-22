@@ -820,6 +820,10 @@ defmodule Arbor.AI do
     AcpSession.create_session(session, opts)
   end
 
+  @doc false
+  @spec acp_provider_session_id(term()) :: {:ok, String.t()} | {:error, term()}
+  def acp_provider_session_id(info), do: AcpSession.provider_session_id(info)
+
   @doc """
   Send a message/prompt to an ACP session.
 

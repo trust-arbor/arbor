@@ -487,26 +487,46 @@ defmodule Arbor.Actions.Acp do
     defp public_start_result(meta, params, provider, continuity) when is_map(meta) do
       worker_session_id = map_get(meta, :worker_session_id) || map_get(meta, "worker_session_id")
 
+      pooled? =
+        truthy?(map_get(meta, :pooled) || map_get(meta, "pooled")) || params[:use_pool] == true
+
+      allow_missing_provider_id? =
+        pooled? and params[:use_pool] == true and continuity == "new" and
+          non_empty_string(params[:session_id]) == nil
+
       if is_binary(worker_session_id) and worker_session_id != "" do
-        {:ok,
-         %{
-           worker_session_id: worker_session_id,
-           session_id: map_get(meta, :session_id) || map_get(meta, "session_id") || "",
-           provider: to_string(map_get(meta, :provider) || map_get(meta, "provider") || provider),
-           model:
-             to_string(
-               map_get(meta, :model) || map_get(meta, "model") || params[:model] || "default"
-             ),
-           status: to_string(map_get(meta, :status) || map_get(meta, "status") || "ready"),
-           pooled:
-             truthy?(map_get(meta, :pooled) || map_get(meta, "pooled")) ||
-               params[:use_pool] == true,
-           continuity: continuity
-         }}
+        with {:ok, session_id} <-
+               public_provider_session_id(meta, allow_missing_provider_id?) do
+          {:ok,
+           %{
+             worker_session_id: worker_session_id,
+             session_id: session_id,
+             provider:
+               to_string(map_get(meta, :provider) || map_get(meta, "provider") || provider),
+             model:
+               to_string(
+                 map_get(meta, :model) || map_get(meta, "model") || params[:model] || "default"
+               ),
+             status: to_string(map_get(meta, :status) || map_get(meta, "status") || "ready"),
+             pooled: pooled?,
+             continuity: continuity
+           }}
+        end
       else
         {:error, :invalid_worker_session_handle}
       end
     end
+
+    defp public_provider_session_id(meta, true) do
+      case Arbor.AI.acp_provider_session_id(meta) do
+        {:ok, session_id} -> {:ok, session_id}
+        {:error, {:invalid_provider_session_id, :missing}} -> {:ok, ""}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    defp public_provider_session_id(meta, false),
+      do: Arbor.AI.acp_provider_session_id(meta)
 
     defp normalize_provider(provider) when is_binary(provider) do
       case SafeAtom.to_allowed(provider, Acp.allowed_providers()) do
