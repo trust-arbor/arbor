@@ -2856,6 +2856,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert detail["failure_reason"] == provider_failure
     end
 
+    test "pipeline_error maps every reviewed DOT error code" do
+      for code <- [
+            "committed_change_materialization_failed",
+            "council_review_failed",
+            "review_tier_invalid_or_missing",
+            "draft_pr_failed"
+          ] do
+        assert {:error, {:pipeline_error, detail}} =
+                 run_with_context(%{"status" => "pipeline_error", "error" => code})
+
+        assert detail["error"] == code
+        assert detail["outcome"]["code"] == code
+      end
+    end
+
     test "pipeline_error projects the stable worker provider account exhaustion reason" do
       stable_reason = "worker provider account exhausted"
 

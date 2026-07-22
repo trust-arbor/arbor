@@ -298,7 +298,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
           "requires_input",
           "validation",
           "validator",
-          "same_session"
+          "after_external_change"
         )
       )
       |> Map.put("validation", capacity_validation())
@@ -321,7 +321,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
           "requires_input",
           "validation",
           "validator",
-          "same_session"
+          "after_external_change"
         )
       )
       |> Map.put("validation", capacity_validation(343))
@@ -349,7 +349,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
           "requires_input",
           "validation",
           "validator",
-          "same_session"
+          "after_external_change"
         )
       )
       |> Map.put("validation", [%{"reason" => "validation_capacity_exceeded"}])

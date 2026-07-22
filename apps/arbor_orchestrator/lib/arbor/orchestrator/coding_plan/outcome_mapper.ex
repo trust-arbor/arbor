@@ -56,13 +56,13 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
       disposition: "failed",
       phase: "adoption",
       origin: "arbor",
-      retry: "new_session"
+      retry: "after_external_change"
     },
     "review_failed" => %{
       disposition: "failed",
       phase: "review",
       origin: "reviewer",
-      retry: "new_session"
+      retry: "after_external_change"
     },
     "review_rejected" => %{
       disposition: "rejected",
@@ -86,7 +86,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
       disposition: "requires_input",
       phase: "validation",
       origin: "validator",
-      retry: "same_session"
+      retry: "after_external_change"
     },
     "validation_failed" => %{
       disposition: "failed",
@@ -98,6 +98,10 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
 
   @pipeline_error_codes ~w(
     pipeline_error
+    committed_change_materialization_failed
+    council_review_failed
+    draft_pr_failed
+    review_tier_invalid_or_missing
     worker_provider_account_exhausted
     worker_provider_session_id_missing
     worker_recovery_continuity_invalid
@@ -117,6 +121,30 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
       phase: "control",
       origin: "runtime",
       retry: "new_session"
+    },
+    "committed_change_materialization_failed" => %{
+      disposition: "failed",
+      phase: "review",
+      origin: "arbor",
+      retry: "after_external_change"
+    },
+    "council_review_failed" => %{
+      disposition: "failed",
+      phase: "review",
+      origin: "reviewer",
+      retry: "after_external_change"
+    },
+    "draft_pr_failed" => %{
+      disposition: "failed",
+      phase: "adoption",
+      origin: "arbor",
+      retry: "after_external_change"
+    },
+    "review_tier_invalid_or_missing" => %{
+      disposition: "failed",
+      phase: "review",
+      origin: "reviewer",
+      retry: "after_external_change"
     },
     "worker_provider_account_exhausted" => %{
       disposition: "failed",
