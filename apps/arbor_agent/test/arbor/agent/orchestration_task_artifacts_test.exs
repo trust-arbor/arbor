@@ -4,6 +4,24 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
   @moduletag :fast
 
   alias Arbor.Agent.Orchestration.TaskArtifacts
+  alias Arbor.Contracts.Coding.TaskOutcomeRegistry
+
+  test "recognizes exactly the closed coding result status set" do
+    for status <- TaskOutcomeRegistry.coding_result_statuses() do
+      result =
+        TaskArtifacts.normalize(%{
+          "status" => status,
+          "branch" => "agent/change",
+          "worktree_path" => "/tmp/ws"
+        })
+
+      assert result.result_type == :coding_change
+      assert result.payload.report.status == status
+    end
+
+    unknown = TaskArtifacts.normalize(%{"status" => "unknown_status", "branch" => "agent/change"})
+    assert unknown.result_type == :value
+  end
 
   test "normalizes change_committed coding results" do
     raw = %{

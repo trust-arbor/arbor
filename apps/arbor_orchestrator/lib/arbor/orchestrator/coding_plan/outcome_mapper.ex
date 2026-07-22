@@ -2,262 +2,34 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
   @moduledoc """
   Pure, closed mapping from coding pipeline evidence to `TaskOutcome` maps.
 
-  This is the owner of the compatibility terminal vocabulary. It accepts only
-  structured evidence and never uses response or failure prose to classify an
-  outcome.
+  It consumes the contract-owned compatibility vocabulary and accepts only
+  structured evidence; response or failure prose never classifies an outcome.
   """
 
-  alias Arbor.Contracts.Coding.TaskOutcome
-
-  @terminal_statuses ~w(
-    approval_denied
-    change_committed
-    declined
-    human_review_required
-    no_changes
-    pr_created
-    pr_failed
-    review_failed
-    review_rejected
-    review_requires_rework
-    rework_exhausted
-    validation_capacity_exceeded
-    validation_failed
-  )
-
-  @terminal_registry %{
-    "approval_denied" => %{
-      disposition: "rejected",
-      phase: "commit",
-      origin: "operator",
-      retry: "none"
-    },
-    "change_committed" => %{
-      disposition: "succeeded",
-      phase: "commit",
-      origin: "arbor",
-      retry: "none"
-    },
-    "declined" => %{disposition: "rejected", phase: "control", origin: "operator", retry: "none"},
-    "human_review_required" => %{
-      disposition: "requires_input",
-      phase: "review",
-      origin: "reviewer",
-      retry: "none"
-    },
-    "no_changes" => %{
-      disposition: "succeeded",
-      phase: "worker_turn",
-      origin: "worker",
-      retry: "none"
-    },
-    "pr_created" => %{disposition: "succeeded", phase: "adoption", origin: "arbor", retry: "none"},
-    "pr_failed" => %{
-      disposition: "failed",
-      phase: "adoption",
-      origin: "arbor",
-      retry: "after_external_change"
-    },
-    "review_failed" => %{
-      disposition: "failed",
-      phase: "review",
-      origin: "reviewer",
-      retry: "after_external_change"
-    },
-    "review_rejected" => %{
-      disposition: "rejected",
-      phase: "review",
-      origin: "reviewer",
-      retry: "none"
-    },
-    "review_requires_rework" => %{
-      disposition: "requires_input",
-      phase: "review",
-      origin: "reviewer",
-      retry: "same_session"
-    },
-    "rework_exhausted" => %{
-      disposition: "failed",
-      phase: "review",
-      origin: "runtime",
-      retry: "new_session"
-    },
-    "validation_capacity_exceeded" => %{
-      disposition: "requires_input",
-      phase: "validation",
-      origin: "validator",
-      retry: "after_external_change"
-    },
-    "validation_failed" => %{
-      disposition: "failed",
-      phase: "validation",
-      origin: "validator",
-      retry: "same_session"
-    }
-  }
-
-  @pipeline_error_codes ~w(
-    pipeline_error
-    committed_change_materialization_failed
-    council_review_failed
-    draft_pr_failed
-    review_tier_invalid_or_missing
-    worker_provider_account_exhausted
-    worker_provider_session_id_missing
-    worker_recovery_continuity_invalid
-    worker_recovery_reopen_failed
-    worker_recovery_send_failed
-    worker_recovery_summary_failed
-    worker_send_recovery_exhausted
-    worker_stale_close_failed
-    worker_stop_reason_not_end_turn
-    worker_turn_no_progress
-    workspace_missing
-  )
-
-  @pipeline_registry %{
-    "pipeline_error" => %{
-      disposition: "failed",
-      phase: "control",
-      origin: "runtime",
-      retry: "new_session"
-    },
-    "committed_change_materialization_failed" => %{
-      disposition: "failed",
-      phase: "review",
-      origin: "arbor",
-      retry: "after_external_change"
-    },
-    "council_review_failed" => %{
-      disposition: "failed",
-      phase: "review",
-      origin: "reviewer",
-      retry: "after_external_change"
-    },
-    "draft_pr_failed" => %{
-      disposition: "failed",
-      phase: "adoption",
-      origin: "arbor",
-      retry: "after_external_change"
-    },
-    "review_tier_invalid_or_missing" => %{
-      disposition: "failed",
-      phase: "review",
-      origin: "reviewer",
-      retry: "after_external_change"
-    },
-    "worker_provider_account_exhausted" => %{
-      disposition: "failed",
-      phase: "worker_turn",
-      origin: "provider",
-      retry: "new_session"
-    },
-    "worker_provider_session_id_missing" => %{
-      disposition: "failed",
-      phase: "worker_start",
-      origin: "acp_transport",
-      retry: "new_session"
-    },
-    "worker_recovery_continuity_invalid" => %{
-      disposition: "failed",
-      phase: "worker_turn",
-      origin: "runtime",
-      retry: "new_session"
-    },
-    "worker_recovery_reopen_failed" => %{
-      disposition: "failed",
-      phase: "worker_start",
-      origin: "acp_transport",
-      retry: "new_session"
-    },
-    "worker_recovery_send_failed" => %{
-      disposition: "failed",
-      phase: "worker_turn",
-      origin: "acp_transport",
-      retry: "new_session"
-    },
-    "worker_recovery_summary_failed" => %{
-      disposition: "failed",
-      phase: "worker_turn",
-      origin: "worker",
-      retry: "new_session"
-    },
-    "worker_send_recovery_exhausted" => %{
-      disposition: "failed",
-      phase: "worker_turn",
-      origin: "runtime",
-      retry: "new_session"
-    },
-    "worker_stale_close_failed" => %{
-      disposition: "failed",
-      phase: "cleanup",
-      origin: "acp_transport",
-      retry: "new_session"
-    },
-    "worker_stop_reason_not_end_turn" => %{
-      disposition: "failed",
-      phase: "worker_turn",
-      origin: "acp_transport",
-      retry: "new_session"
-    },
-    "worker_turn_no_progress" => %{
-      disposition: "failed",
-      phase: "worker_turn",
-      origin: "worker",
-      retry: "same_session"
-    },
-    "workspace_missing" => %{
-      disposition: "failed",
-      phase: "workspace",
-      origin: "arbor",
-      retry: "after_external_change"
-    }
-  }
-
-  @special_registry %{
-    "invalid_terminal_evidence" => %{
-      disposition: "failed",
-      phase: "control",
-      origin: "runtime",
-      retry: "none"
-    },
-    "worker_model_mismatch" => %{
-      disposition: "failed",
-      phase: "worker_start",
-      origin: "provider",
-      retry: "new_session"
-    }
-  }
-
-  @registered_codes Map.keys(
-                      Map.merge(
-                        Map.merge(@terminal_registry, @pipeline_registry),
-                        @special_registry
-                      )
-                    )
+  alias Arbor.Contracts.Coding.{TaskOutcome, TaskOutcomeRegistry}
 
   @doc "Return the compatibility terminal statuses in registry order."
   @spec terminal_statuses() :: [String.t()]
-  def terminal_statuses, do: @terminal_statuses
+  def terminal_statuses, do: TaskOutcomeRegistry.terminal_statuses()
 
   @doc "Return all stable pipeline-error codes emitted by the coding graph."
   @spec pipeline_error_codes() :: [String.t()]
-  def pipeline_error_codes, do: @pipeline_error_codes
+  def pipeline_error_codes, do: TaskOutcomeRegistry.pipeline_error_codes()
 
   @doc "Return the closed stable code registry."
   @spec registered_codes() :: [String.t()]
-  def registered_codes, do: Enum.sort(@registered_codes)
+  def registered_codes, do: TaskOutcomeRegistry.registered_codes()
 
   @spec terminal_status?(term()) :: boolean()
-  def terminal_status?(status), do: is_binary(status) and status in @terminal_statuses
+  def terminal_status?(status), do: TaskOutcomeRegistry.terminal_status?(status)
 
   @spec pipeline_error_code?(term()) :: boolean()
-  def pipeline_error_code?(code), do: is_binary(code) and code in @pipeline_error_codes
+  def pipeline_error_code?(code), do: TaskOutcomeRegistry.pipeline_error_code?(code)
 
   @doc "Map a compatibility terminal using trusted structured ACP evidence."
   @spec map_terminal(term(), map(), keyword() | map()) :: {:ok, map()} | {:error, term()}
   def map_terminal(status, evidence, opts \\ []) do
-    with {:ok, spec} <- fetch_spec(@terminal_registry, status),
+    with {:ok, spec} <- TaskOutcomeRegistry.terminal_spec(status),
          {:ok, facts} <- trusted_facts(evidence, opts) do
       case reject_provider_exhaustion(facts) do
         {:error, :provider_account_exhausted} ->
@@ -284,8 +56,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
     code = structured_error_code(error_code, evidence)
 
     with {:ok, facts} <- trusted_facts(evidence, opts),
-         {:ok, spec} <- Map.fetch(@pipeline_registry, code) do
-      outcome(Map.put(spec, :code, code), facts)
+         {:ok, spec} <- TaskOutcomeRegistry.pipeline_error_spec(code) do
+      outcome(spec, facts)
     else
       _ -> {:ok, invalid_terminal_evidence(evidence, opts)}
     end
@@ -296,7 +68,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
   def normalize(outcome) when is_map(outcome) and not is_struct(outcome) do
     with true <- Enum.all?(Map.keys(outcome), &is_binary/1),
          {:ok, typed} <- TaskOutcome.new(outcome),
-         true <- typed.code in @registered_codes,
+         true <- TaskOutcomeRegistry.registered_code?(typed.code),
          canonical = TaskOutcome.to_map(typed),
          true <- canonical == outcome do
       {:ok, canonical}
@@ -327,18 +99,10 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
   def invalid_terminal_evidence(evidence, opts \\ []) do
     facts = trusted_facts_or_empty(evidence, opts)
 
-    {:ok, mapped} = outcome(Map.fetch!(@special_registry, "invalid_terminal_evidence"), facts)
+    {:ok, spec} = TaskOutcomeRegistry.spec("invalid_terminal_evidence")
+    {:ok, mapped} = outcome(spec, facts)
     mapped
   end
-
-  defp fetch_spec(registry, status) when is_binary(status) do
-    case Map.fetch(registry, status) do
-      {:ok, spec} -> {:ok, Map.put(spec, :code, status)}
-      :error -> {:error, :unknown_terminal}
-    end
-  end
-
-  defp fetch_spec(_registry, _status), do: {:error, :unknown_terminal}
 
   defp outcome(spec, facts) do
     attrs = %{
@@ -360,15 +124,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
   end
 
   defp invalid_typed_outcome do
-    {:ok, typed} =
-      TaskOutcome.new(%{
-        version: TaskOutcome.schema_version(),
-        disposition: "failed",
-        code: "invalid_terminal_evidence",
-        phase: "control",
-        origin: "runtime",
-        retry: "none"
-      })
+    {:ok, spec} = TaskOutcomeRegistry.spec("invalid_terminal_evidence")
+    {:ok, typed} = TaskOutcome.new(Map.put(spec, :version, TaskOutcome.schema_version()))
 
     typed
   end
@@ -376,8 +133,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
   defp maybe_model_mismatch(spec, facts) do
     if is_binary(facts[:requested_model]) and is_binary(facts[:confirmed_model]) and
          facts.requested_model != facts.confirmed_model do
-      Map.fetch!(@special_registry, "worker_model_mismatch")
-      |> Map.put(:code, "worker_model_mismatch")
+      {:ok, mismatch} = TaskOutcomeRegistry.spec("worker_model_mismatch")
+      mismatch
     else
       spec
     end
@@ -483,7 +240,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
   defp option_get(_opts, _key), do: nil
 
   defp structured_error_code(error_code, evidence) when is_binary(error_code) do
-    if error_code in @pipeline_error_codes,
+    if TaskOutcomeRegistry.pipeline_error_code?(error_code),
       do: error_code,
       else: structured_error_code(nil, evidence)
   end
@@ -543,7 +300,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
   end
 
   defp compatible_fields(%{"code" => code} = outcome, status) when code == status do
-    spec = Map.fetch!(@terminal_registry, status)
+    {:ok, spec} = TaskOutcomeRegistry.terminal_spec(status)
 
     if outcome["disposition"] == spec.disposition and outcome["phase"] == spec.phase and
          outcome["origin"] == spec.origin and outcome["retry"] == spec.retry,

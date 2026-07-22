@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.CodingPlan.TranscriptStore do
   @moduledoc false
 
   alias Arbor.Common.SafePath
-  alias Arbor.Contracts.Coding.TranscriptDescriptor
+  alias Arbor.Contracts.Coding.{TaskOutcomeRegistry, TranscriptDescriptor}
 
   @filename "acp-transcript.json"
   @schema_version 1
@@ -46,17 +46,6 @@ defmodule Arbor.Orchestrator.CodingPlan.TranscriptStore do
   @field_keys MapSet.new(~w(text original_bytes truncated sha256))
   @event_keys MapSet.new(~w(source_seq kind content tool_name tool_call_id))
   @prompt_kinds MapSet.new(["initial", "task_control"])
-  @terminal_statuses MapSet.new([
-                       "success",
-                       "provider_error",
-                       "timeout",
-                       "inactivity_timeout",
-                       "stream_callback_failure",
-                       "stream_callback_timeout",
-                       "prompt_exit",
-                       "client_down",
-                       "cancelled"
-                     ])
   @event_kinds MapSet.new([
                  "agent_message_chunk",
                  "agent_thought_chunk",
@@ -285,7 +274,7 @@ defmodule Arbor.Orchestrator.CodingPlan.TranscriptStore do
              MapSet.new(~w(status response error stop_reason)) or
              {:error, :invalid_terminal_shape},
          true <-
-           MapSet.member?(@terminal_statuses, terminal["status"]) or
+           TaskOutcomeRegistry.transcript_terminal_status?(terminal["status"]) or
              {:error, :invalid_terminal_status},
          :ok <- validate_field(terminal["response"], @max_response_bytes),
          :ok <- validate_field(terminal["error"], @max_error_bytes),

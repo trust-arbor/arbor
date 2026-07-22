@@ -8,23 +8,6 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   generic fallback for ordinary chat/value tasks.
   """
 
-  @coding_statuses MapSet.new(~w(
-    approval_denied
-    change_committed
-    declined
-    human_review_required
-    no_changes
-    pipeline_error
-    pr_created
-    pr_failed
-    review_failed
-    review_rejected
-    review_requires_rework
-    rework_exhausted
-    validation_capacity_exceeded
-    validation_failed
-  ))
-
   @coding_tool_names MapSet.new(~w(
     coding_produce_reviewable_change
     coding.produce_reviewable_change
@@ -75,6 +58,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     BranchLifecycleDescriptor,
     TaskEvidenceDescriptor,
     TaskOutcome,
+    TaskOutcomeRegistry,
     TranscriptDescriptor,
     WorkspaceReleaseDescriptor
   }
@@ -293,7 +277,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     artifacts = value(map, :artifacts)
 
     is_binary(status) and
-      MapSet.member?(@coding_statuses, status) and
+      TaskOutcomeRegistry.coding_result_status?(status) and
       (Enum.any?(
          [:branch, :commit, :worktree_path, :validation, :review],
          &present?(value(map, &1))

@@ -4,6 +4,7 @@ defmodule Arbor.Orchestrator.CodingPlan.TranscriptStoreTest do
   import Bitwise
 
   alias Arbor.AI.AcpTranscript
+  alias Arbor.Contracts.Coding.TaskOutcomeRegistry
   alias Arbor.Orchestrator.CodingPlan.ArtifactStore
 
   @moduletag :fast
@@ -199,6 +200,17 @@ defmodule Arbor.Orchestrator.CodingPlan.TranscriptStoreTest do
       |> Map.put("stream_tail", %{})
 
     refute ArtifactStore.valid_transcript_descriptor?(bad_descriptor)
+  end
+
+  test "terminal validation follows the closed registry and rejects coding statuses", %{
+    root: root
+  } do
+    assert TaskOutcomeRegistry.transcript_terminal_status?("success")
+
+    invalid = put_in(turn(0, "p", "r"), ["terminal", "status"], "change_committed")
+
+    assert {:error, :invalid_terminal_status} =
+             ArtifactStore.append_transcript_turn(root, @task_id, invalid)
   end
 
   test "hostile integer metadata is rejected before JSON publication", %{root: root} do
