@@ -31,6 +31,9 @@ defmodule Arbor.LLM.Plugs.Fixture do
   text, thinking text, tool calls, finish reason, and bounded usage cross the
   boundary; transport context, provider metadata, raw/error fields, headers,
   signatures, encrypted reasoning details, and other provider internals do not.
+  New v2 writes require canonical atom-keyed live usage; string-keyed usage is
+  rejected because replay reconstructs the adapter-visible usage map with atom
+  keys.
   Loaded complete fixtures reconstruct a minimal `%ReqLLM.Response{}` so the
   adapter's existing translation path remains the single response boundary.
 
@@ -728,33 +731,29 @@ defmodule Arbor.LLM.Plugs.Fixture do
   defp serialize_usage(nil), do: {:ok, %{}}
 
   defp serialize_usage(usage) when is_map(usage) do
-    Enum.reduce_while(@usage_fields, {:ok, %{}}, fn {wire_key, atom_key}, {:ok, acc} ->
-      case fetch_known_key(usage, wire_key, atom_key) do
-        :missing ->
-          {:cont, {:ok, acc}}
+    if Enum.all?(Map.keys(usage), &is_atom/1) do
+      Enum.reduce_while(@usage_fields, {:ok, %{}}, fn {wire_key, atom_key}, {:ok, acc} ->
+        case Map.fetch(usage, atom_key) do
+          :error ->
+            {:cont, {:ok, acc}}
 
-        {:ok, nil} ->
-          {:cont, {:ok, acc}}
+          {:ok, nil} ->
+            {:cont, {:ok, acc}}
 
-        {:ok, value} ->
-          case bounded_usage_value(atom_key, value) do
-            {:ok, value} -> {:cont, {:ok, Map.put(acc, wire_key, value)}}
-            :error -> {:halt, {:error, {:complete_response_invalid, {:usage, atom_key}}}}
-          end
-      end
-    end)
+          {:ok, value} ->
+            case bounded_usage_value(atom_key, value) do
+              {:ok, value} -> {:cont, {:ok, Map.put(acc, wire_key, value)}}
+              :error -> {:halt, {:error, {:complete_response_invalid, {:usage, atom_key}}}}
+            end
+        end
+      end)
+    else
+      {:error, {:complete_response_invalid, :usage_keys}}
+    end
   end
 
   defp serialize_usage(_usage),
     do: {:error, {:complete_response_invalid, :usage}}
-
-  defp fetch_known_key(map, wire_key, atom_key) do
-    cond do
-      Map.has_key?(map, atom_key) -> {:ok, Map.get(map, atom_key)}
-      Map.has_key?(map, wire_key) -> {:ok, Map.get(map, wire_key)}
-      true -> :missing
-    end
-  end
 
   defp bounded_usage_value(key, value)
        when key in [
