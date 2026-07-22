@@ -351,8 +351,6 @@ worker narrative or terminal JSON:
 4. Worker prompts still request one valid terminal JSON object so resumed
    older graph artifacts that parse prose do not enter protocol-repair loops.
    The current graph ignores that prose for control.
-5. The shared `STATUS: declined` contract remains on the legacy direct
-   `coding_produce_reviewable_change` path only.
 
 ### Terminal workspace and branch evidence
 
@@ -479,30 +477,3 @@ validation outputs, and the review verdict.
 This artifact is post-mortem and audit evidence. It is not execution authority,
 does not grant approval or replay capability, and does not claim that
 `TaskStore` state or queued controls survive a BEAM restart.
-
-## Rollback (legacy executor)
-
-Rollback is operator-only, temporary for **one release window**, and selected
-before process startup; never by task payload:
-
-```bash
-export ARBOR_CODING_EXECUTOR=legacy
-# then start the Arbor node / release
-```
-
-Unset or `pipeline` keeps the default DOT path. Runtime config stores the raw
-operator value without loading optional umbrella child modules; `arbor_agent`
-validates it before starting children. Invalid selector values fail agent
-startup (fail closed), while lower-level apps remain independently bootable.
-
-The legacy executor (`Arbor.Agent.Orchestration.LegacyCodingTaskExecutor`):
-
-- accepts **only** the strict flat `coding_change` envelope
-  (`kind`, `task`, `repo_path`, `acp_agent`, plus a small optional flat set);
-- **rejects** versioned `plan` objects;
-- **rejects** non-default / profile fields (`review_profile`, `profile`, ...);
-- invokes `coding_produce_reviewable_change` for compatibility.
-
-Do not nest the composite action inside a structured `coding_change` pipeline
-run. Prefer the structured plan envelope unless you are deliberately on the
-legacy rollback path.

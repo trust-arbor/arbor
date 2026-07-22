@@ -18,6 +18,21 @@ defmodule Arbor.Actions.CanonicalUriTest do
   end
 
   describe "canonical_uri_for/2" do
+    test "security regression: retired coding macro is not registered or discoverable" do
+      refute Arbor.Actions.Coding.ProduceReviewableChange in Actions.all_actions()
+      refute Arbor.Actions.Coding.ProduceReviewableChange in Actions.list_actions().coding
+
+      assert {:error, :unknown_action} =
+               Actions.name_to_module("coding_produce_reviewable_change")
+
+      assert {:error, :unknown_action} =
+               Actions.name_to_module("coding.produce_reviewable_change")
+
+      refute "arbor://action/coding/produce_reviewable_change" in Actions.action_namespace_uri_prefixes()
+
+      refute UriRegistry.registered?("arbor://action/coding/produce_reviewable_change")
+    end
+
     test "registered actions do not use the retired plural action namespace" do
       legacy_uris =
         Actions.all_actions()

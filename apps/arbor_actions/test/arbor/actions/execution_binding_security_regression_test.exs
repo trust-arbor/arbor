@@ -14,9 +14,6 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
     BoundStrippedTaskCompositeAction
   }
 
-  alias Arbor.Actions.Coding.ProduceReviewableChange
-  alias Arbor.Actions.Coding.Workspace.Acquire
-
   test "security regression: nested composite cannot strip the active binding" do
     context = bound_context([BoundCompositeAction])
 
@@ -328,39 +325,6 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
              Arbor.Actions.execute_action(module, %{}, context)
 
     refute_receive :hot_reloaded_action_executed
-  end
-
-  test "security regression: ProduceReviewableChange cannot directly run an absent child action" do
-    context = bound_context([ProduceReviewableChange])
-
-    assert {:error,
-            {:execution_binding_rejected, {:missing_action_binding, "coding_workspace_acquire"}}} =
-             Arbor.Actions.execute_action(
-               ProduceReviewableChange,
-               %{task: "must not execute", repo_path: System.tmp_dir!()},
-               context
-             )
-  end
-
-  test "security regression: ProduceReviewableChange cannot directly run a drifted child action" do
-    {:ok, outer} = Arbor.Actions.runtime_descriptor(ProduceReviewableChange)
-    {:ok, child} = Arbor.Actions.runtime_descriptor(Acquire)
-    drifted_child = Map.put(child, "beam_sha256", String.duplicate("0", 64))
-
-    context =
-      binding_context(%{
-        outer["name"] => outer,
-        drifted_child["name"] => drifted_child
-      })
-
-    assert {:error,
-            {:execution_binding_rejected,
-             {:action_binding_mismatch, "coding_workspace_acquire", ["beam_sha256"]}}} =
-             Arbor.Actions.execute_action(
-               ProduceReviewableChange,
-               %{task: "must not execute", repo_path: System.tmp_dir!()},
-               context
-             )
   end
 
   defp bound_context(modules) do

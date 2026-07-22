@@ -216,6 +216,13 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/coding/reviewed_commit"))
       assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/git"))
       assert "arbor://action/consensus/decide_review" in uris
+      refute "arbor://action/coding/produce_reviewable_change" in uris
+
+      assert Arbor.Trust.effective_mode(
+               agent_id,
+               "arbor://action/coding/produce_reviewable_change",
+               []
+             ) == :block
     end
 
     test "template repo file grants mint concrete FileGuard scopes" do
@@ -388,7 +395,6 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
             "arbor://agent/spawn_worker",
             "arbor://trust/write",
             "arbor://governance/change",
-            "arbor://action/coding/produce_reviewable_change",
             "arbor://action/pipeline/run",
             "arbor://pipeline/run",
             "arbor://orchestrator/map/dispatch",

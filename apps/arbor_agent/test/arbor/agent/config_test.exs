@@ -23,14 +23,11 @@ defmodule Arbor.Agent.ConfigTest do
     original_finalization_timeout =
       Application.get_env(:arbor_agent, :executor_finalization_timeout_ms)
 
-    original_mode = Application.get_env(:arbor_agent, :coding_executor_mode)
-
     on_exit(fn ->
       restore_env(:task_executors, original_executors)
       restore_env(:default_task_executor, original_default)
       restore_env(:executor_callback_timeout_ms, original_callback_timeout)
       restore_env(:executor_finalization_timeout_ms, original_finalization_timeout)
-      restore_env(:coding_executor_mode, original_mode)
     end)
 
     :ok
@@ -89,28 +86,11 @@ defmodule Arbor.Agent.ConfigTest do
   end
 
   test "task_executors/0 defaults to empty map" do
-    Application.put_env(:arbor_agent, :coding_executor_mode, :pipeline)
     Application.delete_env(:arbor_agent, :task_executors)
     assert Config.task_executors() == %{}
   end
 
-  test "runtime coding executor selector is validated at the agent boundary" do
-    Application.delete_env(:arbor_agent, :coding_executor_mode)
-    assert Config.coding_executor_mode() == :pipeline
-    assert Config.validate_runtime!() == :ok
-
-    Application.put_env(:arbor_agent, :coding_executor_mode, "legacy")
-    assert Config.coding_executor_mode() == :legacy
-    assert Config.validate_runtime!() == :ok
-
-    Application.put_env(:arbor_agent, :coding_executor_mode, "unknown")
-
-    assert_raise RuntimeError, ~r/ARBOR_CODING_EXECUTOR/, fn ->
-      Config.validate_runtime!()
-    end
-  end
-
-  test "runtime config keeps the coding selector data-only for lower-level apps" do
+  test "runtime config does not define a retired coding executor selector" do
     runtime_config =
       "../../../../../config/runtime.exs"
       |> Path.expand(__DIR__)
@@ -118,22 +98,8 @@ defmodule Arbor.Agent.ConfigTest do
 
     refute runtime_config =~ "Arbor.Agent.Config"
     refute runtime_config =~ "Arbor.Orchestrator.CodingTaskExecutor"
-    refute runtime_config =~ "Arbor.Agent.Orchestration.LegacyCodingTaskExecutor"
-    assert runtime_config =~ "config :arbor_agent, coding_executor_mode: coding_executor_mode"
-  end
-
-  test "legacy mode overrides only the coding_change executor" do
-    Application.put_env(:arbor_agent, :coding_executor_mode, "legacy")
-
-    Application.put_env(:arbor_agent, :task_executors, %{
-      "coding_change" => ValidExecutor,
-      "other" => ValidExecutor
-    })
-
-    assert Config.task_executors()["coding_change"] ==
-             Arbor.Agent.Orchestration.LegacyCodingTaskExecutor
-
-    assert Config.task_executors()["other"] == ValidExecutor
+    refute runtime_config =~ "ARBOR_CODING_EXECUTOR"
+    refute runtime_config =~ "coding_executor_mode"
   end
 
   test "task_executor/1 resolves string and atom config keys" do

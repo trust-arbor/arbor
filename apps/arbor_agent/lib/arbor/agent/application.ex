@@ -5,8 +5,6 @@ defmodule Arbor.Agent.Application do
 
   @impl true
   def start(_type, _args) do
-    :ok = Arbor.Agent.Config.validate_runtime!()
-
     children =
       if Application.get_env(:arbor_agent, :start_children, true) do
         [

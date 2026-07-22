@@ -29,13 +29,6 @@ defmodule Arbor.AgentTest do
     end
   end
 
-  describe "run_legacy_coding_task/3" do
-    test "routes through the public facade and preserves executor validation" do
-      assert {:error, :invalid_agent_id} =
-               Arbor.Agent.run_legacy_coding_task("", %{}, %{})
-    end
-  end
-
   describe "get_state/1" do
     test "returns error for non-running agent" do
       assert {:error, :not_found} = Arbor.Agent.get_state("nonexistent")

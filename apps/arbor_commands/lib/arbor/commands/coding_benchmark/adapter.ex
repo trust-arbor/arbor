@@ -316,11 +316,9 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     end
   end
 
-  # Per-validation budget for the legacy ProduceReviewableChange path. Bounded by
-  # the trusted harness execution timeout and the reviewed standard spawn-capable
-  # Shell ceiling so cold compile cannot sit at the action's 300s default while
-  # the pipeline path correctly uses the Shell-derived 600s profile ceiling.
-  # Data only — never control authority.
+  # Preserve the historical flat legacy-axis request budget for injected
+  # compatibility callbacks. The archived production adapter never invokes a
+  # coding executor, while synthetic tests still exercise this generic path.
   defp legacy_validation_timeout_ms(execution_timeout_ms)
        when is_integer(execution_timeout_ms) and execution_timeout_ms > 0 do
     ceiling = Shell.spawn_capable_max_timeout_ms()

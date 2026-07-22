@@ -259,12 +259,11 @@ defmodule Arbor.Actions.SigningTest do
       agent_id: agent_id,
       read_path: read_path
     } do
-      # coding_produce_reviewable_change (and similar composites) authorize once,
-      # mark AuthContext verified, then nest authorize_and_execute for validation
-      # actions like Mix.Compile. The nested call reuses the parent's
+      # Composite actions authorize once, mark AuthContext verified, then nest
+      # authorize_and_execute for validation actions like Mix.Compile. The nested call reuses the parent's
       # resource-bound signed_request; re-verifying it against the nested URI
       # fails with :resource_mismatch / :replayed_nonce → :unauthorized.
-      parent_resource = "arbor://action/coding/produce_reviewable_change"
+      parent_resource = "arbor://action/coding/reviewed_commit"
       {:ok, signed} = SignedRequest.sign(parent_resource, agent_id, identity.private_key)
 
       # Parent layer consumes the nonce and marks the AuthContext verified.
@@ -300,7 +299,7 @@ defmodule Arbor.Actions.SigningTest do
            agent_id: agent_id,
            read_path: read_path
          } do
-      parent_resource = "arbor://action/coding/produce_reviewable_change"
+      parent_resource = "arbor://action/coding/reviewed_commit"
       {:ok, signed} = SignedRequest.sign(parent_resource, agent_id, identity.private_key)
       assert {:ok, ^agent_id} = Arbor.Security.verify_request(signed)
 
@@ -326,7 +325,7 @@ defmodule Arbor.Actions.SigningTest do
       agent_id: agent_id,
       read_path: read_path
     } do
-      parent_resource = "arbor://action/coding/produce_reviewable_change"
+      parent_resource = "arbor://action/coding/reviewed_commit"
       {:ok, signed} = SignedRequest.sign(parent_resource, agent_id, identity.private_key)
       assert {:ok, ^agent_id} = Arbor.Security.verify_request(signed)
 

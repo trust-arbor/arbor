@@ -303,7 +303,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert data["metadata"]["acp_provider"] == "codex"
 
       resources = Enum.map(data["required_capabilities"], & &1["resource"])
-      assert "arbor://action/coding/produce_reviewable_change" in resources
+      refute "arbor://action/coding/produce_reviewable_change" in resources
       assert "arbor://action/coding/security_regression/validate" in resources
       assert "arbor://action/coding/cross_app/validate" in resources
       assert "arbor://action/coding/workspace/**" in resources
@@ -341,7 +341,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       preset = data["trust_preset"]
       assert preset["baseline"] == "block"
       assert preset["rules"]["arbor://orchestrator/execute"] == "auto"
-      assert preset["rules"]["arbor://action/coding/produce_reviewable_change"] == "auto"
+      refute Map.has_key?(preset["rules"], "arbor://action/coding/produce_reviewable_change")
       assert preset["rules"]["arbor://action/coding/security_regression/validate"] == "ask"
       assert preset["rules"]["arbor://action/coding/cross_app/validate"] == "ask"
       assert preset["rules"]["arbor://action/coding/workspace"] == "auto"
@@ -380,7 +380,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       refute Map.has_key?(preset["rules"], "arbor://trust/write")
     end
 
-    test "shipped instructions treat structured coding_change as canonical and composite as rollback" do
+    test "security regression: shipped template removes the retired coding macro" do
       assert {:ok, data} = TemplateStore.resolve("coding_agent")
       instructions = data["character"]["instructions"]
       joined = Enum.join(instructions, "\n")
@@ -395,14 +395,9 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert joined =~ ~s({"kind":"coding_change","plan":{...}})
       assert joined =~ "worker.provider"
 
-      assert Enum.any?(
-               instructions,
-               &String.contains?(&1, "coding_produce_reviewable_change")
-             )
-
-      assert joined =~ "compatibility/rollback"
-      assert joined =~ "one release window"
-      assert joined =~ "Do not nest `coding_produce_reviewable_change`"
+      refute joined =~ "coding_produce_reviewable_change"
+      refute joined =~ "compatibility/rollback"
+      refute joined =~ "one release window"
 
       # Stale primary-macro framing must not remain
       refute Enum.any?(
@@ -413,12 +408,13 @@ defmodule Arbor.Agent.TemplateStoreTest do
                )
              )
 
-      # Rollback capability/trust entries stay for the legacy window
       resources = Enum.map(data["required_capabilities"], & &1["resource"])
-      assert "arbor://action/coding/produce_reviewable_change" in resources
+      refute "arbor://action/coding/produce_reviewable_change" in resources
 
-      assert data["trust_preset"]["rules"]["arbor://action/coding/produce_reviewable_change"] ==
-               "auto"
+      refute Map.has_key?(
+               data["trust_preset"]["rules"],
+               "arbor://action/coding/produce_reviewable_change"
+             )
     end
   end
 

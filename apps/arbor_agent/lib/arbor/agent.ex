@@ -111,12 +111,6 @@ defmodule Arbor.Agent do
   @doc "Connect to MCP servers configured in an agent's profile."
   defdelegate connect_mcp_servers(agent_id), to: Arbor.Agent.Manager
 
-  @doc "Run a legacy structured coding task through the public agent facade."
-  @spec run_legacy_coding_task(String.t(), map(), map() | keyword()) :: term()
-  def run_legacy_coding_task(agent_id, task, context) do
-    Arbor.Agent.Orchestration.LegacyCodingTaskExecutor.run(agent_id, task, context)
-  end
-
   # ===========================================================================
   # Public API — Authorized versions (for callers that need capability checks)
   # ===========================================================================

@@ -79,12 +79,6 @@ if roots = parse_coding_roots.("ARBOR_CODING_WORKTREE_ROOTS") do
   config :arbor_orchestrator, coding_worktree_roots: roots
 end
 
-# Operator-only coding executor route. Keep runtime config data-only so a
-# lower-level umbrella app can boot without loading optional child modules.
-if coding_executor_mode = System.get_env("ARBOR_CODING_EXECUTOR") do
-  config :arbor_agent, coding_executor_mode: coding_executor_mode
-end
-
 # ============================================================================
 # Dashboard secret key base (production)
 # ============================================================================

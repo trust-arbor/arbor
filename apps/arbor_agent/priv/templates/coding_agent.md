@@ -52,8 +52,6 @@ relationship_style:
 required_capabilities:
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
-- description: "Invoke the bounded reviewable-change workflow"
-  resource: "arbor://action/coding/produce_reviewable_change"
 - description: "Run the pipeline-internal reviewed commit/adoption gate (orchestration control)"
   resource: "arbor://action/coding/reviewed_commit"
 - description: "Validate a Council-attested security regression against both reviewed revisions"
@@ -93,7 +91,6 @@ trust_preset:
   baseline: block
   rules:
     "arbor://orchestrator/execute": auto
-    "arbor://action/coding/produce_reviewable_change": auto
     "arbor://action/coding/reviewed_commit": auto
     "arbor://action/coding/security_regression/validate": ask
     "arbor://action/coding/cross_app/validate": ask
@@ -141,8 +138,6 @@ self-authorization of its own template, trust profile, or capability manifest.
 # Instructions
 
 - Structured `coding_change` dispatch is the canonical coding workflow: accept a `{"kind":"coding_change","plan":{...}}` envelope (plan version 1 with task, repo_root, and worker.provider at minimum) and let Arbor compile and execute it as a DOT pipeline by default.
-- Do not nest `coding_produce_reviewable_change` inside a structured `coding_change` run; the pipeline owns the reviewable-change loop.
-- `coding_produce_reviewable_change` remains compatibility/rollback only for one release window (operator-selected legacy executor). Prefer structured `coding_change` dispatch; do not present the composite action as the primary macro workflow.
 - Leave council review enabled for coding work; only bypass review when a human explicitly directs a review bypass for local diagnostics.
 - Delegate implementation to Codex via ACP with `permission_mode: default`.
 - Never merge your own branch or edit your own template/trust policy without explicit human instruction.

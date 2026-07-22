@@ -21,7 +21,6 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
   )
 
   @runtime_env [
-    {:arbor_agent, :coding_executor_mode},
     {:arbor_commands, :coding_benchmark_workspace_root},
     {:arbor_commands, :coding_benchmark_artifact_root},
     {:arbor_commands, :coding_benchmark_execution_timeout_ms},
@@ -375,7 +374,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
 
   test "legacy process-global executor selectors are rejected without mutation" do
     scenario = scenario!(~w(happy))
-    Application.put_env(:arbor_agent, :coding_executor_mode, :unchanged)
+    Application.put_env(:arbor_agent, :task_executors, :unchanged)
 
     assert {:error,
             %{
@@ -384,12 +383,12 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
             }} =
              CodingBenchmark.run(scenario.manifest,
                dry_run: true,
-               executor_selector: %{app: :arbor_agent, key: :coding_executor_mode},
+               executor_selector: %{app: :arbor_agent, key: :task_executors},
                fixture_root: scenario.root,
                workspace_root: scenario.root
              )
 
-    assert Application.get_env(:arbor_agent, :coding_executor_mode) == :unchanged
+    assert Application.get_env(:arbor_agent, :task_executors) == :unchanged
   end
 
   test "Mix task writes JSON at its boundary with all supported execution options" do
