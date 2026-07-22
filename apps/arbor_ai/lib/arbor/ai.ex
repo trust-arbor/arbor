@@ -873,6 +873,18 @@ defmodule Arbor.AI do
     end
   end
 
+  @doc """
+  Return a non-mutating, static readiness observation for an ACP provider.
+
+  The provider may be a known provider atom or its bounded string name. The
+  result is a JSON-clean envelope containing a canonical provider observation
+  and its digest. Authentication and live model availability are not probed.
+  """
+  @spec acp_provider_readiness(atom() | String.t(), String.t() | nil) :: map()
+  def acp_provider_readiness(provider, requested_model \\ nil) do
+    AcpSession.Readiness.observe(provider, requested_model)
+  end
+
   @doc "Whether `provider` is a known ACP provider in the catalog."
   @spec acp_known_provider?(atom()) :: boolean()
   def acp_known_provider?(provider) when is_atom(provider), do: provider in acp_providers()
