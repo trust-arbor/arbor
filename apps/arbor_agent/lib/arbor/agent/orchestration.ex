@@ -13,7 +13,7 @@ defmodule Arbor.Agent.Orchestration do
 
   require Logger
 
-  alias Arbor.Agent.Orchestration.{PendingApproval, TaskArtifacts}
+  alias Arbor.Agent.Orchestration.{ApprovalInventoryProjection, PendingApproval, TaskArtifacts}
   alias Arbor.Contracts.Security.CapabilityUri
 
   @approval_read_uri "arbor://approval/read"
@@ -25,6 +25,9 @@ defmodule Arbor.Agent.Orchestration do
   @task_adopt_uri "arbor://agent/task/adopt"
   @default_task_inventory_items 64
   @max_task_inventory_items 1_000
+  @default_approval_inventory_items 64
+  @max_approval_inventory_items 1_000
+  @max_approval_inventory_backend_entries 1_000
   @max_task_id_bytes 256
   @task_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
   @max_destination_ref_bytes 256
@@ -256,6 +259,28 @@ defmodule Arbor.Agent.Orchestration do
   end
 
   @doc """
+  Return a bounded, read-only inventory of pending approvals.
+
+  This is a volatile projection of the existing Consensus and Comms approval
+  authorities. It contains only reconciliation-safe identifiers, ownership,
+  lifecycle, and count evidence; it does not create or retain approval state.
+  """
+  @spec pending_approval_inventory(keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def pending_approval_inventory(opts \\ []) do
+    with {:ok, normalized} <- normalize_approval_inventory_options(opts),
+         :ok <- authorize(opts, @approval_read_uri, :read),
+         {:ok, entries, evidence} <- approval_inventory_entries(opts) do
+      {:ok,
+       ApprovalInventoryProjection.from_entries(
+         entries,
+         normalized.filters,
+         normalized.max_items,
+         evidence
+       )}
+    end
+  end
+
+  @doc """
   Answer a pending approval.
 
   `:rework` is represented as a rejection in the underlying backend with
@@ -317,6 +342,129 @@ defmodule Arbor.Agent.Orchestration do
     do: {:ok, inventory}
 
   defp normalize_task_inventory_result(_result), do: {:error, :task_inventory_unavailable}
+
+  defp normalize_approval_inventory_options(opts) when is_list(opts) or is_map(opts) do
+    entries = if is_list(opts), do: opts, else: Map.to_list(opts)
+    keys = Enum.map(entries, &approval_inventory_option_key/1)
+
+    allowed = [
+      :caller_id,
+      :agent_id,
+      :principal_id,
+      :resource_uri,
+      :task_id,
+      :max_items,
+      :authorize?,
+      :consensus_module,
+      :interaction_router,
+      :security_module
+    ]
+
+    cond do
+      :invalid in keys or Enum.any?(keys, &(&1 not in allowed)) ->
+        {:error, :invalid_approval_inventory_options}
+
+      length(keys) != length(Enum.uniq(keys)) ->
+        {:error, :invalid_approval_inventory_options}
+
+      true ->
+        with {:ok, _caller_id} <- inventory_caller_id(entries),
+             {:ok, task_id} <- normalize_optional_task_filter(entries),
+             {:ok, agent_id} <- normalize_approval_inventory_id_filter(entries, :agent_id),
+             {:ok, principal_id} <-
+               normalize_approval_inventory_id_filter(entries, :principal_id),
+             {:ok, resource_uri} <- normalize_approval_inventory_resource_filter(entries),
+             {:ok, max_items} <- normalize_approval_inventory_max_items(entries),
+             {:ok, authorize?} <- normalize_approval_inventory_authorize(entries),
+             {:ok, consensus_module} <-
+               normalize_approval_inventory_module(entries, :consensus_module, Arbor.Consensus),
+             {:ok, interaction_router} <-
+               normalize_approval_inventory_module(
+                 entries,
+                 :interaction_router,
+                 Module.concat([:Arbor, :Comms])
+               ),
+             {:ok, security_module} <-
+               normalize_approval_inventory_module(entries, :security_module, Arbor.Security) do
+          {:ok,
+           %{
+             filters: %{
+               task_id: task_id,
+               agent_id: agent_id,
+               principal_id: principal_id,
+               resource_uri: resource_uri
+             },
+             max_items: max_items,
+             authorize?: authorize?,
+             consensus_module: consensus_module,
+             interaction_router: interaction_router,
+             security_module: security_module
+           }}
+        else
+          _ -> {:error, :invalid_approval_inventory_options}
+        end
+    end
+  end
+
+  defp normalize_approval_inventory_options(_opts),
+    do: {:error, :invalid_approval_inventory_options}
+
+  defp approval_inventory_option_key({key, _value}) when is_atom(key), do: key
+  defp approval_inventory_option_key(_entry), do: :invalid
+
+  defp normalize_approval_inventory_id_filter(entries, key) do
+    case Keyword.get(entries, key) do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) and byte_size(value) <= @max_task_id_bytes ->
+        if String.valid?(value) and value != "" and not String.contains?(value, <<0>>) do
+          {:ok, value}
+        else
+          {:error, :invalid_approval_inventory_filter}
+        end
+
+      _ ->
+        {:error, :invalid_approval_inventory_filter}
+    end
+  end
+
+  defp normalize_approval_inventory_resource_filter(entries) do
+    case Keyword.get(entries, :resource_uri) do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) and byte_size(value) <= @max_task_id_bytes ->
+        if CapabilityUri.valid?(value), do: {:ok, value}, else: {:error, :invalid_resource_uri}
+
+      _ ->
+        {:error, :invalid_resource_uri}
+    end
+  end
+
+  defp normalize_approval_inventory_max_items(entries) do
+    case Keyword.get(entries, :max_items, @default_approval_inventory_items) do
+      value when is_integer(value) and value > 0 and value <= @max_approval_inventory_items ->
+        {:ok, value}
+
+      _ ->
+        {:error, :invalid_max_items}
+    end
+  end
+
+  defp normalize_approval_inventory_authorize(entries) do
+    case Keyword.get(entries, :authorize?, true) do
+      value when is_boolean(value) -> {:ok, value}
+      _ -> {:error, :invalid_authorize_option}
+    end
+  end
+
+  defp normalize_approval_inventory_module(entries, key, default) do
+    case Keyword.get(entries, key, default) do
+      module when is_atom(module) -> {:ok, module}
+      _ -> {:error, :invalid_backend_module}
+    end
+  end
 
   defp normalize_task_inventory_options(opts) when is_list(opts) or is_map(opts) do
     entries = if is_list(opts), do: opts, else: Map.to_list(opts)
@@ -1025,6 +1173,126 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_keyword_opts(_opts), do: []
 
   defp bounded_inspect(term), do: inspect(term, limit: 10, printable_limit: 500)
+
+  defp approval_inventory_entries(opts) do
+    with {:ok, consensus, consensus_evidence} <-
+           approval_inventory_backend(:consensus, consensus_module(opts), :list_pending),
+         {:ok, interactions, interaction_evidence} <-
+           approval_inventory_backend(
+             :interaction,
+             interaction_backend(opts),
+             :pending_interactions
+           ) do
+      entries =
+        inventory_entries(:consensus, consensus) ++ inventory_entries(:interaction, interactions)
+
+      evidence = %{
+        "max_entries" => @max_approval_inventory_backend_entries,
+        "omitted" => consensus_evidence.omitted + interaction_evidence.omitted,
+        "truncated" => consensus_evidence.truncated or interaction_evidence.truncated,
+        "sources" => %{
+          "consensus" => %{
+            "observed" => consensus_evidence.observed,
+            "omitted" => consensus_evidence.omitted,
+            "truncated" => consensus_evidence.truncated
+          },
+          "interaction" => %{
+            "observed" => interaction_evidence.observed,
+            "omitted" => interaction_evidence.omitted,
+            "truncated" => interaction_evidence.truncated
+          }
+        }
+      }
+
+      {:ok, entries, evidence}
+    end
+  end
+
+  defp approval_inventory_backend(source, module, function) do
+    case apply_if_exported(module, function, []) do
+      entries when is_list(entries) ->
+        {bounded, omitted} = Enum.split(entries, @max_approval_inventory_backend_entries)
+
+        {:ok, bounded,
+         %{
+           observed: length(bounded),
+           omitted: length(omitted),
+           truncated: omitted != []
+         }}
+
+      :module_unavailable ->
+        {:error, {:approval_backend_unavailable, source}}
+
+      _other ->
+        {:error, {:invalid_approval_backend_result, source}}
+    end
+  rescue
+    _ -> {:error, {:approval_backend_unavailable, source}}
+  catch
+    _, _ -> {:error, {:approval_backend_unavailable, source}}
+  end
+
+  defp inventory_entries(source, entries) do
+    Enum.map(entries, fn entry ->
+      cond do
+        not is_map(entry) ->
+          {:malformed, source}
+
+        source == :consensus and authorization_request?(entry) ->
+          inventory_consensus_entry(entry)
+
+        source == :interaction and value(entry, :kind) in [:approval, "approval"] ->
+          inventory_interaction_entry(entry)
+
+        source == :consensus and is_nil(value(entry, :topic)) ->
+          {:malformed, source}
+
+        source == :interaction and is_nil(value(entry, :kind)) ->
+          {:malformed, source}
+
+        true ->
+          {:ignored, source}
+      end
+    end)
+  end
+
+  defp inventory_consensus_entry(proposal) do
+    if inventory_backend_shape?(proposal, :consensus) do
+      approval = from_consensus(proposal)
+      {:approval, :consensus, approval, approval_task_id(approval)}
+    else
+      {:malformed, :consensus}
+    end
+  rescue
+    _ -> {:malformed, :consensus}
+  catch
+    _, _ -> {:malformed, :consensus}
+  end
+
+  defp inventory_interaction_entry(interaction) do
+    if inventory_backend_shape?(interaction, :interaction) do
+      approval = from_interaction(interaction)
+      {:approval, :interaction, approval, approval_task_id(approval)}
+    else
+      {:malformed, :interaction}
+    end
+  rescue
+    _ -> {:malformed, :interaction}
+  catch
+    _, _ -> {:malformed, :interaction}
+  end
+
+  defp inventory_backend_shape?(entry, :consensus) do
+    is_binary(value(entry, :id)) and value(entry, :id) != "" and
+      is_binary(value(entry, :proposer)) and value(entry, :proposer) != "" and
+      is_map(value(entry, :metadata, %{})) and is_map(value(entry, :context, %{}))
+  end
+
+  defp inventory_backend_shape?(entry, :interaction) do
+    is_binary(value(entry, :request_id)) and value(entry, :request_id) != "" and
+      is_binary(value(entry, :agent_id)) and value(entry, :agent_id) != "" and
+      is_map(value(entry, :metadata, %{}))
+  end
 
   defp all_pending_approvals(opts) do
     consensus_pending(opts) ++ interaction_pending(opts)
