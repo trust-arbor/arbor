@@ -42,6 +42,16 @@ defmodule Arbor.AI.AcpSession.ReadinessTest do
     assert observation["launch_bound_model_id"] == "grok-4.5"
   end
 
+  test "string provider ids retain launch-bound model evidence on mismatch" do
+    result = observe("grok", "grok-code-fast", observation: :available)
+    observation = result["observation"]
+
+    assert observation["provider"] == "grok"
+    assert observation["failure_code"] == "model_mismatch"
+    assert observation["requested_model_id"] == "grok-code-fast"
+    assert observation["launch_bound_model_id"] == "grok-4.5"
+  end
+
   test "unknown provider strings do not intern atoms" do
     _ = Arbor.AI.acp_provider_readiness("provider-that-is-not-registered")
     before = :erlang.system_info(:atom_count)

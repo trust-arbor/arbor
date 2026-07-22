@@ -230,6 +230,12 @@ defmodule Arbor.AI.AcpSession.Readiness.Internal do
   defp safe_requested_model(_model), do: nil
 
   defp model_fields(provider, requested_model) do
+    provider =
+      case resolve_provider(provider) do
+        {:ok, provider_atom, _kind} -> provider_atom
+        {:error, _reason} -> provider
+      end
+
     case model_strategy(provider) do
       {:ok, :dynamic} ->
         case safe_requested_model(requested_model) do
