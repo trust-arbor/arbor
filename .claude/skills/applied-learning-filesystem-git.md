@@ -311,3 +311,7 @@ instead of committing contradictory evidence (found 2026-07-21 during Phase 7A l
 <!-- applied-learning: unsigned-local-checkpoint-successes-are-revalidation-hints-only -->
 <a id="applied-learning-unsigned-local-checkpoint-successes-are-revalidation-hints-only"></a>
 **Unsigned local checkpoint successes are revalidation hints, not evidence.** Owner-only file mode provides confidentiality from other users but no authenticity against same-user tampering. A cached success must consume the normal proof budget and pass the live proof boundary again before classification; only exact-scope deterministic preserve outcomes may skip work (found 2026-07-21 reviewing historical branch-audit proof caching).
+
+<!-- applied-learning: host-maintenance-scripts-must-target-system-runtime-apis -->
+<a id="applied-learning-host-maintenance-scripts-must-target-system-runtime-apis"></a>
+**Host maintenance scripts must target system-runtime APIs.** macOS' bundled Ruby can predate `Enumerable#filter_map`; a local branch audit failed before classification when a diagnostic assumed it. For dependency-free `ruby` one-liners, use broadly supported constructs such as `map { ... }.compact`, or invoke an explicitly pinned runtime (found 2026-07-22 during local branch cleanup).
