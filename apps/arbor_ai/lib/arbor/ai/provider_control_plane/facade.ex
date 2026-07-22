@@ -85,15 +85,34 @@ defmodule Arbor.AI.ProviderControlPlane do
   end
 
   defp safe_read(reader) do
-    case Task.async(fn -> invoke_reader(reader) end) |> Task.await(@read_timeout_ms) do
-      {:ok, status} -> {:ok, status}
-      {:error, :unavailable} -> {:error, :unavailable}
-      {:error, _} -> {:error, :malformed}
-      _ -> {:error, :malformed}
-    end
+    task = Task.async(fn -> invoke_reader(reader) end)
+    wait_for_read(task)
   catch
     :exit, _ -> {:error, :unavailable}
     _, _ -> {:error, :malformed}
+  end
+
+  defp wait_for_read(task) do
+    case Task.yield(task, @read_timeout_ms) do
+      {:ok, {:ok, status}} ->
+        {:ok, status}
+
+      {:ok, {:error, :unavailable}} ->
+        {:error, :unavailable}
+
+      {:ok, {:error, _}} ->
+        {:error, :malformed}
+
+      {:ok, _} ->
+        {:error, :malformed}
+
+      {:exit, _} ->
+        {:error, :malformed}
+
+      nil ->
+        Task.shutdown(task, :brutal_kill)
+        {:error, :unavailable}
+    end
   end
 
   defp status_key(:budget), do: :budget_status

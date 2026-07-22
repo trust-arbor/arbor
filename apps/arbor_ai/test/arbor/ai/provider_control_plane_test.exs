@@ -1,7 +1,8 @@
 defmodule Arbor.AI.ProviderControlPlaneTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.AI
+  alias Arbor.AI.QuotaTracker
   alias Arbor.AI.ProviderControlPlane.BudgetProjection
 
   @observed_at ~U[2026-07-22 20:00:00Z]
@@ -73,6 +74,17 @@ defmodule Arbor.AI.ProviderControlPlaneTest do
     assert snapshot["remaining_spend"] == 1.75
   end
 
+  test "keeps valid overspend evidence at a zero remaining provider budget" do
+    overspent = put_in(@budget_status, [:backends, :openai, :cost], 7.25)
+
+    assert {:ok, %{snapshot: snapshot}} =
+             snapshot(:openai, budget_status: overspent, provider_ceilings: %{"openai" => 5.0})
+
+    assert snapshot["current_spend"] == 7.25
+    assert snapshot["configured_spend_ceiling"] == 5.0
+    assert snapshot["remaining_spend"] == 0.0
+  end
+
   test "projects exhausted quota and its reset, then available after reset" do
     future = DateTime.add(@observed_at, 900, :second)
     past = DateTime.add(@observed_at, -900, :second)
@@ -117,6 +129,50 @@ defmodule Arbor.AI.ProviderControlPlaneTest do
                quota_reader: fn -> {:error, :unavailable} end,
                observed_at: @observed_at
              )
+  end
+
+  test "real QuotaTracker snapshots mark future reset as exhausted and past reset as available" do
+    backend = :quota_snapshot_regression
+    future = DateTime.add(DateTime.utc_now(), 3_600, :second)
+    past = DateTime.add(DateTime.utc_now(), -3_600, :second)
+
+    on_exit(fn ->
+      QuotaTracker.clear(backend)
+      :timer.sleep(10)
+    end)
+
+    QuotaTracker.mark_quota_exhausted(backend, until: future)
+    :timer.sleep(20)
+
+    assert {:ok, status} = QuotaTracker.snapshot_status(limit: 128)
+    assert status["quota_snapshot_regression"].available == false
+    assert status["quota_snapshot_regression"].available_at == DateTime.to_iso8601(future)
+
+    QuotaTracker.mark_quota_exhausted(backend, until: past)
+    :timer.sleep(20)
+
+    assert {:ok, status} = QuotaTracker.snapshot_status(limit: 128)
+    assert status["quota_snapshot_regression"].available == true
+  end
+
+  test "shuts down a timed-out bounded reader" do
+    parent = self()
+
+    reader = fn ->
+      send(parent, {:bounded_reader_started, self()})
+      Process.sleep(5_000)
+      {:ok, @budget_status}
+    end
+
+    assert {:error, :unavailable} =
+             AI.provider_budget_snapshot("openai",
+               budget_reader: reader,
+               quota_reader: fn -> {:ok, %{}} end,
+               observed_at: @observed_at
+             )
+
+    assert_receive {:bounded_reader_started, reader_pid}
+    refute Process.alive?(reader_pid)
   end
 
   test "fails closed for malformed bounded tracker state without leaking it" do

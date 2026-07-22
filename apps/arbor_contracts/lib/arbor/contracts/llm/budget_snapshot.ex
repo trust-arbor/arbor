@@ -5,6 +5,9 @@ defmodule Arbor.Contracts.LLM.BudgetSnapshot do
   Spend fields are marginal API spend in USD. Subscription fields are
   provider-specific allowance units and are deliberately separate: using a
   subscription is never encoded as zero monetary cost.
+
+  A configured spend ceiling is evidence for remaining-budget projection, not
+  a historical hard cap; recorded current spend may exceed it.
   """
 
   use TypedStruct
@@ -243,11 +246,8 @@ defmodule Arbor.Contracts.LLM.BudgetSnapshot do
       remaining != nil and remaining > ceiling ->
         {:error, {:invalid_field, "remaining_spend"}}
 
-      current != nil and current > ceiling ->
-        {:error, {:invalid_field, "current_spend"}}
-
       current != nil and remaining != nil and
-          abs(remaining - (ceiling - current)) > @consistency_tolerance ->
+          abs(remaining - max(0, ceiling - current)) > @consistency_tolerance ->
         {:error, {:invalid_field, "remaining_spend"}}
 
       true ->

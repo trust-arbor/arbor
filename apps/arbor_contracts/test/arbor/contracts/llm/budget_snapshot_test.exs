@@ -43,8 +43,14 @@ defmodule Arbor.Contracts.LLM.BudgetSnapshotTest do
     assert {:error, {:invalid_field, "remaining_spend"}} =
              BudgetSnapshot.new(Map.put(@valid, :remaining_spend, 7.0))
 
-    assert {:error, {:invalid_field, "current_spend"}} =
-             BudgetSnapshot.new(Map.put(@valid, :current_spend, 11.0))
+    assert {:ok, overspent} =
+             BudgetSnapshot.new(%{@valid | current_spend: 11.0, remaining_spend: 0.0})
+
+    assert overspent.current_spend == 11.0
+    assert overspent.remaining_spend == 0.0
+
+    assert {:error, {:invalid_field, "remaining_spend"}} =
+             BudgetSnapshot.new(%{@valid | current_spend: 11.0, remaining_spend: 0.5})
 
     for field <- [
           :configured_spend_ceiling,

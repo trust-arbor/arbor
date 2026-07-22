@@ -298,7 +298,7 @@ defmodule Arbor.AI.QuotaTracker do
         with {:ok, provider} <- provider_name(backend),
              {:ok, available_at, available_datetime} <-
                snapshot_datetime(Map.get(info, :available_at)) do
-          available = DateTime.compare(available_datetime, now) != :lt
+          available = DateTime.compare(available_datetime, now) != :gt
 
           {:cont,
            {:ok,
