@@ -87,6 +87,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
     {"output_cost", :output_cost},
     {"total_cost", :total_cost}
   ]
+  @usage_atom_keys Enum.map(@usage_fields, &elem(&1, 1))
   @finish_reasons %{
     "stop" => :stop,
     "length" => :length,
@@ -731,7 +732,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
   defp serialize_usage(nil), do: {:ok, %{}}
 
   defp serialize_usage(usage) when is_map(usage) do
-    if Enum.all?(Map.keys(usage), &is_atom/1) do
+    if Enum.all?(Map.keys(usage), &(&1 in @usage_atom_keys)) do
       Enum.reduce_while(@usage_fields, {:ok, %{}}, fn {wire_key, atom_key}, {:ok, acc} ->
         case Map.fetch(usage, atom_key) do
           :error ->

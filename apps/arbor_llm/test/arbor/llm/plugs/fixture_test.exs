@@ -385,6 +385,15 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       refute File.exists?(Fixture.path_for(call))
     end
 
+    test "rejects unknown atom-keyed live usage before v2 publication" do
+      call = Call.new(:complete, {"openai:unknown-atom-live-usage", [], []})
+      response = req_response("answer", usage: %{input_tokens: 7, provider_secret: 2})
+
+      assert {:error, reason} = Fixture.save(call, {:ok, response})
+      assert inspect(reason) =~ "usage_keys"
+      refute File.exists?(Fixture.path_for(call))
+    end
+
     test "rejects oversized and count-excess complete response collections without publication" do
       cases = [
         {
