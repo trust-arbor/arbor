@@ -4,7 +4,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
   import Bitwise
 
   alias Arbor.Contracts.Coding.{TaskTerminalEnvelope, ValidationCapacityHandoff}
-  alias Arbor.Orchestrator.CodingPlan.ArtifactStore
+  alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, OutcomeMapper}
+
+  @verification_tree_oid String.duplicate("a", 40)
+  @verification_observed_at "2026-07-22T12:00:00.000Z"
 
   setup do
     base =
@@ -282,6 +285,60 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert Enum.sort(File.ls!(root)) == [
              "coding-terminal-evidence.json"
            ]
+  end
+
+  test "persists verification reports, rejects forged status pairs, and accepts legacy v1", %{
+    root: root
+  } do
+    File.mkdir_p!(root)
+    report = verification_report()
+    result = Map.put(terminal_result(root), "verification_report", report)
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_verified", result, [])
+
+    evidence = descriptor["path"] |> File.read!() |> Jason.decode!()
+    assert evidence["schema_version"] == 1
+    assert evidence["verification_report"] == report
+
+    {:ok, rework_outcome} =
+      OutcomeMapper.map_terminal("rework_exhausted", %{
+        "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"}
+      })
+
+    compatible_rework =
+      result
+      |> Map.put("status", "validation_failed")
+      |> Map.put("canonical_status", "rework_exhausted")
+      |> Map.put("outcome", rework_outcome)
+      |> Map.put("verification_report", verification_report("blocked"))
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(
+               root,
+               "task_rework_validation",
+               compatible_rework,
+               []
+             )
+
+    forged = Map.put(result, "verification_report", verification_report("blocked"))
+
+    assert {:error, {:invalid_terminal_result, :verification_status_mismatch}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_forged", forged, [])
+
+    malformed = Map.put(result, "verification_report", Map.put(report, "authority", "secret"))
+
+    assert {:error, {:invalid_terminal_field, "verification_report"}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_malformed", malformed, [])
+
+    legacy = terminal_result(root)
+
+    assert {:ok, legacy_descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_legacy_v1", legacy, [])
+
+    legacy_evidence = legacy_descriptor["path"] |> File.read!() |> Jason.decode!()
+    assert legacy_evidence["schema_version"] == 1
+    refute Map.has_key?(legacy_evidence, "verification_report")
   end
 
   test "archives every canonical task terminal without changing the callback envelope", %{
@@ -919,6 +976,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
         "graph_hash" => String.duplicate("a", 64),
         "compiler_version" => "coding-plan-1"
       }
+    }
+  end
+
+  defp verification_report(status \\ "passed") do
+    %{
+      "version" => 1,
+      "status" => status,
+      "profile" => "default",
+      "candidate_ref" => "git-tree:" <> @verification_tree_oid,
+      "observed_at" => @verification_observed_at,
+      "diagnostics" => []
     }
   end
 

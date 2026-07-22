@@ -10,11 +10,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   alias Arbor.Contracts.Coding.{Plan, TaskTerminalEnvelope, ValidationCapacityHandoff, WorkPacket}
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, Compiler, Profiles, ValidationProgram}
   alias Arbor.Orchestrator.CodingTaskExecutor
-  alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, Compiler}
   alias Arbor.Orchestrator.Config
   alias Arbor.Security
   alias Arbor.Security.SigningAuthorityBroker
+
+  @verification_tree_oid String.duplicate("a", 40)
+  @verification_head_oid String.duplicate("b", 40)
+  @verification_digest String.duplicate("c", 64)
+  @verification_other_digest String.duplicate("d", 64)
+  @verification_observed_at "2026-07-22T12:00:00.000Z"
 
   defmodule CapturingRunner do
     @moduledoc false
@@ -885,6 +891,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     )
   end
 
+  defp verification_task("security_regression") do
+    valid_direct_task(%{
+      "validation_profile" => "security_regression",
+      "requested_paths" => ["apps/arbor_security/test/security_regression_test.exs"]
+    })
+  end
+
+  defp verification_task(profile),
+    do: valid_direct_task(%{"validation_profile" => profile})
+
   defp valid_context(overrides \\ %{}) do
     Map.merge(%{"task_id" => "task_coding_1"}, overrides)
   end
@@ -1024,6 +1040,155 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   defp sha256(value) do
     Base.encode16(:crypto.hash(:sha256, value), case: :lower)
+  end
+
+  defp maybe_add_verification_evidence(context) do
+    validation_claimed? =
+      Map.get(context, "status") in ~w(validation_failed validation_capacity_exceeded) or
+        Enum.any?(
+          ~w(validation validation_candidate_tree_oid validation_observed_at),
+          &Map.has_key?(context, &1)
+        )
+
+    if validation_claimed?,
+      do: Map.merge(default_verification_evidence(), context),
+      else: context
+  end
+
+  defp default_verification_evidence do
+    %{
+      "coding_plan_validation_program" => validation_program!("default"),
+      "validation_candidate_tree_oid" => @verification_tree_oid,
+      "validation_observed_at" => @verification_observed_at
+    }
+  end
+
+  defp validation_program!(profile_id) do
+    {:ok, profile} = Profiles.fetch_executable(profile_id)
+
+    {:ok, program} =
+      ValidationProgram.build(profile["validation_strategy"], %{"wall_clock_ms" => 900_000})
+
+    program
+  end
+
+  defp validation_result("default") do
+    %{
+      "path" => "/owner/worktree",
+      "exit_code" => 0,
+      "passed" => true,
+      "stdout" => "compile output",
+      "stderr" => "",
+      "feedback" => Map.delete(validation_check(), "reason"),
+      "feedback_json" => "ignored raw feedback",
+      "validated_tree_oid" => @verification_tree_oid,
+      "validated_head" => @verification_head_oid
+    }
+  end
+
+  defp validation_result("cross_app") do
+    %{
+      "passed" => true,
+      "reason" => "cross_app_validated",
+      "base_commit" => @verification_head_oid,
+      "changed_files" => ["apps/arbor_orchestrator/lib/example.ex"],
+      "changed_apps" => ["arbor_orchestrator"],
+      "affected_apps" => ["arbor_orchestrator"],
+      "test_paths" => ["apps/arbor_orchestrator/test/example_test.exs"],
+      "root_wide" => false,
+      "compile" => validation_check(%{"status" => "completed"}),
+      "xref" => validation_check(%{"status" => "completed"}),
+      "test_compile" => validation_check(%{"status" => "completed"}),
+      "test" => validation_check(%{"status" => "completed"}),
+      "validated_tree_oid" => @verification_tree_oid,
+      "validated_head" => @verification_head_oid,
+      "feedback_json" => "ignored raw feedback"
+    }
+  end
+
+  defp validation_result("security_regression") do
+    test_path = "apps/arbor_security/test/security_regression_test.exs"
+    candidate = validation_security_leg(0, 1, 0)
+    base = validation_security_leg(1, 0, 1)
+
+    %{
+      "passed" => true,
+      "reason" => "security_regression_validated",
+      "base_commit" => @verification_head_oid,
+      "candidate_fingerprint" => @verification_digest,
+      "test_paths" => [test_path],
+      "source_hashes" => [%{"path" => test_path, "sha256" => @verification_other_digest}],
+      "candidate" => candidate,
+      "base" => base,
+      "diagnostics" => %{
+        "candidate" => validation_security_diagnostic(candidate),
+        "base" => validation_security_diagnostic(base)
+      },
+      "evidence_type" => "reviewed_regression_evidence",
+      "attested_base_commit" => @verification_head_oid,
+      "attested_candidate_commit" => @verification_head_oid,
+      "attested_candidate_tree_oid" => @verification_tree_oid,
+      "attested_diff_sha256" => @verification_digest,
+      "attested_selected_tests" => [
+        %{"path" => test_path, "blob_sha256" => @verification_other_digest}
+      ],
+      "review_attestation_digest" => @verification_digest,
+      "council_decision_digest" => @verification_other_digest,
+      "feedback_json" => "ignored raw feedback"
+    }
+  end
+
+  defp validation_check(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "exit_code" => 0,
+        "passed" => true,
+        "reason" => nil,
+        "stdout_excerpt" => "ignored output",
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => @verification_digest,
+        "stderr_sha256" => @verification_other_digest
+      },
+      overrides
+    )
+  end
+
+  defp validation_security_leg(exit_code, passed, test_failures) do
+    %{
+      "completed" => true,
+      "status" => "completed",
+      "exit_code" => exit_code,
+      "timed_out" => false,
+      "executed" => 1,
+      "passed" => passed,
+      "test_failures" => test_failures,
+      "setup_failures" => 0,
+      "skipped" => 0,
+      "excluded" => 0,
+      "invalid" => 0
+    }
+  end
+
+  defp validation_security_diagnostic(leg) do
+    %{
+      "exit_code" => leg["exit_code"],
+      "timed_out" => leg["timed_out"],
+      "output_bytes" => 12,
+      "output_sha256" => @verification_digest
+    }
+  end
+
+  defp verification_report(status \\ "passed") do
+    %{
+      "version" => 1,
+      "status" => status,
+      "profile" => "default",
+      "candidate_ref" => "git-tree:" <> @verification_tree_oid,
+      "observed_at" => @verification_observed_at,
+      "diagnostics" => []
+    }
   end
 
   defp finalized_adoption_fixture do
@@ -2420,6 +2585,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   describe "final context mapping" do
     defp run_with_context(context) do
+      context = maybe_add_verification_evidence(context)
+
       Application.put_env(
         :arbor_orchestrator,
         :coding_executor_final_context,
@@ -2430,6 +2597,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     defp run_with_engine_result(context, overrides \\ %{}) do
+      context = maybe_add_verification_evidence(context)
+
       engine_result =
         Map.merge(
           %{
@@ -2450,6 +2619,45 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       )
 
       CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+    end
+
+    defp run_with_profile_verification(profile, action_result, context_overrides \\ %{}) do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_runner_reply,
+        fn _path, opts ->
+          program =
+            opts
+            |> Keyword.fetch!(:initial_values)
+            |> Map.fetch!("coding_plan_validation_program")
+
+          assert program["profile_id"] == profile
+
+          context =
+            completed_turn_context()
+            |> Map.merge(%{
+              "status" => "change_committed",
+              "commit_hash" => @verification_head_oid,
+              "validation" => action_result,
+              "coding_plan_validation_program" => program,
+              "validation_candidate_tree_oid" => @verification_tree_oid,
+              "validation_observed_at" => @verification_observed_at
+            })
+            |> Map.merge(context_overrides)
+
+          {:ok,
+           %{
+             run_id: Keyword.fetch!(opts, :run_id),
+             context: context,
+             completed_nodes: ["validate"],
+             final_outcome: nil,
+             taint: %{},
+             node_durations: %{}
+           }}
+        end
+      )
+
+      CodingTaskExecutor.run("agent_1", verification_task(profile), valid_context())
     end
 
     defp completed_turn_context do
@@ -2776,6 +2984,99 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["tier_decision"] == "rework"
     end
 
+    test "rework_exhausted preserves legacy validation failure verification compatibility" do
+      validation = %{"passed" => false}
+
+      assert {:ok, result} =
+               run_with_profile_verification("default", validation, %{
+                 "status" => "rework_exhausted",
+                 "legacy_status" => "validation_failed"
+               })
+
+      assert result["status"] == "validation_failed"
+      assert result["canonical_status"] == "rework_exhausted"
+      assert result["outcome"]["code"] == "rework_exhausted"
+      assert result["verification_report"]["status"] == "blocked"
+    end
+
+    test "adapts default, cross-app, and security validation through the compiler program" do
+      for profile <- ~w(default cross_app security_regression) do
+        validation = validation_result(profile)
+        assert {:ok, result} = run_with_profile_verification(profile, validation)
+
+        assert result["validation"] == [validation]
+        assert result["verification_report"]["status"] == "passed"
+        assert result["verification_report"]["profile"] == profile
+
+        assert result["verification_report"]["candidate_ref"] ==
+                 "git-tree:" <> @verification_tree_oid
+
+        refute inspect(result["verification_report"]) =~ "ignored raw feedback"
+      end
+    end
+
+    test "security regression: successful terminals reject drifted or malformed validation" do
+      drifted =
+        validation_result("default")
+        |> Map.put("validated_tree_oid", String.duplicate("f", 40))
+
+      for validation <- [drifted, %{"passed" => true}] do
+        assert {:error, {:invalid_terminal_evidence, :verification_terminal_status_mismatch}} =
+                 run_with_profile_verification("default", validation)
+      end
+    end
+
+    test "validation failures retain blocked reports for malformed validator evidence" do
+      validation = %{"passed" => false}
+
+      assert {:ok, result} =
+               run_with_profile_verification("default", validation, %{
+                 "status" => "validation_failed"
+               })
+
+      assert result["validation"] == [validation]
+      assert result["verification_report"]["status"] == "blocked"
+
+      assert Enum.all?(result["verification_report"]["diagnostics"], fn diagnostic ->
+               diagnostic["code"] == "validation_evidence_invalid"
+             end)
+    end
+
+    test "security regression: missing or malformed owner verification evidence fails closed" do
+      validation = validation_result("default")
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_final_context,
+        Map.merge(completed_turn_context(), %{
+          "status" => "change_committed",
+          "validation" => validation
+        })
+      )
+
+      assert {:error,
+              {:invalid_terminal_evidence,
+               {:missing_verification_evidence, "coding_plan_validation_program"}}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      for {field, malformed, expected} <- [
+            {"coding_plan_validation_program", %{}, :invalid_validation_program},
+            {"validation_candidate_tree_oid", "not-an-oid", :invalid_candidate_tree_oid},
+            {"validation_observed_at", "not-a-timestamp", :invalid_observed_at}
+          ] do
+        context =
+          default_verification_evidence()
+          |> Map.merge(completed_turn_context())
+          |> Map.merge(%{"status" => "change_committed", "validation" => validation})
+          |> Map.put(field, malformed)
+
+        Application.put_env(:arbor_orchestrator, :coding_executor_final_context, context)
+
+        assert {:error, {:invalid_terminal_evidence, ^expected}} =
+                 CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      end
+    end
+
     test "validation failure, capacity, and pr failure succeed as coding results" do
       assert {:ok, result} =
                run_with_context(%{
@@ -2889,21 +3190,22 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           {:ok,
            %{
              run_id: Keyword.fetch!(opts, :run_id),
-             context: %{
-               "status" => "validation_failed",
-               "worktree_path" => "/tmp/ws",
-               "validation" => [%{"passed" => false}],
-               "worker_session_id" => "worker_transcript",
-               "worker_provider_session_id" => "provider-session",
-               "worker" => %{"provider" => "codex", "model" => "default"},
-               "worker_status" => %{
-                 "provider" => "codex",
-                 "model" => "default",
-                 "session_id" => "provider-session"
-               },
-               "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"},
-               "exec.implement.transcript" => descriptor
-             },
+             context:
+               Map.merge(default_verification_evidence(), %{
+                 "status" => "validation_failed",
+                 "worktree_path" => "/tmp/ws",
+                 "validation" => [%{"passed" => false}],
+                 "worker_session_id" => "worker_transcript",
+                 "worker_provider_session_id" => "provider-session",
+                 "worker" => %{"provider" => "codex", "model" => "default"},
+                 "worker_status" => %{
+                   "provider" => "codex",
+                   "model" => "default",
+                   "session_id" => "provider-session"
+                 },
+                 "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"},
+                 "exec.implement.transcript" => descriptor
+               }),
              completed_nodes: ["worker_message", "validate"],
              final_outcome: nil,
              taint: %{},
@@ -2954,19 +3256,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           {:ok,
            %{
              run_id: Keyword.fetch!(opts, :run_id),
-             context: %{
-               "status" => "validation_failed",
-               "worker_session_id" => "worker_transcript",
-               "worker_provider_session_id" => "provider-session",
-               "worker" => %{"provider" => "codex", "model" => "default"},
-               "worker_status" => %{
-                 "provider" => "codex",
-                 "model" => "default",
-                 "session_id" => "provider-session"
-               },
-               "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"},
-               "exec.implement.transcript" => descriptor
-             },
+             context:
+               Map.merge(default_verification_evidence(), %{
+                 "status" => "validation_failed",
+                 "worker_session_id" => "worker_transcript",
+                 "worker_provider_session_id" => "provider-session",
+                 "worker" => %{"provider" => "codex", "model" => "default"},
+                 "worker_status" => %{
+                   "provider" => "codex",
+                   "model" => "default",
+                   "session_id" => "provider-session"
+                 },
+                 "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"},
+                 "exec.implement.transcript" => descriptor
+               }),
              completed_nodes: ["worker_message", "validate"],
              final_outcome: nil,
              taint: %{},
@@ -3009,19 +3312,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           {:ok,
            %{
              run_id: Keyword.fetch!(opts, :run_id),
-             context: %{
-               "status" => "validation_failed",
-               "worker_session_id" => "worker_transcript",
-               "worker_provider_session_id" => "provider-session",
-               "worker" => %{"provider" => "codex", "model" => "default"},
-               "worker_status" => %{
-                 "provider" => "codex",
-                 "model" => "default",
-                 "session_id" => "provider-session"
-               },
-               "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"},
-               "exec.implement.transcript" => descriptor
-             },
+             context:
+               Map.merge(default_verification_evidence(), %{
+                 "status" => "validation_failed",
+                 "worker_session_id" => "worker_transcript",
+                 "worker_provider_session_id" => "provider-session",
+                 "worker" => %{"provider" => "codex", "model" => "default"},
+                 "worker_status" => %{
+                   "provider" => "codex",
+                   "model" => "default",
+                   "session_id" => "provider-session"
+                 },
+                 "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"},
+                 "exec.implement.transcript" => descriptor
+               }),
              completed_nodes: ["worker_message", "validate"],
              final_outcome: nil,
              taint: %{},
@@ -3216,7 +3520,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  # PID/ref as list elements must drop the entire list field —
                  # never leave the atom/string "drop" in the payload.
                  "files" => ["lib/a.ex", self(), make_ref()],
-                 "validation" => [self(), %{"passed" => true}],
                  "review" => %{"recommendation" => "keep", "handle" => self()}
                })
 
@@ -3228,7 +3531,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute Map.has_key?(result, "callback")
       # Nested rich list elements drop the entire optional field.
       refute Map.has_key?(result, "files")
-      refute Map.has_key?(result, "validation")
       # Review map drops non-JSON keys but keeps clean siblings.
       assert result["review"] == %{"recommendation" => "keep"}
       assert result["review_recommendation"] == "keep"
@@ -3776,6 +4078,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert {:error, {:invalid_finalize_result, :outcome}} =
                CodingTaskExecutor.finalize_task("agent_1", forged, [], valid_context())
+    end
+
+    test "admits and persists the closed verification report result field" do
+      root = prepare_finalize_artifacts()
+      report = verification_report()
+      result = Map.put(finalize_result(root), "verification_report", report)
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", result, [], valid_context())
+
+      assert finalized["verification_report"] == report
+
+      evidence =
+        finalized["artifacts"]["task_evidence"]["path"]
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert evidence["verification_report"] == report
     end
 
     test "requires complete CrossApp capacity evidence and rejects status mismatches" do

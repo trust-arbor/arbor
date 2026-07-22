@@ -54,11 +54,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   alias Arbor.Common.SafePath
 
   alias Arbor.Contracts.Coding.{
-    Plan,
     BranchLifecycleDescriptor,
+    Plan,
     TaskEvidenceDescriptor,
     TranscriptDescriptor,
     ValidationCapacityHandoff,
+    VerificationReport,
     WorkspaceReleaseDescriptor
   }
 
@@ -68,6 +69,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   alias Arbor.Orchestrator.CodingPlan.{
     ActionCatalog,
     ArtifactStore,
+    CandidateVerificationCore,
     Compilation,
     ExecutionManifest,
     Normalizer,
@@ -191,6 +193,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     diff
     files
     validation
+    verification_report
     review
     review_recommendation
     tier_decision
@@ -954,6 +957,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   defp validate_finalize_optional_data(result) do
     with :ok <- validate_finalize_json_field(result, "validation", &is_list/1),
+         :ok <- validate_finalize_verification_report(result),
          :ok <- validate_finalize_json_field(result, "review", &is_map/1),
          :ok <-
            validate_finalize_descriptor_field(
@@ -962,6 +966,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              BranchLifecycleDescriptor
            ) do
       :ok
+    end
+  end
+
+  defp validate_finalize_verification_report(result) do
+    case Map.fetch(result, "verification_report") do
+      :error ->
+        :ok
+
+      {:ok, report} ->
+        if VerificationReport.valid?(report),
+          do: :ok,
+          else: {:error, {:invalid_finalize_field, "verification_report"}}
     end
   end
 
@@ -2103,17 +2119,92 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                  clean,
                  requested_model: requested_model,
                  worker_provider: worker_provider
-               ) do
+               ),
+             {:ok, verification_report} <-
+               adapt_terminal_verification(context, clean, status, legacy) do
           {:ok,
            clean
            |> build_coding_payload(status, legacy)
            |> Map.put("outcome", outcome)
+           |> maybe_put_verification_report(verification_report)
            |> maybe_put_validation_failure(engine_result)}
         else
           {:error, outcome} -> {:error, {:invalid_terminal_evidence, outcome}}
         end
     end
   end
+
+  defp adapt_terminal_verification(raw_context, clean_context, status, legacy_status) do
+    if terminal_validation_claimed?(raw_context, status) do
+      {public_status, canonical_status} = terminal_status_pair(status, legacy_status)
+
+      with {:ok, program} <-
+             fetch_verification_evidence(clean_context, "coding_plan_validation_program"),
+           {:ok, candidate_tree_oid} <-
+             fetch_verification_evidence(clean_context, "validation_candidate_tree_oid"),
+           {:ok, observed_at} <-
+             fetch_verification_evidence(clean_context, "validation_observed_at"),
+           {:ok, report} <-
+             CandidateVerificationCore.verify(
+               program,
+               candidate_tree_oid,
+               Map.get(clean_context, "validation"),
+               observed_at
+             ),
+           :ok <-
+             validate_terminal_verification_consistency(
+               public_status,
+               canonical_status,
+               report
+             ) do
+        {:ok, report}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp terminal_validation_claimed?(context, status) do
+    status in ~w(validation_failed validation_capacity_exceeded) or
+      Enum.any?(~w(validation validation_candidate_tree_oid validation_observed_at), fn key ->
+        is_map(context) and Map.has_key?(context, key)
+      end)
+  end
+
+  defp fetch_verification_evidence(context, key) do
+    case Map.fetch(context, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, {:missing_verification_evidence, key}}
+    end
+  end
+
+  defp validate_terminal_verification_consistency("validation_failed", _canonical_status, %{
+         "status" => report_status
+       })
+       when report_status in ~w(failed blocked),
+       do: :ok
+
+  defp validate_terminal_verification_consistency(
+         "validation_capacity_exceeded",
+         "validation_capacity_exceeded",
+         %{"status" => "blocked"}
+       ),
+       do: :ok
+
+  defp validate_terminal_verification_consistency(
+         _public_status,
+         _canonical_status,
+         %{"status" => "passed"}
+       ),
+       do: :ok
+
+  defp validate_terminal_verification_consistency(_public_status, _canonical_status, _report),
+    do: {:error, :verification_terminal_status_mismatch}
+
+  defp maybe_put_verification_report(payload, nil), do: payload
+
+  defp maybe_put_verification_report(payload, verification_report),
+    do: Map.put(payload, "verification_report", verification_report)
 
   defp maybe_put_validation_failure(
          %{"canonical_status" => "validation_failed"} = payload,
@@ -2429,15 +2520,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp maybe_put_metric(map, key, value), do: Map.put(map, key, value)
 
   defp build_coding_payload(context, status, legacy) do
-    {public_status, canonical_status} =
-      case {status, legacy} do
-        {"rework_exhausted", legacy_status}
-        when is_binary(legacy_status) and legacy_status != "" ->
-          {legacy_status, "rework_exhausted"}
-
-        {status, _} ->
-          {status, status}
-      end
+    {public_status, canonical_status} = terminal_status_pair(status, legacy)
 
     commit = context_get(context, "commit") || context_get(context, "commit_hash")
     commit_hash = context_get(context, "commit_hash") || commit
@@ -2487,6 +2570,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     |> Map.merge(workspace_release_projection(context))
     |> reject_nil_values()
   end
+
+  defp terminal_status_pair("rework_exhausted", legacy_status)
+       when is_binary(legacy_status) and legacy_status != "",
+       do: {legacy_status, "rework_exhausted"}
+
+  defp terminal_status_pair(status, _legacy_status), do: {status, status}
 
   defp pipeline_error_detail(context, engine_result, worker_provider, requested_model) do
     {:ok, outcome} =

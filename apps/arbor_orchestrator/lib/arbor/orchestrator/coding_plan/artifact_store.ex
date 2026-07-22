@@ -31,6 +31,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     diff
     files
     validation
+    verification_report
     review
     review_recommendation
     tier_decision
@@ -64,12 +65,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     ReconciliationManifest,
     TaskEvidenceDescriptor,
     ValidationCapacityHandoff,
+    VerificationReport,
     WorkspaceReleaseDescriptor
   }
 
+  alias Arbor.Orchestrator.CodingPlan.OutcomeMapper
   alias Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCore
   alias Arbor.Orchestrator.CodingPlan.TranscriptStore
-  alias Arbor.Orchestrator.CodingPlan.OutcomeMapper
 
   @typedoc "JSON-clean descriptor for an archived coding-plan compilation."
   @type descriptor :: %{required(String.t()) => String.t()}
@@ -116,6 +118,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          :ok <- validate_json_object(result, :invalid_terminal_result),
          :ok <- validate_terminal_result(result),
          {:ok, result} <- normalize_terminal_capacity(result),
+         {:ok, result} <- normalize_terminal_verification_report(result),
          {:ok, result} <- normalize_terminal_descriptors(result),
          {:ok, controls} <- TaskTerminalArchiveCore.validate_control_history(task_id, controls),
          {:ok, body} <- build_terminal_evidence(result, task_id, controls),
@@ -701,6 +704,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
 
   defp validate_terminal_optional_data(result) do
     with :ok <- validate_terminal_validation(Map.get(result, "validation")),
+         :ok <- validate_terminal_verification_report(result),
+         :ok <- validate_terminal_verification_consistency(result),
          :ok <- validate_terminal_review(Map.get(result, "review")),
          :ok <-
            validate_terminal_descriptor_field(
@@ -715,6 +720,60 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
              BranchLifecycleDescriptor
            ) do
       :ok
+    end
+  end
+
+  defp validate_terminal_verification_report(result) do
+    case Map.fetch(result, "verification_report") do
+      :error ->
+        :ok
+
+      {:ok, report} ->
+        if VerificationReport.valid?(report),
+          do: :ok,
+          else: {:error, {:invalid_terminal_field, "verification_report"}}
+    end
+  end
+
+  defp validate_terminal_verification_consistency(result) do
+    case Map.fetch(result, "verification_report") do
+      :error ->
+        :ok
+
+      {:ok, %{"status" => report_status}} ->
+        case {Map.get(result, "status"), Map.get(result, "canonical_status")} do
+          {"validation_failed", _canonical} when report_status in ~w(failed blocked) ->
+            :ok
+
+          {"validation_capacity_exceeded", "validation_capacity_exceeded"}
+          when report_status == "blocked" ->
+            :ok
+
+          {_public, _canonical} when report_status == "passed" ->
+            :ok
+
+          _other ->
+            {:error, {:invalid_terminal_result, :verification_status_mismatch}}
+        end
+
+      _other ->
+        {:error, {:invalid_terminal_result, :verification_status_mismatch}}
+    end
+  end
+
+  defp normalize_terminal_verification_report(result) do
+    case Map.fetch(result, "verification_report") do
+      :error ->
+        {:ok, result}
+
+      {:ok, report} ->
+        case VerificationReport.normalize(report) do
+          {:ok, normalized} ->
+            {:ok, Map.put(result, "verification_report", normalized)}
+
+          {:error, reason} ->
+            {:error, {:invalid_terminal_field, {"verification_report", reason}}}
+        end
     end
   end
 
@@ -953,6 +1012,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
       |> maybe_put_terminal_descriptor(
         "branch_lifecycle",
         get_in(result, ["artifacts", "branch_lifecycle"])
+      )
+      |> maybe_put_terminal_descriptor(
+        "verification_report",
+        Map.get(result, "verification_report")
       )
       |> maybe_put_terminal_candidate(result, task_id)
 
