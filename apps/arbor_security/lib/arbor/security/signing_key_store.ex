@@ -20,6 +20,7 @@ defmodule Arbor.Security.SigningKeyStore do
   """
 
   alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Contracts.Security.SigningAuthority.Validator, as: SigningAuthorityValidator
   alias Arbor.Security.Crypto
 
   require Logger
@@ -98,15 +99,12 @@ defmodule Arbor.Security.SigningKeyStore do
           | {:error,
              :invalid_principal | :store_unavailable | :no_signing_key | :invalid_key_material}
   def status(agent_id) do
-    cond do
-      not valid_principal?(agent_id) ->
+    case SigningAuthorityValidator.validate_principal_id(agent_id) do
+      {:error, _reason} ->
         {:error, :invalid_principal}
 
-      not available?() ->
-        {:error, :store_unavailable}
-
-      true ->
-        read_status(agent_id)
+      :ok ->
+        if available?(), do: read_status(agent_id), else: {:error, :store_unavailable}
     end
   end
 
@@ -239,46 +237,36 @@ defmodule Arbor.Security.SigningKeyStore do
   end
 
   defp get_read_only_encryption_key do
-    with {:ok, master_key} <- read_master_key() do
+    with {:ok, master_key} <- read_master_key(master_key_path()) do
       {:ok, Crypto.derive_key(master_key, @key_derivation_info, 32)}
-    end
-  end
-
-  defp read_master_key do
-    case File.read(master_key_path()) do
-      {:ok, <<key::binary-size(32)>>} ->
-        {:ok, key}
-
-      {:ok, hex} when is_binary(hex) ->
-        case Base.decode16(hex, case: :mixed) do
-          {:ok, key} when byte_size(key) == 32 -> {:ok, key}
-          _ -> {:error, :invalid_master_key}
-        end
-
-      {:error, _reason} ->
-        {:error, :master_key_unavailable}
     end
   end
 
   defp ensure_master_key do
     path = master_key_path()
 
-    case File.read(path) do
-      {:ok, <<key::binary-size(32)>>} ->
-        {:ok, key}
-
-      {:ok, hex} when is_binary(hex) ->
-        # Support hex-encoded master key
-        case Base.decode16(hex, case: :mixed) do
-          {:ok, key} when byte_size(key) == 32 -> {:ok, key}
-          _ -> {:error, :invalid_master_key}
-        end
-
-      {:error, :enoent} ->
+    case read_master_key(path) do
+      {:error, {:master_key_read_failed, :enoent}} ->
         generate_master_key(path)
 
-      {:error, reason} ->
-        {:error, {:master_key_read_failed, reason}}
+      result ->
+        result
+    end
+  end
+
+  defp read_master_key(path) do
+    case File.read(path) do
+      {:ok, encoded_key} -> parse_master_key(encoded_key)
+      {:error, reason} -> {:error, {:master_key_read_failed, reason}}
+    end
+  end
+
+  defp parse_master_key(<<key::binary-size(32)>>), do: {:ok, key}
+
+  defp parse_master_key(hex) when is_binary(hex) do
+    case Base.decode16(hex, case: :mixed) do
+      {:ok, key} when byte_size(key) == 32 -> {:ok, key}
+      _ -> {:error, :invalid_master_key}
     end
   end
 
@@ -403,12 +391,4 @@ defmodule Arbor.Security.SigningKeyStore do
        do: :ok
 
   defp validate_signing_key(_signing_key), do: {:error, :invalid_key_material}
-
-  defp valid_principal?(agent_id) when is_binary(agent_id) do
-    byte_size(agent_id) in 1..256 and
-      (agent_id == "system_authority" or
-         String.match?(agent_id, ~r/\A(?:agent_|human_)[A-Za-z0-9_-]+\z/))
-  end
-
-  defp valid_principal?(_agent_id), do: false
 end

@@ -57,6 +57,12 @@ defmodule Arbor.Security.SigningKeyStoreTest do
     test "rejects invalid principal input" do
       assert {:error, :invalid_principal} = Security.signing_key_status(nil)
       assert {:error, :invalid_principal} = Security.signing_key_status("")
+      assert {:error, :invalid_principal} = Security.signing_key_status("system_authority")
+    end
+
+    test "uses the signing-authority principal contract without a narrower local grammar" do
+      assert {:error, :no_signing_key} =
+               Security.signing_key_status("agent_contract.accepted/by-validator")
     end
 
     test "reports malformed encrypted material without exposing storage errors" do
@@ -78,13 +84,14 @@ defmodule Arbor.Security.SigningKeyStoreTest do
       assert {:error, :invalid_key_material} = Security.signing_key_status(@test_agent_id)
     end
 
-    test "does not create a master key while checking a missing signing key" do
+    test "does not create a missing master key while checking an encrypted signing record" do
       base =
         Path.join(System.tmp_dir!(), "arbor_signing_status_#{System.unique_integer([:positive])}")
 
-      keypath = Path.join([base, "security", "master.key"])
+      existing_keypath = Path.join([base, "existing", "master.key"])
+      missing_keypath = Path.join([base, "missing", "master.key"])
       previous = Application.get_env(:arbor_security, :master_key_path)
-      Application.put_env(:arbor_security, :master_key_path, keypath)
+      Application.put_env(:arbor_security, :master_key_path, existing_keypath)
 
       on_exit(fn ->
         File.rm_rf(base)
@@ -95,8 +102,14 @@ defmodule Arbor.Security.SigningKeyStoreTest do
         end
       end)
 
-      assert {:error, :no_signing_key} = Security.signing_key_status(@test_agent_id)
-      refute File.exists?(keypath)
+      {_pub, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+      assert :ok = SigningKeyStore.put(@test_agent_id, private_key)
+      assert File.exists?(existing_keypath)
+
+      Application.put_env(:arbor_security, :master_key_path, missing_keypath)
+
+      assert {:error, :invalid_key_material} = Security.signing_key_status(@test_agent_id)
+      refute File.exists?(missing_keypath)
     end
   end
 
