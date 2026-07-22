@@ -7,7 +7,8 @@ defmodule Arbor.LLM.OAuthTest do
   @env_keys [
     :oauth_store_dir,
     :oauth_refresh_fun,
-    :oauth_cli_files
+    :oauth_cli_files,
+    :oauth_source_files
   ]
 
   setup do
@@ -27,6 +28,7 @@ defmodule Arbor.LLM.OAuthTest do
     Application.put_env(:arbor_llm, :oauth_store_dir, store_dir)
     Application.delete_env(:arbor_llm, :oauth_refresh_fun)
     Application.delete_env(:arbor_llm, :oauth_cli_files)
+    Application.delete_env(:arbor_llm, :oauth_source_files)
 
     on_exit(fn ->
       Enum.each(prior, fn
@@ -116,30 +118,111 @@ defmodule Arbor.LLM.OAuthTest do
       assert File.read!(path) == legacy_bytes
     end
 
-    test "security regression: source-owned mode is explicit but unsupported and never refreshes",
+    test "security regression: explicit OpenAI source ownership reads through without modifying source",
          %{store_dir: store_dir} do
-      path =
-        write_envelope!(store_dir, :openai, %{
-          "version" => 1,
-          "provider" => "openai",
-          "account_id" => "acct_source",
-          "origin" => "external_cli",
-          "owner" => "source_owned",
-          "source" => "codex_file",
-          "generation" => 3,
-          "tokens" => %{}
-        })
-
-      before = File.read!(path)
+      source_path = Path.join(store_dir, "codex-auth.json")
+      source_bytes = write_codex_source!(source_path, "source-access", "source-refresh-secret")
+      write_envelope!(store_dir, :openai, source_envelope(:openai, "acct_source"))
+      Application.put_env(:arbor_llm, :oauth_source_files, %{openai: source_path})
 
       Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
         flunk("source-owned mode must not touch a refresh token")
       end)
 
-      assert {:error, :oauth_source_owned_unsupported} = OAuth.access_token(:openai)
-      assert {:error, :oauth_source_owned_unsupported} = OAuth.provenance(:openai)
-      refute OAuth.configured?(:openai)
+      assert {:ok, receipt} = OAuth.credential_receipt(:openai)
+      assert receipt.access_token == "source-access"
+      assert receipt.account_id == "acct_source"
+      assert receipt.owner == "source_owned"
+      refute inspect(receipt) =~ "source-access"
+      refute inspect(receipt) =~ "source-refresh-secret"
+      assert {:ok, "source-access"} = OAuth.access_token(:openai)
+      assert OAuth.configured?(:openai)
+
+      client =
+        Arbor.LLM.Client.from_env(
+          adapters: %{"dummy" => Arbor.LLM.Adapter.OAuthResponses},
+          discover_local: false,
+          discover_acp: false,
+          discover_oauth: true
+        )
+
+      assert Map.has_key?(client.adapters, "openai_oauth")
+      assert File.read!(source_path) == source_bytes
+    end
+
+    test "security regression: xAI source ownership remains explicitly unsupported",
+         %{store_dir: store_dir} do
+      path = write_envelope!(store_dir, :xai, source_envelope(:xai, nil))
+      before = File.read!(path)
+
+      assert {:error, :oauth_source_owned_unsupported} = OAuth.credential_receipt(:xai)
+      assert {:error, :oauth_source_owned_unsupported} = OAuth.access_token(:xai)
+      assert {:error, :oauth_source_owned_unsupported} = OAuth.provenance(:xai)
+      refute OAuth.configured?(:xai)
       assert File.read!(path) == before
+    end
+
+    test "security regression: unchanged source reread does not produce a retry receipt",
+         %{store_dir: store_dir} do
+      source_path = Path.join(store_dir, "codex-auth.json")
+      write_codex_source!(source_path, "same-access", "never-forward-refresh")
+      write_envelope!(store_dir, :openai, source_envelope(:openai, "acct_source"))
+      Application.put_env(:arbor_llm, :oauth_source_files, %{openai: source_path})
+
+      assert {:ok, used} = OAuth.credential_receipt(:openai)
+      assert {:error, :oauth_source_token_unchanged} = OAuth.reread_source_credential(used)
+
+      write_codex_source!(source_path, "changed-access", "changed-refresh-never-forward")
+      assert {:ok, latest} = OAuth.reread_source_credential(used)
+      assert latest.access_token == "changed-access"
+      refute inspect(latest) =~ "changed-access"
+      refute inspect(latest) =~ "changed-refresh-never-forward"
+    end
+
+    test "security regression: source provenance is bounded and contains no token material",
+         %{store_dir: store_dir} do
+      source_path = Path.join(store_dir, "codex-auth.json")
+      write_codex_source!(source_path, "provenance-access", "provenance-refresh")
+      write_envelope!(store_dir, :openai, source_envelope(:openai, "acct_source", 17))
+      Application.put_env(:arbor_llm, :oauth_source_files, %{openai: source_path})
+
+      assert {:ok, provenance} = OAuth.provenance(:openai)
+      public = Arbor.Contracts.LLM.AuthProvenance.to_map(provenance)
+      rendered = inspect(public)
+
+      assert public["owner"] == "source_owned"
+      assert public["origin"] == "external_cli"
+      assert public["source"] == "codex_file"
+      assert public["generation"] == 17
+      assert is_integer(public["source_generation"])
+      assert is_binary(public["source_observed_at"])
+      assert byte_size(rendered) < 1_024
+      refute rendered =~ "provenance-access"
+      refute rendered =~ "provenance-refresh"
+      refute rendered =~ "token_hash"
+    end
+
+    test "security regression: source reads reject symlink, malformed, oversized, and mismatched files",
+         %{store_dir: store_dir} do
+      source_path = Path.join(store_dir, "codex-auth.json")
+      write_envelope!(store_dir, :openai, source_envelope(:openai, "acct_source"))
+      Application.put_env(:arbor_llm, :oauth_source_files, %{openai: source_path})
+
+      target = Path.join(store_dir, "codex-target.json")
+      write_codex_source!(target, "target-access", "target-refresh")
+      File.ln_s!(target, source_path)
+      assert {:error, :oauth_source_file_symlink} = OAuth.credential_receipt(:openai)
+      refute OAuth.configured?(:openai)
+
+      File.rm!(source_path)
+      File.write!(source_path, "{")
+      assert {:error, :oauth_source_credential_invalid} = OAuth.credential_receipt(:openai)
+
+      File.write!(source_path, String.duplicate("x", 1_048_577))
+      assert {:error, :oauth_source_file_oversized} = OAuth.credential_receipt(:openai)
+
+      write_codex_source!(source_path, "other-access", "other-refresh", "acct_other")
+      assert {:error, :oauth_source_credential_invalid} = OAuth.credential_receipt(:openai)
     end
 
     test "security regression: adapter discovery refuses raw stores and CLI-file presence",
@@ -153,6 +236,10 @@ defmodule Arbor.LLM.OAuthTest do
       File.write!(cli_path, Jason.encode!(%{"tokens" => %{"refresh_token" => "cli-secret"}}))
       Application.put_env(:arbor_llm, :oauth_cli_files, %{openai: cli_path})
 
+      source_path = Path.join(store_dir, "codex-auth.json")
+      source_bytes = write_codex_source!(source_path, "source-access", "source-refresh")
+      Application.put_env(:arbor_llm, :oauth_source_files, %{openai: source_path})
+
       client =
         Arbor.LLM.Client.from_env(
           adapters: %{"dummy" => Arbor.LLM.Adapter.OAuthResponses},
@@ -163,6 +250,7 @@ defmodule Arbor.LLM.OAuthTest do
 
       refute Map.has_key?(client.adapters, "openai_oauth")
       refute Map.has_key?(client.adapters, "xai_oauth")
+      assert File.read!(source_path) == source_bytes
     end
 
     test "security regression: public provenance is bounded and never contains tokens", %{
@@ -712,6 +800,41 @@ defmodule Arbor.LLM.OAuthTest do
       "generation" => Keyword.get(opts, :generation, 0),
       "tokens" => tokens
     }
+  end
+
+  defp source_envelope(provider, account_id, generation \\ 3) do
+    {source, account_id} =
+      case provider do
+        :openai -> {"codex_file", account_id}
+        :xai -> {"grok_file", account_id}
+      end
+
+    %{
+      "version" => 1,
+      "provider" => Atom.to_string(provider),
+      "account_id" => account_id,
+      "origin" => "external_cli",
+      "owner" => "source_owned",
+      "source" => source,
+      "generation" => generation,
+      "tokens" => %{}
+    }
+  end
+
+  defp write_codex_source!(path, access_token, refresh_token, account_id \\ "acct_source") do
+    bytes =
+      Jason.encode!(%{
+        "tokens" => %{
+          "access_token" => access_token,
+          "refresh_token" => refresh_token,
+          "account_id" => account_id,
+          "id_token" => "ignored-id-token"
+        },
+        "last_refresh" => "2026-07-22T00:00:00Z"
+      })
+
+    File.write!(path, bytes)
+    bytes
   end
 
   # Temps are ".#{key}....tmp". Plain "*.tmp" skips leading-dot names; use ".*.tmp"

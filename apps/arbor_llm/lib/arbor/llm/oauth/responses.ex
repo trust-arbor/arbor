@@ -13,6 +13,7 @@ defmodule Arbor.LLM.OAuth.Responses do
   """
 
   alias Arbor.LLM.{Deadline, Endpoint, OAuth, ResponseBudget}
+  alias Arbor.LLM.OAuth.CredentialReceipt
 
   @max_response_bytes 16_777_216
   @max_events 100_000
@@ -56,12 +57,46 @@ defmodule Arbor.LLM.OAuth.Responses do
   defp do_complete(provider, req, opts, limits) do
     with :ok <- ResponseBudget.validate(req, request_limits()),
          {:ok, key} <- provider_key(provider),
-         {:ok, token} <- OAuth.access_token(provider) do
+         {:ok, credential} <- OAuth.credential_receipt(provider) do
       sid = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
       body = build_body(Keyword.get(opts, :model) || @default_models[key], req)
 
-      request_sse(@endpoints[key], headers(key, token, sid), body, limits)
+      request_with_credential(key, credential, sid, body, limits)
     end
+  end
+
+  defp request_with_credential(key, credential, sid, body, limits) do
+    result = request_sse(response_endpoint(key), headers(key, credential, sid), body, limits)
+
+    case {result, credential} do
+      {{:error, {:responses_http, 401, :redacted}},
+       %CredentialReceipt{provider: :openai, owner: "source_owned"} = used} ->
+        retry_source_once(key, used, sid, body, limits)
+
+      _ ->
+        result
+    end
+  end
+
+  defp retry_source_once(key, used, sid, body, limits) do
+    with {:ok, latest} <- OAuth.reread_source_credential(used) do
+      case request_sse(response_endpoint(key), headers(key, latest, sid), body, limits) do
+        {:error, {:responses_http, 401, :redacted}} ->
+          {:error, :oauth_source_reauthentication_required}
+
+        result ->
+          result
+      end
+    else
+      {:error, _reason} -> {:error, :oauth_source_reauthentication_required}
+    end
+  end
+
+  defp response_endpoint(key) do
+    case Application.get_env(:arbor_llm, :oauth_response_endpoints) do
+      %{} = configured -> Map.get(configured, key) || Map.get(configured, Atom.to_string(key))
+      _ -> nil
+    end || @endpoints[key]
   end
 
   @doc false
@@ -170,19 +205,19 @@ defmodule Arbor.LLM.OAuth.Responses do
   end
 
   # Codex backend needs the Cloudflare-whitelisting headers + account-id (else 403); xAI a conv-id.
-  defp headers(:openai, token, sid) do
+  defp headers(:openai, %CredentialReceipt{} = credential, sid) do
     [
-      {"authorization", "Bearer " <> token},
+      {"authorization", "Bearer " <> credential.access_token},
       {"user-agent", "codex_cli_rs/0.0.0 (Arbor)"},
       {"originator", "codex_cli_rs"},
-      {"chatgpt-account-id", OAuth.account_id(:openai) || ""},
+      {"chatgpt-account-id", credential.account_id || ""},
       {"session_id", sid},
       {"x-client-request-id", sid}
     ]
   end
 
-  defp headers(:xai, token, sid) do
-    [{"authorization", "Bearer " <> token}, {"x-grok-conv-id", sid}]
+  defp headers(:xai, %CredentialReceipt{} = credential, sid) do
+    [{"authorization", "Bearer " <> credential.access_token}, {"x-grok-conv-id", sid}]
   end
 
   @doc false

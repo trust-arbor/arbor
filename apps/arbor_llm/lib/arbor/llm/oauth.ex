@@ -1,3 +1,37 @@
+defmodule Arbor.LLM.OAuth.CredentialReceipt do
+  @moduledoc false
+
+  @derive {Inspect,
+           only: [
+             :provider,
+             :owner,
+             :account_id,
+             :generation,
+             :source_generation,
+             :source_observed_at
+           ]}
+  @enforce_keys [:provider, :owner, :access_token, :account_id, :generation]
+  defstruct [
+    :provider,
+    :owner,
+    :access_token,
+    :account_id,
+    :generation,
+    :source_generation,
+    :source_observed_at
+  ]
+
+  @type t :: %__MODULE__{
+          provider: :openai | :xai,
+          owner: String.t(),
+          access_token: String.t(),
+          account_id: String.t() | nil,
+          generation: non_neg_integer(),
+          source_generation: non_neg_integer() | nil,
+          source_observed_at: String.t() | nil
+        }
+end
+
 defmodule Arbor.LLM.OAuth do
   @moduledoc """
   Subscription OAuth token access for LLM providers that authenticate against their SUBSCRIPTION
@@ -7,10 +41,10 @@ defmodule Arbor.LLM.OAuth do
   (`~/.arbor/oauth/<provider>.json`, 0600). Only an explicitly Arbor-owned family acquired by an
   Arbor login may be refreshed or published. Legacy ownerless stores are intentionally refused and
   left byte-for-byte unchanged; operators must relogin once an independent Arbor login flow exists.
-  Codex/Grok CLI credentials are never imported, copied, refreshed, or modified.
-
-  Source-owned envelopes are reserved for a future access-token read-through implementation and
-  currently fail explicitly. This module does not provide an OAuth login/device flow.
+  Codex/Grok CLI credentials are never imported, copied, refreshed, or modified. An explicitly
+  source-owned OpenAI envelope may read through one configured Codex file for its current access
+  token and matching account ID. The source refresh token is never retained or submitted. xAI
+  source ownership remains unsupported because Grok currently exposes only a refresh token.
 
   Concurrent in-process refresh is single-flighted per provider via a `:global` transaction.
   Successful rotating refreshes fail closed unless the full envelope is durably published with
@@ -27,6 +61,7 @@ defmodule Arbor.LLM.OAuth do
   """
 
   alias Arbor.LLM.{Deadline, Endpoint, ResponseBudget}
+  alias Arbor.LLM.OAuth.CredentialReceipt
   alias Arbor.Contracts.LLM.AuthProvenance
 
   @max_oauth_response_bytes 1_048_576
@@ -35,12 +70,15 @@ defmodule Arbor.LLM.OAuth do
   @max_token_json_bytes 1_048_576
   @max_account_id_bytes 512
   @max_generation 1_000_000_000_000
+  @max_source_path_bytes 4_096
+  @source_generation_range 4_294_967_295
   @credential_version 1
   @credential_fields ~w(version provider account_id origin owner source generation tokens)
   @token_fields ~w(access_token refresh_token)
   # Cover one concurrent refresh (~20s) plus margin; lock is released on owner death.
   @refresh_lock_retries 20
   @default_store_dir "~/.arbor/oauth"
+  @default_openai_source_file "~/.codex/auth.json"
 
   # Keep the "*_oauth" provider atoms alive so callers that String.to_existing_atom a provider
   # string (e.g. the eval runner's normalize_provider) can resolve "openai_oauth"/"xai_oauth".
@@ -70,46 +108,65 @@ defmodule Arbor.LLM.OAuth do
   """
   @spec access_token(atom() | String.t()) :: {:ok, String.t()} | {:error, term()}
   def access_token(provider) do
-    with {:ok, key, config} <- resolve(provider),
-         {:ok, credential} <- read_credential(key) do
-      case credential.owner do
-        "arbor_owned" ->
-          case usable_access_token(credential.tokens, config) do
-            {:ok, token} -> {:ok, token}
-            :refresh -> refresh_singleflight(key, config)
-          end
-
-        "source_owned" ->
-          {:error, :oauth_source_owned_unsupported}
-      end
-    end
+    with {:ok, receipt} <- credential_receipt(provider), do: {:ok, receipt.access_token}
   end
 
-  @doc "The ChatGPT-Account-ID header value for OpenAI (from the token file). nil otherwise."
+  @doc "The ChatGPT-Account-ID value for OpenAI. Prefer `credential_receipt/1` for requests."
   @spec account_id(atom() | String.t()) :: String.t() | nil
   def account_id(provider) do
     with {:ok, :openai, _config} <- resolve(provider),
-         {:ok, %{owner: "arbor_owned", account_id: account_id}} <- read_credential(:openai) do
-      account_id
+         {:ok, credential} <- read_credential(:openai) do
+      case credential.owner do
+        "arbor_owned" -> credential.account_id
+        "source_owned" -> source_account_id(credential)
+      end
     else
       _ -> nil
     end
   end
+
+  @doc false
+  @spec credential_receipt(atom() | String.t()) ::
+          {:ok, CredentialReceipt.t()} | {:error, term()}
+  def credential_receipt(provider) do
+    with {:ok, key, config} <- resolve(provider),
+         {:ok, credential} <- read_credential(key) do
+      credential_receipt(key, config, credential)
+    end
+  end
+
+  @doc false
+  @spec reread_source_credential(CredentialReceipt.t()) ::
+          {:ok, CredentialReceipt.t()} | {:error, atom()}
+  def reread_source_credential(
+        %CredentialReceipt{provider: :openai, owner: "source_owned"} = used
+      ) do
+    source_reread_singleflight(used)
+  end
+
+  def reread_source_credential(%CredentialReceipt{}),
+    do: {:error, :oauth_source_owned_unsupported}
+
+  def reread_source_credential(_receipt), do: {:error, :oauth_source_receipt_invalid}
 
   @doc "Whether `provider` has a usable subscription-OAuth token on disk (and isn't Anthropic)."
   @spec available?(atom() | String.t()) :: boolean()
   def available?(provider), do: match?({:ok, _}, access_token(provider))
 
   @doc """
-  Whether `provider` has a valid Arbor-owned credential envelope — no refresh and no network.
-  Legacy/raw stores, CLI files, malformed envelopes, and unsupported source-owned mode do not make
-  an adapter discoverable. Anthropic is refused.
+  Whether `provider` has a usable explicitly owned credential mode — no refresh and no network.
+  Source-owned OpenAI additionally requires a currently readable valid Codex source. Legacy/raw
+  stores, source-file presence alone, malformed inputs, and xAI source ownership are not ready.
   """
   @spec configured?(atom() | String.t()) :: boolean()
   def configured?(provider) do
     case resolve(provider) do
-      {:ok, key, _config} ->
-        match?({:ok, %{owner: "arbor_owned"}}, read_credential(key))
+      {:ok, key, config} ->
+        with {:ok, credential} <- read_credential(key) do
+          configured_credential?(key, config, credential)
+        else
+          _ -> false
+        end
 
       _ ->
         false
@@ -119,25 +176,25 @@ defmodule Arbor.LLM.OAuth do
   @doc "Return bounded public ownership provenance without credential material."
   @spec provenance(atom() | String.t()) :: {:ok, AuthProvenance.t()} | {:error, term()}
   def provenance(provider) do
-    with {:ok, key, _config} <- resolve(provider),
+    with {:ok, key, config} <- resolve(provider),
          {:ok, credential} <- read_credential(key),
-         :ok <- provenance_supported?(credential.owner),
+         {:ok, account_id, source_generation, source_observed_at} <-
+           provenance_fields(key, config, credential),
          {:ok, provenance} <-
            AuthProvenance.new(%{
              version: AuthProvenance.schema_version(),
              provider: credential.provider,
-             account_id: credential.account_id,
+             account_id: account_id,
              origin: credential.origin,
              owner: credential.owner,
              source: credential.source,
-             generation: credential.generation
+             generation: credential.generation,
+             source_generation: source_generation,
+             source_observed_at: source_observed_at
            }) do
       {:ok, provenance}
     end
   end
-
-  defp provenance_supported?("arbor_owned"), do: :ok
-  defp provenance_supported?("source_owned"), do: {:error, :oauth_source_owned_unsupported}
 
   # ── internals ──
 
@@ -319,6 +376,263 @@ defmodule Arbor.LLM.OAuth do
   end
 
   defp store_path(key), do: Path.join(store_dir(), "#{key}.json")
+
+  defp credential_receipt(key, config, %{owner: "arbor_owned"} = credential) do
+    case usable_access_token(credential.tokens, config) do
+      {:ok, token} ->
+        {:ok, arbor_receipt(key, credential, token)}
+
+      :refresh ->
+        with {:ok, token} <- refresh_singleflight(key, config),
+             {:ok, %{owner: "arbor_owned"} = latest} <- read_credential(key),
+             ^token <- latest.tokens["access_token"] do
+          {:ok, arbor_receipt(key, latest, token)}
+        else
+          {:error, _reason} = error -> error
+          _ -> {:error, :oauth_token_store_changed_after_refresh}
+        end
+    end
+  end
+
+  defp credential_receipt(:openai, _config, %{owner: "source_owned"} = credential),
+    do: read_openai_source_receipt(credential)
+
+  defp credential_receipt(:xai, _config, %{owner: "source_owned"}),
+    do: {:error, :oauth_source_owned_unsupported}
+
+  defp source_account_id(credential) do
+    case read_openai_source_receipt(credential) do
+      {:ok, receipt} -> receipt.account_id
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp configured_credential?(_key, _config, %{owner: "arbor_owned"}), do: true
+
+  defp configured_credential?(:openai, _config, %{owner: "source_owned"} = credential),
+    do: match?({:ok, %CredentialReceipt{}}, read_openai_source_receipt(credential))
+
+  defp configured_credential?(:xai, _config, %{owner: "source_owned"}), do: false
+
+  defp provenance_fields(_key, _config, %{owner: "arbor_owned"} = credential),
+    do: {:ok, credential.account_id, nil, nil}
+
+  defp provenance_fields(:openai, _config, %{owner: "source_owned"} = credential) do
+    with {:ok, receipt} <- read_openai_source_receipt(credential) do
+      {:ok, receipt.account_id, receipt.source_generation, receipt.source_observed_at}
+    end
+  end
+
+  defp provenance_fields(:xai, _config, %{owner: "source_owned"}),
+    do: {:error, :oauth_source_owned_unsupported}
+
+  defp arbor_receipt(key, credential, token) do
+    %CredentialReceipt{
+      provider: key,
+      owner: "arbor_owned",
+      access_token: token,
+      account_id: credential.account_id,
+      generation: credential.generation,
+      source_generation: nil,
+      source_observed_at: nil
+    }
+  end
+
+  defp source_reread_singleflight(%CredentialReceipt{} = used) do
+    # This serializes Arbor rereads in-process; it does not coordinate with the Codex writer.
+    id = {{__MODULE__, :source_reread, used.provider}, self()}
+    nodes = [node() | Node.list()]
+
+    case :global.trans(
+           id,
+           fn -> reread_source_under_lock(used) end,
+           nodes,
+           @refresh_lock_retries
+         ) do
+      :aborted -> {:error, :oauth_source_reread_lock_aborted}
+      result -> result
+    end
+  end
+
+  defp reread_source_under_lock(%CredentialReceipt{provider: :openai} = used) do
+    with {:ok, %{owner: "source_owned"} = credential} <- read_credential(:openai),
+         true <- credential.generation == used.generation,
+         {:ok, latest} <- read_openai_source_receipt(credential),
+         false <- latest.access_token == used.access_token do
+      {:ok, latest}
+    else
+      true -> {:error, :oauth_source_token_unchanged}
+      false -> {:error, :oauth_source_configuration_changed}
+      {:ok, _other_owner} -> {:error, :oauth_source_configuration_changed}
+      {:error, _reason} -> {:error, :oauth_source_reauthentication_required}
+    end
+  end
+
+  defp read_openai_source_receipt(credential) do
+    with {:ok, source_path} <- source_path(:openai),
+         {:ok, body, stat} <- read_regular_source_file(source_path),
+         {:ok, json} <- ResponseBudget.decode_json(body, @token_json_limits),
+         %{"tokens" => %{} = tokens} <- json,
+         {:ok, access_token} <- validate_token(tokens["access_token"], @max_access_token_bytes),
+         {:ok, account_id} <- validate_account_id(:openai, tokens["account_id"]),
+         true <- account_id == credential.account_id do
+      {:ok,
+       %CredentialReceipt{
+         provider: :openai,
+         owner: "source_owned",
+         access_token: access_token,
+         account_id: account_id,
+         generation: credential.generation,
+         source_generation: source_generation(stat),
+         source_observed_at: DateTime.utc_now() |> DateTime.to_iso8601()
+       }}
+    else
+      {:error, reason}
+      when reason in [
+             :oauth_source_path_invalid,
+             :oauth_source_file_unreadable,
+             :oauth_source_file_symlink,
+             :oauth_source_file_not_regular,
+             :oauth_source_file_oversized,
+             :oauth_source_file_changed
+           ] ->
+        {:error, reason}
+
+      _ ->
+        {:error, :oauth_source_credential_invalid}
+    end
+  end
+
+  defp source_path(:openai) do
+    configured = Application.get_env(:arbor_llm, :oauth_source_files, %{})
+
+    value =
+      case configured do
+        %{} -> Map.get(configured, :openai) || Map.get(configured, "openai")
+        _ -> nil
+      end
+
+    path = value || @default_openai_source_file
+
+    if is_binary(path) and byte_size(path) > 0 and byte_size(path) <= @max_source_path_bytes and
+         String.valid?(path) and not String.match?(path, ~r/[\x00-\x1F\x7F]/) do
+      {:ok, Path.expand(path)}
+    else
+      {:error, :oauth_source_path_invalid}
+    end
+  rescue
+    _exception -> {:error, :oauth_source_path_invalid}
+  catch
+    _kind, _reason -> {:error, :oauth_source_path_invalid}
+  end
+
+  defp read_regular_source_file(path) do
+    with {:ok, before} <- regular_path_stat(path) do
+      read_opened_source_file(path, before)
+    end
+  end
+
+  defp read_opened_source_file(path, before) do
+    case :file.open(path, [:raw, :binary, :read]) do
+      {:ok, io} ->
+        try do
+          with {:ok, opened} <- handle_stat(io),
+               true <- stable_file_identity?(before, opened),
+               {:ok, opened_path} <- regular_path_stat(path),
+               true <- stable_file_identity?(opened, opened_path),
+               {:ok, body} <- read_bounded_source(io),
+               {:ok, after_read} <- handle_stat(io),
+               true <- stable_file_identity?(opened, after_read),
+               {:ok, after_path} <- regular_path_stat(path),
+               true <- stable_file_identity?(after_read, after_path) do
+            {:ok, body, opened}
+          else
+            {:error, reason} -> {:error, reason}
+            false -> {:error, :oauth_source_file_changed}
+          end
+        after
+          _ = :file.close(io)
+        end
+
+      {:error, _reason} ->
+        {:error, :oauth_source_file_unreadable}
+    end
+  rescue
+    _exception -> {:error, :oauth_source_file_unreadable}
+  catch
+    _kind, _reason -> {:error, :oauth_source_file_unreadable}
+  end
+
+  defp regular_path_stat(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %{type: :symlink}} ->
+        {:error, :oauth_source_file_symlink}
+
+      {:ok, %{type: :regular, size: size} = stat} when size <= @max_token_json_bytes ->
+        {:ok, stat}
+
+      {:ok, %{type: :regular}} ->
+        {:error, :oauth_source_file_oversized}
+
+      {:ok, _stat} ->
+        {:error, :oauth_source_file_not_regular}
+
+      {:error, _reason} ->
+        {:error, :oauth_source_file_unreadable}
+    end
+  end
+
+  defp handle_stat(io) do
+    case :file.read_file_info(io, time: :posix) do
+      {:ok, record} ->
+        case File.Stat.from_record(record) do
+          %{type: :regular, size: size} = stat when size <= @max_token_json_bytes ->
+            {:ok, stat}
+
+          %{type: :regular} ->
+            {:error, :oauth_source_file_oversized}
+
+          _stat ->
+            {:error, :oauth_source_file_not_regular}
+        end
+
+      {:error, _reason} ->
+        {:error, :oauth_source_file_unreadable}
+    end
+  end
+
+  defp read_bounded_source(io) do
+    case :file.read(io, @max_token_json_bytes + 1) do
+      {:ok, body} when byte_size(body) > @max_token_json_bytes ->
+        {:error, :oauth_source_file_oversized}
+
+      {:ok, body} ->
+        case :file.read(io, 1) do
+          :eof -> {:ok, body}
+          {:ok, _more} -> {:error, :oauth_source_file_oversized}
+          {:error, _reason} -> {:error, :oauth_source_file_unreadable}
+        end
+
+      :eof ->
+        {:ok, ""}
+
+      {:error, _reason} ->
+        {:error, :oauth_source_file_unreadable}
+    end
+  end
+
+  defp stable_file_identity?(left, right) do
+    left.type == :regular and right.type == :regular and
+      left.major_device == right.major_device and left.inode == right.inode and
+      left.size == right.size and left.mtime == right.mtime and left.ctime == right.ctime
+  end
+
+  defp source_generation(stat) do
+    :erlang.phash2(
+      {stat.major_device, stat.inode, stat.size, stat.mtime, stat.ctime},
+      @source_generation_range
+    )
+  end
 
   defp usable_access_token(tokens, config) when is_map(tokens) do
     cached = tokens["access_token"]

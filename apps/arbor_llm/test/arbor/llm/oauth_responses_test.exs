@@ -5,16 +5,39 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
 
   alias Arbor.LLM.OAuth.Responses
 
+  @env_keys [
+    :oauth_store_dir,
+    :oauth_source_files,
+    :oauth_response_endpoints,
+    :oauth_refresh_fun,
+    :trusted_oauth_response_endpoints
+  ]
+
   setup do
-    original = Application.get_env(:arbor_llm, :trusted_oauth_response_endpoints)
+    original = Map.new(@env_keys, &{&1, Application.fetch_env(:arbor_llm, &1)})
+
+    root =
+      Path.join(System.tmp_dir!(), "arbor-oauth-responses-#{System.unique_integer([:positive])}")
+
+    store_dir = Path.join(root, "oauth")
+    File.mkdir_p!(store_dir)
+
+    Application.put_env(:arbor_llm, :oauth_store_dir, store_dir)
+    Application.delete_env(:arbor_llm, :oauth_source_files)
+    Application.delete_env(:arbor_llm, :oauth_response_endpoints)
+    Application.delete_env(:arbor_llm, :oauth_refresh_fun)
+    Application.delete_env(:arbor_llm, :trusted_oauth_response_endpoints)
 
     on_exit(fn ->
-      if is_nil(original),
-        do: Application.delete_env(:arbor_llm, :trusted_oauth_response_endpoints),
-        else: Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, original)
+      Enum.each(original, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_llm, key, value)
+        {key, :error} -> Application.delete_env(:arbor_llm, key)
+      end)
+
+      File.rm_rf!(root)
     end)
 
-    :ok
+    {:ok, root: root, store_dir: store_dir}
   end
 
   test "bounded Responses SSE parsing preserves text and decoded tool arguments" do
@@ -206,7 +229,283 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     assert :closed = Task.await(server, 2_000)
   end
 
+  test "security regression: unchanged Codex source after 401 returns stable auth error without retry",
+       %{root: root, store_dir: store_dir} do
+    source_path =
+      configure_source_owned_openai!(root, store_dir, "same-access", "never-send-refresh")
+
+    source_bytes = File.read!(source_path)
+    {url, server} = start_unchanged_401_server()
+    configure_responses_endpoint!(url)
+
+    result = Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+
+    assert result == {:error, :oauth_source_reauthentication_required}
+    refute inspect(result) =~ "same-access"
+    refute inspect(result) =~ "never-send-refresh"
+    assert %{request: request, retried?: false} = Task.await(server, 2_000)
+    assert request =~ "authorization: Bearer same-access"
+    assert request =~ "chatgpt-account-id: acct_source"
+    refute request =~ "never-send-refresh"
+    assert File.read!(source_path) == source_bytes
+  end
+
+  test "security regression: changed Codex access token after 401 retries exactly once with one receipt",
+       %{root: root, store_dir: store_dir} do
+    source_path =
+      configure_source_owned_openai!(root, store_dir, "old-access", "old-refresh-never-send")
+
+    {url, server} =
+      start_changed_401_server(source_path, "new-access", "new-refresh-never-send")
+
+    configure_responses_endpoint!(url)
+
+    assert {:ok, %{text: "retried", tool_calls: []}} =
+             Responses.complete(:openai, empty_request(), receive_timeout: 1_500)
+
+    assert %{first: first, second: second, extra_request?: false} = Task.await(server, 2_000)
+    assert first =~ "authorization: Bearer old-access"
+    assert first =~ "chatgpt-account-id: acct_source"
+    assert second =~ "authorization: Bearer new-access"
+    assert second =~ "chatgpt-account-id: acct_source"
+    refute first =~ "old-refresh-never-send"
+    refute second =~ "new-refresh-never-send"
+  end
+
+  test "security regression: source-owned Responses does not reread or retry non-401 statuses",
+       %{root: root, store_dir: store_dir} do
+    source_path =
+      configure_source_owned_openai!(root, store_dir, "forbidden-access", "hidden-refresh")
+
+    source_bytes = File.read!(source_path)
+    {url, server} = start_single_status_server(403)
+    configure_responses_endpoint!(url)
+
+    assert {:error, {:responses_http, 403, :redacted}} =
+             Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+
+    assert %{requests: 1} = Task.await(server, 2_000)
+    assert File.read!(source_path) == source_bytes
+  end
+
+  test "security regression: concurrent changed-source 401s have one bounded retry per caller",
+       %{root: root, store_dir: store_dir} do
+    caller_count = 6
+
+    source_path =
+      configure_source_owned_openai!(root, store_dir, "shared-old", "shared-old-refresh")
+
+    {url, server} =
+      start_concurrent_changed_401_server(
+        source_path,
+        caller_count,
+        "shared-new",
+        "shared-new-refresh"
+      )
+
+    configure_responses_endpoint!(url)
+
+    results =
+      1..caller_count
+      |> Enum.map(fn _index ->
+        Task.async(fn ->
+          Responses.complete(:openai, empty_request(), receive_timeout: 3_000)
+        end)
+      end)
+      |> Task.await_many(4_000)
+
+    assert Enum.all?(results, &match?({:ok, %{text: "retried"}}, &1))
+
+    assert %{initial: initial, retries: retries, extra_request?: false} =
+             Task.await(server, 4_000)
+
+    assert length(initial) == caller_count
+    assert length(retries) == caller_count
+    assert Enum.all?(initial, &String.contains?(&1, "authorization: Bearer shared-old"))
+    assert Enum.all?(retries, &String.contains?(&1, "authorization: Bearer shared-new"))
+    refute inspect(initial) =~ "shared-old-refresh"
+    refute inspect(retries) =~ "shared-new-refresh"
+  end
+
   defp sse(event), do: "data: " <> Jason.encode!(event) <> "\n\n"
+
+  defp empty_request, do: %{instructions: "", input: [], tools: nil}
+
+  defp configure_source_owned_openai!(root, store_dir, access_token, refresh_token) do
+    source_path = Path.join(root, "codex-auth.json")
+    write_codex_source!(source_path, access_token, refresh_token)
+
+    envelope = %{
+      "version" => 1,
+      "provider" => "openai",
+      "account_id" => "acct_source",
+      "origin" => "external_cli",
+      "owner" => "source_owned",
+      "source" => "codex_file",
+      "generation" => 7,
+      "tokens" => %{}
+    }
+
+    store_path = Path.join(store_dir, "openai.json")
+    File.write!(store_path, Jason.encode!(envelope))
+    File.chmod!(store_path, 0o600)
+    Application.put_env(:arbor_llm, :oauth_source_files, %{openai: source_path})
+    source_path
+  end
+
+  defp write_codex_source!(path, access_token, refresh_token) do
+    File.write!(
+      path,
+      Jason.encode!(%{
+        "tokens" => %{
+          "access_token" => access_token,
+          "account_id" => "acct_source",
+          "refresh_token" => refresh_token
+        }
+      })
+    )
+  end
+
+  defp configure_responses_endpoint!(url) do
+    Application.put_env(:arbor_llm, :oauth_response_endpoints, %{openai: url})
+    Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, [url])
+  end
+
+  defp start_unchanged_401_server do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        {socket, request} = accept_request!(listener)
+        send_http!(socket, 401, Jason.encode!(%{"detail" => "provider-body-secret"}))
+        :gen_tcp.close(socket)
+        retried? = accepts_connection?(listener, 300)
+        :gen_tcp.close(listener)
+        %{request: request, retried?: retried?}
+      end)
+
+    {url, server}
+  end
+
+  defp start_changed_401_server(source_path, access_token, refresh_token) do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        {first_socket, first} = accept_request!(listener)
+        write_codex_source!(source_path, access_token, refresh_token)
+        send_http!(first_socket, 401, Jason.encode!(%{"token" => refresh_token}))
+        :gen_tcp.close(first_socket)
+
+        {second_socket, second} = accept_request!(listener)
+        send_sse_success!(second_socket)
+        :gen_tcp.close(second_socket)
+
+        extra_request? = accepts_connection?(listener, 300)
+        :gen_tcp.close(listener)
+        %{first: first, second: second, extra_request?: extra_request?}
+      end)
+
+    {url, server}
+  end
+
+  defp start_single_status_server(status) do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        {socket, _request} = accept_request!(listener)
+        send_http!(socket, status, Jason.encode!(%{"detail" => "redacted"}))
+        :gen_tcp.close(socket)
+        requests = if accepts_connection?(listener, 300), do: 2, else: 1
+        :gen_tcp.close(listener)
+        %{requests: requests}
+      end)
+
+    {url, server}
+  end
+
+  defp start_concurrent_changed_401_server(source_path, count, access_token, refresh_token) do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        initial = Enum.map(1..count, fn _index -> accept_request!(listener) end)
+        write_codex_source!(source_path, access_token, refresh_token)
+
+        Enum.each(initial, fn {socket, _request} ->
+          send_http!(socket, 401, Jason.encode!(%{"token" => refresh_token}))
+          :gen_tcp.close(socket)
+        end)
+
+        retries =
+          Enum.map(1..count, fn _index ->
+            {socket, request} = accept_request!(listener)
+            send_sse_success!(socket)
+            :gen_tcp.close(socket)
+            request
+          end)
+
+        extra_request? = accepts_connection?(listener, 300)
+        :gen_tcp.close(listener)
+
+        %{
+          initial: Enum.map(initial, &elem(&1, 1)),
+          retries: retries,
+          extra_request?: extra_request?
+        }
+      end)
+
+    {url, server}
+  end
+
+  defp listen do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(listener)
+    {listener, "http://127.0.0.1:#{port}/responses"}
+  end
+
+  defp accept_request!(listener) do
+    {:ok, socket} = :gen_tcp.accept(listener, 2_000)
+    {:ok, request} = receive_http_headers(socket, "")
+    {socket, request}
+  end
+
+  defp accepts_connection?(listener, timeout) do
+    case :gen_tcp.accept(listener, timeout) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        true
+
+      {:error, :timeout} ->
+        false
+    end
+  end
+
+  defp send_http!(socket, status, body) do
+    reason = if status == 401, do: "Unauthorized", else: "Forbidden"
+
+    :ok =
+      :gen_tcp.send(
+        socket,
+        "HTTP/1.1 #{status} #{reason}\r\ncontent-type: application/json\r\n" <>
+          "content-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n#{body}"
+      )
+  end
+
+  defp send_sse_success!(socket) do
+    body =
+      sse(%{"type" => "response.output_text.delta", "delta" => "retried"}) <> "data: [DONE]\n\n"
+
+    :ok =
+      :gen_tcp.send(
+        socket,
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n" <>
+          "content-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n#{body}"
+      )
+  end
 
   defp start_drip_server(chunk_count, delay_ms) do
     {:ok, listener} =
