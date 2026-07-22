@@ -42,6 +42,24 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   @spec execute(String.t(), map(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, String.t()}
   def execute(name, args, workdir, opts \\ []) do
+    execute_with_result_mode(name, args, workdir, opts, :formatted)
+  end
+
+  @doc """
+  Execute an action and preserve its successful result as the original Elixir term.
+
+  Resolution, execution binding, signing, caller-authority intersection,
+  authorization, approval, and retry behavior are identical to `execute/4`.
+  Errors retain the same bounded string format used by `execute/4`.
+  """
+  @spec execute_structured(String.t(), map(), String.t(), keyword()) ::
+          {:ok, term()} | {:error, String.t()}
+  def execute_structured(name, args, workdir, opts \\ []) do
+    execute_with_result_mode(name, args, workdir, opts, :structured)
+  end
+
+  defp execute_with_result_mode(name, args, workdir, opts, result_mode)
+       when result_mode in [:formatted, :structured] do
     agent_id = Keyword.get(opts, :agent_id, "system")
     signed_request = Keyword.get(opts, :signed_request)
     signer = Keyword.get(opts, :signer)
@@ -78,7 +96,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               task_id,
               session_id,
               signed_request,
-              signer
+              signer,
+              result_mode
             )
         end
       else
@@ -86,6 +105,10 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           {:error, "Action #{name} execution binding rejected: #{inspect(reason)}"}
       end
     end)
+  end
+
+  defp execute_with_result_mode(_name, _args, _workdir, _opts, result_mode) do
+    raise ArgumentError, "unsupported action result mode: #{inspect(result_mode)}"
   end
 
   @doc """
@@ -175,7 +198,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          task_id,
          session_id,
          signed_request,
-         signer
+         signer,
+         result_mode
        ) do
     with {:ok, pinned_binding} <- verify_pinned_action(action_module, name, opts),
          {:ok, execution_binding_context} <- execution_binding_context(opts),
@@ -249,7 +273,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                 params,
                 context,
                 name,
-                boundary_ref
+                boundary_ref,
+                result_mode
               )
             else
               {:error, reason} ->
@@ -268,7 +293,15 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end
   end
 
-  defp execute_authorized_action(agent_id, action_module, params, context, name, boundary) do
+  defp execute_authorized_action(
+         agent_id,
+         action_module,
+         params,
+         context,
+         name,
+         boundary,
+         result_mode
+       ) do
     result = Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context)
 
     case result do
@@ -280,11 +313,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           params,
           context,
           name,
-          boundary
+          boundary,
+          result_mode
         )
 
       {:ok, result} ->
-        {:ok, format_result(result)}
+        successful_result(result, result_mode)
 
       {:error, reason} ->
         msg =
@@ -504,7 +538,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          params,
          context,
          name,
-         boundary
+         boundary,
+         result_mode
        ) do
     if interaction_request?(proposal_id) do
       await_interaction_and_retry(
@@ -514,7 +549,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         params,
         context,
         name,
-        boundary
+        boundary,
+        result_mode
       )
     else
       await_consensus_and_retry(
@@ -524,7 +560,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         params,
         context,
         name,
-        boundary
+        boundary,
+        result_mode
       )
     end
   end
@@ -545,7 +582,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          params,
          context,
          name,
-         boundary
+         boundary,
+         result_mode
        ) do
     alias Arbor.Contracts.Comms.ApprovalAnswer
 
@@ -570,7 +608,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               name,
               request_id,
               :operator,
-              boundary
+              boundary,
+              result_mode
             )
 
           {:error, :timeout} ->
@@ -606,7 +645,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          params,
          context,
          name,
-         boundary
+         boundary,
+         result_mode
        ) do
     alias Arbor.Contracts.Comms.ApprovalAnswer
 
@@ -632,7 +672,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               name,
               proposal_id,
               :consensus,
-              boundary
+              boundary,
+              result_mode
             )
 
           {:ok, :approved} ->
@@ -645,7 +686,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               context,
               name,
               proposal_id,
-              boundary
+              boundary,
+              result_mode
             )
 
           {:error, :timeout} ->
@@ -696,13 +738,24 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          name,
          request_id,
          backend,
-         boundary
+         boundary,
+         result_mode
        ) do
     case normalized do
       {:ok, :approve} ->
         Logger.info("[ActionsExecutor] Approval granted for #{name}, executing")
         track_approval(agent_id, action_module)
-        retry_execution(agent_id, action_module, params, context, name, request_id, boundary)
+
+        retry_execution(
+          agent_id,
+          action_module,
+          params,
+          context,
+          name,
+          request_id,
+          boundary,
+          result_mode
+        )
 
       {:ok, :rework, note} ->
         track_rejection(agent_id, action_module)
@@ -732,7 +785,16 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   # Re-execute only the exact invocation that was approved. The one-shot marker
   # satisfies ApprovalGuard for this retry without minting durable authority.
-  defp retry_execution(agent_id, action_module, params, context, name, request_id, boundary) do
+  defp retry_execution(
+         agent_id,
+         action_module,
+         params,
+         context,
+         name,
+         request_id,
+         boundary,
+         result_mode
+       ) do
     with :ok <- verify_retry_resolution(name, action_module),
          :ok <- verify_retry_binding(name, action_module, context),
          :ok <- verify_retry_caller_authority(action_module, params, agent_id, context),
@@ -752,7 +814,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
       case result do
         {:ok, result} ->
-          {:ok, format_result(result)}
+          successful_result(result, result_mode)
 
         {:ok, :pending_approval, _proposal_id} ->
           {:error,
@@ -1166,6 +1228,13 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp maybe_put_context(context, _key, nil), do: context
   defp maybe_put_context(context, _key, ""), do: context
   defp maybe_put_context(context, key, value), do: Map.put(context, key, value)
+
+  defp successful_result(result, :formatted), do: {:ok, format_result(result)}
+  defp successful_result(result, :structured), do: {:ok, result}
+
+  defp successful_result(_result, result_mode) do
+    raise ArgumentError, "unsupported action result mode: #{inspect(result_mode)}"
+  end
 
   @doc false
   def format_result(result) when is_binary(result), do: result
