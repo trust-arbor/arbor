@@ -14,6 +14,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   }
 
   alias Arbor.Orchestrator.Dot.Parser
+  alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
   alias Arbor.Orchestrator.Viz.DotSerializer
 
   @action_modules [
@@ -130,7 +131,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     end
   end
 
-  test "compilation validation rejects missing or graph-divergent validation descriptors", ctx do
+  test "compilation validation rejects missing or plan-divergent validation descriptors", ctx do
     plan = plan!()
     assert {:ok, compilation} = compile(plan, ctx)
 
@@ -142,16 +143,50 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error, {:invalid_compilation_field, "initial_values"}} =
              Compilation.validate(missing, plan)
 
-    divergent =
+    divergent_values =
       put_in(
-        compilation.initial_values["coding_plan_validation_program"]["static_parameters"][
-          "timeout"
-        ],
+        compilation.initial_values,
+        ["coding_plan_validation_program", "static_parameters", "timeout"],
         1
       )
 
-    assert {:error, {:invalid_compilation_field, "initial_values"}} =
-             Compilation.validate(%{compilation | initial_values: divergent}, plan)
+    assert :ok =
+             ValidationProgram.validate(divergent_values["coding_plan_validation_program"])
+
+    graph = parse!(compilation.dot_source)
+
+    validate_node = Map.fetch!(graph.nodes, "validate")
+    validate_node = %{validate_node | attrs: Map.put(validate_node.attrs, "param.timeout", 1)}
+    graph = %{graph | nodes: Map.put(graph.nodes, "validate", validate_node)}
+    dot_source = DotSerializer.serialize(graph)
+    graph_hash = sha256(dot_source)
+
+    assert {:ok, compiled_graph} = IRCompiler.compile(parse!(dot_source))
+
+    assert {:ok, {execution_manifest, execution_manifest_digest}} =
+             ExecutionManifest.build(compiled_graph, ctx.action_catalog, graph_hash)
+
+    manifest =
+      compilation.manifest
+      |> Map.put("graph_hash", graph_hash)
+      |> Map.put("execution_manifest", execution_manifest)
+      |> Map.put("execution_manifest_digest", execution_manifest_digest)
+
+    divergent = %{
+      compilation
+      | dot_source: dot_source,
+        graph_hash: graph_hash,
+        execution_manifest: execution_manifest,
+        execution_manifest_digest: execution_manifest_digest,
+        initial_values: divergent_values,
+        manifest: manifest
+    }
+
+    assert :ok =
+             ExecutionManifest.validate(execution_manifest, execution_manifest_digest, graph_hash)
+
+    assert {:error, {:compilation_field_mismatch, "initial_values"}} =
+             Compilation.validate(divergent, plan)
   end
 
   test "version 2 binds the validated work packet digest in graph, inputs, and manifest", ctx do

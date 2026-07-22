@@ -4,7 +4,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   use TypedStruct
 
   alias Arbor.Contracts.Coding.Plan
-  alias Arbor.Orchestrator.CodingPlan.{ExecutionManifest, ValidationProgram}
+  alias Arbor.Orchestrator.CodingPlan.{ExecutionManifest, Profiles, ValidationProgram}
   alias Arbor.Orchestrator.Dot.Parser
 
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
@@ -185,10 +185,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   end
 
   defp validation_program(compilation, plan) do
-    with {:ok, program} <-
+    with {:ok, profile} <- Profiles.fetch_executable(plan.validation_profile),
+         {:ok, expected_program} <-
+           ValidationProgram.build(profile["validation_strategy"], plan.budgets),
+         {:ok, program} <-
            Map.fetch(compilation.initial_values, "coding_plan_validation_program"),
          :ok <- ValidationProgram.validate(program),
-         :ok <- require_equal(program["profile_id"], plan.validation_profile, "initial_values"),
+         :ok <- require_equal(program, expected_program, "initial_values"),
          {:ok, graph} <- parse_graph(compilation.dot_source),
          {:ok, validate_node} <- Map.fetch(graph.nodes, "validate"),
          {:ok, projected_attrs} <- ValidationProgram.project_onto(program, validate_node.attrs),
@@ -197,7 +200,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
     else
       :error -> invalid("initial_values")
       {:error, :invalid_validation_program} -> invalid("initial_values")
-      {:error, _reason} = error -> error
+      {:error, {:compilation_field_mismatch, _field}} = error -> error
+      {:error, _reason} -> invalid("initial_values")
     end
   end
 

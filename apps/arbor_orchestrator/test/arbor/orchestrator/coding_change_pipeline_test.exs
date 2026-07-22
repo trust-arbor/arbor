@@ -1207,6 +1207,19 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     send_calls
   end
 
+  defp assert_validation_inspections(calls, attempts) do
+    inspect_calls =
+      Enum.filter(calls, fn {name, _args} -> name == "coding_workspace_inspect" end)
+
+    validation_captures =
+      Enum.filter(inspect_calls, fn {_name, args} ->
+        args["include_committable_tree"] in [true, "true"]
+      end)
+
+    assert length(inspect_calls) == attempts * 3
+    assert length(validation_captures) == attempts
+  end
+
   defp action_prompts(calls) do
     for {"acp_send_message", args} <- calls, do: args["prompt"]
   end
@@ -2040,8 +2053,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert Enum.at(prompts, 1) =~ "Structured validation feedback JSON"
       assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
-      # Two turns × (pre-turn capture + post-turn inspect)
-      assert Enum.count(calls, fn {name, _} -> name == "coding_workspace_inspect" end) == 4
+      # Every turn performs pre-turn, post-turn, and fresh validation inspection.
+      assert_validation_inspections(calls, 2)
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
     end
@@ -2061,7 +2074,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert Enum.at(prompts, 1) =~ "Structured review feedback JSON"
       assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
-      assert Enum.count(calls, fn {name, _} -> name == "coding_workspace_inspect" end) == 4
+      assert_validation_inspections(calls, 2)
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
     end
