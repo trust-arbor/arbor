@@ -194,7 +194,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          :ok <- boolean_value(inventory["truncated"]),
          {:ok, counts} <- normalize_resource_counts(inventory["counts"]),
          {:ok, resources} <- normalize_resources(inventory["resources"], counts["returned"]),
-         :ok <- validate_resource_count_invariants(counts, length(resources)) do
+         :ok <- validate_resource_count_invariants(counts, resources) do
       {:ok, %{inventory | "journal" => journal, "filters" => filters, "resources" => resources}}
     end
   end
@@ -218,10 +218,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   defp normalize_task_counts(_counts), do: {:error, :malformed_task_counts}
 
   defp validate_task_count_invariants(counts, returned) do
-    if counts["returned"] == returned and counts["returned"] <= counts["matching"] and
-         counts["matching"] <= counts["observed"] and
-         counts["filtered_out"] ==
-           max(counts["observed"] - counts["malformed"] - counts["matching"], 0),
+    if counts["returned"] == returned and
+         counts["observed"] ==
+           counts["malformed"] + counts["filtered_out"] + counts["matching"] and
+         counts["matching"] == counts["returned"] + counts["truncated"],
        do: :ok,
        else: {:error, :inconsistent_task_counts}
   end
@@ -242,13 +242,19 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   defp normalize_resource_counts(_counts), do: {:error, :malformed_resource_counts}
 
-  defp validate_resource_count_invariants(counts, returned) do
+  defp validate_resource_count_invariants(counts, resources) do
     by_type_total = Enum.sum(Map.values(counts["by_type"]))
+    returned_by_type = Enum.frequencies_by(resources, & &1["resource_type"])
 
-    if counts["returned"] == returned and counts["returned"] <= counts["matching"] and
-         counts["matching"] <= counts["available"] and
-         counts["filtered_out"] == counts["available"] - counts["matching"] and
-         by_type_total == counts["matching"],
+    by_type_matches_returned? =
+      counts["truncated"] > 0 or
+        Enum.all?(@resource_types, fn type ->
+          Map.get(counts["by_type"], type, 0) == Map.get(returned_by_type, type, 0)
+        end)
+
+    if counts["available"] == counts["filtered_out"] + counts["matching"] and
+         counts["matching"] == counts["returned"] + counts["truncated"] and
+         by_type_total == counts["matching"] and by_type_matches_returned?,
        do: :ok,
        else: {:error, :inconsistent_resource_counts}
   end

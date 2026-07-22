@@ -126,7 +126,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
     assert {:error, :inconsistent_resource_counts} =
              ReconciliationCore.reconcile(
                tasks,
-               put_in(resources, ["counts", "by_type", "quarantine"], 1),
+               resources
+               |> put_in(["counts", "by_type", "live_workspace_lease"], 0)
+               |> put_in(["counts", "by_type", "quarantine"], 1),
                @observed_at
              )
 
@@ -154,6 +156,38 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
                }),
                @observed_at
              )
+  end
+
+  test "rejects incomplete non-truncated inventories and overlapping malformed counts" do
+    tasks = task_inventory([task("task-1", "running", true)])
+
+    resources =
+      resource_inventory([resource("live_workspace_lease", "resource-1", "task-1", "principal")])
+
+    incomplete_tasks =
+      task_inventory([])
+      |> put_in(["counts", "observed"], 1)
+      |> put_in(["counts", "matching"], 1)
+      |> put_in(["counts", "returned"], 0)
+
+    assert {:error, :inconsistent_task_counts} =
+             ReconciliationCore.reconcile(incomplete_tasks, resources, @observed_at)
+
+    overlapping_malformed_tasks =
+      put_in(tasks, ["counts", "malformed"], 1)
+
+    assert {:error, :inconsistent_task_counts} =
+             ReconciliationCore.reconcile(overlapping_malformed_tasks, resources, @observed_at)
+
+    incomplete_resources =
+      resource_inventory([])
+      |> put_in(["counts", "available"], 1)
+      |> put_in(["counts", "matching"], 1)
+      |> put_in(["counts", "returned"], 0)
+      |> put_in(["counts", "by_type", "live_workspace_lease"], 1)
+
+    assert {:error, :inconsistent_resource_counts} =
+             ReconciliationCore.reconcile(tasks, incomplete_resources, @observed_at)
   end
 
   test "accepts exact task_id scopes and rejects unmatched or broad task scopes" do
@@ -207,7 +241,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
 
     assert {:error, :truncated_observation} =
              ReconciliationCore.reconcile(
-               valid_tasks |> put_in(["counts", "truncated"], 1),
+               valid_tasks
+               |> put_in(["counts", "observed"], 2)
+               |> put_in(["counts", "matching"], 2)
+               |> put_in(["counts", "truncated"], 1),
                valid_resources,
                @observed_at
              )
