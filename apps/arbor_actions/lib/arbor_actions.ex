@@ -208,7 +208,19 @@ defmodule Arbor.Actions do
 
   @doc "Return a bounded, read-only coding resource inventory for reconciliation."
   @spec coding_resource_inventory(keyword()) :: {:ok, map()} | {:error, term()}
-  def coding_resource_inventory(opts \\ []), do: CodingResourceInventory.snapshot(opts)
+  def coding_resource_inventory(opts \\ [])
+
+  def coding_resource_inventory(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) and
+         Enum.all?(Keyword.keys(opts), &(&1 in [:task_id, :principal_id, :max_items])) do
+      CodingResourceInventory.snapshot(opts)
+    else
+      {:error, :invalid_coding_resource_inventory_options}
+    end
+  end
+
+  def coding_resource_inventory(_opts),
+    do: {:error, :invalid_coding_resource_inventory_options}
 
   @doc "Return the bounded identity of the reviewed Mix and loaded BEAM toolchain."
   @spec coding_toolchain_identity() ::

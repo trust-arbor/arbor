@@ -1,14 +1,14 @@
 defmodule Arbor.Actions.Coding.ResourceInventoryTest do
   use Arbor.Actions.ActionCase, async: true
 
-  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Coding.{CodingResourceInventory, WorkspaceLeaseRegistry}
 
   @moduletag :fast
 
   test "empty state is a bounded JSON-clean inventory" do
     server = start_registry("empty")
 
-    assert {:ok, inventory} = Actions.coding_resource_inventory(server: server)
+    assert {:ok, inventory} = CodingResourceInventory.snapshot(server: server)
     assert inventory["resources"] == []
     assert inventory["counts"]["available"] == 0
     assert inventory["counts"]["returned"] == 0
@@ -33,7 +33,7 @@ defmodule Arbor.Actions.Coding.ResourceInventoryTest do
       }
     end)
 
-    assert {:ok, inventory} = Actions.coding_resource_inventory(server: server)
+    assert {:ok, inventory} = CodingResourceInventory.snapshot(server: server)
 
     assert Enum.map(inventory["resources"], & &1["resource_type"]) == [
              "live_workspace_lease",
@@ -70,8 +70,8 @@ defmodule Arbor.Actions.Coding.ResourceInventoryTest do
     end)
 
     opts = [server: server, task_id: "task-a", principal_id: "principal-a", max_items: 1]
-    assert {:ok, first} = Actions.coding_resource_inventory(opts)
-    assert {:ok, second} = Actions.coding_resource_inventory(opts)
+    assert {:ok, first} = CodingResourceInventory.snapshot(opts)
+    assert {:ok, second} = CodingResourceInventory.snapshot(opts)
     assert first == second
     assert first["counts"]["matching"] == 2
     assert first["counts"]["returned"] == 1
@@ -80,16 +80,16 @@ defmodule Arbor.Actions.Coding.ResourceInventoryTest do
     assert hd(first["resources"])["resource_id"] == "ws-a"
 
     assert {:error, :invalid_coding_resource_inventory_options} =
-             Actions.coding_resource_inventory(server: server, unknown: true)
+             CodingResourceInventory.snapshot(server: server, unknown: true)
 
     assert {:error, :invalid_coding_resource_inventory_options} =
-             Actions.coding_resource_inventory(task_id: "task-a", task_id: "task-b")
+             CodingResourceInventory.snapshot(task_id: "task-a", task_id: "task-b")
 
     assert {:error, :invalid_coding_resource_inventory_options} =
-             Actions.coding_resource_inventory(server: server, task_id: "")
+             CodingResourceInventory.snapshot(server: server, task_id: "")
 
     assert {:error, :invalid_coding_resource_inventory_options} =
-             Actions.coding_resource_inventory(server: server, max_items: 257)
+             CodingResourceInventory.snapshot(server: server, max_items: 257)
   end
 
   test "observation does not mutate registry state and redacts ownership internals" do
@@ -100,7 +100,7 @@ defmodule Arbor.Actions.Coding.ResourceInventoryTest do
     end)
 
     before = :sys.get_state(server)
-    assert {:ok, inventory} = Actions.coding_resource_inventory(server: server)
+    assert {:ok, inventory} = CodingResourceInventory.snapshot(server: server)
     after_state = :sys.get_state(server)
 
     assert before == after_state
@@ -128,7 +128,7 @@ defmodule Arbor.Actions.Coding.ResourceInventoryTest do
       }
     end)
 
-    assert {:ok, inventory} = Actions.coding_resource_inventory(server: server)
+    assert {:ok, inventory} = CodingResourceInventory.snapshot(server: server)
 
     assert inventory["journal"] == %{
              "status" => "degraded",
@@ -141,6 +141,13 @@ defmodule Arbor.Actions.Coding.ResourceInventoryTest do
     assert quarantine["quarantine_reason"] == "poisoned_journal"
     refute String.contains?(Jason.encode!(inventory), secret)
     assert_json_clean(inventory)
+  end
+
+  test "security regression: public inventory rejects internal server selection" do
+    server = start_registry("public-server-selection")
+
+    assert {:error, :invalid_coding_resource_inventory_options} =
+             Actions.coding_resource_inventory(server: server)
   end
 
   defp start_registry(label) do
