@@ -211,6 +211,127 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       assert is_binary(view.fingerprint)
     end
 
+    test "inspect opt-in returns the exact Git add -A committable tree", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/workspace-committable-tree",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{}
+               )
+
+      assert {:ok, ordinary} =
+               Workspace.Inspect.run(%{workspace_id: lease.workspace_id}, %{})
+
+      refute Map.has_key?(ordinary, :committable_tree_oid)
+
+      assert {:ok, baseline} =
+               Workspace.Inspect.run(
+                 %{workspace_id: lease.workspace_id, include_committable_tree: true},
+                 %{}
+               )
+
+      assert baseline.committable_tree_oid ==
+               git!(lease.worktree_path, ["rev-parse", "HEAD^{tree}"])
+
+      File.write!(Path.join(lease.worktree_path, "README.md"), "unstaged change\n")
+
+      assert {:ok, unstaged} =
+               Workspace.Inspect.run(
+                 %{workspace_id: lease.workspace_id, include_committable_tree: true},
+                 %{}
+               )
+
+      refute unstaged.committable_tree_oid == baseline.committable_tree_oid
+
+      git!(lease.worktree_path, ["add", "-A"])
+      assert unstaged.committable_tree_oid == git!(lease.worktree_path, ["write-tree"])
+
+      assert {:ok, staged} =
+               Workspace.Inspect.run(
+                 %{workspace_id: lease.workspace_id, include_committable_tree: true},
+                 %{}
+               )
+
+      assert staged.committable_tree_oid == unstaged.committable_tree_oid
+
+      File.write!(Path.join(lease.worktree_path, "README.md"), "staged plus unstaged\n")
+
+      assert {:ok, staged_and_unstaged} =
+               Workspace.Inspect.run(
+                 %{workspace_id: lease.workspace_id, include_committable_tree: true},
+                 %{}
+               )
+
+      refute staged_and_unstaged.committable_tree_oid == staged.committable_tree_oid
+
+      File.write!(Path.join(lease.worktree_path, "untracked.txt"), "untracked\n")
+
+      assert {:ok, untracked} =
+               Workspace.Inspect.run(
+                 %{workspace_id: lease.workspace_id, include_committable_tree: true},
+                 %{}
+               )
+
+      refute untracked.committable_tree_oid == staged_and_unstaged.committable_tree_oid
+
+      git!(lease.worktree_path, ["add", "-A"])
+      assert untracked.committable_tree_oid == git!(lease.worktree_path, ["write-tree"])
+    end
+
+    test "security regression: committable tree inspection fails closed and only canonical true activates it",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      assert {:error, :not_found} =
+               Workspace.Inspect.run(
+                 %{workspace_id: "ws_missing", include_committable_tree: true},
+                 %{}
+               )
+
+      assert {:error, "workspace_id is required"} =
+               Workspace.Inspect.run(%{include_committable_tree: true}, %{})
+
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/workspace-missing-committable-tree",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{}
+               )
+
+      git!(repo, ["worktree", "remove", "--force", lease.worktree_path])
+
+      assert {:ok, ordinary} =
+               Workspace.Inspect.run(%{workspace_id: lease.workspace_id}, %{})
+
+      assert ordinary.exists == false
+      refute Map.has_key?(ordinary, :committable_tree_oid)
+
+      assert {:ok, direct_string_input} =
+               Workspace.Inspect.run(
+                 %{workspace_id: lease.workspace_id, include_committable_tree: "true"},
+                 %{}
+               )
+
+      assert direct_string_input.exists == false
+      refute Map.has_key?(direct_string_input, :committable_tree_oid)
+
+      assert {:error, :committable_tree_binding_failed} =
+               Workspace.Inspect.run(
+                 %{workspace_id: lease.workspace_id, include_committable_tree: true},
+                 %{}
+               )
+    end
+
     test "security regression: detached cleanup is idempotent after path and registration absence",
          %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))

@@ -1755,7 +1755,9 @@ defmodule Arbor.Actions.Coding.Workspace do
     Returns registry metadata plus live workspace inspection: `exists`, `dirty`,
     `head_commit`, `changed_from_base` (dirty OR HEAD differs from the acquired
     `base_commit`), a bounded `fingerprint`, and `turn_progressed` when a
-    `baseline_fingerprint` is supplied. PID/ref/function data stay private.
+    `baseline_fingerprint` is supplied. When `include_committable_tree` is true,
+    also returns the exact tree OID that `git add -A` would commit. PID/ref/function
+    data stay private.
     """
 
     use Jido.Action,
@@ -1774,17 +1776,26 @@ defmodule Arbor.Actions.Coding.Workspace do
           required: false,
           doc:
             "Optional pre-turn fingerprint; when present, turn_progressed reports owner-observed progress"
+        ],
+        include_committable_tree: [
+          type: :boolean,
+          default: false,
+          doc: "Include the exact Git add -A committable tree OID"
         ]
       ]
 
     alias Arbor.Actions
     alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+    alias Arbor.Actions.Mix, as: MixAction
+
+    @git_oid_regex ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
 
     def taint_roles do
       %{
         workspace_id: :control,
-        baseline_fingerprint: :control
+        baseline_fingerprint: :control,
+        include_committable_tree: :control
       }
     end
 
@@ -1804,6 +1815,7 @@ defmodule Arbor.Actions.Coding.Workspace do
              }) do
           {:ok, lease} ->
             baseline = map_value(params, :baseline_fingerprint)
+            include_committable_tree? = map_value(params, :include_committable_tree) == true
 
             view =
               lease
@@ -1815,12 +1827,14 @@ defmodule Arbor.Actions.Coding.Workspace do
                 )
               )
 
-            if view.exists == true and view.fingerprint_valid != true do
-              Actions.emit_failed(__MODULE__, :workspace_fingerprint_failed)
-              {:error, :workspace_fingerprint_failed}
-            else
+            with :ok <- require_valid_fingerprint(view),
+                 {:ok, view} <- maybe_include_committable_tree(view, include_committable_tree?) do
               Actions.emit_completed(__MODULE__, %{workspace_id: workspace_id})
               {:ok, view}
+            else
+              {:error, reason} ->
+                Actions.emit_failed(__MODULE__, reason)
+                {:error, reason}
             end
 
           {:error, reason} ->
@@ -1833,6 +1847,31 @@ defmodule Arbor.Actions.Coding.Workspace do
     end
 
     def run(_params, _context), do: {:error, "workspace_id is required"}
+
+    defp require_valid_fingerprint(%{exists: true, fingerprint_valid: valid})
+         when valid != true,
+         do: {:error, :workspace_fingerprint_failed}
+
+    defp require_valid_fingerprint(_view), do: :ok
+
+    defp maybe_include_committable_tree(view, false), do: {:ok, view}
+
+    defp maybe_include_committable_tree(%{exists: true} = view, true) do
+      case MixAction.committable_tree_binding(map_value(view, :worktree_path)) do
+        {:ok, %{tree_oid: oid}} when is_binary(oid) ->
+          if Regex.match?(@git_oid_regex, oid) do
+            {:ok, Map.put(view, :committable_tree_oid, oid)}
+          else
+            {:error, :committable_tree_binding_failed}
+          end
+
+        _other ->
+          {:error, :committable_tree_binding_failed}
+      end
+    end
+
+    defp maybe_include_committable_tree(_view, true),
+      do: {:error, :committable_tree_binding_failed}
 
     defp map_value(map, key) when is_map(map) and is_atom(key) do
       cond do
