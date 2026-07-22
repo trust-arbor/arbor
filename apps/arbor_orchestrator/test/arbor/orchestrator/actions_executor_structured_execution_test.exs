@@ -5,6 +5,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
   @moduletag :security_regression
 
   alias Arbor.Common.ActionRegistry
+  alias Arbor.Comms.InteractionRouter
   alias Arbor.Orchestrator.ActionsExecutor
   alias Arbor.Persistence.BufferedStore
 
@@ -209,7 +210,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
       end)
 
     request = await_pending_request(agent_id)
-    assert :ok = Arbor.Comms.InteractionRouter.respond(request.request_id, :approved)
+    assert :ok = InteractionRouter.respond(request.request_id, :approved)
     assert {:ok, %{input_type: "query"}} = Task.await(execution, 3_000)
   end
 
@@ -225,7 +226,7 @@ defmodule Arbor.Orchestrator.ActionsExecutorStructuredExecutionTest do
   defp await_pending_request(_agent_id, 0), do: flunk("approval request did not appear")
 
   defp await_pending_request(agent_id, attempts) do
-    case Enum.find(Arbor.Comms.InteractionRouter.pending(), &(&1.agent_id == agent_id)) do
+    case Enum.find(InteractionRouter.pending(), &(&1.agent_id == agent_id)) do
       nil ->
         Process.sleep(10)
         await_pending_request(agent_id, attempts - 1)

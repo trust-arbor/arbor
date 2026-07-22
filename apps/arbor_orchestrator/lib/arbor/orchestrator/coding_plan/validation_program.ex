@@ -205,25 +205,26 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
          %{"test_stage_timeout" => test_stage_timeout_ms, "timeout" => timeout_ms} = params
        )
        when map_size(params) == 2 do
-    with {:ok, strategy} <- canonical_strategy("cross_app") do
-      timeout_max_ms = strategy["timeout_max_ms"]
-      test_stage_timeout_max_ms = strategy["test_stage_timeout_max_ms"]
+    case canonical_strategy("cross_app") do
+      {:ok, strategy} ->
+        timeout_max_ms = strategy["timeout_max_ms"]
+        test_stage_timeout_max_ms = strategy["test_stage_timeout_max_ms"]
 
-      is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= timeout_max_ms and
-        is_integer(test_stage_timeout_ms) and test_stage_timeout_ms >= timeout_ms and
-        test_stage_timeout_ms <= test_stage_timeout_max_ms and
-        (timeout_ms == timeout_max_ms or test_stage_timeout_ms == timeout_ms)
-    else
-      _error -> false
+        is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= timeout_max_ms and
+          is_integer(test_stage_timeout_ms) and test_stage_timeout_ms >= timeout_ms and
+          test_stage_timeout_ms <= test_stage_timeout_max_ms and
+          (timeout_ms == timeout_max_ms or test_stage_timeout_ms == timeout_ms)
+
+      _error ->
+        false
     end
   end
 
   defp valid_static_parameters?(_profile_id, _parameters), do: false
 
   defp valid_timeout?(profile_id, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
-    with {:ok, strategy} <- canonical_strategy(profile_id) do
-      timeout_ms <= strategy["timeout_max_ms"]
-    else
+    case canonical_strategy(profile_id) do
+      {:ok, strategy} -> timeout_ms <= strategy["timeout_max_ms"]
       _error -> false
     end
   end
