@@ -81,17 +81,17 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjectionTest do
     assert {:ok, second} = Orchestration.pending_approval_inventory(opts)
     assert first == second
 
-    assert Enum.map(first["approvals"], & &1["approval_id"]) == ["a-approval", "b-approval"]
-    assert Enum.at(first["approvals"], 0)["task_id"] == "task-a"
+    assert Enum.map(first["approvals"], & &1["approval_id"]) == ["b-approval", "z-approval"]
+    assert Enum.at(first["approvals"], 0)["task_id"] == "task-b"
     assert first["counts"]["observed"] == 6
-    assert first["counts"]["matching"] == 3
+    assert first["counts"]["matching"] == 2
     assert first["counts"]["returned"] == 2
-    assert first["counts"]["truncated"] == 1
-    assert first["counts"]["duplicates"] == 1
+    assert first["counts"]["truncated"] == 0
+    assert first["counts"]["duplicates"] == 2
     assert first["counts"]["malformed"] == 1
     assert first["counts"]["ignored"] == 1
-    assert first["counts"]["quarantined"] == 2
-    assert first["truncated"] == true
+    assert first["counts"]["quarantined"] == 3
+    refute first["truncated"]
 
     assert first["storage"] == %{
              "durability" => "volatile",
@@ -132,6 +132,59 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjectionTest do
 
     assert Enum.map(inventory["approvals"], & &1["approval_id"]) == ["approval-one"]
     assert inventory["filters"]["task_id"] == "task-one"
+  end
+
+  test "quarantines every conflicting duplicate identity independent of backend order" do
+    records = [
+      consensus("conflict", "agent-a", "task-a", "arbor://fs/read/repo/file.ex"),
+      consensus("conflict", "agent-a", "task-a", "arbor://shell/exec/git")
+    ]
+
+    inventories =
+      for ordered <- [records, Enum.reverse(records)] do
+        Process.put({Consensus, :pending}, ordered)
+
+        assert {:ok, inventory} =
+                 inventory(
+                   caller_id: "operator",
+                   consensus_module: Consensus,
+                   interaction_router: Comms,
+                   security_module: Security
+                 )
+
+        inventory
+      end
+
+    assert [first, second] = inventories
+    assert first == second
+    assert first["approvals"] == []
+    assert first["counts"]["matching"] == 0
+    assert first["counts"]["returned"] == 0
+    assert first["counts"]["duplicates"] == 2
+    assert first["counts"]["quarantined"] == 2
+  end
+
+  test "quarantines non-ISO string timestamps and canonicalizes valid ones" do
+    Process.put(
+      {Consensus, :pending},
+      [
+        consensus("valid-time", "agent-a", "task-a", created_at: "2026-07-22T12:00:00+00:00"),
+        consensus("invalid-time", "agent-a", "task-b", created_at: "not-a-timestamp")
+      ]
+    )
+
+    assert {:ok, inventory} =
+             inventory(
+               caller_id: "operator",
+               consensus_module: Consensus,
+               interaction_router: Comms,
+               security_module: Security
+             )
+
+    assert [approval] = inventory["approvals"]
+    assert approval["created_at"] == "2026-07-22T12:00:00Z"
+    assert inventory["counts"]["malformed"] == 1
+    assert inventory["counts"]["quarantined"] == 1
   end
 
   test "backend overrun is explicitly bounded" do
@@ -200,7 +253,7 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjectionTest do
       metadata: metadata,
       context: Keyword.get(opts, :context, %{}),
       status: :pending,
-      created_at: @timestamp
+      created_at: Keyword.get(opts, :created_at, @timestamp)
     }
   end
 

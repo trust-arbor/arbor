@@ -73,44 +73,67 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
     do: invalid_inventory()
 
   defp reduce_entries(entries) do
-    Enum.reduce(entries, {[], initial_counts(), MapSet.new()}, fn entry,
-                                                                  {approvals, counts, seen} ->
-      counts = Map.update!(counts, :observed, &(&1 + 1))
+    identity_counts =
+      Enum.reduce(entries, %{}, fn
+        {:approval, source, %PendingApproval{} = approval, _task_id}, counts ->
+          case approval_identity(source, approval) do
+            {:ok, identity} -> Map.update(counts, identity, 1, &(&1 + 1))
+            :error -> counts
+          end
 
+        _entry, counts ->
+          counts
+      end)
+
+    counts = Map.put(initial_counts(), :observed, length(entries))
+
+    Enum.reduce(entries, {[], counts}, fn entry, {approvals, counts} ->
       case entry do
         {:approval, source, %PendingApproval{} = approval, task_id} ->
-          case project_approval(source, approval, task_id) do
-            {:ok, projected} ->
-              duplicate_key = {projected["source"], projected["approval_id"]}
-
-              if MapSet.member?(seen, duplicate_key) do
-                {approvals, Map.update!(counts, :duplicates, &(&1 + 1)), seen}
+          case approval_identity(source, approval) do
+            {:ok, identity} ->
+              if Map.get(identity_counts, identity, 0) > 1 do
+                {approvals, Map.update!(counts, :duplicates, &(&1 + 1))}
               else
-                {
-                  [projected | approvals],
-                  Map.update!(counts, :valid, &(&1 + 1)),
-                  MapSet.put(seen, duplicate_key)
-                }
+                project_or_quarantine(approvals, counts, source, approval, task_id)
               end
 
-            :malformed ->
-              {approvals, Map.update!(counts, :malformed, &(&1 + 1)), seen}
+            _ ->
+              project_or_quarantine(approvals, counts, source, approval, task_id)
           end
 
         {:malformed, _source} ->
-          {approvals, Map.update!(counts, :malformed, &(&1 + 1)), seen}
+          {approvals, Map.update!(counts, :malformed, &(&1 + 1))}
 
         {:ignored, _source} ->
-          {approvals, Map.update!(counts, :ignored, &(&1 + 1)), seen}
+          {approvals, Map.update!(counts, :ignored, &(&1 + 1))}
 
         _ ->
-          {approvals, Map.update!(counts, :malformed, &(&1 + 1)), seen}
+          {approvals, Map.update!(counts, :malformed, &(&1 + 1))}
       end
     end)
-    |> then(fn {approvals, counts, _seen} -> {approvals, counts} end)
   end
 
   defp initial_counts, do: %{observed: 0, valid: 0, ignored: 0, malformed: 0, duplicates: 0}
+
+  defp project_or_quarantine(approvals, counts, source, approval, task_id) do
+    case project_approval(source, approval, task_id) do
+      {:ok, projected} ->
+        {[projected | approvals], Map.update!(counts, :valid, &(&1 + 1))}
+
+      :malformed ->
+        {approvals, Map.update!(counts, :malformed, &(&1 + 1))}
+    end
+  end
+
+  defp approval_identity(source, %PendingApproval{} = approval) do
+    with {:ok, source} <- source_string(source),
+         {:ok, approval_id} <- required_string(approval.id, @max_id_bytes) do
+      {:ok, {source, approval_id}}
+    else
+      _ -> :error
+    end
+  end
 
   defp project_approval(source, %PendingApproval{} = approval, task_id) do
     with {:ok, approval_id} <- required_string(approval.id, @max_id_bytes),
@@ -231,7 +254,10 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
 
   defp optional_timestamp(value) when is_binary(value) and byte_size(value) <= 64 do
     if String.valid?(value) and value != "" and not String.contains?(value, <<0>>) do
-      {:ok, value}
+      case DateTime.from_iso8601(value) do
+        {:ok, datetime, _offset} -> {:ok, DateTime.to_iso8601(datetime)}
+        _ -> :error
+      end
     else
       :error
     end
