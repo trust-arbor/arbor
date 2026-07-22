@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   @moduletag :fast
 
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, ValidationCapacityHandoff}
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.CodingTaskExecutor
@@ -708,6 +708,48 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "compiler_version" => "coding-plan-1"
       }
     }
+  end
+
+  defp capacity_validation_fixture do
+    inventory_sha256 = String.duplicate("a", 64)
+
+    batch = %{
+      "index" => 1,
+      "total" => 1,
+      "count" => 1,
+      "label" => "batch-1-of-1-n1-#{inventory_sha256}",
+      "inventory_sha256" => inventory_sha256
+    }
+
+    {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest([batch])
+
+    handoff = %{
+      "schema_version" => 1,
+      "phase" => "structural",
+      "available_budget_ms" => 1_000,
+      "per_batch_budget_ms" => 1_200_000,
+      "required_budget_ms" => 1_200_000,
+      "completed_batch_count" => 0,
+      "completed_file_count" => 0,
+      "unstarted_batch_count" => 1,
+      "unstarted_file_count" => 1,
+      "total_batch_count" => 1,
+      "total_file_count" => 1,
+      "ordered_plan_sha256" => ordered_plan_sha256,
+      "unstarted_batches" => [batch]
+    }
+
+    [
+      %{
+        "passed" => false,
+        "reason" => "validation_capacity_exceeded",
+        "test" => %{
+          "passed" => false,
+          "reason" => "validation_capacity_exceeded",
+          "capacity_handoff" => handoff
+        }
+      }
+    ]
   end
 
   defp sha256(value) do
@@ -2405,7 +2447,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["tier_decision"] == "rework"
     end
 
-    test "validation_failed and pr_failed succeed as coding results" do
+    test "validation failure, capacity, and pr failure succeed as coding results" do
       assert {:ok, result} =
                run_with_context(%{
                  "status" => "validation_failed",
@@ -2415,6 +2457,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert result["status"] == "validation_failed"
       assert result["validation"] == [%{"passed" => false}]
+
+      assert {:ok, capacity} =
+               run_with_context(%{
+                 "status" => "validation_capacity_exceeded",
+                 "worktree_path" => "/tmp/ws",
+                 "validation" => [
+                   %{
+                     "passed" => false,
+                     "reason" => "validation_capacity_exceeded"
+                   }
+                 ]
+               })
+
+      assert capacity["status"] == "validation_capacity_exceeded"
+      assert capacity["canonical_status"] == "validation_capacity_exceeded"
 
       assert {:ok, pr_failed} =
                run_with_context(%{
@@ -3090,6 +3147,36 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   # ---------------------------------------------------------------------------
 
   describe "finalize_task" do
+    test "requires complete CrossApp capacity evidence and rejects status mismatches" do
+      root = prepare_finalize_artifacts()
+
+      malformed =
+        finalize_result(root)
+        |> Map.put("status", "validation_capacity_exceeded")
+        |> Map.put("canonical_status", "validation_capacity_exceeded")
+        |> Map.put("validation", [%{"reason" => "validation_capacity_exceeded"}])
+
+      assert {:error, {:invalid_finalize_result, :capacity_handoff}} =
+               CodingTaskExecutor.finalize_task("agent_1", malformed, [], valid_context())
+
+      valid =
+        finalize_result(root)
+        |> Map.put("status", "validation_capacity_exceeded")
+        |> Map.put("canonical_status", "validation_capacity_exceeded")
+        |> Map.put("validation", capacity_validation_fixture())
+
+      assert {:ok, _finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", valid, [], valid_context())
+
+      mismatched =
+        valid
+        |> Map.put("status", "validation_failed")
+        |> Map.put("canonical_status", "validation_failed")
+
+      assert {:error, {:invalid_finalize_result, :capacity_evidence_mismatch}} =
+               CodingTaskExecutor.finalize_task("agent_1", mismatched, [], valid_context())
+    end
+
     test "attaches evidence while preserving the successful executor result" do
       root = prepare_finalize_artifacts()
       result = finalize_result(root)

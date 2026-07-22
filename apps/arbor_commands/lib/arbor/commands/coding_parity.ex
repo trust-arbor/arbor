@@ -1,4 +1,6 @@
 defmodule Arbor.Commands.CodingParity do
+  alias Arbor.Contracts.Coding.ValidationCapacityHandoff
+
   @moduledoc """
   Projects stable `coding_change` task-result artifacts for deterministic path
   parity. Artifact quality is reported separately; branch, commit, opaque ID,
@@ -11,7 +13,8 @@ defmodule Arbor.Commands.CodingParity do
   @statuses ~w(
     approval_denied cancelled change_committed declined human_review_required
     no_changes pr_created pr_failed review_failed review_rejected
-    review_requires_rework rework_exhausted validation_failed
+    review_requires_rework rework_exhausted validation_capacity_exceeded
+    validation_failed
   )
   @no_validation_statuses ~w(cancelled declined no_changes)
   # Opaque approval IDs/notes remain projected as artifacts when present but are
@@ -155,11 +158,39 @@ defmodule Arbor.Commands.CodingParity do
         canonical -> canonical
       end
 
-    with {:ok, status} <- token(value, "terminal_status"), true <- status in @statuses do
+    with {:ok, status} <- token(value, "terminal_status"),
+         true <- status in @statuses,
+         :ok <- capacity_status_consistency(sources, status) do
       {:ok, status}
     else
       false -> invalid("unknown_terminal_status", "terminal_status")
       {:error, _reason} = error -> error
+    end
+  end
+
+  defp capacity_status_consistency(sources, status) do
+    selected_status = first(sources, [{"status", :status}])
+    selected_canonical = first(sources, [{"canonical_status", :canonical_status}])
+
+    capacity_status_in_any_source? =
+      Enum.any?(sources, fn source ->
+        Enum.any?(
+          [{"status", :status}, {"canonical_status", :canonical_status}],
+          &(first([source], [&1]) == "validation_capacity_exceeded")
+        )
+      end)
+
+    cond do
+      status == "validation_capacity_exceeded" and
+        selected_status == "validation_capacity_exceeded" and
+          selected_canonical == "validation_capacity_exceeded" ->
+        :ok
+
+      status == "validation_capacity_exceeded" or capacity_status_in_any_source? ->
+        invalid("capacity_status_mismatch", "terminal_status")
+
+      true ->
+        :ok
     end
   end
 
@@ -204,11 +235,39 @@ defmodule Arbor.Commands.CodingParity do
   end
 
   defp validation_outcome(sources, status) do
-    case first(sources, [{"validation_outcome", :validation_outcome}, {"validation", :validation}]) do
-      @missing when status == "validation_failed" -> {:ok, "failed"}
-      @missing when status in @no_validation_statuses -> {:ok, "not_run"}
-      @missing -> invalid("missing_validation_outcome", "validation_outcome")
-      value -> aggregate_validation(value)
+    selected =
+      first(sources, [{"validation_outcome", :validation_outcome}, {"validation", :validation}])
+
+    if status != "validation_capacity_exceeded" and capacity_validation_in_any_source?(sources) do
+      invalid("invalid_capacity_terminal", "validation")
+    else
+      validation_outcome_from_selected(selected, sources, status)
+    end
+  end
+
+  defp validation_outcome_from_selected(selected, sources, status) do
+    case selected do
+      @missing when status == "validation_failed" ->
+        {:ok, "failed"}
+
+      @missing when status == "validation_capacity_exceeded" ->
+        invalid("invalid_capacity_terminal", "validation")
+
+      @missing when status in @no_validation_statuses ->
+        {:ok, "not_run"}
+
+      @missing ->
+        invalid("missing_validation_outcome", "validation_outcome")
+
+      _value when status == "validation_capacity_exceeded" ->
+        if valid_capacity_terminal?(sources),
+          do: {:ok, "capacity_exceeded"},
+          else: invalid("invalid_capacity_terminal", "validation")
+
+      value ->
+        if capacity_marker?(value),
+          do: invalid("invalid_capacity_terminal", "validation"),
+          else: aggregate_validation(value)
     end
   end
 
@@ -222,8 +281,11 @@ defmodule Arbor.Commands.CodingParity do
       end
     end)
     |> case do
-      {:ok, outcomes} -> {:ok, Enum.find(["failed", "passed"], "not_run", &(&1 in outcomes))}
-      error -> error
+      {:ok, outcomes} ->
+        {:ok, Enum.find(["failed", "passed"], "not_run", &(&1 in outcomes))}
+
+      error ->
+        error
     end
   end
 
@@ -252,6 +314,54 @@ defmodule Arbor.Commands.CodingParity do
       end
     end
   end
+
+  defp valid_capacity_terminal?(sources) do
+    case first(sources, [{"validation", :validation}]) do
+      [report] when is_map(report) and not is_struct(report) ->
+        test = first([report], [{"test", :test}])
+
+        first([report], [{"reason", :reason}]) == "validation_capacity_exceeded" and
+          is_map(test) and not is_struct(test) and
+          first([test], [{"reason", :reason}]) == "validation_capacity_exceeded" and
+          ValidationCapacityHandoff.valid?(
+            first([test], [{"capacity_handoff", :capacity_handoff}])
+          )
+
+      _ ->
+        false
+    end
+  end
+
+  defp capacity_validation_in_any_source?(sources) do
+    Enum.any?(sources, fn source ->
+      case first([source], [
+             {"validation_outcome", :validation_outcome},
+             {"validation", :validation}
+           ]) do
+        @missing -> false
+        value -> capacity_marker?(value)
+      end
+    end)
+  end
+
+  defp capacity_marker?(value) when is_map(value) and not is_struct(value) do
+    Enum.any?(value, fn {key, nested} ->
+      key = if is_atom(key), do: Atom.to_string(key), else: key
+
+      key == "capacity_handoff" or
+        (key in ~w(reason status canonical_status outcome) and
+           nested in [
+             "capacity_exceeded",
+             :capacity_exceeded,
+             "validation_capacity_exceeded",
+             :validation_capacity_exceeded
+           ]) or
+        capacity_marker?(nested)
+    end)
+  end
+
+  defp capacity_marker?(value) when is_list(value), do: Enum.any?(value, &capacity_marker?/1)
+  defp capacity_marker?(_value), do: false
 
   defp review_outcome(sources) do
     fields = [

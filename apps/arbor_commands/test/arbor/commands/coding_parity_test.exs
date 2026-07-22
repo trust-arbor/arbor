@@ -4,6 +4,7 @@ defmodule Arbor.Commands.CodingParityTest do
   @moduletag :fast
 
   alias Arbor.Commands.CodingParity
+  alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
   @tree_a String.duplicate("a", 40)
   @tree_b String.duplicate("b", 40)
@@ -124,6 +125,93 @@ defmodule Arbor.Commands.CodingParityTest do
     assert projection["semantic"]["terminal_status"] == "approval_denied"
     assert projection["semantic"]["approval_request_id"] == "irq_deadbeefcafebabe"
     assert projection["semantic"]["approval_note"] == "please no"
+  end
+
+  test "projects validation capacity distinctly from ordinary validation failure" do
+    inventory_sha256 = String.duplicate("d", 64)
+
+    batch = %{
+      "index" => 1,
+      "total" => 1,
+      "count" => 1,
+      "label" => "batch-1-of-1-n1-#{inventory_sha256}",
+      "inventory_sha256" => inventory_sha256
+    }
+
+    {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest([batch])
+
+    handoff = %{
+      "schema_version" => 1,
+      "phase" => "structural",
+      "available_budget_ms" => 5_000,
+      "per_batch_budget_ms" => 10_000,
+      "required_budget_ms" => 10_000,
+      "completed_batch_count" => 0,
+      "completed_file_count" => 0,
+      "unstarted_batch_count" => 1,
+      "unstarted_file_count" => 1,
+      "total_batch_count" => 1,
+      "total_file_count" => 1,
+      "ordered_plan_sha256" => ordered_plan_sha256,
+      "unstarted_batches" => [batch]
+    }
+
+    result =
+      pipeline_result()
+      |> put_in(["payload", "report", "status"], "validation_capacity_exceeded")
+      |> put_in(["payload", "report", "canonical_status"], "validation_capacity_exceeded")
+      |> put_in(["payload", "report", "validation"], [
+        %{
+          "passed" => false,
+          "reason" => "validation_capacity_exceeded",
+          "test" => %{
+            "passed" => false,
+            "reason" => "validation_capacity_exceeded",
+            "capacity_handoff" => handoff
+          }
+        }
+      ])
+
+    assert {:ok, projection} = CodingParity.project(result, %{"tree_oid" => @tree_a})
+    assert projection["semantic"]["terminal_status"] == "validation_capacity_exceeded"
+    assert projection["semantic"]["validation_outcome"] == "capacity_exceeded"
+
+    status_only = update_in(result, ["payload", "report"], &Map.delete(&1, "validation"))
+
+    assert {:error, %{"reason" => "invalid_capacity_terminal"}} =
+             CodingParity.project(status_only, %{"tree_oid" => @tree_a})
+
+    normal_mismatch =
+      result
+      |> put_in(["payload", "report", "status"], "validation_failed")
+      |> put_in(["payload", "report", "canonical_status"], "validation_failed")
+
+    assert {:error, %{"reason" => "invalid_capacity_terminal"}} =
+             CodingParity.project(normal_mismatch, %{"tree_oid" => @tree_a})
+
+    status_mismatch =
+      result
+      |> put_in(["payload", "report", "status"], "validation_failed")
+      |> put_in(["payload", "report", "canonical_status"], "validation_capacity_exceeded")
+
+    assert {:error, %{"reason" => "capacity_status_mismatch"}} =
+             CodingParity.project(status_mismatch, %{"tree_oid" => @tree_a})
+
+    capacity_validation = get_in(result, ["payload", "report", "validation"])
+
+    hidden_evidence =
+      pipeline_result()
+      |> put_in(["raw", "validation"], capacity_validation)
+
+    assert {:error, %{"reason" => "invalid_capacity_terminal"}} =
+             CodingParity.project(hidden_evidence, %{"tree_oid" => @tree_a})
+
+    hidden_status =
+      pipeline_result()
+      |> put_in(["raw", "canonical_status"], "validation_capacity_exceeded")
+
+    assert {:error, %{"reason" => "capacity_status_mismatch"}} =
+             CodingParity.project(hidden_status, %{"tree_oid" => @tree_a})
   end
 
   test "opaque approval_request_id and approval_note differences do not break parity" do

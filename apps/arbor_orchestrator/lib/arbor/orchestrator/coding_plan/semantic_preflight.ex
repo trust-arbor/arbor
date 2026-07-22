@@ -1059,6 +1059,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"prep_release_mode_retain", "context.status=review_rejected"},
       {"prep_release_mode_retain", "context.status=rework_exhausted"},
       {"prep_release_mode_retain", "context.status=validation_failed"},
+      {"prep_release_mode_retain", "context.status=validation_capacity_exceeded"},
       {"prep_release_mode_retain", nil},
       {"route_success_workspace_retention", "context.status=change_committed"},
       {"route_success_workspace_retention", "context.status=human_review_required"},
@@ -1138,7 +1139,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     # the earliest owner-observed gate that may abort into the shared cleanup
     # status without re-entering the commit gate.
     "status_pipeline_error_then_close" => "capture_pre_turn_workspace",
-    "status_validation_failed" => "validate"
+    "status_validation_failed" => "validate",
+    "status_validation_capacity_exceeded" => "validate"
   }
 
   @operator_rework_chain ~w(
@@ -3063,7 +3065,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"validate",
        [
          {"status_validation_failed", "outcome=fail"},
-         {"check_validation_passed", "outcome=success"}
+         {"status_validation_capacity_exceeded",
+          "outcome=success&&context.validation.reason=validation_capacity_exceeded"},
+         {"check_validation_passed",
+          "outcome=success&&context.validation.reason!=validation_capacity_exceeded"}
        ]},
       {"check_validation_passed",
        [

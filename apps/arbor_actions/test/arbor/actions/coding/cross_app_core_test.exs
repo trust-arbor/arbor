@@ -1362,6 +1362,35 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.next_test_step(10_000, forged_split, 10_000)
   end
 
+  test "structural admission binds the exact ordered unstarted inventory" do
+    files = [
+      "apps/alpha/test/a_test.exs",
+      "apps/alpha/test/b_test.exs",
+      "apps/beta/test/c_test.exs"
+    ]
+
+    assert {:ok, batches} = Core.partition_test_batches(files)
+    assert {:capacity_exceeded, check} = Core.admit_test_batches(batches, 1_000, 1_000)
+
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert handoff["phase"] == "structural"
+    assert handoff["available_budget_ms"] == 1_000
+    assert handoff["required_budget_ms"] == length(batches) * 1_000
+    assert handoff["completed_batch_count"] == 0
+    assert handoff["completed_file_count"] == 0
+    assert handoff["unstarted_batch_count"] == length(batches)
+    assert handoff["unstarted_file_count"] == length(files)
+    assert Enum.all?(handoff["unstarted_batches"], &(not Map.has_key?(&1, "paths")))
+    assert handoff["per_batch_budget_ms"] == 1_000
+
+    assert handoff["required_budget_ms"] ==
+             handoff["unstarted_batch_count"] * handoff["per_batch_budget_ms"]
+
+    assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(handoff)
+    assert {:ok, _} = Jason.encode(check)
+  end
+
   defp signed_batch(paths, index, total) do
     digest =
       paths

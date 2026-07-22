@@ -7,6 +7,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   without filesystem, process, clock, or registry operations.
   """
 
+  alias Arbor.Contracts.Coding.ValidationCapacityHandoff
+
   @default_timeout 300_000
   @minimum_timeout 1_000
   # cross_app uses Shell :intensive resource_profile for every contained Mix
@@ -150,6 +152,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           | {:run, test_batch(), pos_integer(), [test_batch()]}
           | {:timeout, test_batch(), [test_batch()]}
           | {:error, term()}
+
+  @typedoc "Bounded evidence for a validation capacity handoff."
+  @type capacity_handoff :: %{required(String.t()) => term()}
 
   @doc "Construct and validate the action's deliberately narrow input surface."
   @spec new(map()) :: {:ok, input()} | {:error, atom()}
@@ -504,6 +509,144 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def next_test_step(remaining_ms, batches, operation_timeout_ms) do
     invalid_test_step_input(remaining_ms, batches, operation_timeout_ms)
   end
+
+  @doc """
+  Conservative admission check for the complete reviewed batch plan.
+
+  Every admitted batch receives up to the operation ceiling. If that complete
+  worst-case plan cannot fit the aggregate stage budget, the caller must hand
+  off before launching a child rather than knowingly starting a partial plan.
+  """
+  @spec admit_test_batches([test_batch()], pos_integer(), pos_integer()) ::
+          :ok | {:capacity_exceeded, map()} | {:error, term()}
+  def admit_test_batches(batches, available_ms, operation_timeout_ms)
+      when is_list(batches) and is_integer(available_ms) and
+             is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
+    required_ms = length(batches) * operation_timeout_ms
+
+    cond do
+      batches == [] ->
+        :ok
+
+      not valid_remaining_batches?(batches) ->
+        {:error, :invalid_test_batch_plan}
+
+      required_ms <= available_ms ->
+        :ok
+
+      true ->
+        case capacity_handoff(
+               :structural,
+               available_ms,
+               operation_timeout_ms,
+               required_ms,
+               [],
+               batches
+             ) do
+          {:ok, check} -> {:capacity_exceeded, check}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  def admit_test_batches(_batches, _available_ms, _operation_timeout_ms),
+    do: {:error, :invalid_test_batch_plan}
+
+  @doc """
+  Build the bounded, JSON-clean handoff check for an unstarted batch suffix.
+
+  Batch paths are already admitted and normalized by partition_test_batches/1.
+  The descriptor therefore binds the exact ordered suffix while retaining only
+  deterministic labels, counts, and digests. Retained workspace and authorized
+  inventory can reconstruct filenames; terminal evidence never carries them.
+  """
+  @spec capacity_handoff(
+          :structural | :runtime,
+          integer(),
+          pos_integer(),
+          pos_integer(),
+          [test_batch()],
+          [test_batch()]
+        ) :: {:ok, map()} | {:error, term()}
+  def capacity_handoff(
+        phase,
+        available_ms,
+        per_batch_budget_ms,
+        required_ms,
+        completed_batches,
+        unstarted_batches
+      )
+      when phase in [:structural, :runtime] and is_integer(available_ms) and
+             is_integer(per_batch_budget_ms) and per_batch_budget_ms > 0 and
+             is_integer(required_ms) and required_ms > 0 and is_list(completed_batches) and
+             is_list(unstarted_batches) do
+    with :ok <- validate_capacity_batches(completed_batches, unstarted_batches),
+         all_batches <- completed_batches ++ unstarted_batches,
+         completed_files <- Enum.sum(Enum.map(completed_batches, & &1.count)),
+         unstarted_files <- Enum.sum(Enum.map(unstarted_batches, & &1.count)),
+         compact_batches <- Enum.map(unstarted_batches, &capacity_batch/1),
+         {:ok, ordered_plan_sha256} <-
+           ValidationCapacityHandoff.ordered_plan_digest(compact_batches),
+         {:ok, handoff} <-
+           ValidationCapacityHandoff.new(%{
+             "schema_version" => ValidationCapacityHandoff.schema_version(),
+             "phase" => Atom.to_string(phase),
+             "available_budget_ms" => max(available_ms, 0),
+             "per_batch_budget_ms" => per_batch_budget_ms,
+             "required_budget_ms" => required_ms,
+             "completed_batch_count" => length(completed_batches),
+             "completed_file_count" => completed_files,
+             "unstarted_batch_count" => length(unstarted_batches),
+             "unstarted_file_count" => unstarted_files,
+             "total_batch_count" => length(all_batches),
+             "total_file_count" => completed_files + unstarted_files,
+             "ordered_plan_sha256" => ordered_plan_sha256,
+             "unstarted_batches" => compact_batches
+           }) do
+      check =
+        completed_check(
+          %{"passed" => false, "exit_code" => nil},
+          reason: "validation_capacity_exceeded"
+        )
+        |> Map.put("capacity_handoff", ValidationCapacityHandoff.to_map(handoff))
+
+      {:ok, check}
+    else
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def capacity_handoff(
+        _phase,
+        _available_ms,
+        _per_batch_budget_ms,
+        _required_ms,
+        _completed_batches,
+        _unstarted_batches
+      ),
+      do: {:error, :invalid_capacity_handoff}
+
+  defp capacity_batch(batch) do
+    %{
+      "index" => Map.get(batch, :index),
+      "total" => Map.get(batch, :total),
+      "count" => Map.get(batch, :count),
+      "label" => Map.get(batch, :label),
+      "inventory_sha256" => Map.get(batch, :inventory_sha256)
+    }
+  end
+
+  defp validate_capacity_batches(completed_batches, unstarted_batches)
+       when is_list(completed_batches) and is_list(unstarted_batches) and unstarted_batches != [] do
+    all_batches = completed_batches ++ unstarted_batches
+
+    if Enum.all?(all_batches, &is_map/1) and valid_remaining_batches?(all_batches),
+      do: :ok,
+      else: {:error, :invalid_capacity_batch_plan}
+  end
+
+  defp validate_capacity_batches(_completed_batches, _unstarted_batches),
+    do: {:error, :invalid_capacity_batch_plan}
 
   defp invalid_test_step_input(remaining_ms, batches, operation_timeout_ms) do
     {:error,
@@ -1589,7 +1732,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   defp normalize_check(check) when is_map(check) do
-    %{
+    normalized = %{
       "status" =>
         to_string_value(Map.get(check, :status) || Map.get(check, "status") || "unknown"),
       "passed" => Map.get(check, :passed) || Map.get(check, "passed") || false,
@@ -1608,6 +1751,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       "stderr_sha256" =>
         Map.get(check, :stderr_sha256) || Map.get(check, "stderr_sha256") || sha256("")
     }
+
+    case Map.get(check, :capacity_handoff) || Map.get(check, "capacity_handoff") do
+      handoff when is_map(handoff) -> Map.put(normalized, "capacity_handoff", handoff)
+      _ -> normalized
+    end
   end
 
   defp normalize_check(_), do: skipped_check("missing_check")

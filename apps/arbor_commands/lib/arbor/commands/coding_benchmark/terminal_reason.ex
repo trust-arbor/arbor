@@ -52,7 +52,7 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
   def from_result(_result, status) when status in ~w(change_committed no_changes pr_created),
     do: nil
 
-  def from_result(result, _status) when is_map(result) and not is_struct(result) do
+  def from_result(result, status) when is_map(result) and not is_struct(result) do
     sources = result_sources(result)
 
     explicit =
@@ -63,10 +63,43 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReason do
         if is_nil(value), do: nil, else: sanitize(value)
       end)
 
-    explicit || validation_failure_reason(sources)
+    derived = validation_failure_reason(sources)
+
+    derived =
+      if derived == "validation_failed" and capacity_validation?(sources),
+        do: nil,
+        else: derived
+
+    explicit || derived || capacity_fallback(status)
   end
 
   def from_result(_result, _status), do: nil
+
+  defp capacity_fallback("validation_capacity_exceeded"),
+    do: "validation_capacity_exceeded"
+
+  defp capacity_fallback(_status), do: nil
+
+  defp capacity_validation?(sources) do
+    Enum.any?(sources, fn source ->
+      case map_value(source, "validation", :validation) do
+        validations when is_list(validations) ->
+          Enum.any?(validations, fn
+            entry when is_map(entry) and not is_struct(entry) ->
+              map_value(entry, "reason", :reason) in [
+                "validation_capacity_exceeded",
+                :validation_capacity_exceeded
+              ]
+
+            _ ->
+              false
+          end)
+
+        _ ->
+          false
+      end
+    end)
+  end
 
   defp result_sources(result) do
     payload = map_value(result, "payload", :payload) || %{}

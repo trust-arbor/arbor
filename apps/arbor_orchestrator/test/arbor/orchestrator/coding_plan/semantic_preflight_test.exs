@@ -1344,8 +1344,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     bypassed =
       String.replace(
         ctx.template_source,
-        ~s(validate -> check_validation_passed [condition="outcome=success"]),
-        ~s(validate -> check_validation_passed [condition="outcome=success"]\n  validate -> prep_commit_path [condition="context.bypass_validation_result=true"])
+        ~s(validate -> check_validation_passed [condition="outcome=success&&context.validation.reason!=validation_capacity_exceeded"]),
+        ~s(validate -> check_validation_passed [condition="outcome=success&&context.validation.reason!=validation_capacity_exceeded"]\n  validate -> prep_commit_path [condition="context.bypass_validation_result=true"])
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} = compile(plan!(), ctx, bypassed)

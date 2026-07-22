@@ -81,6 +81,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     review_rejected
     review_requires_rework
     rework_exhausted
+    validation_capacity_exceeded
     validation_failed
   ))
 
@@ -89,6 +90,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   alias Arbor.Contracts.Coding.{
     BranchLifecycleDescriptor,
     TaskEvidenceDescriptor,
+    ValidationCapacityHandoff,
     WorkspaceReleaseDescriptor
   }
 
@@ -138,6 +140,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          :ok <- validate_terminal_task_id(task_id),
          :ok <- validate_json_object(result, :invalid_terminal_result),
          :ok <- validate_terminal_result(result),
+         {:ok, result} <- normalize_terminal_capacity(result),
          {:ok, result} <- normalize_terminal_descriptors(result),
          {:ok, controls} <- normalize_terminal_controls(controls, task_id),
          {:ok, body} <- build_terminal_evidence(result, task_id, controls),
@@ -263,7 +266,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          true <- MapSet.member?(@terminal_statuses, Map.fetch!(result, "status")),
          true <- MapSet.member?(@terminal_statuses, canonical_status),
          :ok <- validate_terminal_artifacts(Map.fetch!(result, "artifacts")),
-         :ok <- validate_terminal_optional_data(result) do
+         :ok <- validate_terminal_optional_data(result),
+         :ok <- validate_terminal_capacity_consistency(result) do
       :ok
     else
       false -> {:error, {:invalid_terminal_result, :not_successful}}
@@ -380,6 +384,76 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
       :ok
     end
   end
+
+  defp normalize_terminal_capacity(result) do
+    if Map.get(result, "status") == "validation_capacity_exceeded" do
+      [report] = Map.fetch!(result, "validation")
+      test = Map.fetch!(report, "test")
+
+      {:ok, handoff} =
+        ValidationCapacityHandoff.normalize(Map.fetch!(test, "capacity_handoff"))
+
+      normalized_test = Map.put(test, "capacity_handoff", handoff)
+      normalized_report = Map.put(report, "test", normalized_test)
+      {:ok, Map.put(result, "validation", [normalized_report])}
+    else
+      {:ok, result}
+    end
+  rescue
+    _ -> {:error, {:invalid_terminal_result, :capacity_handoff}}
+  end
+
+  defp validate_terminal_capacity_consistency(result) do
+    status = Map.get(result, "status")
+    canonical_status = Map.get(result, "canonical_status")
+
+    capacity_status? =
+      status == "validation_capacity_exceeded" or
+        canonical_status == "validation_capacity_exceeded"
+
+    cond do
+      capacity_status? and
+        status == "validation_capacity_exceeded" and
+          canonical_status == "validation_capacity_exceeded" ->
+        validate_capacity_terminal_shape(result)
+
+      capacity_status? ->
+        {:error, {:invalid_terminal_result, :capacity_status_mismatch}}
+
+      capacity_marker?(Map.get(result, "validation")) ->
+        {:error, {:invalid_terminal_result, :capacity_evidence_mismatch}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_capacity_terminal_shape(result) do
+    with [report] <- Map.get(result, "validation"),
+         true <- is_map(report) and not is_struct(report),
+         "validation_capacity_exceeded" <- Map.get(report, "reason"),
+         test when is_map(test) and not is_struct(test) <- Map.get(report, "test"),
+         "validation_capacity_exceeded" <- Map.get(test, "reason"),
+         handoff when is_map(handoff) and not is_struct(handoff) <-
+           Map.get(test, "capacity_handoff"),
+         true <- ValidationCapacityHandoff.valid?(handoff) do
+      :ok
+    else
+      _ -> {:error, {:invalid_terminal_result, :capacity_handoff}}
+    end
+  end
+
+  defp capacity_marker?(value) when is_map(value) and not is_struct(value) do
+    Enum.any?(value, fn {key, nested} ->
+      key == "capacity_handoff" or
+        (key in ~w(reason status canonical_status outcome) and
+           nested in ~w(capacity_exceeded validation_capacity_exceeded)) or
+        capacity_marker?(nested)
+    end)
+  end
+
+  defp capacity_marker?(value) when is_list(value), do: Enum.any?(value, &capacity_marker?/1)
+  defp capacity_marker?(_value), do: false
 
   defp validate_terminal_artifact_descriptor(artifacts, key, contract) do
     case Map.fetch(artifacts, key) do

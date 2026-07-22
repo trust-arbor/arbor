@@ -3,6 +3,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
   import Bitwise
 
+  alias Arbor.Contracts.Coding.ValidationCapacityHandoff
   alias Arbor.Orchestrator.CodingPlan.ArtifactStore
 
   setup do
@@ -273,6 +274,59 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert Enum.sort(File.ls!(root)) == [
              "coding-terminal-evidence.json"
            ]
+  end
+
+  test "accepts only complete validated CrossApp capacity evidence", %{root: root} do
+    File.mkdir_p!(root)
+
+    result =
+      terminal_result(root)
+      |> Map.put("status", "validation_capacity_exceeded")
+      |> Map.put("canonical_status", "validation_capacity_exceeded")
+      |> Map.put("validation", capacity_validation())
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity", result, [])
+  end
+
+  test "maximum compact capacity terminal evidence stays below the archive cap", %{root: root} do
+    File.mkdir_p!(root)
+
+    result =
+      terminal_result(root)
+      |> Map.put("status", "validation_capacity_exceeded")
+      |> Map.put("canonical_status", "validation_capacity_exceeded")
+      |> Map.put("validation", capacity_validation(343))
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity_max", result, [])
+
+    bytes = File.read!(Path.join(root, "coding-terminal-evidence.json"))
+    assert byte_size(bytes) < 1_048_576
+    refute bytes =~ "\"paths\""
+  end
+
+  test "rejects malformed capacity status and capacity evidence mismatches", %{root: root} do
+    File.mkdir_p!(root)
+    result = terminal_result(root)
+
+    malformed =
+      result
+      |> Map.put("status", "validation_capacity_exceeded")
+      |> Map.put("canonical_status", "validation_capacity_exceeded")
+      |> Map.put("validation", [%{"reason" => "validation_capacity_exceeded"}])
+
+    assert {:error, {:invalid_terminal_result, :capacity_handoff}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity", malformed, [])
+
+    mismatched =
+      result
+      |> Map.put("validation", capacity_validation())
+      |> Map.put("status", "validation_failed")
+      |> Map.put("canonical_status", "validation_failed")
+
+    assert {:error, {:invalid_terminal_result, :capacity_evidence_mismatch}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity", mismatched, [])
   end
 
   test "normalizes terminal lifecycle descriptors and rejects authority-bearing artifacts", %{
@@ -592,6 +646,63 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
         "compiler_version" => "coding-plan-1"
       }
     }
+  end
+
+  defp capacity_validation(batch_count \\ 1) do
+    batches =
+      Enum.map(1..batch_count, fn index ->
+        count =
+          cond do
+            batch_count == 1 -> 1
+            index <= 255 -> 1
+            index <= 342 -> 20
+            true -> 5
+          end
+
+        inventory_sha256 =
+          :crypto.hash(:sha256, "inventory-#{index}")
+          |> Base.encode16(case: :lower)
+
+        %{
+          "index" => index,
+          "total" => batch_count,
+          "count" => count,
+          "label" => "batch-#{index}-of-#{batch_count}-n#{count}-#{inventory_sha256}",
+          "inventory_sha256" => inventory_sha256
+        }
+      end)
+
+    {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest(batches)
+    file_count = Enum.sum(Enum.map(batches, & &1["count"]))
+    per_batch_budget_ms = 1_200_000
+
+    handoff = %{
+      "schema_version" => 1,
+      "phase" => "structural",
+      "available_budget_ms" => 1_000,
+      "per_batch_budget_ms" => per_batch_budget_ms,
+      "required_budget_ms" => batch_count * per_batch_budget_ms,
+      "completed_batch_count" => 0,
+      "completed_file_count" => 0,
+      "unstarted_batch_count" => batch_count,
+      "unstarted_file_count" => file_count,
+      "total_batch_count" => batch_count,
+      "total_file_count" => file_count,
+      "ordered_plan_sha256" => ordered_plan_sha256,
+      "unstarted_batches" => batches
+    }
+
+    [
+      %{
+        "passed" => false,
+        "reason" => "validation_capacity_exceeded",
+        "test" => %{
+          "passed" => false,
+          "reason" => "validation_capacity_exceeded",
+          "capacity_handoff" => handoff
+        }
+      }
+    ]
   end
 
   defp terminal_control(overrides \\ %{}) do

@@ -142,8 +142,11 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
     assert result.raw["canonical_status"] == "rework_exhausted"
   end
 
-  test "existing declined and validation_failed variants still normalize" do
-    for status <- ~w(declined validation_failed no_changes pr_failed review_rejected) do
+  test "existing terminal variants including capacity still normalize" do
+    for status <- ~w(
+           declined validation_failed validation_capacity_exceeded no_changes pr_failed
+           review_rejected
+         ) do
       raw = %{
         status: status,
         worktree_path: "/tmp/ws",

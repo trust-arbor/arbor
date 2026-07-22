@@ -12,6 +12,34 @@ defmodule Arbor.Commands.CodingBenchmark.TerminalReasonTest do
     assert TerminalReason.from_result(%{"error" => "ignored"}, "pr_created") == nil
   end
 
+  test "capacity terminal keeps its distinct reason" do
+    result = %{
+      "payload" => %{
+        "status" => "validation_capacity_exceeded",
+        "validation" => [
+          %{"passed" => false, "reason" => "validation_capacity_exceeded"}
+        ]
+      }
+    }
+
+    assert TerminalReason.from_result(result, "validation_capacity_exceeded") ==
+             "validation_capacity_exceeded"
+  end
+
+  test "capacity fallback does not override an explicit bounded error" do
+    result = %{
+      "payload" => %{
+        "error" => "capacity handoff failed before validation evidence was archived",
+        "validation" => [
+          %{"passed" => false, "reason" => "validation_capacity_exceeded"}
+        ]
+      }
+    }
+
+    assert TerminalReason.from_result(result, "validation_capacity_exceeded") ==
+             "capacity handoff failed before validation evidence was archived"
+  end
+
   test "explicit error remains the terminal reason" do
     result = %{
       "payload" => %{

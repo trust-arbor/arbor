@@ -590,6 +590,30 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
 
+    assert Map.has_key?(graph.nodes, "status_validation_capacity_exceeded")
+
+    assert edge_condition(graph, "validate", "status_validation_capacity_exceeded") ==
+             "outcome=success&&context.validation.reason=validation_capacity_exceeded"
+
+    assert edge_condition(graph, "validate", "check_validation_passed") ==
+             "outcome=success&&context.validation.reason!=validation_capacity_exceeded"
+
+    assert Enum.any?(graph.edges, fn edge ->
+             edge.from == "status_validation_capacity_exceeded" and
+               edge.to == "close_worker" and is_nil(edge.attrs["condition"])
+           end)
+
+    assert Enum.any?(graph.edges, fn edge ->
+             edge.from == "route_release_mode" and
+               edge.to == "prep_release_mode_retain" and
+               edge.attrs["condition"] == "context.status=validation_capacity_exceeded"
+           end)
+
+    refute Enum.any?(graph.edges, fn edge ->
+             edge.from == "status_validation_capacity_exceeded" and
+               edge.to in ["check_validation_category_budget", "check_validation_total_budget"]
+           end)
+
     # Dormant security nodes are dropped (same as default).
     refute Map.has_key?(graph.nodes, "hoist_review_attestation_id")
     refute Map.has_key?(graph.nodes, "route_validated_review")

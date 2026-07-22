@@ -21,6 +21,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     review_rejected
     review_requires_rework
     rework_exhausted
+    validation_capacity_exceeded
     validation_failed
   ))
 

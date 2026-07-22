@@ -1169,6 +1169,13 @@ digraph CodingChangeV1 {
     output_key="status"
   ]
 
+  status_validation_capacity_exceeded [
+    type="transform",
+    transform="constant",
+    expression="validation_capacity_exceeded",
+    output_key="status"
+  ]
+
   status_rework_exhausted [
     type="transform",
     transform="constant",
@@ -1598,7 +1605,8 @@ digraph CodingChangeV1 {
 
   // Hard validation action error (not soft passed=false)
   validate -> status_validation_failed [condition="outcome=fail"]
-  validate -> check_validation_passed [condition="outcome=success"]
+  validate -> status_validation_capacity_exceeded [condition="outcome=success&&context.validation.reason=validation_capacity_exceeded"]
+  validate -> check_validation_passed [condition="outcome=success&&context.validation.reason!=validation_capacity_exceeded"]
 
   // Validation soft-fail: initiate at most one validation repair and never a
   // third total repair attempt.
@@ -1608,6 +1616,7 @@ digraph CodingChangeV1 {
   check_validation_total_budget -> status_validation_failed [condition="context.total_rework_count>=2"]
   check_validation_total_budget -> inc_validation_rework_count [condition="context.total_rework_count<2"]
   status_validation_failed -> close_worker
+  status_validation_capacity_exceeded -> close_worker
   inc_validation_rework_count -> inc_validation_total_rework_count
   inc_validation_total_rework_count -> mark_validation_rework_kind
   mark_validation_rework_kind -> mark_validation_rework_iteration
@@ -1790,6 +1799,7 @@ digraph CodingChangeV1 {
   route_release_mode -> prep_release_mode_discard [condition="context.status=no_changes"]
 
   route_release_mode -> prep_release_mode_retain [condition="context.status=validation_failed"]
+  route_release_mode -> prep_release_mode_retain [condition="context.status=validation_capacity_exceeded"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=rework_exhausted"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=approval_denied"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=review_rejected"]

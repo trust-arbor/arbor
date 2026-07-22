@@ -126,6 +126,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     inc_worker_send_recovery_count
                     init_worker_send_recovery_count
                     validate
+                    status_validation_capacity_exceeded
                   ])
 
   @security_required_nodes Enum.sort(

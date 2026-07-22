@@ -51,7 +51,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test", "apps/beta/test"],
-        30_000
+        60_000,
+        120_000
       )
 
     assert check["passed"]
@@ -62,11 +63,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     # App test root boundary forces separate per-app batches.
     assert_receive {:mix_invocation, ^worktree, alpha_batch, opts_a}
     assert alpha_batch == ["test", "--", "apps/alpha/test/alpha_test.exs"]
-    assert Keyword.get(opts_a, :timeout) == 30_000
+    assert Keyword.get(opts_a, :timeout) == 60_000
 
     assert_receive {:mix_invocation, ^worktree, beta_batch, opts_b}
     assert beta_batch == ["test", "--", "apps/beta/test/beta_test.exs"]
-    assert Keyword.get(opts_b, :timeout) == 30_000
+    assert Keyword.get(opts_b, :timeout) == 60_000
 
     # Never a raw directory; only exact admitted file paths.
     refute_received {:mix_invocation, _, ["test", "--", "apps/alpha/test"], _}
@@ -102,7 +103,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test"],
-        60_000
+        60_000,
+        120_000
       )
 
     refute check["passed"]
@@ -121,7 +123,36 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _}
   end
 
-  test "child that consumes remaining budget is timed out; later batches never launch", %{
+  test "structural capacity admission hands off the complete suffix before launch", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:unexpected_mix_invocation, args})
+      flunk("structurally impossible plan must not launch a child")
+    end)
+
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test", "apps/beta/test"],
+        5_000,
+        5_000
+      )
+
+    assert check["reason"] == "validation_capacity_exceeded"
+    assert check["capacity_handoff"]["phase"] == "structural"
+    assert check["capacity_handoff"]["available_budget_ms"] == 5_000
+    assert check["capacity_handoff"]["required_budget_ms"] == 10_000
+    assert check["capacity_handoff"]["completed_batch_count"] == 0
+    assert check["capacity_handoff"]["unstarted_file_count"] == 2
+    assert {:ok, _} = Jason.encode(check)
+    refute_received {:unexpected_mix_invocation, _}
+  end
+
+  test "runtime capacity exhaustion hands off after completed child", %{
     worktree: worktree
   } do
     parent = self()
@@ -148,20 +179,26 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     end)
 
     check =
-      Shell.run_app_tests(
-        worktree,
-        ["apps/alpha/test"],
-        5_000
-      )
+      Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 10_000)
 
     refute check["passed"]
-    assert check["reason"] == "tests_timed_out"
-    assert String.contains?(check["stdout_excerpt"], "[#{batch1.label}]")
-    # First batch itself overran the shared budget — classified as timeout, not pass.
-    refute String.contains?(
-             check["stdout_excerpt"],
-             "budget exhausted before #{batch2.label}"
-           )
+    assert check["reason"] == "validation_capacity_exceeded"
+    assert check["capacity_handoff"]["phase"] == "runtime"
+    assert check["capacity_handoff"]["completed_batch_count"] == 1
+    assert check["capacity_handoff"]["unstarted_batch_count"] == 1
+    assert check["stdout_excerpt"] == ""
+
+    assert check["capacity_handoff"]["unstarted_batches"] == [
+             %{
+               "index" => batch2.index,
+               "total" => batch2.total,
+               "count" => batch2.count,
+               "label" => batch2.label,
+               "inventory_sha256" => batch2.inventory_sha256
+             }
+           ]
+
+    refute Map.has_key?(hd(check["capacity_handoff"]["unstarted_batches"]), "paths")
 
     assert byte_size(check["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
 
@@ -210,11 +247,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     end)
 
     check =
-      Shell.run_app_tests(
-        worktree,
-        ["apps/alpha/test"],
-        5_000
-      )
+      Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 10_000)
 
     refute check["passed"]
     assert check["reason"] == "tests_timed_out"
@@ -229,7 +262,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(opts1, :timeout) == 5_000
     assert_receive {:mix_invocation, ["test", "--" | r2], opts2}
     assert r2 == batch2.paths
-    assert Keyword.get(opts2, :timeout) == 4_000
+    assert Keyword.get(opts2, :timeout) == 5_000
     refute_received {:mix_invocation, _, _}
   end
 
@@ -420,18 +453,30 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test", "apps/beta/test"],
-        5_000
+        5_000,
+        10_000
       )
 
     refute check["passed"]
-    assert check["reason"] == "tests_timed_out"
+    assert check["reason"] == "validation_capacity_exceeded"
+    assert check["capacity_handoff"]["phase"] == "runtime"
 
-    # First batch is budget-exhausted (never launched), second may or may not
-    # appear in excerpt depending on ordering; at least the first is present.
-    assert String.contains?(
-             check["stdout_excerpt"],
-             "budget exhausted before #{alpha_batch.label}"
-           )
+    assert check["capacity_handoff"]["unstarted_batches"] == [
+             %{
+               "index" => alpha_batch.index,
+               "total" => alpha_batch.total,
+               "count" => alpha_batch.count,
+               "label" => alpha_batch.label,
+               "inventory_sha256" => alpha_batch.inventory_sha256
+             },
+             %{
+               "index" => beta_batch.index,
+               "total" => beta_batch.total,
+               "count" => beta_batch.count,
+               "label" => beta_batch.label,
+               "inventory_sha256" => beta_batch.inventory_sha256
+             }
+           ]
 
     refute_received {:mix_invocation, _}
     assert {:ok, _} = Jason.encode(check)
@@ -492,7 +537,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test"],
-        10_000
+        10_000,
+        20_000
       )
 
     refute check["passed"]
@@ -845,6 +891,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
                worktree,
                ["apps/alpha/test"],
                30_000,
+               60_000,
                %{id: "res"}
              )
 
