@@ -21,6 +21,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
   )
 
   @runtime_env [
+    {:arbor_agent, :task_executors},
     {:arbor_commands, :coding_benchmark_workspace_root},
     {:arbor_commands, :coding_benchmark_artifact_root},
     {:arbor_commands, :coding_benchmark_execution_timeout_ms},
@@ -372,7 +373,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
              )
   end
 
-  test "legacy process-global executor selectors are rejected without mutation" do
+  test "process-global executor selectors are rejected without mutation" do
     scenario = scenario!(~w(happy))
     Application.put_env(:arbor_agent, :task_executors, :unchanged)
 

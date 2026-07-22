@@ -397,6 +397,16 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterExecutionTest do
     assert_receive {:pipeline_mark_abandoned, ^expected_task_id}
   end
 
+  test "retired legacy adapter has no production executor default" do
+    requests = benchmark_requests!()
+    Application.delete_env(:arbor_commands, :coding_benchmark_legacy_executor_module)
+
+    assert {:error, :legacy_executor_removed, _envelope} =
+             LegacyAdapter.run(requests.legacy)
+
+    refute_receive {:executor_call, :legacy, _, _, _}
+  end
+
   test "security regression: separate run roots never collide on task/run identity" do
     # Two semantically identical fixture/path/seed/repetition requests that only
     # differ by harness-private execution_namespace (as if two CodingBenchmark.run/2
