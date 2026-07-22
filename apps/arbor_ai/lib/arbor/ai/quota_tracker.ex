@@ -119,6 +119,37 @@ defmodule Arbor.AI.QuotaTracker do
   end
 
   @doc """
+  Read a bounded, redacted quota view without starting the tracker.
+
+  This is the control-plane read API. It omits provider-supplied reason text
+  and returns an error when the tracker is unavailable or malformed.
+  """
+  @spec snapshot_status(keyword()) :: {:ok, map()} | {:error, :unavailable | :malformed}
+  def snapshot_status(opts \\ [])
+
+  def snapshot_status(opts) when is_list(opts) do
+    limit = snapshot_limit(opts)
+
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        if Process.alive?(pid) do
+          try do
+            GenServer.call(pid, {:snapshot_status, limit}, 500)
+          catch
+            :exit, _ -> {:error, :unavailable}
+          end
+        else
+          {:error, :unavailable}
+        end
+
+      _ ->
+        {:error, :unavailable}
+    end
+  end
+
+  def snapshot_status(_opts), do: {:error, :malformed}
+
+  @doc """
   Get the best available backend from a list, considering quota status.
 
   Returns `nil` if none are available.
@@ -180,6 +211,14 @@ defmodule Arbor.AI.QuotaTracker do
       |> Map.new()
 
     {:reply, status, state}
+  end
+
+  @impl true
+  def handle_call({:snapshot_status, limit}, _from, state) do
+    case bounded_snapshot_status(state.backends, limit, DateTime.utc_now()) do
+      {:ok, status} -> {:reply, {:ok, status}, state}
+      {:error, :malformed} -> {:reply, {:error, :malformed}, state}
+    end
   end
 
   @impl true
@@ -250,6 +289,54 @@ defmodule Arbor.AI.QuotaTracker do
     # Cleanup every 5 minutes
     Process.send_after(self(), :cleanup, :timer.minutes(5))
   end
+
+  defp bounded_snapshot_status(backends, limit, now) when is_map(backends) do
+    if map_size(backends) > limit do
+      {:error, :malformed}
+    else
+      Enum.reduce_while(backends, {:ok, %{}}, fn {backend, info}, {:ok, acc} ->
+        with {:ok, provider} <- provider_name(backend),
+             {:ok, available_at, available_datetime} <-
+               snapshot_datetime(Map.get(info, :available_at)) do
+          available = DateTime.compare(available_datetime, now) != :lt
+
+          {:cont,
+           {:ok,
+            Map.put(acc, provider, %{
+              available: available,
+              available_at: available_at
+            })}}
+        else
+          _ -> {:halt, {:error, :malformed}}
+        end
+      end)
+    end
+  end
+
+  defp bounded_snapshot_status(_backends, _limit, _now), do: {:error, :malformed}
+
+  defp provider_name(provider) when is_atom(provider), do: {:ok, Atom.to_string(provider)}
+
+  defp provider_name(provider) when is_binary(provider) and byte_size(provider) <= 512 do
+    if String.valid?(provider) and String.trim(provider) != "" and
+         not String.match?(provider, ~r/[\x00-\x1F\x7F]/),
+       do: {:ok, provider},
+       else: {:error, :malformed}
+  end
+
+  defp provider_name(_provider), do: {:error, :malformed}
+
+  defp snapshot_datetime(%DateTime{} = datetime),
+    do: {:ok, DateTime.to_iso8601(datetime), datetime}
+
+  defp snapshot_datetime(datetime) when is_binary(datetime) do
+    case DateTime.from_iso8601(datetime) do
+      {:ok, parsed, _offset} -> {:ok, DateTime.to_iso8601(parsed), parsed}
+      _ -> {:error, :malformed}
+    end
+  end
+
+  defp snapshot_datetime(_datetime), do: {:error, :malformed}
 
   defp calculate_available_at(opts) do
     cond do
@@ -348,6 +435,15 @@ defmodule Arbor.AI.QuotaTracker do
     case DateTime.from_iso8601(iso) do
       {:ok, dt, _} -> dt
       _ -> DateTime.utc_now()
+    end
+  end
+
+  defp snapshot_limit(opts) do
+    opts
+    |> Keyword.get(:limit, 128)
+    |> case do
+      limit when is_integer(limit) and limit > 0 -> min(limit, 128)
+      _ -> 128
     end
   end
 

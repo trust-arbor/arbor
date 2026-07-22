@@ -52,6 +52,7 @@ defmodule Arbor.AI do
     BudgetTracker,
     Config,
     LLMTrace,
+    ProviderControlPlane,
     SessionReader,
     SystemPromptBuilder,
     ToolSignals,
@@ -883,6 +884,35 @@ defmodule Arbor.AI do
   @spec acp_provider_readiness(atom() | String.t(), String.t() | nil) :: map()
   def acp_provider_readiness(provider, requested_model \\ nil) do
     AcpSession.Readiness.observe(provider, requested_model)
+  end
+
+  @doc """
+  Return bounded provider budget and quota evidence with its canonical digest.
+
+  The snapshot's spend fields are marginal API spend in USD. A zero spend
+  value does not mean a subscription or local route is economically free;
+  `subscription_capacity_state` remains explicit and defaults to `unknown`.
+
+  Provider-specific remaining spend is present only when
+  `:provider_spend_ceilings_usd` explicitly configures that provider. The
+  aggregate daily budget is never assigned to an individual provider.
+
+  `:observed_at` (a `DateTime`) and `:expiry_seconds` are injectable for
+  deterministic callers and tests. The normal expiry is short and bounded.
+  """
+  @spec provider_budget_snapshot(atom() | String.t(), keyword()) ::
+          {:ok, %{snapshot: map(), digest: String.t()}}
+          | {:error, :unavailable | :malformed}
+  def provider_budget_snapshot(provider, opts \\ []) do
+    ProviderControlPlane.snapshot(provider, opts)
+  end
+
+  @doc "Return bounded snapshots for every provider present in the two trackers."
+  @spec provider_budget_snapshots(keyword()) ::
+          {:ok, [%{snapshot: map(), digest: String.t()}]}
+          | {:error, :unavailable | :malformed}
+  def provider_budget_snapshots(opts \\ []) do
+    ProviderControlPlane.snapshots(opts)
   end
 
   @doc "Whether `provider` is a known ACP provider in the catalog."

@@ -3,7 +3,8 @@ defmodule Arbor.AI.BudgetTracker do
   Tracks API usage and cost across LLM backends.
 
   The BudgetTracker provides budget-aware routing by tracking spend per-backend
-  and per-day. It enables the router to prefer free backends when budget is low
+  and per-day. It enables the router to prefer zero-marginal-API-spend backends
+  when budget is low
   and block paid backends when over budget.
 
   ## Features
@@ -16,16 +17,20 @@ defmodule Arbor.AI.BudgetTracker do
   ## Cost Model
 
   Backends are classified into three cost tiers:
-  - **Free**: Local/self-hosted backends (ollama, lmstudio) and subscription CLI tools
-  - **Subscription**: CLI tools paid via subscription (treated as $0/token)
+  - **Local**: Local/self-hosted backends (ollama, lmstudio)
+  - **Subscription**: CLI tools paid via subscription; their allowance is not an API
+    spend ceiling and is tracked separately when observed
   - **API**: Direct API access with per-token pricing
+
+  A zero recorded API cost means only that this tracker did not record marginal
+  API spend. It does not mean that a route is economically free.
 
   ## Configuration
 
       config :arbor_ai,
         enable_budget_tracking: true,
         daily_api_budget_usd: 10.00,
-        budget_prefer_free_threshold: 0.5,  # prefer free when < 50% remaining
+        budget_prefer_free_threshold: 0.5,  # legacy option name
         cost_overrides: %{}
 
   ## Usage
@@ -61,12 +66,12 @@ defmodule Arbor.AI.BudgetTracker do
 
   # Default cost per million tokens (can be overridden via config)
   @default_costs %{
-    # Free backends (local/subscription)
+    # Local backends and other routes whose marginal API spend is recorded as zero.
     {:ollama, :any} => %{input: 0.0, output: 0.0},
     {:lmstudio, :any} => %{input: 0.0, output: 0.0},
     {:opencode, :any} => %{input: 0.0, output: 0.0},
 
-    # Subscription CLI (treated as free since paid monthly)
+    # Subscription CLI routes; zero API spend does not describe their allowance.
     {:anthropic, :cli} => %{input: 0.0, output: 0.0},
     {:openai, :cli} => %{input: 0.0, output: 0.0},
     {:gemini, :cli} => %{input: 0.0, output: 0.0},
@@ -81,7 +86,7 @@ defmodule Arbor.AI.BudgetTracker do
     {:gemini, :flash} => %{input: 0.075, output: 0.30}
   }
 
-  # Free backends (no API cost)
+  # Backends whose configured cost model records no marginal API spend.
   @free_backends [:ollama, :lmstudio, :opencode, :qwen, :grok]
 
   # Budget threshold levels for warnings
@@ -175,7 +180,8 @@ defmodule Arbor.AI.BudgetTracker do
   end
 
   @doc """
-  Returns true when budget is low enough to prefer free backends.
+  Returns true when budget is low enough to prefer backends with zero recorded
+  marginal API spend. The function name is retained for compatibility.
 
   Default threshold is 50% of daily budget remaining.
   """
@@ -231,6 +237,38 @@ defmodule Arbor.AI.BudgetTracker do
   end
 
   @doc """
+  Read a bounded, snapshot-safe view without starting the tracker.
+
+  Unlike `get_status/0`, this API is intended for control-plane evidence: it
+  does not return persisted paths or other internal state, and it returns an
+  error when the tracker is unavailable.
+  """
+  @spec snapshot_status(keyword()) :: {:ok, status()} | {:error, :unavailable | :malformed}
+  def snapshot_status(opts \\ [])
+
+  def snapshot_status(opts) when is_list(opts) do
+    limit = snapshot_limit(opts)
+
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        if Process.alive?(pid) do
+          try do
+            GenServer.call(pid, {:snapshot_status, limit}, 500)
+          catch
+            :exit, _ -> {:error, :unavailable}
+          end
+        else
+          {:error, :unavailable}
+        end
+
+      _ ->
+        {:error, :unavailable}
+    end
+  end
+
+  def snapshot_status(_opts), do: {:error, :malformed}
+
+  @doc """
   Manually reset budget tracking (clears all spend data).
   """
   @spec reset() :: :ok
@@ -243,7 +281,9 @@ defmodule Arbor.AI.BudgetTracker do
   end
 
   @doc """
-  Check if a backend is considered "free" (no API cost).
+  Check if a backend is configured for zero recorded marginal API spend. The
+  function name is retained for compatibility and does not assert that access
+  is economically free.
   """
   @spec free_backend?(atom()) :: boolean()
   def free_backend?(backend) when is_atom(backend) do
@@ -421,6 +461,35 @@ defmodule Arbor.AI.BudgetTracker do
   end
 
   @impl true
+  def handle_call({:snapshot_status, limit}, _from, state) do
+    try do
+      check_date_rollover()
+      [{:total_spent, spent}] = :ets.lookup(@table, :total_spent)
+      budget = daily_budget()
+
+      case collect_backend_stats(limit) do
+        {:ok, backends} ->
+          {:reply,
+           {:ok,
+            %{
+              daily_budget: budget,
+              spent_today: Float.round(spent, 4),
+              remaining: Float.round(max(0.0, budget - spent), 4),
+              percent_remaining: if(budget > 0, do: max(0.0, budget - spent) / budget, else: 1.0),
+              backends: backends
+            }}, state}
+
+        {:error, :malformed} ->
+          {:reply, {:error, :malformed}, state}
+      end
+    rescue
+      _ -> {:reply, {:error, :malformed}, state}
+    catch
+      _, _ -> {:reply, {:error, :malformed}, state}
+    end
+  end
+
+  @impl true
   def handle_info(:daily_reset, state) do
     Logger.info("Daily budget reset triggered")
     do_reset()
@@ -464,6 +533,33 @@ defmodule Arbor.AI.BudgetTracker do
          cost: Float.round(stats.cost, 4)
        }}
     end)
+  end
+
+  defp collect_backend_stats(limit) when is_integer(limit) and limit > 0 do
+    match_spec = [{{{:backend, :"$1"}, :"$2"}, [], [{{:"$1", :"$2"}}]}]
+
+    rows =
+      case :ets.select(@table, match_spec, limit + 1) do
+        {rows, _continuation} -> rows
+        :"$end_of_table" -> []
+      end
+
+    if length(rows) > limit do
+      {:error, :malformed}
+    else
+      backends =
+        rows
+        |> Enum.into(%{}, fn {backend, stats} ->
+          {backend,
+           %{
+             requests: stats.requests,
+             tokens: stats.tokens,
+             cost: Float.round(stats.cost, 4)
+           }}
+        end)
+
+      {:ok, backends}
+    end
   end
 
   defp calculate_cost(backend, model, input_tokens, output_tokens) do
@@ -725,5 +821,14 @@ defmodule Arbor.AI.BudgetTracker do
 
   defp signal_verbosity do
     Application.get_env(:arbor_ai, :signal_verbosity, :normal)
+  end
+
+  defp snapshot_limit(opts) do
+    opts
+    |> Keyword.get(:limit, 128)
+    |> case do
+      limit when is_integer(limit) and limit > 0 -> min(limit, 128)
+      _ -> 128
+    end
   end
 end
