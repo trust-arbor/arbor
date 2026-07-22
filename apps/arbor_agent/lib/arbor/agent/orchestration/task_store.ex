@@ -50,6 +50,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_approval_cleanup_interaction_router Module.concat([:Arbor, :Comms])
   @default_approval_cleanup_audit Arbor.Security
   @default_max_tasks 1_000
+  @default_inventory_items 64
   @default_steer_retry_delay_ms 100
   @default_max_steer_retry_delay_ms 5_000
   @default_max_controls_per_task 100
@@ -60,7 +61,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @max_destination_ref_bytes 256
 
   alias Arbor.Agent.Config
-  alias Arbor.Agent.Orchestration.TaskArtifacts
+  alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskInventoryProjection}
 
   @type task_id :: String.t()
   # :waiting_approval is retained for status projection / facade enrichment
@@ -137,6 +138,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @spec status(task_id(), keyword() | map()) :: {:ok, task_status()} | {:error, :not_found}
   def status(task_id, opts \\ []) do
     GenServer.call(store_name(opts), {:status, task_id})
+  end
+
+  @doc "Return a bounded, redacted inventory of the volatile task registry."
+  @spec inventory(keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def inventory(opts \\ []) do
+    opts = normalize_opts(opts)
+    filters = Map.take(Map.new(opts), [:task_id, :agent_id, :state])
+    max_items = opt(opts, :max_items, @default_inventory_items)
+
+    GenServer.call(store_name(opts), {:inventory, filters, max_items})
   end
 
   @doc "Return the completed task result."
@@ -348,6 +359,31 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       :error ->
         {:reply, {:error, :not_found}, state}
     end
+  end
+
+  def handle_call({:inventory, filters, max_items}, _from, state) do
+    cond do
+      not is_integer(max_items) or max_items <= 0 or max_items > state.max_tasks ->
+        {:reply, {:error, :invalid_task_inventory_options}, state}
+
+      true ->
+        owner_statuses = owner_statuses(state.tasks)
+
+        inventory =
+          TaskInventoryProjection.from_state(state, filters, max_items, owner_statuses)
+
+        {:reply, {:ok, inventory}, state}
+    end
+  rescue
+    _ -> {:reply, {:error, :task_inventory_unavailable}, state}
+  catch
+    _, _ -> {:reply, {:error, :task_inventory_unavailable}, state}
+  end
+
+  # Inventory messages are data-only. Reject legacy/forged selector-bearing
+  # shapes without inspecting or executing the supplied fourth term.
+  def handle_call({:inventory, _filters, _max_items, _selector}, _from, state) do
+    {:reply, {:error, :invalid_task_inventory_message}, state}
   end
 
   def handle_call({:result, task_id}, _from, state) do
@@ -2005,6 +2041,57 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         end
     }
   end
+
+  defp owner_statuses(tasks) when is_map(tasks) do
+    tasks
+    |> :maps.iterator()
+    |> take_owner_entries(@default_max_tasks)
+    |> Enum.reduce(%{}, fn {key, record}, statuses ->
+      task_id =
+        case record do
+          %{task_id: task_id} when is_binary(task_id) -> task_id
+          %{"task_id" => task_id} when is_binary(task_id) -> task_id
+          _ when is_binary(key) -> key
+          _ -> nil
+        end
+
+      if is_binary(task_id) do
+        pid = record_value(record, :pid)
+
+        Map.put(statuses, task_id, %{
+          present: is_pid(pid),
+          alive: is_pid(pid) and Process.alive?(pid)
+        })
+      else
+        statuses
+      end
+    end)
+  rescue
+    _ -> %{}
+  catch
+    _, _ -> %{}
+  end
+
+  defp owner_statuses(_tasks), do: %{}
+
+  defp take_owner_entries(iterator, limit), do: take_owner_entries(iterator, limit, [])
+
+  defp take_owner_entries(_iterator, 0, acc), do: acc
+
+  defp take_owner_entries(iterator, limit, acc) do
+    case :maps.next(iterator) do
+      :none ->
+        acc
+
+      {key, value, next_iterator} ->
+        take_owner_entries(next_iterator, limit - 1, [{key, value} | acc])
+    end
+  end
+
+  defp record_value(record, key) when is_map(record),
+    do: Map.get(record, key, Map.get(record, to_string(key)))
+
+  defp record_value(_record, _key), do: nil
 
   defp remove_ref(state, ref) do
     update_in(state.refs, &Map.delete(&1, ref))

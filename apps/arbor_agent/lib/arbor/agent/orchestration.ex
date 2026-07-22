@@ -23,6 +23,8 @@ defmodule Arbor.Agent.Orchestration do
   @task_cancel_uri "arbor://agent/task/cancel"
   @task_steer_uri "arbor://agent/task/steer"
   @task_adopt_uri "arbor://agent/task/adopt"
+  @default_task_inventory_items 64
+  @max_task_inventory_items 1_000
   @max_task_id_bytes 256
   @task_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
   @max_destination_ref_bytes 256
@@ -69,6 +71,25 @@ defmodule Arbor.Agent.Orchestration do
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_task_read(opts, caller_id, status) do
       {:ok, enrich_waiting_approval(status, opts)}
+    end
+  end
+
+  @doc """
+  Return a bounded, read-only inventory of volatile orchestration tasks.
+
+  The inventory contains only reconciliation join/lifecycle evidence. It is
+  explicitly non-durable: callers must reconcile it with the coding-resource
+  inventory or other durable evidence rather than treating absence as proof of
+  task completion.
+  """
+  @spec task_inventory(keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def task_inventory(opts \\ []) do
+    with {:ok, normalized} <- normalize_task_inventory_options(opts),
+         :ok <- authorize_task_inventory(normalized) do
+      normalized
+      |> task_inventory_store_opts()
+      |> Arbor.Agent.Orchestration.TaskStore.inventory()
+      |> normalize_task_inventory_result()
     end
   end
 
@@ -267,6 +288,135 @@ defmodule Arbor.Agent.Orchestration do
     |> task_store_module()
     |> apply_if_exported(:status, [task_id, task_store_opts(opts)])
     |> normalize_task_status_result()
+  end
+
+  defp authorize_task_inventory(%{caller_id: caller_id, filters: %{task_id: nil}}) do
+    case authorize_caller([], caller_id, @task_read_uri, :read) do
+      :ok -> :ok
+      _ -> {:error, {:unauthorized, :task_read_required}}
+    end
+  end
+
+  defp authorize_task_inventory(%{caller_id: caller_id, filters: %{task_id: task_id}}) do
+    with {:ok, status} <- task_status_unchecked(task_id, []),
+         :ok <- authorize_task_read([], caller_id, status) do
+      :ok
+    end
+  end
+
+  defp task_inventory_store_opts(%{filters: filters, max_items: max_items}) do
+    [
+      task_id: filters.task_id,
+      agent_id: filters.agent_id,
+      state: filters.state,
+      max_items: max_items
+    ]
+  end
+
+  defp normalize_task_inventory_result({:ok, inventory}) when is_map(inventory),
+    do: {:ok, inventory}
+
+  defp normalize_task_inventory_result(_result), do: {:error, :task_inventory_unavailable}
+
+  defp normalize_task_inventory_options(opts) when is_list(opts) or is_map(opts) do
+    entries = if is_list(opts), do: opts, else: Map.to_list(opts)
+    keys = Enum.map(entries, &task_inventory_option_key/1)
+
+    cond do
+      :invalid in keys ->
+        {:error, :invalid_task_inventory_options}
+
+      Enum.any?(keys, &(&1 not in [:caller_id, :task_id, :agent_id, :state, :max_items])) ->
+        {:error, :invalid_task_inventory_options}
+
+      length(keys) != length(Enum.uniq(keys)) ->
+        {:error, :invalid_task_inventory_options}
+
+      true ->
+        with {:ok, caller_id} <- inventory_caller_id(entries),
+             {:ok, task_id} <- normalize_optional_task_filter(entries),
+             {:ok, agent_id} <- normalize_optional_agent_filter(entries),
+             {:ok, state} <- normalize_optional_state_filter(entries),
+             {:ok, max_items} <- normalize_inventory_max_items(entries) do
+          {:ok,
+           %{
+             caller_id: caller_id,
+             filters: %{task_id: task_id, agent_id: agent_id, state: state},
+             max_items: max_items
+           }}
+        else
+          _ -> {:error, :invalid_task_inventory_options}
+        end
+    end
+  end
+
+  defp normalize_task_inventory_options(_opts), do: {:error, :invalid_task_inventory_options}
+
+  defp task_inventory_option_key({key, _value}) when is_atom(key), do: key
+  defp task_inventory_option_key(_entry), do: :invalid
+
+  defp inventory_caller_id(entries) do
+    case Keyword.get(entries, :caller_id) do
+      caller_id when is_binary(caller_id) and caller_id != "" -> {:ok, caller_id}
+      _ -> {:error, :caller_id_required}
+    end
+  end
+
+  defp normalize_optional_task_filter(entries) do
+    case Keyword.get(entries, :task_id) do
+      nil -> {:ok, nil}
+      task_id -> normalize_task_id(task_id)
+    end
+  end
+
+  defp normalize_optional_agent_filter(entries) do
+    case Keyword.get(entries, :agent_id) do
+      nil ->
+        {:ok, nil}
+
+      agent_id when is_binary(agent_id) and byte_size(agent_id) <= @max_task_id_bytes ->
+        if String.valid?(agent_id) and agent_id != "" and not String.contains?(agent_id, <<0>>) do
+          {:ok, agent_id}
+        else
+          {:error, :invalid_agent_id}
+        end
+
+      _ ->
+        {:error, :invalid_agent_id}
+    end
+  end
+
+  defp normalize_optional_state_filter(entries) do
+    case Keyword.get(entries, :state) do
+      nil ->
+        {:ok, nil}
+
+      state when state in [:running, :waiting_approval, :done, :failed, :cancelled] ->
+        {:ok, state}
+
+      state when is_binary(state) ->
+        case state do
+          "running" -> {:ok, :running}
+          "waiting_approval" -> {:ok, :waiting_approval}
+          "done" -> {:ok, :done}
+          "failed" -> {:ok, :failed}
+          "cancelled" -> {:ok, :cancelled}
+          _ -> {:error, :invalid_state}
+        end
+
+      _ ->
+        {:error, :invalid_state}
+    end
+  end
+
+  defp normalize_inventory_max_items(entries) do
+    case Keyword.get(entries, :max_items, @default_task_inventory_items) do
+      value when is_integer(value) and value > 0 and value <= @max_task_inventory_items ->
+        {:ok, value}
+
+      _ ->
+        {:error, :invalid_max_items}
+    end
   end
 
   # Facade projection only: a still-running task may surface as :waiting_approval
