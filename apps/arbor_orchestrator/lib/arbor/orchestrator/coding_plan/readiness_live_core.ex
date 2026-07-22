@@ -5,6 +5,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
 
   @acp_source "acp_provider_readiness"
   @acp_runtime "acp"
+  # The readiness timestamp is captured immediately before the ACP facade
+  # observes its provider. Permit only this bounded capture-time skew.
+  @provider_clock_skew_seconds 5
   @toolchain_fields ~w(
     schema_version platform architecture otp_release elixir_version
     mix_wrapper_path runtime_roots identity_digest
@@ -14,7 +17,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
   @doc false
   @spec acp(term(), String.t(), String.t() | nil, DateTime.t()) ::
           {:ok, :passed | :degraded, String.t() | nil, DateTime.t()}
-          | {:error, :malformed | :unavailable | :model_mismatch | :missing_executable}
+          | {:error,
+             :malformed
+             | :unavailable
+             | :model_mismatch
+             | :missing_executable
+             | :expired
+             | :future}
   def acp(envelope, provider, requested_model, observed_at)
       when is_binary(provider) and is_struct(observed_at, DateTime) do
     with true <- json_clean?(envelope),
@@ -22,10 +31,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
          :ok <- validate_acp_identity(observation, provider),
          :ok <- validate_model(observation, requested_model),
          {:ok, decision} <- decision(observation),
-         {:ok, expires_at} <- provider_expiry(observation, observed_at) do
+         :ok <- validate_freshness(observation, observed_at),
+         {:ok, expires_at} <- expiry(observed_at, observation["expires_at"]) do
       {:ok, decision, digest, expires_at}
     else
-      {:error, reason} when reason in [:model_mismatch, :missing_executable, :unavailable] ->
+      {:error, reason}
+      when reason in [
+             :model_mismatch,
+             :missing_executable,
+             :unavailable,
+             :expired,
+             :future
+           ] ->
         {:error, reason}
 
       _ ->
@@ -58,7 +75,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
   def toolchain(_identity), do: {:error, :malformed}
 
   @doc false
-  @spec expiry(DateTime.t(), String.t() | nil) :: DateTime.t()
+  @spec expiry(DateTime.t(), String.t() | nil) ::
+          {:ok, DateTime.t()} | {:error, :malformed | :expired}
+  def expiry(observed_at, nil) when is_struct(observed_at, DateTime) do
+    {:ok, DateTime.add(observed_at, 30, :second)}
+  end
+
   def expiry(observed_at, provider_expiry) when is_struct(observed_at, DateTime) do
     maximum = DateTime.add(observed_at, 30, :second)
 
@@ -66,11 +88,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
       {:ok, provider_expiry} ->
         if DateTime.compare(provider_expiry, observed_at) == :gt and
              DateTime.compare(provider_expiry, maximum) == :lt,
-           do: provider_expiry,
-           else: maximum
+           do: {:ok, provider_expiry},
+           else:
+             if(DateTime.compare(provider_expiry, observed_at) == :gt,
+               do: {:ok, maximum},
+               else: {:error, :expired}
+             )
 
       :error ->
-        maximum
+        {:error, :malformed}
     end
   end
 
@@ -156,11 +182,31 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
 
   defp decision(_observation), do: {:error, :malformed}
 
-  defp provider_expiry(%{"expires_at" => provider_expiry}, observed_at) do
-    {:ok, expiry(observed_at, provider_expiry)}
+  defp validate_freshness(observation, observed_at) do
+    with {:ok, provider_observed_at} <- parse_datetime(observation["observed_at"]),
+         :ok <- not_future?(provider_observed_at, observed_at),
+         {:ok, provider_expiry} <- parse_datetime(observation["expires_at"]),
+         :ok <- not_expired?(provider_expiry, observed_at) do
+      :ok
+    else
+      {:error, reason} when reason in [:future, :expired] -> {:error, reason}
+      _ -> {:error, :malformed}
+    end
   end
 
-  defp provider_expiry(_observation, observed_at), do: {:ok, expiry(observed_at, nil)}
+  defp not_future?(provider_observed_at, observed_at) do
+    latest_allowed = DateTime.add(observed_at, @provider_clock_skew_seconds, :second)
+
+    if DateTime.compare(provider_observed_at, latest_allowed) == :gt,
+      do: {:error, :future},
+      else: :ok
+  end
+
+  defp not_expired?(provider_expiry, observed_at) do
+    if DateTime.compare(provider_expiry, observed_at) == :gt,
+      do: :ok,
+      else: {:error, :expired}
+  end
 
   defp validate_toolchain(identity) do
     base_identity = Map.delete(identity, "identity_digest")

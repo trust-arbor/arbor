@@ -151,7 +151,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   defp live_report(plan_digest, plan, opts, observed_at, base_diagnostics) do
     observed_datetime = parse_datetime!(observed_at)
-    expires_at = ReadinessLiveCore.expiry(observed_datetime, nil)
+    {:ok, expires_at} = ReadinessLiveCore.expiry(observed_datetime, nil)
 
     case live_diagnostics(plan, opts, observed_at, observed_datetime, expires_at) do
       {:ok, diagnostics, expires_at} ->
@@ -294,6 +294,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                observed_at,
                "The ACP provider is unavailable for the coding plan.",
                "Restore provider availability and retry live readiness."
+             )}
+
+          {:error, :expired} ->
+            {:blocked,
+             blocked(
+               "acp_health",
+               "acp_evidence_expired",
+               observed_at,
+               "The ACP readiness evidence has expired.",
+               "Refresh ACP readiness evidence before dispatch."
+             )}
+
+          {:error, :future} ->
+            {:blocked,
+             blocked(
+               "acp_health",
+               "acp_evidence_future",
+               observed_at,
+               "The ACP readiness evidence is dated in the future.",
+               "Use an ACP observation at or before the readiness observation time."
              )}
 
           {:error, :malformed} ->

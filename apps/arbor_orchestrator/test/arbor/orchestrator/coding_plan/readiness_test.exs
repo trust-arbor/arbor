@@ -3,7 +3,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
 
   alias Arbor.Contracts.Coding.Plan
   alias Arbor.Contracts.LLM.ProviderObservation
-  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, Readiness, WorkspaceScope}
+
+  alias Arbor.Orchestrator.CodingPlan.{
+    ActionCatalog,
+    Readiness,
+    ReadinessLiveCore,
+    WorkspaceScope
+  }
 
   @moduletag :fast
 
@@ -211,6 +217,67 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert report["expires_at"] == "2026-07-22T12:00:12Z"
   end
 
+  test "live expired ACP evidence is blocked and never promoted to the default TTL", ctx do
+    opts =
+      live_opts(ctx,
+        acp_provider_readiness: fn _provider, _model ->
+          acp_envelope(
+            observed_at: "2026-07-22T11:59:50Z",
+            expires_at: "2026-07-22T12:00:00Z"
+          )
+        end,
+        coding_toolchain_identity: fn -> flunk("toolchain must not be observed") end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert report["status"] == "blocked"
+    assert blocked_code(report) == "acp_evidence_expired"
+    assert report["expires_at"] == "2026-07-22T12:00:30.000Z"
+  end
+
+  test "live ACP evidence within the bounded capture skew is accepted", ctx do
+    opts =
+      live_opts(ctx,
+        acp_provider_readiness: fn _provider, _model ->
+          acp_envelope(
+            observed_at: "2026-07-22T12:00:01Z",
+            expires_at: "2026-07-22T12:00:30Z"
+          )
+        end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert report["status"] == "degraded"
+    assert diagnostic(report, "acp_health")["decision"] == "degraded"
+  end
+
+  test "live ACP evidence beyond the bounded capture skew is blocked", ctx do
+    opts =
+      live_opts(ctx,
+        acp_provider_readiness: fn _provider, _model ->
+          acp_envelope(
+            observed_at: "2026-07-22T12:00:06Z",
+            expires_at: "2026-07-22T12:00:30Z"
+          )
+        end,
+        coding_toolchain_identity: fn -> flunk("toolchain must not be observed") end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert report["status"] == "blocked"
+    assert blocked_code(report) == "acp_evidence_future"
+  end
+
+  test "pure expiry rejects provider expiry at or before readiness time" do
+    observed_at = ~U[2026-07-22 12:00:00Z]
+
+    assert {:error, :expired} =
+             ReadinessLiveCore.expiry(observed_at, "2026-07-22T11:59:59Z")
+
+    assert {:error, :expired} =
+             ReadinessLiveCore.expiry(observed_at, "2026-07-22T12:00:00Z")
+  end
+
   test "unknown readiness modes fail closed with one diagnostic", ctx do
     assert {:ok, report} =
              Readiness.check(plan(ctx.repo), readiness_opts(ctx) |> Keyword.put(:mode, :probe))
@@ -376,7 +443,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
         provider: Keyword.get(opts, :provider, "grok"),
         source: "acp_provider_readiness",
         runtime: "acp",
-        observed_at: @observed_at,
+        observed_at: Keyword.get(opts, :observed_at, @observed_at),
         expires_at: Keyword.get(opts, :expires_at, "2026-07-22T12:00:30Z"),
         availability: Keyword.get(opts, :availability, "degraded"),
         auth_health: Keyword.get(opts, :auth_health, "unknown"),
