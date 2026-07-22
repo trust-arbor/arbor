@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   @moduletag :fast
 
-  alias Arbor.Contracts.Coding.{Plan, ValidationCapacityHandoff}
+  alias Arbor.Contracts.Coding.{Plan, ValidationCapacityHandoff, WorkPacket}
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.CodingTaskExecutor
@@ -104,12 +104,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     alias Arbor.Orchestrator.CodingPlan.Compiler
 
     def compile(%Plan{} = plan, opts) do
-      with {:ok, compilation} <- Compiler.compile(plan, opts) do
-        initial_values =
-          Map.put(compilation.initial_values, "permission_mode", plan.worker["permission_mode"])
-
-        {:ok, %{compilation | initial_values: initial_values}}
-      end
+      Compiler.compile(plan, opts)
     end
   end
 
@@ -686,6 +681,33 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     %{"kind" => "coding_change", "plan" => plan}
   end
 
+  defp valid_v2_direct_task(plan_overrides \\ %{}) do
+    packet = %{
+      "version" => 1,
+      "success_criteria" => ["focused tests pass"],
+      "non_goals" => ["expand execution authority"],
+      "constraints" => ["preserve existing behavior"],
+      "architecture_refs" => [
+        "apps/arbor_orchestrator/lib/arbor/orchestrator/coding_task_executor.ex"
+      ],
+      "required_evidence" => ["focused test output"],
+      "checkpoint_policy" => "direct"
+    }
+
+    {:ok, packet_digest} = WorkPacket.digest(packet)
+
+    valid_direct_task(
+      Map.merge(
+        %{
+          "version" => 2,
+          "work_packet" => packet,
+          "work_packet_digest" => packet_digest
+        },
+        plan_overrides
+      )
+    )
+  end
+
   defp valid_context(overrides \\ %{}) do
     Map.merge(%{"task_id" => "task_coding_1"}, overrides)
   end
@@ -1255,7 +1277,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert opts[:timeout] == 120_000
       assert iv["acp_agent"] == "grok"
       assert iv["model"] == "grok-code-fast"
-      assert iv["permission_mode"] == "deny"
+      refute Map.has_key?(iv, "permission_mode")
       assert iv["inactivity_timeout_ms"] == 45_000
       assert iv["open_pr"] == "true"
       assert iv["submit_review"] == "true"
@@ -1996,6 +2018,27 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       refute_receive {:coding_executor_captured_run, _path, _opts}
+    end
+
+    test "security regression: v2 work packet digest tampering fails before runner" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_compiler,
+        MutatingInitialValuesCompiler
+      )
+
+      Process.put(
+        :coding_executor_initial_value_mutation,
+        {:put, "coding_plan_work_packet_digest", "sha256:" <> String.duplicate("0", 64)}
+      )
+
+      assert {:error,
+              {:invalid_coding_plan_compiler_reply,
+               {:compilation_field_mismatch, "initial_values"}}} =
+               CodingTaskExecutor.run("agent_1", valid_v2_direct_task(), valid_context())
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
     end
 
     test "security regression: executor boundary reruns semantic preflight before runner" do
