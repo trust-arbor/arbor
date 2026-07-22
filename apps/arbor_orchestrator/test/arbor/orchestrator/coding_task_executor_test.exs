@@ -421,6 +421,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       do: {:ok, %{"unexpected" => "reply"}}
   end
 
+  defmodule ObservedTaskTerminalArtifactStore do
+    @moduledoc false
+
+    def archive_task_terminal(root, task_id, terminal_envelope, controls) do
+      if observer = Application.get_env(:arbor_orchestrator, :coding_executor_test_observer) do
+        send(observer, :task_terminal_artifact_store_called)
+      end
+
+      ArtifactStore.archive_task_terminal(root, task_id, terminal_envelope, controls)
+    end
+  end
+
   defmodule RaisingTaskTerminalArtifactStore do
     @moduledoc false
 
@@ -3667,6 +3679,27 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  [],
                  %{"task_id" => " task_coding_1"}
                )
+    end
+
+    test "validates with the shared core before invoking a configured store" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        ObservedTaskTerminalArtifactStore
+      )
+
+      envelope = successful_terminal_envelope("task_coding_1")
+      noncanonical = Map.put(envelope, "unexpected", true)
+
+      assert {:error, :invalid_task_terminal_envelope} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 noncanonical,
+                 [],
+                 valid_context()
+               )
+
+      refute_receive :task_terminal_artifact_store_called
     end
 
     test "fails closed for unavailable stores, malformed replies, and unverifiable files" do

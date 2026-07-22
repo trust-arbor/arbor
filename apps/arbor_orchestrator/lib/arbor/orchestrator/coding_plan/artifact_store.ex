@@ -16,39 +16,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @reconciliation_directory "coding-reconciliation"
   @max_reconciliation_bytes 1_048_576
   @max_terminal_evidence_bytes 1_048_576
-  @max_terminal_controls 100
   @max_terminal_task_id_bytes 512
-  @max_terminal_control_bytes 16_384
-  @max_task_terminal_bytes 1_048_576
-  @max_task_terminal_depth 9
-  @max_task_terminal_nodes 2_048
-
-  @reconciled_control_states ~w(delivered delivery_unconfirmed unsupported)
-  @delivery_modes ~w(native_tool_loop acp_native same_session_follow_up next_stage)
-
-  @task_terminal_descriptor_keys MapSet.new(~w(
-    schema_version
-    task_id
-    path
-    sha256
-    byte_size
-    terminal_state
-    outcome_code
-  ))
-
-  @terminal_control_keys MapSet.new(~w(
-    control_id
-    task_id
-    sequence
-    status
-    sender_id
-    message
-    queued_at
-    delivered_at
-    target_stage
-    delivery_mode
-    error
-  ))
 
   @terminal_result_keys MapSet.new(~w(
     status
@@ -95,11 +63,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     BranchLifecycleDescriptor,
     ReconciliationManifest,
     TaskEvidenceDescriptor,
-    TaskTerminalEnvelope,
     ValidationCapacityHandoff,
     WorkspaceReleaseDescriptor
   }
 
+  alias Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCore
   alias Arbor.Orchestrator.CodingPlan.TranscriptStore
   alias Arbor.Orchestrator.CodingPlan.OutcomeMapper
 
@@ -149,7 +117,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          :ok <- validate_terminal_result(result),
          {:ok, result} <- normalize_terminal_capacity(result),
          {:ok, result} <- normalize_terminal_descriptors(result),
-         {:ok, controls} <- normalize_terminal_controls(controls, task_id),
+         {:ok, controls} <- TaskTerminalArchiveCore.validate_control_history(task_id, controls),
          {:ok, body} <- build_terminal_evidence(result, task_id, controls),
          {:ok, encoded} <- encode_canonical_json(body, :terminal_evidence),
          :ok <- validate_terminal_evidence_size(encoded),
@@ -169,24 +137,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
           {:ok, map()} | {:error, term()}
   def archive_task_terminal(root, task_id, terminal_envelope, controls) do
     with {:ok, root} <- normalize_task_terminal_root(root),
-         :ok <- validate_terminal_task_id(task_id),
-         {:ok, terminal_envelope} <- normalize_exact_task_terminal_envelope(terminal_envelope),
-         :ok <- validate_task_terminal_semantics(terminal_envelope),
-         :ok <- validate_embedded_task_ids(terminal_envelope, task_id),
-         {:ok, controls} <- normalize_reconciled_terminal_controls(controls, task_id),
-         body = %{
-           "schema_version" => 1,
-           "task_id" => task_id,
-           "terminal_envelope" => terminal_envelope,
-           "controls" => controls
-         },
-         :ok <- validate_task_terminal_bounds(body),
-         {:ok, encoded} <- encode_canonical_json(body, :task_terminal),
-         :ok <- validate_task_terminal_size(encoded),
+         {:ok, archive} <- TaskTerminalArchiveCore.build(task_id, terminal_envelope, controls),
          path = Path.join(root, @task_terminal_filename),
          :ok <- validate_task_terminal_path(root, path),
-         :ok <- write_task_terminal_once(path, encoded, root),
-         {:ok, descriptor} <- verify_task_terminal(path, task_id, body, encoded) do
+         :ok <- write_task_terminal_once(path, archive.encoded, root),
+         {:ok, descriptor} <- verify_task_terminal(path, archive) do
       {:ok, descriptor}
     else
       {:error, _reason} = error -> error
@@ -618,135 +573,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     end
   end
 
-  defp normalize_exact_task_terminal_envelope(envelope)
-       when is_map(envelope) and not is_struct(envelope) do
-    with true <- Enum.all?(Map.keys(envelope), &is_binary/1),
-         {:ok, normalized} <- TaskTerminalEnvelope.normalize(envelope),
-         true <- normalized == envelope do
-      {:ok, envelope}
-    else
-      _ -> {:error, :invalid_task_terminal_envelope}
-    end
-  end
-
-  defp normalize_exact_task_terminal_envelope(_envelope),
-    do: {:error, :invalid_task_terminal_envelope}
-
-  defp validate_task_terminal_semantics(envelope) do
-    state = envelope["terminal_state"]
-    outcome = envelope["outcome"]
-    code = outcome["code"]
-    disposition = outcome["disposition"]
-    kind = envelope["evidence"]["kind"]
-    prior? = Map.has_key?(envelope, "prior_outcome")
-
-    valid? =
-      finalization_failure_terminal?(state, code, disposition, prior?, kind) or
-        case kind do
-          "executor_result" ->
-            state == "done" and disposition != "cancelled" and not prior? and
-              code not in lifecycle_terminal_codes()
-
-          "pipeline_failure" ->
-            state == "failed" and disposition == "failed" and not prior? and
-              code not in lifecycle_terminal_codes()
-
-          "task_cancelled" ->
-            lifecycle_terminal?(state, code, disposition, prior?, "cancelled", "task_cancelled")
-
-          "task_owner_died" ->
-            lifecycle_terminal?(state, code, disposition, prior?, "failed", "task_owner_died")
-
-          "approval_owner_terminated" ->
-            lifecycle_terminal?(
-              state,
-              code,
-              disposition,
-              prior?,
-              "failed",
-              "approval_owner_terminated"
-            )
-
-          "task_runner_failed" ->
-            lifecycle_terminal?(state, code, disposition, prior?, "failed", "task_runner_failed")
-
-          "invalid_terminal_evidence" ->
-            lifecycle_terminal?(
-              state,
-              code,
-              disposition,
-              prior?,
-              "failed",
-              "invalid_terminal_evidence"
-            )
-
-          _other ->
-            false
-        end
-
-    if valid?, do: :ok, else: {:error, :invalid_task_terminal_semantics}
-  end
-
-  defp finalization_failure_terminal?(state, code, disposition, prior?, kind) do
-    state == "failed" and code == "task_finalization_failed" and disposition == "failed" and
-      prior? and kind in ["executor_result", "invalid_terminal_evidence"]
-  end
-
-  defp lifecycle_terminal?(state, code, disposition, prior?, expected_state, expected_code) do
-    state == expected_state and code == expected_code and disposition == expected_state and
-      not prior?
-  end
-
-  defp lifecycle_terminal_codes do
-    ~w(
-      task_cancelled
-      task_owner_died
-      approval_owner_terminated
-      task_runner_failed
-      invalid_terminal_evidence
-      task_finalization_failed
-    )
-  end
-
-  defp validate_embedded_task_ids(value, task_id) do
-    case embedded_task_ids(value, []) do
-      {:ok, ids} ->
-        if Enum.all?(ids, &(&1 == task_id)),
-          do: :ok,
-          else: {:error, :task_terminal_task_id_mismatch}
-
-      :error ->
-        {:error, :task_terminal_task_id_mismatch}
-    end
-  end
-
-  defp embedded_task_ids(map, acc) when is_map(map) and not is_struct(map) do
-    Enum.reduce_while(map, {:ok, acc}, fn
-      {"task_id", value}, {:ok, ids} when is_binary(value) ->
-        {:cont, {:ok, [value | ids]}}
-
-      {"task_id", _value}, _acc ->
-        {:halt, :error}
-
-      {_key, value}, {:ok, ids} ->
-        case embedded_task_ids(value, ids) do
-          {:ok, nested_ids} -> {:cont, {:ok, nested_ids}}
-          :error -> {:halt, :error}
-        end
-    end)
-  end
-
-  defp embedded_task_ids(list, acc) when is_list(list) do
-    Enum.reduce_while(list, {:ok, acc}, fn value, {:ok, ids} ->
-      case embedded_task_ids(value, ids) do
-        {:ok, nested_ids} -> {:cont, {:ok, nested_ids}}
-        :error -> {:halt, :error}
-      end
-    end)
-  end
-
-  defp embedded_task_ids(_value, acc), do: {:ok, acc}
-
   defp validate_terminal_task_id(task_id)
        when is_binary(task_id) and byte_size(task_id) <= @max_terminal_task_id_bytes do
     if String.valid?(task_id) and String.trim(task_id) != "" and
@@ -1097,134 +923,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
 
   defp validate_terminal_review(_value), do: {:error, {:invalid_terminal_review, :expected_map}}
 
-  defp normalize_terminal_controls(controls, task_id) when is_list(controls) do
-    if length(controls) > @max_terminal_controls do
-      {:error, {:invalid_terminal_controls, :too_many}}
-    else
-      Enum.reduce_while(controls, {:ok, {[], MapSet.new(), MapSet.new(), 0}}, fn control,
-                                                                                 {:ok,
-                                                                                  {acc, ids,
-                                                                                   sequences,
-                                                                                   previous}} ->
-        case validate_terminal_control(control, task_id, ids, sequences, previous) do
-          {:ok, id, sequence} ->
-            {:cont,
-             {:ok,
-              {[control | acc], MapSet.put(ids, id), MapSet.put(sequences, sequence), sequence}}}
-
-          {:error, _reason} = error ->
-            {:halt, error}
-        end
-      end)
-      |> case do
-        {:ok, {controls, _ids, _sequences, _previous}} -> {:ok, Enum.reverse(controls)}
-        {:error, _reason} = error -> error
-      end
-    end
-  end
-
-  defp normalize_terminal_controls(_controls, _task_id),
-    do: {:error, {:invalid_terminal_controls, :expected_list}}
-
-  defp normalize_reconciled_terminal_controls(controls, task_id) do
-    with {:ok, controls} <- normalize_terminal_controls(controls, task_id),
-         :ok <- validate_reconciled_terminal_control_values(controls) do
-      {:ok, controls}
-    end
-  end
-
-  defp validate_reconciled_terminal_control_values(controls) do
-    Enum.reduce_while(controls, :ok, fn control, :ok ->
-      case validate_reconciled_terminal_control(control) do
-        :ok -> {:cont, :ok}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-  end
-
-  defp validate_reconciled_terminal_control(control) do
-    with status when status in @reconciled_control_states <- control["status"],
-         :ok <- validate_control_string(control["sender_id"], 512, true),
-         :ok <- validate_control_string(control["message"], 4_000, false),
-         :ok <- validate_control_string(control["queued_at"], 128, false),
-         :ok <- validate_control_string(control["delivered_at"], 128, true),
-         :ok <- validate_control_string(control["target_stage"], 200, true),
-         :ok <- validate_control_string(control["delivery_mode"], 128, true),
-         :ok <- validate_control_string(control["error"], 512, true),
-         :ok <- validate_reconciled_control_state(control, status) do
-      :ok
-    else
-      _ -> {:error, {:invalid_terminal_control, :nonterminal_or_malformed}}
-    end
-  end
-
-  defp validate_control_string(nil, _maximum, true), do: :ok
-
-  defp validate_control_string(value, maximum, _nullable?) when is_binary(value) do
-    valid? =
-      String.valid?(value) and byte_size(value) <= maximum and
-        String.trim(value) != ""
-
-    if valid?, do: :ok, else: {:error, :invalid_control_string}
-  end
-
-  defp validate_control_string(_value, _maximum, _nullable?),
-    do: {:error, :invalid_control_string}
-
-  defp validate_reconciled_control_state(control, "delivered") do
-    if nonblank_control_string?(control["delivered_at"]) and
-         control["delivery_mode"] in @delivery_modes and is_nil(control["error"]),
-       do: :ok,
-       else: {:error, :invalid_delivered_control}
-  end
-
-  defp validate_reconciled_control_state(control, "delivery_unconfirmed") do
-    if is_nil(control["delivered_at"]) and nonblank_control_string?(control["error"]) and
-         (is_nil(control["delivery_mode"]) or control["delivery_mode"] in @delivery_modes),
-       do: :ok,
-       else: {:error, :invalid_unconfirmed_control}
-  end
-
-  defp validate_reconciled_control_state(control, "unsupported") do
-    if is_nil(control["delivered_at"]) and is_nil(control["delivery_mode"]) and
-         nonblank_control_string?(control["error"]),
-       do: :ok,
-       else: {:error, :invalid_unsupported_control}
-  end
-
-  defp nonblank_control_string?(value),
-    do: is_binary(value) and String.valid?(value) and String.trim(value) != ""
-
-  defp validate_terminal_control(control, task_id, ids, sequences, previous)
-       when is_map(control) and not is_struct(control) do
-    with :ok <-
-           validate_bounded_json_object(
-             control,
-             :invalid_terminal_control,
-             @max_terminal_control_bytes
-           ),
-         true <- MapSet.equal?(Map.keys(control) |> MapSet.new(), @terminal_control_keys),
-         {:ok, id} <- required_terminal_string(control, "control_id"),
-         {:ok, control_task_id} <- required_terminal_string(control, "task_id"),
-         true <- control_task_id == task_id,
-         true <- byte_size(id) <= 256,
-         true <- not MapSet.member?(ids, id),
-         sequence when is_integer(sequence) and sequence > 0 and not is_boolean(sequence) <-
-           Map.get(control, "sequence"),
-         true <- sequence > previous,
-         false <- MapSet.member?(sequences, sequence) do
-      {:ok, id, sequence}
-    else
-      false -> {:error, {:invalid_terminal_control, :identity_or_order}}
-      nil -> {:error, {:invalid_terminal_control, :sequence}}
-      {:error, _reason} = error -> error
-      _ -> {:error, {:invalid_terminal_control, :malformed}}
-    end
-  end
-
-  defp validate_terminal_control(_control, _task_id, _ids, _sequences, _previous),
-    do: {:error, {:invalid_terminal_control, :expected_map}}
-
   defp build_terminal_evidence(result, task_id, controls) do
     artifacts = Map.fetch!(result, "artifacts")
     validation = Map.get(result, "validation") || []
@@ -1312,21 +1010,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     end
   end
 
-  defp validate_bounded_json_object(value, error_tag, max_bytes)
-       when is_map(value) and not is_struct(value) do
-    with :ok <- validate_json_object(value, error_tag),
-         {:ok, encoded} <- encode_json(value, error_tag),
-         true <- byte_size(encoded) <= max_bytes do
-      :ok
-    else
-      false -> {:error, {error_tag, :too_large}}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp validate_bounded_json_object(_value, error_tag, _max_bytes),
-    do: {:error, {error_tag, :expected_map}}
-
   defp validate_terminal_evidence_size(encoded)
        when is_binary(encoded) and byte_size(encoded) <= @max_terminal_evidence_bytes,
        do: :ok
@@ -1357,70 +1040,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
       _ -> {:error, :terminal_evidence_verification_failed}
     end
   end
-
-  defp validate_task_terminal_bounds(body) do
-    case consume_task_terminal_json(body, 0, @max_task_terminal_nodes) do
-      {:ok, _nodes_left} -> :ok
-      :error -> {:error, :task_terminal_bounds_exceeded}
-    end
-  end
-
-  defp consume_task_terminal_json(_value, _depth, nodes_left) when nodes_left <= 0,
-    do: :error
-
-  defp consume_task_terminal_json(_value, depth, _nodes_left)
-       when depth > @max_task_terminal_depth,
-       do: :error
-
-  defp consume_task_terminal_json(value, _depth, nodes_left)
-       when is_boolean(value) or is_nil(value) or is_integer(value),
-       do: {:ok, nodes_left - 1}
-
-  defp consume_task_terminal_json(value, _depth, nodes_left) when is_float(value) do
-    case Jason.encode(value) do
-      {:ok, _encoded} -> {:ok, nodes_left - 1}
-      _ -> :error
-    end
-  end
-
-  defp consume_task_terminal_json(value, _depth, nodes_left) when is_binary(value) do
-    if String.valid?(value), do: {:ok, nodes_left - 1}, else: :error
-  end
-
-  defp consume_task_terminal_json(value, depth, nodes_left) when is_list(value) do
-    if proper_list?(value) do
-      Enum.reduce_while(value, {:ok, nodes_left - 1}, fn item, {:ok, left} ->
-        case consume_task_terminal_json(item, depth + 1, left) do
-          {:ok, next_left} -> {:cont, {:ok, next_left}}
-          :error -> {:halt, :error}
-        end
-      end)
-    else
-      :error
-    end
-  end
-
-  defp consume_task_terminal_json(value, depth, nodes_left)
-       when is_map(value) and not is_struct(value) do
-    if Enum.all?(Map.keys(value), &(is_binary(&1) and String.valid?(&1))) do
-      Enum.reduce_while(value, {:ok, nodes_left - 1}, fn {_key, item}, {:ok, left} ->
-        case consume_task_terminal_json(item, depth + 1, left) do
-          {:ok, next_left} -> {:cont, {:ok, next_left}}
-          :error -> {:halt, :error}
-        end
-      end)
-    else
-      :error
-    end
-  end
-
-  defp consume_task_terminal_json(_value, _depth, _nodes_left), do: :error
-
-  defp validate_task_terminal_size(encoded)
-       when is_binary(encoded) and byte_size(encoded) <= @max_task_terminal_bytes,
-       do: :ok
-
-  defp validate_task_terminal_size(_encoded), do: {:error, :task_terminal_too_large}
 
   defp validate_task_terminal_path(root, path) do
     with true <- Path.dirname(path) == root,
@@ -1480,26 +1099,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     end
   end
 
-  defp verify_task_terminal(path, task_id, expected_body, expected_encoded) do
-    expected_digest = sha256(expected_encoded)
-    envelope = expected_body["terminal_envelope"]
+  defp verify_task_terminal(path, archive) do
+    expected_descriptor = Map.put(archive.descriptor_fields, "path", path)
 
     with {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(path),
          true <- Bitwise.band(mode, 0o777) == 0o600,
-         {:ok, ^expected_encoded} <- File.read(path),
-         {:ok, ^expected_body} <- Jason.decode(expected_encoded),
-         descriptor = %{
-           "schema_version" => 1,
-           "task_id" => task_id,
-           "path" => path,
-           "sha256" => expected_digest,
-           "byte_size" => byte_size(expected_encoded),
-           "terminal_state" => envelope["terminal_state"],
-           "outcome_code" => envelope["outcome"]["code"]
-         },
-         true <-
-           MapSet.equal?(Map.keys(descriptor) |> MapSet.new(), @task_terminal_descriptor_keys) do
-      {:ok, descriptor}
+         {:ok, bytes} <- File.read(path),
+         true <- bytes === archive.encoded,
+         {:ok, body} <- Jason.decode(bytes),
+         true <- body === archive.body do
+      {:ok, expected_descriptor}
     else
       _ -> {:error, :task_terminal_verification_failed}
     end
@@ -1690,8 +1299,4 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     suffix = System.unique_integer([:positive, :monotonic])
     Path.join(Path.dirname(path), ".#{Path.basename(path)}.tmp-#{suffix}")
   end
-
-  defp proper_list?([]), do: true
-  defp proper_list?([_head | tail]), do: proper_list?(tail)
-  defp proper_list?(_other), do: false
 end
