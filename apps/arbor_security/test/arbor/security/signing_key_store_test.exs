@@ -2,6 +2,8 @@ defmodule Arbor.Security.SigningKeyStoreTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
+  alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Security
   alias Arbor.Security.SigningKeyStore
 
   @test_agent_id "agent_test_signing_key_store_#{:erlang.unique_integer([:positive])}"
@@ -37,6 +39,64 @@ defmodule Arbor.Security.SigningKeyStoreTest do
       assert :ok = SigningKeyStore.put(@test_agent_id, priv2)
       assert {:ok, retrieved} = SigningKeyStore.get(@test_agent_id)
       assert retrieved == priv2
+    end
+  end
+
+  describe "signing_key_status/1" do
+    test "reports available without returning key material" do
+      {_pub, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+
+      assert :ok = SigningKeyStore.put(@test_agent_id, private_key)
+      assert {:ok, :available} = Security.signing_key_status(@test_agent_id)
+    end
+
+    test "reports a missing signing key" do
+      assert {:error, :no_signing_key} = Security.signing_key_status(@test_agent_id)
+    end
+
+    test "rejects invalid principal input" do
+      assert {:error, :invalid_principal} = Security.signing_key_status(nil)
+      assert {:error, :invalid_principal} = Security.signing_key_status("")
+    end
+
+    test "reports malformed encrypted material without exposing storage errors" do
+      {_pub, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+      assert :ok = SigningKeyStore.put(@test_agent_id, private_key)
+
+      malformed = %Record{
+        id: @test_agent_id,
+        key: @test_agent_id,
+        data: %{"ct" => "not-base64", "iv" => "not-base64", "tag" => "not-base64"},
+        metadata: %{}
+      }
+
+      assert :ok =
+               Arbor.Persistence.BufferedStore.put(@test_agent_id, malformed,
+                 name: :arbor_security_signing_keys
+               )
+
+      assert {:error, :invalid_key_material} = Security.signing_key_status(@test_agent_id)
+    end
+
+    test "does not create a master key while checking a missing signing key" do
+      base =
+        Path.join(System.tmp_dir!(), "arbor_signing_status_#{System.unique_integer([:positive])}")
+
+      keypath = Path.join([base, "security", "master.key"])
+      previous = Application.get_env(:arbor_security, :master_key_path)
+      Application.put_env(:arbor_security, :master_key_path, keypath)
+
+      on_exit(fn ->
+        File.rm_rf(base)
+
+        case previous do
+          nil -> Application.delete_env(:arbor_security, :master_key_path)
+          value -> Application.put_env(:arbor_security, :master_key_path, value)
+        end
+      end)
+
+      assert {:error, :no_signing_key} = Security.signing_key_status(@test_agent_id)
+      refute File.exists?(keypath)
     end
   end
 

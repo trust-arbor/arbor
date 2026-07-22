@@ -1081,6 +1081,18 @@ defmodule Arbor.Security do
   defdelegate load_signing_key(agent_id), to: SigningKeyStore, as: :get
 
   @doc """
+  Check whether an agent's encrypted signing key is available for use.
+
+  Returns only a bounded readiness result. Decrypted key material and storage
+  records are never returned, and this operation does not mutate key state.
+  """
+  @spec signing_key_status(String.t()) ::
+          {:ok, :available}
+          | {:error,
+             :invalid_principal | :store_unavailable | :no_signing_key | :invalid_key_material}
+  def signing_key_status(agent_id), do: SigningKeyStore.status(agent_id)
+
+  @doc """
   Delete an agent's signing key.
 
   Called during agent destruction.

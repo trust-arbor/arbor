@@ -88,6 +88,29 @@ defmodule Arbor.Security.SigningKeyStore do
   end
 
   @doc """
+  Report whether an agent's encrypted signing key is readable.
+
+  This is an observation-only operation. It never creates or writes a master
+  key, and it never returns decrypted key material.
+  """
+  @spec status(String.t()) ::
+          {:ok, :available}
+          | {:error,
+             :invalid_principal | :store_unavailable | :no_signing_key | :invalid_key_material}
+  def status(agent_id) do
+    cond do
+      not valid_principal?(agent_id) ->
+        {:error, :invalid_principal}
+
+      not available?() ->
+        {:error, :store_unavailable}
+
+      true ->
+        read_status(agent_id)
+    end
+  end
+
+  @doc """
   Store a keypair (signing + optional encryption) for an agent, encrypted at rest.
 
   Stores a map of `%{"signing" => ed25519_priv, "encryption" => x25519_priv}`.
@@ -215,6 +238,28 @@ defmodule Arbor.Security.SigningKeyStore do
     end
   end
 
+  defp get_read_only_encryption_key do
+    with {:ok, master_key} <- read_master_key() do
+      {:ok, Crypto.derive_key(master_key, @key_derivation_info, 32)}
+    end
+  end
+
+  defp read_master_key do
+    case File.read(master_key_path()) do
+      {:ok, <<key::binary-size(32)>>} ->
+        {:ok, key}
+
+      {:ok, hex} when is_binary(hex) ->
+        case Base.decode16(hex, case: :mixed) do
+          {:ok, key} when byte_size(key) == 32 -> {:ok, key}
+          _ -> {:error, :invalid_master_key}
+        end
+
+      {:error, _reason} ->
+        {:error, :master_key_unavailable}
+    end
+  end
+
   defp ensure_master_key do
     path = master_key_path()
 
@@ -318,4 +363,52 @@ defmodule Arbor.Security.SigningKeyStore do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp read_status(agent_id) do
+    try do
+      with {:ok, raw} <- get_record(agent_id),
+           {:ok, enc_key} <- get_read_only_encryption_key(),
+           :ok <- validate_signing_record(raw, enc_key) do
+        {:ok, :available}
+      else
+        {:error, :not_found} -> {:error, :no_signing_key}
+        {:error, :store_unavailable} -> {:error, :store_unavailable}
+        {:error, _reason} -> {:error, :invalid_key_material}
+      end
+    rescue
+      ArgumentError -> {:error, :store_unavailable}
+      _ -> {:error, :invalid_key_material}
+    catch
+      :exit, _reason -> {:error, :store_unavailable}
+      :throw, _value -> {:error, :invalid_key_material}
+    end
+  end
+
+  defp validate_signing_record(raw, enc_key) do
+    case unwrap_record(raw) do
+      %{"format" => "keypair", "v" => 2} = data ->
+        with {:ok, %{signing: signing_key}} <- decrypt_keypair(data, enc_key) do
+          validate_signing_key(signing_key)
+        end
+
+      data ->
+        with {:ok, signing_key} <- decrypt_single_key(data, enc_key) do
+          validate_signing_key(signing_key)
+        end
+    end
+  end
+
+  defp validate_signing_key(signing_key)
+       when is_binary(signing_key) and byte_size(signing_key) in [32, 64],
+       do: :ok
+
+  defp validate_signing_key(_signing_key), do: {:error, :invalid_key_material}
+
+  defp valid_principal?(agent_id) when is_binary(agent_id) do
+    byte_size(agent_id) in 1..256 and
+      (agent_id == "system_authority" or
+         String.match?(agent_id, ~r/\A(?:agent_|human_)[A-Za-z0-9_-]+\z/))
+  end
+
+  defp valid_principal?(_agent_id), do: false
 end
