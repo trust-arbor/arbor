@@ -123,6 +123,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   alias Arbor.Actions.Config
   alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.WorkspaceReconciliationProjection
   alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore, as: BranchLifecycle
   alias Arbor.Actions.Coding.WorkspaceLifecycleStatusCore, as: LifecycleStatus
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: RetentionJournal
@@ -436,6 +437,25 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     do: call(:lifecycle_status, opts)
 
   def lifecycle_status(_opts), do: {:error, :invalid_lifecycle_status_options}
+
+  @doc false
+  @spec reconciliation_inventory(String.t() | nil, String.t() | nil, pos_integer(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def reconciliation_inventory(task_id, principal_id, max_items, opts \\ [])
+
+  def reconciliation_inventory(task_id, principal_id, max_items, opts)
+      when (is_binary(task_id) or is_nil(task_id)) and
+             (is_binary(principal_id) or is_nil(principal_id)) and
+             is_integer(max_items) and max_items > 0 and is_list(opts) do
+    if max_items <= RetentionJournal.max_records() do
+      call({:reconciliation_inventory, task_id, principal_id, max_items}, opts)
+    else
+      {:error, :invalid_reconciliation_inventory_options}
+    end
+  end
+
+  def reconciliation_inventory(_task_id, _principal_id, _max_items, _opts),
+    do: {:error, :invalid_reconciliation_inventory_options}
 
   @doc false
   @spec acquire_validation_resource(String.t(), map() | keyword()) ::
@@ -952,6 +972,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     }
 
     {:reply, {:ok, LifecycleStatus.aggregate(snapshot)}, state}
+  end
+
+  def handle_call(
+        {:reconciliation_inventory, task_id, principal_id, max_items},
+        _from,
+        state
+      ) do
+    inventory =
+      WorkspaceReconciliationProjection.from_registry_state(
+        state,
+        task_id,
+        principal_id,
+        max_items
+      )
+
+    {:reply, {:ok, inventory}, state}
   end
 
   def handle_call(

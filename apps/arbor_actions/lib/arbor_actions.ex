@@ -74,6 +74,7 @@ defmodule Arbor.Actions do
   """
 
   alias Arbor.Actions.Coding.{Workspace, WorkspaceLeaseRegistry}
+  alias Arbor.Actions.Coding.CodingResourceInventory
   alias Arbor.Actions.Coding.ToolchainIdentityCore
   alias Arbor.Actions.Egress
   alias Arbor.Actions.TaintEnforcement
@@ -204,6 +205,10 @@ defmodule Arbor.Actions do
 
   def coding_workspace_lifecycle_status(_opts),
     do: {:error, :invalid_lifecycle_status_options}
+
+  @doc "Return a bounded, read-only coding resource inventory for reconciliation."
+  @spec coding_resource_inventory(keyword()) :: {:ok, map()} | {:error, term()}
+  def coding_resource_inventory(opts \\ []), do: CodingResourceInventory.snapshot(opts)
 
   @doc "Return the bounded identity of the reviewed Mix and loaded BEAM toolchain."
   @spec coding_toolchain_identity() ::
