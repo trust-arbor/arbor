@@ -461,4 +461,366 @@ defmodule Arbor.AI.Runtime.DispatchTest do
                )
     end
   end
+
+  describe "dispatch/2 — opt-in ProviderRouter mode" do
+    alias Arbor.Contracts.LLM.{ModelEntry, ProviderEntry}
+
+    defmodule RouterRuntime do
+      @moduledoc false
+      @behaviour Arbor.AI.Runtime
+
+      alias Arbor.Contracts.AI.RuntimeProfile
+
+      @impl true
+      def prepare(request, _opts) do
+        send(Application.fetch_env!(:arbor_ai, :_test_router_pid), {:prepare, request})
+        {:ok, request}
+      end
+
+      @impl true
+      def execute(request, _callbacks, _opts) do
+        send(Application.fetch_env!(:arbor_ai, :_test_router_pid), {:execute, request})
+
+        case Application.get_env(:arbor_ai, :_test_router_fail_model) do
+          model when model == request.model ->
+            {:error, :timeout}
+
+          _ ->
+            {:ok,
+             %Arbor.LLM.Response{
+               text: "router success",
+               finish_reason: :stop,
+               usage: %{input_tokens: 1, output_tokens: 1},
+               raw: %{
+                 provider: request.provider,
+                 model: request.model,
+                 runtime: request.runtime
+               }
+             }}
+        end
+      end
+
+      @impl true
+      def profile do
+        {:ok, profile} =
+          RuntimeProfile.new(%{
+            runtime_id: :router_test,
+            display_name: "router test",
+            owns_model_loop: false,
+            owns_thread_history: false,
+            supports_jido_actions: false,
+            supports_action_hooks: false,
+            supports_native_tools: false,
+            runs_context_engine: false,
+            exposes_compaction_data: false,
+            unsupported_features: []
+          })
+
+        profile
+      end
+    end
+
+    setup do
+      original = Application.get_env(:arbor_ai, :runtime_registry, %{})
+
+      Application.put_env(:arbor_ai, :runtime_registry, %{
+        arbor: RouterRuntime,
+        acp: RouterRuntime
+      })
+
+      Application.put_env(:arbor_ai, :_test_router_pid, self())
+
+      on_exit(fn ->
+        Application.put_env(:arbor_ai, :runtime_registry, original)
+        Application.delete_env(:arbor_ai, :_test_router_pid)
+        Application.delete_env(:arbor_ai, :_test_router_fail_model)
+      end)
+
+      :ok
+    end
+
+    test "legacy dispatch still uses Selector when router input is absent" do
+      request = build_request("totally-unknown-legacy-model")
+
+      assert {:ok, response} = Dispatch.dispatch(request)
+      assert response.raw.model == "totally-unknown-legacy-model"
+      assert response.raw.runtime == :arbor
+      assert_receive {:prepare, %Request{model: "totally-unknown-legacy-model"}}
+    end
+
+    test "exact primary route is authorized before prepare and executes ProviderEntry.ref" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      request = build_request("ignored-by-router")
+      test_pid = self()
+      handler_id = "router-order-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:arbor, :runtime, :selected],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:selected, metadata.provider_ref})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      authorizer = fn route ->
+        send(test_pid, {:authorize, route})
+        :allow
+      end
+
+      assert {:ok, response} =
+               Dispatch.dispatch(request,
+                 provider_route_input: provider_route_input([primary]),
+                 route_authorizer: authorizer
+               )
+
+      assert_receive first_message
+      assert {:authorize, %{provider: %ProviderEntry{ref: "wire-primary"}}} = first_message
+
+      assert_receive second_message
+      assert {:selected, "wire-primary"} = second_message
+
+      assert_receive {:prepare,
+                      %Request{
+                        provider: "provider_a",
+                        model: "wire-primary",
+                        runtime: :arbor
+                      }}
+
+      assert_receive {:execute, %Request{model: "wire-primary"}}
+      assert response.raw.model == "wire-primary"
+    end
+
+    test "fallback route is independently mapped and authorized after a transient failure" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+      Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
+      test_pid = self()
+
+      authorizer = fn route ->
+        send(test_pid, {:authorize, route.provider.ref})
+        :allow
+      end
+
+      assert {:ok, response} =
+               Dispatch.dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([fallback, primary]),
+                 route_authorizer: authorizer
+               )
+
+      assert_receive {:authorize, "wire-primary"}
+      assert_receive {:prepare, %Request{model: "wire-primary"}}
+      assert_receive {:execute, %Request{model: "wire-primary"}}
+      assert_receive {:authorize, "wire-fallback"}
+
+      assert_receive {:prepare,
+                      %Request{
+                        provider: "provider_b",
+                        model: "wire-fallback",
+                        runtime: :acp
+                      }}
+
+      assert_receive {:execute, %Request{model: "wire-fallback"}}
+      assert response.raw.model == "wire-fallback"
+    end
+
+    test "router attempts preserve selected and fallback telemetry compatibility" do
+      handler_id = "router-compat-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach_many(
+        handler_id,
+        [[:arbor, :runtime, :selected], [:arbor, :runtime, :fallback]],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:route_telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+      Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
+
+      assert {:ok, _response} =
+               Dispatch.dispatch(build_request("original-model"),
+                 provider_route_input: provider_route_input([fallback, primary]),
+                 route_authorizer: fn _ -> :allow end,
+                 telemetry_metadata: %{
+                   canonical_id: String.duplicate("m", 513),
+                   provider: false,
+                   provider_ref: String.duplicate("r", 513),
+                   runtime: nil
+                 }
+               )
+
+      assert_receive {:route_telemetry, [:arbor, :runtime, :selected], %{count: 1},
+                      %{
+                        canonical_id: "primary",
+                        provider: :provider_a,
+                        provider_ref: "wire-primary",
+                        runtime: :arbor
+                      }}
+
+      assert_receive {:route_telemetry, [:arbor, :runtime, :fallback], %{count: 1}, fallback_meta}
+      assert fallback_meta.original_model == "original-model"
+      assert fallback_meta.override == %{model: "fallback", provider: :provider_b, runtime: :acp}
+
+      assert_receive {:route_telemetry, [:arbor, :runtime, :selected], %{count: 1},
+                      %{provider: :provider_b, provider_ref: "wire-fallback", runtime: :acp}}
+    end
+
+    test "malformed, ineligible, and unmappable router requests never fall back to Selector" do
+      request = build_request("totally-unknown-selector-compatible-model")
+      handler_id = "router-invalid-selected-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:arbor, :runtime, :selected],
+        fn _event, _measurements, _metadata, _config -> send(test_pid, :selected) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:error, {:selection_failed, {:provider_route, :invalid_route_input}}} =
+               Dispatch.dispatch(request,
+                 provider_route_input: %{},
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      ineligible =
+        provider_route_input([route_model("primary", :provider_a, "wire", :arbor)])
+        |> put_in([:task_registry, "default", :requirements], %{providers: ["missing"]})
+
+      assert {:error, {:selection_failed, {:provider_route, :no_eligible_routes}}} =
+               Dispatch.dispatch(request,
+                 provider_route_input: ineligible,
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      module_route = route_model("module", :provider_a, "wire", RouterRuntime)
+
+      assert {:error, {:selection_failed, {:provider_route, :route_mapping_mismatch}}} =
+               Dispatch.dispatch(request,
+                 provider_route_input: provider_route_input([module_route]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      malformed_ref =
+        route_model("primary", :provider_a, String.duplicate("r", 513), :arbor)
+
+      assert {:error, {:selection_failed, {:provider_route, :invalid_route_input}}} =
+               Dispatch.dispatch(request,
+                 provider_route_input: provider_route_input([malformed_ref]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      with_params =
+        provider_route_input([route_model("primary", :provider_a, "wire", :arbor)])
+        |> Map.put(:policy, %{params: %{"temperature" => 0.2}})
+
+      assert {:error, {:selection_failed, {:provider_route, :unsupported_route_params}}} =
+               Dispatch.dispatch(request,
+                 provider_route_input: with_params,
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      refute_received {:prepare, _}
+      refute_received {:execute, _}
+      refute_received :selected
+    end
+
+    test "missing, malformed, raised, pending, and denied authorizers block runtime execution" do
+      route_input =
+        provider_route_input([route_model("primary", :provider_a, "wire-primary", :arbor)])
+
+      cases = [
+        {[], :route_authorizer_required},
+        {[route_authorizer: :not_a_callback], :invalid_route_authorizer},
+        {[route_authorizer: fn _ -> raise "boom" end], :raised},
+        {[route_authorizer: fn _ -> {:requires_approval, :egress} end], :pending},
+        {[route_authorizer: fn _ -> {:error, :denied} end], :denied}
+      ]
+
+      Enum.each(cases, fn {authorizer_opts, reason} ->
+        opts = [provider_route_input: route_input] ++ authorizer_opts
+
+        assert {:error, {:authorization_failed, ^reason}} =
+                 Dispatch.dispatch(build_request("ignored"), opts)
+
+        refute_received {:prepare, _}
+        refute_received {:execute, _}
+      end)
+    end
+
+    test "post-success executed telemetry identifies a router selection, not provider confirmation" do
+      handler_id = "router-executed-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:arbor, :runtime, :executed],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      route = route_model("primary", :provider_a, "wire-primary", :arbor)
+
+      assert {:ok, _response} =
+               Dispatch.dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([route]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      assert_receive {:telemetry, [:arbor, :runtime, :executed], %{count: 1}, metadata}
+      assert metadata.provider == :provider_a
+      assert metadata.provider_ref == "wire-primary"
+      assert metadata.runtime == :arbor
+      assert metadata.attempt == :primary
+      assert metadata.route_identity == :router_selected
+      assert metadata.provider_confirmed == false
+    end
+
+    defp provider_route_input(catalog) do
+      %{
+        task_class: "default",
+        task_registry: %{"default" => %{requirements: %{}}},
+        catalog: catalog,
+        scoreboard:
+          Enum.map(catalog, fn model ->
+            provider = hd(model.providers)
+
+            %{
+              model: model.canonical_id,
+              provider: Atom.to_string(provider.id),
+              runtime: provider.runtimes |> hd() |> Atom.to_string(),
+              score: if(model.canonical_id == "primary", do: 1.0, else: 0.5)
+            }
+          end),
+        observations: [],
+        budgets: [],
+        now: ~U[2026-07-22 22:00:00Z],
+        policy: %{}
+      }
+    end
+
+    defp route_model(canonical_id, provider, ref, runtime) do
+      %ModelEntry{
+        canonical_id: canonical_id,
+        providers: [%ProviderEntry{id: provider, ref: ref, auth: :none, runtimes: [runtime]}],
+        family: :test,
+        context_window: 100_000,
+        max_output_tokens: 4_000
+      }
+    end
+  end
 end

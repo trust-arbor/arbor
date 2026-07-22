@@ -35,7 +35,9 @@ defmodule Arbor.AI.Runtime.Dispatch do
 
   require Logger
 
+  alias Arbor.AI.Runtime.ProviderRouter
   alias Arbor.AI.Runtime.Registry, as: RuntimeRegistry
+  alias Arbor.AI.Runtime.RoutePlan
   alias Arbor.AI.Runtime.Selector
   alias Arbor.Common.ModelProfile
   alias Arbor.Contracts.LLM.ModelEntry
@@ -47,7 +49,9 @@ defmodule Arbor.AI.Runtime.Dispatch do
   @type dispatch_opts :: [
           client: Client.t() | nil,
           policy: Selector.policy(),
-          telemetry_metadata: map()
+          telemetry_metadata: map(),
+          provider_route_input: ProviderRouter.input(),
+          route_authorizer: (RoutePlan.route() -> term())
         ]
 
   @doc """
@@ -64,6 +68,12 @@ defmodule Arbor.AI.Runtime.Dispatch do
       updates. Forwarded to the chosen runtime's `execute/3`.
     * `:client` — only used when the chosen runtime is `:arbor`; passes
       through to `Runtime.Arbor.execute/3` as an injectable `%Client{}`.
+    * `:provider_route_input` — explicitly opts this call into
+      `ProviderRouter` mode. The input must include the caller's catalog
+      structs. Once present, selection never falls back to `Selector`.
+    * `:route_authorizer` — required in router mode. A process-local callback
+      invoked with each exact mapped route before runtime preparation. Only
+      `:allow` admits the attempt.
 
   Any other keys in `opts` are forwarded as runtime opts to the chosen
   runtime's `prepare/2` and `execute/3`.
@@ -110,6 +120,14 @@ defmodule Arbor.AI.Runtime.Dispatch do
   @impl Arbor.LLM.Dispatcher
   @spec dispatch(Request.t(), dispatch_opts()) :: {:ok, Response.t()} | {:error, term()}
   def dispatch(%Request{} = request, opts \\ []) do
+    if Keyword.has_key?(opts, :provider_route_input) do
+      dispatch_provider_route(request, opts)
+    else
+      dispatch_legacy(request, opts)
+    end
+  end
+
+  defp dispatch_legacy(%Request{} = request, opts) do
     policy = Keyword.get(opts, :policy, %{})
     fallback_chain = Map.get(policy, :fallback_chain, [])
     base_policy = Map.delete(policy, :fallback_chain)
@@ -122,6 +140,120 @@ defmodule Arbor.AI.Runtime.Dispatch do
       eligible?: &fallback_eligible?/1,
       on_fallback: &emit_fallback/3
     )
+  end
+
+  defp dispatch_provider_route(%Request{} = request, opts) do
+    route_input = Keyword.fetch!(opts, :provider_route_input)
+
+    case RoutePlan.build(route_input) do
+      {:ok, plan} -> run_route_plan(request, plan, opts)
+      {:error, reason} -> {:error, {:selection_failed, {:provider_route, reason}}}
+    end
+  end
+
+  defp run_route_plan(request, %RoutePlan{} = plan, opts) do
+    initial_attempt = %{request: request, route: plan.primary, opts: opts, attempt: :primary}
+
+    case dispatch_route_attempt(initial_attempt) do
+      {:ok, _response} = success ->
+        success
+
+      {:error, reason} = error ->
+        if plan.fallbacks != [] and fallback_eligible?(reason) do
+          run_route_fallbacks(request, plan.fallbacks, opts, error)
+        else
+          error
+        end
+    end
+  end
+
+  defp run_route_fallbacks(_request, [], _opts, last_error), do: last_error
+
+  defp run_route_fallbacks(request, [route | rest], opts, last_error) do
+    attempt = %{
+      request: request,
+      route: route,
+      opts: opts,
+      attempt: :fallback,
+      fallback_from: last_error
+    }
+
+    case dispatch_route_attempt(attempt) do
+      {:ok, _response} = success ->
+        success
+
+      {:error, reason} = error ->
+        if rest != [] and fallback_eligible?(reason) do
+          run_route_fallbacks(request, rest, opts, error)
+        else
+          error
+        end
+    end
+  end
+
+  defp dispatch_route_attempt(%{request: request, route: route, opts: opts} = attempt) do
+    extra_meta = Keyword.get(opts, :telemetry_metadata, %{})
+    callbacks = Keyword.get(opts, :callbacks, %{})
+    selection = %{provider: route.provider, runtime: route.runtime}
+
+    with :ok <- authorize_route(Keyword.get(opts, :route_authorizer), route),
+         :ok <- maybe_emit_route_fallback(attempt, route),
+         :ok <-
+           emit_selected(route.model_entry, selection, request, route_extra_meta(extra_meta)),
+         {:ok, runtime_module} <- exact_runtime_module(route.runtime),
+         rewritten <- rewrite_routed_request(request, route),
+         runtime_opts <-
+           Keyword.drop(opts, [
+             :policy,
+             :telemetry_metadata,
+             :callbacks,
+             :provider_route_input,
+             :route_authorizer
+           ]),
+         {:ok, prepared} <- runtime_module.prepare(rewritten, runtime_opts),
+         {:ok, response} <- runtime_module.execute(prepared, callbacks, runtime_opts) do
+      :ok = emit_executed(route, request, attempt.attempt)
+      {:ok, response}
+    end
+  end
+
+  defp maybe_emit_route_fallback(%{fallback_from: last_error} = attempt, route) do
+    emit_route_fallback(attempt, route, last_error)
+  end
+
+  defp maybe_emit_route_fallback(_attempt, _route), do: :ok
+
+  defp authorize_route(authorizer, route) when is_function(authorizer, 1) do
+    case authorizer.(route) do
+      :allow -> :ok
+      {:requires_approval, _reason} -> {:error, {:authorization_failed, :pending}}
+      _other -> {:error, {:authorization_failed, :denied}}
+    end
+  rescue
+    _ -> {:error, {:authorization_failed, :raised}}
+  catch
+    _, _ -> {:error, {:authorization_failed, :raised}}
+  end
+
+  defp authorize_route(nil, _route),
+    do: {:error, {:authorization_failed, :route_authorizer_required}}
+
+  defp authorize_route(_authorizer, _route),
+    do: {:error, {:authorization_failed, :invalid_route_authorizer}}
+
+  defp exact_runtime_module(runtime) do
+    case Map.fetch(RuntimeRegistry.all(), runtime) do
+      {:ok, module} when is_atom(module) ->
+        if Code.ensure_loaded?(module) and function_exported?(module, :prepare, 2) and
+             function_exported?(module, :execute, 3) do
+          {:ok, module}
+        else
+          {:error, {:selection_failed, {:provider_route, :runtime_unavailable}}}
+        end
+
+      _ ->
+        {:error, {:selection_failed, {:provider_route, :runtime_unavailable}}}
+    end
   end
 
   defp dispatch_attempt(%{request: request, policy: policy, opts: opts}) do
@@ -223,6 +355,33 @@ defmodule Arbor.AI.Runtime.Dispatch do
 
     safe_telemetry([:arbor, :runtime, :fallback], %{count: 1}, metadata)
     :ok
+  end
+
+  defp emit_route_fallback(initial_attempt, route, last_error) do
+    emit_fallback(initial_attempt, route_marker(route), last_error)
+  end
+
+  defp route_marker(route) do
+    %{
+      model: route.model_entry.canonical_id,
+      provider: route.provider.id,
+      runtime: route.runtime
+    }
+  end
+
+  defp route_extra_meta(extra_meta) when is_map(extra_meta) do
+    Map.drop(extra_meta, [
+      :canonical_id,
+      :provider,
+      :provider_ref,
+      :runtime,
+      :model_family,
+      "canonical_id",
+      "provider",
+      "provider_ref",
+      "runtime",
+      "model_family"
+    ])
   end
 
   defp inspect_error({:error, reason}), do: Arbor.LLM.inspect_external_reason(reason)
@@ -360,6 +519,15 @@ defmodule Arbor.AI.Runtime.Dispatch do
     %{request | provider: provider, runtime: runtime}
   end
 
+  defp rewrite_routed_request(%Request{} = request, route) do
+    %{
+      request
+      | provider: Atom.to_string(route.provider.id),
+        model: route.provider.ref,
+        runtime: route.runtime
+    }
+  end
+
   defp emit_selected(model_entry, selection, request, extra_meta) do
     metadata =
       %{
@@ -374,6 +542,29 @@ defmodule Arbor.AI.Runtime.Dispatch do
 
     safe_telemetry([:arbor, :runtime, :selected], %{count: 1}, metadata)
     :ok
+  end
+
+  defp emit_executed(route, request, attempt) do
+    metadata = %{
+      canonical_id: route.model_entry.canonical_id,
+      provider: route.provider.id,
+      provider_ref: route.provider.ref,
+      runtime: route.runtime,
+      request_id: bounded_request_id(request),
+      attempt: attempt,
+      route_identity: :router_selected,
+      provider_confirmed: false
+    }
+
+    safe_telemetry([:arbor, :runtime, :executed], %{count: 1}, metadata)
+    :ok
+  end
+
+  defp bounded_request_id(%Request{} = request) do
+    case Map.get(request, :request_id) do
+      value when is_binary(value) and byte_size(value) <= 256 -> value
+      _ -> nil
+    end
   end
 
   # :telemetry is optional dep — most umbrella runs have it, but be

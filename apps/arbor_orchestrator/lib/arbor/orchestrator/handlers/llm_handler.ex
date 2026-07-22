@@ -167,15 +167,29 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   def idempotency, do: :idempotent_with_key
 
   defp call_llm_and_respond(prompt, node, context, graph, base_updates, opts) do
-    # Egress gate (2026-06-14 URI-addressing-vs-classification decision). The
-    # compute-node LLM path has no per-operation capability, so we check egress
-    # standing through Arbor.Trust.authorize_egress/3 before dispatching.
-    # arbor_orchestrator hard-deps the trust/security stack, so this is direct.
-    # Inert unless egress enforcement is switched on; emits observability while
-    # dark. A gate CRASH fails open (never let the gate halt LLM on a bug).
-    case egress_halt_outcome(context, base_updates) do
-      %Outcome{} = halt -> halt
-      _ -> call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+    router_mode? = Keyword.has_key?(opts, :provider_route_input)
+    tool_loop? = Map.get(node.attrs, "use_tools") in ["true", true]
+
+    cond do
+      router_mode? and tool_loop? ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "ProviderRouter dispatch is not supported for tool-loop calls",
+          context_updates: Map.put(base_updates, "last_response", nil)
+        }
+
+      router_mode? ->
+        # The session provider may be stale once ProviderRouter selects an exact
+        # destination. Router mode authorizes every mapped attempt inside Dispatch.
+        call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+
+      true ->
+        # Legacy defense-in-depth gate (2026-06-14 URI-addressing-vs-classification
+        # decision). Keep its historical behavior unchanged when router mode is absent.
+        case egress_halt_outcome(context, base_updates) do
+          %Outcome{} = halt -> halt
+          _ -> call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+        end
     end
   end
 
@@ -1169,6 +1183,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       call_opts
       |> Keyword.put(:client, client)
       |> Keyword.put(:policy, build_dispatch_policy(context, request))
+      |> maybe_put_route_authorizer(context)
 
     run_id = Keyword.get(call_opts, :run_id)
 
@@ -1195,12 +1210,57 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       |> Keyword.put(:client, client)
       |> Keyword.put(:callbacks, callbacks)
       |> Keyword.put(:policy, build_dispatch_policy(context, request))
+      |> maybe_put_route_authorizer(context)
 
     run_id = Keyword.get(call_opts, :run_id)
 
     Arbor.Orchestrator.HeartbeatRefresher.with_heartbeat_refresh(run_id, fn ->
       Dispatcher.dispatch(request, dispatch_opts)
     end)
+  end
+
+  defp maybe_put_route_authorizer(dispatch_opts, context) do
+    if Keyword.has_key?(dispatch_opts, :provider_route_input) do
+      authorizer = route_authorizer(Context.get(context, "session.agent_id"), context)
+
+      Keyword.put(dispatch_opts, :route_authorizer, authorizer)
+    else
+      dispatch_opts
+    end
+  end
+
+  defp route_authorizer(agent_id, context) when is_binary(agent_id) do
+    if valid_route_principal?(agent_id) do
+      taint = egress_taint_level(context)
+
+      fn
+        %{provider: %{id: provider_id}}
+        when is_atom(provider_id) and provider_id not in [nil, true, false] ->
+          tier = resolve_egress_tier(provider_id)
+
+          Arbor.Trust.authorize_egress(agent_id, tier,
+            egress_taint: taint,
+            egress_destination: Atom.to_string(provider_id)
+          )
+
+        _malformed_route ->
+          {:error, {:egress_blocked, :external_provider, :invalid_route}}
+      end
+    else
+      denying_route_authorizer()
+    end
+  end
+
+  defp route_authorizer(_agent_id, _context), do: denying_route_authorizer()
+
+  defp denying_route_authorizer do
+    fn _route -> {:error, {:egress_blocked, :external_provider, :invalid_principal}} end
+  end
+
+  defp valid_route_principal?(agent_id) do
+    byte_size(agent_id) > byte_size("agent_") and byte_size(agent_id) <= 256 and
+      String.valid?(agent_id) and String.starts_with?(agent_id, "agent_") and
+      String.trim(agent_id) == agent_id and not String.match?(agent_id, ~r/[\x00-\x1F\x7F]/)
   end
 
   # Assemble the Selector policy from session context. Currently
