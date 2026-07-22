@@ -162,6 +162,10 @@ defmodule Arbor.Contracts.Coding.Plan do
   @spec supported_schema_versions() :: [pos_integer()]
   def supported_schema_versions, do: @supported_schema_versions
 
+  @doc "Return all coding profile IDs accepted by this contract."
+  @spec profile_ids() :: [String.t()]
+  def profile_ids, do: Enum.sort(@profile_ids)
+
   @doc """
   Construct and validate a coding plan.
 

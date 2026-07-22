@@ -27,7 +27,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   alias Arbor.Orchestrator.Viz.DotSerializer
 
   @compiler_version "coding-plan-1"
-  @template_version "coding-change-v1"
   @security_dormant_nodes ~w[
     check_security_rework_fresh
     compare_security_rework_commit
@@ -168,7 +167,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          dot_source: dot_source,
          graph_hash: graph_hash,
          compiler_version: @compiler_version,
-         template_version: @template_version,
+         template_version: Profiles.template_version(),
          plan_fingerprint: plan_fingerprint,
          action_catalog_digest: action_catalog["digest"],
          execution_manifest: execution_manifest,
@@ -356,7 +355,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp resolve_template_source(_opts) do
     :arbor_orchestrator
-    |> Application.app_dir("priv/pipelines/coding-change-v1.dot")
+    |> Application.app_dir("priv/pipelines/#{Profiles.template_version()}.dot")
     |> read_template()
   end
 
@@ -1105,7 +1104,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp put_graph_metadata(graph, plan, plan_fingerprint, catalog_digest) do
     metadata = %{
       @graph_metadata_keys.compiler_version => @compiler_version,
-      @graph_metadata_keys.template_version => @template_version,
+      @graph_metadata_keys.template_version => Profiles.template_version(),
       @graph_metadata_keys.plan_version => Integer.to_string(plan.version),
       @graph_metadata_keys.plan_fingerprint => plan_fingerprint,
       @graph_metadata_keys.task_class => plan.task_class,
@@ -1582,7 +1581,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "timeout" => plan.budgets["wall_clock_ms"],
       "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
       @graph_metadata_keys.compiler_version => @compiler_version,
-      @graph_metadata_keys.template_version => @template_version,
+      @graph_metadata_keys.template_version => Profiles.template_version(),
       @graph_metadata_keys.plan_version => plan.version,
       @graph_metadata_keys.plan_fingerprint => plan_fingerprint,
       @graph_metadata_keys.task_class => plan.task_class,
@@ -1628,7 +1627,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
        ) do
     %{
       "compiler_version" => @compiler_version,
-      "template_version" => @template_version,
+      "template_version" => Profiles.template_version(),
       "graph_hash" => graph_hash,
       "plan_fingerprint" => plan_fingerprint,
       "plan_version" => plan.version,

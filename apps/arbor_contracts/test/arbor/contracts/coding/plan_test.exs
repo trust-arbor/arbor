@@ -223,6 +223,18 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       assert plan.version == 2
     end
 
+    test "exposes the canonical coding profile IDs" do
+      assert Plan.profile_ids() == ~w[
+               contract_change
+               cross_app
+               database_migration
+               default
+               docs_only
+               frontend_visual
+               security_regression
+             ]
+    end
+
     test "rejects unsupported and non-integer schema versions" do
       for version <- [0, 3, "1", nil] do
         assert {:error, {:invalid_field, "version", _}} =
@@ -240,17 +252,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
     end
 
     test "accepts every declared task and validation profile independent of executability" do
-      profiles = ~w(
-        default
-        security_regression
-        contract_change
-        frontend_visual
-        docs_only
-        cross_app
-        database_migration
-      )
-
-      for profile <- profiles do
+      for profile <- Plan.profile_ids() do
         attrs =
           @minimal_attrs
           |> Map.put(:task_class, profile)

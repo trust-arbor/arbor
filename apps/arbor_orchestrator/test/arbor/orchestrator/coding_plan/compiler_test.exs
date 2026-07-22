@@ -8,7 +8,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     ActionCatalog,
     Compilation,
     Compiler,
-    ExecutionManifest
+    ExecutionManifest,
+    Profiles
   }
 
   alias Arbor.Orchestrator.Dot.Parser
@@ -40,7 +41,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
   setup_all do
     template_path =
-      Application.app_dir(:arbor_orchestrator, "priv/pipelines/coding-change-v1.dot")
+      Application.app_dir(
+        :arbor_orchestrator,
+        "priv/pipelines/#{Profiles.template_version()}.dot"
+      )
 
     {:ok, catalog} = ActionCatalog.snapshot(modules: @action_modules)
 
@@ -80,6 +84,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert first.manifest["action_names"] == Enum.sort(first.manifest["action_names"])
     assert first.manifest["handler_types"] == Enum.sort(first.manifest["handler_types"])
+  end
+
+  test "compiler projections use the canonical coding template version", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = parse!(compilation.dot_source)
+    template_version = Profiles.template_version()
+
+    assert compilation.template_version == template_version
+    assert graph.attrs["coding_plan_template_version"] == template_version
+    assert compilation.initial_values["coding_plan_template_version"] == template_version
+    assert compilation.manifest["template_version"] == template_version
   end
 
   test "version 2 binds the validated work packet digest in graph, inputs, and manifest", ctx do
@@ -402,7 +417,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert compilation.initial_values["inactivity_timeout_ms"] == 300_000
 
     assert graph.attrs["coding_plan_compiler_version"] == "coding-plan-1"
-    assert graph.attrs["coding_plan_template_version"] == "coding-change-v1"
+    assert graph.attrs["coding_plan_template_version"] == Profiles.template_version()
     assert graph.attrs["coding_plan_fingerprint"] == compilation.plan_fingerprint
 
     assert graph.attrs["coding_plan_action_catalog_digest"] ==

@@ -1,21 +1,14 @@
 defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Coding.Plan
   alias Arbor.Orchestrator.CodingPlan.Profiles
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
 
   @moduletag :fast
 
-  @known_ids ~w[
-    contract_change
-    cross_app
-    database_migration
-    default
-    docs_only
-    frontend_visual
-    security_regression
-  ]
+  @known_ids Plan.profile_ids()
 
   @executable_ids ~w[cross_app default security_regression]
   @unsupported_ids @known_ids -- @executable_ids
@@ -27,10 +20,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert Profiles.known_ids() == @known_ids
       assert Enum.map(profiles, & &1["id"]) == @known_ids
       assert {:ok, _encoded} = Jason.encode(profiles)
+      assert Profiles.template_version() == "coding-change-v1"
 
       for profile <- profiles do
         assert Map.keys(profile) |> Enum.all?(&is_binary/1)
-        assert profile["template_version"] == "coding-change-v1"
+        assert profile["template_version"] == Profiles.template_version()
+        assert profile["semantic_policy"]["validation_profile"] == profile["id"]
         assert is_boolean(profile["executable"])
         assert is_map(profile["validation_strategy"])
         assert is_map(profile["review_strategy"])
@@ -40,6 +35,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
         assert profile["required_nested_actions"] ==
                  Enum.sort(["consensus_decide_review", "git_commit"])
       end
+    end
+
+    test "contract and registry profile IDs cannot drift independently" do
+      assert Profiles.known_ids() == Plan.profile_ids()
     end
 
     test "requires the frozen-ledger reducer and git_commit in compiled execution manifests" do

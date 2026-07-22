@@ -7,9 +7,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   landed fail closed instead of falling back to `default`.
   """
 
+  alias Arbor.Contracts.Coding.Plan
   alias Arbor.Orchestrator.Graph
 
   @template_version "coding-change-v1"
+  @contract_profile_ids Plan.profile_ids()
   # Shared Shell spawn-capable ceilings — must not drift above unit admission.
   # `:standard` is the default for ordinary Mix / security_regression paths.
   @spawn_capable_max_timeout_ms Arbor.Shell.spawn_capable_max_timeout_ms()
@@ -1726,6 +1728,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
             |> Enum.sort_by(& &1["id"])
 
   @profiles_by_id Map.new(@profiles, &{&1["id"], &1})
+  @registry_profile_ids Enum.map(@profiles, & &1["id"])
+
+  unless Enum.sort(@registry_profile_ids) == @contract_profile_ids do
+    raise CompileError,
+      description:
+        "coding profile registry drift: contract=#{inspect(@contract_profile_ids)} " <>
+          "registry=#{inspect(@registry_profile_ids)}"
+  end
 
   @type json_value ::
           nil | boolean() | number() | String.t() | [json_value()] | %{String.t() => json_value()}
@@ -1744,6 +1754,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @doc "Returns every declared profile, sorted by profile ID."
   @spec all() :: [descriptor()]
   def all, do: @profiles
+
+  @doc "Returns the canonical version of the coding DOT template."
+  @spec template_version() :: String.t()
+  def template_version, do: @template_version
 
   @doc "Returns every declared profile ID in lexical order."
   @spec known_ids() :: [String.t()]
