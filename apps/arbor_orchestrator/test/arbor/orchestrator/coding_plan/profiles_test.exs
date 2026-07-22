@@ -66,6 +66,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
       assert default["validation_strategy"] == %{
                "action" => "mix_compile",
+               "context_keys" => ["path", "workspace_id"],
+               "result_adapter" => "mix_compile_v1",
+               "static_parameters" => %{"warnings_as_errors" => true},
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => 600_000
              }
@@ -94,6 +97,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "action" => "coding_security_regression_validate",
                "authority_parameter" => "review_attestation_id",
                "authority_source" => "review.review_attestation_id",
+               "context_keys" => ["review_attestation_id"],
+               "result_adapter" => "security_regression_v1",
+               "static_parameters" => %{},
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => 600_000,
                "two_revision" => true
@@ -128,6 +134,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "action" => "coding_cross_app_validate",
                "authority_parameter" => "workspace_id",
                "authority_source" => "workspace_id",
+               "context_keys" => ["workspace_id"],
+               "result_adapter" => "cross_app_v1",
+               "static_parameters" => %{},
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => intensive_ceiling,
                "test_stage_timeout_budget_source" => "budgets.wall_clock_ms",

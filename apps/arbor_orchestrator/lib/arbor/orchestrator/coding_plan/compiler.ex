@@ -14,7 +14,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     Compilation,
     ExecutionManifest,
     Profiles,
-    SemanticPreflight
+    SemanticPreflight,
+    ValidationProgram
   }
 
   alias Arbor.Orchestrator.Dot.Parser
@@ -102,10 +103,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     with {:ok, plan} <- normalize_plan(plan),
          {:ok, opts} <- normalize_options(opts),
          {:ok, profile} <- Profiles.fetch_executable(plan.validation_profile),
-         {:ok, validation_timeout_ms} <-
-           Profiles.validation_timeout(profile, plan.budgets["wall_clock_ms"]),
-         {:ok, validation_test_stage_timeout_ms} <-
-           Profiles.validation_test_stage_timeout(profile, plan.budgets["wall_clock_ms"]),
+         {:ok, validation_program} <-
+           ValidationProgram.build(profile["validation_strategy"], plan.budgets),
+         validation_timeout_ms = validation_program["static_parameters"]["timeout"],
+         validation_test_stage_timeout_ms =
+           validation_program["static_parameters"]["test_stage_timeout"],
          :ok <- validate_supported_features(plan),
          {:ok, action_catalog} <- resolve_action_catalog(opts),
          {:ok, template_source} <- resolve_template_source(opts),
@@ -117,8 +119,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            apply_reviewed_mutations(
              template_graph,
              plan,
-             validation_timeout_ms,
-             validation_test_stage_timeout_ms,
+             validation_program,
              plan_fingerprint,
              action_catalog
            ),
@@ -409,8 +410,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp apply_reviewed_mutations(
          graph,
          plan,
-         validation_timeout_ms,
-         validation_test_stage_timeout_ms,
+         validation_program,
          plan_fingerprint,
          action_catalog
        ) do
@@ -420,13 +420,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <- rewrite_worker_close(graph, plan.worker),
          {:ok, graph} <- rewrite_prompt_budgets(graph),
          {:ok, graph} <- rewrite_rework_budget(graph, plan.rework["max_cycles"]),
-         {:ok, graph} <-
-           rewrite_profile_flow(
-             graph,
-             plan,
-             validation_timeout_ms,
-             validation_test_stage_timeout_ms
-           ),
+         {:ok, graph} <- rewrite_validation(graph, validation_program),
+         {:ok, graph} <- rewrite_profile_flow(graph, plan),
          {:ok, graph} <-
            rewrite_review_route(graph, plan.review_profile, plan.validation_profile),
          :ok <- require_action_node(graph, "review_change", "council_review_change") do
@@ -531,46 +526,22 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end)
   end
 
-  defp rewrite_profile_flow(
-         graph,
-         %Plan{validation_profile: "default"},
-         validation_timeout_ms,
-         _validation_test_stage_timeout_ms
-       ) do
-    with {:ok, graph} <- rewrite_default_validation(graph, validation_timeout_ms) do
-      drop_security_dormant_nodes(graph)
-    end
+  defp rewrite_profile_flow(graph, %Plan{validation_profile: "default"}) do
+    drop_security_dormant_nodes(graph)
+  end
+
+  defp rewrite_profile_flow(graph, %Plan{validation_profile: "cross_app"}) do
+    drop_security_dormant_nodes(graph)
   end
 
   defp rewrite_profile_flow(
          graph,
-         %Plan{validation_profile: "cross_app"},
-         validation_timeout_ms,
-         validation_test_stage_timeout_ms
-       )
-       when is_integer(validation_test_stage_timeout_ms) and
-              validation_test_stage_timeout_ms > 0 do
-    with {:ok, graph} <-
-           rewrite_cross_app_validation(
-             graph,
-             validation_timeout_ms,
-             validation_test_stage_timeout_ms
-           ) do
-      drop_security_dormant_nodes(graph)
-    end
-  end
-
-  defp rewrite_profile_flow(
-         graph,
-         %Plan{validation_profile: "security_regression"} = plan,
-         validation_timeout_ms,
-         _validation_test_stage_timeout_ms
+         %Plan{validation_profile: "security_regression"} = plan
        ) do
     max_cycles = plan.rework["max_cycles"]
 
     with :ok <- validate_security_test_paths(plan.requested_paths),
          {:ok, graph} <- remove_security_dormant_seed_edges(graph),
-         {:ok, graph} <- rewrite_security_validator(graph, validation_timeout_ms),
          {:ok, graph} <- rewrite_security_review(graph),
          {:ok, graph} <- rewrite_security_rework_prompt(graph),
          {:ok, graph} <-
@@ -654,41 +625,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end
   end
 
-  defp rewrite_default_validation(graph, timeout) do
+  defp rewrite_validation(graph, validation_program) do
     update_node(graph, "validate", fn attrs ->
       with :ok <- require_action_attrs(attrs, "mix_compile") do
-        {:ok,
-         attrs
-         |> Map.put("context_keys", "path,workspace_id")
-         |> Map.put("param.warnings_as_errors", true)
-         |> Map.put("param.timeout", timeout)}
-      end
-    end)
-  end
-
-  defp rewrite_cross_app_validation(graph, timeout, test_stage_timeout) do
-    update_node(graph, "validate", fn attrs ->
-      with :ok <- require_action_attrs(attrs, "mix_compile") do
-        {:ok,
-         attrs
-         |> Map.put("action", "coding_cross_app_validate")
-         |> Map.put("context_keys", "workspace_id")
-         |> Map.put("param.timeout", timeout)
-         |> Map.put("param.test_stage_timeout", test_stage_timeout)
-         |> Map.delete("param.warnings_as_errors")}
-      end
-    end)
-  end
-
-  defp rewrite_security_validator(graph, timeout) do
-    update_node(graph, "validate", fn attrs ->
-      with :ok <- require_action_attrs(attrs, "mix_compile") do
-        {:ok,
-         attrs
-         |> Map.put("action", "coding_security_regression_validate")
-         |> Map.put("context_keys", "review_attestation_id")
-         |> Map.put("param.timeout", timeout)
-         |> Map.delete("param.warnings_as_errors")}
+        ValidationProgram.project_onto(validation_program, attrs)
       end
     end)
   end

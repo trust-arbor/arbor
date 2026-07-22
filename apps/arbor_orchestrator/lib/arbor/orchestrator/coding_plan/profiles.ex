@@ -1558,6 +1558,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "required_actions" => @default_required_actions,
                 "validation_strategy" => %{
                   "action" => "mix_compile",
+                  "context_keys" => ["path", "workspace_id"],
+                  "result_adapter" => "mix_compile_v1",
+                  "static_parameters" => %{"warnings_as_errors" => true},
                   "timeout_budget_source" => "budgets.wall_clock_ms",
                   "timeout_max_ms" => @spawn_capable_max_timeout_ms
                 },
@@ -1581,6 +1584,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "action" => "coding_security_regression_validate",
                   "authority_parameter" => "review_attestation_id",
                   "authority_source" => "review.review_attestation_id",
+                  "context_keys" => ["review_attestation_id"],
+                  "result_adapter" => "security_regression_v1",
+                  "static_parameters" => %{},
                   "timeout_budget_source" => "budgets.wall_clock_ms",
                   "timeout_max_ms" => @spawn_capable_max_timeout_ms,
                   "two_revision" => true
@@ -1674,6 +1680,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "action" => "coding_cross_app_validate",
                   "authority_parameter" => "workspace_id",
                   "authority_source" => "workspace_id",
+                  "context_keys" => ["workspace_id"],
+                  "result_adapter" => "cross_app_v1",
+                  "static_parameters" => %{},
                   "timeout_budget_source" => "budgets.wall_clock_ms",
                   # Intensive Shell profile: per-op child ceiling only.
                   "timeout_max_ms" => @spawn_capable_intensive_max_timeout_ms,

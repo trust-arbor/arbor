@@ -9,7 +9,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Compilation,
     Compiler,
     ExecutionManifest,
-    Profiles
+    Profiles,
+    ValidationProgram
   }
 
   alias Arbor.Orchestrator.Dot.Parser
@@ -95,6 +96,36 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert graph.attrs["coding_plan_template_version"] == template_version
     assert compilation.initial_values["coding_plan_template_version"] == template_version
     assert compilation.manifest["template_version"] == template_version
+  end
+
+  test "compiler validate nodes equal the canonical validation program projection", ctx do
+    template_validate = node_attrs(parse!(ctx.template_source), "validate")
+
+    cases = [
+      {"default", %{}},
+      {"cross_app", %{"validation_profile" => "cross_app"}},
+      {"security_regression",
+       %{
+         "validation_profile" => "security_regression",
+         "requested_paths" => [
+           "apps/arbor_security/test/security_regression_test.exs"
+         ]
+       }}
+    ]
+
+    for {profile_id, overrides} <- cases do
+      plan = plan!(overrides)
+      assert {:ok, profile} = Profiles.fetch_executable(profile_id)
+
+      assert {:ok, program} =
+               ValidationProgram.build(profile["validation_strategy"], plan.budgets)
+
+      assert {:ok, expected_attrs} =
+               ValidationProgram.project_onto(program, template_validate)
+
+      assert {:ok, compilation} = compile(plan, ctx)
+      assert node_attrs(parse!(compilation.dot_source), "validate") == expected_attrs
+    end
   end
 
   test "version 2 binds the validated work packet digest in graph, inputs, and manifest", ctx do
