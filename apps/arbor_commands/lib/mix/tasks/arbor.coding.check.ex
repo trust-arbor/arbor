@@ -24,6 +24,14 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
   @rpc_timeout_ms 5_000
   @max_human_diagnostics 6
   @human_text_bytes 160
+  @readiness_runtime_options [
+    :observed_at,
+    :repo_roots,
+    :worktree_roots,
+    :template_path,
+    :template_source,
+    :action_catalog
+  ]
 
   @type runtime_opt ::
           {:readiness_checker, (term(), keyword() -> term())}
@@ -205,35 +213,17 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
     end
   end
 
-  defp invoke_check(plan, _mode, runtime_opts) do
+  defp invoke_check(plan, mode, runtime_opts) do
     checker =
       Keyword.get(runtime_opts, :readiness_checker, &Arbor.Orchestrator.check_coding_readiness/2)
 
-    readiness_opts =
-      runtime_opts
-      |> Keyword.take([
-        :observed_at,
-        :repo_roots,
-        :worktree_roots,
-        :template_path,
-        :template_source,
-        :action_catalog
-      ])
+    readiness_opts = readiness_opts(mode, runtime_opts)
 
     safe_invoke(fn -> checker.(plan, readiness_opts) end, :local)
   end
 
   defp invoke_remote(target, plan, runtime_opts) do
-    readiness_opts =
-      runtime_opts
-      |> Keyword.take([
-        :observed_at,
-        :repo_roots,
-        :worktree_roots,
-        :template_path,
-        :template_source,
-        :action_catalog
-      ])
+    readiness_opts = readiness_opts(:live, runtime_opts)
 
     rpc_call =
       Keyword.get(runtime_opts, :rpc_call, fn node, module, function, args, timeout ->
@@ -252,6 +242,10 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
       end,
       :remote
     )
+  end
+
+  defp readiness_opts(mode, runtime_opts) when mode in [:static, :live] do
+    [mode: mode] ++ Keyword.take(runtime_opts, @readiness_runtime_options)
   end
 
   defp discover_target(runtime_opts) do
@@ -349,7 +343,29 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
     end
   end
 
-  defp encode_json(value), do: Jason.encode!(value)
+  defp encode_json(value), do: value |> canonical_json() |> IO.iodata_to_binary()
+
+  defp canonical_json(nil), do: "null"
+  defp canonical_json(true), do: "true"
+  defp canonical_json(false), do: "false"
+  defp canonical_json(value) when is_binary(value), do: Jason.encode_to_iodata!(value)
+  defp canonical_json(value) when is_integer(value), do: Integer.to_string(value)
+  defp canonical_json(value) when is_float(value), do: Jason.encode_to_iodata!(value)
+
+  defp canonical_json(value) when is_list(value) do
+    ["[", value |> Enum.map(&canonical_json/1) |> Enum.intersperse(","), "]"]
+  end
+
+  defp canonical_json(value) when is_map(value) and not is_struct(value) do
+    entries =
+      value
+      |> Enum.sort_by(fn {key, _value} -> key end)
+      |> Enum.map(fn {key, item} ->
+        [Jason.encode_to_iodata!(key), ":", canonical_json(item)]
+      end)
+
+    ["{", Enum.intersperse(entries, ","), "}"]
+  end
 
   defp bounded_display(value) when is_binary(value),
     do: String.slice(value, 0, @human_text_bytes)
