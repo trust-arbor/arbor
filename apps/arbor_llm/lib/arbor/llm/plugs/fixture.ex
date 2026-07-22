@@ -8,12 +8,13 @@ defmodule Arbor.LLM.Plugs.Fixture do
     * Where fixtures live on disk (configurable, with a sensible
       umbrella-aware default)
     * The SHA-256 hash that keys each fixture
-    * The JSON serialize/deserialize round-trip for `Arbor.LLM.Call`
-      results (chat completions, streams, embeddings, errors)
+    * The typed JSON boundary for `Arbor.LLM.Call` results (chat
+      completions, streams, embeddings, errors)
 
   ## Fixture format
 
       {
+        "schema_version": 2,
         "operation": "complete",
         "request_hash": "b3a8f2c7…",
         "request_summary": { … informational, ignored by the loader … },
@@ -26,16 +27,23 @@ defmodule Arbor.LLM.Plugs.Fixture do
   (`:signed_request`, `:base_url`, `:provider`) are scrubbed before
   hashing so fixtures stay stable.
 
-  Streaming recording accepts eager event lists and `Arbor.LLM.OwnedStream`.
-  Generic lazy enumerables are rejected without enumeration because they have no
-  cancellation/finalization protocol when a producer callback stops returning.
+  Complete fixtures record the live `{:ok, %ReqLLM.Response{}}` boundary. Only
+  text, thinking text, tool calls, finish reason, and bounded usage cross the
+  boundary; transport context, provider metadata, raw/error fields, headers,
+  signatures, encrypted reasoning details, and other provider internals do not.
+  Loaded complete fixtures reconstruct a minimal `%ReqLLM.Response{}` so the
+  adapter's existing translation path remains the single response boundary.
+
+  New fixtures use schema version 2. Missing versions load as legacy v1. Unknown
+  versions fail closed. Live lazy `ReqLLM` streams are deliberately unsupported
+  for recording: only eager event lists and owned Arbor streams are recordable;
+  a bounded live stream is rejected without enumeration or fixture publication.
   """
 
   alias Arbor.LLM.Call
   alias Arbor.LLM.Boundary
   alias Arbor.LLM.Deadline
   alias Arbor.LLM.OwnedStream
-  alias Arbor.LLM.Response
   alias Arbor.LLM.ResponseBudget
   alias Arbor.LLM.StreamEvent
 
@@ -48,6 +56,37 @@ defmodule Arbor.LLM.Plugs.Fixture do
     max_map_keys: 10_000,
     max_list_items: 100_000
   ]
+  @fixture_schema_version 2
+  @legacy_fixture_schema_version 1
+  @max_response_string_bytes 1_048_576
+  @max_usage_token 1_000_000_000
+  @max_usage_cost 1_000_000.0
+  @usage_fields [
+    {"input_tokens", :input_tokens},
+    {"output_tokens", :output_tokens},
+    {"total_tokens", :total_tokens},
+    {"cached_tokens", :cached_tokens},
+    {"reasoning_tokens", :reasoning_tokens},
+    {"prompt_tokens", :prompt_tokens},
+    {"completion_tokens", :completion_tokens},
+    {"cache_read_tokens", :cache_read_tokens},
+    {"input", :input},
+    {"output", :output},
+    {"total", :total},
+    {"input_cost", :input_cost},
+    {"output_cost", :output_cost},
+    {"total_cost", :total_cost}
+  ]
+  @finish_reasons %{
+    "stop" => :stop,
+    "length" => :length,
+    "tool_calls" => :tool_calls,
+    "content_filter" => :content_filter,
+    "error" => :error,
+    "cancelled" => :cancelled,
+    "incomplete" => :incomplete,
+    "unknown" => :unknown
+  }
 
   # ── Paths ──────────────────────────────────────────────────────────
 
@@ -174,8 +213,9 @@ defmodule Arbor.LLM.Plugs.Fixture do
          true <- is_map(decoded) or {:error, :fixture_object_required},
          true <- decoded["operation"] == Atom.to_string(op) or {:error, :operation_mismatch},
          true <- decoded["request_hash"] == request_hash(call) or {:error, :request_hash_mismatch},
+         {:ok, schema_version} <- schema_version(decoded),
          {:ok, recorded_at, _} <- DateTime.from_iso8601(decoded["recorded_at"] || ""),
-         {:ok, deserialized} <- safe_deserialize(op, decoded["response"]),
+         {:ok, deserialized} <- safe_deserialize(op, schema_version, decoded["response"]),
          {:ok, response} <- validate_replay(call, deserialized) do
       {:ok, response, recorded_at}
     else
@@ -183,6 +223,14 @@ defmodule Arbor.LLM.Plugs.Fixture do
       {:error, reason} -> fixture_error(reason)
       _invalid -> fixture_error(:invalid_fixture_shape)
     end
+  end
+
+  defp schema_version(decoded) do
+    version = Map.get(decoded, "schema_version", @legacy_fixture_schema_version)
+
+    if version in [@legacy_fixture_schema_version, @fixture_schema_version],
+      do: {:ok, version},
+      else: {:error, {:unsupported_schema_version, version}}
   end
 
   @doc """
@@ -224,6 +272,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
            prepare_serialization(op, result, opts, receipt),
          :ok <- ensure_record_active(receipt),
          fixture = %{
+           "schema_version" => @fixture_schema_version,
            "operation" => Atom.to_string(op),
            "request_hash" => request_hash(call),
            "request_summary" => summarize_request(op, call.request),
@@ -242,11 +291,21 @@ defmodule Arbor.LLM.Plugs.Fixture do
     end
   end
 
-  # ── Serialization (Arbor result shape → JSON-safe shape) ───────────
+  # ── Serialization (live pipeline result → closed JSON shape) ───────
 
-  defp prepare_serialization(:complete, {:ok, %Response{} = resp} = result, _opts, _receipt) do
-    {:ok, %{"outcome" => "ok", "value" => serialize_response(resp)}, result}
+  defp prepare_serialization(
+         :complete,
+         {:ok, %ReqLLM.Response{} = response} = result,
+         _opts,
+         _receipt
+       ) do
+    with {:ok, serialized} <- serialize_req_llm_response(response) do
+      {:ok, %{"outcome" => "ok", "value" => serialized}, result}
+    end
   end
+
+  defp prepare_serialization(:complete, {:ok, _other}, _opts, _receipt),
+    do: {:error, :req_llm_response_required}
 
   defp prepare_serialization(:stream, {:ok, enum}, opts, receipt) do
     with {:ok, events} <- collect_stream_events(enum, opts, receipt) do
@@ -274,20 +333,240 @@ defmodule Arbor.LLM.Plugs.Fixture do
       {:ok, %{"outcome" => "error", "reason" => Arbor.LLM.inspect_external_reason(reason)},
        result}
 
+  defp prepare_serialization(:complete, _other, _opts, _receipt),
+    do: {:error, :req_llm_response_required}
+
   defp prepare_serialization(_op, other, _opts, _receipt),
     do: {:ok, %{"outcome" => "raw", "raw" => Arbor.LLM.inspect_external_reason(other)}, other}
 
-  defp serialize_response(%Response{} = r) do
-    %{
-      "text" => r.text,
-      "finish_reason" => r.finish_reason,
-      "content_parts" => r.content_parts,
-      "usage" => r.usage,
-      "warnings" => r.warnings
-      # NOTE: `:raw` deliberately omitted — it holds the upstream
-      # ReqLLM.Response struct, which round-trips poorly to JSON.
-      # Replayed responses have raw: nil.
-    }
+  defp serialize_req_llm_response(%ReqLLM.Response{} = response) do
+    with {:ok, text} <- response_text(response),
+         {:ok, thinking} <- response_thinking(response),
+         {:ok, tool_calls} <- response_tool_calls(response),
+         {:ok, finish_reason} <- serialize_finish_reason(response.finish_reason),
+         {:ok, usage} <- serialize_usage(response.usage) do
+      {:ok,
+       %{
+         "response_kind" => "req_llm",
+         "text" => text,
+         "thinking" => thinking,
+         "tool_calls" => tool_calls,
+         "finish_reason" => finish_reason,
+         "usage" => usage
+       }}
+    end
+  end
+
+  defp response_text(%ReqLLM.Response{} = response) do
+    response
+    |> ReqLLM.Response.text()
+    |> bounded_response_string(:text)
+  rescue
+    _ -> {:error, {:complete_response_invalid, :text}}
+  end
+
+  defp response_thinking(%ReqLLM.Response{message: %ReqLLM.Message{} = message}) do
+    reasoning_details = reasoning_detail_texts(message.reasoning_details)
+
+    thinking =
+      if reasoning_details == [],
+        do: thinking_part_texts(message.content),
+        else: reasoning_details
+
+    bounded_response_strings(thinking, :thinking)
+  end
+
+  defp response_thinking(%ReqLLM.Response{message: nil}), do: {:ok, []}
+
+  defp response_tool_calls(%ReqLLM.Response{message: %ReqLLM.Message{} = message}) do
+    tool_calls = message.tool_calls || []
+
+    if is_list(tool_calls) do
+      Enum.reduce_while(tool_calls, {:ok, []}, fn tool_call, {:ok, acc} ->
+        case serialize_tool_call(tool_call) do
+          {:ok, value} -> {:cont, {:ok, [value | acc]}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, values} -> {:ok, Enum.reverse(values)}
+        {:error, _reason} = error -> error
+      end
+    else
+      {:error, {:complete_response_invalid, :tool_calls}}
+    end
+  end
+
+  defp response_tool_calls(%ReqLLM.Response{message: nil}), do: {:ok, []}
+
+  defp reasoning_detail_texts(details) when is_list(details) do
+    details
+    |> Enum.map(fn
+      %ReqLLM.Message.ReasoningDetails{text: text} -> text
+      _ -> nil
+    end)
+    |> Enum.filter(&is_binary/1)
+  end
+
+  defp reasoning_detail_texts(_details), do: []
+
+  defp thinking_part_texts(parts) when is_list(parts) do
+    parts
+    |> Enum.map(fn
+      %ReqLLM.Message.ContentPart{type: :thinking, text: text} -> text
+      _ -> nil
+    end)
+    |> Enum.filter(&is_binary/1)
+  end
+
+  defp thinking_part_texts(_parts), do: []
+
+  defp serialize_tool_call(%ReqLLM.ToolCall{id: id, function: function})
+       when is_map(function) do
+    serialize_tool_call_fields(
+      id,
+      Map.get(function, "name", Map.get(function, :name)),
+      Map.get(function, "arguments", Map.get(function, :arguments))
+    )
+  end
+
+  defp serialize_tool_call(%{} = tool_call) do
+    function = Map.get(tool_call, "function", Map.get(tool_call, :function, %{}))
+
+    if is_map(function) do
+      serialize_tool_call_fields(
+        Map.get(tool_call, "id", Map.get(tool_call, :id)),
+        Map.get(function, "name", Map.get(function, :name)),
+        Map.get(function, "arguments", Map.get(function, :arguments))
+      )
+    else
+      {:error, {:complete_response_invalid, :tool_call_function}}
+    end
+  end
+
+  defp serialize_tool_call(_tool_call),
+    do: {:error, {:complete_response_invalid, :tool_call}}
+
+  defp serialize_tool_call_fields(id, name, arguments)
+       when is_binary(id) and is_binary(name) and not is_nil(arguments) do
+    with {:ok, id} <- bounded_response_string(id, :tool_call_id),
+         {:ok, name} <- bounded_response_string(name, :tool_call_name),
+         {:ok, arguments} <- json_safe(arguments) do
+      {:ok, %{"id" => id, "name" => name, "arguments" => arguments}}
+    end
+  end
+
+  defp serialize_tool_call_fields(_id, _name, _arguments),
+    do: {:error, {:complete_response_invalid, :tool_call_fields}}
+
+  defp serialize_finish_reason(nil), do: {:ok, nil}
+
+  defp serialize_finish_reason(reason) when is_atom(reason) do
+    case reason do
+      reason
+      when reason in [
+             :stop,
+             :length,
+             :tool_calls,
+             :content_filter,
+             :error,
+             :cancelled,
+             :incomplete,
+             :unknown
+           ] ->
+        {:ok, Atom.to_string(reason)}
+
+      _ ->
+        {:error, {:complete_response_invalid, :finish_reason}}
+    end
+  end
+
+  defp serialize_finish_reason(_reason),
+    do: {:error, {:complete_response_invalid, :finish_reason}}
+
+  defp serialize_usage(nil), do: {:ok, %{}}
+
+  defp serialize_usage(usage) when is_map(usage) do
+    Enum.reduce_while(@usage_fields, {:ok, %{}}, fn {wire_key, atom_key}, {:ok, acc} ->
+      case fetch_known_key(usage, wire_key, atom_key) do
+        :missing ->
+          {:cont, {:ok, acc}}
+
+        {:ok, nil} ->
+          {:cont, {:ok, acc}}
+
+        {:ok, value} ->
+          case bounded_usage_value(atom_key, value) do
+            {:ok, value} -> {:cont, {:ok, Map.put(acc, wire_key, value)}}
+            :error -> {:halt, {:error, {:complete_response_invalid, {:usage, atom_key}}}}
+          end
+      end
+    end)
+  end
+
+  defp serialize_usage(_usage),
+    do: {:error, {:complete_response_invalid, :usage}}
+
+  defp fetch_known_key(map, wire_key, atom_key) do
+    cond do
+      Map.has_key?(map, atom_key) -> {:ok, Map.get(map, atom_key)}
+      Map.has_key?(map, wire_key) -> {:ok, Map.get(map, wire_key)}
+      true -> :missing
+    end
+  end
+
+  defp bounded_usage_value(key, value)
+       when key in [
+              :input_tokens,
+              :output_tokens,
+              :total_tokens,
+              :cached_tokens,
+              :reasoning_tokens,
+              :prompt_tokens,
+              :completion_tokens,
+              :cache_read_tokens,
+              :input,
+              :output,
+              :total
+            ] and is_integer(value) and value >= 0 and value <= @max_usage_token,
+       do: {:ok, value}
+
+  defp bounded_usage_value(key, value) when key in [:input_cost, :output_cost, :total_cost] do
+    cond do
+      is_integer(value) and value >= 0 and value <= @max_usage_cost ->
+        {:ok, value * 1.0}
+
+      is_float(value) and value >= 0.0 and value < @max_usage_cost and value == value ->
+        {:ok, value}
+
+      true ->
+        :error
+    end
+  end
+
+  defp bounded_usage_value(_key, _value), do: :error
+
+  defp bounded_response_string(nil, _field), do: {:ok, ""}
+
+  defp bounded_response_string(value, _field)
+       when is_binary(value) and byte_size(value) <= @max_response_string_bytes do
+    if String.valid?(value), do: {:ok, value}, else: {:error, :invalid_response_string}
+  end
+
+  defp bounded_response_string(_value, field),
+    do: {:error, {:complete_response_invalid, field}}
+
+  defp bounded_response_strings(values, field) when is_list(values) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
+      case bounded_response_string(value, field) do
+        {:ok, value} -> {:cont, {:ok, [value | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, values} -> {:ok, Enum.reverse(values)}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp serialize_stream_event(%StreamEvent{type: type, data: data}) do
@@ -444,21 +723,32 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   defp request_options(_call), do: []
 
-  # ── Deserialization (JSON shape → Arbor result shape) ──────────────
+  # ── Deserialization (JSON shape → live adapter boundary) ───────────
 
-  defp deserialize(_op, %{"outcome" => "error", "reason" => reason}) do
+  defp deserialize(_op, _version, %{"outcome" => "error", "reason" => reason}) do
     {:error, {:replayed_error, external_reason(reason)}}
   end
 
-  defp deserialize(:complete, %{"outcome" => "ok", "value" => json}) do
-    {:ok, deserialize_response(json)}
+  defp deserialize(:complete, @fixture_schema_version, %{
+         "outcome" => "ok",
+         "value" => value
+       }) do
+    deserialize_req_llm_response(value)
   end
 
-  defp deserialize(:stream, %{"outcome" => "ok", "value" => %{"events" => events}}) do
+  defp deserialize(:complete, @legacy_fixture_schema_version, %{
+         "outcome" => "ok",
+         "value" => value
+       }) do
+    deserialize_legacy_response(value)
+  end
+
+  defp deserialize(:stream, _version, %{"outcome" => "ok", "value" => %{"events" => events}})
+       when is_list(events) do
     {:ok, Enum.map(events, &deserialize_stream_event/1)}
   end
 
-  defp deserialize(op, %{"outcome" => "ok", "value" => v})
+  defp deserialize(op, _version, %{"outcome" => "ok", "value" => v})
        when op in [:embed_cloud, :embed_local] and is_map(v) do
     cond do
       Map.has_key?(v, "indexed_embeddings") ->
@@ -477,10 +767,11 @@ defmodule Arbor.LLM.Plugs.Fixture do
     end
   end
 
-  defp deserialize(op, %{"outcome" => "ok"}) when op in [:embed_cloud, :embed_local],
+  defp deserialize(op, _version, %{"outcome" => "ok"}) when op in [:embed_cloud, :embed_local],
     do: {:invalid_fixture_shape, :embedding_value_object_required}
 
-  defp deserialize(_op, _response), do: {:invalid_fixture_shape, :known_outcome_required}
+  defp deserialize(_op, _version, _response),
+    do: {:invalid_fixture_shape, :known_outcome_required}
 
   defp deserialize_indexed_embeddings(value) do
     version = Map.get(value, "association_version", 1)
@@ -514,38 +805,280 @@ defmodule Arbor.LLM.Plugs.Fixture do
     end
   end
 
-  defp deserialize_response(json) do
-    %Response{
-      text: json["text"] || "",
-      finish_reason: safe_atom(json["finish_reason"] || "stop", :stop),
-      content_parts: (json["content_parts"] || []) |> Enum.map(&deserialize_content_part/1),
-      usage: deserialize_usage(json["usage"] || %{}),
-      warnings: json["warnings"] || [],
-      raw: nil
-    }
-  end
+  defp deserialize_req_llm_response(value) when is_map(value) do
+    required_keys = ["finish_reason", "response_kind", "text", "thinking", "tool_calls", "usage"]
 
-  defp deserialize_content_part(part) when is_map(part) do
-    atomized = Map.new(part, fn {k, v} -> {safe_atom(k, k), v} end)
-
-    # `kind` is the discriminator — downstream code pattern-matches on
-    # the atom (e.g. `case part.kind do :text -> ...`). Atom-ize it on
-    # the way back so replay results match the live shape.
-    case Map.get(atomized, :kind) do
-      kind when is_binary(kind) -> Map.put(atomized, :kind, safe_atom(kind, kind))
-      _ -> atomized
+    with :ok <- closed_map(value, required_keys),
+         true <- value["response_kind"] == "req_llm" or {:error, :req_llm_response_required},
+         {:ok, text} <- deserialize_response_string(value["text"], :text),
+         {:ok, thinking} <- deserialize_response_strings(value["thinking"], :thinking),
+         {:ok, tool_calls} <- deserialize_req_llm_tool_calls(value["tool_calls"]),
+         {:ok, finish_reason} <- deserialize_finish_reason(value["finish_reason"]),
+         usage when is_map(usage) <- deserialize_usage(value["usage"]) do
+      {:ok, build_req_llm_response(text, thinking, tool_calls, finish_reason, usage)}
+    else
+      {:error, reason} -> {:invalid_fixture_shape, reason}
+      :invalid_usage -> {:invalid_fixture_shape, :complete_usage_required}
+      _invalid -> {:invalid_fixture_shape, :req_llm_response_required}
     end
   end
 
-  defp deserialize_stream_event(%{"type" => type, "data" => data}) do
-    %StreamEvent{
-      type: safe_atom(type, :delta),
-      data: Map.new(data, fn {k, v} -> {safe_atom(k, k), v} end)
+  defp deserialize_req_llm_response(_value),
+    do: {:invalid_fixture_shape, :req_llm_response_object_required}
+
+  defp deserialize_legacy_response(json) when is_map(json) do
+    text = Map.get(json, "text", "")
+    content_parts = Map.get(json, "content_parts", [])
+    finish_reason = Map.get(json, "finish_reason", "stop")
+    reasoning_content = Map.get(json, "reasoning_content")
+
+    with {:ok, text} <- deserialize_response_string(text, :text),
+         {:ok, content, tool_calls} <- deserialize_legacy_content_parts(content_parts),
+         {:ok, content} <- add_legacy_reasoning(content, reasoning_content),
+         {:ok, content} <- add_legacy_text(content, text),
+         {:ok, finish_reason} <- deserialize_legacy_finish_reason(finish_reason),
+         usage when is_map(usage) <- deserialize_usage(Map.get(json, "usage", %{})) do
+      {:ok, build_req_llm_response(text, content, tool_calls, finish_reason, usage, true)}
+    else
+      :invalid_usage -> {:invalid_fixture_shape, :legacy_usage_required}
+      {:error, reason} -> {:invalid_fixture_shape, reason}
+      _invalid -> {:invalid_fixture_shape, :legacy_response_required}
+    end
+  end
+
+  defp deserialize_legacy_response(_json),
+    do: {:invalid_fixture_shape, :legacy_response_object_required}
+
+  defp deserialize_legacy_content_parts(parts) when is_list(parts) do
+    Enum.reduce_while(parts, {:ok, [], []}, fn part, {:ok, content, tool_calls} ->
+      case deserialize_legacy_content_part(part) do
+        {:content, part} -> {:cont, {:ok, [part | content], tool_calls}}
+        {:tool_call, tool_call} -> {:cont, {:ok, content, [tool_call | tool_calls]}}
+        :ignore -> {:cont, {:ok, content, tool_calls}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, content, tool_calls} -> {:ok, Enum.reverse(content), Enum.reverse(tool_calls)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp deserialize_legacy_content_parts(_parts),
+    do: {:error, :legacy_content_parts_list_required}
+
+  defp deserialize_legacy_content_part(%{"kind" => "text", "text" => text}) do
+    with {:ok, text} <- deserialize_response_string(text, :text) do
+      {:content, ReqLLM.Message.ContentPart.text(text)}
+    end
+  end
+
+  defp deserialize_legacy_content_part(%{"kind" => "thinking", "text" => text}) do
+    with {:ok, text} <- deserialize_response_string(text, :thinking) do
+      {:content, ReqLLM.Message.ContentPart.thinking(text)}
+    end
+  end
+
+  defp deserialize_legacy_content_part(%{"kind" => "tool_call"} = part) do
+    with {:ok, tool_call} <-
+           deserialize_tool_call_fields(
+             Map.get(part, "id"),
+             Map.get(part, "name"),
+             Map.get(part, "arguments", %{})
+           ) do
+      {:tool_call, tool_call}
+    end
+  end
+
+  defp deserialize_legacy_content_part(%{"kind" => kind})
+       when kind in ["image", "audio", "document", "tool_result"],
+       do: :ignore
+
+  defp deserialize_legacy_content_part(_part),
+    do: {:error, :legacy_content_part_required}
+
+  defp add_legacy_reasoning(content, reasoning) when is_binary(reasoning) and reasoning != "" do
+    with {:ok, reasoning} <- deserialize_response_string(reasoning, :thinking) do
+      if Enum.any?(content, &match?(%ReqLLM.Message.ContentPart{type: :thinking}, &1)),
+        do: {:ok, content},
+        else: {:ok, [ReqLLM.Message.ContentPart.thinking(reasoning) | content]}
+    end
+  end
+
+  defp add_legacy_reasoning(content, nil), do: {:ok, content}
+  defp add_legacy_reasoning(content, _reasoning), do: {:ok, content}
+
+  defp add_legacy_text(content, text) do
+    if text == "" or Enum.any?(content, &match?(%ReqLLM.Message.ContentPart{type: :text}, &1)),
+      do: {:ok, content},
+      else: {:ok, content ++ [ReqLLM.Message.ContentPart.text(text)]}
+  end
+
+  defp deserialize_req_llm_tool_calls(calls) when is_list(calls) do
+    Enum.reduce_while(calls, {:ok, []}, fn call, {:ok, acc} ->
+      with :ok <- closed_map(call, ["arguments", "id", "name"]),
+           {:ok, tool_call} <-
+             deserialize_tool_call_fields(call["id"], call["name"], call["arguments"]) do
+        {:cont, {:ok, [tool_call | acc]}}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+        _invalid -> {:halt, {:error, :tool_call_required}}
+      end
+    end)
+    |> case do
+      {:ok, calls} -> {:ok, Enum.reverse(calls)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp deserialize_req_llm_tool_calls(_calls),
+    do: {:error, :tool_calls_list_required}
+
+  defp deserialize_tool_call_fields(id, name, arguments)
+       when is_binary(id) and is_binary(name) do
+    if is_json_term(arguments) do
+      with {:ok, id} <- deserialize_response_string(id, :tool_call_id),
+           {:ok, name} <- deserialize_response_string(name, :tool_call_name) do
+        {:ok,
+         %ReqLLM.ToolCall{
+           id: id,
+           type: "function",
+           function: %{"name" => name, "arguments" => arguments}
+         }}
+      end
+    else
+      {:error, :tool_call_arguments_required}
+    end
+  end
+
+  defp deserialize_tool_call_fields(_id, _name, _arguments),
+    do: {:error, :tool_call_fields_required}
+
+  defp deserialize_finish_reason(nil), do: {:ok, nil}
+
+  defp deserialize_finish_reason(reason) when is_binary(reason),
+    do: Map.fetch(@finish_reasons, reason)
+
+  defp deserialize_finish_reason(_reason), do: {:error, :finish_reason_required}
+
+  defp deserialize_legacy_finish_reason(nil), do: {:ok, nil}
+  defp deserialize_legacy_finish_reason("other"), do: {:ok, :unknown}
+  defp deserialize_legacy_finish_reason(reason), do: deserialize_finish_reason(reason)
+
+  defp deserialize_response_string(value, _field)
+       when is_binary(value) and byte_size(value) <= @max_response_string_bytes do
+    if String.valid?(value), do: {:ok, value}, else: {:error, :invalid_response_string}
+  end
+
+  defp deserialize_response_string(_value, field),
+    do: {:error, {:invalid_response_string, field}}
+
+  defp deserialize_response_strings(values, field) when is_list(values) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
+      case deserialize_response_string(value, field) do
+        {:ok, value} -> {:cont, {:ok, [value | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, values} -> {:ok, Enum.reverse(values)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp deserialize_response_strings(_values, field),
+    do: {:error, {:invalid_response_strings, field}}
+
+  defp closed_map(map, keys) when is_map(map) do
+    if Enum.sort(Map.keys(map)) == Enum.sort(keys),
+      do: :ok,
+      else: {:error, :closed_fixture_map_required}
+  end
+
+  defp closed_map(_map, _keys), do: {:error, :closed_fixture_map_required}
+
+  defp build_req_llm_response(text, thinking, tool_calls, finish_reason, usage, legacy? \\ false)
+
+  defp build_req_llm_response(text, thinking, tool_calls, finish_reason, usage, false)
+       when is_binary(text) and is_list(thinking) do
+    content = Enum.map(thinking, &ReqLLM.Message.ContentPart.thinking/1)
+    content = if text == "", do: content, else: content ++ [ReqLLM.Message.ContentPart.text(text)]
+    build_req_llm_response(text, content, tool_calls, finish_reason, usage, true)
+  end
+
+  defp build_req_llm_response(_text, content, tool_calls, finish_reason, usage, true) do
+    %ReqLLM.Response{
+      id: "fixture-replay",
+      model: "fixture-replay",
+      context: ReqLLM.Context.new([]),
+      message: %ReqLLM.Message{role: :assistant, content: content, tool_calls: tool_calls},
+      stream?: false,
+      stream: nil,
+      usage: usage,
+      finish_reason: finish_reason,
+      provider_meta: %{},
+      error: nil
     }
   end
 
+  defp is_json_term(value)
+       when is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value),
+       do: true
+
+  defp is_json_term(value) when is_list(value), do: Enum.all?(value, &is_json_term/1)
+
+  defp is_json_term(value) when is_map(value),
+    do: Enum.all?(value, fn {k, v} -> is_binary(k) and is_json_term(v) end)
+
+  defp is_json_term(_value), do: false
+
+  defp deserialize_stream_event(%{"type" => type, "data" => data}) when is_map(data) do
+    %StreamEvent{type: deserialize_stream_type(type), data: deserialize_stream_data(data)}
+  end
+
+  defp deserialize_stream_event(_event),
+    do: %StreamEvent{type: :error, data: %{reason: :invalid_event}}
+
+  defp deserialize_stream_type(type) do
+    case type do
+      "start" -> :start
+      "delta" -> :delta
+      "tool_call" -> :tool_call
+      "step_finish" -> :step_finish
+      "finish" -> :finish
+      "error" -> :error
+      _ -> :error
+    end
+  end
+
+  defp deserialize_stream_data(data) do
+    Map.new(data, fn {key, value} ->
+      {stream_data_key(key), value}
+    end)
+  end
+
+  defp stream_data_key("text"), do: :text
+  defp stream_data_key("thinking"), do: :thinking
+  defp stream_data_key("terminal?"), do: :terminal?
+  defp stream_data_key("reason"), do: :reason
+  defp stream_data_key(key), do: key
+
   defp deserialize_usage(usage) when is_map(usage) do
-    Map.new(usage, fn {k, v} -> {safe_atom(k, k), v} end)
+    Enum.reduce_while(@usage_fields, %{}, fn {wire_key, atom_key}, acc ->
+      case Map.fetch(usage, wire_key) do
+        :error ->
+          {:cont, acc}
+
+        {:ok, nil} ->
+          {:cont, acc}
+
+        {:ok, value} ->
+          case bounded_usage_value(atom_key, value) do
+            {:ok, value} -> {:cont, Map.put(acc, atom_key, value)}
+            :error -> {:halt, :invalid_usage}
+          end
+      end
+    end)
   end
 
   defp deserialize_usage(_usage), do: :invalid_usage
@@ -594,8 +1127,8 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   defp validate_replay(%Call{}, response), do: {:ok, response}
 
-  defp safe_deserialize(op, response) do
-    {:ok, deserialize(op, response)}
+  defp safe_deserialize(op, schema_version, response) do
+    {:ok, deserialize(op, schema_version, response)}
   rescue
     exception -> {:error, {:fixture_decode_exception, external_exception(exception)}}
   catch
@@ -605,14 +1138,6 @@ defmodule Arbor.LLM.Plugs.Fixture do
   defp fixture_error(reason), do: {:error, {:invalid_fixture, external_reason(reason)}}
   defp external_reason(reason), do: Arbor.LLM.sanitize_external_reason(reason)
   defp external_exception(exception), do: Arbor.LLM.sanitize_external_exception(exception)
-
-  defp safe_atom(s, fallback) when is_binary(s) do
-    String.to_existing_atom(s)
-  rescue
-    ArgumentError -> fallback
-  end
-
-  defp safe_atom(other, _fallback), do: other
 
   # ── Request summaries (informational only) ─────────────────────────
 

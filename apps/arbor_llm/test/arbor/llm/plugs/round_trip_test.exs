@@ -20,13 +20,11 @@ defmodule Arbor.LLM.Plugs.RoundTripTest do
   @moduletag :fast
 
   alias Arbor.LLM.Call
-  alias Arbor.LLM.ContentPart
   alias Arbor.LLM.Pipeline
   alias Arbor.LLM.Plugs.Fixture
   alias Arbor.LLM.Plugs.Record
   alias Arbor.LLM.Plugs.Replay
   alias Arbor.LLM.Plugs.StalenessWarn
-  alias Arbor.LLM.Response
 
   # A fake terminal plug that returns the response stashed in the
   # process dictionary. Lets us run a "record" pass with a known
@@ -64,16 +62,11 @@ defmodule Arbor.LLM.Plugs.RoundTripTest do
   describe "record → replay round-trip via Pipeline.through/2" do
     test "replay reconstructs the same response shape" do
       response =
-        %Response{
-          text: "Pong",
+        req_response("Pong",
           finish_reason: :tool_calls,
-          content_parts: [
-            ContentPart.tool_call("call_1", "ping", %{"target" => "localhost"}),
-            ContentPart.text("Pong")
-          ],
-          usage: %{input_tokens: 10, output_tokens: 2, total_cost: 1.0e-6},
-          warnings: []
-        }
+          tool_calls: [ReqLLM.ToolCall.new("call_1", "ping", ~s({"target":"localhost"}))],
+          usage: %{input_tokens: 10, output_tokens: 2, total_cost: 1.0e-6}
+        )
 
       Process.put(:fake_result, {:ok, response})
 
@@ -104,15 +97,15 @@ defmodule Arbor.LLM.Plugs.RoundTripTest do
 
       # The reconstructed response matches the original on the
       # round-trippable fields:
-      assert replayed.text == response.text
+      assert ReqLLM.Response.text(replayed) == ReqLLM.Response.text(response)
       assert replayed.finish_reason == response.finish_reason
       assert replayed.usage[:input_tokens] == 10
       assert replayed.usage[:total_cost] == 1.0e-6
 
       # Content-parts kind survived the atom round-trip.
-      kinds = Enum.map(replayed.content_parts, & &1.kind)
-      assert :tool_call in kinds
+      kinds = Enum.map(replayed.message.content, & &1.type)
       assert :text in kinds
+      assert [%ReqLLM.ToolCall{id: "call_1"}] = replayed.message.tool_calls
 
       # Provenance metadata is set.
       assert replay_pass.metadata.replayed_from == Fixture.path_for(replay_pass)
@@ -123,8 +116,8 @@ defmodule Arbor.LLM.Plugs.RoundTripTest do
     end
 
     test "fresh request falls through to Dispatch and records a new fixture", %{tmp_dir: tmp_dir} do
-      response_a = %Response{text: "A", finish_reason: :stop, content_parts: [], usage: %{}}
-      response_b = %Response{text: "B", finish_reason: :stop, content_parts: [], usage: %{}}
+      response_a = req_response("A")
+      response_b = req_response("B")
 
       # Record fixture A.
       Process.put(:fake_result, {:ok, response_a})
@@ -143,7 +136,8 @@ defmodule Arbor.LLM.Plugs.RoundTripTest do
 
       # Fell through to Dispatch (got B, not the replay of A).
       refute pass.halted
-      assert {:ok, %Response{text: "B"}} = pass.result
+      assert {:ok, %ReqLLM.Response{} = response} = pass.result
+      assert ReqLLM.Response.text(response) == "B"
       refute Map.has_key?(pass.metadata, :replayed_from)
       assert pass.metadata[:recorded_to] == Fixture.path_for(pass)
 
@@ -156,7 +150,7 @@ defmodule Arbor.LLM.Plugs.RoundTripTest do
 
       Application.put_env(:arbor_llm, :fixture_max_age_days, 0)
 
-      response = %Response{text: "stale", finish_reason: :stop, content_parts: [], usage: %{}}
+      response = req_response("stale")
       Process.put(:fake_result, {:ok, response})
 
       request = {"openai:fake", [], []}
@@ -197,5 +191,24 @@ defmodule Arbor.LLM.Plugs.RoundTripTest do
 
       Application.delete_env(:arbor_llm, :fixture_max_age_days)
     end
+  end
+
+  defp req_response(text, opts \\ []) do
+    %ReqLLM.Response{
+      id: "response-test",
+      model: "fake-model",
+      context: ReqLLM.Context.new([]),
+      message: %ReqLLM.Message{
+        role: :assistant,
+        content: [ReqLLM.Message.ContentPart.text(text)],
+        tool_calls: Keyword.get(opts, :tool_calls)
+      },
+      stream?: false,
+      stream: nil,
+      usage: Keyword.get(opts, :usage, %{}),
+      finish_reason: Keyword.get(opts, :finish_reason, :stop),
+      provider_meta: %{},
+      error: nil
+    }
   end
 end

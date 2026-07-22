@@ -17,7 +17,6 @@ defmodule Arbor.LLM.Plugs.RecordTest do
   alias Arbor.LLM.Call
   alias Arbor.LLM.Plugs.Fixture
   alias Arbor.LLM.Plugs.Record
-  alias Arbor.LLM.Response
 
   setup do
     tmp_dir =
@@ -41,7 +40,7 @@ defmodule Arbor.LLM.Plugs.RecordTest do
 
   describe "Record.call/1 — result present, not a replay" do
     test "persists the fixture + stamps recorded_to" do
-      response = %Response{text: "pong", finish_reason: :stop, content_parts: [], usage: %{}}
+      response = req_response("pong")
 
       call =
         :complete
@@ -55,12 +54,7 @@ defmodule Arbor.LLM.Plugs.RecordTest do
     end
 
     test "persisted fixture round-trips through Fixture.load/1" do
-      response = %Response{
-        text: "round-trip",
-        finish_reason: :stop,
-        content_parts: [],
-        usage: %{}
-      }
+      response = req_response("round-trip")
 
       call =
         :complete
@@ -69,7 +63,8 @@ defmodule Arbor.LLM.Plugs.RecordTest do
 
       _ = Record.call(call)
 
-      assert {:ok, {:ok, %Response{text: "round-trip"}}, %DateTime{}} = Fixture.load(call)
+      assert {:ok, {:ok, %ReqLLM.Response{} = response}, %DateTime{}} = Fixture.load(call)
+      assert ReqLLM.Response.text(response) == "round-trip"
     end
   end
 
@@ -78,7 +73,7 @@ defmodule Arbor.LLM.Plugs.RecordTest do
       call =
         :complete
         |> Call.new({"openai:gpt-4o-mini", [], []})
-        |> Map.put(:result, {:ok, %Response{text: "from replay"}})
+        |> Map.put(:result, {:ok, req_response("from replay")})
         |> Call.put_metadata(%{
           replayed_from: "/some/path/abc.json",
           recorded_at: ~U[2026-01-01 00:00:00Z]
@@ -113,7 +108,7 @@ defmodule Arbor.LLM.Plugs.RecordTest do
 
   describe "Record.call/1 — halted call" do
     test "halted call passes through (use macro injects this)" do
-      response = %Response{text: "halted but has result"}
+      response = req_response("halted but has result")
 
       call =
         :complete
@@ -127,5 +122,23 @@ defmodule Arbor.LLM.Plugs.RecordTest do
       refute File.exists?(Fixture.path_for(call))
       refute Map.has_key?(result.metadata, :recorded_to)
     end
+  end
+
+  defp req_response(text) do
+    %ReqLLM.Response{
+      id: "response-test",
+      model: "gpt-4o-mini",
+      context: ReqLLM.Context.new([]),
+      message: %ReqLLM.Message{
+        role: :assistant,
+        content: [ReqLLM.Message.ContentPart.text(text)]
+      },
+      stream?: false,
+      stream: nil,
+      usage: %{},
+      finish_reason: :stop,
+      provider_meta: %{},
+      error: nil
+    }
   end
 end

@@ -7,7 +7,7 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
   reconstruct what `save(call, result)` persisted. Each operation
   has its own result shape, so each gets its own round-trip test:
 
-    * `:complete` → `{:ok, %Arbor.LLM.Response{}}`
+    * `:complete` → `{:ok, %ReqLLM.Response{}}`
     * `:stream` → `{:ok, [%StreamEvent{}, ...]}`
     * `:embed_cloud` / `:embed_local` → `{:ok, embeddings, usage}`
     * any → `{:error, reason}` (reason gets stringified)
@@ -24,11 +24,9 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
   @moduletag :fast
 
   alias Arbor.LLM.Call
-  alias Arbor.LLM.ContentPart
   alias Arbor.LLM.FileReceipt
   alias Arbor.LLM.OwnedStream
   alias Arbor.LLM.Plugs.Fixture
-  alias Arbor.LLM.Response
   alias Arbor.LLM.StreamEvent
 
   setup do
@@ -177,23 +175,21 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
 
       original_response =
         {:ok,
-         %Response{
-           text: "Hello there!",
+         req_response("Hello there!",
            finish_reason: :stop,
-           content_parts: [ContentPart.text("Hello there!")],
-           usage: %{input_tokens: 12, output_tokens: 4, total_cost: 3.0e-6},
-           warnings: []
-         }}
+           usage: %{input_tokens: 12, output_tokens: 4, total_cost: 3.0e-6}
+         )}
 
       :ok = Fixture.save(call, original_response)
 
       {:ok, replayed, %DateTime{}} = Fixture.load(call)
 
-      assert {:ok, %Response{} = replayed_response} = replayed
-      assert replayed_response.text == "Hello there!"
+      assert {:ok, %ReqLLM.Response{} = replayed_response} = replayed
+      assert ReqLLM.Response.text(replayed_response) == "Hello there!"
       assert replayed_response.finish_reason == :stop
-      assert replayed_response.warnings == []
-      assert replayed_response.raw == nil, "raw is deliberately not round-tripped"
+      assert replayed_response.message.role == :assistant
+      assert replayed_response.provider_meta == %{}
+      assert replayed_response.error == nil
 
       # Usage values survive — verifying that the cost data (which we
       # care about for the future CostTracker plug) survives the
@@ -208,30 +204,136 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
 
       original_response =
         {:ok,
-         %Response{
-           text: "",
+         req_response("Let me check.",
            finish_reason: :tool_calls,
-           content_parts: [
-             ContentPart.tool_call("call_abc", "get_weather", %{"city" => "NYC"}),
-             ContentPart.text("Let me check.")
-           ],
-           usage: %{input_tokens: 58, output_tokens: 16},
-           warnings: []
-         }}
+           tool_calls: [ReqLLM.ToolCall.new("call_abc", "get_weather", ~s({"city":"NYC"}))],
+           usage: %{input_tokens: 58, output_tokens: 16}
+         )}
 
       :ok = Fixture.save(call, original_response)
       {:ok, replayed, _ts} = Fixture.load(call)
 
-      assert {:ok, %Response{finish_reason: :tool_calls, content_parts: parts}} = replayed
+      assert {:ok,
+              %ReqLLM.Response{finish_reason: :tool_calls, message: message} = replayed_response} =
+               replayed
 
-      tool_call_part = Enum.find(parts, &(&1.kind == :tool_call))
-      assert tool_call_part.id == "call_abc"
-      assert tool_call_part.name == "get_weather"
-      # Arguments are serialized to a string and don't reconstruct as
-      # a map by default — the round-trip preserves the data but not
-      # the exact shape of map vs JSON string. The replay path here
-      # uses stringification for unknown nested terms. Callers needing
-      # to assert on argument values can re-parse the JSON.
+      assert [%ReqLLM.ToolCall{id: "call_abc", function: function}] = message.tool_calls
+      assert function["name"] == "get_weather"
+      assert Jason.decode!(function["arguments"]) == %{"city" => "NYC"}
+      assert ReqLLM.Response.text(replayed_response) == "Let me check."
+    end
+
+    test "writes a closed v2 ReqLLM payload without provider internals" do
+      call = Call.new(:complete, {"openai:gpt-4o-mini", [], []})
+
+      response =
+        req_response("answer",
+          content: [
+            ReqLLM.Message.ContentPart.thinking("private reasoning"),
+            ReqLLM.Message.ContentPart.text("answer")
+          ],
+          reasoning_details: [
+            %ReqLLM.Message.ReasoningDetails{
+              text: "private reasoning",
+              signature: "encrypted-signature",
+              encrypted?: true,
+              provider: :openai,
+              provider_data: %{"secret" => "provider-internal"}
+            }
+          ],
+          tool_calls: [ReqLLM.ToolCall.new("call_1", "lookup", "{}")],
+          usage: %{input_tokens: 3, output_tokens: 2, total_tokens: 5, total_cost: 0.01}
+        )
+
+      :ok = Fixture.save(call, {:ok, response})
+      fixture = call |> Fixture.path_for() |> File.read!() |> Jason.decode!()
+      value = fixture["response"]["value"]
+
+      assert fixture["schema_version"] == 2
+      assert value["response_kind"] == "req_llm"
+      assert value["thinking"] == ["private reasoning"]
+      assert value["tool_calls"] == [%{"id" => "call_1", "name" => "lookup", "arguments" => "{}"}]
+      refute Map.has_key?(value, "context")
+      refute Map.has_key?(value, "provider_meta")
+      refute Map.has_key?(value, "raw")
+      refute Map.has_key?(value, "error")
+      refute File.read!(Fixture.path_for(call)) =~ "encrypted-signature"
+      refute File.read!(Fixture.path_for(call)) =~ "provider-internal"
+    end
+
+    test "loads legacy v1 Arbor response wire shape into ReqLLM" do
+      call = Call.new(:complete, {"openai:gpt-4o-mini", [], []})
+
+      write_fixture(call, %{
+        "outcome" => "ok",
+        "value" => %{
+          "text" => "legacy answer",
+          "finish_reason" => "tool_calls",
+          "content_parts" => [
+            %{"kind" => "thinking", "text" => "legacy reasoning", "signature" => "ignore-me"},
+            %{
+              "kind" => "tool_call",
+              "id" => "legacy-call",
+              "name" => "lookup",
+              "arguments" => %{"q" => "x"}
+            },
+            %{"kind" => "text", "text" => "legacy answer"}
+          ],
+          "usage" => %{"input_tokens" => 4, "output_tokens" => 2, "total_cost" => 0.02},
+          "warnings" => ["ignored"]
+        }
+      })
+
+      assert {:ok, {:ok, %ReqLLM.Response{} = response}, %DateTime{}} = Fixture.load(call)
+      assert ReqLLM.Response.text(response) == "legacy answer"
+      assert ReqLLM.Response.thinking(response) == "legacy reasoning"
+      assert [%ReqLLM.ToolCall{id: "legacy-call"}] = response.message.tool_calls
+      assert response.usage == %{input_tokens: 4, output_tokens: 2, total_cost: 0.02}
+    end
+
+    test "rejects unknown fixture versions and malformed v2 complete values" do
+      call = Call.new(:complete, {"openai:versioned", [], []})
+
+      write_fixture(
+        call,
+        %{
+          "schema_version" => 99,
+          "outcome" => "ok",
+          "value" => %{}
+        },
+        99
+      )
+
+      assert {:error, {:invalid_fixture, {:unsupported_schema_version, 99}}} = Fixture.load(call)
+
+      write_fixture(
+        call,
+        %{
+          "schema_version" => 2,
+          "outcome" => "ok",
+          "value" => %{
+            "response_kind" => "not_req_llm",
+            "text" => "x",
+            "thinking" => [],
+            "tool_calls" => [],
+            "finish_reason" => "stop",
+            "usage" => %{}
+          }
+        },
+        2
+      )
+
+      assert {:error, {:invalid_fixture, _reason}} = Fixture.load(call)
+    end
+
+    test "rejects normalized Arbor responses instead of persisting them as raw" do
+      call = Call.new(:complete, {"openai:wrong-boundary", [], []})
+
+      assert {:error, reason} =
+               Fixture.save(call, {:ok, %Arbor.LLM.Response{text: "not live boundary"}})
+
+      assert inspect(reason) =~ "req_llm_response_required"
+      refute File.exists?(Fixture.path_for(call))
     end
 
     test "round-trips an :error result" do
@@ -303,6 +405,15 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       assert inspect(unowned_reason) =~ "owned_stream_or_eager_list_required"
       refute_receive :unowned_next_called
       refute File.exists?(Fixture.path_for(unowned_call))
+    end
+
+    test "security regression: live BoundedStream result is rejected without enumeration" do
+      call = Call.new(:stream, {"openai:bounded-stream", [], []})
+      stream = %Arbor.LLM.Adapter.ReqLLM.BoundedStream{stream: []}
+
+      assert {:error, reason} = Fixture.save(call, {:ok, stream})
+      assert inspect(reason) =~ "owned_stream_or_eager_list_required"
+      refute File.exists?(Fixture.path_for(call))
     end
 
     test "security regression: recording deadline synchronously cleans up an owned stream" do
@@ -527,7 +638,7 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       fixture_path = Fixture.path_for(call)
       outside = tmp_dir <> "-hardlink-source.json"
 
-      :ok = Fixture.save(call, {:ok, %Response{text: "linked"}})
+      :ok = Fixture.save(call, {:ok, req_response("linked")})
       :ok = File.rename(fixture_path, outside)
       :ok = File.ln(outside, fixture_path)
       on_exit(fn -> File.rm(outside) end)
@@ -547,7 +658,7 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       File.ln_s!(outside, symlink_path)
 
       assert {:error, symlink_reason} =
-               Fixture.save(symlink_call, {:ok, %Response{text: "must-not-write"}})
+               Fixture.save(symlink_call, {:ok, req_response("must-not-write")})
 
       assert inspect(symlink_reason) =~ "not_regular_file"
       assert File.read!(outside) == "outside-original"
@@ -558,7 +669,7 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       File.ln!(outside, hardlink_path)
 
       assert {:error, hardlink_reason} =
-               Fixture.save(hardlink_call, {:ok, %Response{text: "must-not-write"}})
+               Fixture.save(hardlink_call, {:ok, req_response("must-not-write")})
 
       assert inspect(hardlink_reason) =~ "hardlink_rejected"
       assert File.read!(outside) == "outside-original"
@@ -568,7 +679,7 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       fifo_path = Fixture.path_for(fifo_call)
       {_, 0} = System.cmd("mkfifo", [fifo_path])
 
-      task = Task.async(fn -> Fixture.save(fifo_call, {:ok, %Response{text: "x"}}) end)
+      task = Task.async(fn -> Fixture.save(fifo_call, {:ok, req_response("x")}) end)
       assert {:ok, {:error, fifo_reason}} = Task.yield(task, 500)
       assert inspect(fifo_reason) =~ "not_regular_file"
 
@@ -579,11 +690,11 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       call = Call.new(:complete, {"openai:hostile-serialization", [], []})
       huge = :erlang.bsl(1, 1_000_000)
 
-      response = %Response{
-        text: "ok",
-        content_parts: [%{__struct__: %{"fake" => huge}, nested: [huge]}],
-        usage: %{}
-      }
+      response =
+        req_response("ok",
+          content: [%ReqLLM.Message.ContentPart{type: :text, text: "ok", metadata: %{}}],
+          usage: %{input_tokens: huge}
+        )
 
       assert {:error, reason} = Fixture.save(call, {:ok, response})
       assert byte_size(inspect(reason)) < 1_024
@@ -598,7 +709,7 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       call = Call.new(:complete, {"openai:gpt-4o-mini", [], []})
 
       before_save = DateTime.utc_now()
-      :ok = Fixture.save(call, {:ok, %Response{text: "x"}})
+      :ok = Fixture.save(call, {:ok, req_response("x")})
       after_save = DateTime.utc_now()
 
       {:ok, _result, recorded_at} = Fixture.load(call)
@@ -609,13 +720,40 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
     end
   end
 
-  defp write_fixture(call, response) do
+  defp req_response(text, opts \\ []) do
+    content = Keyword.get(opts, :content, [ReqLLM.Message.ContentPart.text(text)])
+
+    %ReqLLM.Response{
+      id: "response-test",
+      model: "gpt-4o-mini",
+      context: ReqLLM.Context.new([]),
+      message: %ReqLLM.Message{
+        role: :assistant,
+        content: content,
+        tool_calls: Keyword.get(opts, :tool_calls),
+        reasoning_details: Keyword.get(opts, :reasoning_details)
+      },
+      stream?: false,
+      stream: nil,
+      usage: Keyword.get(opts, :usage, %{}),
+      finish_reason: Keyword.get(opts, :finish_reason, :stop),
+      provider_meta: %{"provider_secret" => "must-not-persist"},
+      error: nil
+    }
+  end
+
+  defp write_fixture(call, response, schema_version \\ nil) do
     fixture = %{
       "operation" => Atom.to_string(call.operation),
       "request_hash" => Fixture.request_hash(call),
       "recorded_at" => "2026-07-11T00:00:00Z",
       "response" => response
     }
+
+    fixture =
+      if is_nil(schema_version),
+        do: fixture,
+        else: Map.put(fixture, "schema_version", schema_version)
 
     File.write!(Fixture.path_for(call), Jason.encode!(fixture))
   end

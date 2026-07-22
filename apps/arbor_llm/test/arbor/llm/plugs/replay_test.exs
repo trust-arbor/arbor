@@ -18,7 +18,6 @@ defmodule Arbor.LLM.Plugs.ReplayTest do
   alias Arbor.LLM.Call
   alias Arbor.LLM.Plugs.Fixture
   alias Arbor.LLM.Plugs.Replay
-  alias Arbor.LLM.Response
 
   setup do
     tmp_dir =
@@ -47,13 +46,14 @@ defmodule Arbor.LLM.Plugs.ReplayTest do
       :ok =
         Fixture.save(
           call,
-          {:ok, %Response{text: "pong", finish_reason: :stop, content_parts: [], usage: %{}}}
+          {:ok, req_response("pong")}
         )
 
       replayed = Replay.call(call)
 
       assert replayed.halted == true
-      assert {:ok, %Response{text: "pong"}} = replayed.result
+      assert {:ok, %ReqLLM.Response{} = response} = replayed.result
+      assert ReqLLM.Response.text(response) == "pong"
       assert replayed.metadata.replayed_from == Fixture.path_for(call)
       assert %DateTime{} = replayed.metadata.recorded_at
     end
@@ -91,7 +91,7 @@ defmodule Arbor.LLM.Plugs.ReplayTest do
 
   describe "Replay.call/1 — call already has a result" do
     test "passes through (doesn't overwrite an upstream plug's work)" do
-      existing_response = %Response{text: "set by an earlier plug"}
+      existing_response = req_response("set by an earlier plug")
 
       call =
         :complete
@@ -99,11 +99,12 @@ defmodule Arbor.LLM.Plugs.ReplayTest do
         |> Map.put(:result, {:ok, existing_response})
 
       # Save a fixture for this hash — Replay should NOT consult it.
-      :ok = Fixture.save(call, {:ok, %Response{text: "from fixture"}})
+      :ok = Fixture.save(call, {:ok, req_response("from fixture")})
 
       result = Replay.call(call)
 
-      assert {:ok, %Response{text: "set by an earlier plug"}} = result.result
+      assert {:ok, %ReqLLM.Response{} = response} = result.result
+      assert ReqLLM.Response.text(response) == "set by an earlier plug"
       refute Map.has_key?(result.metadata, :replayed_from)
     end
   end
@@ -116,5 +117,23 @@ defmodule Arbor.LLM.Plugs.ReplayTest do
 
       assert result == call
     end
+  end
+
+  defp req_response(text) do
+    %ReqLLM.Response{
+      id: "response-test",
+      model: "gpt-4o-mini",
+      context: ReqLLM.Context.new([]),
+      message: %ReqLLM.Message{
+        role: :assistant,
+        content: [ReqLLM.Message.ContentPart.text(text)]
+      },
+      stream?: false,
+      stream: nil,
+      usage: %{},
+      finish_reason: :stop,
+      provider_meta: %{},
+      error: nil
+    }
   end
 end
