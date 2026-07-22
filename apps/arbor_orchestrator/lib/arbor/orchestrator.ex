@@ -48,6 +48,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Contracts.Coding.Plan
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.CodingPlan.ActionCatalog
+  alias Arbor.Orchestrator.CodingPlan.CandidateVerifier
   alias Arbor.Orchestrator.CodingPlan.Compilation
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
   alias Arbor.Orchestrator.CodingPlan.Profiles
@@ -393,6 +394,12 @@ defmodule Arbor.Orchestrator do
   @spec reconcile_coding_resources(keyword() | map()) :: {:ok, map()} | {:error, term()}
   def reconcile_coding_resources(opts \\ []) do
     Reconciliation.dry_run(opts)
+  end
+
+  @doc "Verify an owner-observed coding candidate through authorized validation actions."
+  @spec verify_coding_candidate(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def verify_coding_candidate(candidate, opts) do
+    CandidateVerifier.verify(candidate, opts)
   end
 
   @doc """

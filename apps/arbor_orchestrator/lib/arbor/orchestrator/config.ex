@@ -266,6 +266,7 @@ defmodule Arbor.Orchestrator.Config do
   @default_coding_readiness_security_module Arbor.Security
   @default_pipeline_status_module Arbor.Orchestrator.PipelineStatus
   @default_coding_task_control_facade Arbor.AI
+  @default_coding_candidate_actions_executor Arbor.Orchestrator.ActionsExecutor
   @default_coding_approval_timeout_ms 300_000
   @coding_approval_completion_reserve_ms 5_000
 
@@ -295,6 +296,16 @@ defmodule Arbor.Orchestrator.Config do
   @spec coding_pipeline_runner() :: module()
   def coding_pipeline_runner do
     Application.get_env(@app, :coding_pipeline_runner, @default_coding_pipeline_runner)
+  end
+
+  @doc "Trusted action executor used by coding-candidate verification."
+  @spec coding_candidate_actions_executor() :: module()
+  def coding_candidate_actions_executor do
+    Application.get_env(
+      @app,
+      :coding_candidate_actions_executor,
+      @default_coding_candidate_actions_executor
+    )
   end
 
   @doc """
