@@ -4,11 +4,55 @@ defmodule Arbor.Contracts.Coding.PlanTest do
   @moduletag :fast
 
   alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.WorkPacket
 
   @minimal_attrs %{
     task: "Implement the Phase 4 coding plan contract",
     repo_root: "/workspace/arbor",
     worker: %{provider: "codex"}
+  }
+
+  @v1_fixture %{
+    "version" => 1,
+    "task" => "Implement the Phase 4 coding plan contract",
+    "repo_root" => "/workspace/arbor",
+    "base_ref" => "HEAD",
+    "task_class" => "default",
+    "workspace_policy" => %{
+      "mode" => "isolated",
+      "branch_name" => nil,
+      "worktree_base_dir" => nil
+    },
+    "worker" => %{
+      "provider" => "codex",
+      "model" => nil,
+      "permission_mode" => "default",
+      "use_pool" => true,
+      "resume_provider" => nil,
+      "resume_session_id" => nil
+    },
+    "validation_profile" => "default",
+    "review_profile" => "binding",
+    "overlays" => [],
+    "rework" => %{"max_cycles" => 2, "stop_conditions" => []},
+    "budgets" => %{
+      "wall_clock_ms" => 900_000,
+      "inactivity_timeout_ms" => 300_000,
+      "model_cost_usd" => nil,
+      "parallelism" => 1
+    },
+    "output" => %{"commit" => true, "draft_pr" => false, "retain_workspace" => true},
+    "requested_paths" => []
+  }
+
+  @work_packet %{
+    "version" => 1,
+    "success_criteria" => ["focused tests pass"],
+    "non_goals" => ["execution authority"],
+    "constraints" => ["touch only owned files"],
+    "architecture_refs" => ["apps/arbor_contracts/lib/arbor/contracts/coding/plan.ex"],
+    "required_evidence" => ["focused test output"],
+    "checkpoint_policy" => "direct"
   }
 
   @top_keys ~w(
@@ -73,6 +117,16 @@ defmodule Arbor.Contracts.Coding.PlanTest do
 
       assert plan.requested_paths == []
       assert Plan.schema_version() == 1
+    end
+
+    test "pins the exact version 1 to_map representation" do
+      assert {:ok, plan} = Plan.new(@minimal_attrs)
+      assert Plan.to_map(plan) == @v1_fixture
+
+      assert {:ok, parsed_fixture} = Plan.new(@v1_fixture)
+      assert Plan.to_map(parsed_fixture) == @v1_fixture
+      refute Map.has_key?(Plan.to_map(parsed_fixture), "work_packet")
+      refute Map.has_key?(Plan.to_map(parsed_fixture), "work_packet_digest")
     end
 
     test "accepts fully string-keyed JSON input" do
@@ -160,8 +214,17 @@ defmodule Arbor.Contracts.Coding.PlanTest do
   end
 
   describe "version and profile validation" do
-    test "requires integer schema version 1" do
-      for version <- [0, 2, "1", nil] do
+    test "keeps schema_version at 1 while exposing supported version 2" do
+      assert Plan.schema_version() == 1
+      assert Plan.latest_schema_version() == 2
+      assert Plan.supported_schema_versions() == [1, 2]
+
+      assert {:ok, plan} = Plan.new(v2_attrs())
+      assert plan.version == 2
+    end
+
+    test "rejects unsupported and non-integer schema versions" do
+      for version <- [0, 3, "1", nil] do
         assert {:error, {:invalid_field, "version", _}} =
                  Plan.new(Map.put(@minimal_attrs, :version, version))
       end
@@ -219,6 +282,136 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       assert plan.review_profile == "none"
       assert map["review_profile"] == "none"
       refute Map.has_key?(map, "submit_review")
+    end
+  end
+
+  describe "version 2 work packet binding" do
+    test "stores a canonical packet map and exact digest" do
+      attrs = v2_attrs()
+
+      assert {:ok, plan} = Plan.new(attrs)
+      assert plan.work_packet == @work_packet
+      assert {:ok, digest} = WorkPacket.digest(@work_packet)
+      assert plan.work_packet_digest == digest
+
+      map = Plan.to_map(plan)
+      assert map["work_packet"] == @work_packet
+      assert map["work_packet_digest"] == digest
+
+      assert Map.keys(map) |> Enum.sort() ==
+               (@top_keys ++ ["work_packet", "work_packet_digest"]) |> Enum.sort()
+    end
+
+    test "requires both packet fields and rejects packet fields on version 1" do
+      attrs = v2_attrs()
+
+      assert {:error, {:missing_field, "work_packet"}} =
+               Plan.new(Map.delete(attrs, :work_packet))
+
+      assert {:error, {:missing_field, "work_packet_digest"}} =
+               Plan.new(Map.delete(attrs, :work_packet_digest))
+
+      assert {:error, {:invalid_field, "work_packet", {:unsupported_for_version, 1}}} =
+               Plan.new(Map.put(@minimal_attrs, :work_packet, @work_packet))
+
+      assert {:error, {:invalid_field, "work_packet_digest", {:unsupported_for_version, 1}}} =
+               Plan.new(
+                 Map.put(
+                   @minimal_attrs,
+                   :work_packet_digest,
+                   "sha256:" <> String.duplicate("0", 64)
+                 )
+               )
+    end
+
+    test "rejects packet tampering and digest mismatches" do
+      attrs = v2_attrs()
+
+      tampered_packet = Map.put(attrs.work_packet, "non_goals", ["changed"])
+
+      assert {:error, {:invalid_field, "work_packet_digest", :digest_mismatch}} =
+               Plan.new(Map.put(attrs, :work_packet, tampered_packet))
+
+      assert {:error, {:invalid_field, "work_packet_digest", :digest_mismatch}} =
+               Plan.new(
+                 Map.put(attrs, :work_packet_digest, "sha256:" <> String.duplicate("0", 64))
+               )
+
+      for digest <- [nil, 42, :digest, "not-a-digest"] do
+        assert {:error, {:invalid_field, "work_packet_digest", :digest_mismatch}} =
+                 Plan.new(Map.put(attrs, :work_packet_digest, digest))
+      end
+    end
+
+    test "rejects malformed, unknown, duplicate, and hostile packet input without raising" do
+      cases = [
+        Map.put(@work_packet, "success_criteria", []),
+        Map.put(@work_packet, "unexpected", "field"),
+        Map.put(@work_packet, "success_criteria", [self()]),
+        Map.put(@work_packet, "success_criteria", [fn -> :not_json end]),
+        Map.put(@work_packet, "success_criteria", [{:not, :json}]),
+        Map.put(@work_packet, "success_criteria", ["valid" | :improper]),
+        self(),
+        fn -> :not_json end,
+        {:not, :json},
+        nil
+      ]
+
+      for packet <- cases do
+        assert {:error, _reason} = Plan.new(Map.put(v2_attrs(), :work_packet, packet))
+      end
+
+      duplicate_packet = Map.delete(@work_packet, "required_evidence")
+      duplicate_packet = Map.put(duplicate_packet, "success_criteria", ["first"])
+      duplicate_packet = Map.put(duplicate_packet, :success_criteria, ["second"])
+
+      assert {:error, {:duplicate_fields, ["work_packet.success_criteria"]}} =
+               Plan.new(Map.put(v2_attrs(), :work_packet, duplicate_packet))
+    end
+
+    test "rejects duplicate atom/string aliases at the plan boundary" do
+      attrs = v2_attrs()
+
+      assert {:error, {:duplicate_fields, ["work_packet"]}} =
+               Plan.new(Map.put(attrs, "work_packet", @work_packet))
+
+      assert {:error, {:duplicate_fields, ["work_packet_digest"]}} =
+               Plan.new(Map.put(attrs, "work_packet_digest", attrs.work_packet_digest))
+    end
+
+    test "requires design checkpoints for high-risk task classes" do
+      required = ~w(
+        security_regression
+        contract_change
+        cross_app
+        database_migration
+        frontend_visual
+      )
+
+      for task_class <- required do
+        assert {:error,
+                {:invalid_field, "work_packet.checkpoint_policy",
+                 {:required_for_task_class, ^task_class, "design_required"}}} =
+                 Plan.new(v2_attrs(task_class, "direct"))
+
+        assert {:ok, _plan} = Plan.new(v2_attrs(task_class, "design_required"))
+      end
+    end
+
+    test "allows direct or design_required checkpoints for default and docs_only" do
+      for task_class <- ~w(default docs_only), policy <- ~w(direct design_required) do
+        assert {:ok, _plan} = Plan.new(v2_attrs(task_class, policy))
+      end
+    end
+
+    test "round-trips the canonical version 2 map through JSON" do
+      assert {:ok, plan} = Plan.new(v2_attrs("docs_only", "design_required"))
+      canonical = Plan.to_map(plan)
+
+      assert {:ok, json} = Jason.encode(canonical)
+      assert Jason.decode!(json) == canonical
+      assert {:ok, reparsed} = Plan.new(Jason.decode!(json))
+      assert Plan.to_map(reparsed) == canonical
     end
   end
 
@@ -709,5 +902,16 @@ defmodule Arbor.Contracts.Coding.PlanTest do
 
   defp assert_string_keyed_json(value) do
     assert is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value)
+  end
+
+  defp v2_attrs(task_class \\ "default", checkpoint_policy \\ "direct") do
+    packet = Map.put(@work_packet, "checkpoint_policy", checkpoint_policy)
+    {:ok, digest} = WorkPacket.digest(packet)
+
+    @minimal_attrs
+    |> Map.put(:version, 2)
+    |> Map.put(:task_class, task_class)
+    |> Map.put(:work_packet, packet)
+    |> Map.put(:work_packet_digest, digest)
   end
 end

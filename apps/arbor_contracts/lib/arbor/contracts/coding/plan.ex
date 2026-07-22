@@ -36,7 +36,11 @@ defmodule Arbor.Contracts.Coding.Plan do
 
   use TypedStruct
 
+  alias Arbor.Contracts.Coding.WorkPacket
+
   @schema_version 1
+  @latest_schema_version 2
+  @supported_schema_versions [@schema_version, @latest_schema_version]
 
   @profile_ids ~w(
     default
@@ -51,6 +55,13 @@ defmodule Arbor.Contracts.Coding.Plan do
   @review_profiles ~w(binding human_required none)
   @workspace_modes ~w(isolated)
   @permission_modes ~w(default deny)
+  @design_required_task_classes ~w(
+    security_regression
+    contract_change
+    cross_app
+    database_migration
+    frontend_visual
+  )
 
   # These names match canonical terminal workflow outcomes. The compiler, not
   # planner-supplied free-form text, decides how each condition is wired.
@@ -70,7 +81,9 @@ defmodule Arbor.Contracts.Coding.Plan do
     :rework,
     :budgets,
     :output,
-    :requested_paths
+    :requested_paths,
+    :work_packet,
+    :work_packet_digest
   ]
   @workspace_fields [:mode, :branch_name, :worktree_base_dir]
   @worker_fields [
@@ -114,6 +127,7 @@ defmodule Arbor.Contracts.Coding.Plan do
   @type rework :: %{required(String.t()) => non_neg_integer() | [String.t()]}
   @type budgets :: %{required(String.t()) => number() | nil}
   @type output :: %{required(String.t()) => boolean()}
+  @type work_packet :: %{required(String.t()) => term()}
 
   typedstruct enforce: true do
     @typedoc "A normalized coding plan with no embedded execution authority."
@@ -132,11 +146,21 @@ defmodule Arbor.Contracts.Coding.Plan do
     field(:budgets, budgets(), default: @default_budgets)
     field(:output, output(), default: @default_output)
     field(:requested_paths, [String.t()], default: [])
+    field(:work_packet, work_packet() | nil, default: nil)
+    field(:work_packet_digest, String.t() | nil, default: nil)
   end
 
-  @doc "Return the integer schema version accepted by this contract."
+  @doc "Return the legacy schema version retained for compatibility."
   @spec schema_version() :: pos_integer()
   def schema_version, do: @schema_version
+
+  @doc "Return the newest schema version understood by this contract."
+  @spec latest_schema_version() :: pos_integer()
+  def latest_schema_version, do: @latest_schema_version
+
+  @doc "Return all schema versions understood by this contract."
+  @spec supported_schema_versions() :: [pos_integer()]
+  def supported_schema_versions, do: @supported_schema_versions
 
   @doc """
   Construct and validate a coding plan.
@@ -150,12 +174,15 @@ defmodule Arbor.Contracts.Coding.Plan do
   def new(attrs) do
     with {:ok, attrs} <- normalize_object(attrs, @top_fields, []),
          {:ok, version} <- normalize_version(Map.get(attrs, :version, @schema_version)),
+         {:ok, {work_packet, work_packet_digest}} <-
+           normalize_work_packet_fields(attrs, version),
          {:ok, task} <- fetch_nonblank_string(attrs, :task, []),
          {:ok, repo_root} <- fetch_nonblank_string(attrs, :repo_root, []),
          {:ok, base_ref} <-
            normalize_nonblank_string(Map.get(attrs, :base_ref, @default_base_ref), "base_ref"),
          {:ok, task_class} <-
            normalize_enum(Map.get(attrs, :task_class, "default"), @profile_ids, "task_class"),
+         :ok <- validate_checkpoint_policy(task_class, work_packet),
          {:ok, workspace_policy} <-
            normalize_workspace_policy(Map.get(attrs, :workspace_policy, %{})),
          {:ok, worker} <- fetch_worker(attrs),
@@ -192,15 +219,21 @@ defmodule Arbor.Contracts.Coding.Plan do
          rework: rework,
          budgets: budgets,
          output: output,
-         requested_paths: requested_paths
+         requested_paths: requested_paths,
+         work_packet: work_packet,
+         work_packet_digest: work_packet_digest
        }}
     end
+  rescue
+    _ -> {:error, {:invalid_object, "plan"}}
+  catch
+    _, _ -> {:error, {:invalid_object, "plan"}}
   end
 
   @doc "Return the complete canonical string-keyed JSON representation."
   @spec to_map(t()) :: %{required(String.t()) => term()}
   def to_map(%__MODULE__{} = plan) do
-    %{
+    base = %{
       "version" => plan.version,
       "task" => plan.task,
       "repo_root" => plan.repo_root,
@@ -216,13 +249,96 @@ defmodule Arbor.Contracts.Coding.Plan do
       "output" => plan.output,
       "requested_paths" => plan.requested_paths
     }
+
+    if plan.version == @latest_schema_version do
+      Map.merge(base, %{
+        "work_packet" => plan.work_packet,
+        "work_packet_digest" => plan.work_packet_digest
+      })
+    else
+      base
+    end
   end
 
-  defp normalize_version(@schema_version), do: {:ok, @schema_version}
+  defp normalize_version(value) when value in @supported_schema_versions, do: {:ok, value}
 
   defp normalize_version(value) do
-    {:error, {:invalid_field, "version", {:expected, @schema_version, value}}}
+    {:error, {:invalid_field, "version", {:expected_one_of, @supported_schema_versions, value}}}
   end
+
+  defp normalize_work_packet_fields(attrs, @schema_version) do
+    cond do
+      Map.has_key?(attrs, :work_packet) ->
+        {:error, {:invalid_field, "work_packet", {:unsupported_for_version, @schema_version}}}
+
+      Map.has_key?(attrs, :work_packet_digest) ->
+        {:error,
+         {:invalid_field, "work_packet_digest", {:unsupported_for_version, @schema_version}}}
+
+      true ->
+        {:ok, {nil, nil}}
+    end
+  end
+
+  defp normalize_work_packet_fields(attrs, @latest_schema_version) do
+    with {:ok, packet_attrs} <- fetch_required_field(attrs, :work_packet),
+         {:ok, supplied_digest} <- fetch_required_field(attrs, :work_packet_digest),
+         {:ok, packet} <- normalize_work_packet(packet_attrs),
+         {:ok, expected_digest} <- WorkPacket.digest(packet),
+         :ok <- validate_work_packet_digest(supplied_digest, expected_digest) do
+      {:ok, {WorkPacket.to_map(packet), expected_digest}}
+    end
+  end
+
+  defp fetch_required_field(attrs, key) do
+    case Map.fetch(attrs, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, {:missing_field, Atom.to_string(key)}}
+    end
+  end
+
+  defp normalize_work_packet(value) do
+    case WorkPacket.new(value) do
+      {:ok, packet} -> {:ok, packet}
+      {:error, reason} -> {:error, prefix_work_packet_error(reason)}
+    end
+  end
+
+  defp prefix_work_packet_error({:missing_field, field}),
+    do: {:missing_field, "work_packet." <> field}
+
+  defp prefix_work_packet_error({:unknown_fields, fields}),
+    do: {:unknown_fields, Enum.map(fields, &("work_packet." <> &1))}
+
+  defp prefix_work_packet_error({:duplicate_fields, fields}),
+    do: {:duplicate_fields, Enum.map(fields, &("work_packet." <> &1))}
+
+  defp prefix_work_packet_error({:invalid_field, field, reason}),
+    do: {:invalid_field, "work_packet." <> field, reason}
+
+  defp prefix_work_packet_error(reason), do: reason
+
+  defp validate_work_packet_digest(supplied_digest, expected_digest)
+       when is_binary(supplied_digest) and supplied_digest === expected_digest,
+       do: :ok
+
+  defp validate_work_packet_digest(_supplied_digest, _expected_digest),
+    do: {:error, {:invalid_field, "work_packet_digest", :digest_mismatch}}
+
+  defp validate_checkpoint_policy(_task_class, nil), do: :ok
+
+  defp validate_checkpoint_policy(task_class, packet)
+       when task_class in @design_required_task_classes do
+    if packet["checkpoint_policy"] == "design_required" do
+      :ok
+    else
+      {:error,
+       {:invalid_field, "work_packet.checkpoint_policy",
+        {:required_for_task_class, task_class, "design_required"}}}
+    end
+  end
+
+  defp validate_checkpoint_policy(_task_class, _packet), do: :ok
 
   defp normalize_workspace_policy(value) do
     with {:ok, attrs} <- normalize_object(value, @workspace_fields, ["workspace_policy"]),
