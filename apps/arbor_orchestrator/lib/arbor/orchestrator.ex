@@ -381,7 +381,9 @@ defmodule Arbor.Orchestrator do
           {:ok, map()}
   def check_coding_readiness(plan_or_attrs, opts \\ []) when is_list(opts) do
     opts =
-      Keyword.put_new(opts, :observed_at, DateTime.utc_now() |> DateTime.to_iso8601(:extended))
+      opts
+      |> Keyword.take([:observed_at, :mode, :agent_id])
+      |> Keyword.put_new(:observed_at, DateTime.utc_now() |> DateTime.to_iso8601(:extended))
 
     Readiness.check(plan_or_attrs, opts)
   end

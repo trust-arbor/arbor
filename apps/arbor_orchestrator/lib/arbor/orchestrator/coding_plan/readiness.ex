@@ -7,12 +7,30 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     Compilation,
     Normalizer,
     ReadinessCore,
-    ReadinessRoots
+    WorkspaceScope
   }
 
   alias Arbor.Orchestrator.Config
 
   @compiler_options [:template_path, :template_source, :action_catalog]
+
+  @doc false
+  @spec prepare(term(), keyword()) ::
+          {:ok, Plan.t(), Compilation.t()} | {:error, term()}
+  def prepare(plan_or_attrs, opts \\ [])
+
+  def prepare(plan_or_attrs, opts) when is_list(opts) do
+    with {:ok, plan} <- normalize_plan(plan_or_attrs),
+         {:ok, repo_roots} <- configured_roots(opts, :repo),
+         {:ok, worktree_roots} <- configured_roots(opts, :worktree),
+         {:ok, canonical_plan} <- WorkspaceScope.normalize(plan, repo_roots, worktree_roots),
+         {:ok, compilation} <- compile(canonical_plan, opts),
+         {:ok, validated} <- Compilation.validate(compilation, canonical_plan) do
+      {:ok, canonical_plan, validated}
+    end
+  end
+
+  def prepare(_plan_or_attrs, _opts), do: {:error, :invalid_options}
 
   @doc false
   @spec check(term(), keyword()) :: {:ok, map()}
@@ -47,8 +65,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
   defp check_with_time(plan_or_attrs, opts, observed_at, invalid_digest) do
     case normalize_plan(plan_or_attrs) do
       {:ok, plan} ->
-        plan_digest = ReadinessCore.plan_digest(Plan.to_map(plan))
-        check_plan(plan, plan_digest, opts, observed_at)
+        requested_plan_digest = ReadinessCore.plan_digest(Plan.to_map(plan))
+        check_plan(plan, requested_plan_digest, opts, observed_at)
 
       {:error, reason} ->
         ReadinessCore.report(
@@ -68,12 +86,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     end
   end
 
-  defp check_plan(plan, plan_digest, opts, observed_at) do
-    with {:ok, repo_roots} <- configured_roots(opts, :repo),
-         {:ok, worktree_roots} <- configured_roots(opts, :worktree),
-         :ok <- ReadinessRoots.validate(plan, repo_roots, worktree_roots),
-         {:ok, compilation} <- compile(plan, opts),
-         {:ok, _validated} <- Compilation.validate(compilation, plan) do
+  defp check_plan(plan, requested_plan_digest, opts, observed_at) do
+    with {:ok, canonical_plan, _compilation} <- prepare(plan, opts) do
+      plan_digest = ReadinessCore.plan_digest(Plan.to_map(canonical_plan))
+
       diagnostics =
         [
           passed("plan_schema", "plan_valid", observed_at, "The coding plan is valid."),
@@ -100,7 +116,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
       ReadinessCore.report(plan_digest, observed_at, "degraded", diagnostics)
     else
       {:error, reason} ->
-        blocked_report(plan_digest, observed_at, reason)
+        blocked_report(requested_plan_digest, observed_at, reason)
     end
   end
 
@@ -163,6 +179,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
      "Use existing absolute directories outside the filesystem root."}
   end
 
+  defp failure_diagnostic({:invalid_coding_root, kind}) do
+    {"trusted_roots", "#{kind}_root_invalid", "A configured #{kind} root is invalid.",
+     "Use an existing absolute directory outside the filesystem root."}
+  end
+
   defp failure_diagnostic({:error, reason}), do: failure_diagnostic(reason)
 
   defp failure_diagnostic(:invalid_repo_roots),
@@ -171,14 +192,24 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
   defp failure_diagnostic(:invalid_worktree_roots),
     do: root_failure("worktree_roots_invalid", "worktree")
 
-  defp failure_diagnostic(:invalid_repo_path), do: root_failure("repo_path_invalid", "repository")
-  defp failure_diagnostic(:repo_path), do: root_failure("repo_path_invalid", "repository")
-  defp failure_diagnostic(:repo_outside_root), do: root_failure("repo_outside_root", "repository")
+  defp failure_diagnostic({:invalid_coding_path, :repo_path}),
+    do: root_failure("repo_path_invalid", "repository")
 
-  defp failure_diagnostic(:invalid_worktree_path),
+  defp failure_diagnostic({:coding_path_outside_roots, :repo_path}),
+    do: root_failure("repo_outside_root", "repository")
+
+  defp failure_diagnostic(:git_root_outside_coding_roots),
+    do: root_failure("git_root_outside_root", "Git repository")
+
+  defp failure_diagnostic(:invalid_git_repository) do
+    {"trusted_roots", "invalid_git_repository", "The requested path is not a Git repository.",
+     "Use an existing path inside a trusted Git repository."}
+  end
+
+  defp failure_diagnostic({:invalid_coding_path, :worktree_base_dir}),
     do: root_failure("worktree_path_invalid", "worktree")
 
-  defp failure_diagnostic(:worktree_outside_root),
+  defp failure_diagnostic({:coding_path_outside_roots, :worktree_base_dir}),
     do: root_failure("worktree_outside_root", "worktree")
 
   defp failure_diagnostic({:profile_not_executable, _id, _reason}) do
