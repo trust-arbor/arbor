@@ -88,7 +88,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     task_class: "coding_plan_task_class",
     validation_profile: "coding_plan_validation_profile",
     review_profile: "coding_plan_review_profile",
-    action_catalog_digest: "coding_plan_action_catalog_digest"
+    action_catalog_digest: "coding_plan_action_catalog_digest",
+    work_packet_digest: "coding_plan_work_packet_digest"
   }
 
   @type compile_error :: term()
@@ -1113,8 +1114,21 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       @graph_metadata_keys.action_catalog_digest => catalog_digest
     }
 
-    %{graph | attrs: Map.merge(graph.attrs, metadata)}
+    metadata = maybe_put_graph_work_packet_digest(metadata, plan)
+
+    attrs =
+      graph.attrs
+      |> Map.delete(@graph_metadata_keys.work_packet_digest)
+      |> Map.merge(metadata)
+
+    %{graph | attrs: attrs}
   end
+
+  defp maybe_put_graph_work_packet_digest(metadata, %Plan{version: 2} = plan),
+    do: Map.put(metadata, @graph_metadata_keys.work_packet_digest, plan.work_packet_digest)
+
+  defp maybe_put_graph_work_packet_digest(metadata, _plan),
+    do: Map.delete(metadata, @graph_metadata_keys.work_packet_digest)
 
   defp verify_canonical_roundtrip(graph, source) do
     if DotSerializer.serialize(graph) == source do
@@ -1579,8 +1593,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
     |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
     |> maybe_put("model", plan.worker["model"])
+    |> maybe_put_initial_work_packet_digest(plan)
     |> maybe_put_test_paths(plan)
   end
+
+  defp maybe_put_initial_work_packet_digest(values, %Plan{version: 2} = plan),
+    do: Map.put(values, @graph_metadata_keys.work_packet_digest, plan.work_packet_digest)
+
+  defp maybe_put_initial_work_packet_digest(values, _plan),
+    do: Map.delete(values, @graph_metadata_keys.work_packet_digest)
 
   defp maybe_put_test_paths(values, %Plan{validation_profile: "security_regression"} = plan),
     do: Map.put(values, "test_paths", plan.requested_paths)
@@ -1621,7 +1642,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "action_names" => generated_action_names(graph),
       "handler_types" => generated_handler_types(graph)
     }
+    |> maybe_put_manifest_work_packet_digest(plan)
   end
+
+  defp maybe_put_manifest_work_packet_digest(manifest, %Plan{version: 2} = plan),
+    do: Map.put(manifest, "work_packet_digest", plan.work_packet_digest)
+
+  defp maybe_put_manifest_work_packet_digest(manifest, _plan),
+    do: Map.delete(manifest, "work_packet_digest")
 
   defp generated_action_names(%Graph{} = graph) do
     graph.nodes

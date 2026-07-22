@@ -8,6 +8,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   alias Arbor.Orchestrator.Dot.Parser
 
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
+  @work_packet_digest_pattern ~r/\Asha256:[0-9a-f]{64}\z/
+  @work_packet_graph_metadata_key "coding_plan_work_packet_digest"
+  @work_packet_binding_keys ["work_packet", "work_packet_digest", @work_packet_graph_metadata_key]
   @max_version_bytes 128
 
   @type json_scalar :: nil | boolean() | number() | String.t()
@@ -40,6 +43,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
 
     with :ok <- require_equal(compilation.plan_map, plan_map, "plan_map"),
          :ok <- validate_dot_source(compilation.dot_source),
+         :ok <- validate_work_packet_bindings(compilation, plan),
          :ok <- validate_nonblank(compilation.compiler_version, "compiler_version"),
          :ok <- validate_nonblank(compilation.template_version, "template_version"),
          :ok <- validate_digest(compilation.graph_hash, "graph_hash"),
@@ -171,26 +175,29 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
       |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
       |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
       |> maybe_put("model", plan.worker["model"])
+      |> maybe_put_initial_work_packet_digest(plan)
       |> maybe_put_test_paths(plan)
 
     require_equal(compilation.initial_values, expected, "initial_values")
   end
 
   defp validate_manifest(compilation, plan) do
-    bindings = [
-      {"graph_hash", compilation.graph_hash},
-      {"compiler_version", compilation.compiler_version},
-      {"template_version", compilation.template_version},
-      {"plan_fingerprint", compilation.plan_fingerprint},
-      {"action_catalog_digest", compilation.action_catalog_digest},
-      {"execution_manifest", compilation.execution_manifest},
-      {"execution_manifest_digest", compilation.execution_manifest_digest},
-      {"plan_version", plan.version},
-      {"task_class", plan.task_class},
-      {"validation_profile", plan.validation_profile},
-      {"review_profile", plan.review_profile},
-      {"overlays", plan.overlays}
-    ]
+    bindings =
+      [
+        {"graph_hash", compilation.graph_hash},
+        {"compiler_version", compilation.compiler_version},
+        {"template_version", compilation.template_version},
+        {"plan_fingerprint", compilation.plan_fingerprint},
+        {"action_catalog_digest", compilation.action_catalog_digest},
+        {"execution_manifest", compilation.execution_manifest},
+        {"execution_manifest_digest", compilation.execution_manifest_digest},
+        {"plan_version", plan.version},
+        {"task_class", plan.task_class},
+        {"validation_profile", plan.validation_profile},
+        {"review_profile", plan.review_profile},
+        {"overlays", plan.overlays}
+      ]
+      |> maybe_add_manifest_work_packet_digest(plan)
 
     Enum.reduce_while(bindings, :ok, fn {field, expected}, :ok ->
       case Map.fetch(compilation.manifest, field) do
@@ -199,6 +206,86 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
       end
     end)
   end
+
+  defp validate_work_packet_bindings(compilation, plan) do
+    with :ok <- validate_graph_work_packet_binding(compilation.dot_source, plan),
+         :ok <- reject_inappropriate_manifest_work_packet_keys(compilation.manifest, plan) do
+      :ok
+    end
+  end
+
+  defp validate_graph_work_packet_binding(dot_source, %Plan{version: 2} = plan) do
+    with :ok <- validate_work_packet_digest(plan.work_packet_digest),
+         {:ok, graph} <- parse_graph(dot_source),
+         :ok <-
+           require_equal(
+             Map.get(graph.attrs, @work_packet_graph_metadata_key),
+             plan.work_packet_digest,
+             "dot_source.#{@work_packet_graph_metadata_key}"
+           ) do
+      :ok
+    end
+  end
+
+  defp validate_graph_work_packet_binding(dot_source, %Plan{version: 1}) do
+    with {:ok, graph} <- parse_graph(dot_source) do
+      if Map.has_key?(graph.attrs, @work_packet_graph_metadata_key) do
+        mismatch("dot_source.#{@work_packet_graph_metadata_key}")
+      else
+        :ok
+      end
+    end
+  end
+
+  defp parse_graph(dot_source) do
+    case Parser.parse(dot_source) do
+      {:ok, graph} -> {:ok, graph}
+      _other -> invalid("dot_source")
+    end
+  rescue
+    _exception -> invalid("dot_source")
+  catch
+    _kind, _reason -> invalid("dot_source")
+  end
+
+  defp validate_work_packet_digest(value) when is_binary(value) do
+    if Regex.match?(@work_packet_digest_pattern, value),
+      do: :ok,
+      else: invalid("work_packet_digest")
+  end
+
+  defp validate_work_packet_digest(_value), do: invalid("work_packet_digest")
+
+  defp reject_inappropriate_manifest_work_packet_keys(manifest, %Plan{version: 2})
+       when is_map(manifest) do
+    case Enum.find(@work_packet_binding_keys, &Map.has_key?(manifest, &1)) do
+      nil -> :ok
+      "work_packet_digest" -> :ok
+      key -> mismatch("manifest.#{key}")
+    end
+  end
+
+  defp reject_inappropriate_manifest_work_packet_keys(manifest, %Plan{version: 1})
+       when is_map(manifest) do
+    case Enum.find(@work_packet_binding_keys, &Map.has_key?(manifest, &1)) do
+      nil -> :ok
+      key -> mismatch("manifest.#{key}")
+    end
+  end
+
+  defp reject_inappropriate_manifest_work_packet_keys(_manifest, _plan),
+    do: invalid("manifest")
+
+  defp maybe_put_initial_work_packet_digest(values, %Plan{version: 2} = plan),
+    do: Map.put(values, @work_packet_graph_metadata_key, plan.work_packet_digest)
+
+  defp maybe_put_initial_work_packet_digest(values, _plan),
+    do: Map.delete(values, @work_packet_graph_metadata_key)
+
+  defp maybe_add_manifest_work_packet_digest(bindings, %Plan{version: 2} = plan),
+    do: bindings ++ [{"work_packet_digest", plan.work_packet_digest}]
+
+  defp maybe_add_manifest_work_packet_digest(bindings, _plan), do: bindings
 
   defp reject_manifest_envelope_forbidden_keys(manifest) do
     manifest

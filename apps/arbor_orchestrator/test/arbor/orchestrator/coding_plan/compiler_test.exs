@@ -2,6 +2,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.WorkPacket
 
   alias Arbor.Orchestrator.CodingPlan.{
     ActionCatalog,
@@ -11,6 +12,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   }
 
   alias Arbor.Orchestrator.Dot.Parser
+  alias Arbor.Orchestrator.Viz.DotSerializer
 
   @action_modules [
     Arbor.Actions.Acp.StartSession,
@@ -78,6 +80,92 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert first.manifest["action_names"] == Enum.sort(first.manifest["action_names"])
     assert first.manifest["handler_types"] == Enum.sort(first.manifest["handler_types"])
+  end
+
+  test "version 2 binds the validated work packet digest in graph, inputs, and manifest", ctx do
+    plan = v2_plan!()
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+    digest = plan.work_packet_digest
+
+    assert graph.attrs["coding_plan_work_packet_digest"] == digest
+    assert compilation.initial_values["coding_plan_work_packet_digest"] == digest
+    assert compilation.manifest["work_packet_digest"] == digest
+    assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
+  end
+
+  test "version 2 compilation rejects missing or tampered packet bindings", ctx do
+    plan = v2_plan!()
+    assert {:ok, compilation} = compile(plan, ctx)
+
+    missing_initial = %{
+      compilation
+      | initial_values: Map.delete(compilation.initial_values, "coding_plan_work_packet_digest")
+    }
+
+    assert {:error, {:compilation_field_mismatch, "initial_values"}} =
+             Compilation.validate(missing_initial, plan)
+
+    tampered_manifest = %{
+      compilation
+      | manifest:
+          Map.put(
+            compilation.manifest,
+            "work_packet_digest",
+            "sha256:" <> String.duplicate("0", 64)
+          )
+    }
+
+    assert {:error, {:compilation_field_mismatch, "manifest.work_packet_digest"}} =
+             Compilation.validate(tampered_manifest, plan)
+
+    missing_graph =
+      update_graph_attrs(compilation, &Map.delete(&1, "coding_plan_work_packet_digest"))
+
+    assert {:error, {:compilation_field_mismatch, "dot_source.coding_plan_work_packet_digest"}} =
+             Compilation.validate(missing_graph, plan)
+
+    tampered_graph =
+      update_graph_attrs(compilation, fn attrs ->
+        Map.put(attrs, "coding_plan_work_packet_digest", "sha256:" <> String.duplicate("0", 64))
+      end)
+
+    assert {:error, {:compilation_field_mismatch, "dot_source.coding_plan_work_packet_digest"}} =
+             Compilation.validate(tampered_graph, plan)
+  end
+
+  test "version 1 omits and rejects version 2 packet bindings", ctx do
+    plan = plan!()
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    refute Map.has_key?(graph.attrs, "coding_plan_work_packet_digest")
+    refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet_digest")
+    refute Map.has_key?(compilation.manifest, "work_packet_digest")
+    assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
+
+    extra_manifest =
+      %{
+        compilation
+        | manifest:
+            Map.put(
+              compilation.manifest,
+              "work_packet_digest",
+              "sha256:" <> String.duplicate("0", 64)
+            )
+      }
+
+    assert {:error, {:compilation_field_mismatch, "manifest.work_packet_digest"}} =
+             Compilation.validate(extra_manifest, plan)
+
+    extra_graph =
+      update_graph_attrs(compilation, fn attrs ->
+        Map.put(attrs, "coding_plan_work_packet_digest", "sha256:" <> String.duplicate("0", 64))
+      end)
+
+    assert {:error, {:compilation_field_mismatch, "dot_source.coding_plan_work_packet_digest"}} =
+             Compilation.validate(extra_graph, plan)
   end
 
   test "regression: valid execution manifest schemas may contain authority-like property names",
@@ -1159,6 +1247,21 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     }
   end
 
+  defp v2_plan! do
+    packet = %{
+      "version" => 1,
+      "success_criteria" => ["focused tests pass"],
+      "non_goals" => ["execution authority"],
+      "constraints" => ["touch only owned files"],
+      "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
+      "required_evidence" => ["focused test output"],
+      "checkpoint_policy" => "direct"
+    }
+
+    {:ok, digest} = WorkPacket.digest(packet)
+    plan!(%{version: 2, work_packet: packet, work_packet_digest: digest})
+  end
+
   defp deep_merge(left, right) do
     Map.merge(left, right, fn _key, left_value, right_value ->
       if is_map(left_value) and is_map(right_value) do
@@ -1172,6 +1275,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   defp parse!(source) do
     {:ok, graph} = Parser.parse(source)
     graph
+  end
+
+  defp update_graph_attrs(compilation, update_fun) do
+    graph = parse!(compilation.dot_source)
+    dot_source = DotSerializer.serialize(%{graph | attrs: update_fun.(graph.attrs)})
+    %{compilation | dot_source: dot_source}
   end
 
   defp action_schema_property?(compilation, action_name, property) do
