@@ -63,6 +63,9 @@ defmodule Arbor.AI.BudgetTracker do
   # ETS table name
   @table __MODULE__
   @store_name :arbor_ai_tracking
+  @max_event_ids 4_096
+  @max_event_id_bytes 64
+  @max_event_cost_usd 1_000_000.0
 
   # Default cost per million tokens (can be overridden via config)
   @default_costs %{
@@ -340,39 +343,43 @@ defmodule Arbor.AI.BudgetTracker do
     model = Map.get(metadata, :model, "unknown")
     input_tokens = Map.get(metadata, :input_tokens, 0)
     output_tokens = Map.get(metadata, :output_tokens, 0)
-    cost = calculate_cost(backend, model, input_tokens, output_tokens)
 
-    # Update totals
-    [{:total_spent, current_spent}] = :ets.lookup(@table, :total_spent)
-    [{:total_requests, current_requests}] = :ets.lookup(@table, :total_requests)
-    [{:total_tokens, current_tokens}] = :ets.lookup(@table, :total_tokens)
+    with {:ok, cost} <- usage_cost(backend, model, input_tokens, output_tokens, metadata),
+         true <- remember_event_id(Map.get(metadata, :event_id)) do
+      # Update totals
+      [{:total_spent, current_spent}] = :ets.lookup(@table, :total_spent)
+      [{:total_requests, current_requests}] = :ets.lookup(@table, :total_requests)
+      [{:total_tokens, current_tokens}] = :ets.lookup(@table, :total_tokens)
 
-    new_spent = current_spent + cost
-    new_tokens = current_tokens + input_tokens + output_tokens
+      new_spent = current_spent + cost
+      new_tokens = current_tokens + input_tokens + output_tokens
 
-    :ets.insert(@table, {:total_spent, new_spent})
-    :ets.insert(@table, {:total_requests, current_requests + 1})
-    :ets.insert(@table, {:total_tokens, new_tokens})
+      :ets.insert(@table, {:total_spent, new_spent})
+      :ets.insert(@table, {:total_requests, current_requests + 1})
+      :ets.insert(@table, {:total_tokens, new_tokens})
 
-    # Update per-backend stats
-    update_backend_stats(backend, input_tokens, output_tokens, cost)
+      # Update per-backend stats
+      update_backend_stats(backend, input_tokens, output_tokens, cost)
 
-    # Maybe persist
-    maybe_save_persistence()
+      # Maybe persist
+      maybe_save_persistence()
 
-    # Check budget thresholds and emit warnings
-    new_state = check_budget_warnings(new_spent, state)
+      # Check budget thresholds and emit warnings
+      new_state = check_budget_warnings(new_spent, state)
 
-    Logger.debug("Recorded usage",
-      backend: backend,
-      model: model,
-      input_tokens: input_tokens,
-      output_tokens: output_tokens,
-      cost: cost,
-      total_spent: new_spent
-    )
+      Logger.debug("Recorded usage",
+        backend: backend,
+        model: model,
+        input_tokens: input_tokens,
+        output_tokens: output_tokens,
+        cost: cost,
+        total_spent: new_spent
+      )
 
-    {:noreply, new_state}
+      {:noreply, new_state}
+    else
+      _ -> {:noreply, state}
+    end
   end
 
   @impl true
@@ -521,6 +528,57 @@ defmodule Arbor.AI.BudgetTracker do
     end
   end
 
+  defp usage_cost(backend, model, input_tokens, output_tokens, metadata) do
+    with true <- is_integer(input_tokens) and input_tokens >= 0,
+         true <- is_integer(output_tokens) and output_tokens >= 0 do
+      case Map.fetch(metadata, :cost_usd) do
+        :error ->
+          {:ok, calculate_cost(backend, model, input_tokens, output_tokens)}
+
+        {:ok, cost} when is_integer(cost) and cost >= 0 and cost <= @max_event_cost_usd ->
+          {:ok, cost * 1.0}
+
+        {:ok, cost}
+        when is_float(cost) and cost >= 0.0 and cost < @max_event_cost_usd and cost == cost ->
+          {:ok, cost}
+
+        _ ->
+          {:error, :malformed_cost}
+      end
+    else
+      _ -> {:error, :malformed_usage}
+    end
+  end
+
+  defp remember_event_id(nil), do: true
+
+  defp remember_event_id(event_id)
+       when is_binary(event_id) and byte_size(event_id) > 0 and
+              byte_size(event_id) <= @max_event_id_bytes do
+    key = {:usage_event, event_id}
+
+    if :ets.insert_new(@table, {key, true}) do
+      prune_event_ids()
+      true
+    else
+      false
+    end
+  end
+
+  defp remember_event_id(_event_id), do: false
+
+  defp prune_event_ids do
+    entries = :ets.match_object(@table, {{:usage_event, :_}, :_})
+
+    if length(entries) > @max_event_ids do
+      entries
+      |> Enum.take(length(entries) - @max_event_ids)
+      |> Enum.each(fn {{:usage_event, event_id}, _} ->
+        :ets.delete(@table, {:usage_event, event_id})
+      end)
+    end
+  end
+
   defp collect_backend_stats do
     :ets.select(@table, [
       {{{:backend, :"$1"}, :"$2"}, [], [{{:"$1", :"$2"}}]}
@@ -645,6 +703,10 @@ defmodule Arbor.AI.BudgetTracker do
     # Clear all backend-specific stats
     :ets.select_delete(@table, [
       {{{:backend, :_}, :_}, [], [true]}
+    ])
+
+    :ets.select_delete(@table, [
+      {{{:usage_event, :_}, :_}, [], [true]}
     ])
 
     # Reset totals

@@ -958,7 +958,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       # StalenessWarn, etc.
       Arbor.LLM.Plugs.ResponseLimit,
       Arbor.LLM.Plugs.Dispatch,
-      Arbor.LLM.Plugs.RateLimitBackoff
+      Arbor.LLM.Plugs.RateLimitBackoff,
+      Arbor.LLM.Plugs.Usage
     ])
   end
 

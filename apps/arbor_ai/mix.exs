@@ -39,6 +39,7 @@ defmodule ArborAi.MixProject do
       {:toml, "~> 0.7"},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
+      {:telemetry, "~> 1.2"},
       # jido_ai and req_llm versions pinned in root mix.exs
       {:jido_ai, "~> 2.0.0-rc.0", override: true},
       {:req_llm, "~> 1.6", override: true},

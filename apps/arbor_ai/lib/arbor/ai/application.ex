@@ -19,6 +19,7 @@ defmodule Arbor.AI.Application do
             Arbor.AI.QuotaTracker
           ] ++
           budget_tracker_child() ++
+          llm_usage_consumer_child() ++
           usage_stats_child() ++
           managed_acp_children() ++
           acp_pool_children()
@@ -81,6 +82,14 @@ defmodule Arbor.AI.Application do
   defp budget_tracker_child do
     if Application.get_env(:arbor_ai, :enable_budget_tracking, true) do
       [Arbor.AI.BudgetTracker]
+    else
+      []
+    end
+  end
+
+  defp llm_usage_consumer_child do
+    if Application.get_env(:arbor_ai, :enable_llm_usage_tracking, true) do
+      [Arbor.AI.LLMUsageConsumer]
     else
       []
     end
