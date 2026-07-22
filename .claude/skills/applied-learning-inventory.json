@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 516,
+  "entry_count": 517,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6252,8 +6252,21 @@
       "source_incident": "found 2026-07-22 when Coding Plan v2 bound the work-packet digest in compilation but the executor did not verify it).",
       "content_sha256": "c4ba3bfb642b36a1e63fa7993f855c81463dfade6df0bfb1f09a497b7f74c083",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 517,
+      "source_kind": "post-migration",
+      "slug": "sequential-readiness-observers-need-a-bounded-capture-time-skew",
+      "title": "Sequential readiness observers need a bounded capture-time skew.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-sequential-readiness-observers-need-a-bounded-capture-time-skew",
+      "source_date": "2026-07-22",
+      "source_incident": "found 2026-07-22 while reviewing live coding readiness).",
+      "content_sha256": "8bcab44a6a4dec1eabfc11c8ff95ec27c95280a03a085289d822900521502ed6",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 55
+  "post_migration_entry_count": 56
 }

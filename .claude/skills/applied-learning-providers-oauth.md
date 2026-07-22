@@ -120,3 +120,13 @@ the continuity authority because a valid load response may omit it; any response
 is present must match exactly. Provider IDs are opaque: validate their bounds and shape but
 never trim or otherwise rewrite their bytes (found 2026-07-21 after two Grok 4.5 coding
 tasks failed with `worker_provider_session_id_missing`).
+
+<!-- applied-learning: sequential-readiness-observers-need-a-bounded-capture-time-skew -->
+<a id="applied-learning-sequential-readiness-observers-need-a-bounded-capture-time-skew"></a>
+**Sequential readiness observers need a bounded capture-time skew.** If the coordinator
+records its observation time before invoking a provider observer, the provider's honest
+timestamp will normally be a few milliseconds later; a strict `provider_observed_at <=
+readiness_observed_at` check rejects every healthy call. Permit one small documented skew
+window for that call ordering, still require provider expiry after the coordinator time,
+and reject evidence beyond the window rather than refreshing it (found 2026-07-22 while
+reviewing live coding readiness).
