@@ -21,6 +21,8 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
     :checkpoint_policy
   ]
   @field_names Enum.map(@fields, &Atom.to_string/1)
+  # Future nested objects must add their path and fixed field order here.
+  @canonical_object_fields %{[] => @field_names}
   @required_fields [:success_criteria]
 
   @max_fields length(@fields)
@@ -28,6 +30,7 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   @max_text_bytes 4_096
   @max_architecture_ref_bytes 4_096
   @max_packet_bytes 256_000
+  @digest_prefix "sha256:"
 
   @schema %{
     version: @schema_version,
@@ -167,17 +170,21 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
 
   def canonical_bytes(_attrs), do: {:error, {:invalid_work_packet, :object_required}}
 
-  @doc "Hash canonical packet bytes with SHA-256 and return lowercase hex."
-  @spec sha256(t() | map() | keyword()) :: {:ok, String.t()} | {:error, term()}
-  def sha256(packet_or_attrs) do
+  @doc "Hash canonical packet bytes as `sha256:` followed by 64 lowercase hex characters."
+  @spec digest(t() | map() | keyword()) :: {:ok, String.t()} | {:error, term()}
+  def digest(packet_or_attrs) do
     with {:ok, bytes} <- canonical_bytes(packet_or_attrs) do
-      {:ok, Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)}
+      {:ok, @digest_prefix <> Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)}
     end
   rescue
     _ -> {:error, {:invalid_work_packet, :malformed}}
   catch
     _, _ -> {:error, {:invalid_work_packet, :malformed}}
   end
+
+  @doc "Compatibility alias for `digest/1`; returns the same prefixed SHA-256 digest."
+  @spec sha256(t() | map() | keyword()) :: {:ok, String.t()} | {:error, term()}
+  def sha256(packet_or_attrs), do: digest(packet_or_attrs)
 
   defp normalize_version(@schema_version), do: {:ok, @schema_version}
   defp normalize_version(_version), do: {:error, {:invalid_field, "version", :unsupported}}
@@ -401,8 +408,8 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   defp key_name(_key), do: :error
 
   defp packet_size_ok?(packet) do
-    case Jason.encode(to_map(packet)) do
-      {:ok, bytes} -> byte_size(bytes) <= @max_packet_bytes
+    case encode_packet(packet) do
+      {:ok, _bytes} -> true
       {:error, _reason} -> false
     end
   end
@@ -410,7 +417,7 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   defp too_large, do: {:error, {:invalid_work_packet, :packet_too_large}}
 
   defp encode_packet(packet) do
-    case Jason.encode(to_map(packet)) do
+    case Jason.encode(canonical_packet(packet)) do
       {:ok, bytes} when byte_size(bytes) <= @max_packet_bytes -> {:ok, bytes}
       {:ok, _bytes} -> too_large()
       {:error, _reason} -> {:error, {:invalid_work_packet, :not_json}}
@@ -420,4 +427,27 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   catch
     _, _ -> {:error, {:invalid_work_packet, :not_json}}
   end
+
+  defp canonical_packet(packet) do
+    packet
+    |> to_map()
+    |> canonical_json_object([])
+  end
+
+  defp canonical_json_object(values, path) do
+    @canonical_object_fields
+    |> Map.fetch!(path)
+    |> Enum.map(fn field ->
+      {field, canonical_json_value(Map.fetch!(values, field), path ++ [field])}
+    end)
+    |> Jason.OrderedObject.new()
+  end
+
+  defp canonical_json_value(map, path) when is_map(map) and not is_struct(map),
+    do: canonical_json_object(map, path)
+
+  defp canonical_json_value(list, path) when is_list(list),
+    do: Enum.map(list, &canonical_json_value(&1, path))
+
+  defp canonical_json_value(value, _path), do: value
 end

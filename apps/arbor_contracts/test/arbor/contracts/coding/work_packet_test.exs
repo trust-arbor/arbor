@@ -37,7 +37,7 @@ defmodule Arbor.Contracts.Coding.WorkPacketTest do
     assert normalized["non_goals"] == []
   end
 
-  test "normalizes atom and string aliases to the same digest" do
+  test "pins canonical bytes and the prefixed SHA-256 digest" do
     atom_attrs = [
       version: 1,
       success_criteria: ["one", "two"],
@@ -59,10 +59,17 @@ defmodule Arbor.Contracts.Coding.WorkPacketTest do
     assert {:ok, string_bytes} = WorkPacket.canonical_bytes(string_packet)
     assert atom_bytes == string_bytes
 
-    assert {:ok, atom_digest} = WorkPacket.sha256(atom_attrs)
-    assert {:ok, string_digest} = WorkPacket.sha256(string_attrs)
+    assert atom_bytes ==
+             ~s({"version":1,"success_criteria":["one","two"],"non_goals":["not allowed"],"constraints":[],"architecture_refs":[],"required_evidence":[],"checkpoint_policy":"design_required"})
+
+    assert {:ok, atom_digest} = WorkPacket.digest(atom_attrs)
+    assert {:ok, string_digest} = WorkPacket.digest(string_attrs)
     assert atom_digest == string_digest
-    assert atom_digest == Base.encode16(:crypto.hash(:sha256, atom_bytes), case: :lower)
+
+    assert atom_digest ==
+             "sha256:bfce982a19343a038620aab91a71f4a02c8a72880d700916d41547f1d320706e"
+
+    assert WorkPacket.sha256(atom_attrs) == {:ok, atom_digest}
   end
 
   test "canonical bytes do not depend on input object order" do
@@ -214,6 +221,7 @@ defmodule Arbor.Contracts.Coding.WorkPacketTest do
       assert {:error, _reason} =
                WorkPacket.canonical_bytes(Map.put(@valid, "required_evidence", [value]))
 
+      assert {:error, _reason} = WorkPacket.digest(Map.put(@valid, "required_evidence", [value]))
       assert {:error, _reason} = WorkPacket.sha256(Map.put(@valid, "required_evidence", [value]))
     end
   end
