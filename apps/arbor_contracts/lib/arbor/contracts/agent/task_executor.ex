@@ -123,6 +123,18 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
 
   Explicit runner overrides report steering as unsupported.
 
+  Configured executors may implement `finalize_terminal_task/4` to opt into a
+  canonical envelope for every terminal outcome. TaskStore constructs the
+  registry-backed, versioned, bounded JSON envelope after steering controls
+  reconcile, then invokes this acknowledgement-only callback exactly once
+  before publication. The executor cannot replace the envelope or its outcome.
+  Callback failure is represented as `task_finalization_failed` while retaining
+  the prior outcome and bounded original evidence. Raw runner and DOWN terms are
+  never placed in the envelope. Explicit runner overrides do not invoke it.
+
+  Executors without `finalize_terminal_task/4` retain the existing compatibility
+  behavior below.
+
   Configured executors may implement `finalize_task/4` for mandatory terminal artifact retention.
   TaskStore calls it only after a successful configured
   executor return and terminal steering reconciliation. It is time-bounded
@@ -243,6 +255,9 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   @typedoc "Ordered, terminally reconciled steering controls."
   @type reconciled_steering_controls :: [steering_control()]
 
+  @typedoc "Canonical versioned JSON envelope for one completed executor terminal."
+  @type terminal_envelope :: json_map()
+
   @doc """
   Execute a task for `agent_id` with the given task payload and context.
 
@@ -312,6 +327,23 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   @callback steer_task(agent_id(), steering_control(), execution_context()) :: steering_result()
 
   @doc """
+  Optionally retain the canonical envelope for every configured task terminal.
+
+  TaskStore calls this exactly once after steering reconciliation and before
+  publishing success, failure, or cancellation. The callback is time-bounded
+  and acknowledgement-only: returning `:ok` accepts the exact supplied
+  envelope; every other return, exception, exit, or timeout produces the
+  canonical `task_finalization_failed` outcome. Explicit runner overrides and
+  generic executors without this callback keep historical behavior.
+  """
+  @callback finalize_terminal_task(
+              agent_id(),
+              terminal_envelope(),
+              reconciled_steering_controls(),
+              execution_context()
+            ) :: :ok | {:error, term()}
+
+  @doc """
   Optionally finalize a successful configured executor result.
 
   TaskStore calls this only for a successful configured executor return, after
@@ -348,6 +380,7 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   @optional_callbacks task_status: 2,
                       cancel_task: 2,
                       steer_task: 3,
+                      finalize_terminal_task: 4,
                       finalize_task: 4,
                       adopt_task: 4
 end

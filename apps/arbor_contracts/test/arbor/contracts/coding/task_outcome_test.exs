@@ -198,4 +198,41 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeTest do
              "retry" => "none"
            }
   end
+
+  test "registry-backed construction owns semantics and never classifies prose" do
+    assert {:ok, outcome} =
+             TaskOutcome.from_code("task_owner_died", %{
+               "disposition" => "succeeded",
+               "phase" => "commit",
+               "origin" => "operator",
+               "retry" => "none",
+               "message" => "everything succeeded despite words"
+             })
+
+    assert TaskOutcome.to_map(outcome) == %{
+             "version" => 1,
+             "disposition" => "failed",
+             "code" => "task_owner_died",
+             "phase" => "control",
+             "origin" => "runtime",
+             "retry" => "new_session",
+             "message" => "everything succeeded despite words"
+           }
+
+    assert {:error, {:unknown_task_outcome_code, "task_owner_died in prose"}} =
+             TaskOutcome.from_code("task_owner_died in prose")
+  end
+
+  test "registered validation rejects caller-forged code semantics" do
+    assert {:ok, canonical} = TaskOutcome.from_code("no_changes")
+    assert {:ok, ^canonical} = TaskOutcome.validate_registered(TaskOutcome.to_map(canonical))
+
+    forged =
+      canonical
+      |> TaskOutcome.to_map()
+      |> Map.put("disposition", "failed")
+
+    assert {:error, {:invalid_task_outcome, :registry_semantics_mismatch}} =
+             TaskOutcome.validate_registered(forged)
+  end
 end

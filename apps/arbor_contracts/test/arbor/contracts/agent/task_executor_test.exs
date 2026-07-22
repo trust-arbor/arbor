@@ -37,6 +37,9 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     def steer_task(_agent_id, _control, _context), do: {:ok, :native_tool_loop}
 
     @impl true
+    def finalize_terminal_task(_agent_id, _envelope, _reconciled_controls, _context), do: :ok
+
+    @impl true
     def finalize_task(_agent_id, result, _reconciled_controls, _context), do: {:ok, result}
 
     @impl true
@@ -57,26 +60,30 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert function_exported?(PendingApprovalExecutor, :run, 3)
   end
 
-  test "optional progress, cancel, steering, finalize, and adoption callbacks are declared" do
+  test "optional progress, cancel, steering, all-terminal finalize, and adoption callbacks are declared" do
     assert {:task_status, 2} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:cancel_task, 2} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:steer_task, 3} in TaskExecutor.behaviour_info(:optional_callbacks)
+    assert {:finalize_terminal_task, 4} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:finalize_task, 4} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:adopt_task, 4} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:run, 3} in TaskExecutor.behaviour_info(:callbacks)
     assert {:task_status, 2} in TaskExecutor.behaviour_info(:callbacks)
     assert {:cancel_task, 2} in TaskExecutor.behaviour_info(:callbacks)
     assert {:steer_task, 3} in TaskExecutor.behaviour_info(:callbacks)
+    assert {:finalize_terminal_task, 4} in TaskExecutor.behaviour_info(:callbacks)
     assert {:finalize_task, 4} in TaskExecutor.behaviour_info(:callbacks)
     assert {:adopt_task, 4} in TaskExecutor.behaviour_info(:callbacks)
 
     assert function_exported?(FullExecutor, :task_status, 2)
     assert function_exported?(FullExecutor, :cancel_task, 2)
     assert function_exported?(FullExecutor, :steer_task, 3)
+    assert function_exported?(FullExecutor, :finalize_terminal_task, 4)
     assert function_exported?(FullExecutor, :finalize_task, 4)
     assert function_exported?(FullExecutor, :adopt_task, 4)
     refute function_exported?(CompliantExecutor, :task_status, 2)
     refute function_exported?(CompliantExecutor, :cancel_task, 2)
+    refute function_exported?(CompliantExecutor, :finalize_terminal_task, 4)
     refute function_exported?(CompliantExecutor, :finalize_task, 4)
     refute function_exported?(CompliantExecutor, :adopt_task, 4)
   end
@@ -134,6 +141,7 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert moduledoc =~ "task_status"
     assert moduledoc =~ "cancel_task"
     assert moduledoc =~ "steer_task"
+    assert moduledoc =~ "finalize_terminal_task"
     assert moduledoc =~ "finalize_task"
     assert moduledoc =~ "adopt_task"
     assert moduledoc =~ "post-terminal task adoption"

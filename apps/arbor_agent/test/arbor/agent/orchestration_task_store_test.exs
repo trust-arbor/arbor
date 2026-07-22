@@ -4,6 +4,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   @moduletag :fast
 
   alias Arbor.Agent.Orchestration.TaskStore
+  alias Arbor.Contracts.Coding.TaskOutcome
 
   defmodule ControlledRunner do
     def run(agent_id, task, opts) do
@@ -378,6 +379,53 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
   end
 
+  defmodule AllTerminalExecutor do
+    def run(agent_id, task, context) do
+      send(recording_pid(), {:all_terminal_executor_started, self(), agent_id, task, context})
+
+      receive do
+        {:finish, result} -> result
+        {:crash, reason} -> exit(reason)
+      after
+        1_000 -> {:error, :test_timeout}
+      end
+    end
+
+    def finalize_terminal_task(agent_id, envelope, controls, context) do
+      send(
+        recording_pid(),
+        {:finalize_terminal_task_called, agent_id, envelope, controls, context, self()}
+      )
+
+      case Application.get_env(:arbor_agent, :task_store_test_terminal_finalize, :success) do
+        :success ->
+          :ok
+
+        {:error, reason} ->
+          {:error, reason}
+
+        :raise ->
+          raise "finalize_terminal_task boom"
+
+        :exit ->
+          exit(:finalize_terminal_task_exit)
+
+        :hang ->
+          receive do
+          after
+            30_000 -> :ok
+          end
+
+        :invalid ->
+          {:ok, envelope}
+      end
+    end
+
+    defp recording_pid do
+      Application.fetch_env!(:arbor_agent, :task_store_test_pid)
+    end
+  end
+
   defmodule NoRunModule do
     def other, do: :ok
   end
@@ -405,6 +453,10 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     original_cancel = Application.get_env(:arbor_agent, :task_store_test_cancel)
     original_steer = Application.get_env(:arbor_agent, :task_store_test_steer)
     original_finalize = Application.get_env(:arbor_agent, :task_store_test_finalize)
+
+    original_terminal_finalize =
+      Application.get_env(:arbor_agent, :task_store_test_terminal_finalize)
+
     original_adopt = Application.get_env(:arbor_agent, :task_store_test_adopt)
     original_cleanup_behavior = Application.get_env(:arbor_agent, :lifecycle_cleanup_behavior)
 
@@ -419,6 +471,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       restore_env(:task_store_test_cancel, original_cancel)
       restore_env(:task_store_test_steer, original_steer)
       restore_env(:task_store_test_finalize, original_finalize)
+      restore_env(:task_store_test_terminal_finalize, original_terminal_finalize)
       restore_env(:task_store_test_adopt, original_adopt)
       restore_env(:lifecycle_cleanup_behavior, original_cleanup_behavior)
     end)
@@ -911,6 +964,322 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end)
 
     refute_receive {:finalize_task_called, _, _, _, _, _}, 50
+  end
+
+  test "all-terminal success preserves the canonical outcome and legacy done result", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+    outcome = registered_outcome("no_changes")
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "complete normally"},
+               name: store,
+               task_id: "task_all_terminal_success"
+             )
+
+    assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, context}
+
+    result = %{
+      "status" => "no_changes",
+      "branch" => "test/success",
+      "outcome" => outcome,
+      "evidence" => %{"summary" => "done"}
+    }
+
+    send(runner_pid, {:finish, {:ok, result}})
+
+    assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], ^context,
+                    _callback_pid}
+
+    assert envelope["terminal_state"] == "done"
+    assert envelope["outcome"] == outcome
+    assert envelope["evidence"]["kind"] == "executor_result"
+    assert envelope["evidence"]["result"] == result
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :done
+      assert status.outcome == outcome
+
+      assert {:ok, completed} = TaskStore.result(task_id, name: store)
+      assert completed.result_type == :coding_change
+      assert completed.payload.outcome == outcome
+      assert completed.raw == result
+    end)
+
+    refute_receive {:finalize_terminal_task_called, "agent_1", _, _, _, _}, 100
+  end
+
+  test "all-terminal pipeline failure preserves its canonical outcome in result and status", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+    outcome = registered_outcome("worker_turn_no_progress")
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "pipeline failure"},
+               name: store
+             )
+
+    assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+
+    detail = %{
+      "status" => "pipeline_error",
+      "error" => "worker_turn_no_progress",
+      "outcome" => outcome
+    }
+
+    send(runner_pid, {:finish, {:error, {:pipeline_error, detail}}})
+
+    assert_receive {:finalize_terminal_task_called, "agent_1", callback_envelope, [], _, _}
+    assert callback_envelope["outcome"] == outcome
+    assert callback_envelope["evidence"]["kind"] == "pipeline_failure"
+
+    assert_eventually(fn ->
+      assert {:ok, envelope} = TaskStore.result(task_id, name: store)
+      assert envelope == callback_envelope
+
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :failed
+      assert status.outcome == envelope["outcome"]
+    end)
+  end
+
+  test "lifecycle regression: all-terminal cancellation publishes task_cancelled", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "cancel"},
+               name: store
+             )
+
+    assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, context}
+    runner_ref = Process.monitor(runner_pid)
+
+    assert {:ok, cancelled} = TaskStore.cancel(task_id, name: store)
+    assert cancelled.state == :cancelled
+    assert cancelled.outcome["code"] == "task_cancelled"
+
+    assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], ^context, _}
+    assert envelope["terminal_state"] == "cancelled"
+    assert envelope["evidence"] == %{"kind" => "task_cancelled"}
+    assert_receive {:DOWN, ^runner_ref, :process, ^runner_pid, :killed}
+
+    assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+    assert {:ok, %{outcome: outcome}} = TaskStore.status(task_id, name: store)
+    assert outcome == envelope["outcome"]
+  end
+
+  test "lifecycle regression: abnormal owner DOWN is canonical and drops raw reason", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "crash"},
+               name: store
+             )
+
+    assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+    raw_reason = {:secret_owner_reason, self(), AllTerminalExecutor}
+    send(runner_pid, {:crash, raw_reason})
+
+    assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], _, _}
+    assert envelope["outcome"]["code"] == "task_owner_died"
+    assert envelope["evidence"] == %{"kind" => "task_owner_died"}
+    refute Jason.encode!(envelope) =~ "secret_owner_reason"
+    refute Jason.encode!(envelope) =~ inspect(self())
+
+    assert_eventually(fn ->
+      assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+      assert {:ok, %{state: :failed, outcome: outcome}} = TaskStore.status(task_id, name: store)
+      assert outcome == envelope["outcome"]
+    end)
+  end
+
+  test "ownerless approval and generic runner errors receive distinct canonical outcomes", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+
+    cases = [
+      {{:ok, :pending_approval, "approval_terminal_1"}, "approval_owner_terminated"},
+      {{:error, {:raw_runner_error, self(), AllTerminalExecutor}}, "task_runner_failed"}
+    ]
+
+    for {runner_result, expected_code} <- cases do
+      task_id = "task_terminal_#{expected_code}"
+
+      assert {:ok, ^task_id} =
+               TaskStore.dispatch(
+                 "agent_1",
+                 %{"kind" => "coding_change", "input" => expected_code},
+                 name: store,
+                 task_id: task_id
+               )
+
+      assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+      send(runner_pid, {:finish, runner_result})
+
+      assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], _, _}
+      assert envelope["outcome"]["code"] == expected_code
+
+      if expected_code == "approval_owner_terminated" do
+        assert envelope["evidence"]["approval_id"] == "approval_terminal_1"
+      else
+        encoded = Jason.encode!(envelope)
+        refute encoded =~ "raw_runner_error"
+        refute encoded =~ inspect(self())
+      end
+
+      assert_eventually(fn ->
+        assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+        assert {:ok, %{outcome: outcome}} = TaskStore.status(task_id, name: store)
+        assert outcome == envelope["outcome"]
+      end)
+    end
+  end
+
+  test "missing and forged outcomes fail closed as invalid_terminal_evidence", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+
+    forged = registered_outcome("no_changes") |> Map.put("disposition", "failed")
+
+    for {suffix, result} <- [
+          {"missing", %{"status" => "no_changes", "branch" => "test/missing"}},
+          {"forged", %{"status" => "no_changes", "branch" => "test/forged", "outcome" => forged}}
+        ] do
+      task_id = "task_invalid_terminal_#{suffix}"
+
+      assert {:ok, ^task_id} =
+               TaskStore.dispatch(
+                 "agent_1",
+                 %{"kind" => "coding_change", "input" => suffix},
+                 name: store,
+                 task_id: task_id
+               )
+
+      assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+      send(runner_pid, {:finish, {:ok, result}})
+
+      assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], _, _}
+      assert envelope["outcome"]["code"] == "invalid_terminal_evidence"
+
+      assert_eventually(fn ->
+        assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+
+        assert {:ok, %{state: :failed, outcome: outcome}} =
+                 TaskStore.status(task_id, name: store)
+
+        assert outcome == envelope["outcome"]
+      end)
+    end
+  end
+
+  test "all-terminal finalizer failure and timeout retain prior outcome and evidence once", %{
+    supervisor: supervisor
+  } do
+    for mode <- [{:error, {:raw_finalizer_error, self()}}, :hang, :invalid] do
+      Application.put_env(:arbor_agent, :task_store_test_terminal_finalize, mode)
+      store = start_all_terminal_store(supervisor, executor_finalization_timeout_ms: 40)
+      task_id = "task_terminal_finalizer_#{System.unique_integer([:positive])}"
+      outcome = registered_outcome("no_changes")
+
+      assert {:ok, ^task_id} =
+               TaskStore.dispatch(
+                 "agent_1",
+                 %{"kind" => "coding_change", "input" => "finalizer failure"},
+                 name: store,
+                 task_id: task_id
+               )
+
+      assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+
+      original_result = %{
+        "status" => "no_changes",
+        "branch" => "test/finalizer",
+        "outcome" => outcome,
+        "evidence" => %{"retained" => true}
+      }
+
+      send(runner_pid, {:finish, {:ok, original_result}})
+
+      assert_receive {:finalize_terminal_task_called, "agent_1", callback_envelope, [], _, _},
+                     1_000
+
+      assert_eventually(fn ->
+        assert {:ok, envelope} = TaskStore.result(task_id, name: store)
+        assert envelope["outcome"]["code"] == "task_finalization_failed"
+        assert envelope["prior_outcome"] == outcome
+        assert envelope["evidence"] == callback_envelope["evidence"]
+        assert envelope["evidence"]["result"] == original_result
+
+        encoded = Jason.encode!(envelope)
+        refute encoded =~ "raw_finalizer_error"
+        refute encoded =~ inspect(self())
+
+        assert {:ok, %{state: :failed, outcome: status_outcome}} =
+                 TaskStore.status(task_id, name: store)
+
+        assert status_outcome == envelope["outcome"]
+      end)
+
+      refute_receive {:finalize_terminal_task_called, "agent_1", _, _, _, _}, 100
+    end
+  end
+
+  test "configured executors without all-terminal opt-in retain historical errors", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :default_task_executor, DefaultRecordingExecutor)
+    store = Module.concat(__MODULE__, :GenericCompatibilityStore)
+    start_supervised!({TaskStore, name: store, task_supervisor: supervisor}, id: store)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "generic task", name: store)
+    assert_receive {:default_executor, runner_pid, "agent_1", "generic task", _context}
+    send(runner_pid, {:finish, {:error, :historical_runner_error}})
+
+    assert_eventually(fn ->
+      assert {:error, {:failed, :historical_runner_error}} =
+               TaskStore.result(task_id, name: store)
+
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      refute Map.has_key?(status, :outcome)
+    end)
+
+    refute_receive {:finalize_terminal_task_called, _, _, _, _, _}, 50
+
+    assert {:ok, override_task_id} =
+             TaskStore.dispatch("agent_1", "explicit override",
+               name: store,
+               runner: AllTerminalExecutor
+             )
+
+    assert_receive {:all_terminal_executor_started, override_pid, "agent_1", "explicit override",
+                    override_context}
+
+    assert is_list(override_context)
+    send(override_pid, {:finish, {:error, :override_historical_error}})
+
+    assert_eventually(fn ->
+      assert {:error, {:failed, :override_historical_error}} =
+               TaskStore.result(override_task_id, name: store)
+    end)
+
+    refute_receive {:finalize_terminal_task_called, _, _, _, _, _}, 50
   end
 
   test "failed completion keeps accepted queued controls explicitly unconfirmed", %{
@@ -3210,6 +3579,11 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     }
   end
 
+  defp registered_outcome(code) do
+    {:ok, outcome} = TaskOutcome.from_code(code)
+    TaskOutcome.to_map(outcome)
+  end
+
   defp subscribe_to_task_steering_transitions(task_id) do
     test_pid = self()
     ensure_signals_started()
@@ -3263,6 +3637,21 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     Application.put_env(:arbor_agent, :task_executors, %{
       "coding_change" => FinalizingExecutor
+    })
+
+    final_opts =
+      [name: store, task_supervisor: supervisor, steer_confirmation_delay_ms: 10_000]
+      |> Keyword.merge(opts)
+
+    start_supervised!({TaskStore, final_opts}, id: store)
+    store
+  end
+
+  defp start_all_terminal_store(supervisor, opts \\ []) do
+    store = Module.concat(__MODULE__, :"AllTerminalStore#{System.unique_integer([:positive])}")
+
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => AllTerminalExecutor
     })
 
     final_opts =

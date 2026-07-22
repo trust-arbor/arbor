@@ -65,6 +65,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcome do
     :confirmed_model
   ]
   @required_fields [:version, :disposition, :code, :phase, :origin, :retry]
+  @semantic_fields @required_fields
   @max_fields length(@fields)
   @max_code_bytes 128
   @max_text_bytes 4_096
@@ -111,6 +112,57 @@ defmodule Arbor.Contracts.Coding.TaskOutcome do
   @doc "Return the accepted retry values."
   @spec retries() :: [String.t()]
   def retries, do: @retries
+
+  @doc """
+  Construct an outcome from one exact registered code.
+
+  Registry-owned semantic fields are always replaced by the registered values;
+  callers may supply only optional diagnostic fields. No message or other prose
+  is inspected to select or alter the code.
+  """
+  @spec from_code(String.t(), map()) :: {:ok, t()} | {:error, term()}
+  def from_code(code, optional_attrs \\ %{})
+
+  def from_code(code, optional_attrs)
+      when is_binary(code) and is_map(optional_attrs) and not is_struct(optional_attrs) do
+    case Arbor.Contracts.Coding.TaskOutcomeRegistry.lookup(code) do
+      {:ok, spec} ->
+        optional_attrs =
+          Map.drop(
+            optional_attrs,
+            @semantic_fields ++ Enum.map(@semantic_fields, &Atom.to_string/1)
+          )
+
+        optional_attrs
+        |> Map.merge(spec)
+        |> Map.put(:version, @schema_version)
+        |> new()
+
+      :error ->
+        {:error, {:unknown_task_outcome_code, code}}
+    end
+  end
+
+  def from_code(_code, _optional_attrs),
+    do: {:error, {:invalid_task_outcome, :registered_code_required}}
+
+  @doc "Validate that an existing outcome exactly matches its registered code semantics."
+  @spec validate_registered(map() | keyword()) :: {:ok, t()} | {:error, term()}
+  def validate_registered(attrs) do
+    with {:ok, outcome} <- new(attrs),
+         {:ok, spec} <- Arbor.Contracts.Coding.TaskOutcomeRegistry.lookup(outcome.code),
+         true <- registered_semantics?(outcome, spec) do
+      {:ok, outcome}
+    else
+      :error -> {:error, {:unknown_task_outcome_code, outcome_code(attrs)}}
+      false -> {:error, {:invalid_task_outcome, :registry_semantics_mismatch}}
+      {:error, _reason} = error -> error
+    end
+  rescue
+    _ -> {:error, {:invalid_task_outcome, :malformed}}
+  catch
+    _, _ -> {:error, {:invalid_task_outcome, :malformed}}
+  end
 
   @doc "Return the closed ACP delivery-state values."
   @spec delivery_states() :: [String.t()]
@@ -346,6 +398,23 @@ defmodule Arbor.Contracts.Coding.TaskOutcome do
     String.valid?(value) and String.trim(value) != "" and byte_size(value) <= maximum and
       not String.contains?(value, <<0>>) and not String.match?(value, ~r/[\x00-\x1F\x7F]/)
   end
+
+  defp registered_semantics?(outcome, spec) do
+    outcome.disposition == spec.disposition and outcome.phase == spec.phase and
+      outcome.origin == spec.origin and outcome.retry == spec.retry
+  end
+
+  defp outcome_code(attrs) when is_map(attrs),
+    do: Map.get(attrs, :code, Map.get(attrs, "code"))
+
+  defp outcome_code(attrs) when is_list(attrs) do
+    case List.keyfind(attrs, :code, 0) || List.keyfind(attrs, "code", 0) do
+      {_key, code} -> code
+      nil -> nil
+    end
+  end
+
+  defp outcome_code(_attrs), do: nil
 
   defp proper_list?([]), do: true
   defp proper_list?([_head | tail]), do: proper_list?(tail)

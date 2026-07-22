@@ -62,6 +62,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskInventoryProjection}
+  alias Arbor.Contracts.Coding.TaskTerminalEnvelope
 
   @type task_id :: String.t()
   # :waiting_approval is retained for status projection / facade enrichment
@@ -302,6 +303,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           waiting_on: nil,
           result: nil,
           error: nil,
+          terminal_envelope: nil,
+          terminal_finalized: false,
           pid: task_ref.pid,
           ref: task_ref.ref,
           started_at: now,
@@ -392,6 +395,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         {:ok, %{state: :done, result: result}} ->
           {:ok, result}
 
+        {:ok, %{state: state, terminal_envelope: envelope}}
+        when state in [:failed, :cancelled] and is_map(envelope) ->
+          {:ok, envelope}
+
         {:ok, %{state: :failed, error: error}} ->
           {:error, {:failed, error}}
 
@@ -460,6 +467,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             completed_at: now
           })
           |> reconcile_terminal_controls()
+          |> maybe_finalize_terminal(:task_cancelled, state)
           |> revoke_task_capabilities()
 
         next_state =
@@ -603,6 +611,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
                 completed_at: now
               })
               |> reconcile_terminal_controls()
+              |> maybe_finalize_terminal(:task_owner_died, state)
               |> revoke_task_capabilities()
 
             {put_in(state.tasks[task_id], record),
@@ -1509,21 +1518,207 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   # their terminal states are reconciled. Explicit runner overrides never cross
   # this library boundary.
   defp maybe_finalize_task_result(
-         %{state: :done, context_mode: :json_clean} = record,
+         %{context_mode: :json_clean} = record,
          runner_result,
          state
        ) do
     module = Map.get(record, :executor)
 
-    if is_atom(module) and Code.ensure_loaded?(module) and
-         function_exported?(module, :finalize_task, 4) do
-      finalize_configured_task(record, runner_result, state, module)
+    cond do
+      Map.get(record, :terminal_finalized, false) ->
+        record
+
+      all_terminal_finalizer?(module) ->
+        finalize_all_terminal(record, {:runner_result, runner_result}, state, module)
+
+      record.state == :done and legacy_finalizer?(module) ->
+        finalize_configured_task(record, runner_result, state, module)
+
+      true ->
+        record
+    end
+  end
+
+  defp maybe_finalize_task_result(record, _runner_result, _state), do: record
+
+  defp maybe_finalize_terminal(%{context_mode: :json_clean} = record, terminal, state) do
+    module = Map.get(record, :executor)
+
+    if not Map.get(record, :terminal_finalized, false) and all_terminal_finalizer?(module) do
+      finalize_all_terminal(record, terminal, state, module)
     else
       record
     end
   end
 
-  defp maybe_finalize_task_result(record, _runner_result, _state), do: record
+  defp maybe_finalize_terminal(record, _terminal, _state), do: record
+
+  defp all_terminal_finalizer?(module) do
+    is_atom(module) and Code.ensure_loaded?(module) and
+      function_exported?(module, :finalize_terminal_task, 4)
+  end
+
+  defp legacy_finalizer?(module) do
+    is_atom(module) and Code.ensure_loaded?(module) and
+      function_exported?(module, :finalize_task, 4)
+  end
+
+  defp finalize_all_terminal(record, terminal, state, module) do
+    envelope = terminal_envelope(record, terminal)
+    record = put_terminal_envelope(record, envelope)
+
+    timeout =
+      Map.get(
+        state,
+        :executor_finalization_timeout_ms,
+        Config.executor_finalization_timeout_ms()
+      )
+
+    callback_result =
+      call_executor_callback(
+        state,
+        fn ->
+          module.finalize_terminal_task(
+            record.agent_id,
+            envelope,
+            record.controls,
+            record.context
+          )
+        end,
+        timeout
+      )
+
+    case callback_result do
+      :ok ->
+        Map.put(record, :terminal_finalized, true)
+
+      _failure ->
+        {:ok, failed_envelope} = TaskTerminalEnvelope.finalization_failed(envelope)
+
+        record
+        |> put_terminal_envelope(failed_envelope)
+        |> Map.merge(%{
+          state: :failed,
+          current_step: "failed",
+          waiting_on: nil,
+          error: :task_finalization_failed,
+          terminal_finalized: true
+        })
+    end
+  end
+
+  defp terminal_envelope(record, {:runner_result, {:ok, result}}) do
+    with {:ok, clean_result} <- canonicalize_and_roundtrip(result),
+         {:ok, outcome} <- TaskArtifacts.extract_outcome(clean_result),
+         {:ok, envelope} <-
+           TaskTerminalEnvelope.preserve(
+             outcome,
+             terminal_state(record),
+             %{"kind" => "executor_result", "result" => clean_result}
+           ) do
+      envelope
+    else
+      _failure -> invalid_terminal_envelope(record, result)
+    end
+  end
+
+  defp terminal_envelope(record, {:runner_result, {:error, {:pipeline_error, detail}}}) do
+    with {:ok, clean_detail} <- canonicalize_and_roundtrip(detail),
+         {:ok, outcome} <- TaskArtifacts.extract_outcome(clean_detail),
+         {:ok, envelope} <-
+           TaskTerminalEnvelope.preserve(
+             outcome,
+             terminal_state(record),
+             %{"kind" => "pipeline_failure", "result" => clean_detail}
+           ) do
+      envelope
+    else
+      _failure -> invalid_terminal_envelope(record, detail)
+    end
+  end
+
+  defp terminal_envelope(record, {:runner_result, {:ok, :pending_approval, approval_id}}),
+    do: approval_owner_terminated_envelope(record, approval_id)
+
+  defp terminal_envelope(
+         record,
+         {:runner_result, {:error, {:pending_approval, approval_id}}}
+       ),
+       do: approval_owner_terminated_envelope(record, approval_id)
+
+  defp terminal_envelope(record, {:runner_result, {:error, _raw_error}}),
+    do: lifecycle_envelope!("task_runner_failed", record, %{"kind" => "task_runner_failed"})
+
+  defp terminal_envelope(record, {:runner_result, _malformed}),
+    do: invalid_terminal_envelope(record, nil)
+
+  defp terminal_envelope(record, :task_cancelled),
+    do: lifecycle_envelope!("task_cancelled", record, %{"kind" => "task_cancelled"})
+
+  defp terminal_envelope(record, :task_owner_died),
+    do: lifecycle_envelope!("task_owner_died", record, %{"kind" => "task_owner_died"})
+
+  defp approval_owner_terminated_envelope(record, approval_id) when is_binary(approval_id) do
+    case TaskTerminalEnvelope.from_code(
+           "approval_owner_terminated",
+           terminal_state(record),
+           %{
+             "kind" => "approval_owner_terminated",
+             "approval_id" => approval_id
+           }
+         ) do
+      {:ok, envelope} -> envelope
+      {:error, _reason} -> invalid_terminal_envelope(record, nil)
+    end
+  end
+
+  defp approval_owner_terminated_envelope(record, _approval_id),
+    do: invalid_terminal_envelope(record, nil)
+
+  defp invalid_terminal_envelope(record, result) do
+    evidence =
+      case canonicalize_and_roundtrip(result) do
+        {:ok, clean} -> %{"kind" => "invalid_terminal_evidence", "result" => clean}
+        {:error, _reason} -> %{"kind" => "invalid_terminal_evidence"}
+      end
+
+    case TaskTerminalEnvelope.from_code(
+           "invalid_terminal_evidence",
+           terminal_state(record),
+           evidence
+         ) do
+      {:ok, envelope} ->
+        envelope
+
+      {:error, _reason} ->
+        lifecycle_envelope!("invalid_terminal_evidence", record, %{
+          "kind" => "invalid_terminal_evidence"
+        })
+    end
+  end
+
+  defp lifecycle_envelope!(code, record, evidence) do
+    {:ok, envelope} = TaskTerminalEnvelope.from_code(code, terminal_state(record), evidence)
+    envelope
+  end
+
+  defp terminal_state(%{state: state}) when state in [:done, :failed, :cancelled],
+    do: Atom.to_string(state)
+
+  defp put_terminal_envelope(record, envelope) do
+    record = Map.put(record, :terminal_envelope, envelope)
+
+    if envelope["outcome"]["code"] == "invalid_terminal_evidence" do
+      Map.merge(record, %{
+        state: :failed,
+        current_step: "failed",
+        waiting_on: nil,
+        error: :invalid_terminal_evidence
+      })
+    else
+      record
+    end
+  end
 
   defp finalize_configured_task(record, {:ok, result}, state, module)
        when is_map(result) and not is_struct(result) do
@@ -1999,6 +2194,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       :error -> status
     end
   end
+
+  defp status_outcome(%{terminal_envelope: %{"outcome" => outcome}}), do: {:ok, outcome}
 
   defp status_outcome(%{state: :done, result: result}),
     do: TaskArtifacts.extract_outcome(result)
