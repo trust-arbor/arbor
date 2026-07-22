@@ -125,7 +125,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMStreamingUsageTest do
     refute_receive {:usage_event, @event, _, _}, 50
   end
 
-  test "security regression: a final response rejected by Boundary emits no usage" do
+  test "a final response rejected by Boundary emits no usage" do
     request = %Request{provider: "openai", model: "gpt-4"}
 
     assert {:error, _reason} =
@@ -134,7 +134,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMStreamingUsageTest do
     refute_receive {:usage_event, @event, _, _}, 50
   end
 
-  test "security regression: bounded stream transport or assembly errors emit no usage" do
+  test "bounded stream transport or assembly errors emit no usage" do
     Application.put_env(:arbor_llm, :streaming_usage_test_mode, :process_error)
     request = %Request{provider: "openai", model: "gpt-4"}
 
@@ -142,7 +142,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMStreamingUsageTest do
     refute_receive {:usage_event, @event, _, _}, 50
   end
 
-  test "security regression: callback failure emits no usage" do
+  test "callback failure emits no usage" do
     request = %Request{provider: "openai", model: "gpt-4"}
     callback = fn _event -> raise "callback rejected" end
 

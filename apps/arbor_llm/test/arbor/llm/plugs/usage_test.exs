@@ -129,6 +129,20 @@ defmodule Arbor.LLM.Plugs.UsageTest do
     end
   end
 
+  test "streaming finalizer marks malformed input finalized and repeated calls stay silent" do
+    state = Usage.streaming_provenance(build_call(:stream, {:ok, :bounded_stream}))
+    finalized = Usage.finalize_streaming(:not_a_response, state)
+
+    assert finalized.usage_finalized?
+
+    assert Usage.finalize_streaming(
+             arbor_response(%{input_tokens: 4, output_tokens: 3}),
+             finalized
+           ) == finalized
+
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
   test "streaming finalizer emits nothing for halted or replayed provenance" do
     halted =
       build_call(:stream, {:ok, :bounded_stream})

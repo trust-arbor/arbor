@@ -109,7 +109,8 @@ defmodule Arbor.LLM.Plugs.Usage do
     _, _ -> provenance
   end
 
-  def finalize_streaming(_response, provenance) when is_map(provenance), do: provenance
+  def finalize_streaming(_response, provenance) when is_map(provenance),
+    do: Map.put(provenance, :usage_finalized?, true)
 
   defp extract_usage(operation, result) do
     case usage_map(operation, result) do
