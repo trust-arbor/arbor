@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 513,
+  "entry_count": 516,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6213,8 +6213,47 @@
       "source_incident": "found 2026-07-21 while proving a mismatched launch-bound Grok model never starts the ACP client).",
       "content_sha256": "8bf2a843fa1f9e20d97788c471bfb780f142f86269eae3a47c5c2d792eb6e5b3",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 514,
+      "source_kind": "post-migration",
+      "slug": "normalized-coding-profile-ids-are-not-proof-that-the-profile-is-executable",
+      "title": "Normalized Coding Plan profile ids are not proof that a profile is executable.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-normalized-coding-profile-ids-are-not-proof-that-the-profile-is-executable",
+      "source_date": "2026-07-22",
+      "source_incident": "found 2026-07-22 when a bounded contract-only delegation used a normalized but non-executable profile).",
+      "content_sha256": "b23534da699a0f4420f6f8fca2410e87ac1dc44dfaa93b18e36ceb6883330b85",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 515,
+      "source_kind": "post-migration",
+      "slug": "readiness-and-execution-must-share-the-same-canonicalizer",
+      "title": "Readiness and execution must share the same canonicalizer.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-readiness-and-execution-must-share-the-same-canonicalizer",
+      "source_date": "2026-07-22",
+      "source_incident": "found 2026-07-22 while reviewing the first static coding-readiness slice).",
+      "content_sha256": "48a2087b82d3205dec6ae5fe0a0457156a751c1aa11280311191b6075b547396",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 516,
+      "source_kind": "post-migration",
+      "slug": "validate-trusted-compiler-output-at-the-final-execution-boundary",
+      "title": "Validate trusted compiler output at the final execution boundary with the same canonical validator used by preflight.",
+      "topic": "dot-pipelines",
+      "destination": ".claude/skills/dot-pipeline-authoring.md",
+      "anchor": "applied-learning-validate-trusted-compiler-output-at-the-final-execution-boundary",
+      "source_date": "2026-07-22",
+      "source_incident": "found 2026-07-22 when Coding Plan v2 bound the work-packet digest in compilation but the executor did not verify it).",
+      "content_sha256": "c4ba3bfb642b36a1e63fa7993f855c81463dfade6df0bfb1f09a497b7f74c083",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 52
+  "post_migration_entry_count": 55
 }
