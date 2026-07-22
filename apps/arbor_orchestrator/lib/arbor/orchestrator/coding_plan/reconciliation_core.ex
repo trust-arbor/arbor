@@ -14,6 +14,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   @max_tasks 1_000
   @max_resources 1_000
   @max_json_bytes 1_000_000
+  # Match the producer collection bounds; the document byte limit remains
+  # the independent protection against large records.
+  @max_json_collection_items 1_000
   @resource_types ~w(live_workspace_lease retained_workspace_record validation_resource quarantine)
   @resource_order %{
     "live_workspace_lease" => 0,
@@ -677,7 +680,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       not is_nil(task_filters["state"]) ->
         {:error, :unsupported_task_scope}
 
-      not is_nil(task_filters["task_id"]) and not is_nil(resource_filters["task_id"]) and
+      not is_nil(task_filters["task_id"]) and
           task_filters["task_id"] != resource_filters["task_id"] ->
         {:error, :inconsistent_scope}
 
@@ -874,8 +877,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
            is_binary(key) and byte_size(key) <= 256 and bounded_json?(nested, depth + 1)
          end)
 
-  defp bounded_json?(value, depth) when is_list(value) and length(value) <= 256,
-    do: Enum.all?(value, &bounded_json?(&1, depth + 1))
+  defp bounded_json?(value, depth)
+       when is_list(value) and length(value) <= @max_json_collection_items,
+       do: Enum.all?(value, &bounded_json?(&1, depth + 1))
 
   defp bounded_json?(value, _depth) when is_binary(value),
     do: String.valid?(value) and byte_size(value) <= 16_384

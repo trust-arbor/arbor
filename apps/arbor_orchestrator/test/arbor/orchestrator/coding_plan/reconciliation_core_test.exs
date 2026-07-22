@@ -204,6 +204,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
 
     assert manifest["scope"]["task_id"] == "task-1"
 
+    assert {:ok, _manifest, _digest} =
+             ReconciliationCore.reconcile(task_inventory, scoped_resources, @observed_at)
+
+    assert {:error, :inconsistent_scope} =
+             ReconciliationCore.reconcile(scoped_tasks, resource_inventory, @observed_at)
+
+    principal_scoped_resources =
+      put_in(resource_inventory, ["filters", "principal_id"], "principal")
+
+    assert {:error, :inconsistent_scope} =
+             ReconciliationCore.reconcile(scoped_tasks, principal_scoped_resources, @observed_at)
+
     assert {:error, :inconsistent_scope} =
              ReconciliationCore.reconcile(
                scoped_tasks,
@@ -222,6 +234,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
              ReconciliationCore.reconcile(
                put_in(task_inventory, ["filters", "state"], "running"),
                resource_inventory,
+               @observed_at
+             )
+  end
+
+  test "accepts producer-sized collections beyond the old 256-item JSON cap" do
+    tasks = Enum.map(1..257, &task("task-#{&1}", "running", true))
+    resources = [resource("live_workspace_lease", "resource-1", "task-1", "principal")]
+
+    assert {:ok, _manifest, _digest} =
+             ReconciliationCore.reconcile(
+               task_inventory(tasks),
+               resource_inventory(resources),
                @observed_at
              )
   end
