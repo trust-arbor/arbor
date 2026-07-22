@@ -3,7 +3,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
   import Bitwise
 
-  alias Arbor.Contracts.Coding.ValidationCapacityHandoff
+  alias Arbor.Contracts.Coding.{TaskTerminalEnvelope, ValidationCapacityHandoff}
   alias Arbor.Orchestrator.CodingPlan.ArtifactStore
 
   setup do
@@ -282,6 +282,223 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert Enum.sort(File.ls!(root)) == [
              "coding-terminal-evidence.json"
            ]
+  end
+
+  test "archives every canonical task terminal without changing the callback envelope", %{
+    base: base
+  } do
+    task_id = "task_all_terminal_1"
+
+    {:ok, success} =
+      TaskTerminalEnvelope.from_code("no_changes", "done", %{
+        "kind" => "executor_result",
+        "result" => %{
+          "status" => "no_changes",
+          "artifacts" => %{
+            "task_evidence" => %{
+              "schema_version" => 1,
+              "task_id" => task_id,
+              "path" => "/trusted/evidence.json",
+              "sha256" => String.duplicate("a", 64),
+              "byte_size" => 123
+            }
+          }
+        }
+      })
+
+    {:ok, pipeline_failure} =
+      TaskTerminalEnvelope.from_code("worker_turn_no_progress", "failed", %{
+        "kind" => "pipeline_failure",
+        "result" => %{"status" => "pipeline_error"}
+      })
+
+    {:ok, cancellation} =
+      TaskTerminalEnvelope.from_code("task_cancelled", "cancelled", %{
+        "kind" => "task_cancelled"
+      })
+
+    {:ok, owner_death} =
+      TaskTerminalEnvelope.from_code("task_owner_died", "failed", %{
+        "kind" => "task_owner_died"
+      })
+
+    {:ok, invalid_evidence} =
+      TaskTerminalEnvelope.from_code("invalid_terminal_evidence", "failed", %{
+        "kind" => "invalid_terminal_evidence"
+      })
+
+    {:ok, legacy_finalizer_failure} = TaskTerminalEnvelope.finalization_failed(success)
+
+    {:ok, invalid_legacy_finalizer_failure} =
+      TaskTerminalEnvelope.finalization_failed(invalid_evidence)
+
+    cases = [
+      success: success,
+      pipeline_failure: pipeline_failure,
+      cancellation: cancellation,
+      owner_death: owner_death,
+      invalid_evidence: invalid_evidence,
+      legacy_finalizer_failure: legacy_finalizer_failure,
+      invalid_legacy_finalizer_failure: invalid_legacy_finalizer_failure
+    ]
+
+    for {name, envelope} <- cases do
+      root = Path.join(base, Atom.to_string(name))
+      File.mkdir_p!(root)
+      controls = if name == :success, do: [terminal_control(%{"task_id" => task_id})], else: []
+
+      assert {:ok, descriptor} =
+               ArtifactStore.archive_task_terminal(root, task_id, envelope, controls)
+
+      body = descriptor["path"] |> File.read!() |> Jason.decode!()
+
+      assert body == %{
+               "schema_version" => 1,
+               "task_id" => task_id,
+               "terminal_envelope" => envelope,
+               "controls" => controls
+             }
+
+      assert body["terminal_envelope"] === envelope
+      assert descriptor["terminal_state"] == envelope["terminal_state"]
+      assert descriptor["outcome_code"] == envelope["outcome"]["code"]
+      assert descriptor["sha256"] == sha256(File.read!(descriptor["path"]))
+      assert descriptor["byte_size"] == File.stat!(descriptor["path"]).size
+
+      assert Map.keys(descriptor) |> MapSet.new() ==
+               MapSet.new(
+                 ~w(schema_version task_id path sha256 byte_size terminal_state outcome_code)
+               )
+
+      assert (File.stat!(descriptor["path"]).mode &&& 0o777) == 0o600
+    end
+  end
+
+  test "task terminal archive is exactly idempotent and rejects conflicting rewrite", %{
+    root: root
+  } do
+    File.mkdir_p!(root)
+    envelope = successful_task_terminal_envelope("task_coding_1")
+
+    assert {:ok, first} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, [])
+
+    first_bytes = File.read!(first["path"])
+
+    assert {:ok, ^first} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, [])
+
+    assert File.read!(first["path"]) == first_bytes
+
+    {:ok, conflicting} =
+      TaskTerminalEnvelope.from_code("task_owner_died", "failed", %{
+        "kind" => "task_owner_died"
+      })
+
+    assert {:error, :task_terminal_conflict} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", conflicting, [])
+
+    assert File.read!(first["path"]) == first_bytes
+  end
+
+  test "rejects malformed or noncanonical task terminals and mismatched controls", %{root: root} do
+    File.mkdir_p!(root)
+    envelope = successful_task_terminal_envelope("task_coding_1")
+
+    atom_keyed = Map.new(envelope, fn {key, value} -> {String.to_existing_atom(key), value} end)
+    extra_key = Map.put(envelope, "unexpected", true)
+    wrong_state = Map.put(envelope, "terminal_state", "failed")
+    forged_outcome = put_in(envelope, ["outcome", "disposition"], "failed")
+    wrong_embedded_task = put_in(envelope, ["evidence", "result", "task_id"], "other-task")
+
+    over_bound =
+      put_in(envelope, ["evidence", "result", "detail"], String.duplicate("x", 70_000))
+
+    for malformed <- [atom_keyed, extra_key, forged_outcome, over_bound] do
+      assert {:error, :invalid_task_terminal_envelope} =
+               ArtifactStore.archive_task_terminal(root, "task_coding_1", malformed, [])
+    end
+
+    assert {:error, :invalid_task_terminal_semantics} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", wrong_state, [])
+
+    assert {:error, :task_terminal_task_id_mismatch} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", wrong_embedded_task, [])
+
+    assert {:error, {:invalid_terminal_control, :identity_or_order}} =
+             ArtifactStore.archive_task_terminal(
+               root,
+               "task_coding_1",
+               envelope,
+               [terminal_control(%{"task_id" => "other-task"})]
+             )
+
+    assert {:error, {:invalid_terminal_control, :nonterminal_or_malformed}} =
+             ArtifactStore.archive_task_terminal(
+               root,
+               "task_coding_1",
+               envelope,
+               [
+                 terminal_control(%{
+                   "status" => "queued",
+                   "delivered_at" => nil,
+                   "delivery_mode" => nil
+                 })
+               ]
+             )
+
+    assert {:error, {:invalid_terminal_controls, :too_many}} =
+             ArtifactStore.archive_task_terminal(
+               root,
+               "task_coding_1",
+               envelope,
+               Enum.map(1..101, fn sequence ->
+                 terminal_control(%{
+                   "control_id" => "control_#{sequence}",
+                   "sequence" => sequence
+                 })
+               end)
+             )
+  end
+
+  test "task terminal archive rejects symlink roots and unsafe destination files", %{
+    base: base,
+    root: root
+  } do
+    File.mkdir_p!(root)
+    envelope = successful_task_terminal_envelope("task_coding_1")
+    root_link = Path.join(base, "task-root-link")
+    File.ln_s!(root, root_link)
+
+    assert {:error, :invalid_task_terminal_root} =
+             ArtifactStore.archive_task_terminal(root_link, "task_coding_1", envelope, [])
+
+    path = Path.join(root, "coding-task-terminal.json")
+    outside = Path.join(base, "outside-terminal.json")
+    File.write!(outside, "outside")
+    File.ln_s!(outside, path)
+
+    assert {:error, :task_terminal_symlink} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, [])
+
+    File.rm!(path)
+    File.mkdir!(path)
+
+    assert {:error, :invalid_task_terminal_file} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, [])
+  end
+
+  test "task terminal replay rejects an insecure existing file mode", %{root: root} do
+    File.mkdir_p!(root)
+    envelope = successful_task_terminal_envelope("task_coding_1")
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, [])
+
+    File.chmod!(descriptor["path"], 0o644)
+
+    assert {:error, :insecure_task_terminal_mode} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, [])
   end
 
   test "accepts only complete validated CrossApp capacity evidence", %{root: root} do
@@ -791,6 +1008,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       overrides
     )
   end
+
+  defp successful_task_terminal_envelope(task_id) do
+    {:ok, envelope} =
+      TaskTerminalEnvelope.from_code("no_changes", "done", %{
+        "kind" => "executor_result",
+        "result" => %{"status" => "no_changes", "task_id" => task_id}
+      })
+
+    envelope
+  end
+
+  defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
 
   defp read_artifacts(descriptor) do
     Map.new(artifact_paths(descriptor), fn {name, path} -> {name, File.read!(path)} end)

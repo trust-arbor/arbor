@@ -57,6 +57,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     Plan,
     BranchLifecycleDescriptor,
     TaskEvidenceDescriptor,
+    TaskTerminalEnvelope,
     TranscriptDescriptor,
     ValidationCapacityHandoff,
     WorkspaceReleaseDescriptor
@@ -221,6 +222,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                                    )
   @max_finalize_controls 100
   @max_finalize_task_id_bytes 512
+  @max_finalize_control_bytes 16_384
+  @reconciled_control_states ~w(delivered delivery_unconfirmed unsupported)
+  @reconciled_delivery_modes ~w(native_tool_loop acp_native same_session_follow_up next_stage)
+
+  @task_terminal_descriptor_keys MapSet.new(~w(
+    schema_version
+    task_id
+    path
+    sha256
+    byte_size
+    terminal_state
+    outcome_code
+  ))
 
   @adoptable_statuses MapSet.new(~w(change_committed human_review_required pr_created))
   @adoption_request_keys MapSet.new(~w(destination_ref))
@@ -442,6 +456,38 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   catch
     :exit, reason -> {:error, {:coding_task_finalize_exit, reason}}
     kind, reason -> {:error, {:coding_task_finalize_throw, {kind, reason}}}
+  end
+
+  @doc "Archive and acknowledge the exact canonical envelope for every task terminal."
+  @impl true
+  @spec finalize_terminal_task(String.t(), map(), list(), map() | keyword()) ::
+          :ok | {:error, term()}
+  def finalize_terminal_task(agent_id, terminal_envelope, controls, context) do
+    with :ok <- validate_agent_id(agent_id),
+         {:ok, exec_ctx} <- validate_context(context),
+         :ok <- validate_exact_context_task_id(context, exec_ctx.task_id),
+         :ok <- validate_finalize_task_id(exec_ctx.task_id),
+         {:ok, terminal_envelope} <- validate_exact_task_terminal_envelope(terminal_envelope),
+         :ok <- validate_task_terminal_semantics(terminal_envelope),
+         :ok <- validate_embedded_terminal_task_ids(terminal_envelope, exec_ctx.task_id),
+         :ok <- validate_reconciled_finalize_controls(controls, exec_ctx.task_id),
+         {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
+         {:ok, descriptor} <-
+           archive_task_terminal(logs_root, exec_ctx.task_id, terminal_envelope, controls),
+         :ok <-
+           validate_task_terminal_descriptor(
+             descriptor,
+             logs_root,
+             exec_ctx.task_id,
+             terminal_envelope,
+             controls
+           ) do
+      :ok
+    end
+  rescue
+    _exception -> {:error, :coding_task_terminal_finalize_error}
+  catch
+    _kind, _reason -> {:error, :coding_task_terminal_finalize_error}
   end
 
   @doc "Prove and settle post-terminal integration of a published coding candidate."
@@ -1070,6 +1116,273 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp validate_finalize_controls(_controls),
     do: {:error, {:invalid_finalize_controls, :expected_list}}
 
+  defp validate_exact_context_task_id(context, task_id) do
+    if is_map(context) and Map.get(context, "task_id") == task_id,
+      do: :ok,
+      else: {:error, :task_terminal_context_mismatch}
+  end
+
+  defp validate_exact_task_terminal_envelope(envelope)
+       when is_map(envelope) and not is_struct(envelope) do
+    with true <- Enum.all?(Map.keys(envelope), &is_binary/1),
+         {:ok, normalized} <- TaskTerminalEnvelope.normalize(envelope),
+         true <- normalized == envelope do
+      {:ok, envelope}
+    else
+      _ -> {:error, :invalid_task_terminal_envelope}
+    end
+  end
+
+  defp validate_exact_task_terminal_envelope(_envelope),
+    do: {:error, :invalid_task_terminal_envelope}
+
+  defp validate_task_terminal_semantics(envelope) do
+    state = envelope["terminal_state"]
+    outcome = envelope["outcome"]
+    code = outcome["code"]
+    disposition = outcome["disposition"]
+    kind = envelope["evidence"]["kind"]
+    prior? = Map.has_key?(envelope, "prior_outcome")
+
+    valid? =
+      task_finalization_failure_terminal?(state, code, disposition, prior?, kind) or
+        case kind do
+          "executor_result" ->
+            state == "done" and disposition != "cancelled" and not prior? and
+              code not in task_lifecycle_terminal_codes()
+
+          "pipeline_failure" ->
+            state == "failed" and disposition == "failed" and not prior? and
+              code not in task_lifecycle_terminal_codes()
+
+          "task_cancelled" ->
+            task_lifecycle_terminal?(
+              state,
+              code,
+              disposition,
+              prior?,
+              "cancelled",
+              "task_cancelled"
+            )
+
+          "task_owner_died" ->
+            task_lifecycle_terminal?(
+              state,
+              code,
+              disposition,
+              prior?,
+              "failed",
+              "task_owner_died"
+            )
+
+          "approval_owner_terminated" ->
+            task_lifecycle_terminal?(
+              state,
+              code,
+              disposition,
+              prior?,
+              "failed",
+              "approval_owner_terminated"
+            )
+
+          "task_runner_failed" ->
+            task_lifecycle_terminal?(
+              state,
+              code,
+              disposition,
+              prior?,
+              "failed",
+              "task_runner_failed"
+            )
+
+          "invalid_terminal_evidence" ->
+            task_lifecycle_terminal?(
+              state,
+              code,
+              disposition,
+              prior?,
+              "failed",
+              "invalid_terminal_evidence"
+            )
+
+          _other ->
+            false
+        end
+
+    if valid?, do: :ok, else: {:error, :invalid_task_terminal_semantics}
+  end
+
+  defp task_finalization_failure_terminal?(state, code, disposition, prior?, kind) do
+    state == "failed" and code == "task_finalization_failed" and disposition == "failed" and
+      prior? and kind in ["executor_result", "invalid_terminal_evidence"]
+  end
+
+  defp task_lifecycle_terminal?(
+         state,
+         code,
+         disposition,
+         prior?,
+         expected_state,
+         expected_code
+       ) do
+    state == expected_state and code == expected_code and disposition == expected_state and
+      not prior?
+  end
+
+  defp task_lifecycle_terminal_codes do
+    ~w(
+      task_cancelled
+      task_owner_died
+      approval_owner_terminated
+      task_runner_failed
+      invalid_terminal_evidence
+      task_finalization_failed
+    )
+  end
+
+  defp validate_embedded_terminal_task_ids(value, task_id) do
+    case collect_embedded_terminal_task_ids(value, []) do
+      {:ok, ids} ->
+        if Enum.all?(ids, &(&1 == task_id)),
+          do: :ok,
+          else: {:error, :task_terminal_task_id_mismatch}
+
+      :error ->
+        {:error, :task_terminal_task_id_mismatch}
+    end
+  end
+
+  defp collect_embedded_terminal_task_ids(map, acc)
+       when is_map(map) and not is_struct(map) do
+    Enum.reduce_while(map, {:ok, acc}, fn
+      {"task_id", value}, {:ok, ids} when is_binary(value) ->
+        {:cont, {:ok, [value | ids]}}
+
+      {"task_id", _value}, _acc ->
+        {:halt, :error}
+
+      {_key, value}, {:ok, ids} ->
+        case collect_embedded_terminal_task_ids(value, ids) do
+          {:ok, nested_ids} -> {:cont, {:ok, nested_ids}}
+          :error -> {:halt, :error}
+        end
+    end)
+  end
+
+  defp collect_embedded_terminal_task_ids(list, acc) when is_list(list) do
+    Enum.reduce_while(list, {:ok, acc}, fn value, {:ok, ids} ->
+      case collect_embedded_terminal_task_ids(value, ids) do
+        {:ok, nested_ids} -> {:cont, {:ok, nested_ids}}
+        :error -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp collect_embedded_terminal_task_ids(_value, acc), do: {:ok, acc}
+
+  defp validate_reconciled_finalize_controls(controls, task_id) when is_list(controls) do
+    if length(controls) > @max_finalize_controls do
+      {:error, :invalid_reconciled_terminal_controls}
+    else
+      controls
+      |> Enum.reduce_while({:ok, {MapSet.new(), MapSet.new(), 0}}, fn control,
+                                                                      {:ok,
+                                                                       {ids, sequences, previous}} ->
+        case validate_reconciled_finalize_control(control, task_id, ids, sequences, previous) do
+          {:ok, control_id, sequence} ->
+            {:cont,
+             {:ok, {MapSet.put(ids, control_id), MapSet.put(sequences, sequence), sequence}}}
+
+          {:error, _reason} ->
+            {:halt, {:error, :invalid_reconciled_terminal_controls}}
+        end
+      end)
+      |> case do
+        {:ok, _state} -> :ok
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  defp validate_reconciled_finalize_controls(_controls, _task_id),
+    do: {:error, :invalid_reconciled_terminal_controls}
+
+  defp validate_reconciled_finalize_control(control, task_id, ids, sequences, previous)
+       when is_map(control) and not is_struct(control) do
+    with true <- MapSet.equal?(Map.keys(control) |> MapSet.new(), @allowed_control_keys),
+         :ok <- ensure_string_keyed_json_map(control, :non_json_control),
+         {:ok, encoded} <- Jason.encode(control),
+         true <- byte_size(encoded) <= @max_finalize_control_bytes,
+         control_id when is_binary(control_id) <- control["control_id"],
+         true <- String.valid?(control_id) and String.trim(control_id) != "",
+         true <- byte_size(control_id) <= @max_control_id_bytes,
+         false <- MapSet.member?(ids, control_id),
+         ^task_id <- control["task_id"],
+         sequence when is_integer(sequence) and sequence > previous <- control["sequence"],
+         false <- MapSet.member?(sequences, sequence),
+         status when status in @reconciled_control_states <- control["status"],
+         :ok <- validate_reconciled_control_strings(control),
+         :ok <- validate_reconciled_finalize_control_state(control, status) do
+      {:ok, control_id, sequence}
+    else
+      _ -> {:error, :invalid_reconciled_terminal_control}
+    end
+  rescue
+    _ -> {:error, :invalid_reconciled_terminal_control}
+  end
+
+  defp validate_reconciled_finalize_control(_control, _task_id, _ids, _sequences, _previous),
+    do: {:error, :invalid_reconciled_terminal_control}
+
+  defp validate_reconciled_control_strings(control) do
+    with :ok <- validate_optional_control_string(control["sender_id"], 512),
+         :ok <- validate_required_control_string(control["message"], @max_control_message_bytes),
+         :ok <- validate_required_control_string(control["queued_at"], 128),
+         :ok <- validate_optional_control_string(control["delivered_at"], 128),
+         :ok <- validate_optional_control_string(control["target_stage"], @max_target_stage_bytes),
+         :ok <- validate_optional_control_string(control["delivery_mode"], 128),
+         :ok <- validate_optional_control_string(control["error"], 512) do
+      :ok
+    end
+  end
+
+  defp validate_optional_control_string(nil, _maximum), do: :ok
+
+  defp validate_optional_control_string(value, maximum),
+    do: validate_required_control_string(value, maximum)
+
+  defp validate_required_control_string(value, maximum)
+       when is_binary(value) and byte_size(value) <= maximum do
+    if String.valid?(value) and String.trim(value) != "",
+      do: :ok,
+      else: {:error, :invalid_control_string}
+  end
+
+  defp validate_required_control_string(_value, _maximum),
+    do: {:error, :invalid_control_string}
+
+  defp validate_reconciled_finalize_control_state(control, "delivered") do
+    if is_binary(control["delivered_at"]) and
+         control["delivery_mode"] in @reconciled_delivery_modes and is_nil(control["error"]),
+       do: :ok,
+       else: {:error, :invalid_delivered_control}
+  end
+
+  defp validate_reconciled_finalize_control_state(control, "delivery_unconfirmed") do
+    if is_nil(control["delivered_at"]) and is_binary(control["error"]) and
+         (is_nil(control["delivery_mode"]) or
+            control["delivery_mode"] in @reconciled_delivery_modes),
+       do: :ok,
+       else: {:error, :invalid_unconfirmed_control}
+  end
+
+  defp validate_reconciled_finalize_control_state(control, "unsupported") do
+    if is_nil(control["delivered_at"]) and is_nil(control["delivery_mode"]) and
+         is_binary(control["error"]),
+       do: :ok,
+       else: {:error, :invalid_unsupported_control}
+  end
+
   defp validate_finalize_artifact_files(result, root) do
     artifacts = Map.fetch!(result, "artifacts")
 
@@ -1136,6 +1449,78 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
       true ->
         invoke_terminal_evidence_store(store, root, task_id, result, controls)
+    end
+  end
+
+  defp archive_task_terminal(root, task_id, terminal_envelope, controls) do
+    store = Config.coding_plan_artifact_store()
+
+    cond do
+      not is_atom(store) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      not Code.ensure_loaded?(store) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      not function_exported?(store, :archive_task_terminal, 4) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      true ->
+        invoke_task_terminal_store(store, root, task_id, terminal_envelope, controls)
+    end
+  end
+
+  defp invoke_task_terminal_store(store, root, task_id, terminal_envelope, controls) do
+    case store.archive_task_terminal(root, task_id, terminal_envelope, controls) do
+      {:ok, descriptor} when is_map(descriptor) -> {:ok, descriptor}
+      {:error, _reason} -> {:error, :coding_task_terminal_archive_failed}
+      _other -> {:error, :invalid_coding_task_terminal_store_reply}
+    end
+  rescue
+    _exception -> {:error, :coding_task_terminal_archive_failed}
+  catch
+    _kind, _reason -> {:error, :coding_task_terminal_archive_failed}
+  end
+
+  defp validate_task_terminal_descriptor(
+         descriptor,
+         root,
+         task_id,
+         terminal_envelope,
+         controls
+       ) do
+    expected_path = Path.join(root, "coding-task-terminal.json")
+
+    expected_body = %{
+      "schema_version" => 1,
+      "task_id" => task_id,
+      "terminal_envelope" => terminal_envelope,
+      "controls" => controls
+    }
+
+    expected_terminal_state = terminal_envelope["terminal_state"]
+    expected_outcome_code = terminal_envelope["outcome"]["code"]
+
+    with :ok <- validate_json_object(descriptor, :task_terminal_descriptor),
+         true <-
+           MapSet.equal?(Map.keys(descriptor) |> MapSet.new(), @task_terminal_descriptor_keys),
+         1 <- descriptor["schema_version"],
+         ^task_id <- descriptor["task_id"],
+         ^expected_path <- descriptor["path"],
+         ^expected_terminal_state <- descriptor["terminal_state"],
+         ^expected_outcome_code <- descriptor["outcome_code"],
+         :ok <- validate_hash(descriptor["sha256"], "sha256"),
+         expected_byte_size when is_integer(expected_byte_size) and expected_byte_size > 0 <-
+           descriptor["byte_size"],
+         {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(expected_path),
+         true <- Bitwise.band(mode, 0o777) == 0o600,
+         {:ok, bytes} <- File.read(expected_path),
+         ^expected_byte_size <- byte_size(bytes),
+         true <- sha256(bytes) == descriptor["sha256"],
+         {:ok, ^expected_body} <- Jason.decode(bytes) do
+      :ok
+    else
+      _ -> {:error, :invalid_coding_task_terminal_descriptor}
     end
   end
 

@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   @moduletag :fast
 
-  alias Arbor.Contracts.Coding.{Plan, ValidationCapacityHandoff, WorkPacket}
+  alias Arbor.Contracts.Coding.{Plan, TaskTerminalEnvelope, ValidationCapacityHandoff, WorkPacket}
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.CodingTaskExecutor
@@ -120,6 +120,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         root,
         task_id,
         result,
+        controls
+      )
+    end
+
+    def archive_task_terminal(root, task_id, terminal_envelope, controls) do
+      Arbor.Orchestrator.CodingPlan.ArtifactStore.archive_task_terminal(
+        root,
+        task_id,
+        terminal_envelope,
         controls
       )
     end
@@ -403,6 +412,45 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     @moduledoc false
     def archive_terminal_evidence(_root, _task_id, _result, _controls),
       do: {:ok, %{"unexpected" => "reply"}}
+  end
+
+  defmodule InvalidTaskTerminalArtifactStoreReply do
+    @moduledoc false
+
+    def archive_task_terminal(_root, _task_id, _terminal_envelope, _controls),
+      do: {:ok, %{"unexpected" => "reply"}}
+  end
+
+  defmodule RaisingTaskTerminalArtifactStore do
+    @moduledoc false
+
+    def archive_task_terminal(_root, _task_id, _terminal_envelope, _controls),
+      do: raise("secret task terminal store failure")
+  end
+
+  defmodule TamperingTaskTerminalArtifactStore do
+    @moduledoc false
+
+    def archive_task_terminal(root, task_id, terminal_envelope, controls) do
+      with {:ok, descriptor} <-
+             ArtifactStore.archive_task_terminal(root, task_id, terminal_envelope, controls),
+           :ok <- File.write(descriptor["path"], "{}"),
+           :ok <- File.chmod(descriptor["path"], 0o600) do
+        {:ok, descriptor}
+      end
+    end
+  end
+
+  defmodule InsecureTaskTerminalArtifactStore do
+    @moduledoc false
+
+    def archive_task_terminal(root, task_id, terminal_envelope, controls) do
+      with {:ok, descriptor} <-
+             ArtifactStore.archive_task_terminal(root, task_id, terminal_envelope, controls),
+           :ok <- File.chmod(descriptor["path"], 0o644) do
+        {:ok, descriptor}
+      end
+    end
   end
 
   defmodule RaisingTerminalArtifactStore do
@@ -846,6 +894,35 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       },
       overrides
     )
+  end
+
+  defp reconciled_control(overrides \\ %{}) do
+    valid_control(
+      Map.merge(
+        %{
+          "status" => "delivered",
+          "delivered_at" => "2026-07-22T12:00:00Z",
+          "delivery_mode" => "same_session_follow_up",
+          "error" => nil
+        },
+        overrides
+      )
+    )
+  end
+
+  defp successful_terminal_envelope(task_id) do
+    {:ok, envelope} =
+      TaskTerminalEnvelope.from_code("no_changes", "done", %{
+        "kind" => "executor_result",
+        "result" => %{"status" => "no_changes", "task_id" => task_id}
+      })
+
+    envelope
+  end
+
+  defp task_terminal_root(task_id) do
+    digest = Base.encode16(:crypto.hash(:sha256, task_id), case: :lower)
+    Path.join(Config.coding_pipeline_logs_root(), "task-" <> digest)
   end
 
   defp prepare_finalize_artifacts do
@@ -3462,6 +3539,202 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   # ---------------------------------------------------------------------------
   # Terminal evidence finalization
   # ---------------------------------------------------------------------------
+
+  describe "finalize_terminal_task" do
+    test "acknowledges only after persisting the exact callback envelope and controls" do
+      task_id = "task_coding_1"
+      envelope = successful_terminal_envelope(task_id)
+      controls = [reconciled_control()]
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+
+      path = Path.join(task_terminal_root(task_id), "coding-task-terminal.json")
+      body = path |> File.read!() |> Jason.decode!()
+
+      assert body == %{
+               "schema_version" => 1,
+               "task_id" => task_id,
+               "terminal_envelope" => envelope,
+               "controls" => controls
+             }
+
+      assert body["terminal_envelope"] === envelope
+      assert Bitwise.band(File.stat!(path).mode, 0o777) == 0o600
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+    end
+
+    test "accepts cancellation and legacy-finalizer failure terminal semantics" do
+      {:ok, cancellation} =
+        TaskTerminalEnvelope.from_code("task_cancelled", "cancelled", %{
+          "kind" => "task_cancelled"
+        })
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 cancellation,
+                 [],
+                 valid_context(%{"task_id" => "task_cancelled_terminal"})
+               )
+
+      original = successful_terminal_envelope("task_legacy_finalize_failed")
+      {:ok, failed} = TaskTerminalEnvelope.finalization_failed(original)
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 failed,
+                 [],
+                 valid_context(%{"task_id" => "task_legacy_finalize_failed"})
+               )
+
+      {:ok, invalid} =
+        TaskTerminalEnvelope.from_code("invalid_terminal_evidence", "failed", %{
+          "kind" => "invalid_terminal_evidence"
+        })
+
+      {:ok, invalid_failed} = TaskTerminalEnvelope.finalization_failed(invalid)
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 invalid_failed,
+                 [],
+                 valid_context(%{"task_id" => "task_invalid_legacy_finalize_failed"})
+               )
+    end
+
+    test "rejects noncanonical envelopes, semantic mismatch, and mismatched controls" do
+      envelope = successful_terminal_envelope("task_coding_1")
+
+      atom_keyed =
+        Map.new(envelope, fn {key, value} -> {String.to_existing_atom(key), value} end)
+
+      assert {:error, :invalid_task_terminal_envelope} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 atom_keyed,
+                 [],
+                 valid_context()
+               )
+
+      assert {:error, :invalid_task_terminal_semantics} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 Map.put(envelope, "terminal_state", "failed"),
+                 [],
+                 valid_context()
+               )
+
+      assert {:error, :task_terminal_task_id_mismatch} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 put_in(envelope, ["evidence", "result", "task_id"], "other-task"),
+                 [],
+                 valid_context()
+               )
+
+      for control <- [
+            reconciled_control(%{"task_id" => "other-task"}),
+            valid_control()
+          ] do
+        assert {:error, :invalid_reconciled_terminal_controls} =
+                 CodingTaskExecutor.finalize_terminal_task(
+                   "agent_1",
+                   envelope,
+                   [control],
+                   valid_context()
+                 )
+      end
+
+      assert {:error, :task_terminal_context_mismatch} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 [],
+                 %{"task_id" => " task_coding_1"}
+               )
+    end
+
+    test "fails closed for unavailable stores, malformed replies, and unverifiable files" do
+      envelope = successful_terminal_envelope("task_coding_1")
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        InvalidTerminalArtifactStoreReply
+      )
+
+      assert {:error, :coding_plan_artifact_store_unavailable} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 [],
+                 valid_context()
+               )
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        InvalidTaskTerminalArtifactStoreReply
+      )
+
+      assert {:error, :invalid_coding_task_terminal_descriptor} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 [],
+                 valid_context()
+               )
+
+      for store <- [RaisingTaskTerminalArtifactStore, TamperingTaskTerminalArtifactStore] do
+        Application.put_env(:arbor_orchestrator, :coding_plan_artifact_store, store)
+
+        assert {:error, reason} =
+                 CodingTaskExecutor.finalize_terminal_task(
+                   "agent_1",
+                   envelope,
+                   [],
+                   valid_context()
+                 )
+
+        assert reason in [
+                 :coding_task_terminal_archive_failed,
+                 :invalid_coding_task_terminal_descriptor
+               ]
+
+        refute inspect(reason) =~ "secret"
+        File.rm(Path.join(task_terminal_root("task_coding_1"), "coding-task-terminal.json"))
+      end
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        InsecureTaskTerminalArtifactStore
+      )
+
+      assert {:error, :invalid_coding_task_terminal_descriptor} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 [],
+                 valid_context()
+               )
+    end
+  end
 
   describe "finalize_task" do
     test "rejects a caller-forged inconsistent outcome" do

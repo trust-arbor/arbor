@@ -356,9 +356,10 @@ defmodule Arbor.Orchestrator.Config do
 
   Defaults to `Arbor.Orchestrator.CodingPlan.ArtifactStore`. Tests and alternate
   packaging may inject a compatible module via `:coding_plan_artifact_store`.
-  Compatible stores implement both `archive/4` and
-  `archive_terminal_evidence/4`; missing terminal publication fails an opted-in
-  coding task during mandatory finalization.
+  Compatible stores implement `archive/4`, the adoption-facing legacy
+  `archive_terminal_evidence/4`, and the all-terminal
+  `archive_task_terminal/4`; missing mandatory publication fails an opted-in
+  coding task during finalization.
   """
   @spec coding_plan_artifact_store() :: module()
   def coding_plan_artifact_store do
