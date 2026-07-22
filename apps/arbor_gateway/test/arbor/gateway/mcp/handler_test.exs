@@ -3,6 +3,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   @moduletag :fast
 
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
+  alias Arbor.Contracts.Coding.TaskTerminalEnvelope
   alias Arbor.Gateway.MCP.Handler
 
   defmodule FakeOrchestration do
@@ -547,6 +548,47 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
       assert_received {:task_result, "task_1", opts}
       assert opts[:caller_id] == "human_1"
+    end
+
+    test "task status and result project canonical outcomes without changing their structure", %{
+      state: state
+    } do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+      outcome = task_outcome("worker_turn_no_progress")
+
+      status = %{
+        task_id: "task_1",
+        agent_id: "agent_1",
+        state: :failed,
+        current_step: "failed",
+        waiting_on: nil,
+        started_at: ~U[2026-07-08 12:00:00Z],
+        updated_at: ~U[2026-07-08 12:00:01Z],
+        completed_at: ~U[2026-07-08 12:00:01Z],
+        metadata: %{"ticket" => "A-1"},
+        outcome: outcome
+      }
+
+      envelope =
+        terminal_envelope(
+          "worker_turn_no_progress",
+          "failed",
+          %{"kind" => "pipeline_failure", "result" => %{"outcome" => outcome}}
+        )
+
+      Process.put({FakeOrchestration, :status_result}, {:ok, status})
+      Process.put({FakeOrchestration, :result_result}, {:ok, envelope})
+
+      {:ok, %{content: [%{text: status_text}]}, _state} =
+        Handler.handle_call_tool("arbor_task_status", %{"task_id" => "task_1"}, state)
+
+      assert %{"task" => %{"state" => "failed", "outcome" => ^outcome}} =
+               Jason.decode!(status_text)
+
+      {:ok, %{content: [%{text: result_text}]}, _state} =
+        Handler.handle_call_tool("arbor_task_result", %{"task_id" => "task_1"}, state)
+
+      assert %{"task_id" => "task_1", "result" => ^envelope} = Jason.decode!(result_text)
     end
 
     test "cancel_task requires SignedRequest authentication", %{state: state} do
@@ -1284,5 +1326,16 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       refute text =~ ~r/Agent agent_\w+: \d+ notes/,
              "Overview component leaks a specific agent_id and memory count — M8 regression"
     end
+  end
+
+  defp task_outcome(code) do
+    {:ok, outcome} = Arbor.Contracts.Coding.TaskOutcome.from_code(code)
+    Arbor.Contracts.Coding.TaskOutcome.to_map(outcome)
+  end
+
+  defp terminal_envelope(code, state, evidence) do
+    outcome = task_outcome(code)
+    {:ok, envelope} = TaskTerminalEnvelope.preserve(outcome, state, evidence)
+    envelope
   end
 end

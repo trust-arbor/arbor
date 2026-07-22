@@ -14,6 +14,7 @@ defmodule Arbor.Agent.Orchestration do
   require Logger
 
   alias Arbor.Agent.Orchestration.{ApprovalInventoryProjection, PendingApproval, TaskArtifacts}
+  alias Arbor.Contracts.Coding.{TaskOutcome, TaskTerminalEnvelope}
   alias Arbor.Contracts.Security.CapabilityUri
 
   @approval_read_uri "arbor://approval/read"
@@ -228,6 +229,7 @@ defmodule Arbor.Agent.Orchestration do
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_task_adopt(opts, caller_id, status),
          {:ok, destination_ref} <- normalize_destination_ref(destination_ref),
+         :ok <- ensure_successful_task(status),
          store_result <-
            opts
            |> task_store_module()
@@ -1726,26 +1728,45 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_task_dispatch_result(other), do: {:error, {:unexpected_task_store_result, other}}
 
   defp normalize_task_status_result({:ok, status}) when is_map(status) do
-    {:ok,
-     %{
-       task_id: value(status, :task_id),
-       agent_id: value(status, :agent_id),
-       state: normalize_task_state(value(status, :state)),
-       current_step: value(status, :current_step),
-       waiting_on: value(status, :waiting_on),
-       started_at: value(status, :started_at),
-       updated_at: value(status, :updated_at),
-       completed_at: value(status, :completed_at),
-       metadata: value(status, :metadata, %{}) || %{},
-       steering: value(status, :steering, %{"counts" => %{}, "last" => nil}) || %{}
-     }}
+    normalized = %{
+      task_id: value(status, :task_id),
+      agent_id: value(status, :agent_id),
+      state: normalize_task_state(value(status, :state)),
+      current_step: value(status, :current_step),
+      waiting_on: value(status, :waiting_on),
+      started_at: value(status, :started_at),
+      updated_at: value(status, :updated_at),
+      completed_at: value(status, :completed_at),
+      metadata: value(status, :metadata, %{}) || %{},
+      steering: value(status, :steering, %{"counts" => %{}, "last" => nil}) || %{}
+    }
+
+    case value(status, :outcome, :__missing__) do
+      :__missing__ ->
+        {:ok, normalized}
+
+      nil ->
+        {:ok, normalized}
+
+      outcome ->
+        case TaskOutcome.validate_registered(outcome) do
+          {:ok, outcome} -> {:ok, Map.put(normalized, :outcome, TaskOutcome.to_map(outcome))}
+          {:error, reason} -> {:error, {:invalid_task_status_outcome, reason}}
+        end
+    end
   end
 
   defp normalize_task_status_result({:error, _} = error), do: error
   defp normalize_task_status_result(:module_unavailable), do: {:error, :task_store_unavailable}
   defp normalize_task_status_result(other), do: {:error, {:unexpected_task_store_result, other}}
 
-  defp normalize_task_result({:ok, result}), do: {:ok, TaskArtifacts.normalize(result)}
+  defp normalize_task_result({:ok, result}) do
+    case normalize_terminal_envelope_result(result) do
+      {:ok, envelope} -> {:ok, envelope}
+      {:error, reason} -> {:error, reason}
+      :not_an_envelope -> {:ok, TaskArtifacts.normalize(result)}
+    end
+  end
 
   defp normalize_task_result({:error, _} = error), do: error
   defp normalize_task_result(:module_unavailable), do: {:error, :task_store_unavailable}
@@ -1763,7 +1784,14 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_task_steer_result(:module_unavailable), do: {:error, :task_store_unavailable}
   defp normalize_task_steer_result(other), do: {:error, {:unexpected_task_store_result, other}}
 
-  defp normalize_task_adopt_result({:ok, result}), do: {:ok, TaskArtifacts.normalize(result)}
+  defp normalize_task_adopt_result({:ok, result}) do
+    case normalize_terminal_envelope_result(result) do
+      {:ok, _envelope} -> {:error, :task_not_adoptable}
+      {:error, reason} -> {:error, reason}
+      :not_an_envelope -> {:ok, TaskArtifacts.normalize(result)}
+    end
+  end
+
   defp normalize_task_adopt_result({:error, _} = error), do: error
   defp normalize_task_adopt_result(:module_unavailable), do: {:error, :task_store_unavailable}
   defp normalize_task_adopt_result(other), do: {:error, {:unexpected_task_store_result, other}}
@@ -1778,6 +1806,32 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_task_state("failed"), do: :failed
   defp normalize_task_state("cancelled"), do: :cancelled
   defp normalize_task_state(_state), do: :running
+
+  defp ensure_successful_task(%{state: :done}), do: :ok
+  defp ensure_successful_task(%{state: state}), do: {:error, {:task_not_adoptable, state}}
+
+  defp normalize_terminal_envelope_result(result) when is_map(result) and not is_struct(result) do
+    if envelope_shaped?(result) do
+      case TaskTerminalEnvelope.normalize(result) do
+        {:ok, envelope} -> {:ok, envelope}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :not_an_envelope
+    end
+  end
+
+  defp normalize_terminal_envelope_result(_result), do: :not_an_envelope
+
+  # `version` also appears in ordinary coding payloads. The terminal state and
+  # prior outcome are envelope-specific markers, so they are the only fields
+  # used to decide whether malformed terminal data must fail closed.
+  defp envelope_shaped?(result) do
+    Map.has_key?(result, :terminal_state) or
+      Map.has_key?(result, "terminal_state") or
+      Map.has_key?(result, :prior_outcome) or
+      Map.has_key?(result, "prior_outcome")
+  end
 
   defp normalize_audit_result(:ok), do: :ok
   defp normalize_audit_result({:error, _}), do: :ok

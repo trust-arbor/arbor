@@ -4,6 +4,7 @@ defmodule Arbor.Agent.OrchestrationTest do
 
   alias Arbor.Agent.Orchestration
   alias Arbor.Agent.Orchestration.PendingApproval
+  alias Arbor.Contracts.Coding.TaskTerminalEnvelope
 
   defmodule FakeSecurity do
     def authorize(actor, resource_uri, action, opts) do
@@ -779,6 +780,105 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert result.raw.status == "change_committed"
     end
 
+    test "preserves a successful coding outcome in status and compatibility result" do
+      outcome = task_terminal_outcome("no_changes")
+      Process.put({FakeTaskStore, :status_result}, {:ok, task_status(:done, outcome)})
+
+      Process.put(
+        {FakeTaskStore, :result_result},
+        {:ok,
+         %{
+           "status" => "no_changes",
+           "branch" => "agent/change",
+           "worktree_path" => "/tmp/ws",
+           "outcome" => outcome
+         }}
+      )
+
+      opts = [caller_id: "human_1", task_store: FakeTaskStore, security_module: FakeSecurity]
+      assert {:ok, status} = Orchestration.task_status("task_1", opts)
+      assert status.state == :done
+      assert status.outcome == outcome
+
+      assert {:ok, result} = Orchestration.task_result("task_1", opts)
+      assert result.payload.outcome == outcome
+      assert result.raw["outcome"] == outcome
+    end
+
+    test "returns failed pipeline, owner-down, invalid-evidence, and finalizer-failure envelopes exactly" do
+      cases = [
+        {"pipeline",
+         task_terminal_envelope("worker_turn_no_progress", "failed", "pipeline_failure")},
+        {"owner_down", task_terminal_envelope("task_owner_died", "failed", "task_owner_died")},
+        {"invalid",
+         task_terminal_envelope(
+           "invalid_terminal_evidence",
+           "failed",
+           "invalid_terminal_evidence"
+         )},
+        {"finalizer", finalization_failed_envelope()}
+      ]
+
+      opts = [caller_id: "human_1", task_store: FakeTaskStore, security_module: FakeSecurity]
+
+      for {suffix, envelope} <- cases do
+        Process.put(
+          {FakeTaskStore, :status_result},
+          {:ok, task_status(:failed, envelope["outcome"])}
+        )
+
+        Process.put({FakeTaskStore, :result_result}, {:ok, envelope})
+
+        assert {:ok, status} = Orchestration.task_status("task_#{suffix}", opts)
+        assert status.state == :failed
+        assert status.outcome == envelope["outcome"]
+
+        assert {:ok, ^envelope} = Orchestration.task_result("task_#{suffix}", opts)
+      end
+    end
+
+    test "preserves cancellation outcome in the cancellation response" do
+      outcome = task_terminal_outcome("task_cancelled")
+      Process.put({FakeTaskStore, :status_result}, {:ok, task_status(:running, nil)})
+      Process.put({FakeTaskStore, :cancel_result}, {:ok, task_status(:cancelled, outcome)})
+
+      assert {:ok, status} =
+               Orchestration.cancel_task("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity
+               )
+
+      assert status.state == :cancelled
+      assert status.outcome == outcome
+    end
+
+    test "fails closed for a malformed terminal envelope and does not classify versioned values" do
+      malformed = %{"version" => 1, "terminal_state" => "failed", "outcome" => %{}}
+      versioned_compatibility = %{"version" => 1, "value" => "ordinary result"}
+
+      Process.put({FakeTaskStore, :result_result}, {:ok, malformed})
+
+      opts = [caller_id: "human_1", task_store: FakeTaskStore, security_module: FakeSecurity]
+
+      assert {:error, _reason} = Orchestration.task_result("task_1", opts)
+
+      Process.put({FakeTaskStore, :result_result}, {:ok, versioned_compatibility})
+      assert {:ok, result} = Orchestration.task_result("task_1", opts)
+      assert result.raw == versioned_compatibility
+    end
+
+    test "preserves generic failed task compatibility behavior" do
+      Process.put({FakeTaskStore, :result_result}, {:error, {:failed, :legacy_runner_error}})
+
+      assert {:error, {:failed, :legacy_runner_error}} =
+               Orchestration.task_result("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity
+               )
+    end
+
     test "reports running tasks as waiting_approval when the shared queue has a pending item" do
       Process.put(
         {FakeConsensus, :pending},
@@ -1519,6 +1619,18 @@ defmodule Arbor.Agent.OrchestrationTest do
 
   describe "adopt_task_change/3" do
     test "checks the terminal task status, authorizes the exact task scope, and adopts the result" do
+      outcome = task_terminal_outcome("no_changes")
+      Process.put({FakeTaskStore, :status_result}, {:ok, task_status(:done, outcome)})
+
+      Process.put(
+        {FakeTaskStore, :adopt_result},
+        {:ok,
+         %{
+           result_type: :coding_change,
+           payload: %{destination_ref: "refs/heads/reviewed", outcome: outcome}
+         }}
+      )
+
       assert {:ok, result} =
                Orchestration.adopt_task_change(
                  "task_1",
@@ -1529,6 +1641,7 @@ defmodule Arbor.Agent.OrchestrationTest do
                )
 
       assert result.payload.destination_ref == "refs/heads/reviewed"
+      assert result.payload.outcome == outcome
       assert_received {:task_status, "task_1", _opts}
 
       assert_received {:authorize, "human_1", "arbor://agent/task/adopt/task_1", :execute,
@@ -1536,6 +1649,24 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert_received {:task_adopt, "task_1", "refs/heads/reviewed", opts}
       assert opts[:caller_id] == "human_1"
+    end
+
+    test "does not adopt failed or cancelled terminal envelopes" do
+      opts = [caller_id: "human_1", task_store: FakeTaskStore, security_module: FakeSecurity]
+
+      for state <- [:failed, :cancelled] do
+        outcome =
+          task_terminal_outcome(
+            if(state == :failed, do: "task_runner_failed", else: "task_cancelled")
+          )
+
+        Process.put({FakeTaskStore, :status_result}, {:ok, task_status(state, outcome)})
+
+        assert {:error, {:task_not_adoptable, ^state}} =
+                 Orchestration.adopt_task_change("task_1", "refs/heads/reviewed", opts)
+
+        refute_received {:task_adopt, _, _, _}
+      end
     end
 
     test "security regression: a different caller cannot adopt another task" do
@@ -1814,5 +1945,44 @@ defmodule Arbor.Agent.OrchestrationTest do
       metadata: metadata,
       submitted_at: DateTime.utc_now()
     }
+  end
+
+  defp task_status(state, outcome) do
+    %{
+      task_id: "task_1",
+      agent_id: "agent_1",
+      state: state,
+      current_step: Atom.to_string(state),
+      waiting_on: nil,
+      started_at: ~U[2026-07-22 12:00:00Z],
+      updated_at: ~U[2026-07-22 12:00:01Z],
+      completed_at: if(state == :running, do: nil, else: ~U[2026-07-22 12:00:01Z]),
+      metadata: %{},
+      outcome: outcome
+    }
+  end
+
+  defp task_terminal_outcome(code) do
+    {:ok, outcome} = Arbor.Contracts.Coding.TaskOutcome.from_code(code)
+    Arbor.Contracts.Coding.TaskOutcome.to_map(outcome)
+  end
+
+  defp task_terminal_envelope(code, terminal_state, evidence_kind) do
+    outcome = task_terminal_outcome(code)
+    evidence = %{"kind" => evidence_kind}
+
+    evidence =
+      if evidence_kind in ["pipeline_failure", "executor_result"],
+        do: Map.put(evidence, "result", %{"outcome" => outcome}),
+        else: evidence
+
+    {:ok, envelope} = TaskTerminalEnvelope.preserve(outcome, terminal_state, evidence)
+    envelope
+  end
+
+  defp finalization_failed_envelope do
+    original = task_terminal_envelope("no_changes", "done", "executor_result")
+    {:ok, envelope} = TaskTerminalEnvelope.finalization_failed(original)
+    envelope
   end
 end
