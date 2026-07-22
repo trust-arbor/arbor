@@ -1528,6 +1528,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       Map.get(record, :terminal_finalized, false) ->
         record
 
+      record.state == :done and legacy_finalizer?(module) and all_terminal_finalizer?(module) ->
+        finalize_legacy_then_all_terminal(record, runner_result, state, module)
+
       all_terminal_finalizer?(module) ->
         finalize_all_terminal(record, {:runner_result, runner_result}, state, module)
 
@@ -1563,8 +1566,59 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       function_exported?(module, :finalize_task, 4)
   end
 
+  defp finalize_legacy_then_all_terminal(record, runner_result, state, module) do
+    finalized_record = finalize_configured_task(record, runner_result, state, module)
+
+    if finalized_record.state == :done do
+      case finalized_raw_result(finalized_record) do
+        {:ok, finalized_result} ->
+          finalize_all_terminal(
+            finalized_record,
+            {:runner_result, {:ok, finalized_result}},
+            state,
+            module
+          )
+
+        {:error, reason} ->
+          failed_record = finalization_failed(finalized_record, reason)
+
+          acknowledge_legacy_finalization_failure(
+            record,
+            failed_record,
+            runner_result,
+            state,
+            module
+          )
+      end
+    else
+      acknowledge_legacy_finalization_failure(
+        record,
+        finalized_record,
+        runner_result,
+        state,
+        module
+      )
+    end
+  end
+
+  defp acknowledge_legacy_finalization_failure(
+         original_record,
+         failed_record,
+         runner_result,
+         state,
+         module
+       ) do
+    original_envelope = terminal_envelope(original_record, {:runner_result, runner_result})
+    {:ok, failed_envelope} = TaskTerminalEnvelope.finalization_failed(original_envelope)
+    acknowledge_all_terminal(failed_record, failed_envelope, state, module)
+  end
+
   defp finalize_all_terminal(record, terminal, state, module) do
     envelope = terminal_envelope(record, terminal)
+    acknowledge_all_terminal(record, envelope, state, module)
+  end
+
+  defp acknowledge_all_terminal(record, envelope, state, module) do
     record = put_terminal_envelope(record, envelope)
 
     timeout =
@@ -1593,7 +1647,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         Map.put(record, :terminal_finalized, true)
 
       _failure ->
-        {:ok, failed_envelope} = TaskTerminalEnvelope.finalization_failed(envelope)
+        failed_envelope = finalization_failure_envelope(envelope)
 
         record
         |> put_terminal_envelope(failed_envelope)
@@ -1605,6 +1659,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           terminal_finalized: true
         })
     end
+  end
+
+  defp finalization_failure_envelope(
+         %{"outcome" => %{"code" => "task_finalization_failed"}} = envelope
+       ),
+       do: envelope
+
+  defp finalization_failure_envelope(envelope) do
+    {:ok, failed_envelope} = TaskTerminalEnvelope.finalization_failed(envelope)
+    failed_envelope
   end
 
   defp terminal_envelope(record, {:runner_result, {:ok, result}}) do
@@ -1675,7 +1739,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp approval_owner_terminated_envelope(record, _approval_id),
     do: invalid_terminal_envelope(record, nil)
 
-  defp invalid_terminal_envelope(record, result) do
+  defp invalid_terminal_envelope(_record, result) do
     evidence =
       case canonicalize_and_roundtrip(result) do
         {:ok, clean} -> %{"kind" => "invalid_terminal_evidence", "result" => clean}
@@ -1684,16 +1748,21 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
     case TaskTerminalEnvelope.from_code(
            "invalid_terminal_evidence",
-           terminal_state(record),
+           "failed",
            evidence
          ) do
       {:ok, envelope} ->
         envelope
 
       {:error, _reason} ->
-        lifecycle_envelope!("invalid_terminal_evidence", record, %{
-          "kind" => "invalid_terminal_evidence"
-        })
+        {:ok, envelope} =
+          TaskTerminalEnvelope.from_code(
+            "invalid_terminal_evidence",
+            "failed",
+            %{"kind" => "invalid_terminal_evidence"}
+          )
+
+        envelope
     end
   end
 

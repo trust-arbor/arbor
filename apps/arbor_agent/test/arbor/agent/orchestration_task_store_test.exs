@@ -426,6 +426,70 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
   end
 
+  defmodule DualFinalizingExecutor do
+    def run(agent_id, task, context) do
+      send(recording_pid(), {:dual_executor_started, self(), agent_id, task, context})
+
+      receive do
+        {:finish, result} -> result
+      after
+        1_000 -> {:error, :test_timeout}
+      end
+    end
+
+    def finalize_task(agent_id, result, controls, context) do
+      send(recording_pid(), {:dual_finalize_task_called, agent_id, result, controls, context})
+
+      case Application.get_env(:arbor_agent, :task_store_test_finalize, :success) do
+        :success ->
+          task_id = context["task_id"]
+
+          descriptor = %{
+            "path" => "/tmp/#{task_id}-evidence.json",
+            "sha256" => String.duplicate("a", 64),
+            "byte_size" => 128,
+            "schema_version" => 1,
+            "task_id" => task_id
+          }
+
+          artifacts =
+            result
+            |> Map.get("artifacts", %{})
+            |> Map.put("task_evidence", descriptor)
+
+          {:ok, result |> Map.put("artifacts", artifacts) |> Map.put("finalized", true)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+
+    def finalize_terminal_task(agent_id, envelope, controls, context) do
+      send(
+        recording_pid(),
+        {:dual_finalize_terminal_called, agent_id, envelope, controls, context}
+      )
+
+      case Application.get_env(:arbor_agent, :task_store_test_terminal_finalize, :success) do
+        :success -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    def adopt_task(agent_id, result, request, context) do
+      send(recording_pid(), {:dual_adopt_called, agent_id, result, request, context})
+
+      case get_in(result, ["artifacts", "task_evidence"]) do
+        %{} -> {:ok, Map.put(result, "adopted", request["destination_ref"])}
+        _missing -> {:error, :task_evidence_missing}
+      end
+    end
+
+    defp recording_pid do
+      Application.fetch_env!(:arbor_agent, :task_store_test_pid)
+    end
+  end
+
   defmodule NoRunModule do
     def other, do: :ok
   end
@@ -1151,7 +1215,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
   end
 
-  test "missing and forged outcomes fail closed as invalid_terminal_evidence", %{
+  test "lifecycle regression: missing and forged outcomes publish a failed terminal envelope", %{
     supervisor: supervisor
   } do
     store = start_all_terminal_store(supervisor)
@@ -1177,6 +1241,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
       assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], _, _}
       assert envelope["outcome"]["code"] == "invalid_terminal_evidence"
+      assert envelope["terminal_state"] == "failed"
 
       assert_eventually(fn ->
         assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
@@ -1187,6 +1252,119 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
         assert outcome == envelope["outcome"]
       end)
     end
+  end
+
+  test "dual finalizers retain evidence before constructing and acknowledging success", %{
+    supervisor: supervisor
+  } do
+    store = start_dual_finalizing_store(supervisor)
+    task_id = "task_dual_finalize_success"
+    outcome = registered_outcome("no_changes")
+
+    assert {:ok, ^task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "retain then acknowledge"},
+               name: store,
+               task_id: task_id
+             )
+
+    assert_receive {:dual_executor_started, runner_pid, "agent_1", _task, context}
+
+    original_result = %{
+      "status" => "no_changes",
+      "canonical_status" => "no_changes",
+      "branch" => "test/dual-finalizer",
+      "outcome" => outcome,
+      "artifacts" => coding_artifacts()
+    }
+
+    send(runner_pid, {:finish, {:ok, original_result}})
+
+    assert_receive {:dual_finalize_task_called, "agent_1", ^original_result, [], ^context}
+
+    assert_receive {:dual_finalize_terminal_called, "agent_1", envelope, [], ^context}
+    finalized_result = envelope["evidence"]["result"]
+    descriptor = get_in(finalized_result, ["artifacts", "task_evidence"])
+
+    assert envelope["terminal_state"] == "done"
+    assert envelope["outcome"] == outcome
+    assert finalized_result["finalized"] == true
+    assert descriptor["task_id"] == task_id
+    assert descriptor["sha256"] == String.duplicate("a", 64)
+
+    assert_eventually(fn ->
+      assert {:ok, completed} = TaskStore.result(task_id, name: store)
+      assert completed.raw == finalized_result
+      assert completed.payload.outcome == outcome
+      assert completed.payload.artifacts["task_evidence"] == descriptor
+
+      assert {:ok, %{state: :done, outcome: status_outcome}} =
+               TaskStore.status(task_id, name: store)
+
+      assert status_outcome == envelope["outcome"]
+    end)
+
+    assert {:ok, adopted} = TaskStore.adopt(task_id, "refs/heads/reviewed", name: store)
+    assert adopted.raw["adopted"] == "refs/heads/reviewed"
+    assert get_in(adopted.raw, ["artifacts", "task_evidence"]) == descriptor
+
+    assert_receive {:dual_adopt_called, "agent_1", adopt_input,
+                    %{"destination_ref" => "refs/heads/reviewed"}, ^context}
+
+    assert get_in(adopt_input, ["artifacts", "task_evidence"]) == descriptor
+    refute_receive {:dual_finalize_task_called, _, _, _, _}, 100
+    refute_receive {:dual_finalize_terminal_called, _, _, _, _}, 100
+  end
+
+  test "dual legacy finalizer failure is acknowledged as task_finalization_failed once", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_finalize, {:error, :archive_failed})
+    store = start_dual_finalizing_store(supervisor)
+    task_id = "task_dual_finalize_failure"
+    outcome = registered_outcome("no_changes")
+
+    assert {:ok, ^task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "archive failure"},
+               name: store,
+               task_id: task_id
+             )
+
+    assert_receive {:dual_executor_started, runner_pid, "agent_1", _task, context}
+
+    original_result = %{
+      "status" => "no_changes",
+      "canonical_status" => "no_changes",
+      "branch" => "test/dual-finalizer-failure",
+      "outcome" => outcome,
+      "artifacts" => coding_artifacts()
+    }
+
+    send(runner_pid, {:finish, {:ok, original_result}})
+
+    assert_receive {:dual_finalize_task_called, "agent_1", ^original_result, [], ^context}
+    assert_receive {:dual_finalize_terminal_called, "agent_1", envelope, [], ^context}
+
+    assert envelope["terminal_state"] == "failed"
+    assert envelope["outcome"]["code"] == "task_finalization_failed"
+    assert envelope["prior_outcome"] == outcome
+    assert envelope["evidence"]["result"] == original_result
+    refute get_in(envelope, ["evidence", "result", "artifacts", "task_evidence"])
+
+    assert_eventually(fn ->
+      assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+
+      assert {:ok, %{state: :failed, outcome: status_outcome}} =
+               TaskStore.status(task_id, name: store)
+
+      assert status_outcome == envelope["outcome"]
+    end)
+
+    refute_receive {:dual_finalize_task_called, _, _, _, _}, 100
+    refute_receive {:dual_finalize_terminal_called, _, _, _, _}, 100
   end
 
   test "all-terminal finalizer failure and timeout retain prior outcome and evidence once", %{
@@ -3584,6 +3762,16 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     TaskOutcome.to_map(outcome)
   end
 
+  defp coding_artifacts do
+    %{
+      "coding_plan_path" => "/tmp/plan.json",
+      "coding_pipeline_path" => "/tmp/pipeline.dot",
+      "compile_manifest_path" => "/tmp/manifest.json",
+      "compiler_version" => "1",
+      "graph_hash" => String.duplicate("b", 64)
+    }
+  end
+
   defp subscribe_to_task_steering_transitions(task_id) do
     test_pid = self()
     ensure_signals_started()
@@ -3652,6 +3840,21 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     Application.put_env(:arbor_agent, :task_executors, %{
       "coding_change" => AllTerminalExecutor
+    })
+
+    final_opts =
+      [name: store, task_supervisor: supervisor, steer_confirmation_delay_ms: 10_000]
+      |> Keyword.merge(opts)
+
+    start_supervised!({TaskStore, final_opts}, id: store)
+    store
+  end
+
+  defp start_dual_finalizing_store(supervisor, opts \\ []) do
+    store = Module.concat(__MODULE__, :"DualFinalizingStore#{System.unique_integer([:positive])}")
+
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => DualFinalizingExecutor
     })
 
     final_opts =

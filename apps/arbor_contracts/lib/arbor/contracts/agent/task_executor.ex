@@ -135,6 +135,13 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   Executors without `finalize_terminal_task/4` retain the existing compatibility
   behavior below.
 
+  When an executor implements both finalizers for a successful task, TaskStore
+  invokes `finalize_task/4` first and constructs the terminal envelope from that
+  callback's finalized result. This preserves retained task-evidence descriptors
+  required by adoption. If the success finalizer fails, TaskStore invokes
+  `finalize_terminal_task/4` once with a failed `task_finalization_failed`
+  envelope. Failure and cancellation paths invoke only the all-terminal callback.
+
   Configured executors may implement `finalize_task/4` for mandatory terminal artifact retention.
   TaskStore calls it only after a successful configured
   executor return and terminal steering reconciliation. It is time-bounded
