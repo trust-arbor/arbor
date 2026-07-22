@@ -73,6 +73,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     end
   end
 
+  test "cross-app compile failure is coded on the compile gate itself in stable order" do
+    assert {:ok, report} = verify("cross_app", cross_failure(:compile))
+
+    assert Enum.map(report["diagnostics"], &{&1["gate_id"], &1["code"]}) == [
+             {"coding.validation.cross_app.compile", "compile_failed"},
+             {"coding.validation.cross_app.xref", "compile_failed"},
+             {"coding.validation.cross_app.test_compile", "compile_failed"},
+             {"coding.validation.cross_app.tests", "compile_failed"}
+           ]
+  end
+
   test "capacity, timeout, and closed security setup reasons are blocked" do
     cases = [
       {"cross_app", cross_capacity_result(), "validation_capacity_exceeded"},
@@ -128,9 +139,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
         feedback: %{
           original.feedback
           | "stdout_excerpt" => "different excerpt",
-            "stderr_excerpt" => "another excerpt",
-            "stdout_sha256" => @other_digest,
-            "stderr_sha256" => @digest
+            "stderr_excerpt" => "another excerpt"
         }
     }
 
@@ -143,7 +152,6 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     changed_cross =
       cross
       |> put_in([:compile, "stdout_excerpt"], "different")
-      |> put_in([:compile, "stdout_sha256"], @other_digest)
       |> Map.put(:feedback_json, "different ignored feedback json")
 
     assert {:ok, cross_report} = verify("cross_app", cross)
@@ -154,7 +162,6 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
 
     changed_security =
       security
-      |> put_in([:diagnostics, :candidate, "output_sha256"], @other_digest)
       |> Map.put(:feedback_json, "different ignored feedback json")
 
     assert {:ok, security_report} = verify("security_regression", security)
@@ -171,6 +178,47 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     failed = cross_failure(:test)
     assert {:ok, failed_report} = verify("cross_app", failed)
     refute first["evidence_ref"] == failed_report["evidence_ref"]
+  end
+
+  test "accepted hashes, scope, heads, and diagnostic execution facts bind evidence_ref" do
+    default = default_result()
+
+    default_variants = [
+      Map.put(default, :validated_head, @base_oid),
+      put_in(default, [:feedback, "stdout_sha256"], @other_digest),
+      put_in(default, [:feedback, "stdout_truncated"], true)
+    ]
+
+    assert_evidence_changes("default", default, default_variants)
+
+    cross = cross_result()
+
+    changed_scope =
+      cross
+      |> Map.put(:base_commit, @candidate_commit)
+      |> Map.put(:validated_head, @base_oid)
+      |> Map.put(:changed_files, ["apps/alpha/lib/alpha.ex", "apps/beta/lib/beta.ex"])
+      |> Map.put(:changed_apps, ["alpha", "beta"])
+      |> Map.put(:affected_apps, ["alpha", "beta"])
+      |> Map.put(:test_paths, ["apps/alpha/test", "apps/beta/test"])
+      |> Map.put(:root_wide, true)
+
+    cross_variants = [
+      changed_scope,
+      put_in(cross, [:compile, "stdout_sha256"], @other_digest),
+      put_in(cross, [:test, "stderr_truncated"], true)
+    ]
+
+    assert_evidence_changes("cross_app", cross, cross_variants)
+
+    security = security_result("security_regression_validated")
+
+    changed_diagnostic =
+      security
+      |> put_in([:diagnostics, :candidate, "output_bytes"], 13)
+      |> put_in([:diagnostics, :candidate, "output_sha256"], @other_digest)
+
+    assert_evidence_changes("security_regression", security, [changed_diagnostic])
   end
 
   test "candidate tree drift blocks every profile at its stable gates" do
@@ -208,9 +256,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       {"cross_app", put_in(cross, [:compile, "passed"], "true")},
       {"cross_app", put_in(cross, [:xref, "reason"], "convenient_reason")},
       {"cross_app", Map.put(cross, :changed_files, Enum.map(1..2_001, &"file#{&1}"))},
+      {"cross_app", Map.put(cross, :changed_files, ["z.ex", "a.ex"])},
+      {"cross_app", Map.put(cross, :changed_apps, ["alpha", "alpha"])},
       {"security_regression", Map.put(security, :reason, "arbitrary_failure")},
       {"security_regression", put_in(security, [:candidate, :executed], "1")},
       {"security_regression", put_in(security, [:candidate, :passed], 2)},
+      {"security_regression", put_in(security, [:diagnostics, :candidate, "exit_code"], 1)},
       {"security_regression", Map.put(security, :source_hashes, [%{path: "test/x.exs"}])},
       {"security_regression", Map.put(security, :extra, true)}
     ]
@@ -237,6 +288,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       "security_regression",
       Map.put(result, :review_attestation_digest, "SHA256:" <> @digest)
     )
+
+    sorted = put_security_tests(result, ["test/a_test.exs", "test/b_test.exs"])
+    assert {:ok, %{"status" => "passed"}} = verify("security_regression", sorted)
+
+    reversed = put_security_tests(result, ["test/b_test.exs", "test/a_test.exs"])
+    assert_invalid_evidence("security_regression", reversed)
   end
 
   test "accepts only exact full SHA-1 or SHA-256 candidate OIDs" do
@@ -287,6 +344,15 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     assert Enum.map(report["diagnostics"], & &1["gate_id"]) == @gate_ids[profile]
     assert Enum.all?(report["diagnostics"], &(&1["code"] == "validation_evidence_invalid"))
     refute Map.has_key?(report, "evidence_ref")
+  end
+
+  defp assert_evidence_changes(profile, original, variants) do
+    assert {:ok, original_report} = verify(profile, original)
+
+    for variant <- variants do
+      assert {:ok, variant_report} = verify(profile, variant)
+      refute variant_report["evidence_ref"] == original_report["evidence_ref"]
+    end
   end
 
   defp program!(profile_id) do
@@ -476,7 +542,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       source_hashes: [%{path: path, sha256: @other_digest}],
       candidate: candidate,
       base: base,
-      diagnostics: %{candidate: security_diagnostic(), base: security_diagnostic()},
+      diagnostics: %{
+        candidate: security_diagnostic(candidate, :candidate),
+        base: security_diagnostic(base, :base)
+      },
       evidence_type: "reviewed_regression_evidence",
       attested_base_commit: @base_oid,
       attested_candidate_commit: @candidate_commit,
@@ -559,13 +628,40 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     }
   end
 
-  defp security_diagnostic do
-    %{
-      "exit_code" => 0,
-      "timed_out" => false,
-      "output_bytes" => 12,
-      "output_sha256" => @digest
-    }
+  defp security_diagnostic(leg, kind) do
+    empty? =
+      case {kind, leg.status} do
+        {:candidate, status} when status in ["source_changed", "helper_missing"] ->
+          true
+
+        {:base, status}
+        when status in ["helper_missing", "snapshot_failed", "overlay_failed", "not_run"] ->
+          true
+
+        _other ->
+          false
+      end
+
+    if empty? do
+      %{}
+    else
+      %{
+        "exit_code" => leg.exit_code,
+        "timed_out" => leg.timed_out,
+        "output_bytes" => 12,
+        "output_sha256" => @digest
+      }
+    end
+  end
+
+  defp put_security_tests(result, paths) do
+    result
+    |> Map.put(:test_paths, paths)
+    |> Map.put(:source_hashes, Enum.map(paths, &%{path: &1, sha256: @other_digest}))
+    |> Map.put(
+      :attested_selected_tests,
+      Enum.map(paths, &%{path: &1, blob_sha256: @other_digest})
+    )
   end
 
   defp stringify_json(map) when is_map(map) do

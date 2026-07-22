@@ -147,15 +147,18 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
          true <- values.passed == (values.exit_code == 0),
          true <- bounded_binary?(values.stdout, @max_raw_output_bytes),
          true <- bounded_binary?(values.stderr, @max_raw_output_bytes),
-         true <- valid_compile_feedback?(values.feedback, values.passed, values.exit_code),
+         {:ok, feedback} <-
+           normalize_compile_feedback(values.feedback, values.passed, values.exit_code),
          true <- bounded_binary?(values.feedback_json, @max_feedback_json_bytes),
          true <- valid_oid?(values.validated_tree_oid),
          true <- valid_oid?(values.validated_head) do
       evidence = %{
         "adapter" => "mix_compile_v1",
         "candidate_tree_oid" => values.validated_tree_oid,
+        "validated_head" => values.validated_head,
         "passed" => values.passed,
-        "exit_code" => values.exit_code
+        "exit_code" => values.exit_code,
+        "feedback" => feedback
       }
 
       assessment = %{
@@ -174,7 +177,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     end
   end
 
-  defp valid_compile_feedback?(feedback, passed, exit_code) do
+  defp normalize_compile_feedback(feedback, passed, exit_code) do
     with {:ok, values} <- exact_string_object(feedback, @compile_feedback_fields),
          true <- values["passed"] == passed,
          true <- values["exit_code"] == exit_code,
@@ -184,9 +187,15 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
          true <- is_boolean(values["stderr_truncated"]),
          true <- valid_sha256?(values["stdout_sha256"]),
          true <- valid_sha256?(values["stderr_sha256"]) do
-      true
+      {:ok,
+       %{
+         "stdout_truncated" => values["stdout_truncated"],
+         "stderr_truncated" => values["stderr_truncated"],
+         "stdout_sha256" => values["stdout_sha256"],
+         "stderr_sha256" => values["stderr_sha256"]
+       }}
     else
-      _other -> false
+      _other -> :error
     end
   end
 
@@ -199,6 +208,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
          true <- bounded_string_list?(values.changed_apps, 256, 64),
          true <- bounded_string_list?(values.affected_apps, 256, 64),
          true <- bounded_string_list?(values.test_paths, 256, @max_path_bytes),
+         true <- ordered_unique?(values.changed_files),
+         true <- ordered_unique?(values.changed_apps),
+         true <- ordered_unique?(values.affected_apps),
+         true <- ordered_unique?(values.test_paths),
          true <- is_boolean(values.root_wide),
          {:ok, compile} <- adapt_cross_check(:compile, values.compile),
          {:ok, xref} <- adapt_cross_check(:xref, values.xref),
@@ -216,8 +229,15 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
       evidence = %{
         "adapter" => "cross_app_v1",
         "candidate_tree_oid" => values.validated_tree_oid,
+        "validated_head" => values.validated_head,
+        "base_commit" => values.base_commit,
         "passed" => values.passed,
         "reason" => values.reason,
+        "changed_files" => values.changed_files,
+        "changed_apps" => values.changed_apps,
+        "affected_apps" => values.affected_apps,
+        "test_paths" => values.test_paths,
+        "root_wide" => values.root_wide,
         "checks" => checks
       }
 
@@ -228,7 +248,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
           true -> "blocked"
         end
 
-      {:ok, evidence, %{status: status, gates: Enum.map(checks, &cross_gate/1)}}
+      gate_checks = Enum.zip([:compile, :xref, :test_compile, :test], checks)
+      {:ok, evidence, %{status: status, gates: Enum.map(gate_checks, &cross_gate/1)}}
     else
       _other -> :error
     end
@@ -258,7 +279,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
         "status" => values["status"],
         "passed" => values["passed"],
         "exit_code" => values["exit_code"],
-        "reason" => values["reason"]
+        "reason" => values["reason"],
+        "stdout_truncated" => values["stdout_truncated"],
+        "stderr_truncated" => values["stderr_truncated"],
+        "stdout_sha256" => values["stdout_sha256"],
+        "stderr_sha256" => values["stderr_sha256"]
       }
 
       projection =
@@ -385,12 +410,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     end
   end
 
-  defp cross_gate(%{"passed" => true}), do: {:passed, "validation_passed"}
+  defp cross_gate({_stage, %{"passed" => true}}), do: {:passed, "validation_passed"}
 
-  defp cross_gate(%{"reason" => reason}) when is_binary(reason),
+  defp cross_gate({_stage, %{"reason" => reason}}) when is_binary(reason),
     do: {:blocked, reason}
 
-  defp cross_gate(_check), do: {:blocked, "validation_failed"}
+  defp cross_gate({stage, _check}), do: {:blocked, cross_stage_failure_code(stage)}
+
+  defp cross_stage_failure_code(:compile), do: "compile_failed"
+  defp cross_stage_failure_code(:xref), do: "xref_failed"
+  defp cross_stage_failure_code(:test_compile), do: "test_compile_failed"
+  defp cross_stage_failure_code(:test), do: "tests_failed"
 
   defp adapt_security(result) do
     with {:ok, values, style} <- exact_envelope(result, @security_fields),
@@ -403,7 +433,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
          {:ok, source_hashes} <- normalize_security_sources(values.source_hashes, style),
          {:ok, candidate} <- normalize_security_leg(values.candidate, style, :candidate),
          {:ok, base} <- normalize_security_leg(values.base, style, :base),
-         true <- valid_security_diagnostics?(values.diagnostics, style),
+         {:ok, diagnostics} <-
+           normalize_security_diagnostics(values.diagnostics, style, candidate, base),
          true <- values.evidence_type == "reviewed_regression_evidence",
          true <- valid_oid?(values.attested_base_commit),
          true <- values.attested_base_commit == values.base_commit,
@@ -429,7 +460,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
         "council_decision_digest" => values.council_decision_digest,
         "selected_tests" => selected_tests,
         "candidate" => candidate,
-        "base" => base
+        "base" => base,
+        "diagnostics" => diagnostics
       }
 
       status =
@@ -486,7 +518,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     source_paths = Enum.map(source_hashes, & &1["path"])
     selected_paths = Enum.map(selected_tests, & &1["path"])
 
-    test_paths == source_paths and source_paths == selected_paths and
+    ordered_unique?(test_paths) and ordered_unique?(source_paths) and
+      ordered_unique?(selected_paths) and test_paths == source_paths and
+      source_paths == selected_paths and
       Enum.zip(source_hashes, selected_tests)
       |> Enum.all?(fn {source, selected} ->
         source["sha256"] == selected["blob_sha256"]
@@ -536,17 +570,28 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
       values.executed == values.passed + values.test_failures
   end
 
-  defp valid_security_diagnostics?(diagnostics, style) do
+  defp normalize_security_diagnostics(diagnostics, style, candidate, base) do
     case exact_styled_object(diagnostics, [:candidate, :base], style) do
       {:ok, values} ->
-        Enum.all?([values.candidate, values.base], &valid_security_diagnostic?/1)
+        with {:ok, candidate_diagnostic} <- normalize_security_diagnostic(values.candidate),
+             {:ok, base_diagnostic} <- normalize_security_diagnostic(values.base),
+             true <- diagnostic_consistent?(candidate_diagnostic, candidate, :candidate),
+             true <- diagnostic_consistent?(base_diagnostic, base, :base) do
+          {:ok, %{"candidate" => candidate_diagnostic, "base" => base_diagnostic}}
+        else
+          _other -> :error
+        end
 
       _other ->
-        false
+        :error
     end
   end
 
-  defp valid_security_diagnostic?(diagnostic) do
+  defp normalize_security_diagnostic(diagnostic)
+       when is_map(diagnostic) and not is_struct(diagnostic) and map_size(diagnostic) == 0,
+       do: {:ok, %{}}
+
+  defp normalize_security_diagnostic(diagnostic) do
     with {:ok, values} <- exact_string_object(diagnostic, @security_diagnostic_fields),
          true <- valid_optional_exit_code?(values["exit_code"]),
          true <- is_boolean(values["timed_out"]),
@@ -554,10 +599,35 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
            is_integer(values["output_bytes"]) and values["output_bytes"] >= 0 and
              values["output_bytes"] <= @max_raw_output_bytes,
          true <- valid_sha256?(values["output_sha256"]) do
-      true
+      {:ok,
+       %{
+         "exit_code" => values["exit_code"],
+         "timed_out" => values["timed_out"],
+         "output_bytes" => values["output_bytes"],
+         "output_sha256" => values["output_sha256"]
+       }}
     else
-      _other -> false
+      _other -> :error
     end
+  end
+
+  defp diagnostic_consistent?(diagnostic, leg, kind) when map_size(diagnostic) == 0 do
+    case {kind, leg["status"]} do
+      {:candidate, status} when status in ["source_changed", "helper_missing"] ->
+        true
+
+      {:base, status}
+      when status in ["helper_missing", "snapshot_failed", "overlay_failed", "not_run"] ->
+        true
+
+      _other ->
+        false
+    end
+  end
+
+  defp diagnostic_consistent?(diagnostic, leg, _kind) do
+    diagnostic["exit_code"] == leg["exit_code"] and
+      diagnostic["timed_out"] == leg["timed_out"]
   end
 
   defp valid_security_verdict?(passed, reason, candidate, base) do
@@ -799,6 +869,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
 
   defp bounded_string_list?(value, maximum_count, maximum_bytes),
     do: match?({:ok, _}, normalize_string_list(value, maximum_count, maximum_bytes))
+
+  defp ordered_unique?(values) when is_list(values),
+    do: values == Enum.sort(values) and values == Enum.uniq(values)
+
+  defp ordered_unique?(_values), do: false
 
   defp normalize_string_list(value, maximum_count, maximum_bytes) do
     with {:ok, entries} <- bounded_list(value, maximum_count, & &1),
