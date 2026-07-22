@@ -56,6 +56,8 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   @registry_name __MODULE__
   @handle_prefix "acp_worker_"
   @cleanup_timeout_ms 5_000
+  @max_inventory_records 10_000
+  @max_inventory_id_bytes 256
 
   # -- Public API -----------------------------------------------------
 
@@ -119,6 +121,109 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     call({:status, worker_session_id, caller}, server_opts)
   end
 
+  @doc false
+  @spec inventory(map(), pos_integer(), keyword()) :: {:ok, map()} | {:error, term()}
+  def inventory(filters, max_items, opts \\ [])
+      when is_map(filters) and is_integer(max_items) and max_items > 0 and is_list(opts) do
+    with {:ok, opts, _remaining} <- normalized_call_opts(opts) do
+      call({:inventory, filters, max_items}, opts)
+    end
+  end
+
+  @doc false
+  @spec inventory_projection(map(), map(), pos_integer(), map()) :: map()
+  def inventory_projection(state, filters, max_items, liveness \\ %{})
+
+  def inventory_projection(state, filters, max_items, liveness)
+      when is_map(state) and is_map(filters) and is_integer(max_items) and max_items > 0 and
+             is_map(liveness) do
+    {records, observed_count, hard_truncated} = bounded_inventory_records(state)
+
+    {candidates, malformed_count} =
+      Enum.reduce(records, {[], 0}, fn record, {candidates, malformed} ->
+        case project_inventory_record(record, liveness) do
+          {:ok, session, record_identities} ->
+            {[{:valid, record, session, record_identities} | candidates], malformed}
+
+          :malformed ->
+            {[{:malformed, record} | candidates], malformed + 1}
+        end
+      end)
+
+    candidates = Enum.reverse(candidates)
+
+    identity_counts =
+      Enum.reduce(candidates, %{}, fn
+        {:valid, _record, _session, record_identities}, counts ->
+          Enum.reduce(record_identities, counts, fn identity, counts ->
+            Map.update(counts, identity, 1, &(&1 + 1))
+          end)
+
+        {:malformed, _record}, counts ->
+          counts
+      end)
+
+    {sessions, quarantine, duplicate_count} =
+      Enum.reduce(candidates, {[], [], 0}, fn
+        {:malformed, record}, {sessions, quarantine, duplicates} ->
+          {sessions, [quarantine_entry(record, "malformed") | quarantine], duplicates}
+
+        {:valid, record, session, record_identities}, {sessions, quarantine, duplicates} ->
+          duplicate? = Enum.any?(record_identities, &(Map.get(identity_counts, &1, 0) > 1))
+
+          if duplicate? do
+            {sessions, [quarantine_entry(record, "duplicate_identity") | quarantine],
+             duplicates + 1}
+          else
+            {[{session, record_identities} | sessions], quarantine, duplicates}
+          end
+      end)
+
+    sessions = Enum.reverse(sessions)
+    quarantine = Enum.reverse(quarantine)
+
+    matching_sessions =
+      sessions
+      |> Enum.map(fn {session, _identities} -> session end)
+      |> Enum.filter(&inventory_matches?(&1, filters))
+      |> Enum.sort_by(&inventory_sort_key/1)
+
+    returned_sessions = Enum.take(matching_sessions, max_items)
+    matching_count = length(matching_sessions)
+    returned_count = length(returned_sessions)
+    quarantined_count = malformed_count + duplicate_count
+    filtered_out = max(observed_count - quarantined_count - matching_count, 0)
+    truncated_count = max(matching_count - returned_count, 0)
+    returned_quarantine = Enum.take(quarantine, max_items)
+
+    %{
+      "schema_version" => 1,
+      "storage" => %{"durability" => "volatile"},
+      "filters" => %{
+        "task_id" => Map.get(filters, :task_id),
+        "principal_id" => Map.get(filters, :principal_id)
+      },
+      "max_items" => max_items,
+      "truncated" => hard_truncated or truncated_count > 0 or length(quarantine) > max_items,
+      "counts" => %{
+        "observed" => observed_count,
+        "matching" => matching_count,
+        "returned" => returned_count,
+        "filtered_out" => filtered_out,
+        "truncated" => truncated_count,
+        "malformed" => malformed_count,
+        "duplicates" => duplicate_count,
+        "quarantined" => quarantined_count,
+        "quarantine_returned" => length(returned_quarantine),
+        "quarantine_truncated" => max(length(quarantine) - length(returned_quarantine), 0)
+      },
+      "sessions" => returned_sessions,
+      "quarantine" => returned_quarantine
+    }
+  end
+
+  def inventory_projection(_state, _filters, _max_items, _liveness), do: invalid_inventory()
+
   @doc """
   Close or check in a managed session when authorized.
 
@@ -168,6 +273,25 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   def init(_opts) do
     {:ok, %{sessions: %{}, by_ref: %{}, closures: %{}}}
   end
+
+  @impl true
+  def handle_call({:inventory, filters, max_items}, _from, state)
+      when is_map(filters) and is_integer(max_items) do
+    inventory = inventory_projection(state, filters, max_items, inventory_liveness(state))
+    {:reply, {:ok, inventory}, state}
+  rescue
+    _ -> {:reply, {:error, :session_inventory_unavailable}, state}
+  catch
+    _, _ -> {:reply, {:error, :session_inventory_unavailable}, state}
+  end
+
+  # Inventory messages are data-only. A selector-bearing legacy or forged
+  # message is rejected without inspecting or executing the supplied term.
+  def handle_call({:inventory, _filters, _max_items, _selector}, _from, state),
+    do: {:reply, {:error, :invalid_session_inventory_message}, state}
+
+  def handle_call({:inventory, _filters, _max_items}, _from, state),
+    do: {:reply, {:error, :invalid_session_inventory_options}, state}
 
   @impl true
   def handle_call({:register, attrs, deadline}, {owner_pid, _tag}, state) do
@@ -288,6 +412,237 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # -- Internals ------------------------------------------------------
+
+  defp bounded_inventory_records(state) do
+    {sessions, session_count, sessions_truncated} =
+      inventory_source_records(Map.get(state, :sessions), :registered)
+
+    {closures, closure_count, closures_truncated} =
+      inventory_source_records(Map.get(state, :closures), :closing)
+
+    records =
+      (sessions ++ closures)
+      |> Enum.sort_by(&inventory_record_sort_key/1)
+      |> Enum.take(@max_inventory_records)
+
+    observed_count = min(session_count + closure_count, @max_inventory_records)
+
+    {records, observed_count,
+     sessions_truncated or closures_truncated or
+       session_count + closure_count > @max_inventory_records}
+  end
+
+  defp inventory_source_records(source, kind) when is_map(source) do
+    records =
+      source
+      |> :maps.iterator()
+      |> take_inventory_iterator(@max_inventory_records)
+      |> Enum.sort_by(fn {key, _value} -> inventory_key_sort_key(key) end)
+      |> Enum.map(fn {key, value} -> {kind, key, value} end)
+
+    {records, min(map_size(source), @max_inventory_records),
+     map_size(source) > @max_inventory_records}
+  end
+
+  defp inventory_source_records(_source, kind), do: {[{kind, nil, nil}], 1, false}
+
+  defp take_inventory_iterator(iterator, limit), do: take_inventory_iterator(iterator, limit, [])
+
+  defp take_inventory_iterator(_iterator, 0, acc), do: acc
+
+  defp take_inventory_iterator(iterator, limit, acc) do
+    case :maps.next(iterator) do
+      :none ->
+        acc
+
+      {key, value, next_iterator} ->
+        take_inventory_iterator(next_iterator, limit - 1, [{key, value} | acc])
+    end
+  end
+
+  defp inventory_record_sort_key({kind, key, _value}) do
+    {inventory_key_sort_key(key), if(kind == :registered, do: 0, else: 1)}
+  end
+
+  defp inventory_key_sort_key(key) when is_binary(key), do: {0, key}
+  defp inventory_key_sort_key(_key), do: {1, ""}
+
+  defp project_inventory_record({kind, key, raw_record}, liveness) do
+    entry = if kind == :closing, do: inventory_value(raw_record, :entry), else: raw_record
+
+    with true <- is_map(entry) and not is_struct(entry),
+         {:ok, worker_session_id} <-
+           inventory_required_id(inventory_value(entry, :worker_session_id)),
+         true <- key == worker_session_id,
+         {:ok, provider} <- inventory_provider(inventory_value(entry, :provider)),
+         {:ok, model} <- inventory_optional_text(inventory_value(entry, :model)),
+         {:ok, provider_session_id} <-
+           inventory_optional_text(inventory_value(entry, :session_id)),
+         {:ok, status} <- inventory_text(inventory_value(entry, :status)),
+         true <- is_boolean(inventory_value(entry, :pooled)),
+         true <- is_boolean(inventory_value(entry, :return_to_pool)),
+         {:ok, task_id} <- inventory_optional_id(inventory_value(entry, :task_id)),
+         {:ok, principal_id} <- inventory_optional_id(inventory_value(entry, :principal_id)) do
+      live = Map.get(liveness, worker_session_id, %{})
+
+      session = %{
+        "worker_session_id" => worker_session_id,
+        "provider_session_id" => provider_session_id,
+        "provider" => provider,
+        "model" => model,
+        "status" => if(kind == :closing, do: "closing", else: status),
+        "pooled" => inventory_value(entry, :pooled),
+        "return_to_pool" => inventory_value(entry, :return_to_pool),
+        "task_id" => task_id,
+        "principal_id" => principal_id,
+        "owner_present" => Map.get(live, :owner_present) == true,
+        "owner_alive" => Map.get(live, :owner_alive) == true,
+        "session_alive" => Map.get(live, :session_alive) == true,
+        "close_cleanup_in_progress" => kind == :closing
+      }
+
+      identities =
+        [{:worker_session, worker_session_id}]
+        |> maybe_add_provider_identity(provider, provider_session_id)
+
+      {:ok, session, identities}
+    else
+      _ -> :malformed
+    end
+  rescue
+    _ -> :malformed
+  catch
+    _, _ -> :malformed
+  end
+
+  defp project_inventory_record(_record, _liveness), do: :malformed
+
+  defp maybe_add_provider_identity(identities, _provider, nil), do: identities
+
+  defp maybe_add_provider_identity(identities, provider, provider_session_id),
+    do: [{:provider_session, provider, provider_session_id} | identities]
+
+  defp inventory_matches?(session, filters) do
+    matches_inventory_filter?(Map.get(filters, :task_id), session["task_id"]) and
+      matches_inventory_filter?(Map.get(filters, :principal_id), session["principal_id"])
+  end
+
+  defp matches_inventory_filter?(nil, _actual), do: true
+  defp matches_inventory_filter?(expected, actual), do: expected == actual
+
+  defp inventory_sort_key(session) do
+    {session["worker_session_id"], session["provider"] || "",
+     session["provider_session_id"] || ""}
+  end
+
+  defp quarantine_entry({kind, key, raw_record}, reason) do
+    entry = if kind == :closing, do: inventory_value(raw_record, :entry), else: raw_record
+    worker_session_id = inventory_optional_id(inventory_value(entry, :worker_session_id))
+
+    %{
+      "kind" => if(kind == :closing, do: "close", else: "registered"),
+      "reason" => reason
+    }
+    |> maybe_put_quarantine_id(worker_session_id)
+    |> Map.put("source_key_valid", is_binary(key) and String.valid?(key))
+  end
+
+  defp maybe_put_quarantine_id(quarantine, {:ok, worker_session_id}),
+    do: Map.put(quarantine, "worker_session_id", worker_session_id)
+
+  defp maybe_put_quarantine_id(quarantine, _invalid), do: quarantine
+
+  defp inventory_liveness(state) do
+    state
+    |> bounded_inventory_records()
+    |> elem(0)
+    |> Enum.reduce(%{}, fn {kind, _key, raw_record}, acc ->
+      entry = if kind == :closing, do: inventory_value(raw_record, :entry), else: raw_record
+      worker_session_id = inventory_value(entry, :worker_session_id)
+
+      if is_binary(worker_session_id) do
+        owner_pid = inventory_value(entry, :owner_pid)
+        session_pid = inventory_value(entry, :session_pid)
+
+        Map.put(acc, worker_session_id, %{
+          owner_present: is_pid(owner_pid),
+          owner_alive: process_alive?(owner_pid),
+          session_alive: process_alive?(session_pid)
+        })
+      else
+        acc
+      end
+    end)
+  end
+
+  defp process_alive?(pid) when is_pid(pid), do: Process.alive?(pid)
+  defp process_alive?(_pid), do: false
+
+  defp inventory_value(map, key, default \\ nil)
+  defp inventory_value(map, key, default) when is_map(map), do: Map.get(map, key, default)
+  defp inventory_value(_map, _key, default), do: default
+
+  defp inventory_required_id(value), do: inventory_id(value, false)
+  defp inventory_optional_id(nil), do: {:ok, nil}
+  defp inventory_optional_id(value), do: inventory_id(value, true)
+
+  defp inventory_id(value, _optional)
+       when is_binary(value) and byte_size(value) > 0 and
+              byte_size(value) <= @max_inventory_id_bytes do
+    if String.valid?(value) and String.trim(value) == value and
+         not String.match?(value, ~r/[\x00-\x1F\x7F]/) do
+      {:ok, value}
+    else
+      :error
+    end
+  end
+
+  defp inventory_id(_value, _optional), do: :error
+
+  defp inventory_provider(value) when is_atom(value), do: inventory_text(Atom.to_string(value))
+  defp inventory_provider(value), do: inventory_text(value)
+
+  defp inventory_optional_text(nil), do: {:ok, nil}
+
+  defp inventory_optional_text(value) when is_atom(value),
+    do: inventory_optional_text(Atom.to_string(value))
+
+  defp inventory_optional_text(value), do: inventory_text(value)
+
+  defp inventory_text(value)
+       when is_binary(value) and byte_size(value) <= @max_inventory_id_bytes do
+    if String.valid?(value) and not String.contains?(value, <<0>>) do
+      {:ok, value}
+    else
+      :error
+    end
+  end
+
+  defp inventory_text(_value), do: :error
+
+  defp invalid_inventory do
+    %{
+      "schema_version" => 1,
+      "storage" => %{"durability" => "volatile"},
+      "filters" => %{"task_id" => nil, "principal_id" => nil},
+      "max_items" => 0,
+      "truncated" => true,
+      "counts" => %{
+        "observed" => 0,
+        "matching" => 0,
+        "returned" => 0,
+        "filtered_out" => 0,
+        "truncated" => 0,
+        "malformed" => 1,
+        "duplicates" => 0,
+        "quarantined" => 1,
+        "quarantine_returned" => 0,
+        "quarantine_truncated" => 0
+      },
+      "sessions" => [],
+      "quarantine" => []
+    }
+  end
 
   # Convert every GenServer.call exit (including timeout) into an error tuple
   # so acquisition cleanup in AcpManaged always runs after a failed register.

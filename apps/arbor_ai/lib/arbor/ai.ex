@@ -1186,6 +1186,20 @@ defmodule Arbor.AI do
     Arbor.AI.AcpManaged.close_session(worker_session_id, opts)
   end
 
+  @doc """
+  Return a bounded, read-only inventory of volatile managed ACP sessions.
+
+  Accepted options are `:caller_id`, optional `:task_id` and `:principal_id`
+  filters, and optional `:max_items`.
+  """
+  @spec acp_managed_session_inventory(keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def acp_managed_session_inventory(opts) when is_list(opts) or is_map(opts) do
+    Arbor.AI.AcpManaged.public_session_inventory(opts)
+  end
+
+  def acp_managed_session_inventory(_opts),
+    do: {:error, :invalid_session_inventory_options}
+
   # ===========================================================================
   # Private Helpers
   # ===========================================================================

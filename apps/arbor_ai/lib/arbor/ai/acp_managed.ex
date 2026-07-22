@@ -11,6 +11,11 @@ defmodule Arbor.AI.AcpManaged do
 
   @default_operation_timeout_ms 120_000
   @cleanup_timeout_ms 500
+  @default_inventory_items 64
+  @max_inventory_items 1_000
+  @max_inventory_id_bytes 256
+  @task_read_uri "arbor://agent/task/read"
+  @inventory_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]*\z/
 
   # Registry/orchestration-only opts. Deliberately excludes :agent_id so it is
   # forwarded into AcpSession / AcpPool (callback authorize identity) while still
@@ -147,6 +152,151 @@ defmodule Arbor.AI.AcpManaged do
     with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 5_000),
          {:ok, opts, _remaining} <- Arbor.AI.Timeout.remaining(opts) do
       SessionRegistry.close(worker_session_id, opts)
+    end
+  end
+
+  @doc false
+  @spec public_session_inventory(keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def public_session_inventory(opts) do
+    with {:ok, normalized} <- normalize_inventory_options(opts, false),
+         :ok <- authorize_session_inventory(normalized),
+         result <- fetch_session_inventory(normalized, []) do
+      normalize_session_inventory_result(result)
+    end
+  end
+
+  @doc false
+  @spec session_inventory(keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def session_inventory(opts) do
+    with {:ok, normalized} <- normalize_inventory_options(opts, true),
+         :ok <- authorize_session_inventory(normalized),
+         result <- fetch_session_inventory(normalized, normalized.registry_opts) do
+      normalize_session_inventory_result(result)
+    end
+  end
+
+  defp fetch_session_inventory(normalized, registry_opts) do
+    SessionRegistry.inventory(normalized.filters, normalized.max_items, registry_opts)
+  end
+
+  defp authorize_session_inventory(%{caller_id: caller_id, filters: filters}) do
+    resource_uri =
+      case filters.task_id do
+        nil -> @task_read_uri
+        task_id -> @task_read_uri <> "/" <> task_id
+      end
+
+    auth_opts =
+      [verify_identity: false]
+      |> maybe_put_principal_scope(filters.principal_id)
+
+    try do
+      case Arbor.Security.authorize(caller_id, resource_uri, :read, auth_opts) do
+        {:ok, :authorized} -> :ok
+        _ -> {:error, {:unauthorized, :task_read_required}}
+      end
+    rescue
+      _ -> {:error, {:unauthorized, :task_read_required}}
+    catch
+      _, _ -> {:error, {:unauthorized, :task_read_required}}
+    end
+  end
+
+  defp maybe_put_principal_scope(opts, nil), do: opts
+
+  defp maybe_put_principal_scope(opts, principal_id),
+    do: Keyword.put(opts, :principal_scope, principal_id)
+
+  defp normalize_session_inventory_result({:ok, inventory}) when is_map(inventory),
+    do: {:ok, inventory}
+
+  defp normalize_session_inventory_result(_result),
+    do: {:error, :session_inventory_unavailable}
+
+  defp normalize_inventory_options(opts, allow_server?) when is_list(opts) or is_map(opts) do
+    entries = if is_list(opts), do: opts, else: Map.to_list(opts)
+    keys = Enum.map(entries, &inventory_option_key/1)
+
+    allowed =
+      [:caller_id, :task_id, :principal_id, :max_items] ++
+        if(allow_server?, do: [:server], else: [])
+
+    cond do
+      :invalid in keys -> {:error, :invalid_session_inventory_options}
+      Enum.any?(keys, &(&1 not in allowed)) -> {:error, :invalid_session_inventory_options}
+      length(keys) != length(Enum.uniq(keys)) -> {:error, :invalid_session_inventory_options}
+      true -> build_inventory_options(entries, allow_server?)
+    end
+  rescue
+    _ -> {:error, :invalid_session_inventory_options}
+  catch
+    _, _ -> {:error, :invalid_session_inventory_options}
+  end
+
+  defp normalize_inventory_options(_opts, _allow_server?),
+    do: {:error, :invalid_session_inventory_options}
+
+  defp inventory_option_key({key, _value}) when is_atom(key), do: key
+  defp inventory_option_key(_entry), do: :invalid
+
+  defp build_inventory_options(entries, allow_server?) do
+    with {:ok, caller_id} <- normalize_inventory_id(Keyword.get(entries, :caller_id)),
+         {:ok, task_id} <- normalize_optional_inventory_id(Keyword.get(entries, :task_id), true),
+         {:ok, principal_id} <-
+           normalize_optional_inventory_id(Keyword.get(entries, :principal_id), false),
+         {:ok, max_items} <- normalize_inventory_max_items(Keyword.get(entries, :max_items)),
+         {:ok, server} <- normalize_inventory_server(entries, allow_server?) do
+      registry_opts = if is_nil(server), do: [], else: [server: server]
+
+      {:ok,
+       %{
+         caller_id: caller_id,
+         filters: %{task_id: task_id, principal_id: principal_id},
+         max_items: max_items,
+         registry_opts: registry_opts
+       }}
+    else
+      _ -> {:error, :invalid_session_inventory_options}
+    end
+  end
+
+  defp normalize_inventory_id(value)
+       when is_binary(value) and byte_size(value) > 0 and
+              byte_size(value) <= @max_inventory_id_bytes do
+    if String.valid?(value) and String.trim(value) == value and
+         Regex.match?(@inventory_id_pattern, value) do
+      {:ok, value}
+    else
+      {:error, :invalid_inventory_id}
+    end
+  end
+
+  defp normalize_inventory_id(_value), do: {:error, :invalid_inventory_id}
+
+  defp normalize_optional_inventory_id(nil, _task_id?), do: {:ok, nil}
+
+  defp normalize_optional_inventory_id(value, true) do
+    with {:ok, value} <- normalize_inventory_id(value), do: {:ok, value}
+  end
+
+  defp normalize_optional_inventory_id(value, false) do
+    with {:ok, value} <- normalize_inventory_id(value), do: {:ok, value}
+  end
+
+  defp normalize_inventory_max_items(nil), do: {:ok, @default_inventory_items}
+
+  defp normalize_inventory_max_items(value)
+       when is_integer(value) and value > 0 and value <= @max_inventory_items,
+       do: {:ok, value}
+
+  defp normalize_inventory_max_items(_value), do: {:error, :invalid_max_items}
+
+  defp normalize_inventory_server(_entries, false), do: {:ok, nil}
+
+  defp normalize_inventory_server(entries, true) do
+    case Keyword.fetch(entries, :server) do
+      {:ok, server} -> {:ok, server}
+      :error -> {:ok, nil}
     end
   end
 
