@@ -456,9 +456,22 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
     if bounded_list?(values, @max_map_entries) do
       values
       |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
-        case optional_identifier(value, field) do
-          {:ok, value} -> {:cont, {:ok, [value | acc]}}
-          {:error, reason} -> {:halt, {:error, reason}}
+        case value do
+          nil ->
+            {:halt, {:error, {:invalid_route_input, {:invalid, field}}}}
+
+          value ->
+            case optional_identifier(value, field) do
+              {:ok, value} ->
+                if value in acc do
+                  {:halt, {:error, {:invalid_route_input, {:duplicate, field}}}}
+                else
+                  {:cont, {:ok, [value | acc]}}
+                end
+
+              {:error, reason} ->
+                {:halt, {:error, reason}}
+            end
         end
       end)
       |> case do
@@ -768,20 +781,21 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
     do: {:error, {:invalid_route_input, {:invalid, :budgets}}}
 
   defp normalize_policy(policy) when is_map(policy) and not is_struct(policy) do
-    with {:ok, policy} <- canonical_fields(policy, @policy_keys, :invalid_policy),
-         :ok <- validate_strict(policy[:strict_evidence]),
-         {:ok, fallback_limit} <- normalize_fallback_limit(policy[:fallback_limit]),
-         :ok <- validate_json_clean(policy[:params] || %{}) do
-      {:ok,
-       Map.merge(
-         %{strict_evidence: false, fallback_limit: @max_fallbacks, params: %{}},
-         Map.put(policy, :fallback_limit, fallback_limit)
-       )}
+    if map_size(policy) > @max_map_entries do
+      {:error, {:invalid_route_input, {:too_many, :policy}}}
+    else
+      with {:ok, policy} <- canonical_fields(policy, @policy_keys, :invalid_policy),
+           :ok <- validate_strict(policy[:strict_evidence]),
+           {:ok, fallback_limit} <- normalize_fallback_limit(policy[:fallback_limit]),
+           :ok <- validate_json_clean(policy[:params] || %{}) do
+        {:ok,
+         Map.merge(
+           %{strict_evidence: false, fallback_limit: @max_fallbacks, params: %{}},
+           Map.put(policy, :fallback_limit, fallback_limit)
+         )}
+      end
     end
   end
-
-  defp normalize_policy(policy) when is_map(policy) and map_size(policy) > @max_map_entries,
-    do: {:error, {:invalid_route_input, {:too_many, :policy}}}
 
   defp normalize_policy(_policy), do: {:error, {:invalid_route_input, {:invalid, :policy}}}
 
@@ -798,41 +812,66 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
   defp normalize_fallback_limit(_value),
     do: {:error, {:invalid_route_input, {:invalid, :fallback_limit}}}
 
-  defp validate_json_clean(value),
-    do:
-      if(json_clean?(value), do: :ok, else: {:error, {:invalid_route_input, {:invalid, :params}}})
+  defp validate_json_clean(value) do
+    case json_clean?(value, 0, @max_json_nodes) do
+      {:ok, _remaining} -> :ok
+      :error -> {:error, {:invalid_route_input, {:invalid, :params}}}
+    end
+  end
 
-  defp json_clean?(value), do: json_clean?(value, 0, @max_json_nodes)
+  defp json_clean?(_value, depth, _nodes) when depth > @max_json_depth, do: :error
+  defp json_clean?(_value, _depth, nodes) when nodes < 1, do: :error
+  defp json_clean?(nil, _depth, nodes), do: {:ok, nodes - 1}
 
-  defp json_clean?(_value, depth, _nodes) when depth > @max_json_depth, do: false
-  defp json_clean?(_value, _depth, nodes) when nodes < 1, do: false
-  defp json_clean?(nil, _depth, _nodes), do: true
+  defp json_clean?(value, _depth, nodes) when is_binary(value) do
+    if String.valid?(value) and byte_size(value) <= @max_text_bytes,
+      do: {:ok, nodes - 1},
+      else: :error
+  end
 
-  defp json_clean?(value, _depth, _nodes) when is_binary(value),
-    do: String.valid?(value) and byte_size(value) <= @max_text_bytes
+  defp json_clean?(value, _depth, nodes) when is_boolean(value), do: {:ok, nodes - 1}
 
-  defp json_clean?(value, _depth, _nodes) when is_boolean(value), do: true
+  defp json_clean?(value, _depth, nodes) when is_integer(value) do
+    if value <= @max_number and value >= -@max_number, do: {:ok, nodes - 1}, else: :error
+  end
 
-  defp json_clean?(value, _depth, _nodes) when is_integer(value),
-    do: value <= @max_number and value >= -@max_number
+  defp json_clean?(value, _depth, nodes) when is_float(value) do
+    if value == value and value <= @max_number and value >= -@max_number,
+      do: {:ok, nodes - 1},
+      else: :error
+  end
 
-  defp json_clean?(value, _depth, _nodes) when is_float(value),
-    do: value == value and value <= @max_number and value >= -@max_number
+  defp json_clean?(value, depth, nodes) when is_list(value) do
+    if bounded_list?(value, @max_map_entries),
+      do: json_clean_list(value, depth + 1, nodes - 1),
+      else: :error
+  end
 
-  defp json_clean?(value, depth, nodes) when is_list(value),
-    do:
-      bounded_list?(value, @max_map_entries) and
-        Enum.all?(value, &json_clean?(&1, depth + 1, nodes - 1))
+  defp json_clean?(value, depth, nodes) when is_map(value) and not is_struct(value) do
+    if map_size(value) <= @max_map_entries,
+      do: json_clean_map(Map.to_list(value), depth + 1, nodes - 1),
+      else: :error
+  end
 
-  defp json_clean?(value, depth, nodes) when is_map(value) and not is_struct(value),
-    do:
-      map_size(value) <= @max_map_entries and
-        Enum.all?(value, fn {key, item} ->
-          is_binary(key) and byte_size(key) <= @max_text_bytes and
-            json_clean?(item, depth + 1, nodes - 1)
-        end)
+  defp json_clean?(_value, _depth, _nodes), do: :error
 
-  defp json_clean?(_value, _depth, _nodes), do: false
+  defp json_clean_list([], _depth, nodes), do: {:ok, nodes}
+
+  defp json_clean_list([value | rest], depth, nodes) do
+    with {:ok, remaining} <- json_clean?(value, depth, nodes),
+         do: json_clean_list(rest, depth, remaining)
+  end
+
+  defp json_clean_map([], _depth, nodes), do: {:ok, nodes}
+
+  defp json_clean_map([{key, value} | rest], depth, nodes) do
+    if is_binary(key) and byte_size(key) <= @max_text_bytes do
+      with {:ok, remaining} <- json_clean?(value, depth, nodes),
+           do: json_clean_map(rest, depth, remaining)
+    else
+      :error
+    end
+  end
 
   defp build_candidates(catalog) do
     with {:ok, candidates} <- collect_candidates(catalog, []),
@@ -951,7 +990,7 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
     active_budgets = Enum.reject(matching_budgets, &expired?(&1, now))
     budget = latest(active_budgets, & &1.observed_at)
     rows = matching_rows(candidate, class, scoreboard)
-    row = List.first(Enum.sort_by(rows, &scoreboard_key(&1, class)))
+    row = List.first(Enum.sort_by(rows, &scoreboard_key(&1, class, candidate)))
 
     reasons =
       reasons ++
@@ -1028,7 +1067,7 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
          candidate,
          observation
        ) do
-    if is_nil(requested) or candidate.model not in [requested, candidate.ref] or
+    if is_nil(requested) or requested not in [candidate.model, candidate.ref] or
          is_nil(observation) or binding_mismatch?(observation, candidate, requested),
        do: ["requirements_failed"],
        else: []
@@ -1288,7 +1327,7 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
 
     allowed = [requested_model, candidate.model, candidate.ref] |> Enum.reject(&is_nil/1)
 
-    (requested != nil and requested != requested_model) or
+    (requested != nil and requested not in allowed) or
       (observation.launch_bound_model_id != nil and
          observation.launch_bound_model_id not in allowed) or
       (observation.confirmed_model_id != nil and observation.confirmed_model_id not in allowed)
@@ -1318,8 +1357,8 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
     end)
   end
 
-  defp scoreboard_key(row, class) do
-    specificity =
+  defp scoreboard_key(row, class, candidate) do
+    task_specificity =
       cond do
         row.task_class == class.resolved -> 0
         row.task_class == class.requested -> 1
@@ -1327,7 +1366,18 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
         true -> 3
       end
 
-    {specificity, row[:last_verified] || "", row[:eval_run_ref] || ""}
+    provider_specificity = if row.provider == candidate.provider, do: 0, else: 1
+    runtime_specificity = if row.runtime == candidate.runtime, do: 0, else: 1
+
+    {task_specificity, provider_specificity, runtime_specificity,
+     newest_verified(row[:last_verified]), row[:eval_run_ref] || ""}
+  end
+
+  defp newest_verified(nil), do: 0
+
+  defp newest_verified(timestamp) do
+    {:ok, datetime, _offset} = DateTime.from_iso8601(timestamp)
+    -DateTime.to_unix(datetime, :microsecond)
   end
 
   defp metrics(nil, _strict),

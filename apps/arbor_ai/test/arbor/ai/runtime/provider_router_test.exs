@@ -349,6 +349,140 @@ defmodule Arbor.AI.Runtime.ProviderRouterTest do
              ProviderRouter.decide_route(Map.to_list(input) ++ [task_class: "duplicate"])
   end
 
+  test "accepts canonical-id and provider-ref exact model bindings" do
+    catalog = [model_with_ref("canonical-model", "provider-ref")]
+    observation = observation_for("canonical-model", :good)
+
+    observation = %{
+      observation
+      | requested_model_id: "provider-ref",
+        launch_bound_model_id: "canonical-model",
+        confirmed_model_id: "canonical-model"
+    }
+
+    for requested <- ["canonical-model", "provider-ref"] do
+      input = base_input("default", %{"default" => %{requirements: %{exact_model: requested}}})
+
+      input = %{
+        input
+        | catalog: catalog,
+          scoreboard: [row("canonical-model", 0.8, 0, 0.1, 0.1, 0.1, 10)],
+          observations: [observation],
+          budgets: [budget_for("canonical-model", :good)]
+      }
+
+      assert {:ok, result} = ProviderRouter.decide_route(input)
+      assert result["model"] == "canonical-model"
+    end
+  end
+
+  test "scoreboard selection orders task, provider, runtime specificity, then newest evidence" do
+    catalog = [model_with_ref("canonical-model", "provider-ref")]
+    input = base_input("default", %{"default" => %{requirements: %{}}})
+
+    input = %{
+      input
+      | catalog: catalog,
+        observations: [observation_for("canonical-model", :good)],
+        budgets: [budget_for("canonical-model", :good)]
+    }
+
+    generic =
+      row("canonical-model", 1.0, 0, 0.0, 0.0, 0.0, 1)
+      |> Map.merge(%{
+        provider: nil,
+        runtime: nil,
+        last_verified: "2026-07-22T23:00:00Z",
+        eval_run_ref: "generic"
+      })
+
+    provider =
+      row("canonical-model", 0.2, 0, 0.0, 0.0, 0.0, 1)
+      |> Map.merge(%{
+        provider: "provider",
+        runtime: nil,
+        last_verified: "2026-07-22T21:00:00Z",
+        eval_run_ref: "provider"
+      })
+
+    exact =
+      row("canonical-model", 0.1, 0, 0.0, 0.0, 0.0, 1)
+      |> Map.merge(%{
+        provider: "provider",
+        runtime: "arbor",
+        last_verified: "2026-07-22T20:00:00Z",
+        eval_run_ref: "exact"
+      })
+
+    assert {:ok, result} =
+             ProviderRouter.decide_route(%{input | scoreboard: [generic, provider, exact]})
+
+    assert result["rationale"]["selected_score_provenance"]["eval_run_ref"] == "exact"
+
+    older =
+      row("canonical-model", 0.1, 0, 0.0, 0.0, 0.0, 1)
+      |> Map.merge(%{
+        provider: nil,
+        runtime: nil,
+        last_verified: "2026-07-22T20:00:00Z",
+        eval_run_ref: "older"
+      })
+
+    newer =
+      row("provider-ref", 0.9, 0, 0.0, 0.0, 0.0, 1)
+      |> Map.merge(%{
+        provider: nil,
+        runtime: nil,
+        last_verified: "2026-07-22T21:00:00Z",
+        eval_run_ref: "newer"
+      })
+
+    assert {:ok, result} = ProviderRouter.decide_route(%{input | scoreboard: [older, newer]})
+    assert result["rationale"]["selected_score_provenance"]["eval_run_ref"] == "newer"
+  end
+
+  test "rejects broad shallow params by cumulative node budget" do
+    input = base_input("default", %{"default" => %{requirements: %{}}})
+
+    broad =
+      Enum.map(1..64, fn index -> %{"a" => index, "b" => index, "c" => index, "d" => index} end)
+
+    assert {:error, {:invalid_route_input, {:invalid, :params}}} =
+             ProviderRouter.decide_route(%{input | policy: %{params: broad}})
+  end
+
+  test "rejects nil and duplicate requirement allowlist members" do
+    input = base_input("default", %{"default" => %{requirements: %{providers: [nil]}}})
+
+    assert {:error, {:invalid_route_input, {:invalid, :providers}}} =
+             ProviderRouter.decide_route(input)
+
+    input =
+      base_input("default", %{"default" => %{requirements: %{providers: [:provider, "provider"]}}})
+
+    assert {:error, {:invalid_route_input, {:duplicate, :providers}}} =
+             ProviderRouter.decide_route(input)
+  end
+
+  test "rejects an oversized policy before field traversal" do
+    input = base_input("default", %{"default" => %{requirements: %{}}})
+    policy = Map.new(1..65, fn index -> {"field-#{index}", true} end)
+
+    assert {:error, {:invalid_route_input, {:too_many, :policy}}} =
+             ProviderRouter.decide_route(%{input | policy: policy})
+  end
+
+  defp model_with_ref(canonical_id, ref) do
+    %ModelEntry{
+      canonical_id: canonical_id,
+      providers: [%ProviderEntry{id: :provider, ref: ref, auth: :none, runtimes: [:arbor]}],
+      family: :good,
+      context_window: 100_000,
+      max_output_tokens: 4_000,
+      capabilities: [:tool_use]
+    }
+  end
+
   defp base_input(task_class, registry) do
     catalog = [model("model-a", :good), model("model-b", :good)]
 
