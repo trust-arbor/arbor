@@ -4,6 +4,16 @@ Read this when choosing a Mix/test isolation boundary, reloading a live runtime,
 
 ## Retained Applied Learning
 
+<!-- applied-learning: compare-repository-wide-quality-failures-with-the-frozen-starting-revision -->
+<a id="applied-learning-compare-repository-wide-quality-failures-with-the-frozen-starting-revision"></a>
+**Compare repository-wide quality failures with the frozen starting revision.**
+`mix quality` can fail on pre-existing formatting or lint backlog outside the
+current change. Run it from an isolated worktree pinned to the starting commit;
+if the same unrelated files fail there, record the baseline and run exact
+changed-file formatting/lint checks plus behavioral tests for the feature. Do
+not format unrelated files merely to make the aggregate alias green (found
+2026-07-22 while verifying the software-factory remediation program).
+
 <!-- applied-learning: terminal-tool-contracts-need-a-reserved-terminal-only-request-after-normal-inspection-tool-rounds-are-exhausted -->
 <a id="applied-learning-terminal-tool-contracts-need-a-reserved-terminal-only-request-after-normal-inspection-tool-rounds-are-exhausted"></a>
 **Terminal-tool contracts need a reserved terminal-only request after normal
