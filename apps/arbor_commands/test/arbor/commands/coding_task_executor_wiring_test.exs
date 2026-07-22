@@ -21,5 +21,6 @@ defmodule Arbor.Commands.CodingTaskExecutorWiringTest do
     assert function_exported?(CodingTaskExecutor, :run, 3)
     assert function_exported?(CodingTaskExecutor, :task_status, 2)
     assert function_exported?(CodingTaskExecutor, :cancel_task, 2)
+    assert function_exported?(CodingTaskExecutor, :finalize_terminal_task, 4)
   end
 end
