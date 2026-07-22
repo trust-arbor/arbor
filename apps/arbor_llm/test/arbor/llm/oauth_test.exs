@@ -97,6 +97,96 @@ defmodule Arbor.LLM.OAuthTest do
     # ~/.arbor/oauth.
   end
 
+  describe "credential ownership enforcement" do
+    test "security regression: legacy ownerless store is refused and preserved byte-for-byte",
+         %{store_dir: store_dir} do
+      path = Path.join(store_dir, "openai.json")
+
+      legacy_bytes =
+        Jason.encode!(%{
+          "access_token" => jwt_access(System.system_time(:second) + 3_600),
+          "refresh_token" => "legacy-refresh-secret",
+          "account_id" => "acct_legacy"
+        })
+
+      File.write!(path, legacy_bytes)
+
+      assert {:error, :oauth_credential_migration_required} = OAuth.access_token(:openai)
+      refute OAuth.configured?(:openai)
+      assert File.read!(path) == legacy_bytes
+    end
+
+    test "security regression: source-owned mode is explicit but unsupported and never refreshes",
+         %{store_dir: store_dir} do
+      path =
+        write_envelope!(store_dir, :openai, %{
+          "version" => 1,
+          "provider" => "openai",
+          "account_id" => "acct_source",
+          "origin" => "external_cli",
+          "owner" => "source_owned",
+          "source" => "codex_file",
+          "generation" => 3,
+          "tokens" => %{}
+        })
+
+      before = File.read!(path)
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
+        flunk("source-owned mode must not touch a refresh token")
+      end)
+
+      assert {:error, :oauth_source_owned_unsupported} = OAuth.access_token(:openai)
+      assert {:error, :oauth_source_owned_unsupported} = OAuth.provenance(:openai)
+      refute OAuth.configured?(:openai)
+      assert File.read!(path) == before
+    end
+
+    test "security regression: adapter discovery refuses raw stores and CLI-file presence",
+         %{store_dir: store_dir} do
+      File.write!(
+        Path.join(store_dir, "openai.json"),
+        Jason.encode!(%{"access_token" => "legacy", "refresh_token" => "legacy-secret"})
+      )
+
+      cli_path = Path.join(store_dir, "cli-openai.json")
+      File.write!(cli_path, Jason.encode!(%{"tokens" => %{"refresh_token" => "cli-secret"}}))
+      Application.put_env(:arbor_llm, :oauth_cli_files, %{openai: cli_path})
+
+      client =
+        Arbor.LLM.Client.from_env(
+          adapters: %{"dummy" => Arbor.LLM.Adapter.OAuthResponses},
+          discover_local: false,
+          discover_acp: false,
+          discover_oauth: true
+        )
+
+      refute Map.has_key?(client.adapters, "openai_oauth")
+      refute Map.has_key?(client.adapters, "xai_oauth")
+    end
+
+    test "security regression: public provenance is bounded and never contains tokens", %{
+      store_dir: store_dir
+    } do
+      write_store!(store_dir, :openai, %{
+        "access_token" => jwt_access(System.system_time(:second) + 3_600),
+        "refresh_token" => "private-refresh-token",
+        "account_id" => "acct_public"
+      })
+
+      assert {:ok, provenance} = OAuth.provenance(:openai)
+      public = Arbor.Contracts.LLM.AuthProvenance.to_map(provenance)
+      rendered = inspect(public)
+
+      assert public["provider"] == "openai"
+      assert public["owner"] == "arbor_owned"
+      refute rendered =~ "private-refresh-token"
+      refute rendered =~ "access_token"
+      refute rendered =~ "refresh_token"
+      refute rendered =~ "token_hash"
+    end
+  end
+
   test "security regression: xAI discovery requires the exact trusted origin" do
     assert {:ok, "https://auth.x.ai/oauth/token"} =
              OAuth.trusted_xai_token_endpoint(%{
@@ -152,11 +242,12 @@ defmodule Arbor.LLM.OAuthTest do
       assert Enum.all?(results, &(&1 == {:ok, fresh_access}))
       assert :atomics.get(counter, 1) == 1
 
-      # Durable store holds the full rotated set.
+      # Durable store holds the full rotated set and advances the owned generation.
       assert {:ok, stored} = read_store(store_dir, :openai)
       assert stored["access_token"] == fresh_access
       assert stored["refresh_token"] == rotated_refresh
       assert stored["account_id"] == "acct_test"
+      assert stored["generation"] == 1
     end
 
     test "provider locks do not unnecessarily serialize different providers", %{
@@ -284,9 +375,10 @@ defmodule Arbor.LLM.OAuthTest do
 
       body = File.read!(path)
       assert {:ok, decoded} = Jason.decode(body)
-      assert decoded["access_token"] == access
-      assert decoded["refresh_token"] == "rt-2"
-      assert decoded["account_id"] == "acct_mode"
+      assert decoded["tokens"]["access_token"] == access
+      assert decoded["tokens"]["refresh_token"] == "rt-2"
+      assert decoded["account_id"] == "acct_test"
+      assert decoded["generation"] == 1
       # No leftover temp files from successful publication (temps are dot-prefixed).
       assert list_temp_files(store_dir) == []
     end
@@ -320,6 +412,98 @@ defmodule Arbor.LLM.OAuthTest do
       assert list_temp_files(store_dir) == []
     end
 
+    test "security regression: refresh responses cannot overwrite ownership metadata",
+         %{store_dir: store_dir} do
+      fresh_access = jwt_access(System.system_time(:second) + 3_600)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{
+            "access_token" => jwt_access(System.system_time(:second) - 5),
+            "refresh_token" => "rt-owned"
+          },
+          account_id: "acct_owner",
+          generation: 41
+        )
+      )
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _config, "rt-owned" ->
+        {:ok,
+         %{
+           "access_token" => fresh_access,
+           "refresh_token" => "rt-rotated",
+           "provider" => "xai",
+           "account_id" => "attacker-account",
+           "origin" => "external_cli",
+           "owner" => "source_owned",
+           "source" => "grok_file",
+           "generation" => 0,
+           "tokens" => %{"refresh_token" => "nested-attacker-token"}
+         }}
+      end)
+
+      assert {:ok, ^fresh_access} = OAuth.access_token(:openai)
+      assert {:ok, stored} = read_store(store_dir, :openai)
+      assert stored["provider"] == "openai"
+      assert stored["account_id"] == "acct_owner"
+      assert stored["origin"] == "arbor_login"
+      assert stored["owner"] == "arbor_owned"
+      assert stored["source"] == "arbor_oauth_store"
+      assert stored["generation"] == 42
+      assert stored["refresh_token"] == "rt-rotated"
+    end
+
+    test "security regression: reused or invalidated refresh preserves the envelope and redacts errors",
+         %{store_dir: store_dir} do
+      for code <- ["refresh_token_reused", "refresh_token_invalidated"] do
+        path =
+          write_store!(store_dir, :openai, %{
+            "access_token" => jwt_access(System.system_time(:second) - 5),
+            "refresh_token" => "stored-refresh-secret"
+          })
+
+        before = File.read!(path)
+        provider_secret = "provider-body-secret-#{code}"
+
+        Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai,
+                                                               _config,
+                                                               "stored-refresh-secret" ->
+          {:error,
+           {:refresh_failed, 401, %{"error" => code, "error_description" => provider_secret}}}
+        end)
+
+        result = OAuth.access_token(:openai)
+        assert result == {:error, :oauth_relogin_required}
+        assert File.read!(path) == before
+        refute inspect(result) =~ provider_secret
+        refute inspect(result) =~ "stored-refresh-secret"
+      end
+    end
+
+    test "security regression: unknown OAuth refresh errors are stable and secret-free",
+         %{store_dir: store_dir} do
+      path =
+        write_store!(store_dir, :openai, %{
+          "access_token" => jwt_access(System.system_time(:second) - 5),
+          "refresh_token" => "stored-refresh-secret"
+        })
+
+      before = File.read!(path)
+      leaked = "provider-response-access-token"
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
+        {:error, {:refresh_failed, 500, %{"access_token" => leaked, "detail" => leaked}}}
+      end)
+
+      result = OAuth.access_token(:openai)
+      assert result == {:error, :oauth_refresh_failed}
+      assert File.read!(path) == before
+      refute inspect(result) =~ leaked
+    end
+
     test "security regression: malformed rotated refresh token is never published or returned",
          %{store_dir: store_dir} do
       stale_access = jwt_access(System.system_time(:second) - 5)
@@ -334,7 +518,7 @@ defmodule Arbor.LLM.OAuthTest do
         {:ok, %{"access_token" => fresh_access, "refresh_token" => nil}}
       end)
 
-      assert {:error, {:invalid_refreshed_refresh_token, :missing_or_not_binary}} =
+      assert {:error, {:invalid_refreshed_refresh_token, :invalid}} =
                OAuth.access_token(:openai)
 
       assert {:ok, stored} = read_store(store_dir, :openai)
@@ -382,7 +566,7 @@ defmodule Arbor.LLM.OAuthTest do
       refute stored["refresh_token"] == "rt-should-not-leak"
     end
 
-    test "security regression: CLI import fails closed when the store path is invalid",
+    test "security regression: an unreadable store never falls back to a CLI credential",
          %{store_dir: store_dir} do
       cli_path = Path.join(store_dir, "cli-openai.json")
 
@@ -411,27 +595,38 @@ defmodule Arbor.LLM.OAuthTest do
       refute File.exists?(Path.join(locked, "openai.json"))
     end
 
-    test "first use imports CLI credentials only when the Arbor store is absent",
+    test "security regression: a missing store never imports or modifies a CLI credential",
          %{store_dir: store_dir} do
-      access = jwt_access(System.system_time(:second) + 3_600)
-      cli_path = Path.join(store_dir, "cli-openai.json")
+      codex_path = Path.join(store_dir, "cli-openai.json")
+      grok_path = Path.join(store_dir, "cli-xai.json")
 
-      File.write!(
-        cli_path,
+      codex_bytes =
         Jason.encode!(%{
           "tokens" => %{
-            "access_token" => access,
-            "refresh_token" => "cli-first-use-refresh"
+            "access_token" => jwt_access(System.system_time(:second) + 3_600),
+            "refresh_token" => "codex-family-refresh"
           }
         })
-      )
 
-      Application.put_env(:arbor_llm, :oauth_cli_files, %{openai: cli_path})
+      grok_bytes =
+        Jason.encode!(%{
+          "https://auth.x.ai::account" => %{"refresh_token" => "grok-family-refresh"}
+        })
 
-      assert {:ok, ^access} = OAuth.access_token(:openai)
-      assert {:ok, stored} = read_store(store_dir, :openai)
-      assert stored["access_token"] == access
-      assert stored["refresh_token"] == "cli-first-use-refresh"
+      File.write!(codex_path, codex_bytes)
+      File.write!(grok_path, grok_bytes)
+
+      Application.put_env(:arbor_llm, :oauth_cli_files, %{
+        openai: codex_path,
+        xai: grok_path
+      })
+
+      assert {:error, :oauth_login_required} = OAuth.access_token(:openai)
+      assert {:error, :oauth_login_required} = OAuth.access_token(:xai)
+      assert File.read!(codex_path) == codex_bytes
+      assert File.read!(grok_path) == grok_bytes
+      refute File.exists?(Path.join(store_dir, "openai.json"))
+      refute File.exists?(Path.join(store_dir, "xai.json"))
     end
 
     test "security regression: corrupt existing store never falls back to stale CLI credentials",
@@ -481,15 +676,42 @@ defmodule Arbor.LLM.OAuthTest do
   # ── hermetic helpers (never touch operator ~/.codex, ~/.grok, or ~/.arbor) ──
 
   defp write_store!(store_dir, provider, tokens) do
+    account_id = Map.get(tokens, "account_id", if(provider == :openai, do: "acct_test"))
+    token_payload = Map.take(tokens, ["access_token", "refresh_token"])
+
+    write_envelope!(
+      store_dir,
+      provider,
+      arbor_envelope(provider, token_payload, account_id: account_id)
+    )
+  end
+
+  defp write_envelope!(store_dir, provider, envelope) do
     path = Path.join(store_dir, "#{provider}.json")
-    File.write!(path, Jason.encode!(tokens))
+    File.write!(path, Jason.encode!(envelope))
     File.chmod!(path, 0o600)
     path
   end
 
   defp read_store(store_dir, provider) do
     path = Path.join(store_dir, "#{provider}.json")
-    Jason.decode(File.read!(path))
+
+    with {:ok, envelope} <- Jason.decode(File.read!(path)) do
+      {:ok, Map.merge(envelope, envelope["tokens"] || %{})}
+    end
+  end
+
+  defp arbor_envelope(provider, tokens, opts) do
+    %{
+      "version" => 1,
+      "provider" => Atom.to_string(provider),
+      "account_id" => Keyword.get(opts, :account_id),
+      "origin" => "arbor_login",
+      "owner" => "arbor_owned",
+      "source" => "arbor_oauth_store",
+      "generation" => Keyword.get(opts, :generation, 0),
+      "tokens" => tokens
+    }
   end
 
   # Temps are ".#{key}....tmp". Plain "*.tmp" skips leading-dot names; use ".*.tmp"

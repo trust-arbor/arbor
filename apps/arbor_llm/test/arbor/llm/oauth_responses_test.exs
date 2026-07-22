@@ -167,6 +167,45 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     assert {:messages, []} = Process.info(self(), :messages)
   end
 
+  test "security regression: OAuth HTTP errors never return provider bodies or bearer secrets" do
+    secret = "oauth-provider-secret-body"
+    token = "oauth-bearer-secret"
+
+    {url, server} =
+      start_error_server(401, Jason.encode!(%{"detail" => secret, "token" => token}))
+
+    result =
+      Responses.request_sse(
+        url,
+        [{"authorization", "Bearer " <> token}],
+        %{},
+        receive_timeout: 500
+      )
+
+    assert result == {:error, {:responses_http, 401, :redacted}}
+    refute inspect(result) =~ secret
+    refute inspect(result) =~ token
+    assert %{request: request} = Task.await(server, 2_000)
+    assert request =~ "authorization: Bearer " <> token
+  end
+
+  test "security regression: OAuth transport failures never return request bearer secrets" do
+    token = "oauth-transport-bearer-secret"
+    {url, server} = start_drop_server()
+
+    result =
+      Responses.request_sse(
+        url,
+        [{"authorization", "Bearer " <> token}],
+        %{},
+        receive_timeout: 500
+      )
+
+    assert result == {:error, {:responses_request_failed, :redacted}}
+    refute inspect(result) =~ token
+    assert :closed = Task.await(server, 2_000)
+  end
+
   defp sse(event), do: "data: " <> Jason.encode!(event) <> "\n\n"
 
   defp start_drip_server(chunk_count, delay_ms) do
@@ -191,6 +230,53 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
         result = send_drip_chunks(socket, chunk_count, delay_ms, 0)
         :gen_tcp.close(socket)
         result
+      end)
+
+    url = "http://127.0.0.1:#{port}/responses"
+    Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, [url])
+    {url, server}
+  end
+
+  defp start_error_server(status, body) do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(listener)
+
+    server =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener)
+        :ok = :gen_tcp.close(listener)
+        {:ok, request} = receive_http_headers(socket, "")
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 #{status} Unauthorized\r\ncontent-type: application/json\r\n" <>
+              "content-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n#{body}"
+          )
+
+        :gen_tcp.close(socket)
+        %{request: request}
+      end)
+
+    url = "http://127.0.0.1:#{port}/responses"
+    Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, [url])
+    {url, server}
+  end
+
+  defp start_drop_server do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(listener)
+
+    server =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener)
+        :ok = :gen_tcp.close(listener)
+        :gen_tcp.close(socket)
+        :closed
       end)
 
     url = "http://127.0.0.1:#{port}/responses"

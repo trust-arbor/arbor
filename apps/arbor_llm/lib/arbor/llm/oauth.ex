@@ -3,24 +3,19 @@ defmodule Arbor.LLM.OAuth do
   Subscription OAuth token access for LLM providers that authenticate against their SUBSCRIPTION
   backends (ChatGPT/Codex, xAI/Grok) rather than metered API keys.
 
-  Tokens are held in an Arbor store (`~/.arbor/oauth/<provider>.json`, 0600), currently imported
-  from the provider CLIs' files (`~/.codex`, `~/.grok`) on first use. There is no independent Arbor
-  OAuth login flow yet; acquisition piggybacks the CLIs. Refresh is implemented: when the cached
-  access token is expiring (or Grok stores only a refresh token), Arbor refreshes against the
-  provider endpoint and atomically writes the rotated set back to its own store.
+  Tokens are held in a versioned Arbor credential envelope
+  (`~/.arbor/oauth/<provider>.json`, 0600). Only an explicitly Arbor-owned family acquired by an
+  Arbor login may be refreshed or published. Legacy ownerless stores are intentionally refused and
+  left byte-for-byte unchanged; operators must relogin once an independent Arbor login flow exists.
+  Codex/Grok CLI credentials are never imported, copied, refreshed, or modified.
 
-  **Important:** importing a rotating CLI refresh token does not create an independent credential
-  family. Arbor's copy and the external CLI can invalidate each other when either process rotates
-  first. The local store and single-flight lock protect Arbor callers only; they do not coordinate
-  Codex, Grok, or another process. Treat this import mode as transitional and avoid concurrent
-  external refresh until the roadmap's explicit Arbor-owned login or source-owned access-token
-  read-through modes replace it. The access token is used as `Authorization: Bearer` against
-  `Arbor.LLM.OAuth.Responses` subscription endpoints. Verified live 2026-07-03 with ChatGPT and
-  SuperGrok subscriptions; the xAI default advanced to grok-4.5 on 2026-07-18.
+  Source-owned envelopes are reserved for a future access-token read-through implementation and
+  currently fail explicitly. This module does not provide an OAuth login/device flow.
 
   Concurrent in-process refresh is single-flighted per provider via a `:global` transaction.
-  Successful rotating refreshes and CLI imports fail closed unless the full token set is durably
-  published with atomic same-directory rename.
+  Successful rotating refreshes fail closed unless the full envelope is durably published with
+  atomic same-directory rename. Provider refresh responses may replace only token payload fields;
+  ownership metadata always comes from the validated stored envelope.
 
   ## SECURITY — Anthropic is HARD-REFUSED
 
@@ -31,14 +26,18 @@ defmodule Arbor.LLM.OAuth do
   sub entitled it in testing, but that's account-specific.
   """
 
-  require Logger
-
   alias Arbor.LLM.{Deadline, Endpoint, ResponseBudget}
+  alias Arbor.Contracts.LLM.AuthProvenance
 
   @max_oauth_response_bytes 1_048_576
   @max_access_token_bytes 65_536
   @max_refresh_token_bytes 65_536
   @max_token_json_bytes 1_048_576
+  @max_account_id_bytes 512
+  @max_generation 1_000_000_000_000
+  @credential_version 1
+  @credential_fields ~w(version provider account_id origin owner source generation tokens)
+  @token_fields ~w(access_token refresh_token)
   # Cover one concurrent refresh (~20s) plus margin; lock is released on owner death.
   @refresh_lock_retries 20
   @default_store_dir "~/.arbor/oauth"
@@ -49,17 +48,14 @@ defmodule Arbor.LLM.OAuth do
   @doc false
   def provider_atoms, do: @provider_atoms
 
-  # Per-provider: token file, refresh endpoint + client_id, JWT-exp skew. token acquisition (login)
-  # is out of scope — piggyback the CLI files.
+  # Per-provider refresh endpoint + client_id and JWT-expiry skew. Acquisition is out of scope.
   @providers %{
     openai: %{
-      file: "~/.codex/auth.json",
       refresh_url: "https://auth.openai.com/oauth/token",
       client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
       skew_s: 120
     },
     xai: %{
-      file: "~/.grok/auth.json",
       discovery_url: "https://auth.x.ai/.well-known/openid-configuration",
       client_id: "b1a00492-073a-47ea-816f-4c329264a828",
       skew_s: 3600
@@ -75,23 +71,16 @@ defmodule Arbor.LLM.OAuth do
   @spec access_token(atom() | String.t()) :: {:ok, String.t()} | {:error, term()}
   def access_token(provider) do
     with {:ok, key, config} <- resolve(provider),
-         {:ok, tokens} <- read_tokens(key, config) do
-      case usable_access_token(tokens, config) do
-        {:ok, token} ->
-          {:ok, token}
-
-        :refresh ->
-          # No valid cached access_token (Grok stores only a refresh_token; OpenAI's cached one may
-          # be expiring), so the transitional implementation refreshes and writes the rotation to
-          # Arbor's local store. This does NOT create an Arbor-owned credential family: the source
-          # CLI may still hold and rotate the same lineage. The roadmap replaces this unsafe import
-          # mode with explicit Arbor-owned login and source-owned access-token read-through.
-          # Single-flight prevents races only among Arbor callers in this BEAM cluster.
-          if is_binary(tokens["refresh_token"]) do
-            refresh_singleflight(key, config)
-          else
-            {:error, :no_usable_token}
+         {:ok, credential} <- read_credential(key) do
+      case credential.owner do
+        "arbor_owned" ->
+          case usable_access_token(credential.tokens, config) do
+            {:ok, token} -> {:ok, token}
+            :refresh -> refresh_singleflight(key, config)
           end
+
+        "source_owned" ->
+          {:error, :oauth_source_owned_unsupported}
       end
     end
   end
@@ -99,9 +88,9 @@ defmodule Arbor.LLM.OAuth do
   @doc "The ChatGPT-Account-ID header value for OpenAI (from the token file). nil otherwise."
   @spec account_id(atom() | String.t()) :: String.t() | nil
   def account_id(provider) do
-    with {:ok, :openai, config} <- resolve(provider),
-         {:ok, tokens} <- read_tokens(:openai, config) do
-      tokens["account_id"]
+    with {:ok, :openai, _config} <- resolve(provider),
+         {:ok, %{owner: "arbor_owned", account_id: account_id}} <- read_credential(:openai) do
+      account_id
     else
       _ -> nil
     end
@@ -112,20 +101,43 @@ defmodule Arbor.LLM.OAuth do
   def available?(provider), do: match?({:ok, _}, access_token(provider))
 
   @doc """
-  Whether `provider` has an OAuth token FILE on disk — no refresh, no network. Safe to call at
-  boot / adapter registration (unlike `available?/1`, which for grok triggers a refresh that
-  consumes the rotating refresh_token). Anthropic is refused.
+  Whether `provider` has a valid Arbor-owned credential envelope — no refresh and no network.
+  Legacy/raw stores, CLI files, malformed envelopes, and unsupported source-owned mode do not make
+  an adapter discoverable. Anthropic is refused.
   """
   @spec configured?(atom() | String.t()) :: boolean()
   def configured?(provider) do
     case resolve(provider) do
-      {:ok, key, config} ->
-        File.exists?(store_path(key)) or File.exists?(cli_path(key, config))
+      {:ok, key, _config} ->
+        match?({:ok, %{owner: "arbor_owned"}}, read_credential(key))
 
       _ ->
         false
     end
   end
+
+  @doc "Return bounded public ownership provenance without credential material."
+  @spec provenance(atom() | String.t()) :: {:ok, AuthProvenance.t()} | {:error, term()}
+  def provenance(provider) do
+    with {:ok, key, _config} <- resolve(provider),
+         {:ok, credential} <- read_credential(key),
+         :ok <- provenance_supported?(credential.owner),
+         {:ok, provenance} <-
+           AuthProvenance.new(%{
+             version: AuthProvenance.schema_version(),
+             provider: credential.provider,
+             account_id: credential.account_id,
+             origin: credential.origin,
+             owner: credential.owner,
+             source: credential.source,
+             generation: credential.generation
+           }) do
+      {:ok, provenance}
+    end
+  end
+
+  defp provenance_supported?("arbor_owned"), do: :ok
+  defp provenance_supported?("source_owned"), do: {:error, :oauth_source_owned_unsupported}
 
   # ── internals ──
 
@@ -161,57 +173,124 @@ defmodule Arbor.LLM.OAuth do
 
   defp normalize_oauth_provider(_provider), do: {:error, :invalid_oauth_provider}
 
-  # Store-first transitional behavior: read Arbor's local copy, importing the CLI file on first
-  # use. A copied rotating refresh token is not independently owned and can conflict with its CLI
-  # source. See the ownership warning in the moduledoc and the planned migration.
-  defp read_tokens(key, config) do
-    case read_stored_tokens(key) do
-      {:ok, tokens} ->
-        {:ok, tokens}
-
-      {:error, {:token_file_unreadable, :enoent}} ->
-        import_from_cli(key, config)
-
-      {:error, reason} ->
-        # CLI import is first-use bootstrap only. Falling back after corruption or an
-        # unreadable store could resurrect a consumed rotating refresh token.
-        {:error, {:oauth_token_store_read_failed, reason}}
-    end
-  end
-
-  defp read_stored_tokens(key) do
+  defp read_credential(key) do
     case read_json(store_path(key)) do
-      {:ok, %{"access_token" => _} = tokens} -> {:ok, tokens}
-      {:ok, %{"refresh_token" => _} = tokens} -> {:ok, tokens}
-      {:ok, _other} -> {:error, :invalid_token_store}
-      {:error, _reason} = error -> error
+      {:ok, %{} = json} -> decode_credential(key, json)
+      {:ok, _other} -> {:error, :oauth_credential_invalid}
+      {:error, {:token_file_unreadable, :enoent}} -> {:error, :oauth_login_required}
+      {:error, reason} -> {:error, {:oauth_token_store_read_failed, reason}}
     end
   end
 
-  defp import_from_cli(key, config) do
-    with {:ok, tokens} <- read_cli_tokens(key, config),
-         :ok <- write_stored(key, tokens) do
-      {:ok, tokens}
-    end
-  end
+  # The migration break is intentional: a raw token map has no trustworthy owner. Refusal must
+  # happen before any token use or write so the operator can inspect and migrate it explicitly.
+  defp decode_credential(_key, %{"access_token" => _token}),
+    do: {:error, :oauth_credential_migration_required}
 
-  defp read_cli_tokens(:openai, config) do
-    with {:ok, json} <- read_json(cli_path(:openai, config)),
-         %{"tokens" => %{} = tokens} <- json do
-      {:ok, tokens}
+  defp decode_credential(_key, %{"refresh_token" => _token}),
+    do: {:error, :oauth_credential_migration_required}
+
+  defp decode_credential(key, envelope) do
+    expected_provider = Atom.to_string(key)
+
+    with :ok <- exact_fields(envelope, @credential_fields),
+         @credential_version <- envelope["version"],
+         ^expected_provider <- envelope["provider"],
+         {:ok, account_id} <- validate_account_id(key, envelope["account_id"]),
+         {:ok, generation} <- validate_generation(envelope["generation"]),
+         {:ok, metadata} <-
+           validate_ownership_metadata(
+             key,
+             envelope["origin"],
+             envelope["owner"],
+             envelope["source"]
+           ),
+         {:ok, tokens} <- validate_owned_tokens(metadata.owner, envelope["tokens"]) do
+      {:ok,
+       Map.merge(metadata, %{
+         version: @credential_version,
+         provider: expected_provider,
+         account_id: account_id,
+         generation: generation,
+         tokens: tokens
+       })}
     else
-      _ -> {:error, {:no_tokens_in_file, cli_path(:openai, config)}}
+      _ -> {:error, :oauth_credential_invalid}
     end
   end
 
-  # Grok stores the token object under a single "https://auth.x.ai::<uuid>" key.
-  defp read_cli_tokens(:xai, config) do
-    with {:ok, json} <- read_json(cli_path(:xai, config)),
-         [{_key, %{} = tokens} | _] <- Map.to_list(json) do
-      {:ok, tokens}
-    else
-      _ -> {:error, {:no_tokens_in_file, cli_path(:xai, config)}}
+  defp exact_fields(%{} = value, fields) do
+    if map_size(value) == length(fields) and Enum.sort(Map.keys(value)) == Enum.sort(fields),
+      do: :ok,
+      else: {:error, :invalid_fields}
+  end
+
+  defp exact_fields(_value, _fields), do: {:error, :invalid_fields}
+
+  defp validate_account_id(:openai, account_id)
+       when is_binary(account_id) and byte_size(account_id) > 0 and
+              byte_size(account_id) <= @max_account_id_bytes do
+    if valid_secret_text?(account_id), do: {:ok, account_id}, else: {:error, :invalid_account_id}
+  end
+
+  defp validate_account_id(:xai, nil), do: {:ok, nil}
+
+  defp validate_account_id(:xai, account_id)
+       when is_binary(account_id) and byte_size(account_id) > 0 and
+              byte_size(account_id) <= @max_account_id_bytes do
+    if valid_secret_text?(account_id), do: {:ok, account_id}, else: {:error, :invalid_account_id}
+  end
+
+  defp validate_account_id(_key, _account_id), do: {:error, :invalid_account_id}
+
+  defp validate_generation(generation)
+       when is_integer(generation) and generation >= 0 and generation <= @max_generation,
+       do: {:ok, generation}
+
+  defp validate_generation(_generation), do: {:error, :invalid_generation}
+
+  defp validate_ownership_metadata(
+         _key,
+         "arbor_login",
+         "arbor_owned",
+         "arbor_oauth_store"
+       ) do
+    {:ok, %{origin: "arbor_login", owner: "arbor_owned", source: "arbor_oauth_store"}}
+  end
+
+  defp validate_ownership_metadata(:openai, "external_cli", "source_owned", "codex_file") do
+    {:ok, %{origin: "external_cli", owner: "source_owned", source: "codex_file"}}
+  end
+
+  defp validate_ownership_metadata(:xai, "external_cli", "source_owned", "grok_file") do
+    {:ok, %{origin: "external_cli", owner: "source_owned", source: "grok_file"}}
+  end
+
+  defp validate_ownership_metadata(_key, _origin, _owner, _source),
+    do: {:error, :invalid_ownership_metadata}
+
+  defp validate_owned_tokens("source_owned", tokens) when tokens == %{}, do: {:ok, %{}}
+
+  defp validate_owned_tokens("arbor_owned", %{} = tokens) do
+    with :ok <- exact_fields(tokens, @token_fields),
+         {:ok, access_token} <- validate_token(tokens["access_token"], @max_access_token_bytes),
+         {:ok, refresh_token} <-
+           validate_token(tokens["refresh_token"], @max_refresh_token_bytes) do
+      {:ok, %{"access_token" => access_token, "refresh_token" => refresh_token}}
     end
+  end
+
+  defp validate_owned_tokens(_owner, _tokens), do: {:error, :invalid_token_payload}
+
+  defp validate_token(token, maximum)
+       when is_binary(token) and byte_size(token) > 0 and byte_size(token) <= maximum do
+    if valid_secret_text?(token), do: {:ok, token}, else: {:error, :invalid_token}
+  end
+
+  defp validate_token(_token, _maximum), do: {:error, :invalid_token}
+
+  defp valid_secret_text?(value) when is_binary(value) do
+    String.valid?(value) and not String.match?(value, ~r/[\x00-\x1F\x7F]/)
   end
 
   @token_json_limits [
@@ -240,20 +319,6 @@ defmodule Arbor.LLM.OAuth do
   end
 
   defp store_path(key), do: Path.join(store_dir(), "#{key}.json")
-
-  # Test-only CLI path override — production never sets :oauth_cli_files.
-  defp cli_path(key, config) do
-    case Application.get_env(:arbor_llm, :oauth_cli_files) do
-      %{} = files ->
-        case Map.get(files, key) || Map.get(files, Atom.to_string(key)) do
-          path when is_binary(path) and byte_size(path) > 0 -> Path.expand(path)
-          _ -> Path.expand(config.file)
-        end
-
-      _ ->
-        Path.expand(config.file)
-    end
-  end
 
   defp usable_access_token(tokens, config) when is_map(tokens) do
     cached = tokens["access_token"]
@@ -287,15 +352,21 @@ defmodule Arbor.LLM.OAuth do
   # Called only while holding the provider-scoped :global lock.
   defp refresh_under_lock(key, config) do
     # Double-check the local store: another Arbor caller may have already refreshed + persisted.
-    case read_stored_tokens(key) do
-      {:ok, latest} ->
-        case usable_access_token(latest, config) do
+    case read_credential(key) do
+      {:ok, %{owner: "arbor_owned"} = latest} ->
+        case usable_access_token(latest.tokens, config) do
           {:ok, token} ->
             {:ok, token}
 
           :refresh ->
             refresh_and_persist(key, config, latest)
         end
+
+      {:ok, %{owner: "source_owned"}} ->
+        {:error, :oauth_source_owned_unsupported}
+
+      {:error, {:oauth_token_store_read_failed, reason}} ->
+        {:error, {:oauth_token_store_reread_failed, reason}}
 
       {:error, reason} ->
         # The pre-lock snapshot may contain a rotating refresh token already consumed by
@@ -304,19 +375,24 @@ defmodule Arbor.LLM.OAuth do
     end
   end
 
-  defp refresh_and_persist(key, config, tokens) do
-    refresh_token = tokens["refresh_token"]
+  defp refresh_and_persist(key, config, %{owner: "arbor_owned"} = credential) do
+    refresh_token = credential.tokens["refresh_token"]
 
-    if is_binary(refresh_token) do
-      with {:ok, refreshed} <- refresh(key, config, refresh_token),
-           {:ok, access} <- validate_refreshed_access_token(refreshed),
-           merged = Map.merge(tokens, refreshed),
-           :ok <- validate_effective_refresh_token(merged),
-           :ok <- write_stored(key, merged) do
-        {:ok, access}
-      end
-    else
-      {:error, :no_usable_token}
+    with {:ok, refreshed} <- refresh(key, config, refresh_token),
+         {:ok, access} <- validate_refreshed_access_token(refreshed),
+         {:ok, effective_refresh} <-
+           effective_refresh_token(refreshed, credential.tokens["refresh_token"]),
+         {:ok, generation} <- next_generation(credential.generation),
+         updated = %{
+           credential
+           | generation: generation,
+             tokens: %{
+               "access_token" => access,
+               "refresh_token" => effective_refresh
+             }
+         },
+         :ok <- write_stored(key, updated) do
+      {:ok, access}
     end
   end
 
@@ -340,31 +416,33 @@ defmodule Arbor.LLM.OAuth do
     {:error, {:invalid_refreshed_access_token, :missing_or_not_binary}}
   end
 
-  defp validate_effective_refresh_token(%{"refresh_token" => refresh_token})
-       when is_binary(refresh_token) and byte_size(refresh_token) > 0 and
-              byte_size(refresh_token) <= @max_refresh_token_bytes do
-    if String.valid?(refresh_token) do
-      :ok
-    else
-      {:error, {:invalid_refreshed_refresh_token, :invalid_utf8}}
+  defp effective_refresh_token(%{"refresh_token" => refresh_token}, _stored) do
+    case validate_token(refresh_token, @max_refresh_token_bytes) do
+      {:ok, token} -> {:ok, token}
+      {:error, _reason} -> {:error, {:invalid_refreshed_refresh_token, :invalid}}
     end
   end
 
-  defp validate_effective_refresh_token(%{"refresh_token" => refresh_token})
-       when is_binary(refresh_token) do
-    {:error, {:invalid_refreshed_refresh_token, :empty_or_oversized}}
+  defp effective_refresh_token(_refreshed, stored) do
+    case validate_token(stored, @max_refresh_token_bytes) do
+      {:ok, token} -> {:ok, token}
+      {:error, _reason} -> {:error, {:invalid_refreshed_refresh_token, :missing_or_not_binary}}
+    end
   end
 
-  defp validate_effective_refresh_token(_tokens) do
-    {:error, {:invalid_refreshed_refresh_token, :missing_or_not_binary}}
-  end
+  defp next_generation(generation)
+       when is_integer(generation) and generation >= 0 and generation < @max_generation,
+       do: {:ok, generation + 1}
+
+  defp next_generation(_generation), do: {:error, :oauth_generation_exhausted}
 
   # Persist tokens to Arbor's local store via atomic same-directory publication.
   # Encode first; exclusive temp (mode 0600 before content); write + fsync; rename over target;
   # fsync the parent directory so the directory entry is crash-durable; ensure final mode 0600.
   # Never delete the old target before rename. Failures clean the temp and return an error.
-  defp write_stored(key, tokens) do
-    with {:ok, json} <- encode_token_json(tokens) do
+  defp write_stored(key, credential) do
+    with {:ok, envelope} <- encode_credential(key, credential),
+         {:ok, json} <- encode_token_json(envelope) do
       path = store_path(key)
       dir = Path.dirname(path)
 
@@ -383,6 +461,33 @@ defmodule Arbor.LLM.OAuth do
             {:error, {:token_store_write_failed, reason}}
         end
       end
+    end
+  end
+
+  defp encode_credential(key, credential) do
+    envelope = %{
+      "version" => credential.version,
+      "provider" => credential.provider,
+      "account_id" => credential.account_id,
+      "origin" => credential.origin,
+      "owner" => credential.owner,
+      "source" => credential.source,
+      "generation" => credential.generation,
+      "tokens" => credential.tokens
+    }
+
+    with {:ok, validated} <- decode_credential(key, envelope) do
+      {:ok,
+       %{
+         "version" => validated.version,
+         "provider" => validated.provider,
+         "account_id" => validated.account_id,
+         "origin" => validated.origin,
+         "owner" => validated.owner,
+         "source" => validated.source,
+         "generation" => validated.generation,
+         "tokens" => validated.tokens
+       }}
     end
   end
 
@@ -533,14 +638,70 @@ defmodule Arbor.LLM.OAuth do
   # Test seam: Application env `:oauth_refresh_fun` (arity 3) replaces network refresh.
   # Production never sets this; public access_token/1 behavior is unchanged when unset.
   defp refresh(key, config, refresh_token) do
-    case Application.get_env(:arbor_llm, :oauth_refresh_fun) do
-      fun when is_function(fun, 3) ->
-        fun.(key, config, refresh_token)
+    result =
+      case Application.get_env(:arbor_llm, :oauth_refresh_fun) do
+        fun when is_function(fun, 3) -> fun.(key, config, refresh_token)
+        _ -> do_refresh(key, config, refresh_token)
+      end
 
-      _ ->
-        do_refresh(key, config, refresh_token)
-    end
+    normalize_refresh_result(result)
   end
+
+  defp normalize_refresh_result({:ok, %{} = refreshed}), do: {:ok, refreshed}
+
+  defp normalize_refresh_result({:error, reason}) do
+    if refresh_family_invalid?(reason),
+      do: {:error, :oauth_relogin_required},
+      else: {:error, :oauth_refresh_failed}
+  end
+
+  defp normalize_refresh_result(_result), do: {:error, :oauth_refresh_failed}
+
+  defp refresh_family_invalid?(reason) do
+    refresh_family_invalid?(reason, 4, 32)
+  rescue
+    _exception -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp refresh_family_invalid?(_reason, _depth, remaining) when remaining <= 0, do: false
+  defp refresh_family_invalid?(_reason, depth, _remaining) when depth <= 0, do: false
+
+  defp refresh_family_invalid?(reason, _depth, _remaining)
+       when reason in [:refresh_token_reused, :refresh_token_invalidated, :invalid_grant],
+       do: true
+
+  defp refresh_family_invalid?(reason, _depth, _remaining) when is_binary(reason) do
+    bounded = binary_part(reason, 0, min(byte_size(reason), 1_024)) |> String.downcase()
+
+    Enum.any?(
+      ["refresh_token_reused", "refresh_token_invalidated", "invalid_grant"],
+      &String.contains?(bounded, &1)
+    )
+  end
+
+  defp refresh_family_invalid?(reason, depth, remaining) when is_tuple(reason) do
+    reason
+    |> Tuple.to_list()
+    |> Enum.take(remaining)
+    |> Enum.any?(&refresh_family_invalid?(&1, depth - 1, remaining - 1))
+  end
+
+  defp refresh_family_invalid?(reason, depth, remaining) when is_list(reason) do
+    reason
+    |> Enum.take(remaining)
+    |> Enum.any?(&refresh_family_invalid?(&1, depth - 1, remaining - 1))
+  end
+
+  defp refresh_family_invalid?(reason, depth, remaining) when is_map(reason) do
+    reason
+    |> Map.to_list()
+    |> Enum.take(remaining)
+    |> Enum.any?(&refresh_family_invalid?(&1, depth - 1, remaining - 1))
+  end
+
+  defp refresh_family_invalid?(_reason, _depth, _remaining), do: false
 
   defp do_refresh(:openai, config, refresh_token) do
     post_token(config.refresh_url, %{
@@ -587,11 +748,13 @@ defmodule Arbor.LLM.OAuth do
       when is_binary(at) and byte_size(at) <= @max_access_token_bytes ->
         {:ok, tokens}
 
-      {:ok, %{status: status, body: body}} ->
-        {:error, {:refresh_failed, status, oauth_error(body)}}
+      {:ok, %{status: _status, body: body}} ->
+        if refresh_family_invalid?(body),
+          do: {:error, :oauth_relogin_required},
+          else: {:error, :oauth_refresh_failed}
 
-      {:error, reason} ->
-        {:error, {:refresh_request_failed, reason}}
+      {:error, _reason} ->
+        {:error, :oauth_refresh_failed}
     end
   end
 
@@ -633,7 +796,4 @@ defmodule Arbor.LLM.OAuth do
       )
     end
   end
-
-  defp oauth_error(%{"error" => e}), do: e
-  defp oauth_error(_), do: :unknown
 end

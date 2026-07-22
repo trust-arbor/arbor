@@ -230,19 +230,19 @@ defmodule Arbor.LLM.OAuth.Responses do
         end
 
       {:ok, %Req.Response{status: status} = response} ->
-        with {:ok, raw} <- collected_body(response, limits.max_response_bytes) do
-          {:error, {:responses_http, status, detail(raw)}}
+        with {:ok, _raw} <- collected_body(response, limits.max_response_bytes) do
+          {:error, {:responses_http, status, :redacted}}
         end
 
-      {:error, reason} ->
-        {:error, {:responses_request_failed, Arbor.LLM.ExternalTerm.sanitize(reason)}}
+      {:error, _reason} ->
+        {:error, {:responses_request_failed, :redacted}}
     end
   rescue
-    exception ->
-      {:error, {:responses_request_failed, Arbor.LLM.ExternalTerm.exception(exception)}}
+    _exception ->
+      {:error, {:responses_request_failed, :redacted}}
   catch
-    kind, reason ->
-      {:error, {:responses_request_failed, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}}
+    _kind, _reason ->
+      {:error, {:responses_request_failed, :redacted}}
   end
 
   defp bounded_sse_receipt(limits) do
@@ -658,10 +658,4 @@ defmodule Arbor.LLM.OAuth.Responses do
       do: binary_part(line, 0, byte_size(line) - 1),
       else: line
   end
-
-  defp detail(body) when is_binary(body),
-    do: body |> String.replace_invalid("") |> String.slice(0, 200)
-
-  defp detail(%{"detail" => detail}) when is_binary(detail), do: String.slice(detail, 0, 200)
-  defp detail(_body), do: :unavailable
 end

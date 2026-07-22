@@ -11,16 +11,32 @@ defmodule Arbor.Contracts.LLM.AuthProvenance do
 
   alias Arbor.Contracts.LLM.ControlPlaneSupport, as: Support
 
-  @schema_version 1
+  @schema_version 2
+  @providers ["openai", "xai"]
   @owners ["arbor_owned", "source_owned"]
-  @fields [:version, :owner, :generation, :source, :source_generation, :source_observed_at]
+  @origins ["arbor_login", "external_cli"]
+  @sources ["arbor_oauth_store", "codex_file", "grok_file"]
+  @fields [
+    :version,
+    :provider,
+    :account_id,
+    :origin,
+    :owner,
+    :source,
+    :generation,
+    :source_generation,
+    :source_observed_at
+  ]
   @max_bytes 16_384
 
   typedstruct enforce: true do
     field(:version, pos_integer(), default: @schema_version)
+    field(:provider, String.t())
+    field(:account_id, String.t() | nil)
+    field(:origin, String.t())
     field(:owner, String.t())
-    field(:generation, non_neg_integer())
     field(:source, String.t())
+    field(:generation, non_neg_integer())
     field(:source_generation, non_neg_integer() | nil, default: nil)
     field(:source_observed_at, String.t() | nil, default: nil)
   end
@@ -31,23 +47,48 @@ defmodule Arbor.Contracts.LLM.AuthProvenance do
   @spec owners() :: [String.t()]
   def owners, do: @owners
 
+  @spec providers() :: [String.t()]
+  def providers, do: @providers
+
+  @spec origins() :: [String.t()]
+  def origins, do: @origins
+
+  @spec sources() :: [String.t()]
+  def sources, do: @sources
+
   @spec new(map() | keyword()) :: {:ok, t()} | {:error, tuple()}
   def new(attrs) do
     with {:ok, attrs} <- Support.normalize_object(attrs, @fields, :invalid_auth_provenance),
          {:ok, version} <- version(Map.get(attrs, :version, @schema_version)),
+         {:ok, provider} <-
+           Support.normalize_enum(Map.get(attrs, :provider), @providers, :provider),
+         {:ok, account_id} <- account_id(Map.get(attrs, :account_id)),
+         {:ok, origin} <- Support.normalize_enum(Map.get(attrs, :origin), @origins, :origin),
          {:ok, owner} <- Support.normalize_enum(Map.get(attrs, :owner), @owners, :owner),
+         {:ok, source} <- Support.normalize_enum(Map.get(attrs, :source), @sources, :source),
          {:ok, generation} <- generation(Map.get(attrs, :generation), :generation),
-         {:ok, source} <- Support.normalize_identifier(Map.get(attrs, :source), :source),
          {:ok, source_generation} <-
            Support.optional_nonnegative_integer(attrs, :source_generation),
          {:ok, source_observed_at, _datetime} <-
-           Support.optional_timestamp(attrs, :source_observed_at) do
+           Support.optional_timestamp(attrs, :source_observed_at),
+         :ok <-
+           validate_ownership(
+             provider,
+             origin,
+             owner,
+             source,
+             source_generation,
+             source_observed_at
+           ) do
       {:ok,
        %__MODULE__{
          version: version,
+         provider: provider,
+         account_id: account_id,
+         origin: origin,
          owner: owner,
-         generation: generation,
          source: source,
+         generation: generation,
          source_generation: source_generation,
          source_observed_at: source_observed_at
        }}
@@ -62,9 +103,12 @@ defmodule Arbor.Contracts.LLM.AuthProvenance do
   def to_map(%__MODULE__{} = provenance) do
     %{
       "version" => provenance.version,
+      "provider" => provenance.provider,
+      "account_id" => provenance.account_id,
+      "origin" => provenance.origin,
       "owner" => provenance.owner,
-      "generation" => provenance.generation,
-      "source" => provenance.source
+      "source" => provenance.source,
+      "generation" => provenance.generation
     }
     |> Support.put_optional("source_generation", provenance.source_generation)
     |> Support.put_optional("source_observed_at", provenance.source_observed_at)
@@ -115,9 +159,54 @@ defmodule Arbor.Contracts.LLM.AuthProvenance do
   defp version(@schema_version), do: {:ok, @schema_version}
   defp version(_version), do: {:error, {:invalid_field, "version"}}
 
+  defp account_id(nil), do: {:ok, nil}
+  defp account_id(value), do: Support.normalize_text(value, :account_id, 512)
+
   defp generation(value, _field)
        when is_integer(value) and value >= 0 and value <= 1_000_000_000_000,
        do: {:ok, value}
 
   defp generation(_value, field), do: {:error, {:invalid_field, Atom.to_string(field)}}
+
+  defp validate_ownership(
+         _provider,
+         "arbor_login",
+         "arbor_owned",
+         "arbor_oauth_store",
+         nil,
+         nil
+       ),
+       do: :ok
+
+  defp validate_ownership(
+         "openai",
+         "external_cli",
+         "source_owned",
+         "codex_file",
+         source_generation,
+         source_observed_at
+       )
+       when is_integer(source_generation) and is_binary(source_observed_at),
+       do: :ok
+
+  defp validate_ownership(
+         "xai",
+         "external_cli",
+         "source_owned",
+         "grok_file",
+         source_generation,
+         source_observed_at
+       )
+       when is_integer(source_generation) and is_binary(source_observed_at),
+       do: :ok
+
+  defp validate_ownership(
+         _provider,
+         _origin,
+         _owner,
+         _source,
+         _source_generation,
+         _source_observed_at
+       ),
+       do: {:error, {:invalid_auth_provenance, :ownership_semantics}}
 end

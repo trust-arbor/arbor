@@ -1361,8 +1361,8 @@ defmodule Arbor.LLM.Client do
     adapters = api_adapters
 
     # Subscription-OAuth adapters (raw model on a flat subscription instead of an API key).
-    # Registered by FILE presence only (configured?/1 — never available?/1, which for grok would
-    # refresh + consume the rotating refresh_token at boot). The adapter refreshes lazily at call.
+    # Registered only for a validated Arbor-owned credential envelope. Discovery never refreshes,
+    # reads CLI credentials, or treats a legacy/raw store as ready.
     adapters =
       if Keyword.get(opts, :discover_oauth, true) do
         adapters
