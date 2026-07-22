@@ -455,3 +455,7 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 <!-- applied-learning: negative-start-link-tests-must-trap-linked-init-failures -->
 <a id="applied-learning-negative-start-link-tests-must-trap-linked-init-failures"></a>
 **Negative `start_link` tests must trap linked init failures.** A GenServer that rejects configuration from `init/1` can propagate the stop reason over the new process link before an assertion observes the public `{:error, reason}` result. In the test process, enable `Process.flag(:trap_exit, true)`, assert the exact returned error, and separately assert that no child side effect began; do not weaken the production fail-closed init path to make the test easier (found 2026-07-21 while proving a mismatched launch-bound Grok model never starts the ACP client).
+
+<!-- applied-learning: atom-interning-regressions-must-check-the-candidate-atom-not-the-vm-global-count -->
+<a id="applied-learning-atom-interning-regressions-must-check-the-candidate-atom-not-the-vm-global-count"></a>
+**Atom-interning regressions must check the candidate atom, not the VM-global count.** The BEAM atom table is process-global, so supervised background work or lazy module loading can legitimately increase `:atom_count` between two assertions even in an `async: false` test. Generate a unique untrusted string and prove `String.to_existing_atom/1` raises both before and after the public call; this tests the exact security invariant without unrelated runtime races (found 2026-07-22 during consolidated software-factory verification).

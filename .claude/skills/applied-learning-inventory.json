@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 517,
+  "entry_count": 519,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6265,8 +6265,34 @@
       "source_incident": "found 2026-07-22 while reviewing live coding readiness).",
       "content_sha256": "8bcab44a6a4dec1eabfc11c8ff95ec27c95280a03a085289d822900521502ed6",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 518,
+      "source_kind": "post-migration",
+      "slug": "compare-repository-wide-quality-failures-with-the-frozen-starting-revision",
+      "title": "Compare repository-wide quality failures with the frozen starting revision.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-compare-repository-wide-quality-failures-with-the-frozen-starting-revision",
+      "source_date": "2026-07-22",
+      "source_incident": "found 2026-07-22 while verifying the software-factory remediation program).",
+      "content_sha256": "d29e5909b2d4c07efc191c1aada230930bd053a70de41eb649c85b127e21b3e3",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 519,
+      "source_kind": "post-migration",
+      "slug": "atom-interning-regressions-must-check-the-candidate-atom-not-the-vm-global-count",
+      "title": "Atom-interning regressions must check the candidate atom, not the VM-global count.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-atom-interning-regressions-must-check-the-candidate-atom-not-the-vm-global-count",
+      "source_date": "2026-07-22",
+      "source_incident": "found 2026-07-22 during consolidated software-factory verification).",
+      "content_sha256": "760f98aad75e554697070a63b540fc7ef1ff34509e34e2f7d14a6c2cef9d5250",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 56
+  "post_migration_entry_count": 58
 }

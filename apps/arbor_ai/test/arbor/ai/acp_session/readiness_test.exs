@@ -53,12 +53,11 @@ defmodule Arbor.AI.AcpSession.ReadinessTest do
   end
 
   test "unknown provider strings do not intern atoms" do
-    _ = Arbor.AI.acp_provider_readiness("provider-that-is-not-registered")
-    before = :erlang.system_info(:atom_count)
-    result = Arbor.AI.acp_provider_readiness("provider-that-is-not-registered")
-    after_count = :erlang.system_info(:atom_count)
+    provider = "provider-that-is-not-registered-#{System.unique_integer([:positive])}"
 
-    assert before == after_count
+    assert_raise ArgumentError, fn -> String.to_existing_atom(provider) end
+    result = Arbor.AI.acp_provider_readiness(provider)
+    assert_raise ArgumentError, fn -> String.to_existing_atom(provider) end
     assert result["observation"]["availability"] == "unavailable"
     assert result["observation"]["failure_code"] == "unknown"
   end
