@@ -31,10 +31,11 @@ defmodule Arbor.Contracts.Coding.TaskOutcome do
   # These values are the closed status vocabularies currently emitted by the
   # ACP action/session paths. `provider_account_exhausted` is an action-level
   # delivery receipt; the other delivery values are task-control terminal
-  # states. Completion values mirror AcpSession terminal transcript statuses.
+  # states. Completion deliberately does not use ACP transcript `success`:
+  # only an explicit `end_turn` stop reason is a trusted worker completion.
   @delivery_states ~w(delivered not_delivered delivery_unknown cancelled provider_account_exhausted)
   @completion_states ~w(
-    success
+    end_turn
     provider_error
     timeout
     inactivity_timeout
@@ -115,7 +116,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcome do
   @spec delivery_states() :: [String.t()]
   def delivery_states, do: @delivery_states
 
-  @doc "Return the closed ACP completion-state values."
+  @doc "Return the closed completion states, including trusted `end_turn`."
   @spec completion_states() :: [String.t()]
   def completion_states, do: @completion_states
 

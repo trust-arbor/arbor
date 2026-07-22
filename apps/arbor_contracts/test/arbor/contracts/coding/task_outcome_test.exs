@@ -30,7 +30,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeTest do
              ~w(delivered not_delivered delivery_unknown cancelled provider_account_exhausted)
 
     assert TaskOutcome.completion_states() ==
-             ~w(success provider_error timeout inactivity_timeout stream_callback_failure stream_callback_timeout prompt_exit client_down cancelled)
+             ~w(end_turn provider_error timeout inactivity_timeout stream_callback_failure stream_callback_timeout prompt_exit client_down cancelled)
   end
 
   test "normalizes atom, string, and keyword-style objects to deterministic JSON" do
@@ -42,7 +42,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeTest do
                  diagnostic_refs: ["refs/arbor/diagnostics/1"],
                  evidence_ref: "refs/arbor/evidence/task-1",
                  delivery_state: :delivered,
-                 completion_state: "success",
+                 completion_state: :end_turn,
                  worker_session_id: "worker-1",
                  provider_session_id: "provider-1",
                  provider: "codex",
@@ -62,7 +62,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeTest do
       "diagnostic_refs" => ["refs/arbor/diagnostics/1"],
       "evidence_ref" => "refs/arbor/evidence/task-1",
       "delivery_state" => "delivered",
-      "completion_state" => "success",
+      "completion_state" => "end_turn",
       "worker_session_id" => "worker-1",
       "provider_session_id" => "provider-1",
       "provider" => "codex",
@@ -150,7 +150,8 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeTest do
           {:origin, "external"},
           {:retry, "forever"},
           {:delivery_state, "maybe"},
-          {:completion_state, "unknown"}
+          {:completion_state, "unknown"},
+          {:completion_state, "success"}
         ] do
       field_name = Atom.to_string(field)
 
