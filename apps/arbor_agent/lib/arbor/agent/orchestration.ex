@@ -266,6 +266,9 @@ defmodule Arbor.Agent.Orchestration do
   This is a volatile projection of the existing Consensus and Comms approval
   authorities. It contains only reconciliation-safe identifiers, ownership,
   lifecycle, and count evidence; it does not create or retain approval state.
+  `:principal_scope` is closed to `:participant` (the default, matching either
+  gated principal or approver) and `:subject` (matching only the gated
+  principal).
   """
   @spec pending_approval_inventory(keyword() | map()) :: {:ok, map()} | {:error, term()}
   def pending_approval_inventory(opts \\ []) do
@@ -353,6 +356,7 @@ defmodule Arbor.Agent.Orchestration do
       :caller_id,
       :agent_id,
       :principal_id,
+      :principal_scope,
       :resource_uri,
       :task_id,
       :max_items,
@@ -375,6 +379,8 @@ defmodule Arbor.Agent.Orchestration do
              {:ok, agent_id} <- normalize_approval_inventory_id_filter(entries, :agent_id),
              {:ok, principal_id} <-
                normalize_approval_inventory_id_filter(entries, :principal_id),
+             {:ok, principal_scope} <-
+               normalize_approval_inventory_principal_scope(entries),
              {:ok, resource_uri} <- normalize_approval_inventory_resource_filter(entries),
              {:ok, max_items} <- normalize_approval_inventory_max_items(entries),
              {:ok, authorize?} <- normalize_approval_inventory_authorize(entries),
@@ -394,6 +400,7 @@ defmodule Arbor.Agent.Orchestration do
                task_id: task_id,
                agent_id: agent_id,
                principal_id: principal_id,
+               principal_scope: principal_scope,
                resource_uri: resource_uri
              },
              max_items: max_items,
@@ -441,6 +448,14 @@ defmodule Arbor.Agent.Orchestration do
 
       _ ->
         {:error, :invalid_resource_uri}
+    end
+  end
+
+  defp normalize_approval_inventory_principal_scope(entries) do
+    case Keyword.get(entries, :principal_scope, :participant) do
+      :participant -> {:ok, :participant}
+      :subject -> {:ok, :subject}
+      _ -> {:error, :invalid_principal_scope}
     end
   end
 
@@ -768,6 +783,7 @@ defmodule Arbor.Agent.Orchestration do
   defp task_scoped_opts(
          opts,
          task_id,
+         agent_id,
          caller_id,
          approval_answer_cap_id,
          steer_cap_id,
@@ -782,13 +798,16 @@ defmodule Arbor.Agent.Orchestration do
     |> Keyword.put(:steer_security_module, security_module(opts))
     |> Keyword.put(:adoption_cap_id, adoption_cap_id)
     |> Keyword.put(:adoption_security_module, security_module(opts))
-    |> Keyword.put(:approval_cleanup_descriptor, approval_cleanup_descriptor(caller_id, opts))
+    |> Keyword.put(
+      :approval_cleanup_descriptor,
+      approval_cleanup_descriptor(agent_id, caller_id, opts)
+    )
   end
 
   # Closed scalar data only — never MFA/module/function/fun/PID selection.
   # TaskStore pins cleanup MFA, backend modules, and cleanup supervisor at init.
-  defp approval_cleanup_descriptor(caller_id, opts) do
-    %{caller_id: caller_id}
+  defp approval_cleanup_descriptor(agent_id, caller_id, opts) do
+    %{caller_id: caller_id, principal_id: agent_id}
     |> maybe_put_cleanup_trace_id(opt(opts, :trace_id))
   end
 
@@ -810,6 +829,7 @@ defmodule Arbor.Agent.Orchestration do
                   task_scoped_opts(
                     opts,
                     task_id,
+                    agent_id,
                     caller_id,
                     approval_answer_cap_id,
                     steer_cap_id,
@@ -1012,6 +1032,7 @@ defmodule Arbor.Agent.Orchestration do
     opts
     |> all_pending_approvals()
     |> Enum.filter(&(approval_task_id(&1) == task_id))
+    |> Enum.filter(&matches_cleanup_principal?(&1, opt(opts, :principal_id)))
     |> Enum.each(fn approval ->
       cleanup_task_approval(approval, task_id, caller_id, reason, opts)
     end)
@@ -1495,6 +1516,18 @@ defmodule Arbor.Agent.Orchestration do
   defp matches_principal?(%PendingApproval{} = approval, principal_id) do
     principal_id in [approval.principal_id, approval.approver_id]
   end
+
+  # Listing includes approvals a principal may answer; destructive cleanup
+  # binds only the principal whose operation is gated by the approval.
+  defp matches_cleanup_principal?(_approval, nil), do: true
+
+  defp matches_cleanup_principal?(
+         %PendingApproval{principal_id: principal_id},
+         principal_id
+       ),
+       do: true
+
+  defp matches_cleanup_principal?(%PendingApproval{}, _principal_id), do: false
 
   defp matches_resource?(_approval, nil), do: true
 

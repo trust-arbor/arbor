@@ -7,13 +7,30 @@ defmodule Arbor.Contracts.Coding.VerificationReport do
 
   @schema_version 1
   @statuses ~w(passed failed blocked)
-  @fields [:version, :status, :profile, :candidate_ref, :observed_at, :diagnostics, :evidence_ref]
+  @fields [
+    :version,
+    :status,
+    :profile,
+    :candidate_ref,
+    :observed_at,
+    :diagnostics,
+    :evidence_ref,
+    :provenance
+  ]
   @required_fields [:version, :status, :profile, :candidate_ref, :observed_at, :diagnostics]
   @max_fields length(@fields)
   @max_text_bytes 512
   @max_timestamp_bytes 64
   @max_diagnostics 256
   @max_report_bytes 256_000
+  @provenance_fields ~w[
+    version task_id workspace_id principal_id plan_fingerprint plan_version
+    validation_profile review_profile work_packet_digest compile_manifest_sha256
+    workspace_provenance_sha256 workspace_lifecycle
+  ]
+  @workspace_lifecycles ~w(active retained_reactivated)
+  @sha256_pattern ~r/\A[0-9a-f]{64}\z/
+  @work_packet_digest_pattern ~r/\Asha256:[0-9a-f]{64}\z/
 
   typedstruct enforce: true do
     @typedoc "Bounded coding-candidate verification evidence."
@@ -25,6 +42,7 @@ defmodule Arbor.Contracts.Coding.VerificationReport do
     field(:observed_at, String.t())
     field(:diagnostics, [map()])
     field(:evidence_ref, String.t() | nil, default: nil)
+    field(:provenance, map() | nil, default: nil)
   end
 
   @doc "Return the accepted verification-report schema version."
@@ -46,7 +64,8 @@ defmodule Arbor.Contracts.Coding.VerificationReport do
          {:ok, candidate_ref} <- bounded_text(attrs.candidate_ref, :candidate_ref),
          {:ok, observed_at} <- normalize_timestamp(attrs.observed_at, :observed_at),
          {:ok, diagnostics} <- normalize_diagnostics(attrs.diagnostics),
-         {:ok, evidence_ref} <- optional_text(attrs, :evidence_ref) do
+         {:ok, evidence_ref} <- optional_text(attrs, :evidence_ref),
+         {:ok, provenance} <- optional_provenance(attrs) do
       report = %__MODULE__{
         version: @schema_version,
         status: status,
@@ -54,7 +73,8 @@ defmodule Arbor.Contracts.Coding.VerificationReport do
         candidate_ref: candidate_ref,
         observed_at: observed_at,
         diagnostics: diagnostics,
-        evidence_ref: evidence_ref
+        evidence_ref: evidence_ref,
+        provenance: provenance
       }
 
       if json_size(report) <= @max_report_bytes,
@@ -79,6 +99,7 @@ defmodule Arbor.Contracts.Coding.VerificationReport do
       "diagnostics" => report.diagnostics
     }
     |> maybe_put("evidence_ref", report.evidence_ref)
+    |> maybe_put("provenance", report.provenance)
   end
 
   @doc "Normalize a verification report directly to its canonical JSON map."
@@ -195,6 +216,53 @@ defmodule Arbor.Contracts.Coding.VerificationReport do
 
   defp normalize_diagnostics(_value), do: {:error, {:invalid_field, "diagnostics"}}
 
+  defp optional_provenance(attrs) do
+    case Map.fetch(attrs, :provenance) do
+      :error -> {:ok, nil}
+      {:ok, nil} -> {:ok, nil}
+      {:ok, value} -> normalize_provenance(value)
+    end
+  end
+
+  defp normalize_provenance(value) when is_map(value) and not is_struct(value) do
+    with true <- Enum.sort(Map.keys(value)) == Enum.sort(@provenance_fields),
+         1 <- value["version"],
+         {:ok, task_id} <- bounded_text(value["task_id"], :task_id),
+         {:ok, workspace_id} <- bounded_text(value["workspace_id"], :workspace_id),
+         {:ok, principal_id} <- bounded_text(value["principal_id"], :principal_id),
+         true <- valid_sha256?(value["plan_fingerprint"]),
+         plan_version when is_integer(plan_version) and plan_version > 0 <-
+           value["plan_version"],
+         {:ok, validation_profile} <-
+           bounded_text(value["validation_profile"], :validation_profile),
+         {:ok, review_profile} <- bounded_text(value["review_profile"], :review_profile),
+         true <- valid_work_packet_digest?(value["work_packet_digest"]),
+         true <- valid_sha256?(value["compile_manifest_sha256"]),
+         true <- valid_sha256?(value["workspace_provenance_sha256"]),
+         workspace_lifecycle when workspace_lifecycle in @workspace_lifecycles <-
+           value["workspace_lifecycle"] do
+      {:ok,
+       %{
+         "version" => 1,
+         "task_id" => task_id,
+         "workspace_id" => workspace_id,
+         "principal_id" => principal_id,
+         "plan_fingerprint" => value["plan_fingerprint"],
+         "plan_version" => plan_version,
+         "validation_profile" => validation_profile,
+         "review_profile" => review_profile,
+         "work_packet_digest" => value["work_packet_digest"],
+         "compile_manifest_sha256" => value["compile_manifest_sha256"],
+         "workspace_provenance_sha256" => value["workspace_provenance_sha256"],
+         "workspace_lifecycle" => workspace_lifecycle
+       }}
+    else
+      _ -> {:error, {:invalid_field, "provenance"}}
+    end
+  end
+
+  defp normalize_provenance(_value), do: {:error, {:invalid_field, "provenance"}}
+
   defp reverse_ok({:ok, values}), do: {:ok, Enum.reverse(values)}
   defp reverse_ok(error), do: error
 
@@ -217,6 +285,12 @@ defmodule Arbor.Contracts.Coding.VerificationReport do
       String.trim(value) != "" and not String.contains?(value, <<0>>) and
       not String.match?(value, ~r/[\x00-\x1F\x7F]/)
   end
+
+  defp valid_sha256?(value),
+    do: is_binary(value) and Regex.match?(@sha256_pattern, value)
+
+  defp valid_work_packet_digest?(value),
+    do: is_binary(value) and Regex.match?(@work_packet_digest_pattern, value)
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

@@ -1,12 +1,11 @@
 defmodule Arbor.Behavioral.TrustCapabilityTest do
   @moduledoc """
-  Behavioral test: trust tier capability check.
+  Behavioral test: granular trust policy and capability checks.
 
   Verifies the end-to-end authorization flow:
-  1. Agent at tier X attempts action requiring tier Y
+  1. An agent's URI-prefix policy resolves its effective autonomy mode
   2. Capability grant → authorize → allowed/denied
   3. Reflex system catches dangerous patterns before capability check
-  4. Trust progression via events
 
   Self-contained — uses its own agent identities and capabilities.
   """
@@ -159,7 +158,7 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
   end
 
   describe "scenario: trust profile lifecycle" do
-    test "create_trust_profile starts agent at untrusted tier" do
+    test "create_trust_profile starts with a conservative granular policy" do
       agent_id = "agent_trust_profile_#{:erlang.unique_integer([:positive])}"
 
       result =
@@ -173,7 +172,9 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
 
       case result do
         {:ok, profile} ->
-          assert profile.tier == :untrusted
+          assert profile.baseline == :ask
+          assert is_map(profile.rules)
+          refute Map.has_key?(profile, :tier)
 
         {:error, _reason} ->
           # Trust.Manager may not be running in test env
@@ -188,12 +189,18 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
       end
     end
 
-    test "check_trust_authorization compares agent tier against required" do
+    test "effective_mode resolves URI rules instead of scalar tiers" do
       agent_id = "agent_trust_auth_#{:erlang.unique_integer([:positive])}"
 
       result =
         try do
-          Arbor.Trust.create_trust_profile(agent_id)
+          Arbor.Trust.ensure_trust_profile(agent_id,
+            baseline: :block,
+            rules: %{
+              "arbor://fs/read" => :allow,
+              "arbor://fs/read/private" => :ask
+            }
+          )
         rescue
           _ -> {:error, :unavailable}
         catch
@@ -202,15 +209,13 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
 
       case result do
         {:ok, _profile} ->
-          # New agent is untrusted — should fail veteran check
-          auth_result = Arbor.Trust.check_trust_authorization(agent_id, :veteran)
-          assert {:error, _} = auth_result
+          assert Arbor.Trust.effective_mode(agent_id, "arbor://fs/read/project/file.ex") == :allow
+          assert Arbor.Trust.effective_mode(agent_id, "arbor://fs/read/private/key") == :ask
 
-          # Should pass untrusted check
-          auth_result = Arbor.Trust.check_trust_authorization(agent_id, :untrusted)
-          assert {:ok, _} = auth_result
+          assert Arbor.Trust.effective_mode(agent_id, "arbor://fs/write/project/file.ex") ==
+                   :block
 
-        {:error, :unavailable} ->
+        {:error, _reason} ->
           # Trust.Manager not running — acceptable in test env
           :ok
       end

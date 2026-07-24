@@ -134,6 +134,46 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjectionTest do
     assert inventory["filters"]["task_id"] == "task-one"
   end
 
+  test "security regression: subject scope excludes approver-only approvals" do
+    Process.put(
+      {Comms, :pending},
+      [
+        interaction("subject-approval", "agent-target", "task-one", "human-one", []),
+        interaction("approver-only", "agent-other", "task-one", "agent-target", [])
+      ]
+    )
+
+    base_opts = [
+      caller_id: "operator",
+      consensus_module: Consensus,
+      interaction_router: Comms,
+      security_module: Security,
+      task_id: "task-one",
+      principal_id: "agent-target"
+    ]
+
+    assert {:ok, participant_inventory} = inventory(base_opts)
+
+    assert Enum.map(participant_inventory["approvals"], & &1["approval_id"]) == [
+             "approver-only",
+             "subject-approval"
+           ]
+
+    assert participant_inventory["filters"]["principal_scope"] == "participant"
+
+    assert {:ok, subject_inventory} =
+             inventory(Keyword.put(base_opts, :principal_scope, :subject))
+
+    assert Enum.map(subject_inventory["approvals"], & &1["approval_id"]) == [
+             "subject-approval"
+           ]
+
+    assert subject_inventory["filters"]["principal_scope"] == "subject"
+
+    assert {:error, :invalid_approval_inventory_options} =
+             inventory(Keyword.put(base_opts, :principal_scope, :approver))
+  end
+
   test "quarantines every conflicting duplicate identity independent of backend order" do
     records = [
       consensus("conflict", "agent-a", "task-a", "arbor://fs/read/repo/file.ex"),

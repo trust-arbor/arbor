@@ -1,9 +1,25 @@
 defmodule Arbor.Gateway.Bridge.ClaudeSessionTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Gateway.Bridge.ClaudeSession
 
   @moduletag :fast
+
+  defmodule UnavailableTrust do
+    def get_trust_profile(_agent_id), do: exit(:trust_service_unavailable)
+    def create_trust_profile(_agent_id), do: exit(:trust_service_unavailable)
+  end
+
+  setup do
+    previous = Application.get_env(:arbor_gateway, :trust_module)
+    Application.put_env(:arbor_gateway, :trust_module, UnavailableTrust)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:arbor_gateway, :trust_module, previous),
+        else: Application.delete_env(:arbor_gateway, :trust_module)
+    end)
+  end
 
   # ===========================================================================
   # to_agent_id/1

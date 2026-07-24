@@ -83,7 +83,10 @@ defmodule Arbor.Historian.TestHelpers do
 
     for stream_id <- streams do
       persistence_event = to_persistence_event(event, stream_id)
-      ETSEventLog.append(stream_id, persistence_event, name: ctx.event_log)
+
+      {:ok, [_persisted_event]} =
+        ETSEventLog.append(stream_id, persistence_event, name: ctx.event_log)
+
       StreamRegistry.record_event(ctx.registry, stream_id, event.timestamp)
     end
 
@@ -137,7 +140,7 @@ defmodule Arbor.Historian.TestHelpers do
       stream_id,
       "arbor.historian.#{event.category}:#{event.type}",
       event.data,
-      id: event.id,
+      id: projection_event_id(event.id, stream_id),
       metadata:
         Map.merge(event.metadata || %{}, %{
           subject_id: stream_id,
@@ -148,6 +151,15 @@ defmodule Arbor.Historian.TestHelpers do
       correlation_id: event[:correlation_id],
       timestamp: event.timestamp
     )
+  end
+
+  defp projection_event_id(signal_id, stream_id) do
+    digest =
+      :sha256
+      |> :crypto.hash([signal_id, 0, stream_id])
+      |> Base.encode16(case: :lower)
+
+    "hist_" <> digest
   end
 
   defp random_hex(bytes) do

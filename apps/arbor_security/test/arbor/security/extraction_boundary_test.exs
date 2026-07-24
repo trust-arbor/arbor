@@ -59,7 +59,8 @@ defmodule Arbor.Security.ExtractionBoundaryTest do
         MapSet.new([
           "apps/arbor_security/lib/arbor/security/capability_store.ex",
           "apps/arbor_security/lib/arbor/security/identity/nonce_cache.ex",
-          "apps/arbor_security/lib/arbor/security/identity/registry.ex"
+          "apps/arbor_security/lib/arbor/security/identity/registry.ex",
+          "apps/arbor_security/lib/arbor/security/signal_sync.ex"
         ])
 
       violations =

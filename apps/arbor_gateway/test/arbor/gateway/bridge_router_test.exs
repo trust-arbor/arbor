@@ -7,11 +7,27 @@ defmodule Arbor.Gateway.Bridge.RouterTest do
 
   @moduletag :fast
 
+  defmodule UnavailableTrust do
+    def get_trust_profile(_agent_id), do: exit(:trust_service_unavailable)
+    def create_trust_profile(_agent_id), do: exit(:trust_service_unavailable)
+  end
+
   @opts Router.init([])
 
   # The Bridge Router does not have its own Plug.Parsers (the main router
   # handles parsing). We need to parse the JSON body before calling the router.
   @parsers_opts Plug.Parsers.init(parsers: [:json], json_decoder: Jason)
+
+  setup do
+    previous = Application.get_env(:arbor_gateway, :trust_module)
+    Application.put_env(:arbor_gateway, :trust_module, UnavailableTrust)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:arbor_gateway, :trust_module, previous),
+        else: Application.delete_env(:arbor_gateway, :trust_module)
+    end)
+  end
 
   defp parsed_post(path, body) do
     conn(:post, path, body)

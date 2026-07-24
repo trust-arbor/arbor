@@ -614,9 +614,9 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       descriptor = opts[:approval_cleanup_descriptor]
       assert is_map(descriptor)
-      # Closed scalar authority boundary: caller_id + optional trace only.
+      # Closed scalar authority boundary: caller/principal + optional trace only.
       # Executable selectors (MFA/modules/functions/PIDs) are never present.
-      assert descriptor == %{caller_id: "human_1"}
+      assert descriptor == %{caller_id: "human_1", principal_id: "agent_1"}
       refute Map.has_key?(descriptor, :mfa)
       refute Map.has_key?(descriptor, :module)
       refute Map.has_key?(descriptor, :function)
@@ -1097,6 +1097,16 @@ defmodule Arbor.Agent.OrchestrationTest do
               }
             ),
             interaction_request(
+              "irq_cancel_other_principal_" <> task_id,
+              "agent_2",
+              "agent_1",
+              "arbor://shell/exec/git",
+              metadata: %{
+                principal_id: "agent_2",
+                approval_context: %{provenance: %{task_id: task_id}}
+              }
+            ),
+            interaction_request(
               "irq_cancel_prefix_" <> task_id,
               "agent_1",
               "human_1",
@@ -1149,6 +1159,8 @@ defmodule Arbor.Agent.OrchestrationTest do
       refute_received {:interaction_abandon, "irq_cancel_prefix_" <> ^task_id, _}
       refute_received {:interaction_abandon, "irq_cancel_missing_" <> ^task_id, _}
 
+      refute_received {:interaction_abandon, "irq_cancel_other_principal_" <> ^task_id, _}
+
       assert {:ok, remaining} =
                Orchestration.list_pending_approvals(
                  authorize?: false,
@@ -1161,6 +1173,7 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert MapSet.member?(remaining_ids, "prop_cancel_missing_" <> task_id)
       assert MapSet.member?(remaining_ids, "irq_cancel_prefix_" <> task_id)
       assert MapSet.member?(remaining_ids, "irq_cancel_missing_" <> task_id)
+      assert MapSet.member?(remaining_ids, "irq_cancel_other_principal_" <> task_id)
 
       refute_receive {:consensus_cancel, "prop_cancel_match_" <> ^task_id}, 200
       refute_receive {:interaction_abandon, "irq_cancel_match_" <> ^task_id, _}, 200
@@ -1315,7 +1328,7 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   describe "cleanup_approvals_for_task/2 lifecycle API" do
-    test "terminates only exact provenance approvals on both backends with terminal audit metadata" do
+    test "security regression: cleanup binds exact task and optional principal provenance" do
       task_id = "task_term_22082"
 
       Process.put(
@@ -1326,6 +1339,9 @@ defmodule Arbor.Agent.OrchestrationTest do
           ),
           consensus_proposal("prop_prefix", "agent_1", "arbor://fs/write/repo/two.ex",
             metadata: %{provenance: %{task_id: task_id <> "0"}}
+          ),
+          consensus_proposal("prop_other_principal", "agent_2", "arbor://fs/write/repo/two.ex",
+            metadata: %{provenance: %{task_id: task_id}}
           ),
           consensus_proposal("prop_missing", "agent_1", "arbor://fs/write/repo/three.ex")
         ]
@@ -1342,6 +1358,23 @@ defmodule Arbor.Agent.OrchestrationTest do
           ),
           interaction_request("irq_other", "agent_1", "human_1", "arbor://shell/exec/mix",
             metadata: %{principal_id: "agent_1", task_id: "task_other"}
+          ),
+          interaction_request(
+            "irq_other_principal",
+            "agent_2",
+            "human_1",
+            "arbor://shell/exec/mix",
+            metadata: %{principal_id: "agent_2", task_id: task_id}
+          ),
+          interaction_request(
+            "irq_target_is_approver_only",
+            "agent_2",
+            "agent_1",
+            "arbor://shell/exec/mix",
+            metadata: %{
+              principal_id: "agent_2",
+              approval_context: %{provenance: %{task_id: task_id}}
+            }
           )
         ]
       )
@@ -1349,6 +1382,7 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert :ok =
                Orchestration.cleanup_approvals_for_task(task_id,
                  caller_id: "dispatch_owner",
+                 principal_id: "agent_1",
                  cleanup_reason: :task_termination,
                  consensus_module: FakeConsensus,
                  interaction_router: FakeInteractionRouter,
@@ -1361,8 +1395,16 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert_received {:interaction_abandon, "irq_matching", :task_termination}
 
       refute_received {:consensus_cancel, "prop_prefix"}
+      refute_received {:consensus_cancel, "prop_other_principal"}
       refute_received {:consensus_cancel, "prop_missing"}
       refute_received {:interaction_abandon, "irq_other", _}
+      refute_received {:interaction_abandon, "irq_other_principal", _}
+      refute_received {:interaction_abandon, "irq_target_is_approver_only", _}
+
+      assert Enum.any?(
+               Process.get({FakeInteractionRouter, :pending}),
+               &(Map.get(&1, :request_id) == "irq_target_is_approver_only")
+             )
 
       assert_received {:audit_answered, "dispatch_owner", "prop_matching", :consensus,
                        :task_terminated, consensus_audit}
@@ -1463,6 +1505,16 @@ defmodule Arbor.Agent.OrchestrationTest do
               }
             ),
             interaction_request(
+              "irq_same_task_other_principal_" <> task_id,
+              "agent_2",
+              "agent_1",
+              "arbor://shell/exec/git",
+              metadata: %{
+                principal_id: "agent_2",
+                approval_context: %{provenance: %{task_id: task_id}}
+              }
+            ),
+            interaction_request(
               "irq_other_" <> task_id,
               "agent_1",
               "human_1",
@@ -1517,7 +1569,11 @@ defmodule Arbor.Agent.OrchestrationTest do
       remaining_ids = remaining |> Enum.map(& &1.id) |> Enum.sort()
 
       assert remaining_ids ==
-               Enum.sort(["prop_prefix_" <> task_id, "irq_other_" <> task_id])
+               Enum.sort([
+                 "prop_prefix_" <> task_id,
+                 "irq_other_" <> task_id,
+                 "irq_same_task_other_principal_" <> task_id
+               ])
 
       assert {:ok, %{state: :done}} =
                Orchestration.task_status(task_id, Keyword.put(opts, :authorize?, false))

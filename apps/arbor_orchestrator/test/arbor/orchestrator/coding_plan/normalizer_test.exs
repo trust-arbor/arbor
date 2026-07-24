@@ -257,7 +257,7 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
       assert {:error, {:non_json_task, :nested_non_string_key}} =
                Normalizer.normalize_task(atom_key_plan)
 
-      assert {:error, {:invalid_field, "version", {:expected, 1, "1"}}} =
+      assert {:error, {:invalid_field, "version", {:expected_one_of, [1, 2], "1"}}} =
                Normalizer.normalize_task(%{
                  "kind" => "coding_change",
                  "plan" => %{

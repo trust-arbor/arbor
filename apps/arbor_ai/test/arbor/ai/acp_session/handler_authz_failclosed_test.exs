@@ -17,6 +17,7 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
   @moduletag :fast
 
   alias Arbor.AI.AcpSession.Handler
+  alias Arbor.AI.TestSupport.AutoTrustPolicy
 
   defmodule RaisingFileGuard do
     @moduledoc false
@@ -47,11 +48,22 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
     end
   end
 
+  defmodule RaisingTrustPolicy do
+    @moduledoc false
+    def confirmation_mode(_agent_id, _resource_uri), do: raise("trust unavailable")
+  end
+
   setup do
+    original_file_guard = Application.get_env(:arbor_ai, :file_guard_module)
+    original_security = Application.get_env(:arbor_ai, :security_module)
+    original_test_pid = Application.get_env(:arbor_ai, :handler_authz_test_pid)
+    original_trust_policy = Application.get_env(:arbor_ai, :trust_policy_module)
+
     on_exit(fn ->
-      Application.delete_env(:arbor_ai, :file_guard_module)
-      Application.delete_env(:arbor_ai, :security_module)
-      Application.delete_env(:arbor_ai, :handler_authz_test_pid)
+      restore_env(:file_guard_module, original_file_guard)
+      restore_env(:security_module, original_security)
+      restore_env(:handler_authz_test_pid, original_test_pid)
+      restore_env(:trust_policy_module, original_trust_policy)
     end)
 
     :ok
@@ -87,9 +99,10 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
 
   describe "ACP tool identity security regression" do
     test "uses structured kind instead of a human-readable command title" do
+      Application.put_env(:arbor_ai, :trust_policy_module, AutoTrustPolicy)
       Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
       Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
-      {:ok, state} = Handler.init(agent_id: "agent_x")
+      {:ok, state} = Handler.init(agent_id: "agent_x", permission_timeout_ms: 10)
 
       tool_call = %{
         "kind" => "execute",
@@ -119,6 +132,19 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
       assert reason =~ "tool identity"
       refute_receive {_uri, :execute}
     end
+  end
+
+  test "security regression: configured trust policy failure denies the permission" do
+    Application.put_env(:arbor_ai, :trust_policy_module, RaisingTrustPolicy)
+    Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
+    Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
+    {:ok, state} = Handler.init(agent_id: "agent_x", permission_timeout_ms: 10)
+
+    assert {:ok, %{"outcome" => "denied", "reason" => reason}, ^state} =
+             Handler.handle_permission_request("s1", %{"kind" => "edit"}, %{}, state)
+
+    assert reason == "trust policy check failed"
+    refute_received {_resource_uri, _action}
   end
 
   # SECURITY REGRESSION (codex authz.acp-session-anonymous-file-access, HIGH):
@@ -164,4 +190,7 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
                Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_ai, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_ai, key, value)
 end

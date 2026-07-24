@@ -134,6 +134,7 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "governance"}), do: :arbor_trust
   defp owner_for_parsed(%CapabilityUri{domain: "acp"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "orchestrator"}), do: :arbor_orchestrator
+  defp owner_for_parsed(%CapabilityUri{domain: "coding"}), do: :arbor_orchestrator
   defp owner_for_parsed(%CapabilityUri{domain: "pipeline"}), do: :arbor_orchestrator
   defp owner_for_parsed(%CapabilityUri{domain: "handler"}), do: :arbor_orchestrator
   defp owner_for_parsed(_parsed), do: nil

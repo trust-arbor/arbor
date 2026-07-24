@@ -1,3 +1,5 @@
+{:ok, _started} = Application.ensure_all_started(:arbor_signals)
+
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 # Create ETS tables first (same as Application.start/2 does)
 tables = [

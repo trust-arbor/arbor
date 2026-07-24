@@ -45,9 +45,11 @@ defmodule Arbor.Orchestrator.Session.Builders do
   @spec build_turn_values(Arbor.Orchestrator.Session.t(), String.t() | map(), DateTime.t()) ::
           map()
   def build_turn_values(state, message, now) do
+    input = normalize_message(message)
+
     user_msg = %{
       "role" => "user",
-      "content" => normalize_message(message),
+      "content" => input,
       "timestamp" => DateTime.to_iso8601(now)
     }
 
@@ -59,7 +61,8 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
     Map.merge(base, %{
       "session.messages" => messages_with_input,
-      "session.input" => normalize_message(message)
+      "session.input" => input,
+      "session.query" => input
     })
   end
 

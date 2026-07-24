@@ -52,6 +52,7 @@ defmodule Arbor.Historian.EventConverter do
     # Extract the historian-specific type from the persistence type
     type = extract_type(event.type)
     meta = event.metadata || %{}
+    domain_meta = SafeAtom.atomize_keys(meta, [:signal_id, :source, :persisted_at])
 
     HistorianEvent.new(
       id: event.id,
@@ -66,7 +67,15 @@ defmodule Arbor.Historian.EventConverter do
       stream_version: event.event_number,
       global_position: event.global_position,
       version: meta[:version] || meta["version"] || "1.0.0",
-      metadata: Map.drop(meta, [:subject_id, :subject_type, :version, "subject_id", "subject_type", "version"])
+      metadata:
+        Map.drop(domain_meta, [
+          :subject_id,
+          :subject_type,
+          :version,
+          "subject_id",
+          "subject_type",
+          "version"
+        ])
     )
   end
 

@@ -1,28 +1,35 @@
 defmodule Mix.Tasks.Arbor.Coding.Check do
-  @shortdoc "Check coding-plan readiness"
+  @shortdoc "Check coding-plan readiness or verify a retained candidate"
   @moduledoc """
   Checks whether a reviewed coding plan can start without acquiring a
-  workspace or starting a coding worker.
+  workspace or starting a coding worker, or asks a running Arbor node to verify
+  a retained candidate through the product validation boundary.
 
       mix arbor.coding.check --plan path/to/plan.json
       mix arbor.coding.check --plan path/to/plan.json --static --json
       mix arbor.coding.check --plan path/to/plan.json --live --agent-id agent_...
+      mix arbor.coding.check --verify --plan path/to/plan.json \
+        --agent-id agent_... --task-id task_... --workspace-id workspace_...
 
   Without an explicit mode, a reachable Arbor node is preferred. If no node is
-  reachable, the task performs the non-mutating local checks instead.
+  reachable, readiness performs the non-mutating local checks instead.
+  Candidate verification is always live and never falls back to readiness.
   """
 
   use Mix.Task
 
   @requirements ["compile"]
 
-  alias Arbor.Contracts.Coding.{Plan, ReadinessReport}
+  alias Arbor.Contracts.Coding.{Plan, ReadinessReport, VerificationReport}
   alias Mix.Tasks.Arbor.Helpers, as: ArborConfig
 
   @max_plan_bytes 256_000
   @max_path_bytes 4_096
-  @max_agent_id_bytes 256
+  @max_id_bytes 256
   @rpc_timeout_ms 5_000
+  @verification_rpc_grace_ms 10_000
+  @max_verification_rpc_timeout_ms 86_410_000
+  @requester_shutdown_timeout_ms 1_000
   @max_human_diagnostics 6
   @human_text_bytes 160
   @readiness_runtime_options [
@@ -37,6 +44,8 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
   @type runtime_opt ::
           {:readiness_checker, (term(), keyword() -> term())}
           | {:rpc_call, (node(), module(), atom(), [term()], pos_integer() -> term())}
+          | {:verification_spawn_request,
+             (node(), module(), atom(), [term()], [term()] -> reference())}
           | {:ensure_distribution, (-> term())}
           | {:server_running?, (-> boolean())}
           | {:target_node, (-> node())}
@@ -49,14 +58,18 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
 
   @doc false
   @spec run([String.t()]) :: :ok | no_return()
-  def run(args) do
-    case execute_with_cli(args, []) do
+  def run(args), do: run(args, [])
+
+  @doc false
+  @spec run([String.t()], [runtime_opt()]) :: :ok | no_return()
+  def run(args, runtime_opts) do
+    case execute_with_cli(args, runtime_opts) do
       {:ok, report, cli} ->
-        emit_report(report, cli.json)
-        maybe_exit(report, cli.json)
+        emit_report(report, cli.operation, cli.json)
+        maybe_exit(report)
 
       {:error, error, cli} ->
-        emit_error(error, cli.json)
+        emit_error(error, cli.operation, cli.json)
         exit({:shutdown, 1})
     end
   end
@@ -77,14 +90,15 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
   @doc false
   @spec exit_code(String.t()) :: 0 | 1
   def exit_code(status) when status in ["ready", "degraded"], do: 0
+  def exit_code("passed"), do: 0
   def exit_code("blocked"), do: 1
   def exit_code(_status), do: 1
 
   defp execute_with_cli(args, runtime_opts) do
     with {:ok, cli} <- parse_args(args),
          {:ok, plan_input} <- read_plan(cli.plan),
-         {:ok, report} <- check(plan_input, cli.mode, cli.agent_id, runtime_opts),
-         {:ok, report} <- normalize_report(report) do
+         {:ok, report} <- execute_operation(plan_input, cli, runtime_opts),
+         {:ok, report} <- normalize_report(report, cli) do
       {:ok, report, cli}
     else
       {:error, error} ->
@@ -101,13 +115,18 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
           plan: :string,
           static: :boolean,
           live: :boolean,
+          verify: :boolean,
           agent_id: :string,
+          task_id: :string,
+          workspace_id: :string,
+          review_attestation_id: :string,
           json: :boolean
         ]
       )
 
     static = Keyword.get(opts, :static, false)
     live = Keyword.get(opts, :live, false)
+    verify = Keyword.get(opts, :verify, false)
 
     cond do
       invalid != [] ->
@@ -118,6 +137,9 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
 
       static and live ->
         command_error("mode", "conflicting_modes")
+
+      verify and static ->
+        command_error("mode", "verification_is_live")
 
       not is_binary(opts[:plan]) ->
         command_error("plan", "required")
@@ -131,12 +153,29 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
           end
 
         with {:ok, agent_id} <- validate_agent_id_option(opts[:agent_id]),
-             :ok <- require_live_agent_id(mode, agent_id) do
+             {:ok, task_id} <- validate_id_option(opts[:task_id], "task_id"),
+             {:ok, workspace_id} <-
+               validate_id_option(opts[:workspace_id], "workspace_id"),
+             {:ok, review_attestation_id} <-
+               validate_id_option(opts[:review_attestation_id], "review_attestation_id"),
+             :ok <-
+               validate_operation_options(
+                 verify,
+                 mode,
+                 agent_id,
+                 task_id,
+                 workspace_id,
+                 review_attestation_id
+               ) do
           {:ok,
            %{
              plan: opts[:plan],
              mode: mode,
              agent_id: agent_id,
+             operation: if(verify, do: :verification, else: :readiness),
+             task_id: task_id,
+             workspace_id: workspace_id,
+             review_attestation_id: review_attestation_id,
              json: Keyword.get(opts, :json, false)
            }}
         end
@@ -144,22 +183,28 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
   end
 
   defp cli_from_args(args) when is_list(args) do
-    {opts, _positional, _invalid} = OptionParser.parse(args, strict: [json: :boolean])
-    %{json: Keyword.get(opts, :json, false)}
+    {opts, _positional, _invalid} =
+      OptionParser.parse(args, strict: [json: :boolean, verify: :boolean])
+
+    %{
+      json: Keyword.get(opts, :json, false),
+      operation: if(Keyword.get(opts, :verify, false), do: :verification, else: :readiness)
+    }
   end
 
-  defp cli_from_args(_args), do: %{json: false}
+  defp cli_from_args(_args), do: %{json: false, operation: :readiness}
 
   defp read_plan(path) when is_binary(path) do
-    cond do
+    invalid_path? =
       not String.valid?(path) or byte_size(path) > @max_path_bytes or
-        String.contains?(path, <<0>>) or String.trim(path) == "" ->
-        command_error("plan", "invalid_path")
+        String.contains?(path, <<0>>) or String.trim(path) == ""
 
-      true ->
-        path
-        |> Path.expand()
-        |> read_plan_file()
+    if invalid_path? do
+      command_error("plan", "invalid_path")
+    else
+      path
+      |> Path.expand()
+      |> read_plan_file()
     end
   end
 
@@ -196,6 +241,14 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
 
   defp decode_plan(_decoded), do: command_error("plan", "expected_object")
 
+  defp execute_operation(plan_input, %{operation: :readiness} = cli, runtime_opts) do
+    check(plan_input, cli.mode, cli.agent_id, runtime_opts)
+  end
+
+  defp execute_operation(plan_input, %{operation: :verification} = cli, runtime_opts) do
+    verify(plan_input, cli, runtime_opts)
+  end
+
   defp check(plan_input, mode, agent_id, runtime_opts) do
     case plan_input do
       {:invalid, raw_plan} ->
@@ -209,6 +262,33 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
           :live -> check_live(plan, agent_id, runtime_opts)
           :auto -> check_auto(plan, agent_id, runtime_opts)
         end
+    end
+  end
+
+  defp verify({:invalid, _raw_plan}, _cli, _runtime_opts),
+    do: command_error("plan", "invalid")
+
+  defp verify({:valid, plan}, cli, runtime_opts) do
+    case discover_target(runtime_opts) do
+      {:ok, target} ->
+        request =
+          %{
+            "agent_id" => cli.agent_id,
+            "task_id" => cli.task_id,
+            "workspace_id" => cli.workspace_id
+          }
+          |> maybe_put("review_attestation_id", cli.review_attestation_id)
+
+        invoke_remote_verification(
+          target,
+          plan,
+          request,
+          verification_rpc_timeout(plan),
+          runtime_opts
+        )
+
+      :unavailable ->
+        command_error("verification", "target_unavailable_start_server")
     end
   end
 
@@ -262,6 +342,297 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
     )
   end
 
+  defp invoke_remote_verification(target, plan, request, timeout, runtime_opts) do
+    rpc_call =
+      case Keyword.fetch(runtime_opts, :rpc_call) do
+        {:ok, callback} ->
+          callback
+
+        :error ->
+          spawn_request =
+            Keyword.get(
+              runtime_opts,
+              :verification_spawn_request,
+              &:erlang.spawn_request/5
+            )
+
+          fn node, module, function, args, rpc_timeout ->
+            cancellable_verification_rpc(
+              node,
+              module,
+              function,
+              args,
+              rpc_timeout,
+              spawn_request
+            )
+          end
+      end
+
+    safe_invoke(
+      fn ->
+        rpc_call.(
+          target,
+          Arbor.Orchestrator,
+          :verify_coding_candidate_for_operator,
+          [plan, request],
+          timeout
+        )
+      end,
+      :verification
+    )
+  end
+
+  @doc false
+  @spec cancellable_verification_rpc(
+          node(),
+          module(),
+          atom(),
+          [term()],
+          pos_integer(),
+          (node(), module(), atom(), [term()], [term()] -> reference())
+        ) :: term()
+  def cancellable_verification_rpc(
+        target,
+        Arbor.Orchestrator,
+        :verify_coding_candidate_for_operator,
+        [plan, request],
+        timeout,
+        spawn_request
+      )
+      when is_atom(target) and is_integer(timeout) and timeout > 0 and
+             is_function(spawn_request, 5) do
+    correlation_id = :crypto.strong_rand_bytes(16)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    parent = self()
+
+    {requester, requester_monitor} =
+      spawn_monitor(fn ->
+        run_verification_requester(
+          parent,
+          target,
+          correlation_id,
+          plan,
+          request,
+          spawn_request
+        )
+      end)
+
+    await_verification_result(
+      requester,
+      requester_monitor,
+      correlation_id,
+      deadline
+    )
+  rescue
+    _exception -> {:badrpc, :verification_spawn_failed}
+  catch
+    _kind, _reason -> {:badrpc, :verification_spawn_failed}
+  end
+
+  def cancellable_verification_rpc(
+        _target,
+        _module,
+        _function,
+        _args,
+        _timeout,
+        _spawn_request
+      ),
+      do: {:badrpc, :invalid_verification_rpc}
+
+  defp run_verification_requester(
+         parent,
+         target,
+         correlation_id,
+         plan,
+         request,
+         spawn_request
+       ) do
+    parent_monitor = Process.monitor(parent)
+
+    request_id =
+      spawn_request.(
+        target,
+        Arbor.Orchestrator,
+        :verify_coding_candidate_for_operator_rpc,
+        [self(), parent, correlation_id, plan, request],
+        [:monitor]
+      )
+
+    send(parent, {:arbor_operator_candidate_requester_started, correlation_id, self()})
+    await_remote_request(parent, parent_monitor, request_id, correlation_id)
+  rescue
+    _exception ->
+      send(parent, {:arbor_operator_candidate_requester_error, correlation_id, :spawn_failed})
+  catch
+    _kind, _reason ->
+      send(parent, {:arbor_operator_candidate_requester_error, correlation_id, :spawn_failed})
+  end
+
+  defp await_remote_request(parent, parent_monitor, request_id, correlation_id) do
+    receive do
+      {:spawn_reply, ^request_id, :ok, remote_pid} when is_pid(remote_pid) ->
+        await_remote_request(parent, parent_monitor, request_id, correlation_id)
+
+      {:spawn_reply, ^request_id, :error, reason} ->
+        send(parent, {:arbor_operator_candidate_requester_error, correlation_id, reason})
+
+      {:DOWN, ^request_id, :process, _remote_pid, reason} ->
+        send(parent, {:arbor_operator_candidate_requester_down, correlation_id, reason})
+
+      {:cancel_operator_candidate_verification, ^correlation_id} ->
+        _ = :erlang.spawn_request_abandon(request_id)
+        Process.demonitor(parent_monitor, [:flush])
+        :ok
+
+      {:stop_operator_candidate_requester, ^correlation_id} ->
+        _ = :erlang.spawn_request_abandon(request_id)
+        Process.demonitor(parent_monitor, [:flush])
+        :ok
+
+      {:DOWN, ^parent_monitor, :process, ^parent, _reason} ->
+        _ = :erlang.spawn_request_abandon(request_id)
+        :ok
+    end
+  end
+
+  defp await_verification_result(requester, requester_monitor, correlation_id, deadline) do
+    receive do
+      {:arbor_operator_candidate_verification_rpc_result, ^correlation_id, result} ->
+        stop_requester(requester, requester_monitor, correlation_id)
+        result
+
+      {:arbor_operator_candidate_verification_rpc_cancelled, ^correlation_id, :ok} ->
+        stop_requester(requester, requester_monitor, correlation_id)
+        {:badrpc, :cancelled}
+
+      {:arbor_operator_candidate_verification_rpc_cancelled, ^correlation_id, _status} ->
+        stop_requester(requester, requester_monitor, correlation_id)
+        {:badrpc, :cancellation_unconfirmed}
+
+      {:arbor_operator_candidate_requester_started, ^correlation_id, ^requester} ->
+        await_verification_result(requester, requester_monitor, correlation_id, deadline)
+
+      {:arbor_operator_candidate_requester_error, ^correlation_id, reason} ->
+        stop_requester(requester, requester_monitor, correlation_id)
+        {:badrpc, reason}
+
+      {:arbor_operator_candidate_requester_down, ^correlation_id, reason} ->
+        await_terminal_message_after_remote_down(
+          requester,
+          requester_monitor,
+          correlation_id,
+          reason
+        )
+
+      {:DOWN, ^requester_monitor, :process, ^requester, reason} ->
+        await_terminal_message_after_remote_down(
+          requester,
+          requester_monitor,
+          correlation_id,
+          reason
+        )
+    after
+      remaining_ms(deadline) ->
+        cancel_and_confirm(requester, requester_monitor, correlation_id)
+    end
+  end
+
+  defp cancel_and_confirm(requester, requester_monitor, correlation_id) do
+    send(requester, {:cancel_operator_candidate_verification, correlation_id})
+    _ = await_requester_down(requester, requester_monitor)
+
+    deadline =
+      System.monotonic_time(:millisecond) +
+        Arbor.Orchestrator.operator_candidate_cancellation_grace_ms()
+
+    await_cancellation_confirmation(correlation_id, deadline)
+  end
+
+  defp await_cancellation_confirmation(correlation_id, deadline) do
+    receive do
+      {:arbor_operator_candidate_verification_rpc_cancelled, ^correlation_id, :ok} ->
+        {:badrpc, :timeout}
+
+      {:arbor_operator_candidate_verification_rpc_cancelled, ^correlation_id, _status} ->
+        {:badrpc, :cancellation_unconfirmed}
+
+      {:arbor_operator_candidate_verification_rpc_result, ^correlation_id, _result} ->
+        {:badrpc, :timeout}
+    after
+      remaining_ms(deadline) -> {:badrpc, :cancellation_unconfirmed}
+    end
+  end
+
+  defp await_terminal_message_after_remote_down(
+         requester,
+         requester_monitor,
+         correlation_id,
+         reason
+       ) do
+    receive do
+      {:arbor_operator_candidate_verification_rpc_result, ^correlation_id, result} ->
+        stop_requester(requester, requester_monitor, correlation_id)
+        result
+
+      {:arbor_operator_candidate_verification_rpc_cancelled, ^correlation_id, :ok} ->
+        stop_requester(requester, requester_monitor, correlation_id)
+        {:badrpc, :cancelled}
+
+      {:arbor_operator_candidate_verification_rpc_cancelled, ^correlation_id, _status} ->
+        stop_requester(requester, requester_monitor, correlation_id)
+        {:badrpc, :cancellation_unconfirmed}
+    after
+      @requester_shutdown_timeout_ms ->
+        stop_requester(requester, requester_monitor, correlation_id)
+        {:badrpc, reason}
+    end
+  end
+
+  defp stop_requester(requester, requester_monitor, correlation_id) do
+    if Process.alive?(requester) do
+      send(requester, {:stop_operator_candidate_requester, correlation_id})
+      _ = await_requester_down(requester, requester_monitor)
+    else
+      Process.demonitor(requester_monitor, [:flush])
+    end
+
+    :ok
+  end
+
+  defp await_requester_down(requester, requester_monitor) do
+    receive do
+      {:DOWN, ^requester_monitor, :process, ^requester, _reason} ->
+        :ok
+    after
+      @requester_shutdown_timeout_ms ->
+        Process.exit(requester, :kill)
+
+        receive do
+          {:DOWN, ^requester_monitor, :process, ^requester, _reason} -> :ok
+        after
+          @requester_shutdown_timeout_ms ->
+            Process.demonitor(requester_monitor, [:flush])
+            :unconfirmed
+        end
+    end
+  end
+
+  defp remaining_ms(deadline) do
+    max(deadline - System.monotonic_time(:millisecond), 0)
+  end
+
+  defp verification_rpc_timeout(plan) do
+    wall_clock_ms = get_in(plan, ["budgets", "wall_clock_ms"])
+
+    case wall_clock_ms do
+      value when is_integer(value) and value > 0 ->
+        min(value + @verification_rpc_grace_ms, @max_verification_rpc_timeout_ms)
+
+      _invalid ->
+        @rpc_timeout_ms
+    end
+  end
+
   defp readiness_opts(mode, agent_id, runtime_opts) when mode in [:static, :live] do
     agent_opts = if is_binary(agent_id), do: [agent_id: agent_id], else: []
 
@@ -276,14 +647,66 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
 
   defp validate_agent_id_option(_agent_id), do: command_error("agent_id", "invalid")
 
+  defp validate_id_option(nil, _field), do: {:ok, nil}
+
+  defp validate_id_option(value, field) when is_binary(value) do
+    if safe_id?(value), do: {:ok, value}, else: command_error(field, "invalid")
+  end
+
+  defp validate_id_option(_value, field), do: command_error(field, "invalid")
+
+  defp validate_operation_options(
+         false,
+         mode,
+         agent_id,
+         task_id,
+         workspace_id,
+         review_attestation_id
+       ) do
+    with :ok <- require_live_agent_id(mode, agent_id),
+         :ok <- reject_readiness_candidate_option(task_id, "task_id"),
+         :ok <- reject_readiness_candidate_option(workspace_id, "workspace_id") do
+      reject_readiness_candidate_option(
+        review_attestation_id,
+        "review_attestation_id"
+      )
+    end
+  end
+
+  defp validate_operation_options(
+         true,
+         _mode,
+         agent_id,
+         task_id,
+         workspace_id,
+         _review_attestation_id
+       ) do
+    with :ok <- require_option(agent_id, "agent_id"),
+         :ok <- require_option(task_id, "task_id") do
+      require_option(workspace_id, "workspace_id")
+    end
+  end
+
+  defp reject_readiness_candidate_option(nil, _field), do: :ok
+
+  defp reject_readiness_candidate_option(_value, field),
+    do: command_error(field, "requires_verify")
+
+  defp require_option(nil, field), do: command_error(field, "required")
+  defp require_option(_value, _field), do: :ok
+
   defp require_live_agent_id(:live, nil), do: command_error("agent_id", "required")
   defp require_live_agent_id(:live, _agent_id), do: :ok
   defp require_live_agent_id(_mode, _agent_id), do: :ok
 
   defp valid_agent_id?(agent_id) do
-    byte_size(agent_id) > 6 and byte_size(agent_id) <= @max_agent_id_bytes and
-      String.valid?(agent_id) and String.starts_with?(agent_id, "agent_") and
-      String.trim(agent_id) != "" and not has_control_byte?(agent_id)
+    byte_size(agent_id) > 6 and String.starts_with?(agent_id, "agent_") and safe_id?(agent_id)
+  end
+
+  defp safe_id?(value) do
+    byte_size(value) > 0 and byte_size(value) <= @max_id_bytes and String.valid?(value) and
+      String.trim(value) == value and not String.contains?(value, <<0>>) and
+      not has_control_byte?(value)
   end
 
   defp has_control_byte?(<<>>), do: false
@@ -311,8 +734,8 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
       {:ok, report} ->
         {:ok, report}
 
-      {:badrpc, _reason} when location == :remote ->
-        command_error("live", "rpc_unavailable")
+      {:badrpc, _reason} when location in [:remote, :verification] ->
+        command_error(location_field(location), "rpc_unavailable")
 
       {:error, _reason} ->
         command_error(location_field(location), "check_failed")
@@ -328,34 +751,65 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
   end
 
   defp safe_callback(fun) when is_function(fun, 0) do
-    try do
-      fun.()
-    rescue
-      _exception -> :unavailable
-    catch
-      _, _reason -> :unavailable
-    end
+    fun.()
+  rescue
+    _exception -> :unavailable
+  catch
+    _, _reason -> :unavailable
   end
 
   defp safe_callback(_fun), do: :unavailable
 
-  defp normalize_report(report) do
+  defp normalize_report(report, %{operation: :readiness}) do
     case ReadinessReport.normalize(report) do
       {:ok, normalized} -> {:ok, normalized}
       {:error, _reason} -> command_error("readiness", "invalid_report")
     end
   end
 
-  defp emit_report(report, true), do: Mix.shell().info(encode_json(report))
+  defp normalize_report(report, %{operation: :verification} = cli) do
+    case VerificationReport.normalize(report) do
+      {:ok, normalized} ->
+        if verification_identity_matches?(normalized, cli),
+          do: {:ok, normalized},
+          else: command_error("verification", "invalid_report")
 
-  defp emit_report(report, false) do
+      {:error, _reason} ->
+        command_error("verification", "invalid_report")
+    end
+  end
+
+  defp verification_identity_matches?(report, cli) do
+    case report["provenance"] do
+      %{
+        "task_id" => task_id,
+        "workspace_id" => workspace_id,
+        "principal_id" => principal_id
+      } ->
+        task_id == cli.task_id and workspace_id == cli.workspace_id and
+          principal_id == cli.agent_id
+
+      _ ->
+        false
+    end
+  end
+
+  defp emit_report(report, _operation, true), do: Mix.shell().info(encode_json(report))
+
+  defp emit_report(report, operation, false) do
     status = report["status"]
-    Mix.shell().info("Coding readiness: #{String.upcase(status)}")
+    Mix.shell().info("#{operation_label(operation)}: #{String.upcase(status)}")
 
     report["diagnostics"]
-    |> Enum.filter(&(&1["decision"] in ["blocked", "degraded", "unavailable"]))
+    |> human_diagnostics(operation)
     |> Enum.take(@max_human_diagnostics)
     |> Enum.each(&emit_human_diagnostic/1)
+  end
+
+  defp human_diagnostics(diagnostics, :verification), do: diagnostics
+
+  defp human_diagnostics(diagnostics, :readiness) do
+    Enum.filter(diagnostics, &(&1["decision"] in ["blocked", "degraded", "unavailable"]))
   end
 
   defp emit_human_diagnostic(diagnostic) do
@@ -372,13 +826,15 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
     end
   end
 
-  defp emit_error(error, true), do: Mix.shell().info(encode_json(error))
+  defp emit_error(error, _operation, true), do: Mix.shell().info(encode_json(error))
 
-  defp emit_error(error, false) do
-    Mix.shell().error("Coding readiness check failed: #{error["field"]} (#{error["reason"]}).")
+  defp emit_error(error, operation, false) do
+    Mix.shell().error(
+      "#{operation_label(operation)} failed: #{error["field"]} (#{error["reason"]})."
+    )
   end
 
-  defp maybe_exit(report, _json) do
+  defp maybe_exit(report) do
     case exit_code(report["status"]) do
       0 -> :ok
       code -> exit({:shutdown, code})
@@ -415,7 +871,14 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
   defp bounded_display(_value), do: "unknown"
 
   defp location_field(:remote), do: "live"
+  defp location_field(:verification), do: "verification"
   defp location_field(:local), do: "readiness"
+
+  defp operation_label(:verification), do: "Coding verification"
+  defp operation_label(_readiness), do: "Coding readiness"
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp command_error(field, reason) do
     {:error,

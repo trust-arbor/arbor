@@ -1152,7 +1152,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       send(owner, :hold)
     end
 
-    test "owner death retains dirty owned work and reactivates for exact task+principal", %{
+    test "security regression: owner death retains dirty work for lineage-only reactivation", %{
       tmp_dir: tmp_dir
     } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
@@ -1223,16 +1223,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
       assert File.exists?(Path.join(lease.worktree_path, "dirty.txt"))
 
+      assert {:error, :retained_workspace_not_authorized} =
+               WorkspaceLeaseRegistry.reactivate_retained_by_lineage(
+                 lease.workspace_id,
+                 "task-other",
+                 "agent-other",
+                 server: server
+               )
+
       assert {:ok, reactivated} =
-               WorkspaceLeaseRegistry.acquire(
-                 %{
-                   repo_path: repo,
-                   branch: branch,
-                   worktree_base_dir: worktree_base,
-                   task_id: task_id,
-                   principal_id: principal_id,
-                   workspace_id: lease.workspace_id
-                 },
+               WorkspaceLeaseRegistry.reactivate_retained_by_lineage(
+                 lease.workspace_id,
+                 task_id,
+                 principal_id,
                  server: server
                )
 

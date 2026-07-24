@@ -51,6 +51,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.CodingPlan.CandidateVerifier
   alias Arbor.Orchestrator.CodingPlan.Compilation
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
+  alias Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier
   alias Arbor.Orchestrator.CodingPlan.Profiles
   alias Arbor.Orchestrator.CodingPlan.Readiness
   alias Arbor.Orchestrator.CodingPlan.Reconciliation
@@ -400,6 +401,60 @@ defmodule Arbor.Orchestrator do
   @spec verify_coding_candidate(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def verify_coding_candidate(candidate, opts) do
     CandidateVerifier.verify(candidate, opts)
+  end
+
+  @doc """
+  Verify a coding candidate from a closed, trusted operator request.
+
+  The caller plan is accepted only when it exactly matches the task's retained
+  compilation artifacts. The target node reconstructs the validation program
+  from that archive and binds the resulting evidence to exact task, workspace,
+  plan, profile, and work-packet provenance. The operator request may identify
+  only the agent, task, workspace, and optional security-review attestation; it
+  cannot carry execution controls or signing authority. This is a trusted
+  BEAM-distribution administration surface and must not be exposed through
+  HTTP, Gateway, or MCP.
+  """
+  @spec verify_coding_candidate_for_operator(term(), term()) ::
+          {:ok, map()} | {:error, term()}
+  def verify_coding_candidate_for_operator(plan, request) do
+    OperatorCandidateVerifier.verify(plan, request)
+  end
+
+  @doc false
+  @spec operator_candidate_cancellation_grace_ms() :: pos_integer()
+  def operator_candidate_cancellation_grace_ms do
+    OperatorCandidateVerifier.cancellation_grace_ms()
+  end
+
+  @doc false
+  @spec verify_coding_candidate_for_operator_rpc(pid(), pid(), binary(), term(), term()) :: :ok
+  def verify_coding_candidate_for_operator_rpc(
+        requester,
+        reply_to,
+        correlation_id,
+        plan,
+        request
+      )
+      when is_pid(requester) and is_pid(reply_to) and is_binary(correlation_id) and
+             byte_size(correlation_id) == 16 do
+    result = OperatorCandidateVerifier.verify_for_requester(plan, request, requester)
+
+    case result do
+      {:error, {:candidate_verification_cancelled, status}} ->
+        send(
+          reply_to,
+          {:arbor_operator_candidate_verification_rpc_cancelled, correlation_id, status}
+        )
+
+      _ ->
+        send(
+          reply_to,
+          {:arbor_operator_candidate_verification_rpc_result, correlation_id, result}
+        )
+    end
+
+    :ok
   end
 
   @doc """

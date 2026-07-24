@@ -352,7 +352,8 @@ defmodule Arbor.Eval.Checks.PIIDetectionTest do
     end
 
     test "detects Slack token" do
-      text = "SLACK_TOKEN=REDACTED"
+      token = "xoxb-" <> "1234567890-abcdefghijk"
+      text = "SLACK_TOKEN=#{token}"
       findings = PIIDetection.scan_text(text)
       assert Enum.any?(findings, fn {label, _} -> label == "Slack Token" end)
     end

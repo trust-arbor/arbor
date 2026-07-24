@@ -34,9 +34,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   terminal steering reconciliation but before publishing success, and failure or
   timeout fails the outer task so required evidence is never silently omitted.
 
-  A configured executor may also implement `adopt_task/4`. Adoption is serialized
-  through this store and is eligible only for successful terminal JSON-clean tasks;
-  callback errors leave the prior result unchanged so callers can retry.
+  A configured executor may also implement `adopt_task/4`. TaskStore serializes
+  adoption admission and commit, but runs the potentially slow callback under
+  the task supervisor so status and result reads remain available. Adoption is
+  eligible only for successful terminal JSON-clean tasks; callback errors leave
+  the prior result unchanged so callers can retry.
   """
 
   use GenServer
@@ -57,6 +59,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_max_steer_retries 7
   @default_max_steering_confirmations 5
   @default_max_steering_replays 3
+  @default_adoption_timeout_ms 120_000
+  @default_adoption_wait_timeout_ms 30_000
+  @max_adoption_timeout_ms 300_000
+  @max_adoption_wait_timeout_ms 120_000
+  @max_adoption_waiters 32
   @max_steering_message_bytes 4_000
   @max_destination_ref_bytes 256
 
@@ -106,6 +113,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       |> Keyword.get(:approval_cleanup_mfa, @default_approval_cleanup_mfa)
       |> validate_approval_cleanup_mfa!()
 
+    _ =
+      opts
+      |> Keyword.get(:adoption_timeout_ms, @default_adoption_timeout_ms)
+      |> validate_adoption_timeout!()
+
     name = Keyword.get(opts, :name, @default_name)
     GenServer.start_link(__MODULE__, opts, name: name)
   end
@@ -123,7 +135,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     * `:caller_id` - optional caller id forwarded in JSON-clean executor context
     * `:approval_answer_cap_id` - private temporary approval-answer capability id
     * `:approval_cleanup_descriptor` - private closed scalar lifecycle cleanup
-      descriptor only (`caller_id` and optional `trace_id`). Executable
+      descriptor only (`caller_id`, delegated `principal_id`, and optional
+      `trace_id`). Executable
       selectors (MFA, modules, functions, PIDs) are stripped on store and never
       retained. Cleanup MFA, Consensus/Comms/Audit modules, and the
       cleanup supervisor are pinned at TaskStore init (production defaults:
@@ -157,10 +170,30 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     GenServer.call(store_name(opts), {:result, task_id})
   end
 
-  @doc "Adopt a successful terminal task into a bounded destination reference."
+  @doc """
+  Adopt a successful terminal task into a bounded destination reference.
+
+  The executor callback runs asynchronously under TaskStore ownership. This
+  call waits a bounded amount of time (`:adoption_wait_timeout_ms`, default
+  #{@default_adoption_wait_timeout_ms} ms) for the owned operation to settle.
+  Timing out the caller does not cancel an adoption that TaskStore already
+  admitted; callers can inspect `result/2` for its eventual committed state.
+  """
   @spec adopt(task_id(), String.t(), keyword() | map()) :: {:ok, map()} | {:error, term()}
   def adopt(task_id, destination_ref, opts \\ []) do
-    GenServer.call(store_name(opts), {:adopt, task_id, destination_ref})
+    with {:ok, wait_timeout_ms} <- adoption_wait_timeout(opts) do
+      deadline_ms = System.monotonic_time(:millisecond) + wait_timeout_ms
+
+      try do
+        GenServer.call(
+          store_name(opts),
+          {:adopt, task_id, destination_ref, deadline_ms},
+          wait_timeout_ms
+        )
+      catch
+        :exit, {:timeout, _call} -> {:error, :task_adoption_wait_timeout}
+      end
+    end
   end
 
   @doc "Cancel a running task."
@@ -253,6 +286,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
            :executor_finalization_timeout_ms,
            Config.executor_finalization_timeout_ms()
          ),
+       adoption_timeout_ms:
+         opts
+         |> Keyword.get(:adoption_timeout_ms, @default_adoption_timeout_ms)
+         |> validate_adoption_timeout!(),
        steer_retry_delay_ms:
          Keyword.get(opts, :steer_retry_delay_ms, @default_steer_retry_delay_ms),
        max_steer_retry_delay_ms:
@@ -277,7 +314,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
        # Arity-2: (agent_id, task_id) — task-scoped Session cancel bridge.
        cancel_turn: Keyword.get(opts, :cancel_turn, &default_cancel_turn/2),
        tasks: %{},
-       refs: %{}
+       refs: %{},
+       adoptions: %{},
+       adoption_refs: %{}
      }}
   end
 
@@ -324,6 +363,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           adoption_cap_id: Keyword.get(opts, :adoption_cap_id),
           adoption_security_module: Keyword.get(opts, :adoption_security_module, Arbor.Security),
           adoption_capability_revoke: Keyword.get(opts, :adoption_capability_revoke),
+          adoption_destination_ref: nil,
           # Closed scalar only — executable keys are never retained on the record.
           approval_cleanup_descriptor:
             normalize_approval_cleanup_descriptor(Keyword.get(opts, :approval_cleanup_descriptor)),
@@ -418,20 +458,23 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     {:reply, reply, state}
   end
 
-  def handle_call({:adopt, task_id, destination_ref}, _from, state) do
-    case Map.fetch(state.tasks, task_id) do
-      {:ok, record} ->
-        case adopt_terminal_task(record, destination_ref, state) do
-          {:ok, updated_record} ->
-            next_state = put_in(state.tasks[task_id], updated_record)
-            {:reply, {:ok, updated_record.result}, next_state}
+  def handle_call({:adopt, task_id, destination_ref}, from, state) do
+    deadline_ms = System.monotonic_time(:millisecond) + @default_adoption_wait_timeout_ms
+    handle_call({:adopt, task_id, destination_ref, deadline_ms}, from, state)
+  end
 
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
+  def handle_call({:adopt, task_id, destination_ref, deadline_ms}, from, state) do
+    state = ensure_adoption_state_shape(state)
+
+    cond do
+      adoption_deadline_expired?(deadline_ms) ->
+        {:reply, {:error, :task_adoption_wait_timeout}, state}
+
+      true ->
+        case begin_adoption(state, task_id, destination_ref, from) do
+          {:wait, next_state} -> {:noreply, next_state}
+          {:reply, reply, next_state} -> {:reply, reply, next_state}
         end
-
-      :error ->
-        {:reply, {:error, :not_found}, state}
     end
   end
 
@@ -511,30 +554,79 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   @impl true
   def handle_info({ref, result}, state) when is_reference(ref) do
-    Process.demonitor(ref, [:flush])
+    state = ensure_adoption_state_shape(state)
 
-    case Map.fetch(state.refs, ref) do
+    case Map.fetch(state.adoption_refs, ref) do
       {:ok, task_id} ->
-        {:noreply, complete_task(state, task_id, ref, result)}
+        Process.demonitor(ref, [:flush])
+        {:noreply, complete_adoption(state, task_id, ref, result)}
 
       :error ->
-        {:noreply, state}
+        Process.demonitor(ref, [:flush])
+
+        case Map.fetch(state.refs, ref) do
+          {:ok, task_id} ->
+            {:noreply, complete_task(state, task_id, ref, result)}
+
+          :error ->
+            {:noreply, state}
+        end
     end
   end
 
   def handle_info({:DOWN, ref, :process, _pid, :normal}, state) when is_reference(ref) do
-    {:noreply, remove_ref(state, ref)}
+    state = ensure_adoption_state_shape(state)
+
+    case Map.fetch(state.adoption_refs, ref) do
+      {:ok, task_id} ->
+        {:noreply, fail_adoption(state, task_id, ref, {:error, :executor_callback_no_result})}
+
+      :error ->
+        {:noreply, remove_ref(state, ref)}
+    end
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
-    case Map.fetch(state.refs, ref) do
+    state = ensure_adoption_state_shape(state)
+
+    case Map.fetch(state.adoption_refs, ref) do
       {:ok, task_id} ->
-        now = DateTime.utc_now()
-        {state, cleanup_job} = terminalize_abnormal_down(state, task_id, reason, now)
-        state = launch_approval_cleanup_job(state, cleanup_job)
-        {:noreply, remove_ref(state, ref)}
+        {:noreply, fail_adoption(state, task_id, ref, {:error, :executor_callback_exit})}
 
       :error ->
+        case Map.fetch(state.refs, ref) do
+          {:ok, task_id} ->
+            now = DateTime.utc_now()
+            {state, cleanup_job} = terminalize_abnormal_down(state, task_id, reason, now)
+            state = launch_approval_cleanup_job(state, cleanup_job)
+            {:noreply, remove_ref(state, ref)}
+
+          :error ->
+            {:noreply, state}
+        end
+    end
+  end
+
+  def handle_info({:adoption_timeout, task_id, ref}, state) when is_reference(ref) do
+    state = ensure_adoption_state_shape(state)
+
+    case Map.get(state.adoptions, task_id) do
+      %{task: %Task{ref: ^ref, pid: pid} = task} when is_pid(pid) ->
+        case Task.yield(task, 0) do
+          {:ok, result} ->
+            {:noreply, complete_adoption(state, task_id, ref, result)}
+
+          {:exit, _reason} ->
+            {:noreply, fail_adoption(state, task_id, ref, {:error, :executor_callback_exit})}
+
+          nil ->
+            if Process.alive?(pid), do: Process.exit(pid, :kill)
+            Process.demonitor(ref, [:flush])
+
+            {:noreply, fail_adoption(state, task_id, ref, {:error, :executor_callback_timeout})}
+        end
+
+      _other ->
         {:noreply, state}
     end
   end
@@ -551,6 +643,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state) do
+    state
+    |> Map.get(:adoptions, %{})
+    |> Map.values()
+    |> Enum.each(fn
+      %{task: %Task{pid: pid}} when is_pid(pid) ->
+        if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+      _other ->
+        :ok
+    end)
+
+    :ok
+  end
 
   defp complete_task(state, task_id, ref, result) do
     now = DateTime.utc_now()
@@ -741,6 +849,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp normalize_approval_cleanup_descriptor(descriptor) when is_map(descriptor) do
     %{}
     |> maybe_put_scalar_id(:caller_id, descriptor_get(descriptor, :caller_id))
+    |> maybe_put_scalar_id(:principal_id, descriptor_get(descriptor, :principal_id))
     |> maybe_put_scalar_id(:trace_id, descriptor_get(descriptor, :trace_id))
     |> case do
       empty when map_size(empty) == 0 -> nil
@@ -822,6 +931,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp cleanup_opts_from_state(state, descriptor, reason) when is_map(descriptor) do
     [
       caller_id: Map.get(descriptor, :caller_id),
+      principal_id: Map.get(descriptor, :principal_id),
       consensus_module:
         Map.get(
           state,
@@ -1844,10 +1954,28 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     })
   end
 
-  defp adopt_terminal_task(
+  defp begin_adoption(state, task_id, destination_ref, from) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        case prepare_adoption(record, destination_ref) do
+          {:ok, input} ->
+            begin_prepared_adoption(state, task_id, input, from)
+
+          {:already_adopted, result} ->
+            {:reply, {:ok, result}, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  defp prepare_adoption(
          %{state: :done, context_mode: :json_clean} = record,
-         destination_ref,
-         state
+         destination_ref
        ) do
     module = Map.get(record, :executor)
 
@@ -1858,39 +1986,248 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
       true ->
         with {:ok, request} <- normalize_adoption_request(destination_ref),
-             {:ok, raw_result} <- finalized_raw_result(record),
-             callback_result <-
-               call_executor_callback(
-                 state,
-                 fn ->
-                   module.adopt_task(record.agent_id, raw_result, request, record.context)
-                 end,
-                 Map.get(
-                   state,
-                   :executor_finalization_timeout_ms,
-                   Config.executor_finalization_timeout_ms()
-                 )
-               ),
-             {:ok, updated_raw_result} <- normalize_adoption_callback(callback_result) do
-          updated_record =
-            record
-            |> Map.put(:result, normalize_result(updated_raw_result))
-            |> Map.put(:updated_at, DateTime.utc_now())
-            |> revoke_adoption_capability()
+             {:ok, raw_result} <- finalized_raw_result(record) do
+          requested_destination = Map.fetch!(request, "destination_ref")
 
-          {:ok, updated_record}
+          case Map.get(record, :adoption_destination_ref) do
+            nil ->
+              {:ok,
+               %{
+                 agent_id: record.agent_id,
+                 context: record.context,
+                 executor: module,
+                 outcome: Map.get(raw_result, "outcome"),
+                 request: request,
+                 raw_result: raw_result,
+                 result_fingerprint: adoption_result_fingerprint(raw_result)
+               }}
+
+            ^requested_destination ->
+              {:already_adopted, record.result}
+
+            _other_destination ->
+              {:error, :task_already_adopted}
+          end
         else
           {:error, reason} -> {:error, {:task_adoption_failed, bounded_error(reason)}}
         end
     end
   end
 
-  defp adopt_terminal_task(%{state: state}, _destination_ref, _store_state)
+  defp prepare_adoption(%{state: state}, _destination_ref)
        when state != :done,
        do: {:error, {:task_not_adoptable, state}}
 
-  defp adopt_terminal_task(_record, _destination_ref, _store_state),
+  defp prepare_adoption(_record, _destination_ref),
     do: {:error, :task_adoption_unsupported}
+
+  defp begin_prepared_adoption(state, task_id, input, from) do
+    case Map.get(state.adoptions, task_id) do
+      nil ->
+        start_adoption(state, task_id, input, from)
+
+      operation ->
+        cond do
+          operation.request != input.request or
+              operation.result_fingerprint != input.result_fingerprint ->
+            {:reply, {:error, :task_adoption_in_progress}, state}
+
+          length(operation.waiters) >= @max_adoption_waiters ->
+            {:reply, {:error, :too_many_adoption_waiters}, state}
+
+          true ->
+            operation = Map.update!(operation, :waiters, &[from | &1])
+            {:wait, put_in(state.adoptions[task_id], operation)}
+        end
+    end
+  end
+
+  defp start_adoption(state, task_id, input, from) do
+    case start_adoption_worker(state, input) do
+      {:ok, task} ->
+        timeout_ref =
+          Process.send_after(
+            self(),
+            {:adoption_timeout, task_id, task.ref},
+            state.adoption_timeout_ms
+          )
+
+        operation =
+          input
+          |> Map.take([
+            :agent_id,
+            :context,
+            :executor,
+            :outcome,
+            :request,
+            :result_fingerprint
+          ])
+          |> Map.merge(%{
+            task: task,
+            timeout_ref: timeout_ref,
+            waiters: [from]
+          })
+
+        next_state =
+          state
+          |> put_in([:adoptions, task_id], operation)
+          |> put_in([:adoption_refs, task.ref], task_id)
+
+        {:wait, next_state}
+
+      {:error, reason} ->
+        {:reply, {:error, {:task_adoption_failed, bounded_error(reason)}}, state}
+    end
+  end
+
+  defp start_adoption_worker(state, input) do
+    owner = self()
+
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        with_adoption_owner_guard(owner, fn ->
+          invoke_adoption_callback(
+            input.executor,
+            input.agent_id,
+            input.raw_result,
+            input.request,
+            input.context
+          )
+        end)
+      end)
+
+    {:ok, task}
+  rescue
+    _exception -> {:error, :executor_callback_failed}
+  catch
+    :exit, _reason -> {:error, :executor_callback_exit}
+  end
+
+  defp with_adoption_owner_guard(owner, callback)
+       when is_pid(owner) and is_function(callback, 0) do
+    worker = self()
+
+    guard =
+      spawn_link(fn ->
+        owner_ref = Process.monitor(owner)
+
+        receive do
+          {:adoption_worker_finished, ^worker} ->
+            Process.demonitor(owner_ref, [:flush])
+
+          {:DOWN, ^owner_ref, :process, ^owner, _reason} ->
+            Process.exit(worker, :kill)
+        end
+      end)
+
+    try do
+      callback.()
+    after
+      send(guard, {:adoption_worker_finished, worker})
+    end
+  end
+
+  defp invoke_adoption_callback(module, agent_id, raw_result, request, context) do
+    module.adopt_task(agent_id, raw_result, request, context)
+  rescue
+    _exception -> {:error, :executor_callback_exception}
+  catch
+    :exit, _reason -> {:error, :executor_callback_exit}
+    _kind, _reason -> {:error, :executor_callback_exception}
+  end
+
+  defp complete_adoption(state, task_id, ref, callback_result) do
+    case Map.get(state.adoptions, task_id) do
+      %{task: %Task{ref: ^ref}} = operation ->
+        state = drop_adoption(state, task_id, operation)
+        {reply, state} = commit_adoption_result(state, task_id, operation, callback_result)
+        reply_adoption_waiters(operation.waiters, reply)
+        state
+
+      _other ->
+        state
+    end
+  end
+
+  defp fail_adoption(state, task_id, ref, callback_result) do
+    complete_adoption(state, task_id, ref, callback_result)
+  end
+
+  defp drop_adoption(state, task_id, operation) do
+    _ = Process.cancel_timer(operation.timeout_ref)
+
+    state
+    |> update_in([:adoptions], &Map.delete(&1, task_id))
+    |> update_in([:adoption_refs], &Map.delete(&1, operation.task.ref))
+  end
+
+  defp commit_adoption_result(state, task_id, operation, callback_result) do
+    with {:ok, record} <- Map.fetch(state.tasks, task_id),
+         :ok <- validate_adoption_snapshot(record, operation),
+         {:ok, updated_raw_result} <- normalize_adoption_callback(callback_result),
+         :ok <- preserve_adoption_outcome(operation, updated_raw_result) do
+      updated_record =
+        record
+        |> Map.put(:result, normalize_result(updated_raw_result))
+        |> Map.put(:adoption_destination_ref, operation.request["destination_ref"])
+        |> Map.put(:updated_at, DateTime.utc_now())
+        |> revoke_adoption_capability()
+
+      {{:ok, updated_record.result}, put_in(state.tasks[task_id], updated_record)}
+    else
+      :error ->
+        adoption_commit_error(state, :task_adoption_state_changed)
+
+      {:error, reason} ->
+        adoption_commit_error(state, reason)
+    end
+  end
+
+  defp adoption_commit_error(state, reason) do
+    {{:error, {:task_adoption_failed, bounded_error(reason)}}, state}
+  end
+
+  defp validate_adoption_snapshot(
+         %{state: :done, context_mode: :json_clean} = record,
+         operation
+       ) do
+    with true <- record.agent_id == operation.agent_id,
+         true <- record.executor == operation.executor,
+         true <- record.context == operation.context,
+         nil <- Map.get(record, :adoption_destination_ref),
+         {:ok, raw_result} <- finalized_raw_result(record),
+         true <-
+           adoption_result_fingerprint(raw_result) == operation.result_fingerprint do
+      :ok
+    else
+      _other -> {:error, :task_adoption_state_changed}
+    end
+  end
+
+  defp validate_adoption_snapshot(_record, _operation),
+    do: {:error, :task_adoption_state_changed}
+
+  defp preserve_adoption_outcome(operation, updated_raw_result) do
+    updated_outcome = Map.get(updated_raw_result, "outcome")
+
+    if operation.outcome == updated_outcome,
+      do: :ok,
+      else: {:error, :adoption_changed_terminal_outcome}
+  end
+
+  defp adoption_result_fingerprint(raw_result) do
+    raw_result
+    |> :erlang.term_to_binary([:deterministic])
+    |> then(&:crypto.hash(:sha256, &1))
+  end
+
+  defp reply_adoption_waiters(waiters, reply) do
+    Enum.each(waiters, &GenServer.reply(&1, reply))
+  rescue
+    _exception -> :ok
+  catch
+    :exit, _reason -> :ok
+  end
 
   defp normalize_adoption_request(destination_ref)
        when is_binary(destination_ref) and
@@ -2359,6 +2696,41 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp record_value(_record, _key), do: nil
 
+  defp ensure_adoption_state_shape(state) do
+    state
+    |> Map.put_new(:adoptions, %{})
+    |> Map.put_new(:adoption_refs, %{})
+    |> Map.put_new(:adoption_timeout_ms, @default_adoption_timeout_ms)
+  end
+
+  defp adoption_deadline_expired?(deadline_ms) when is_integer(deadline_ms) do
+    System.monotonic_time(:millisecond) >= deadline_ms
+  end
+
+  defp adoption_deadline_expired?(_deadline_ms), do: true
+
+  defp adoption_wait_timeout(opts) do
+    case opt(opts, :adoption_wait_timeout_ms, @default_adoption_wait_timeout_ms) do
+      timeout_ms
+      when is_integer(timeout_ms) and timeout_ms > 0 and
+             timeout_ms <= @max_adoption_wait_timeout_ms ->
+        {:ok, timeout_ms}
+
+      _invalid ->
+        {:error, :invalid_adoption_wait_timeout}
+    end
+  end
+
+  defp validate_adoption_timeout!(timeout_ms)
+       when is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= @max_adoption_timeout_ms,
+       do: timeout_ms
+
+  defp validate_adoption_timeout!(timeout_ms) do
+    raise ArgumentError,
+          "adoption_timeout_ms must be between 1 and #{@max_adoption_timeout_ms}, got: " <>
+            inspect(timeout_ms)
+  end
+
   defp remove_ref(state, ref) do
     update_in(state.refs, &Map.delete(&1, ref))
   end
@@ -2369,9 +2741,18 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp prune_tasks(%{max_tasks: max_tasks, tasks: tasks} = state) do
+    active_adoptions =
+      state
+      |> Map.get(:adoptions, %{})
+      |> Map.keys()
+      |> MapSet.new()
+
     completed =
       tasks
-      |> Enum.filter(fn {_id, record} -> record.state in [:done, :failed, :cancelled] end)
+      |> Enum.filter(fn {id, record} ->
+        record.state in [:done, :failed, :cancelled] and
+          not MapSet.member?(active_adoptions, id)
+      end)
       |> Enum.sort_by(fn {_id, record} -> record.updated_at end, DateTime)
 
     excess = max(map_size(tasks) - max_tasks, 0)

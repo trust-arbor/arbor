@@ -364,6 +364,7 @@ defmodule Arbor.Historian.TaintQuery do
       |> Enum.map(fn entry ->
         get_in(entry.data, [:taint_level]) || get_in(entry.data, ["taint_level"])
       end)
+      |> Enum.map(&normalize_level/1)
       |> Enum.reject(&is_nil/1)
       |> Enum.frequencies()
 

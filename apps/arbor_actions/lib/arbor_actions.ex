@@ -222,6 +222,22 @@ defmodule Arbor.Actions do
   def coding_resource_inventory(_opts),
     do: {:error, :invalid_coding_resource_inventory_options}
 
+  @doc """
+  Reactivate one retained workspace using exact task and principal lineage.
+
+  The registry binds the lease owner to the calling process and revalidates the
+  durable workspace identity before returning an active lease.
+  """
+  @spec reactivate_retained_coding_workspace(String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def reactivate_retained_coding_workspace(workspace_id, task_id, principal_id) do
+    WorkspaceLeaseRegistry.reactivate_retained_by_lineage(
+      workspace_id,
+      task_id,
+      principal_id
+    )
+  end
+
   @doc "Return the bounded identity of the reviewed Mix and loaded BEAM toolchain."
   @spec coding_toolchain_identity() ::
           {:ok, %{required(String.t()) => term()}}

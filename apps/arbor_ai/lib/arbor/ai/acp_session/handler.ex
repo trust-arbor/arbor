@@ -11,7 +11,7 @@ defmodule Arbor.AI.AcpSession.Handler do
   compat with sessions that don't specify a working directory). When a
   `workspace_root` is set, all file paths must resolve within it.
 
-  Trust tier integration uses a runtime bridge since `arbor_ai` does not
+  Trust policy integration uses a runtime bridge since `arbor_ai` does not
   depend on `arbor_trust`.
   """
 
@@ -304,14 +304,14 @@ defmodule Arbor.AI.AcpSession.Handler do
     do: {:denied, "no agent identity (anonymous ACP session denied)"}
 
   defp authorize_action(agent_id, resource_uri, action, state) do
-    # Check trust tier confirmation mode first (if available), then security authorization
+    # Check trust confirmation mode first (if available), then security authorization.
     with :authorized <- check_confirmation_mode(agent_id, resource_uri, state),
          :authorized <- check_security_authorize(agent_id, resource_uri, action, state) do
       :authorized
     end
   end
 
-  # Trust tier integration via runtime bridge (arbor_ai does not depend on arbor_trust).
+  # Trust policy integration via runtime bridge (arbor_ai does not depend on arbor_trust).
   # Falls back to :authorized when Trust.Policy or Trust.Manager is unavailable.
   #
   # `:gated` means the trust policy says "this resource requires human
@@ -323,26 +323,55 @@ defmodule Arbor.AI.AcpSession.Handler do
   # is unconditionally denied even when the operator is available to
   # approve it.
   defp check_confirmation_mode(agent_id, resource_uri, state) do
-    if Code.ensure_loaded?(Arbor.Trust.Policy) and
-         Process.whereis(Arbor.Trust.Manager) != nil do
-      case apply(Arbor.Trust.Policy, :confirmation_mode, [agent_id, resource_uri]) do
-        :auto ->
-          :authorized
+    case trust_policy_module() do
+      {:ok, policy_module} ->
+        case apply(policy_module, :confirmation_mode, [agent_id, resource_uri]) do
+          :auto ->
+            :authorized
 
-        :gated ->
-          escalate_for_trust_approval(agent_id, resource_uri, state)
+          :gated ->
+            escalate_for_trust_approval(agent_id, resource_uri, state)
 
-        :deny ->
-          {:denied, "denied by trust policy"}
-      end
-    else
-      :authorized
+          :deny ->
+            {:denied, "denied by trust policy"}
+
+          _invalid ->
+            {:denied, "invalid trust policy decision"}
+        end
+
+      :unavailable ->
+        :authorized
+
+      {:error, _reason} ->
+        {:denied, "trust policy unavailable"}
     end
   rescue
-    _ -> :authorized
+    _exception -> {:denied, "trust policy check failed"}
   catch
-    _kind, _reason -> :authorized
+    _kind, _reason -> {:denied, "trust policy check failed"}
   end
+
+  defp trust_policy_module do
+    case Application.fetch_env(:arbor_ai, :trust_policy_module) do
+      {:ok, module} ->
+        validate_trust_policy_module(module)
+
+      :error ->
+        if Process.whereis(Arbor.Trust.Manager) do
+          validate_trust_policy_module(Arbor.Trust.Policy)
+        else
+          :unavailable
+        end
+    end
+  end
+
+  defp validate_trust_policy_module(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :confirmation_mode, 2),
+      do: {:ok, module},
+      else: {:error, :invalid_trust_policy_module}
+  end
+
+  defp validate_trust_policy_module(_module), do: {:error, :invalid_trust_policy_module}
 
   # Trust gate escalation. The capability layer's pending_approval path
   # already calls InteractionRouter.request inside Security.Escalation;
@@ -452,7 +481,8 @@ defmodule Arbor.AI.AcpSession.Handler do
     kind, reason -> {:denied, "authorization check #{kind}: #{bounded_reason(reason)}"}
   end
 
-  # Security modules + availability, overridable via config for tests.
+  # Security and trust modules are code-owned injection seams. They are never
+  # selected from handler opts or caller-controlled ACP request data.
   defp security_module, do: Application.get_env(:arbor_ai, :security_module, Arbor.Security)
 
   defp file_guard_module,

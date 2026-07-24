@@ -61,7 +61,6 @@ defmodule Arbor.Consensus.MixProject do
       {:arbor_contracts, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_shell, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       # arbor_ai is an optional runtime dependency for LLM classification in TopicMatcher.
       # It's not required at compile time — TopicMatcher uses dependency injection (ai_module opt)

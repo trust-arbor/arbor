@@ -9,6 +9,7 @@ defmodule Arbor.AI.AcpSessionTest do
   alias Arbor.AI.AcpSession.RuntimeHome
   alias Arbor.AI.AcpManaged
   alias Arbor.AI.AcpManaged.SessionRegistry
+  alias Arbor.AI.TestSupport.AutoTrustPolicy
 
   @moduletag :fast
 
@@ -24,6 +25,16 @@ defmodule Arbor.AI.AcpSessionTest do
   defmodule PassthroughSecurity do
     @moduledoc false
     def authorize(_agent_id, _uri, _action, _opts), do: {:ok, :authorized}
+  end
+
+  defmodule DenyingSecurity do
+    @moduledoc false
+    def authorize(_agent_id, _uri, _action, _opts), do: {:error, :no_capability}
+  end
+
+  defmodule RaisingSecurity do
+    @moduledoc false
+    def authorize(_agent_id, _uri, _action, _opts), do: raise("security unavailable")
   end
 
   defmodule SlowCallServer do
@@ -214,6 +225,18 @@ defmodule Arbor.AI.AcpSessionTest do
       restore_env(:file_guard_module, original_file_guard)
       restore_env(:security_module, original_security)
     end)
+  end
+
+  defp install_security_module(module) do
+    original = Application.get_env(:arbor_ai, :security_module)
+    Application.put_env(:arbor_ai, :security_module, module)
+    on_exit(fn -> restore_env(:security_module, original) end)
+  end
+
+  defp install_trust_policy_module(module) do
+    original = Application.get_env(:arbor_ai, :trust_policy_module)
+    Application.put_env(:arbor_ai, :trust_policy_module, module)
+    on_exit(fn -> restore_env(:trust_policy_module, original) end)
   end
 
   defp install_fake_progress_client(inactivity_timeout_ms) do
@@ -1323,7 +1346,8 @@ defmodule Arbor.AI.AcpSessionTest do
     # prompts for a single tool use until it gave up.
     test "handle_permission_request returns spec-shaped outcome when options are offered" do
       install_passthrough_authz()
-      {:ok, state} = Handler.init(agent_id: "test-agent")
+      install_trust_policy_module(AutoTrustPolicy)
+      {:ok, state} = Handler.init(agent_id: "test-agent", permission_timeout_ms: 10)
 
       options = [
         %{
@@ -1354,19 +1378,15 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     test "handle_permission_request with agent_id respects security authorization" do
-      {:ok, state} = Handler.init(agent_id: "test-agent")
+      install_trust_policy_module(AutoTrustPolicy)
+      install_security_module(DenyingSecurity)
 
-      # Behavior depends on whether CapabilityStore is running:
-      # - If running: denied (no capability granted for test-agent)
-      # - If not running: approved (permissive fallback)
-      {:ok, result, ^state} =
-        Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+      {:ok, state} = Handler.init(agent_id: "test-agent", permission_timeout_ms: 10)
 
-      if Process.whereis(Arbor.Security.CapabilityStore) do
-        assert result["outcome"] == "denied"
-      else
-        assert result["outcome"] == "approved"
-      end
+      assert {:ok, %{"outcome" => "denied", "reason" => reason}, ^state} =
+               Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+
+      assert reason =~ "no_capability"
     end
 
     test "handle_file_read reads existing file (no workspace root)" do
@@ -1782,17 +1802,19 @@ defmodule Arbor.AI.AcpSessionTest do
     end
   end
 
-  describe "Handler trust tier integration" do
+  describe "Handler trust integration" do
     alias Arbor.AI.AcpSession.Handler
 
-    test "authorize never crashes regardless of trust/security availability" do
-      # Handler should never crash — it either authorizes or denies gracefully
-      {:ok, state} = Handler.init(agent_id: "test-agent")
+    test "authorization failure is denied without waiting for human approval" do
+      install_trust_policy_module(AutoTrustPolicy)
+      install_security_module(RaisingSecurity)
 
-      {:ok, result, ^state} =
-        Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+      {:ok, state} = Handler.init(agent_id: "test-agent", permission_timeout_ms: 10)
 
-      assert result["outcome"] in ["approved", "denied"]
+      assert {:ok, %{"outcome" => "denied", "reason" => reason}, ^state} =
+               Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+
+      assert reason =~ "authorization check failed"
     end
   end
 

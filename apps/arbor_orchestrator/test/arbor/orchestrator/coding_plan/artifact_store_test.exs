@@ -6,6 +6,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
   alias Arbor.Contracts.Coding.{TaskTerminalEnvelope, ValidationCapacityHandoff}
   alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, OutcomeMapper}
 
+  @compilation_seal_filename ".coding-compilation-seal.json"
+  @compilation_publication_barrier_key {ArtifactStore, :compilation_publication_barrier}
   @verification_tree_oid String.duplicate("a", 40)
   @verification_observed_at "2026-07-22T12:00:00.000Z"
 
@@ -24,8 +26,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
   test "archives exact DOT bytes and JSON-clean plan and manifest", %{root: root} do
     plan = plan_fixture()
-    manifest = manifest_fixture()
     dot_source = "digraph coding {\n  start -> done;\n}\n"
+    manifest = manifest_for(dot_source)
 
     assert {:ok, descriptor} = ArtifactStore.archive(root, plan, dot_source, manifest)
 
@@ -45,6 +47,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert {:ok, _encoded_descriptor} = Jason.encode(descriptor)
 
     assert Enum.sort(File.ls!(expanded_root)) == [
+             @compilation_seal_filename,
              "coding-compile-manifest.json",
              "coding-pipeline.dot",
              "coding-plan.json"
@@ -52,11 +55,21 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
   end
 
   test "creates mode-0600 files", %{root: root} do
-    assert {:ok, descriptor} =
-             ArtifactStore.archive(root, plan_fixture(), "digraph G {}", manifest_fixture())
+    dot_source = "digraph G {}"
 
-    for key <- ["coding_plan_path", "coding_pipeline_path", "compile_manifest_path"] do
-      assert {:ok, stat} = File.stat(descriptor[key])
+    assert {:ok, descriptor} =
+             ArtifactStore.archive(root, plan_fixture(), dot_source, manifest_for(dot_source))
+
+    paths = [
+      descriptor["coding_plan_path"],
+      descriptor["coding_pipeline_path"],
+      descriptor["compile_manifest_path"],
+      compilation_seal_path(root)
+    ]
+
+    for path <- paths do
+      assert {:ok, stat} = File.lstat(path)
+      assert stat.type == :regular
       assert (stat.mode &&& 0o777) == 0o600
     end
   end
@@ -65,47 +78,28 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     root: root
   } do
     parent = self()
-    large_dot = :binary.copy("x", 64 * 1024 * 1024)
+    dot_source = :binary.copy("x", 4_096)
+    stage = {:before_compilation_artifact_link, "coding-pipeline.dot"}
 
     archive_task =
       Task.async(fn ->
-        Process.flag(:priority, :low)
-        send(parent, {:archive_ready, self()})
-
-        receive do
-          :archive -> :ok
-        end
-
-        ArtifactStore.archive(root, plan_fixture(), large_dot, manifest_fixture())
+        Process.put(@compilation_publication_barrier_key, {parent, stage})
+        ArtifactStore.archive(root, plan_fixture(), dot_source, manifest_for(dot_source))
       end)
 
-    observer_task =
-      Task.async(fn ->
-        Process.flag(:priority, :high)
-        send(parent, {:observer_ready, self()})
+    assert_receive {:artifact_store_compilation_barrier, archive_pid, ^stage}, 1_000
 
-        receive do
-          {:observe, archive_pid} ->
-            send(parent, :observer_polling)
-            deadline = System.monotonic_time(:millisecond) + 5_000
-            await_secure_nonempty_temp(root, archive_pid, deadline)
-        end
-      end)
+    assert [%{mode: 0o600, size: size}] = temporary_file_observations(root)
+    assert size == byte_size(dot_source)
 
-    assert_receive {:archive_ready, archive_pid}, 1_000
-    assert_receive {:observer_ready, observer_pid}, 1_000
-    send(observer_pid, {:observe, archive_pid})
-    assert_receive :observer_polling, 1_000
-    send(archive_pid, :archive)
-
-    assert :ok = Task.await(observer_task, 5_000)
+    send(archive_pid, {:artifact_store_compilation_continue, stage})
     assert {:ok, _descriptor} = Task.await(archive_task, 5_000)
   end
 
-  test "overwrites deterministically through fixed artifact paths", %{root: root} do
+  test "same-content replay is idempotent and repairs fixed artifact modes", %{root: root} do
     plan = plan_fixture()
-    manifest = manifest_fixture()
     dot_source = "digraph G { start -> validate -> done }"
+    manifest = manifest_for(dot_source)
 
     assert {:ok, first_descriptor} =
              ArtifactStore.archive(root, plan, dot_source, manifest)
@@ -128,6 +122,388 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     end
 
     refute Enum.any?(File.ls!(root), &String.contains?(&1, ".tmp-"))
+  end
+
+  test "security regression: sealed compilation rejects conflicting replay", %{root: root} do
+    plan = plan_fixture()
+    dot_source = "digraph G { start -> validate -> done }"
+    manifest = manifest_for(dot_source)
+
+    assert {:ok, descriptor} = ArtifactStore.archive(root, plan, dot_source, manifest)
+    original = read_artifacts(descriptor)
+
+    assert {:error, :compilation_seal_conflict} =
+             ArtifactStore.archive(
+               root,
+               Map.put(plan, "task", "caller-selected replacement"),
+               dot_source,
+               manifest
+             )
+
+    assert read_artifacts(descriptor) == original
+  end
+
+  test "security regression: concurrent different writers produce one immutable bundle", %{
+    base: base
+  } do
+    task_id = "task_concurrent_compilation_writers"
+    root = compilation_task_root(base, task_id)
+    parent = self()
+    stage = :before_compilation_seal_link
+
+    candidates = [
+      compilation_candidate("first writer", "digraph G { start -> first -> done }"),
+      compilation_candidate("second writer", "digraph G { start -> second -> done }")
+    ]
+
+    tasks =
+      Enum.map(candidates, fn candidate ->
+        Task.async(fn ->
+          Process.put(@compilation_publication_barrier_key, {parent, stage})
+          send(parent, {:compilation_writer_ready, self()})
+
+          receive do
+            :start_compilation_writer -> :ok
+          end
+
+          {candidate,
+           ArtifactStore.archive(
+             root,
+             candidate.plan,
+             candidate.dot_source,
+             candidate.manifest
+           )}
+        end)
+      end)
+
+    Enum.each(tasks, fn task ->
+      assert_receive {:compilation_writer_ready, writer_pid} when writer_pid == task.pid, 1_000
+    end)
+
+    Enum.each(tasks, &send(&1.pid, :start_compilation_writer))
+
+    Enum.each(tasks, fn task ->
+      assert_receive {:artifact_store_compilation_barrier, writer_pid, ^stage}
+                     when writer_pid == task.pid,
+                     1_000
+    end)
+
+    Enum.each(tasks, &send(&1.pid, {:artifact_store_compilation_continue, stage}))
+
+    results = Enum.map(tasks, &Task.await(&1, 5_000))
+
+    assert [{winner, {:ok, _descriptor}}] =
+             Enum.filter(results, fn {_candidate, result} ->
+               match?({:ok, _descriptor}, result)
+             end)
+
+    assert [{loser, {:error, :compilation_seal_conflict}}] =
+             Enum.reject(results, fn {_candidate, result} ->
+               match?({:ok, _descriptor}, result)
+             end)
+
+    assert {:ok, compilation} = ArtifactStore.read_task_compilation(base, task_id)
+    assert compilation["plan"] == winner.plan
+    assert compilation["dot_source"] == winner.dot_source
+    assert compilation["manifest"] == winner.manifest
+
+    assert {:error, :compilation_seal_conflict} =
+             ArtifactStore.archive(root, loser.plan, loser.dot_source, loser.manifest)
+  end
+
+  test "security regression: deleted artifact rejects conflict and permits same-content repair",
+       %{
+         base: base
+       } do
+    task_id = "task_deleted_compilation_artifact"
+    root = compilation_task_root(base, task_id)
+    original = compilation_candidate("original", "digraph G { start -> original -> done }")
+    conflicting = compilation_candidate("conflicting", "digraph G { start -> conflict -> done }")
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive(root, original.plan, original.dot_source, original.manifest)
+
+    pipeline_path = descriptor["coding_pipeline_path"]
+    File.rm!(pipeline_path)
+
+    assert {:error, :compilation_seal_conflict} =
+             ArtifactStore.archive(
+               root,
+               conflicting.plan,
+               conflicting.dot_source,
+               conflicting.manifest
+             )
+
+    refute File.exists?(pipeline_path)
+
+    assert {:ok, ^descriptor} =
+             ArtifactStore.archive(root, original.plan, original.dot_source, original.manifest)
+
+    assert File.read!(pipeline_path) == original.dot_source
+    assert {:ok, _compilation} = ArtifactStore.read_task_compilation(base, task_id)
+  end
+
+  test "security regression: seal-first crash rejects conflict and same replay recovers", %{
+    base: base
+  } do
+    task_id = "task_seal_first_crash"
+    root = compilation_task_root(base, task_id)
+    original = compilation_candidate("original", "digraph G { start -> sealed -> done }")
+    conflicting = compilation_candidate("conflicting", "digraph G { start -> other -> done }")
+    parent = self()
+    stage = :after_compilation_seal_link
+
+    archive_task =
+      Task.async(fn ->
+        Process.put(@compilation_publication_barrier_key, {parent, stage})
+        ArtifactStore.archive(root, original.plan, original.dot_source, original.manifest)
+      end)
+
+    assert_receive {:artifact_store_compilation_barrier, archive_pid, ^stage}, 1_000
+    assert File.exists?(compilation_seal_path(root))
+    refute Enum.any?(descriptor_artifact_paths(root), &File.exists?/1)
+
+    assert {:error, :compilation_seal_conflict} =
+             ArtifactStore.archive(
+               root,
+               conflicting.plan,
+               conflicting.dot_source,
+               conflicting.manifest
+             )
+
+    assert Task.shutdown(archive_task, :brutal_kill) == nil
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive(root, original.plan, original.dot_source, original.manifest)
+
+    assert {:ok, _compilation} = ArtifactStore.read_task_compilation(base, task_id)
+    refute Process.alive?(archive_pid)
+  end
+
+  test "security regression: partial sealed publication is completed by same replay", %{
+    base: base
+  } do
+    task_id = "task_partial_compilation_publication"
+    root = compilation_task_root(base, task_id)
+    original = compilation_candidate("original", "digraph G { start -> partial -> done }")
+    conflicting = compilation_candidate("conflicting", "digraph G { start -> other -> done }")
+    parent = self()
+    stage = {:after_compilation_artifact_link, "coding-plan.json"}
+
+    archive_task =
+      Task.async(fn ->
+        Process.put(@compilation_publication_barrier_key, {parent, stage})
+        ArtifactStore.archive(root, original.plan, original.dot_source, original.manifest)
+      end)
+
+    assert_receive {:artifact_store_compilation_barrier, archive_pid, ^stage}, 1_000
+    assert File.exists?(compilation_seal_path(root))
+    assert File.exists?(Path.join(root, "coding-plan.json"))
+    refute File.exists?(Path.join(root, "coding-pipeline.dot"))
+    refute File.exists?(Path.join(root, "coding-compile-manifest.json"))
+
+    assert {:error, :compilation_seal_conflict} =
+             ArtifactStore.archive(
+               root,
+               conflicting.plan,
+               conflicting.dot_source,
+               conflicting.manifest
+             )
+
+    assert Task.shutdown(archive_task, :brutal_kill) == nil
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive(root, original.plan, original.dot_source, original.manifest)
+
+    assert {:ok, _compilation} = ArtifactStore.read_task_compilation(base, task_id)
+    refute Process.alive?(archive_pid)
+  end
+
+  test "upgrades matching pre-seal archives but never seals over an existing conflict", %{
+    root: root
+  } do
+    candidate = compilation_candidate("legacy archive", "digraph G { start -> legacy -> done }")
+    source_root = root <> "-source"
+
+    assert {:ok, source_descriptor} =
+             ArtifactStore.archive(
+               source_root,
+               candidate.plan,
+               candidate.dot_source,
+               candidate.manifest
+             )
+
+    File.rm!(compilation_seal_path(source_root))
+
+    assert {:ok, ^source_descriptor} =
+             ArtifactStore.archive(
+               source_root,
+               candidate.plan,
+               candidate.dot_source,
+               candidate.manifest
+             )
+
+    partial_root = root <> "-partial"
+    File.mkdir_p!(partial_root)
+    copy_compilation_artifact!(source_descriptor["coding_plan_path"], partial_root)
+
+    assert {:ok, partial_descriptor} =
+             ArtifactStore.archive(
+               partial_root,
+               candidate.plan,
+               candidate.dot_source,
+               candidate.manifest
+             )
+
+    assert Enum.all?(artifact_paths(partial_descriptor), fn {_name, path} ->
+             File.exists?(path)
+           end)
+
+    assert File.exists?(compilation_seal_path(partial_root))
+
+    conflicting_root = root <> "-conflicting"
+    File.mkdir_p!(conflicting_root)
+    File.write!(Path.join(conflicting_root, "coding-plan.json"), "existing conflicting bytes")
+    File.chmod!(Path.join(conflicting_root, "coding-plan.json"), 0o600)
+
+    assert {:error, {:compilation_artifact_conflict, "coding-plan.json"}} =
+             ArtifactStore.archive(
+               conflicting_root,
+               candidate.plan,
+               candidate.dot_source,
+               candidate.manifest
+             )
+
+    refute File.exists?(compilation_seal_path(conflicting_root))
+  end
+
+  test "graph mismatch is rejected before sealing and a corrected bundle remains readable", %{
+    base: base
+  } do
+    task_id = "task_read_sealed_compilation"
+    root = compilation_task_root(base, task_id)
+    candidate = compilation_candidate("read sealed", "digraph G { start -> read -> done }")
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive(root, candidate.plan, candidate.dot_source, candidate.manifest)
+
+    assert {:ok, compilation} = ArtifactStore.read_task_compilation(base, task_id)
+
+    assert compilation == %{
+             "task_id" => task_id,
+             "plan" => candidate.plan,
+             "dot_source" => candidate.dot_source,
+             "manifest" => candidate.manifest,
+             "plan_sha256" => sha256(Jason.encode!(candidate.plan, pretty: true)),
+             "pipeline_sha256" => sha256(candidate.dot_source),
+             "manifest_sha256" => sha256(Jason.encode!(candidate.manifest, pretty: true))
+           }
+
+    bad_task_id = "task_bad_compilation_graph_hash"
+    bad_root = compilation_task_root(base, bad_task_id)
+
+    assert {:error, :compilation_graph_hash_mismatch} =
+             ArtifactStore.archive(
+               bad_root,
+               candidate.plan,
+               candidate.dot_source,
+               manifest_fixture()
+             )
+
+    refute File.exists?(bad_root)
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive(
+               bad_root,
+               candidate.plan,
+               candidate.dot_source,
+               candidate.manifest
+             )
+
+    assert {:ok, _compilation} = ArtifactStore.read_task_compilation(base, bad_task_id)
+  end
+
+  test "security regression: reader rejects a missing or tampered compilation seal", %{base: base} do
+    task_id = "task_missing_or_tampered_seal"
+    root = compilation_task_root(base, task_id)
+    candidate = compilation_candidate("sealed reader", "digraph G { start -> seal -> done }")
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive(root, candidate.plan, candidate.dot_source, candidate.manifest)
+
+    seal_path = compilation_seal_path(root)
+    File.rm!(seal_path)
+
+    assert {:error, :coding_compilation_provenance_unavailable} =
+             ArtifactStore.read_task_compilation(base, task_id)
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive(root, candidate.plan, candidate.dot_source, candidate.manifest)
+
+    File.write!(seal_path, "{}")
+    File.chmod!(seal_path, 0o600)
+
+    assert {:error, :coding_compilation_provenance_unavailable} =
+             ArtifactStore.read_task_compilation(base, task_id)
+
+    assert {:error, :compilation_seal_conflict} =
+             ArtifactStore.archive(root, candidate.plan, candidate.dot_source, candidate.manifest)
+  end
+
+  test "reader rejects insecure and indirect sealed compilation files", %{base: base} do
+    task_id = "task_invalid_sealed_compilation_file"
+    root = compilation_task_root(base, task_id)
+    candidate = compilation_candidate("fixed files", "digraph G { start -> fixed -> done }")
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive(root, candidate.plan, candidate.dot_source, candidate.manifest)
+
+    plan_path = descriptor["coding_plan_path"]
+    File.chmod!(plan_path, 0o644)
+
+    assert {:error, :coding_compilation_provenance_unavailable} =
+             ArtifactStore.read_task_compilation(base, task_id)
+
+    File.chmod!(plan_path, 0o600)
+    outside = Path.join(base, "outside-coding-plan.json")
+    File.write!(outside, File.read!(plan_path))
+    File.chmod!(outside, 0o600)
+    File.rm!(plan_path)
+    File.ln_s!(outside, plan_path)
+
+    assert {:error, :coding_compilation_provenance_unavailable} =
+             ArtifactStore.read_task_compilation(base, task_id)
+  end
+
+  test "oversized compilation is rejected before sealing and a corrected bundle remains readable",
+       %{base: base} do
+    task_id = "task_oversized_sealed_compilation"
+    root = compilation_task_root(base, task_id)
+    oversized_dot = :binary.copy("x", 4_194_305)
+
+    corrected =
+      compilation_candidate("corrected size", "digraph G { start -> corrected -> done }")
+
+    assert {:error, {:compilation_artifact_size_out_of_bounds, "coding-pipeline.dot"}} =
+             ArtifactStore.archive(
+               root,
+               corrected.plan,
+               oversized_dot,
+               manifest_for(oversized_dot)
+             )
+
+    refute File.exists?(root)
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive(
+               root,
+               corrected.plan,
+               corrected.dot_source,
+               corrected.manifest
+             )
+
+    assert {:ok, compilation} = ArtifactStore.read_task_compilation(base, task_id)
+    assert compilation["dot_source"] == corrected.dot_source
   end
 
   test "rejects malformed arguments with tagged errors before creating files", %{root: root} do
@@ -195,26 +571,26 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
                root_file,
                plan_fixture(),
                "digraph G {}",
-               manifest_fixture()
+               manifest_for("digraph G {}")
              )
 
     assert reason in [:eexist, :enotdir]
   end
 
-  test "removes the temporary file when atomic rename fails", %{root: root} do
+  test "rejects a non-regular fixed artifact without leaving a temporary file", %{root: root} do
     destination = Path.join(root, "coding-plan.json")
     File.mkdir_p!(destination)
 
-    assert {:error, {:write_artifact_failed, "coding-plan.json", reason}} =
+    assert {:error, {:invalid_compilation_artifact, "coding-plan.json"}} =
              ArtifactStore.archive(
                root,
                plan_fixture(),
                "digraph G {}",
-               manifest_fixture()
+               manifest_for("digraph G {}")
              )
 
-    assert is_atom(reason)
     refute Enum.any?(File.ls!(root), &String.contains?(&1, ".tmp-"))
+    refute File.exists?(compilation_seal_path(root))
   end
 
   test "archives closed terminal evidence with digest, size, and restrictive mode", %{root: root} do
@@ -938,6 +1314,39 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     }
   end
 
+  defp manifest_for(dot_source) do
+    Map.put(manifest_fixture(), "graph_hash", sha256(dot_source))
+  end
+
+  defp compilation_candidate(task, dot_source) do
+    %{
+      plan: Map.put(plan_fixture(), "task", task),
+      dot_source: dot_source,
+      manifest: manifest_for(dot_source)
+    }
+  end
+
+  defp compilation_task_root(base, task_id) do
+    digest = :crypto.hash(:sha256, task_id) |> Base.encode16(case: :lower)
+    Path.join(base, "task-" <> digest)
+  end
+
+  defp compilation_seal_path(root), do: Path.join(root, @compilation_seal_filename)
+
+  defp descriptor_artifact_paths(root) do
+    [
+      Path.join(root, "coding-plan.json"),
+      Path.join(root, "coding-pipeline.dot"),
+      Path.join(root, "coding-compile-manifest.json")
+    ]
+  end
+
+  defp copy_compilation_artifact!(source, destination_root) do
+    destination = Path.join(destination_root, Path.basename(source))
+    File.cp!(source, destination)
+    File.chmod!(destination, 0o600)
+  end
+
   defp terminal_result(root) do
     {:ok, expanded_root} = Arbor.Common.SafePath.resolve_real(root)
 
@@ -1099,32 +1508,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       "coding_pipeline_path",
       "compile_manifest_path"
     ])
-  end
-
-  defp await_secure_nonempty_temp(root, task_pid, deadline) do
-    observations = temporary_file_observations(root)
-    nonempty = Enum.filter(observations, &(&1.size > 0))
-
-    case Enum.find(nonempty, &(&1.mode != 0o600)) do
-      nil when nonempty != [] ->
-        :ok
-
-      nil ->
-        cond do
-          not Process.alive?(task_pid) ->
-            {:error, :archive_completed_before_temp_was_observed}
-
-          System.monotonic_time(:millisecond) >= deadline ->
-            {:error, :timed_out_observing_nonempty_temp}
-
-          true ->
-            Process.sleep(0)
-            await_secure_nonempty_temp(root, task_pid, deadline)
-        end
-
-      observation ->
-        {:error, {:nonempty_temp_had_insecure_mode, observation}}
-    end
   end
 
   defp temporary_file_observations(root) do

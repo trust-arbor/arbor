@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 520,
+  "entry_count": 523,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5293,9 +5293,9 @@
       "topic": "testing-live-runtime",
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-a-hermetic-test-must-replace-the-runner-seam-the-code-actually-consumes",
-      "source_date": "2026-07-18",
-      "source_incident": "found 2026-07-18 during contained validation of `task_234818`).",
-      "content_sha256": "1e807b3fb8a40b3f399afc2a9acbae87216930c3f97fa053943408c6c174cca2",
+      "source_date": "2026-07-23",
+      "source_incident": "found 2026-07-18 during contained validation of `task_234818`; reinforced 2026-07-23 when deterministic-evaluator tests never proved Mix ran).",
+      "content_sha256": "258e6139c2520f39777e78705603f72bceed67a1a5282c21e177d9fc59fa9335",
       "always_loaded": false
     },
     {
@@ -6300,12 +6300,51 @@
       "topic": "filesystem-git",
       "destination": ".claude/skills/applied-learning-filesystem-git.md",
       "anchor": "applied-learning-host-maintenance-scripts-must-target-system-runtime-apis",
+      "source_date": "2026-07-23",
+      "source_incident": "found 2026-07-23 during worktree settlement).",
+      "content_sha256": "33609643dc5157436b763f47a5a5b8914832418e2297d88e2f156ab723895d5a",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 521,
+      "source_kind": "post-migration",
+      "slug": "do-not-use-path-as-a-zsh-loop-variable",
+      "title": "Do not use `path` as a zsh loop variable.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-do-not-use-path-as-a-zsh-loop-variable",
       "source_date": "2026-07-22",
-      "source_incident": "found 2026-07-22 during local branch cleanup).",
-      "content_sha256": "fd9248362648f4706831039a89e295af34646f14afaf2a3b83e88dc3efb6452d",
+      "source_incident": "found 2026-07-22 during attached-worktree inventory).",
+      "content_sha256": "bc6b426914ce843b600658002407df76889e9bf617f88c1d3f6bf87e6846feb2",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 522,
+      "source_kind": "post-migration",
+      "slug": "consensus-proposals-must-reference-authoritative-validation-evidence-not-select-execution",
+      "title": "Consensus proposals must reference authoritative validation evidence, not select execution.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-consensus-proposals-must-reference-authoritative-validation-evidence-not-select-execution",
+      "source_date": "2026-07-23",
+      "source_incident": "found 2026-07-23 while repairing the deterministic evaluator after shell hardening).",
+      "content_sha256": "992304bb8f4d66818b409176df97c59749b782664d4707c4bd8cc880d8687785",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 523,
+      "source_kind": "post-migration",
+      "slug": "aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle",
+      "title": "Aggregate tests must own dependency availability and globally named process lifecycle.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle",
+      "source_date": "2026-07-24",
+      "source_incident": "found 2026-07-24 after the aggregate software-factory gate exposed Trust-dependent Gateway decisions and a dispatcher `:already_started` race).",
+      "content_sha256": "3d87c89f5710e864c007780ff339279d9c42876f012374e022e03553e21a103f",
       "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 59
+  "post_migration_entry_count": 62
 }

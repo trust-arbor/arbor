@@ -35,6 +35,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     * `:agent_id` - The agent identity for authorization (default: `"system"`)
     * `:signed_request` - Pre-signed request for identity verification
     * `:signer` - Signer function `(resource -> {:ok, signed} | {:error, reason})`
+    * `:coding_workspace_registry_server` - Trusted atom address for an isolated
+      coding workspace registry; omitted in production's default path
 
   Maps tool names to Arbor Actions, atomizes string-keyed args using the
   action's schema as an allowlist, and executes via the action system.
@@ -203,6 +205,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
        ) do
     with {:ok, pinned_binding} <- verify_pinned_action(action_module, name, opts),
          {:ok, execution_binding_context} <- execution_binding_context(opts),
+         {:ok, workspace_registry_server} <- coding_workspace_registry_server(opts),
          {:ok, retry_workdir_guard} <- capture_retry_workdir_guard(workdir, agent_id) do
       params =
         args
@@ -237,6 +240,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               context =
                 %{auth_context: auth_context, workdir: workdir}
                 |> Map.merge(execution_binding_context)
+                |> maybe_put_context(:server, workspace_registry_server)
                 |> maybe_put_approval_timeout(opts, execution_binding_context)
                 |> Map.put(:retry_workdir_guard, retry_workdir_guard)
                 |> maybe_put_context(:task_id, task_id)
@@ -353,6 +357,19 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
       true ->
         ExecutionManifest.verify_action_module(action_name, action_module, bindings)
+    end
+  end
+
+  defp coding_workspace_registry_server(opts) do
+    case Keyword.fetch(opts, :coding_workspace_registry_server) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, server} when is_atom(server) and server not in [nil, true, false] ->
+        {:ok, server}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_coding_workspace_registry_server}
     end
   end
 

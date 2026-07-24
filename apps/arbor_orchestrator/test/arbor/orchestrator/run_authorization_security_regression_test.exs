@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.{Authorization, Context, Executor, RunAuthorization}
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
+  alias Arbor.Orchestrator.Test.CheckpointResumeHelper
 
   defmodule LobbyOnlySecurity do
     def authorize(_principal, resource, _action, opts) do
@@ -647,7 +648,7 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
 
     assert "parallel" in Enum.map(parent_manifest["handlers"], & &1["handler_type"])
     assert "compute" in Enum.map(parent_manifest["handlers"], & &1["handler_type"])
-    assert "consensus_decide" in Enum.map(parent_manifest["actions"], & &1["name"])
+    assert "consensus_decide_review" in Enum.map(parent_manifest["actions"], & &1["name"])
 
     assert {:ok, child_compiled_graph_hash} = ExecutionManifest.compiled_graph_hash(child)
     assert nested_manifest["compiled_graph_hash"] == child_compiled_graph_hash
@@ -988,7 +989,8 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
     checkpoint_root = Path.join(root, "checkpoint")
     File.mkdir_p!(checkpoint_root)
     private_key = :crypto.strong_rand_bytes(32)
-    run_id = "phase5_authority_checkpoint"
+    run_id = CheckpointResumeHelper.unique_run_id("phase5_authority_checkpoint")
+    CheckpointResumeHelper.schedule_journal_cleanup(run_id)
 
     dot = """
     digraph AuthorityCheckpoint {
@@ -1021,6 +1023,8 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
     assert projection["task_id"] == "task_checkpoint"
     assert is_binary(projection["binding_digest"])
 
+    CheckpointResumeHelper.reopen_as_recovering!(run_id)
+
     assert {:error, :run_authorization_mismatch} =
              Arbor.Orchestrator.run(
                dot,
@@ -1044,7 +1048,8 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
     on_exit(fn -> Arbor.Orchestrator.TestCapabilities.revoke_all("agent_executor") end)
     checkpoint_root = Path.join(root, "bound-checkpoint")
     private_key = :crypto.strong_rand_bytes(32)
-    run_id = "phase5_execution_manifest_checkpoint"
+    run_id = CheckpointResumeHelper.unique_run_id("phase5_execution_manifest_checkpoint")
+    CheckpointResumeHelper.schedule_journal_cleanup(run_id)
 
     dot = """
     digraph BoundCheckpoint {
@@ -1088,6 +1093,8 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
 
     # Mirrors are deliberately omitted. RunAuthorization derives both indexes
     # from the full manifest before comparing the signed checkpoint projection.
+    CheckpointResumeHelper.reopen_as_recovering!(run_id)
+
     assert {:ok, _resumed} =
              Arbor.Orchestrator.run(
                dot,
@@ -1122,6 +1129,8 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
 
     {:ok, altered_digest} = ExecutionManifest.digest(altered_manifest)
 
+    CheckpointResumeHelper.reopen_as_recovering!(run_id)
+
     assert {:error, :run_authorization_mismatch} =
              Arbor.Orchestrator.run(
                dot,
@@ -1130,6 +1139,8 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
                |> Keyword.put(:execution_manifest_digest, altered_digest)
                |> Keyword.put(:resume_from, checkpoint_path)
              )
+
+    CheckpointResumeHelper.reopen_as_recovering!(run_id)
 
     assert {:error, :invalid_execution_manifest_binding} =
              Arbor.Orchestrator.run(
@@ -1278,12 +1289,15 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
       graph_hash = sha256(dot)
       {manifest, digest} = execution_manifest!(graph, graph_hash)
 
+      run_id = CheckpointResumeHelper.unique_run_id("workdir-resume-#{replacement}")
+      CheckpointResumeHelper.schedule_journal_cleanup(run_id)
+
       opts =
         authorized_opts(workdir,
           graph_hash: graph_hash,
           execution_manifest: manifest,
           execution_manifest_digest: digest,
-          run_id: "workdir-resume-#{replacement}",
+          run_id: run_id,
           logs_root: checkpoint_root,
           identity_private_key: private_key,
           resumable: true,
@@ -1292,6 +1306,7 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
 
       assert {:ok, _result} = Arbor.Orchestrator.run(dot, opts)
       checkpoint_path = Path.join(checkpoint_root, "checkpoint.json")
+      CheckpointResumeHelper.reopen_as_recovering!(run_id)
       File.rename!(workdir, moved)
 
       case replacement do

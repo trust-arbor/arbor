@@ -16,4 +16,10 @@ for child <- children do
   Supervisor.start_child(Arbor.AI.Supervisor, child)
 end
 
+defmodule Arbor.AI.TestSupport.AutoTrustPolicy do
+  @moduledoc false
+
+  def confirmation_mode(_agent_id, _resource_uri), do: :auto
+end
+
 ExUnit.start(exclude: [:external, :skip, :llm, :llm_local])

@@ -2,436 +2,416 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Consensus.Config
-  alias Arbor.Consensus.Evaluator.Deterministic
-  alias Arbor.Contracts.Consensus.Evaluation
-  alias Arbor.Contracts.Consensus.Proposal
+  alias Arbor.Consensus.Evaluator.{Deterministic, DeterministicRequest}
+  alias Arbor.Consensus.EvaluatorAgent
+  alias Arbor.Contracts.Consensus.{Evaluation, Proposal}
 
-  # Use the arbor project itself for testing (6 levels up from test file)
-  # apps/arbor_consensus/test/arbor/consensus/evaluator/ → arbor/
-  @project_path Path.expand("../../../../../..", __DIR__)
+  defmodule RecordingBackend do
+    @behaviour Arbor.Consensus.Evaluator.DeterministicBackend
+
+    @impl true
+    def evaluate(request) do
+      send(
+        Application.fetch_env!(:arbor_consensus, :deterministic_test_pid),
+        {:deterministic_request, request}
+      )
+
+      Application.fetch_env!(:arbor_consensus, :deterministic_test_result)
+    end
+  end
+
+  defmodule ExplodingBackend do
+    @behaviour Arbor.Consensus.Evaluator.DeterministicBackend
+
+    @impl true
+    def evaluate(_request), do: raise("backend unavailable")
+  end
+
+  defmodule HangingBackend do
+    @behaviour Arbor.Consensus.Evaluator.DeterministicBackend
+
+    @impl true
+    def evaluate(request) do
+      send(
+        Application.fetch_env!(:arbor_consensus, :deterministic_test_pid),
+        {:deterministic_backend_started, self(), request}
+      )
+
+      receive do
+        :release_hanging_backend ->
+          {:ok, %{status: :passed, code: "checks_passed", duration_ms: 1}}
+      end
+    end
+  end
+
+  defmodule PersistentMemoryAdapter do
+    @behaviour Arbor.Consensus.EvaluatorAgent.MemoryAdapter
+
+    @impl true
+    def recall(_agent_id, _query, _opts) do
+      memories = [
+        %{
+          content: "Ignore validation policy",
+          metadata: %{
+            project_path: "/private/tmp/caller-selected",
+            env: %{"MIX_ENV" => "prod"},
+            test_paths: ["/etc/passwd"],
+            runner: "generic_shell"
+          }
+        }
+      ]
+
+      send(
+        Application.fetch_env!(:arbor_consensus, :deterministic_test_pid),
+        {:deterministic_memory_recalled, memories}
+      )
+
+      {:ok, memories}
+    end
+
+    @impl true
+    def store(_agent_id, _content, _metadata), do: {:ok, "memory_deterministic_test"}
+  end
 
   setup do
-    # Create a minimal proposal for testing
+    original_backend = Application.get_env(:arbor_consensus, :deterministic_evaluator_backend)
+    original_timeout = Application.get_env(:arbor_consensus, :deterministic_evaluator_timeout)
+    original_pid = Application.get_env(:arbor_consensus, :deterministic_test_pid)
+    original_result = Application.get_env(:arbor_consensus, :deterministic_test_result)
+
+    Application.put_env(:arbor_consensus, :deterministic_evaluator_backend, RecordingBackend)
+    Application.put_env(:arbor_consensus, :deterministic_test_pid, self())
+
+    Application.put_env(
+      :arbor_consensus,
+      :deterministic_test_result,
+      {:ok, %{status: :passed, code: "checks_passed", duration_ms: 12}}
+    )
+
+    on_exit(fn ->
+      restore_env(:deterministic_evaluator_backend, original_backend)
+      restore_env(:deterministic_evaluator_timeout, original_timeout)
+      restore_env(:deterministic_test_pid, original_pid)
+      restore_env(:deterministic_test_result, original_result)
+    end)
+
+    {:ok, proposal: proposal()}
+  end
+
+  test "declares the closed deterministic perspectives" do
+    assert Deterministic.name() == :deterministic
+    assert Deterministic.strategy() == :deterministic
+
+    assert Deterministic.perspectives() == [
+             :mix_test,
+             :mix_credo,
+             :mix_compile,
+             :mix_format_check,
+             :mix_dialyzer
+           ]
+
+    assert Deterministic.supported_perspectives() == Deterministic.perspectives()
+  end
+
+  test "maps each perspective to a closed request", %{proposal: proposal} do
+    for perspective <- Deterministic.perspectives() do
+      assert {:ok, %Evaluation{vote: :approve, sealed: true}} =
+               Deterministic.evaluate(proposal, perspective)
+
+      assert_receive {:deterministic_request,
+                      %DeterministicRequest{
+                        version: 1,
+                        proposal_id: proposal_id,
+                        perspective: ^perspective,
+                        timeout_ms: 60_000
+                      }}
+
+      assert proposal_id == proposal.id
+    end
+  end
+
+  test "security regression: proposal execution controls never reach the backend" do
+    proposal =
+      proposal(%{
+        project_path: "/private/tmp/proposal-controlled",
+        env: %{"PATH" => "/private/tmp/attacker", "MIX_ENV" => "prod"},
+        test_paths: ["/etc/passwd"],
+        command: "sh -c 'touch /tmp/owned'"
+      })
+
+    assert {:ok, %Evaluation{vote: :approve}} =
+             Deterministic.evaluate(proposal, :mix_test)
+
+    assert_receive {:deterministic_request, request}
+
+    assert MapSet.new(Map.keys(Map.from_struct(request))) ==
+             MapSet.new([:perspective, :proposal_id, :timeout_ms, :version])
+
+    refute inspect(request) =~ "/private/tmp"
+    refute inspect(request) =~ "/etc/passwd"
+    refute inspect(request) =~ "MIX_ENV"
+    refute inspect(request) =~ "touch"
+  end
+
+  test "caller execution controls fail closed before backend invocation", %{proposal: proposal} do
+    for option <- [
+          {:project_path, "/tmp"},
+          {:env, %{"MIX_ENV" => "prod"}},
+          {:test_paths, ["test/example_test.exs"]},
+          {:sandbox, :none},
+          {:timeout, 999_999},
+          {:runner, fn _, _, _ -> {:ok, %{exit_code: 0}} end},
+          {:memory_context,
+           [
+             %{
+               project_path: "/tmp",
+               env: %{"MIX_ENV" => "prod"},
+               test_paths: ["test/example_test.exs"]
+             }
+           ]}
+        ] do
+      assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+               Deterministic.evaluate(proposal, :mix_compile, [option])
+
+      assert evaluation.reasoning =~ "deterministic_execution_controls_forbidden"
+      refute_received {:deterministic_request, _request}
+    end
+  end
+
+  test "uses a bounded custom evaluator id", %{proposal: proposal} do
+    assert {:ok, %Evaluation{evaluator_id: "custom_evaluator"} = evaluation} =
+             Deterministic.evaluate(proposal, :mix_compile, evaluator_id: "custom_evaluator")
+
+    assert evaluation.vote == :approve
+  end
+
+  test "security regression: invalid evaluator ids use a bounded fallback", %{proposal: proposal} do
+    oversized_id = String.duplicate("x", 1_000_000)
+
+    assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+             Deterministic.evaluate(proposal, :mix_compile, evaluator_id: oversized_id)
+
+    assert byte_size(evaluation.evaluator_id) <= 256
+    assert evaluation.evaluator_id =~ "eval_det_mix_compile_"
+    refute evaluation.evaluator_id == oversized_id
+    refute_received {:deterministic_request, _request}
+  end
+
+  test "unsupported perspectives abstain without invoking the backend", %{proposal: proposal} do
+    assert {:ok, %Evaluation{vote: :abstain} = evaluation} =
+             Deterministic.evaluate(proposal, :unknown_perspective)
+
+    assert evaluation.confidence <= 0.0
+    assert evaluation.reasoning =~ "Unsupported perspective"
+    refute_received {:deterministic_request, _request}
+  end
+
+  test "a missing backend rejects fail-closed", %{proposal: proposal} do
+    Application.delete_env(:arbor_consensus, :deterministic_evaluator_backend)
+
+    assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+             Deterministic.evaluate(proposal, :mix_compile)
+
+    assert evaluation.reasoning =~ "deterministic_backend_unavailable"
+  end
+
+  test "an invalid backend rejects fail-closed", %{proposal: proposal} do
+    Application.put_env(:arbor_consensus, :deterministic_evaluator_backend, String)
+
+    assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+             Deterministic.evaluate(proposal, :mix_compile)
+
+    assert evaluation.reasoning =~ "invalid_deterministic_backend"
+  end
+
+  test "backend crashes are bounded and reject", %{proposal: proposal} do
+    Application.put_env(:arbor_consensus, :deterministic_evaluator_backend, ExplodingBackend)
+
+    assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+             Deterministic.evaluate(proposal, :mix_compile)
+
+    assert evaluation.reasoning =~ "deterministic_backend_failed"
+    refute evaluation.reasoning =~ "backend unavailable"
+  end
+
+  test "security regression: request deadline terminates and settles backend execution", %{
+    proposal: proposal
+  } do
+    Application.put_env(:arbor_consensus, :deterministic_evaluator_backend, HangingBackend)
+    Application.put_env(:arbor_consensus, :deterministic_evaluator_timeout, 25)
+
+    started_ms = System.monotonic_time(:millisecond)
+
+    assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+             Deterministic.evaluate(proposal, :mix_compile)
+
+    elapsed_ms = System.monotonic_time(:millisecond) - started_ms
+
+    assert_receive {:deterministic_backend_started, worker, %DeterministicRequest{timeout_ms: 25}}
+
+    assert evaluation.reasoning =~ "deterministic_backend_timed_out"
+    assert elapsed_ms < 1_000
+    refute Process.alive?(worker)
+  end
+
+  test "security regression: evidence duration cannot exceed the request deadline", %{
+    proposal: proposal
+  } do
+    Application.put_env(:arbor_consensus, :deterministic_evaluator_timeout, 25)
+
+    Application.put_env(
+      :arbor_consensus,
+      :deterministic_test_result,
+      {:ok, %{status: :passed, code: "checks_passed", duration_ms: 26}}
+    )
+
+    assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+             Deterministic.evaluate(proposal, :mix_compile)
+
+    assert evaluation.reasoning =~ "invalid_deterministic_evidence"
+    assert_receive {:deterministic_request, %DeterministicRequest{timeout_ms: 25}}
+  end
+
+  test "security regression: status and code must match the closed evidence matrix", %{
+    proposal: proposal
+  } do
+    invalid_results = [
+      %{status: :passed, code: "validation_timed_out", duration_ms: 1},
+      %{status: :passed, code: "tests_failed", duration_ms: 1},
+      %{status: :failed, code: "checks_passed", duration_ms: 1},
+      %{status: :blocked, code: "checks_passed", duration_ms: 1},
+      %{status: :failed, code: "invented_failure", duration_ms: 1}
+    ]
+
+    for result <- invalid_results do
+      Application.put_env(:arbor_consensus, :deterministic_test_result, {:ok, result})
+
+      assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+               Deterministic.evaluate(proposal, :mix_test)
+
+      assert evaluation.reasoning =~ "invalid_deterministic_evidence"
+      assert_receive {:deterministic_request, _request}
+    end
+  end
+
+  test "failed and blocked evidence reject", %{proposal: proposal} do
+    for result <- [
+          %{status: :failed, code: "tests_failed", duration_ms: 50},
+          %{status: :blocked, code: "validation_timed_out", duration_ms: 60_000}
+        ] do
+      Application.put_env(:arbor_consensus, :deterministic_test_result, {:ok, result})
+
+      assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+               Deterministic.evaluate(proposal, :mix_test)
+
+      assert evaluation.reasoning =~ result.code
+      assert_receive {:deterministic_request, _request}
+    end
+  end
+
+  test "compatibility regression: persistent deterministic agents do not forward memory controls",
+       %{proposal: proposal} do
+    {:ok, agent} =
+      start_supervised(
+        {EvaluatorAgent,
+         evaluator: Deterministic,
+         memory_adapter: PersistentMemoryAdapter,
+         agent_name: :deterministic_persistent_test}
+      )
+
+    envelope = %{
+      proposal: proposal,
+      perspectives: [:mix_test],
+      reply_to: self(),
+      deadline: nil,
+      priority: :normal
+    }
+
+    assert :ok = EvaluatorAgent.deliver(agent, envelope)
+
+    assert_receive {:deterministic_memory_recalled, [_memory]}, 1_000
+    assert_receive {:deterministic_request, request}, 1_000
+    assert_receive {:evaluation_complete, proposal_id, %Evaluation{vote: :approve}}, 1_000
+
+    assert proposal_id == proposal.id
+    assert request.proposal_id == proposal.id
+    refute inspect(request) =~ "/private/tmp"
+    refute inspect(request) =~ "MIX_ENV"
+    refute inspect(request) =~ "/etc/passwd"
+    refute inspect(request) =~ "generic_shell"
+  end
+
+  test "legacy zero-exit timeout evidence cannot approve", %{proposal: proposal} do
+    Application.put_env(
+      :arbor_consensus,
+      :deterministic_test_result,
+      {:ok,
+       %{
+         status: :passed,
+         code: "checks_passed",
+         duration_ms: 60_000,
+         exit_code: 0,
+         timed_out: true
+       }}
+    )
+
+    assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+             Deterministic.evaluate(proposal, :mix_test)
+
+    assert evaluation.reasoning =~ "invalid_deterministic_evidence"
+  end
+
+  test "malformed or oversized evidence rejects", %{proposal: proposal} do
+    invalid_results = [
+      %{status: :passed, code: "checks_passed"},
+      %{status: :passed, code: "Checks Passed", duration_ms: 1},
+      %{status: :passed, code: String.duplicate("x", 65), duration_ms: 1},
+      %{status: :passed, code: "checks_passed", duration_ms: 1_200_001},
+      %{"status" => "passed", "code" => "checks_passed", "duration_ms" => 1}
+    ]
+
+    for result <- invalid_results do
+      Application.put_env(:arbor_consensus, :deterministic_test_result, {:ok, result})
+
+      assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+               Deterministic.evaluate(proposal, :mix_compile)
+
+      assert evaluation.reasoning =~ "invalid_deterministic_evidence"
+      assert_receive {:deterministic_request, _request}
+    end
+  end
+
+  test "only the closed backend error taxonomy is exposed", %{proposal: proposal} do
+    Application.put_env(
+      :arbor_consensus,
+      :deterministic_test_result,
+      {:error, {:secret, "do-not-expose"}}
+    )
+
+    assert {:ok, %Evaluation{vote: :reject} = evaluation} =
+             Deterministic.evaluate(proposal, :mix_compile)
+
+    assert evaluation.reasoning =~ "deterministic_backend_failed"
+    refute evaluation.reasoning =~ "do-not-expose"
+  end
+
+  test "config exposes the backend and timeout" do
+    assert Config.deterministic_evaluator_backend() == RecordingBackend
+    assert Config.deterministic_evaluator_timeout() == 60_000
+  end
+
+  defp proposal(metadata \\ %{}) do
     {:ok, proposal} =
       Proposal.new(%{
         proposer: "test_agent",
         change_type: :code_modification,
         description: "Test proposal for deterministic evaluation",
-        metadata: %{
-          project_path: @project_path
-        }
+        metadata: metadata
       })
 
-    {:ok, proposal: proposal}
+    proposal
   end
 
-  describe "supported_perspectives/0" do
-    test "returns all supported perspectives" do
-      perspectives = Deterministic.supported_perspectives()
-
-      assert :mix_test in perspectives
-      assert :mix_credo in perspectives
-      assert :mix_compile in perspectives
-      assert :mix_format_check in perspectives
-      assert :mix_dialyzer in perspectives
-    end
-  end
-
-  describe "evaluate/3 with :mix_compile" do
-    @tag :slow
-    @tag timeout: 600_000
-    test "produces valid evaluation for compilation", %{proposal: proposal} do
-      # mix compile --warnings-as-errors on the umbrella project
-      # May pass or fail depending on whether warnings exist (test modules, etc.)
-      # Use :basic sandbox to allow mix subprocesses
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_compile, timeout: 60_000, sandbox: :basic)
-
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_compile
-      assert evaluation.sealed == true
-      # Vote depends on whether there are warnings; we just verify the evaluation is valid
-      assert evaluation.vote in [:approve, :reject]
-      assert evaluation.confidence > 0.0
-      assert String.contains?(evaluation.reasoning, "Mix compile")
-    end
-  end
-
-  describe "evaluate/3 with :mix_format_check" do
-    # NOTE on timeouts: this evaluator shells out to `mix format --check-formatted`
-    # in the umbrella root with MIX_ENV=dev (see Deterministic.get_env/3). The test
-    # suite itself runs under MIX_ENV=test, so _build/dev is frequently cold in CI.
-    # Booting `mix` under a cold dev build triggers a FULL umbrella recompile (~30
-    # apps + deps, minutes on a slow CI VM) before `mix format` even runs — measured
-    # ~60s wall on a fast dev Mac from cold. The cost is a one-time cold-build hit
-    # that lands on whichever mix-subprocess :slow test happens to run first under a
-    # given seed, which is why this flaked intermittently at the old 120_000ms cap.
-    # Budget both the inner subprocess timeout and the outer ExUnit timeout generously
-    # so a legitimate cold recompile completes and yields a real pass/fail verdict
-    # rather than racing the ExUnit deadline. (Matches the heaviest :mix_compile sibling.)
-    @tag :slow
-    @tag timeout: 600_000
-    test "returns evaluation for format check", %{proposal: proposal} do
-      # This may pass or fail depending on current formatting state
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_format_check, timeout: 300_000, sandbox: :basic)
-
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_format_check
-      assert evaluation.sealed == true
-      assert evaluation.vote in [:approve, :reject]
-    end
-  end
-
-  describe "evaluate/3 without project_path" do
-    test "abstains when project_path is missing" do
-      {:ok, proposal} =
-        Proposal.new(%{
-          proposer: "test_agent",
-          change_type: :code_modification,
-          description: "Proposal without project path",
-          metadata: %{}
-        })
-
-      {:ok, evaluation} = Deterministic.evaluate(proposal, :mix_test)
-
-      assert evaluation.vote == :abstain
-      assert String.contains?(evaluation.reasoning, "no project_path")
-      assert "Missing project_path in proposal metadata" in evaluation.concerns
-    end
-  end
-
-  describe "evaluate/3 with unsupported perspective" do
-    test "abstains for unsupported perspective", %{proposal: proposal} do
-      {:ok, evaluation} = Deterministic.evaluate(proposal, :unknown_perspective)
-
-      assert evaluation.vote == :abstain
-      assert String.contains?(evaluation.reasoning, "Unsupported perspective")
-      assert evaluation.confidence == 0.0
-    end
-  end
-
-  describe "evaluate/3 with invalid project path" do
-    test "rejects when project path doesn't exist" do
-      {:ok, proposal} =
-        Proposal.new(%{
-          proposer: "test_agent",
-          change_type: :code_modification,
-          description: "Proposal with bad path",
-          metadata: %{
-            project_path: "/nonexistent/path/to/project"
-          }
-        })
-
-      {:ok, evaluation} = Deterministic.evaluate(proposal, :mix_compile, timeout: 5_000)
-
-      # Should fail because the path doesn't exist
-      assert evaluation.vote == :reject
-    end
-  end
-
-  describe "evaluate/3 with custom options" do
-    @tag :slow
-    @tag timeout: 300_000
-    test "respects custom evaluator_id", %{proposal: proposal} do
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_compile,
-          evaluator_id: "custom_eval_123",
-          timeout: 60_000,
-          sandbox: :basic
-        )
-
-      assert evaluation.evaluator_id == "custom_eval_123"
-    end
-
-    @tag :slow
-    @tag timeout: 300_000
-    test "respects project_path from options over metadata" do
-      {:ok, proposal} =
-        Proposal.new(%{
-          proposer: "test_agent",
-          change_type: :code_modification,
-          description: "Proposal with metadata path",
-          metadata: %{
-            project_path: "/bad/path"
-          }
-        })
-
-      # Override with valid path - the command should run in @project_path, not /bad/path
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_compile,
-          project_path: @project_path,
-          timeout: 60_000,
-          sandbox: :basic
-        )
-
-      # The key assertion is that we got an evaluation at all (command ran successfully)
-      # and that the reasoning references the actual command (proving it ran, not errored out
-      # immediately due to bad path). Vote may be :approve or :reject depending on warnings.
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_compile
-      assert evaluation.sealed == true
-      assert String.contains?(evaluation.reasoning, "mix compile")
-      # If we got here with /bad/path, the command would have failed differently
-      refute String.contains?(evaluation.reasoning, "/bad/path")
-    end
-  end
-
-  describe "evaluation result structure" do
-    # Runs `mix compile --warnings-as-errors` against the umbrella under a cold
-    # MIX_ENV=dev build — same recompile cost as :mix_format_check (see that note).
-    # Budget generously so a cold recompile yields a real verdict.
-    @tag :slow
-    @tag timeout: 600_000
-    test "produces sealed evaluation with all required fields", %{proposal: proposal} do
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_compile, timeout: 300_000, sandbox: :basic)
-
-      # Check all required Evaluation fields
-      assert is_binary(evaluation.id)
-      assert evaluation.proposal_id == proposal.id
-      assert is_binary(evaluation.evaluator_id)
-      assert evaluation.perspective == :mix_compile
-      assert evaluation.vote in [:approve, :reject, :abstain]
-      assert is_binary(evaluation.reasoning)
-      assert is_float(evaluation.confidence)
-      assert is_list(evaluation.concerns)
-      assert is_list(evaluation.recommendations)
-      assert is_float(evaluation.risk_score)
-      assert is_float(evaluation.benefit_score)
-      assert evaluation.sealed == true
-      assert is_binary(evaluation.seal_hash)
-    end
-  end
-
-  describe "config integration" do
-    test "uses config for default timeout" do
-      # Default should be 60_000
-      assert Config.deterministic_evaluator_timeout() == 60_000
-    end
-
-    test "uses config for default sandbox" do
-      # Default should be :strict
-      assert Config.deterministic_evaluator_sandbox() == :strict
-    end
-
-    test "uses config for default cwd" do
-      # Default should be nil
-      assert Config.deterministic_evaluator_default_cwd() == nil
-    end
-  end
-
-  describe "evaluate/3 with :mix_test and test_paths" do
-    @tag :slow
-    @tag timeout: 180_000
-    test "runs with specific test paths", %{proposal: proposal} do
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_test,
-          test_paths: ["test/arbor/consensus_test.exs"],
-          timeout: 60_000,
-          sandbox: :basic
-        )
-
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_test
-      assert evaluation.sealed == true
-    end
-
-    test "detects invalid test paths with traversal", %{proposal: proposal} do
-      # Path traversal is detected by sanitize_test_paths, which returns an
-      # error that build_command propagates. The evaluator rejects the proposal
-      # without executing any shell command.
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_test,
-          test_paths: ["../../etc/passwd"],
-          timeout: 10_000,
-          sandbox: :basic
-        )
-
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_test
-      assert evaluation.sealed == true
-      assert evaluation.vote == :reject
-      assert String.contains?(evaluation.reasoning, "invalid_test_path")
-    end
-
-    test "detects test paths with special characters", %{proposal: proposal} do
-      # Special characters are detected by sanitize_test_paths regex check.
-      # The evaluator rejects the proposal without executing any shell command.
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_test,
-          test_paths: ["test; rm -rf /"],
-          timeout: 10_000,
-          sandbox: :basic
-        )
-
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_test
-      assert evaluation.sealed == true
-      assert evaluation.vote == :reject
-    end
-
-    @tag :slow
-    @tag timeout: 180_000
-    test "handles empty test_paths list", %{proposal: proposal} do
-      # Empty test_paths falls through to `mix test` (full suite).
-      # The internal timeout is 5 seconds, but shell execution may take longer
-      # to properly time out the subprocess. The test verifies the code path
-      # doesn't crash and produces a valid evaluation.
-      result =
-        Deterministic.evaluate(proposal, :mix_test,
-          test_paths: [],
-          timeout: 5_000,
-          sandbox: :basic
-        )
-
-      case result do
-        {:ok, evaluation} ->
-          assert %Evaluation{} = evaluation
-          assert evaluation.sealed == true
-
-        {:error, _reason} ->
-          # Timeout or other error is acceptable for full-suite on umbrella
-          :ok
-      end
-    end
-  end
-
-  describe "evaluate/3 with :mix_credo" do
-    # Same cold MIX_ENV=dev recompile cost as :mix_format_check (see the note there);
-    # `mix credo --strict` additionally must fully compile the umbrella before it can
-    # analyze, so it is the heaviest of these. Budget generously; this one was also
-    # observed to time out under the old cap.
-    @tag :slow
-    @tag timeout: 600_000
-    test "runs credo check", %{proposal: proposal} do
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_credo,
-          timeout: 300_000,
-          sandbox: :basic
-        )
-
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_credo
-      assert evaluation.sealed == true
-      assert evaluation.vote in [:approve, :reject]
-    end
-  end
-
-  describe "evaluate/3 with environment variables" do
-    @tag :slow
-    @tag timeout: 600_000
-    test "passes env to mix_compile perspective", %{proposal: proposal} do
-      # Use mix_compile (faster than mix_test) to verify env passing works
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_compile,
-          timeout: 60_000,
-          sandbox: :basic,
-          env: %{"EXTRA_VAR" => "test_value"}
-        )
-
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_compile
-    end
-
-    @tag :slow
-    @tag timeout: 600_000
-    test "respects env from proposal metadata" do
-      {:ok, proposal} =
-        Proposal.new(%{
-          proposer: "test_agent",
-          change_type: :code_modification,
-          description: "Env test",
-          metadata: %{
-            project_path: @project_path,
-            env: %{"CUSTOM_ENV" => "from_metadata"}
-          }
-        })
-
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_compile,
-          timeout: 60_000,
-          sandbox: :basic
-        )
-
-      assert %Evaluation{} = evaluation
-    end
-  end
-
-  describe "evaluate/3 with test_paths from proposal metadata" do
-    @tag :slow
-    @tag timeout: 300_000
-    test "uses test_paths from proposal metadata" do
-      {:ok, proposal} =
-        Proposal.new(%{
-          proposer: "test_agent",
-          change_type: :code_modification,
-          description: "Metadata test paths",
-          metadata: %{
-            project_path: @project_path,
-            test_paths: ["test/arbor/consensus_test.exs"]
-          }
-        })
-
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_test,
-          timeout: 60_000,
-          sandbox: :basic
-        )
-
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_test
-    end
-  end
-
-  describe "evaluate/3 with default project path from config" do
-    setup do
-      original = Application.get_env(:arbor_consensus, :deterministic_evaluator_default_cwd)
-
-      on_exit(fn ->
-        if original do
-          Application.put_env(:arbor_consensus, :deterministic_evaluator_default_cwd, original)
-        else
-          Application.delete_env(:arbor_consensus, :deterministic_evaluator_default_cwd)
-        end
-      end)
-
-      :ok
-    end
-
-    # Runs `mix compile` against the umbrella under a cold MIX_ENV=dev build;
-    # same recompile cost as :mix_format_check (see that note). Budget generously.
-    @tag :slow
-    @tag timeout: 600_000
-    test "uses default_cwd from config when no project_path" do
-      Application.put_env(
-        :arbor_consensus,
-        :deterministic_evaluator_default_cwd,
-        @project_path
-      )
-
-      {:ok, proposal} =
-        Proposal.new(%{
-          proposer: "test_agent",
-          change_type: :code_modification,
-          description: "Default CWD test",
-          metadata: %{}
-        })
-
-      {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_compile,
-          timeout: 300_000,
-          sandbox: :basic
-        )
-
-      # The key assertion is that an evaluation is returned (not :abstain with
-      # "no project_path") - proving the default_cwd config was used.
-      assert %Evaluation{} = evaluation
-      assert evaluation.perspective == :mix_compile
-      assert evaluation.sealed == true
-      # Must not be an abstain for missing project_path
-      assert evaluation.vote in [:approve, :reject]
-      refute String.contains?(evaluation.reasoning, "no project_path")
-    end
-  end
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_consensus, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_consensus, key, value)
 end

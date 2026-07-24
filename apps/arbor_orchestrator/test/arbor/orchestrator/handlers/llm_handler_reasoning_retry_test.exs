@@ -22,7 +22,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerReasoningRetryTest do
     @moduledoc false
     @behaviour Arbor.LLM.Dispatcher
 
-    def start_link do
+    def child_spec(opts) do
+      %{
+        id: __MODULE__,
+        start: {__MODULE__, :start_link, [opts]},
+        restart: :temporary
+      }
+    end
+
+    def start_link(_opts) do
       Agent.start_link(fn -> %{calls: [], plan: []} end, name: __MODULE__)
     end
 
@@ -58,7 +66,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerReasoningRetryTest do
   end
 
   setup do
-    {:ok, _} = ProgrammableDispatcher.start_link()
+    start_supervised!(ProgrammableDispatcher)
     Application.put_env(:arbor_orchestrator, :llm_dispatcher, ProgrammableDispatcher)
 
     on_exit(fn ->

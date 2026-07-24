@@ -2622,6 +2622,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     defp run_with_profile_verification(profile, action_result, context_overrides \\ %{}) do
+      task_id =
+        "task_verification_#{profile}_#{System.unique_integer([:positive, :monotonic])}"
+
       Application.put_env(
         :arbor_orchestrator,
         :coding_executor_runner_reply,
@@ -2657,7 +2660,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         end
       )
 
-      CodingTaskExecutor.run("agent_1", verification_task(profile), valid_context())
+      CodingTaskExecutor.run(
+        "agent_1",
+        verification_task(profile),
+        valid_context(%{"task_id" => task_id})
+      )
     end
 
     defp completed_turn_context do

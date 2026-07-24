@@ -43,6 +43,12 @@ jobs:
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
+      - name: Candidate verification evidence, production path, and cancellation (hermetic)
+        run: |
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/operator_candidate_verifier_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_commands/test/mix/tasks/arbor.coding.check_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_commands/test/mix/tasks/arbor.coding.check_production_path_test.exs --timeout 120000
+
       - name: Setup test database
         run: mix ecto.create -r Arbor.Persistence.Repo && mix ecto.migrate -r Arbor.Persistence.Repo
         continue-on-error: true

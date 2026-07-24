@@ -366,6 +366,13 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
             30_000 -> {:error, :late_adoption}
           end
 
+        :block ->
+          receive do
+            {:finish_adoption, reply} -> reply
+          after
+            30_000 -> {:error, :late_adoption}
+          end
+
         :invalid ->
           :ok
 
@@ -874,6 +881,347 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert raw_result["finalized"] == true
     assert_receive {:revoke_adoption_capability, "cap_adoption"}
     assert :sys.get_state(store).tasks[task_id].adoption_cap_id == nil
+  end
+
+  test "slow adoption stays outside TaskStore, coalesces callers, and commits exactly once", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :block)
+
+    store =
+      start_finalizing_store(supervisor,
+        executor_finalization_timeout_ms: 20,
+        adoption_timeout_ms: 1_000,
+        max_tasks: 1
+      )
+
+    task_id = "task_adopt_async"
+    prior_result = complete_adoptable_task(store, task_id, "cap_adopt_async")
+
+    first =
+      Task.async(fn ->
+        TaskStore.adopt(task_id, "refs/heads/reviewed",
+          name: store,
+          adoption_wait_timeout_ms: 1_000
+        )
+      end)
+
+    assert_receive {:adopt_task_called, "agent_1", raw_result,
+                    %{"destination_ref" => "refs/heads/reviewed"}, %{"task_id" => ^task_id},
+                    callback_pid}
+
+    second =
+      Task.async(fn ->
+        TaskStore.adopt(task_id, "refs/heads/reviewed",
+          name: store,
+          adoption_wait_timeout_ms: 1_000
+        )
+      end)
+
+    assert_eventually(fn ->
+      assert length(:sys.get_state(store).adoptions[task_id].waiters) == 2
+    end)
+
+    status_probe = Task.async(fn -> TaskStore.status(task_id, name: store) end)
+    result_probe = Task.async(fn -> TaskStore.result(task_id, name: store) end)
+
+    assert {:ok, {:ok, %{state: :done}}} = Task.yield(status_probe, 500)
+    assert {:ok, {:ok, ^prior_result}} = Task.yield(result_probe, 500)
+
+    assert {:error, :task_adoption_in_progress} =
+             TaskStore.adopt(task_id, "refs/heads/other",
+               name: store,
+               adoption_wait_timeout_ms: 500
+             )
+
+    assert {:ok, "task_adopt_prune_pressure"} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "apply prune pressure"},
+               name: store,
+               task_id: "task_adopt_prune_pressure"
+             )
+
+    assert_receive {:finalizing_executor_started, _other_runner, "agent_1", _task, _context}
+    assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
+    refute_receive {:revoke_adoption_capability, "cap_adopt_async"}, 50
+    refute_receive {:adopt_task_called, _, _, _, _, _}, 50
+
+    send(
+      callback_pid,
+      {:finish_adoption, {:ok, Map.put(raw_result, "adopted", "refs/heads/reviewed")}}
+    )
+
+    assert {:ok, adopted_result} = Task.await(first, 1_000)
+    assert {:ok, ^adopted_result} = Task.await(second, 1_000)
+    assert adopted_result.raw["adopted"] == "refs/heads/reviewed"
+
+    assert_receive {:revoke_adoption_capability, "cap_adopt_async"}
+    refute_receive {:revoke_adoption_capability, "cap_adopt_async"}, 100
+
+    assert {:ok, ^adopted_result} =
+             TaskStore.adopt(task_id, "refs/heads/reviewed",
+               name: store,
+               adoption_wait_timeout_ms: 500
+             )
+
+    assert {:error, :task_already_adopted} =
+             TaskStore.adopt(task_id, "refs/heads/other",
+               name: store,
+               adoption_wait_timeout_ms: 500
+             )
+
+    refute_receive {:adopt_task_called, _, _, _, _, _}, 50
+    refute_receive {:revoke_adoption_capability, "cap_adopt_async"}, 50
+  end
+
+  test "caller wait timeout leaves an admitted adoption owned by TaskStore", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :block)
+    store = start_finalizing_store(supervisor, adoption_timeout_ms: 1_000)
+    task_id = "task_adopt_wait_timeout"
+    _prior_result = complete_adoptable_task(store, task_id, "cap_adopt_wait_timeout")
+
+    caller =
+      Task.async(fn ->
+        TaskStore.adopt(task_id, "refs/heads/reviewed",
+          name: store,
+          adoption_wait_timeout_ms: 25
+        )
+      end)
+
+    assert_receive {:adopt_task_called, "agent_1", raw_result, request, _context, callback_pid}
+    assert {:error, :task_adoption_wait_timeout} = Task.await(caller, 500)
+    assert Map.has_key?(:sys.get_state(store).adoptions, task_id)
+
+    send(
+      callback_pid,
+      {:finish_adoption, {:ok, Map.put(raw_result, "adopted", request["destination_ref"])}}
+    )
+
+    assert_eventually(fn ->
+      assert {:ok, result} = TaskStore.result(task_id, name: store)
+      assert result.raw["adopted"] == "refs/heads/reviewed"
+      refute Map.has_key?(:sys.get_state(store).adoptions, task_id)
+    end)
+
+    assert_receive {:revoke_adoption_capability, "cap_adopt_wait_timeout"}
+  end
+
+  test "abnormal TaskStore owner death terminates a blocked adoption worker", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :block)
+    store = start_finalizing_store(supervisor, adoption_timeout_ms: 30_000)
+    task_id = "task_adopt_store_owner_died"
+    _prior_result = complete_adoptable_task(store, task_id, "cap_adopt_store_owner_died")
+
+    caller =
+      Task.async(fn ->
+        try do
+          TaskStore.adopt(task_id, "refs/heads/reviewed",
+            name: store,
+            adoption_wait_timeout_ms: 1_000
+          )
+        catch
+          :exit, reason -> {:caller_exit, reason}
+        end
+      end)
+
+    assert_receive {:adopt_task_called, "agent_1", _raw_result, _request, _context, worker}
+
+    store_pid = Process.whereis(store)
+    store_ref = Process.monitor(store_pid)
+    worker_ref = Process.monitor(worker)
+
+    Process.exit(store_pid, :kill)
+
+    assert_receive {:DOWN, ^store_ref, :process, ^store_pid, :killed}
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 500
+    assert {:caller_exit, _reason} = Task.await(caller, 1_000)
+    refute Process.alive?(worker)
+  end
+
+  test "an adoption call that times out before admission cannot execute later", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :block)
+    store = start_finalizing_store(supervisor, adoption_timeout_ms: 1_000)
+    task_id = "task_adopt_queued_timeout"
+    prior_result = complete_adoptable_task(store, task_id, "cap_adopt_queued_timeout")
+
+    :sys.suspend(store)
+
+    caller =
+      Task.async(fn ->
+        TaskStore.adopt(task_id, "refs/heads/reviewed",
+          name: store,
+          adoption_wait_timeout_ms: 25
+        )
+      end)
+
+    reply =
+      try do
+        Task.await(caller, 500)
+      after
+        :sys.resume(store)
+      end
+
+    assert {:error, :task_adoption_wait_timeout} = reply
+
+    assert_eventually(fn ->
+      refute Map.has_key?(:sys.get_state(store).adoptions, task_id)
+    end)
+
+    assert {:ok, ^prior_result} = TaskStore.result(task_id, name: store)
+    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_queued_timeout"
+    refute_receive {:adopt_task_called, _, _, _, _, _}, 100
+    refute_receive {:revoke_adoption_capability, _}, 50
+  end
+
+  test "adoption worker death preserves the prior result and retained authority for retry", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :block)
+    store = start_finalizing_store(supervisor, adoption_timeout_ms: 1_000)
+    task_id = "task_adopt_owner_died"
+    prior_result = complete_adoptable_task(store, task_id, "cap_adopt_owner_died")
+
+    caller =
+      Task.async(fn ->
+        TaskStore.adopt(task_id, "refs/heads/reviewed",
+          name: store,
+          adoption_wait_timeout_ms: 1_000
+        )
+      end)
+
+    assert_receive {:adopt_task_called, "agent_1", _raw_result, _request, _context, callback_pid}
+    Process.exit(callback_pid, :kill)
+
+    assert {:error, {:task_adoption_failed, ":executor_callback_exit"}} =
+             Task.await(caller, 1_000)
+
+    assert {:ok, ^prior_result} = TaskStore.result(task_id, name: store)
+    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_owner_died"
+    refute_receive {:revoke_adoption_capability, _}, 50
+
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :success)
+
+    assert {:ok, retried} =
+             TaskStore.adopt(task_id, "refs/heads/reviewed",
+               name: store,
+               adoption_wait_timeout_ms: 1_000
+             )
+
+    assert retried.raw["adopted"] == "refs/heads/reviewed"
+    assert_receive {:revoke_adoption_capability, "cap_adopt_owner_died"}
+  end
+
+  test "adoption commit rejects terminal result drift without consuming retry authority", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :block)
+    store = start_finalizing_store(supervisor, adoption_timeout_ms: 1_000)
+    task_id = "task_adopt_snapshot_drift"
+    prior_result = complete_adoptable_task(store, task_id, "cap_adopt_snapshot_drift")
+
+    caller =
+      Task.async(fn ->
+        TaskStore.adopt(task_id, "refs/heads/reviewed",
+          name: store,
+          adoption_wait_timeout_ms: 1_000
+        )
+      end)
+
+    assert_receive {:adopt_task_called, "agent_1", raw_result, request, _context, callback_pid}
+    drifted_result = put_in(prior_result.raw["snapshot_marker"], "changed")
+
+    :sys.replace_state(store, fn state ->
+      put_in(state, [:tasks, task_id, :result], drifted_result)
+    end)
+
+    send(
+      callback_pid,
+      {:finish_adoption, {:ok, Map.put(raw_result, "adopted", request["destination_ref"])}}
+    )
+
+    assert {:error, {:task_adoption_failed, ":task_adoption_state_changed"}} =
+             Task.await(caller, 1_000)
+
+    assert {:ok, ^drifted_result} = TaskStore.result(task_id, name: store)
+    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_snapshot_drift"
+    refute_receive {:revoke_adoption_capability, _}, 50
+  end
+
+  test "adoption cannot rewrite the canonical terminal outcome", %{supervisor: supervisor} do
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :block)
+    store = start_finalizing_store(supervisor, adoption_timeout_ms: 1_000)
+    task_id = "task_adopt_outcome_rewrite"
+    prior_result = complete_adoptable_task(store, task_id, "cap_adopt_outcome_rewrite")
+
+    caller =
+      Task.async(fn ->
+        TaskStore.adopt(task_id, "refs/heads/reviewed",
+          name: store,
+          adoption_wait_timeout_ms: 1_000
+        )
+      end)
+
+    assert_receive {:adopt_task_called, "agent_1", raw_result, _request, _context, callback_pid}
+
+    rewritten_outcome =
+      raw_result
+      |> Map.fetch!("outcome")
+      |> Map.put("code", "change_committed")
+
+    send(
+      callback_pid,
+      {:finish_adoption, {:ok, Map.put(raw_result, "outcome", rewritten_outcome)}}
+    )
+
+    assert {:error, {:task_adoption_failed, ":adoption_changed_terminal_outcome"}} =
+             Task.await(caller, 1_000)
+
+    assert {:ok, ^prior_result} = TaskStore.result(task_id, name: store)
+    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_outcome_rewrite"
+    refute_receive {:revoke_adoption_capability, _}, 50
+  end
+
+  test "adoption worker timeout is separate from finalization and remains retryable", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :hang)
+
+    store =
+      start_finalizing_store(supervisor,
+        executor_finalization_timeout_ms: 10,
+        adoption_timeout_ms: 40
+      )
+
+    task_id = "task_adopt_worker_timeout"
+    prior_result = complete_adoptable_task(store, task_id, "cap_adopt_worker_timeout")
+
+    assert {:error, {:task_adoption_failed, ":executor_callback_timeout"}} =
+             TaskStore.adopt(task_id, "refs/heads/reviewed",
+               name: store,
+               adoption_wait_timeout_ms: 500
+             )
+
+    assert {:ok, ^prior_result} = TaskStore.result(task_id, name: store)
+    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_worker_timeout"
+    refute_receive {:revoke_adoption_capability, _}, 50
+
+    Application.put_env(:arbor_agent, :task_store_test_adopt, :success)
+
+    assert {:ok, retried} =
+             TaskStore.adopt(task_id, "refs/heads/reviewed",
+               name: store,
+               adoption_wait_timeout_ms: 1_000
+             )
+
+    assert retried.raw["adopted"] == "refs/heads/reviewed"
+    assert_receive {:revoke_adoption_capability, "cap_adopt_worker_timeout"}
   end
 
   test "adoption callback errors preserve the prior result for retry", %{supervisor: supervisor} do
@@ -2482,6 +2830,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert_receive {:lifecycle_cleanup, ^task_id, cleanup_opts}, 500
     assert cleanup_opts[:caller_id] == "dispatch_owner"
+    assert cleanup_opts[:principal_id] == "agent_1"
     assert cleanup_opts[:cleanup_reason] == :task_termination
     assert cleanup_opts[:trace_id] == "trace_cleanup"
     assert_receive {:revoke_approval_answer_capability, "cap_pending_owner"}
@@ -2531,6 +2880,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert_receive {:lifecycle_cleanup, ^task_id, opts}, 500
     assert opts[:cleanup_reason] == :task_termination
+    assert opts[:principal_id] == "agent_1"
     refute_receive {:lifecycle_cleanup, ^task_id, _}, 200
   end
 
@@ -2631,6 +2981,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert_receive {:lifecycle_cleanup, ^task_id, opts}, 500
     assert opts[:caller_id] == "dispatch_owner"
+    assert opts[:principal_id] == "agent_1"
     assert opts[:cleanup_reason] == :task_cancellation
     assert opts[:trace_id] == "trace_cleanup"
 
@@ -2688,6 +3039,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_receive {:lifecycle_cleanup, ^task_id, opts}, 500
     assert opts[:cleanup_reason] == :task_termination
     assert opts[:caller_id] == "dispatch_owner"
+    assert opts[:principal_id] == "agent_1"
     assert opts[:trace_id] == "trace_cleanup"
     # Store-init backends, not the malicious dispatch values.
     assert opts[:consensus_module] == Arbor.Consensus
@@ -3720,6 +4072,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   defp cleanup_descriptor do
     %{
       caller_id: "dispatch_owner",
+      principal_id: "agent_1",
       trace_id: "trace_cleanup"
     }
   end
@@ -3818,6 +4171,32 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     start_supervised!({TaskStore, final_opts}, id: store)
     store
+  end
+
+  defp complete_adoptable_task(store, task_id, adoption_cap_id) do
+    assert {:ok, ^task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "adopt asynchronously"},
+               name: store,
+               task_id: task_id,
+               adoption_cap_id: adoption_cap_id,
+               adoption_capability_revoke: revoke_adoption_to(self())
+             )
+
+    assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
+
+    send(
+      runner_pid,
+      {:finish, {:ok, %{"status" => "no_changes", "outcome" => task_outcome()}}}
+    )
+
+    assert_eventually(fn ->
+      assert {:ok, _result} = TaskStore.result(task_id, name: store)
+    end)
+
+    assert {:ok, result} = TaskStore.result(task_id, name: store)
+    result
   end
 
   defp start_finalizing_store(supervisor, opts \\ []) do

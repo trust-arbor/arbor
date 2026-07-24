@@ -85,7 +85,7 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
   def ensure_registered(session_id, cwd) do
     agent_id = to_agent_id(session_id)
 
-    case Arbor.Trust.get_trust_profile(agent_id) do
+    case trust_module().get_trust_profile(agent_id) do
       {:ok, _profile} ->
         # Already registered
         Logger.debug("Claude session already registered", agent_id: agent_id)
@@ -160,7 +160,7 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
     )
 
     # Create trust profile
-    case Arbor.Trust.create_trust_profile(agent_id) do
+    case trust_module().create_trust_profile(agent_id) do
       {:ok, _profile} ->
         # Grant default capabilities
         grant_default_capabilities(agent_id, cwd)
@@ -294,4 +294,8 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
   end
 
   defp normalize_path(_), do: ""
+
+  defp trust_module do
+    Application.get_env(:arbor_gateway, :trust_module, Arbor.Trust)
+  end
 end

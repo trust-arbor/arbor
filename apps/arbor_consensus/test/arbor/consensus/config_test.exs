@@ -33,12 +33,10 @@ defmodule Arbor.Consensus.ConfigTest do
       assert Config.deterministic_evaluator_timeout() == 60_000
     end
 
-    test "deterministic_evaluator_sandbox/0 returns default" do
-      assert Config.deterministic_evaluator_sandbox() == :strict
-    end
+    test "architecture regression: consensus has no shell runtime dependency" do
+      applications = Application.spec(:arbor_consensus, :applications) || []
 
-    test "deterministic_evaluator_default_cwd/0 returns default" do
-      assert Config.deterministic_evaluator_default_cwd() == nil
+      refute :arbor_shell in applications
     end
   end
 

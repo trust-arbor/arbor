@@ -1812,7 +1812,8 @@ defmodule Arbor.Actions.Coding.Workspace do
 
         case WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
                task_id: Workspace.context_task_id(context),
-               principal_id: Workspace.context_principal_id(context)
+               principal_id: Workspace.context_principal_id(context),
+               server: Map.get(context, :server) || Map.get(context, "server")
              }) do
           {:ok, lease} ->
             baseline = map_value(params, :baseline_fingerprint)

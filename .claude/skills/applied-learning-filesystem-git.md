@@ -4,6 +4,13 @@ Read this when handling paths, files, symlinks, worktrees, Git provenance, index
 
 ## Retained Applied Learning
 
+<!-- applied-learning: do-not-use-path-as-a-zsh-loop-variable -->
+<a id="applied-learning-do-not-use-path-as-a-zsh-loop-variable"></a>
+**Do not use `path` as a zsh loop variable.** In zsh, lowercase `path` is a
+special array tied to `PATH`; assigning a worktree pathname to it replaces
+command lookup and makes tools such as `git` appear missing. Use names like
+`wt_path` or `repo_path` in portable shell loops (found 2026-07-22 during attached-worktree inventory).
+
 <!-- applied-learning: portable-directory-cleanup-must-account-for-platform-specific-errno-atoms -->
 <a id="applied-learning-portable-directory-cleanup-must-account-for-platform-specific-errno-atoms"></a>
 **Portable directory cleanup must account for platform-specific errno atoms.**
@@ -315,3 +322,7 @@ instead of committing contradictory evidence (found 2026-07-21 during Phase 7A l
 <!-- applied-learning: host-maintenance-scripts-must-target-system-runtime-apis -->
 <a id="applied-learning-host-maintenance-scripts-must-target-system-runtime-apis"></a>
 **Host maintenance scripts must target system-runtime APIs.** macOS' bundled Ruby can predate `Enumerable#filter_map`; a local branch audit failed before classification when a diagnostic assumed it. For dependency-free `ruby` one-liners, use broadly supported constructs such as `map { ... }.compact`, or invoke an explicitly pinned runtime (found 2026-07-22 during local branch cleanup).
+Stdlib extensions are not loaded implicitly either: require the owning library
+explicitly (for example, `require "tmpdir"` before `Dir.tmpdir`) instead of
+assuming another tool already loaded it (found 2026-07-23 during worktree
+settlement).

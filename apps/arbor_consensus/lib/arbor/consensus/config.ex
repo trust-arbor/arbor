@@ -53,7 +53,7 @@ defmodule Arbor.Consensus.Config do
   @app :arbor_consensus
 
   @doc """
-  Timeout for deterministic evaluator commands (default: 60_000ms).
+  Deadline for deterministic backend evaluation (default: 60_000ms).
   """
   @spec deterministic_evaluator_timeout() :: pos_integer()
   def deterministic_evaluator_timeout do
@@ -61,21 +61,14 @@ defmodule Arbor.Consensus.Config do
   end
 
   @doc """
-  Sandbox mode for deterministic evaluator shell commands (default: :strict).
-  """
-  @spec deterministic_evaluator_sandbox() :: atom()
-  def deterministic_evaluator_sandbox do
-    Application.get_env(@app, :deterministic_evaluator_sandbox, :strict)
-  end
+  Backend that resolves closed deterministic requests to authoritative evidence.
 
-  @doc """
-  Default working directory for deterministic evaluator (default: nil).
-
-  If nil, requires project_path in proposal metadata.
+  The default is `nil`, which fails closed. A configured module must implement
+  `Arbor.Consensus.Evaluator.DeterministicBackend`.
   """
-  @spec deterministic_evaluator_default_cwd() :: String.t() | nil
-  def deterministic_evaluator_default_cwd do
-    Application.get_env(@app, :deterministic_evaluator_default_cwd, nil)
+  @spec deterministic_evaluator_backend() :: module() | nil
+  def deterministic_evaluator_backend do
+    Application.get_env(@app, :deterministic_evaluator_backend)
   end
 
   # ===========================================================================

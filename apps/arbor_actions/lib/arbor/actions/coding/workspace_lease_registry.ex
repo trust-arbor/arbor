@@ -340,6 +340,35 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     do: {:error, :invalid_task_principal}
 
   @doc """
+  Reactivate a retained lease by exact opaque workspace, task, and principal identity.
+
+  The registry installs its own monitor for the calling process before the
+  retained record becomes active. No repository path, branch, or owner PID is
+  accepted from the caller.
+  """
+  @spec reactivate_retained_by_lineage(
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def reactivate_retained_by_lineage(workspace_id, task_id, principal_id, opts \\ [])
+
+  def reactivate_retained_by_lineage(workspace_id, task_id, principal_id, opts)
+      when is_binary(workspace_id) and is_binary(task_id) and is_binary(principal_id) and
+             is_list(opts) do
+    if valid_opaque_id?(workspace_id) and valid_opaque_id?(task_id) and
+         valid_opaque_id?(principal_id) do
+      call({:reactivate_retained_by_lineage, workspace_id, task_id, principal_id}, opts)
+    else
+      {:error, :invalid_task_principal}
+    end
+  end
+
+  def reactivate_retained_by_lineage(_workspace_id, _task_id, _principal_id, _opts),
+    do: {:error, :invalid_task_principal}
+
+  @doc """
   Release a lease when authorized.
 
   Modes:
@@ -869,6 +898,38 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:reactivate_retained_by_lineage, workspace_id, task_id, principal_id},
+        {from_pid, _tag},
+        state
+      ) do
+    case Map.fetch(state.retained_by_id, workspace_id) do
+      {:ok, retained} ->
+        prepared = %{
+          workspace_id: workspace_id,
+          workspace_id_explicit: true,
+          owner_pid: from_pid,
+          task_id: task_id,
+          principal_id: principal_id,
+          repo_path: retained.repo_path,
+          branch: retained.branch,
+          candidate_path: retained.worktree_path
+        }
+
+        with true <- principal_task_match?(retained, prepared),
+             :ok <- ensure_workspace_id_free(state, workspace_id),
+             :ok <- ensure_target_free(state, retained.repo_path, retained.branch) do
+          continue_retained_acquire(state, retained, prepared)
+        else
+          false -> {:reply, {:error, :retained_workspace_not_authorized}, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :retained_workspace_not_found}, state}
     end
   end
 

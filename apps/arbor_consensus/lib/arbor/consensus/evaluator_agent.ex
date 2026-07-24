@@ -423,18 +423,26 @@ defmodule Arbor.Consensus.EvaluatorAgent do
   end
 
   defp evaluate_single_perspective(evaluator, proposal, perspective, memory_context) do
-    opts =
-      if memory_context != [] do
-        [memory_context: memory_context]
-      else
-        []
-      end
-
+    opts = evaluator_opts(evaluator, memory_context)
     evaluator.evaluate(proposal, perspective, opts)
   rescue
     e ->
       Logger.error("EvaluatorAgent #{evaluator.name()} evaluate/3 raised: #{inspect(e)}")
       {:error, {:exception, e}}
+  end
+
+  defp evaluator_opts(evaluator, memory_context) do
+    if memory_context != [] and evaluator_strategy(evaluator) != :deterministic,
+      do: [memory_context: memory_context],
+      else: []
+  end
+
+  defp evaluator_strategy(evaluator) do
+    if function_exported?(evaluator, :strategy, 0), do: evaluator.strategy()
+  rescue
+    _exception -> nil
+  catch
+    _kind, _reason -> nil
   end
 
   # =============================================================================

@@ -2,10 +2,8 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Coding.Plan
-  alias Arbor.Orchestrator.CodingPlan.{Compilation, ExecutionManifest}
+  alias Arbor.Orchestrator.CodingPlan.Compiler
   alias Arbor.Orchestrator.Config
-  alias Arbor.Orchestrator.Dot.Parser
-  alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
 
   defmodule FakeCompiler do
     alias Arbor.Contracts.Coding.Plan
@@ -128,7 +126,7 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
     authority_fields =
       ~w(action_catalog capabilities capability graph identity principal signer template_path)
 
-    assert MapSet.disjoint?(all_keys(result), MapSet.new(authority_fields))
+    assert MapSet.disjoint?(Map.keys(result) |> MapSet.new(), MapSet.new(authority_fields))
   end
 
   test "public provenance verification uses packaged compilation and rejects changed DOT bytes" do
@@ -454,77 +452,14 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
 
   @doc false
   def valid_compilation(%Plan{} = plan) do
-    plan_map = Plan.to_map(plan)
+    template_path =
+      :arbor_orchestrator
+      |> :code.priv_dir()
+      |> to_string()
+      |> Path.join("pipelines/coding-change-v1.dot")
 
-    dot_source =
-      "digraph CodingPlan { start [shape=Mdiamond]; done [shape=Msquare]; start -> done; }\n"
-
-    graph_hash = sha256(dot_source)
-    plan_fingerprint = canonical_sha256(plan_map)
-    action_catalog_digest = String.duplicate("c", 64)
-    compiler_version = "test-compiler-1"
-    template_version = "test-template-1"
-    {:ok, parsed_graph} = Parser.parse(dot_source)
-    {:ok, compiled_graph} = IRCompiler.compile(parsed_graph)
-
-    {:ok, {execution_manifest, execution_manifest_digest}} =
-      ExecutionManifest.build(compiled_graph, %{"actions" => []}, graph_hash)
-
-    initial_values =
-      %{
-        "task" => plan.task,
-        "repo_path" => plan.repo_root,
-        "base_ref" => plan.base_ref,
-        "acp_agent" => plan.worker["provider"],
-        "open_pr" => bool_string(plan.output["draft_pr"]),
-        "retain_workspace" => bool_string(plan.output["retain_workspace"]),
-        "submit_review" => bool_string(plan.review_profile != "none"),
-        "timeout" => plan.budgets["wall_clock_ms"],
-        "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
-        "coding_plan_compiler_version" => compiler_version,
-        "coding_plan_template_version" => template_version,
-        "coding_plan_version" => plan.version,
-        "coding_plan_fingerprint" => plan_fingerprint,
-        "coding_plan_task_class" => plan.task_class,
-        "coding_plan_validation_profile" => plan.validation_profile,
-        "coding_plan_review_profile" => plan.review_profile,
-        "coding_plan_action_catalog_digest" => action_catalog_digest
-      }
-      |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
-      |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
-      |> maybe_put("model", plan.worker["model"])
-      |> maybe_put_test_paths(plan)
-
-    manifest = %{
-      "compiler_version" => compiler_version,
-      "template_version" => template_version,
-      "graph_hash" => graph_hash,
-      "plan_fingerprint" => plan_fingerprint,
-      "plan_version" => plan.version,
-      "task_class" => plan.task_class,
-      "validation_profile" => plan.validation_profile,
-      "review_profile" => plan.review_profile,
-      "overlays" => plan.overlays,
-      "action_catalog_digest" => action_catalog_digest,
-      "execution_manifest" => execution_manifest,
-      "execution_manifest_digest" => execution_manifest_digest,
-      "action_names" => [],
-      "handler_types" => []
-    }
-
-    %Compilation{
-      plan_map: plan_map,
-      dot_source: dot_source,
-      graph_hash: graph_hash,
-      compiler_version: compiler_version,
-      template_version: template_version,
-      plan_fingerprint: plan_fingerprint,
-      action_catalog_digest: action_catalog_digest,
-      execution_manifest: execution_manifest,
-      execution_manifest_digest: execution_manifest_digest,
-      initial_values: initial_values,
-      manifest: manifest
-    }
+    {:ok, compilation} = Compiler.compile(plan, template_path: template_path)
+    compilation
   end
 
   defp put_compilation_mutator(mutator) do
@@ -533,39 +468,11 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
     end)
   end
 
-  defp canonical_sha256(term) do
-    term
-    |> canonicalize()
-    |> Jason.encode!()
-    |> sha256()
-  end
-
-  defp canonicalize(map) when is_map(map) do
-    map
-    |> Enum.sort_by(fn {key, _value} -> key end)
-    |> Enum.map(fn {key, value} -> {key, canonicalize(value)} end)
-    |> Jason.OrderedObject.new()
-  end
-
-  defp canonicalize(list) when is_list(list), do: Enum.map(list, &canonicalize/1)
-  defp canonicalize(value), do: value
-
   defp sha256(value) do
     value
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
   end
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  defp maybe_put_test_paths(values, %Plan{validation_profile: "security_regression"} = plan),
-    do: Map.put(values, "test_paths", plan.requested_paths)
-
-  defp maybe_put_test_paths(values, _plan), do: values
-
-  defp bool_string(true), do: "true"
-  defp bool_string(false), do: "false"
 
   defp string_keyed?(value) when is_map(value) do
     Enum.all?(value, fn {key, nested} -> is_binary(key) and string_keyed?(nested) end)
@@ -573,20 +480,6 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
 
   defp string_keyed?(value) when is_list(value), do: Enum.all?(value, &string_keyed?/1)
   defp string_keyed?(_value), do: true
-
-  defp all_keys(value) when is_map(value) do
-    Enum.reduce(value, MapSet.new(), fn {key, nested}, keys ->
-      keys
-      |> MapSet.put(key)
-      |> MapSet.union(all_keys(nested))
-    end)
-  end
-
-  defp all_keys(value) when is_list(value) do
-    Enum.reduce(value, MapSet.new(), &MapSet.union(&2, all_keys(&1)))
-  end
-
-  defp all_keys(_value), do: MapSet.new()
 
   defp restore_env(key, {:ok, value}),
     do: Application.put_env(:arbor_orchestrator, key, value)

@@ -3,13 +3,25 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   Archives the immutable inputs and output of coding-plan compilation.
 
   The caller supplies the per-task artifact root. Artifact names are fixed here
-  and never incorporate plan or task text. Each file is written through a
-  same-directory, mode-`0600` temporary file and atomically renamed into place.
+  and never incorporate plan or task text. A private, mode-`0600` compilation
+  seal claims one bundle identity through an exclusive hard link before the
+  individual files are published through the same no-clobber pattern.
+
+  The seal provides first-writer-wins immutability among callers using this API.
+  It is not an OS-level defense against a same-user process deleting or replacing
+  the entire artifact root or seal.
   """
 
   @plan_filename "coding-plan.json"
   @pipeline_filename "coding-pipeline.dot"
   @manifest_filename "coding-compile-manifest.json"
+  @compilation_seal_filename ".coding-compilation-seal.json"
+  @compilation_seal_schema_version 1
+  @compilation_artifact_filenames [
+    @plan_filename,
+    @pipeline_filename,
+    @manifest_filename
+  ]
   @terminal_evidence_filename "coding-terminal-evidence.json"
   @task_terminal_filename "coding-task-terminal.json"
   @adoption_evidence_prefix "coding-adoption-evidence-"
@@ -17,6 +29,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @max_reconciliation_bytes 1_048_576
   @max_terminal_evidence_bytes 1_048_576
   @max_terminal_task_id_bytes 512
+  @max_compilation_artifact_bytes 4_194_304
+  @max_compilation_seal_bytes 4_096
+  @compilation_publication_barrier_key {__MODULE__, :compilation_publication_barrier}
 
   @terminal_result_keys MapSet.new(~w(
     status
@@ -91,13 +106,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          :ok <- validate_json_object(manifest, :invalid_manifest),
          {:ok, graph_hash} <- fetch_manifest_string(manifest, "graph_hash"),
          {:ok, compiler_version} <- fetch_manifest_string(manifest, "compiler_version"),
+         :ok <- validate_compilation_graph_hash(graph_hash, dot_source),
          {:ok, plan_json} <- encode_json(plan, :plan),
          {:ok, manifest_json} <- encode_json(manifest, :manifest),
-         :ok <- create_root(root),
          paths = artifact_paths(root),
-         :ok <- atomic_write(paths.coding_plan, plan_json),
-         :ok <- atomic_write(paths.coding_pipeline, dot_source),
-         :ok <- atomic_write(paths.compile_manifest, manifest_json) do
+         artifacts = compilation_artifacts(paths, plan_json, dot_source, manifest_json),
+         :ok <- validate_compilation_artifact_sizes(artifacts),
+         :ok <- create_root(root),
+         {:ok, seal_json} <- build_compilation_seal(artifacts),
+         :ok <- publish_compilation_bundle(root, artifacts, seal_json) do
       {:ok,
        %{
          "coding_plan_path" => paths.coding_plan,
@@ -107,6 +124,70 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          "compiler_version" => compiler_version
        }}
     end
+  end
+
+  @doc """
+  Read the fixed compilation artifacts for one task-derived archive root.
+
+  The task id is hashed before it is used as a path segment. Every artifact
+  must be a mode-`0600` regular file beneath the canonical task root, and the
+  archived DOT bytes must match the manifest graph hash.
+  """
+  @spec read_task_compilation(String.t(), String.t()) ::
+          {:ok, map()} | {:error, :coding_compilation_provenance_unavailable}
+  def read_task_compilation(base_root, task_id) do
+    with :ok <- validate_terminal_task_id(task_id),
+         {:ok, base_root} <- normalize_compilation_base(base_root),
+         {:ok, task_root} <- compilation_task_root(base_root, task_id),
+         paths = artifact_paths(task_root),
+         {:ok, seal_json} <-
+           read_compilation_file(
+             compilation_seal_path(task_root),
+             task_root,
+             @max_compilation_seal_bytes
+           ),
+         {:ok, seal} <- decode_compilation_seal(seal_json),
+         {:ok, plan_json} <-
+           read_compilation_file(
+             paths.coding_plan,
+             task_root,
+             @max_compilation_artifact_bytes
+           ),
+         {:ok, dot_source} <-
+           read_compilation_file(
+             paths.coding_pipeline,
+             task_root,
+             @max_compilation_artifact_bytes
+           ),
+         {:ok, manifest_json} <-
+           read_compilation_file(
+             paths.compile_manifest,
+             task_root,
+             @max_compilation_artifact_bytes
+           ),
+         :ok <- verify_sealed_compilation_artifact(seal, @plan_filename, plan_json),
+         :ok <- verify_sealed_compilation_artifact(seal, @pipeline_filename, dot_source),
+         :ok <- verify_sealed_compilation_artifact(seal, @manifest_filename, manifest_json),
+         {:ok, plan} <- decode_compilation_object(plan_json),
+         {:ok, manifest} <- decode_compilation_object(manifest_json),
+         true <- manifest["graph_hash"] == sha256(dot_source) do
+      {:ok,
+       %{
+         "task_id" => task_id,
+         "plan" => plan,
+         "dot_source" => dot_source,
+         "manifest" => manifest,
+         "plan_sha256" => sha256(plan_json),
+         "pipeline_sha256" => sha256(dot_source),
+         "manifest_sha256" => sha256(manifest_json)
+       }}
+    else
+      _ -> {:error, :coding_compilation_provenance_unavailable}
+    end
+  rescue
+    _ -> {:error, :coding_compilation_provenance_unavailable}
+  catch
+    _, _ -> {:error, :coding_compilation_provenance_unavailable}
   end
 
   @doc "Archive the closed, deterministic terminal evidence for a coding task."
@@ -551,6 +632,104 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   end
 
   defp normalize_root(_root), do: {:error, {:invalid_root, :expected_string}}
+
+  defp normalize_compilation_base(root) do
+    with {:ok, expanded} <- normalize_root(root),
+         true <- SafePath.absolute?(expanded),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(expanded),
+         {:ok, canonical} <- SafePath.resolve_real(expanded),
+         true <- File.dir?(canonical) do
+      {:ok, canonical}
+    else
+      _ -> {:error, :invalid_compilation_base}
+    end
+  end
+
+  defp compilation_task_root(base_root, task_id) do
+    digest =
+      task_id
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+
+    with {:ok, task_root} <- SafePath.safe_join(base_root, "task-" <> digest),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(task_root),
+         {:ok, canonical} <- SafePath.resolve_real(task_root),
+         true <- canonical == task_root and SafePath.within?(canonical, base_root) do
+      {:ok, canonical}
+    else
+      _ -> {:error, :invalid_compilation_task_root}
+    end
+  end
+
+  defp read_compilation_file(path, task_root, max_bytes) do
+    with {:ok, %File.Stat{type: :regular, mode: mode, size: size}} <- File.lstat(path),
+         true <- Bitwise.band(mode, 0o777) == 0o600,
+         true <- is_integer(size) and size > 0 and size <= max_bytes,
+         true <- Path.dirname(path) == task_root,
+         {:ok, canonical} <- SafePath.resolve_real(path),
+         true <- canonical == path and SafePath.within?(canonical, task_root),
+         {:ok, content} <- File.read(canonical),
+         true <- byte_size(content) == size do
+      {:ok, content}
+    else
+      _ -> {:error, :invalid_compilation_artifact}
+    end
+  end
+
+  defp decode_compilation_seal(encoded) do
+    with {:ok, seal} <- Jason.decode(encoded),
+         true <- exact_string_keys?(seal, ["artifacts", "schema_version"]),
+         true <- seal["schema_version"] == @compilation_seal_schema_version,
+         artifacts when is_map(artifacts) <- seal["artifacts"],
+         true <- Enum.sort(Map.keys(artifacts)) == Enum.sort(@compilation_artifact_filenames),
+         true <- Enum.all?(artifacts, &valid_compilation_seal_entry?/1),
+         {:ok, canonical} <- encode_canonical_json(seal, :compilation_seal),
+         true <- canonical == encoded do
+      {:ok, seal}
+    else
+      _ -> {:error, :invalid_compilation_seal}
+    end
+  end
+
+  defp valid_compilation_seal_entry?({filename, entry}) do
+    filename in @compilation_artifact_filenames and
+      exact_string_keys?(entry, ["byte_size", "sha256"]) and
+      is_integer(entry["byte_size"]) and entry["byte_size"] > 0 and
+      entry["byte_size"] <= @max_compilation_artifact_bytes and
+      valid_lower_sha256?(entry["sha256"])
+  end
+
+  defp valid_compilation_seal_entry?(_entry), do: false
+
+  defp exact_string_keys?(value, expected) when is_map(value) and not is_struct(value),
+    do: Enum.sort(Map.keys(value)) == expected
+
+  defp exact_string_keys?(_value, _expected), do: false
+
+  defp valid_lower_sha256?(value) when is_binary(value) and byte_size(value) == 64,
+    do: Regex.match?(~r/\A[0-9a-f]{64}\z/, value)
+
+  defp valid_lower_sha256?(_value), do: false
+
+  defp verify_sealed_compilation_artifact(seal, filename, content) do
+    expected = get_in(seal, ["artifacts", filename])
+
+    if is_map(expected) and expected["byte_size"] == byte_size(content) and
+         expected["sha256"] == sha256(content) do
+      :ok
+    else
+      {:error, :compilation_seal_mismatch}
+    end
+  end
+
+  defp decode_compilation_object(encoded) do
+    with {:ok, value} <- Jason.decode(encoded),
+         :ok <- validate_json_object(value, :invalid_compilation_artifact) do
+      {:ok, value}
+    else
+      _ -> {:error, :invalid_compilation_artifact}
+    end
+  end
 
   defp normalize_existing_root(root) do
     with {:ok, expanded} <- normalize_root(root),
@@ -1326,6 +1505,296 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
       coding_pipeline: Path.join(root, @pipeline_filename),
       compile_manifest: Path.join(root, @manifest_filename)
     }
+  end
+
+  defp compilation_seal_path(root), do: Path.join(root, @compilation_seal_filename)
+
+  defp compilation_artifacts(paths, plan_json, dot_source, manifest_json) do
+    [
+      %{filename: @plan_filename, path: paths.coding_plan, content: plan_json},
+      %{filename: @pipeline_filename, path: paths.coding_pipeline, content: dot_source},
+      %{filename: @manifest_filename, path: paths.compile_manifest, content: manifest_json}
+    ]
+  end
+
+  defp validate_compilation_graph_hash(graph_hash, dot_source) do
+    if graph_hash == sha256(dot_source),
+      do: :ok,
+      else: {:error, :compilation_graph_hash_mismatch}
+  end
+
+  defp validate_compilation_artifact_sizes(artifacts) do
+    Enum.reduce_while(artifacts, :ok, fn artifact, :ok ->
+      size = byte_size(artifact.content)
+
+      if size > 0 and size <= @max_compilation_artifact_bytes do
+        {:cont, :ok}
+      else
+        {:halt, {:error, {:compilation_artifact_size_out_of_bounds, artifact.filename}}}
+      end
+    end)
+  end
+
+  defp build_compilation_seal(artifacts) do
+    sealed_artifacts =
+      Map.new(artifacts, fn artifact ->
+        {artifact.filename,
+         %{
+           "byte_size" => byte_size(artifact.content),
+           "sha256" => sha256(artifact.content)
+         }}
+      end)
+
+    encode_canonical_json(
+      %{
+        "schema_version" => @compilation_seal_schema_version,
+        "artifacts" => sealed_artifacts
+      },
+      :compilation_seal
+    )
+  end
+
+  defp publish_compilation_bundle(root, artifacts, seal_json) do
+    with :ok <- claim_compilation_seal(root, artifacts, seal_json) do
+      Enum.reduce_while(artifacts, :ok, fn artifact, :ok ->
+        case write_compilation_artifact(artifact.path, artifact.content) do
+          :ok -> {:cont, :ok}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp claim_compilation_seal(root, artifacts, seal_json) do
+    seal_path = compilation_seal_path(root)
+
+    case File.lstat(seal_path) do
+      {:error, :enoent} ->
+        claim_new_compilation_seal(seal_path, artifacts, seal_json)
+
+      {:ok, _stat} ->
+        verify_existing_compilation_seal(seal_path, seal_json)
+
+      {:error, reason} ->
+        {:error, {:compilation_seal_unavailable, reason}}
+    end
+  end
+
+  defp claim_new_compilation_seal(seal_path, artifacts, seal_json) do
+    case validate_preseal_compilation_artifacts(artifacts) do
+      :ok ->
+        publish_new_compilation_seal(seal_path, seal_json)
+
+      {:error, _reason} = preseal_error ->
+        resolve_preseal_compilation_error(seal_path, seal_json, preseal_error)
+    end
+  end
+
+  defp validate_preseal_compilation_artifacts(artifacts) do
+    Enum.reduce_while(artifacts, :ok, fn artifact, :ok ->
+      case validate_preseal_compilation_artifact(artifact.path, artifact.content) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_preseal_compilation_artifact(path, content) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, %File.Stat{type: :regular}} ->
+        case File.read(path) do
+          {:ok, ^content} ->
+            :ok
+
+          {:ok, _different} ->
+            {:error, {:compilation_artifact_conflict, Path.basename(path)}}
+
+          {:error, reason} ->
+            {:error, {:compilation_artifact_unreadable, Path.basename(path), reason}}
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, {:compilation_artifact_symlink, Path.basename(path)}}
+
+      {:ok, _other} ->
+        {:error, {:invalid_compilation_artifact, Path.basename(path)}}
+
+      {:error, reason} ->
+        {:error, {:compilation_artifact_unavailable, Path.basename(path), reason}}
+    end
+  end
+
+  defp resolve_preseal_compilation_error(seal_path, seal_json, preseal_error) do
+    case File.lstat(seal_path) do
+      {:error, :enoent} ->
+        preseal_error
+
+      {:ok, _stat} ->
+        case verify_existing_compilation_seal(seal_path, seal_json) do
+          :ok -> preseal_error
+          {:error, _reason} = error -> error
+        end
+
+      {:error, reason} ->
+        {:error, {:compilation_seal_unavailable, reason}}
+    end
+  end
+
+  defp publish_new_compilation_seal(path, seal_json) do
+    temporary_path = temporary_path(path)
+
+    publication =
+      try do
+        with :ok <- write_secure_temp(temporary_path, seal_json),
+             :ok <- maybe_wait_for_compilation_publication(:before_compilation_seal_link),
+             :ok <- File.ln(temporary_path, path) do
+          :published
+        else
+          {:error, :eexist} -> :existing
+          {:error, reason} -> {:error, {:write_artifact_failed, Path.basename(path), reason}}
+        end
+      after
+        File.rm(temporary_path)
+      end
+
+    case publication do
+      :published ->
+        maybe_wait_for_compilation_publication(:after_compilation_seal_link)
+
+      :existing ->
+        verify_existing_compilation_seal(path, seal_json)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp verify_existing_compilation_seal(path, seal_json) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode, size: size}}
+      when is_integer(size) and size > 0 and size <= @max_compilation_seal_bytes ->
+        if Bitwise.band(mode, 0o777) == 0o600 do
+          case File.read(path) do
+            {:ok, ^seal_json} -> :ok
+            {:ok, _different} -> {:error, :compilation_seal_conflict}
+            {:error, reason} -> {:error, {:compilation_seal_unreadable, reason}}
+          end
+        else
+          {:error, :invalid_compilation_seal}
+        end
+
+      {:ok, _other} ->
+        {:error, :invalid_compilation_seal}
+
+      {:error, :enoent} ->
+        {:error, :compilation_seal_missing}
+
+      {:error, reason} ->
+        {:error, {:compilation_seal_unavailable, reason}}
+    end
+  end
+
+  defp write_compilation_artifact(path, content) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        write_new_compilation_artifact(path, content)
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        case File.read(path) do
+          {:ok, ^content} ->
+            if Bitwise.band(mode, 0o777) == 0o600,
+              do: :ok,
+              else: repair_compilation_artifact_mode(path, content)
+
+          {:ok, _different} ->
+            {:error, {:compilation_artifact_conflict, Path.basename(path)}}
+
+          {:error, reason} ->
+            {:error, {:compilation_artifact_unreadable, Path.basename(path), reason}}
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, {:compilation_artifact_symlink, Path.basename(path)}}
+
+      {:ok, _other} ->
+        {:error, {:invalid_compilation_artifact, Path.basename(path)}}
+
+      {:error, reason} ->
+        {:error, {:compilation_artifact_unavailable, Path.basename(path), reason}}
+    end
+  end
+
+  defp write_new_compilation_artifact(path, content) do
+    temporary_path = temporary_path(path)
+    filename = Path.basename(path)
+
+    publication =
+      try do
+        with :ok <- write_secure_temp(temporary_path, content),
+             :ok <-
+               maybe_wait_for_compilation_publication(
+                 {:before_compilation_artifact_link, filename}
+               ),
+             :ok <- File.ln(temporary_path, path) do
+          :published
+        else
+          {:error, :eexist} -> :existing
+          {:error, reason} -> {:error, {:write_artifact_failed, filename, reason}}
+        end
+      after
+        File.rm(temporary_path)
+      end
+
+    case publication do
+      :published ->
+        maybe_wait_for_compilation_publication({:after_compilation_artifact_link, filename})
+
+      :existing ->
+        write_compilation_artifact(path, content)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp repair_compilation_artifact_mode(path, content) do
+    with :ok <- File.chmod(path, 0o600),
+         {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(path),
+         true <- Bitwise.band(mode, 0o777) == 0o600,
+         {:ok, ^content} <- File.read(path) do
+      :ok
+    else
+      false ->
+        {:error, {:invalid_compilation_artifact, Path.basename(path)}}
+
+      {:ok, _different} ->
+        {:error, {:compilation_artifact_conflict, Path.basename(path)}}
+
+      {:error, reason} ->
+        {:error, {:compilation_artifact_unavailable, Path.basename(path), reason}}
+
+      _other ->
+        {:error, {:invalid_compilation_artifact, Path.basename(path)}}
+    end
+  end
+
+  # Tests use this timing-only process-local barrier to force publication races.
+  # It cannot change bytes, identity checks, or publication outcomes.
+  defp maybe_wait_for_compilation_publication(stage) do
+    case Process.get(@compilation_publication_barrier_key) do
+      {owner, ^stage} when is_pid(owner) ->
+        send(owner, {:artifact_store_compilation_barrier, self(), stage})
+
+        receive do
+          {:artifact_store_compilation_continue, ^stage} -> :ok
+        end
+
+      _other ->
+        :ok
+    end
   end
 
   defp atomic_write(path, content) do

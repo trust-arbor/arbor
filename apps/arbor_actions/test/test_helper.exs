@@ -1,6 +1,10 @@
 # Add children to the empty app supervisors (start_children: false leaves them empty)
 # arbor_actions tests need shell, persistence, and signal processes
 
+for app <- [:arbor_persistence, :arbor_shell, :arbor_signals, :arbor_security] do
+  {:ok, _started} = Application.ensure_all_started(app)
+end
+
 # Test-only Linux baseline materializer Agent + shared WorkspaceLeaseRegistry
 # rewire. Production Application starts the registry with Arbor.Shell; tests
 # replace that child with the same module, configured only via start opts.

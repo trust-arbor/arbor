@@ -16,7 +16,8 @@ defmodule Arbor.Contracts.Coding.VerificationReportTest do
       candidate_ref: "commit:abc123",
       observed_at: "2026-07-22T12:00:00Z",
       diagnostics: [valid_diagnostic()],
-      evidence_ref: "refs/arbor/evidence/verification.json"
+      evidence_ref: "refs/arbor/evidence/verification.json",
+      provenance: valid_provenance()
     ]
 
     assert {:ok, report} = VerificationReport.new(attrs)
@@ -25,6 +26,8 @@ defmodule Arbor.Contracts.Coding.VerificationReportTest do
 
     assert VerificationReport.to_map(report)["evidence_ref"] ==
              "refs/arbor/evidence/verification.json"
+
+    assert VerificationReport.to_map(report)["provenance"] == valid_provenance()
 
     assert {:ok, _json} = report |> VerificationReport.to_map() |> Jason.encode()
   end
@@ -44,7 +47,8 @@ defmodule Arbor.Contracts.Coding.VerificationReportTest do
           {:candidate_ref, self()},
           {:observed_at, DateTime.utc_now()},
           {:diagnostics, [%{not: "a diagnostic"}]},
-          {:evidence_ref, String.duplicate("x", 513)}
+          {:evidence_ref, String.duplicate("x", 513)},
+          {:provenance, Map.put(valid_provenance(), "workspace_id", nil)}
         ] do
       refute VerificationReport.valid?(Map.put(attrs, field, value)), "expected #{field} to fail"
     end
@@ -94,6 +98,23 @@ defmodule Arbor.Contracts.Coding.VerificationReportTest do
       "decision" => "passed",
       "code" => "ok",
       "observed_at" => "2026-07-22T12:00:00Z"
+    }
+  end
+
+  defp valid_provenance do
+    %{
+      "version" => 1,
+      "task_id" => "task-contract-verification",
+      "workspace_id" => "workspace-contract-verification",
+      "principal_id" => "agent_contract_verification",
+      "plan_fingerprint" => String.duplicate("a", 64),
+      "plan_version" => 2,
+      "validation_profile" => "default",
+      "review_profile" => "standard",
+      "work_packet_digest" => "sha256:" <> String.duplicate("b", 64),
+      "compile_manifest_sha256" => String.duplicate("c", 64),
+      "workspace_provenance_sha256" => String.duplicate("d", 64),
+      "workspace_lifecycle" => "retained_reactivated"
     }
   end
 end

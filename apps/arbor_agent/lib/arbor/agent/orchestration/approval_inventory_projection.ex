@@ -49,6 +49,7 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
         "task_id" => Map.get(filters, :task_id),
         "agent_id" => Map.get(filters, :agent_id),
         "principal_id" => Map.get(filters, :principal_id),
+        "principal_scope" => principal_scope_string(filters),
         "resource_uri" => Map.get(filters, :resource_uri)
       },
       "counts" => %{
@@ -175,17 +176,29 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
   defp matches?(approval, filters) do
     matches_value?(Map.get(filters, :task_id), approval["task_id"]) and
       matches_value?(Map.get(filters, :agent_id), approval["agent_id"]) and
-      matches_principal?(Map.get(filters, :principal_id), approval) and
+      matches_principal?(
+        Map.get(filters, :principal_id),
+        approval,
+        Map.get(filters, :principal_scope, :participant)
+      ) and
       matches_resource?(Map.get(filters, :resource_uri), approval["resource_uri"])
   end
 
   defp matches_value?(nil, _actual), do: true
   defp matches_value?(expected, actual), do: expected == actual
 
-  defp matches_principal?(nil, _approval), do: true
+  defp matches_principal?(nil, _approval, _scope), do: true
 
-  defp matches_principal?(expected, approval),
+  defp matches_principal?(expected, approval, :participant),
     do: expected in [approval["principal_id"], approval["approver_id"]]
+
+  defp matches_principal?(expected, approval, :subject),
+    do: expected == approval["principal_id"]
+
+  defp matches_principal?(_expected, _approval, _scope), do: false
+
+  defp principal_scope_string(%{principal_scope: :subject}), do: "subject"
+  defp principal_scope_string(_filters), do: "participant"
 
   defp matches_resource?(nil, _resource_uri), do: true
 
@@ -278,6 +291,7 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
         "task_id" => nil,
         "agent_id" => nil,
         "principal_id" => nil,
+        "principal_scope" => "participant",
         "resource_uri" => nil
       },
       "counts" => %{

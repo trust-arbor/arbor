@@ -33,9 +33,6 @@ for topic <- [:code_modification, :test_change] do
   })
 end
 
-# Deterministic evaluator tests need shell processes
-Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, []})
-
 # Security processes — force_approve/force_reject check admin capabilities
 for child <- [
       {Arbor.Security.SystemAuthority, []},

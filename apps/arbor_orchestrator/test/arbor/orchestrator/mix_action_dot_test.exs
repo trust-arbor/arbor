@@ -1,10 +1,9 @@
 defmodule Arbor.Orchestrator.MixActionDotTest do
   @moduledoc """
-  End-to-end exercise of the production `mix_test` boundary while the
-  spawn-capable shell backend remains unavailable.
+  End-to-end exercise of the production `mix_test` workspace boundary.
 
   Verifies that ExecHandler resolves the action but the pipeline fails closed
-  at the Mix action instead of silently routing either fixture as passed.
+  before spawn when no owner-issued workspace lease is present.
 
   Slow because each test spins up `mix test` in a freshly-created
   tiny project (~3 s warmup per invocation). Tagged `:slow` to keep
@@ -71,7 +70,7 @@ defmodule Arbor.Orchestrator.MixActionDotTest do
     :ok
   end
 
-  test "passing fixture fails closed before routing without a spawn backend",
+  test "passing fixture fails closed before routing without a workspace lease",
        %{project_path: project_path, logs_root: logs_root} do
     dot = build_dot(project_path)
 
@@ -79,12 +78,12 @@ defmodule Arbor.Orchestrator.MixActionDotTest do
 
     assert result.completed_nodes == ["start", "run_test"]
     assert result.final_outcome.status == :fail
-    assert result.final_outcome.failure_reason =~ "spawn_backend_unavailable"
+    assert result.final_outcome.failure_reason =~ "workspace_id_required"
     refute "mark_pass" in result.completed_nodes
     refute "mark_fail" in result.completed_nodes
   end
 
-  test "failing fixture also fails closed before routing without a spawn backend",
+  test "failing fixture also fails closed before routing without a workspace lease",
        %{project_path: project_path, logs_root: logs_root} do
     add_failing_test(project_path)
 
@@ -94,7 +93,7 @@ defmodule Arbor.Orchestrator.MixActionDotTest do
 
     assert result.completed_nodes == ["start", "run_test"]
     assert result.final_outcome.status == :fail
-    assert result.final_outcome.failure_reason =~ "spawn_backend_unavailable"
+    assert result.final_outcome.failure_reason =~ "workspace_id_required"
     refute "mark_pass" in result.completed_nodes
     refute "mark_fail" in result.completed_nodes
   end
