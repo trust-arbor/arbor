@@ -6,12 +6,25 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
   alias Arbor.Comms.InteractionRegistry.DurableLifecycleCore
   alias Arbor.Comms.InteractionRegistry.DurableStore
   alias Arbor.Comms.InteractionRouter
+  alias Arbor.Comms.PresenceTracker
   alias Arbor.Contracts.Comms.Interaction
   alias Arbor.Contracts.Persistence.Record
   alias __MODULE__.Backend
   alias __MODULE__.ProcessLifetimeBackend
 
   @moduletag :fast
+
+  defmodule TestAdapter do
+    @behaviour Arbor.Contracts.Comms.ChannelAdapter
+
+    def send_interaction(channel_meta, %Interaction{} = interaction) do
+      send(Map.fetch!(channel_meta, :test_pid), {:durable_adapter_called, interaction})
+      :ok
+    end
+
+    def parse_response(_raw), do: :not_interaction
+    def channel_kind, do: :dashboard
+  end
 
   setup do
     path =
@@ -40,7 +53,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
       File.rm(path)
     end)
 
-    :ok
+    {:ok, path: path}
   end
 
   test "the facade exposes durable readiness and rejects unsupported durability" do
@@ -70,14 +83,257 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
   test "durable admission is idempotent and rejects a different interaction" do
     attrs = interaction_attrs("duplicate", request_id: "irq_durable_duplicate")
+    interaction = build_interaction(attrs)
 
-    assert {:ok, request_id} = InteractionRouter.request(attrs, durability: :node_restart)
-    assert {:ok, ^request_id} = InteractionRouter.request(attrs, durability: :node_restart)
+    assert {:ok, request_id} =
+             InteractionRouter.request(interaction, durability: :node_restart)
+
+    assert {:ok, :existing, %Interaction{request_id: ^request_id}} =
+             InteractionRegistry.admit(interaction, durability: :node_restart)
+
+    assert {:ok, ^request_id} =
+             InteractionRouter.request(interaction, durability: :node_restart)
 
     assert {:error, :already_tracked} =
              InteractionRouter.request(%{attrs | description: "different"},
                durability: :node_restart
              )
+  end
+
+  test "security regression: volatile to durable admission cannot rebind an existing ID" do
+    interaction =
+      build_interaction(
+        interaction_attrs("volatile owner", request_id: "irq_volatile_to_durable")
+      )
+
+    assert {:ok, interaction.request_id} ==
+             InteractionRouter.request(interaction, adapter_map: %{})
+
+    assert {:error, :already_tracked} =
+             InteractionRouter.request(interaction,
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+
+    assert {:error, :already_tracked} =
+             InteractionRouter.request(%{interaction | description: "changed volatile payload"},
+               adapter_map: %{}
+             )
+
+    assert {:ok, ^interaction} = InteractionRegistry.get(interaction.request_id)
+    assert {:error, :not_found} = DurableStore.get(interaction.request_id)
+
+    assert %{durability: :volatile} =
+             :sys.get_state(Authority).entries[interaction.request_id]
+  end
+
+  test "security regression: durable to volatile and changed payload retries cannot rebind" do
+    interaction =
+      build_interaction(interaction_attrs("durable owner", request_id: "irq_durable_to_volatile"))
+
+    assert {:ok, interaction.request_id} ==
+             InteractionRouter.request(interaction,
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+
+    {:ok, record_before} = DurableStore.get(interaction.request_id)
+
+    assert {:error, :already_tracked} =
+             InteractionRouter.request(interaction, adapter_map: %{})
+
+    assert {:error, :already_tracked} =
+             InteractionRouter.request(%{interaction | description: "changed durable payload"},
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+
+    assert {:ok, ^record_before} = DurableStore.get(interaction.request_id)
+
+    assert %{durability: :node_restart, operation_id: operation_id} =
+             :sys.get_state(Authority).entries[interaction.request_id]
+
+    assert operation_id == record_before.data["operation_id"]
+  end
+
+  test "security regression: identical pending retry does not dispatch a second notification" do
+    user_id = "durable_retry_user_#{System.unique_integer([:positive])}"
+    track_dashboard(user_id)
+
+    interaction =
+      build_interaction(
+        interaction_attrs("notify once",
+          request_id: "irq_durable_notify_once",
+          user_id: user_id
+        )
+      )
+
+    opts = [durability: :node_restart, adapter_map: %{dashboard: TestAdapter}]
+
+    assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
+    assert_receive {:durable_adapter_called, %Interaction{request_id: "irq_durable_notify_once"}}
+
+    assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
+    refute_receive {:durable_adapter_called, _interaction}, 100
+  end
+
+  test "security regression: durable terminal tombstone rejects re-admission without adapter dispatch" do
+    user_id = "durable_terminal_user_#{System.unique_integer([:positive])}"
+    track_dashboard(user_id)
+
+    interaction =
+      build_interaction(
+        interaction_attrs("terminal tombstone",
+          request_id: "irq_durable_terminal_tombstone",
+          user_id: user_id
+        )
+      )
+
+    opts = [durability: :node_restart, adapter_map: %{dashboard: TestAdapter}]
+
+    assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
+    assert_receive {:durable_adapter_called, %Interaction{request_id: interaction_id}}
+    assert interaction_id == interaction.request_id
+    assert :ok = InteractionRouter.respond(interaction.request_id, :approved)
+    assert {:ok, terminal_record} = DurableStore.get(interaction.request_id)
+
+    assert {:error, {:already_terminal, :responded}} =
+             InteractionRouter.request(interaction, opts)
+
+    assert {:error, {:already_terminal, :responded}} =
+             InteractionRouter.request(%{interaction | description: "changed tombstone payload"},
+               adapter_map: %{dashboard: TestAdapter}
+             )
+
+    refute_receive {:durable_adapter_called, _interaction}, 100
+    assert {:ok, ^terminal_record} = DurableStore.get(interaction.request_id)
+  end
+
+  test "security regression: malformed hydration cannot report durable readiness", %{path: path} do
+    request_id = "irq_malformed_hydration"
+    malformed_record = Record.new(request_id, %{"unexpected" => true})
+    :ok = Backend.put_raw(request_id, malformed_record, path)
+
+    restart_authority()
+
+    assert {:error, :malformed_record} = Arbor.Comms.durable_readiness()
+    refute Arbor.Comms.durable_ready?()
+
+    assert {:ok, "irq_volatile_after_bad_hydration"} =
+             Arbor.Comms.request_interaction(
+               interaction_attrs("volatile remains available",
+                 request_id: "irq_volatile_after_bad_hydration"
+               ),
+               adapter_map: %{}
+             )
+
+    assert {:error, :durable_unavailable} =
+             Arbor.Comms.request_interaction(
+               interaction_attrs("durable fails closed",
+                 request_id: "irq_durable_after_bad_hydration"
+               ),
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+  end
+
+  test "security regression: exact durable waiter returns response persisted before authority restart" do
+    request_id = "irq_durable_missed_broadcast"
+
+    interaction =
+      build_interaction(
+        interaction_attrs("persist before broadcast",
+          request_id: request_id,
+          agent_id: "agent_durable_waiter"
+        )
+      )
+
+    assert {:ok, ^request_id} =
+             InteractionRouter.request(interaction,
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+
+    waiter =
+      Task.async(fn ->
+        Arbor.Comms.await_interaction_response(request_id, interaction.agent_id, timeout: 250)
+      end)
+
+    assert_eventually(fn ->
+      case DurableStore.get(request_id) do
+        {:ok, %Record{data: %{"owner_deadline_unix_ms" => deadline}}} ->
+          is_integer(deadline)
+
+        _ ->
+          false
+      end
+    end)
+
+    assert {:ok, %Interaction{request_id: ^request_id}} =
+             InteractionRegistry.resolve(request_id,
+               response: :approved,
+               metadata: %{"source" => "persisted"}
+             )
+
+    assert {:ok, before_restart} = DurableStore.get(request_id)
+    assert before_restart.data["status"] == "responded"
+    operation_id = before_restart.data["operation_id"]
+
+    restart_authority()
+
+    assert {:ok, after_restart} = DurableStore.get(request_id)
+    assert after_restart.data["operation_id"] == operation_id
+
+    assert {:ok, :approved, %{"source" => "persisted"}} = Task.await(waiter, 2_000)
+  end
+
+  test "security regression: stale durable waiter cannot bind a reused volatile ID", %{path: path} do
+    request_id = "irq_durable_waiter_reused_id"
+
+    durable_interaction =
+      build_interaction(
+        interaction_attrs("original durable operation",
+          request_id: request_id,
+          agent_id: "agent_reused_id_waiter"
+        )
+      )
+
+    assert {:ok, ^request_id} =
+             InteractionRouter.request(durable_interaction,
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+
+    waiter =
+      Task.async(fn ->
+        Arbor.Comms.await_interaction_response(request_id, durable_interaction.agent_id,
+          timeout: 1_000
+        )
+      end)
+
+    assert_eventually(fn ->
+      case DurableStore.get(request_id) do
+        {:ok, %Record{data: %{"owner_deadline_unix_ms" => deadline}}} ->
+          is_integer(deadline)
+
+        _ ->
+          false
+      end
+    end)
+
+    malformed_id = "irq_reused_id_hydration_failure"
+    :ok = Backend.put_raw(malformed_id, Record.new(malformed_id, %{"bad" => true}), path)
+    restart_authority()
+
+    reused_interaction = %{durable_interaction | description: "unrelated volatile operation"}
+
+    assert {:ok, ^request_id} =
+             InteractionRouter.request(reused_interaction, adapter_map: %{})
+
+    assert :ok =
+             InteractionRouter.respond(request_id, :rejected, %{"source" => "reused operation"})
+
+    assert {:error, :timeout} = Task.await(waiter, 2_000)
   end
 
   test "durable pending state survives authority restart and claims a fresh epoch" do
@@ -315,6 +571,33 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     interaction
   end
 
+  defp track_dashboard(user_id) do
+    assert {:ok, _ref} =
+             PresenceTracker.track(self(), user_id, :dashboard, %{test_pid: self()})
+
+    assert_eventually(fn ->
+      match?([{:dashboard, _metadata}], PresenceTracker.active_channels(user_id))
+    end)
+  end
+
+  defp assert_eventually(fun, timeout_ms \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_assert_eventually(fun, deadline)
+  end
+
+  defp do_assert_eventually(fun, deadline) do
+    if fun.() do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) > deadline do
+        flunk("condition not met within timeout")
+      else
+        Process.sleep(10)
+        do_assert_eventually(fun, deadline)
+      end
+    end
+  end
+
   defp restart_authority do
     case Process.whereis(Authority) do
       pid when is_pid(pid) ->
@@ -378,6 +661,14 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     end
 
     def list(_opts), do: Agent.get(__MODULE__, fn state -> {:ok, Map.keys(state)} end)
+
+    def put_raw(key, %Record{} = record, path) do
+      Agent.update(__MODULE__, fn state ->
+        next = Map.put(state, key, record)
+        persist([path: path], next)
+        next
+      end)
+    end
 
     def compare_and_swap(key, :not_found, %Record{} = replacement, opts) do
       Agent.get_and_update(__MODULE__, fn state ->

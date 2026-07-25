@@ -196,14 +196,7 @@ defmodule Arbor.Comms.InteractionRouter do
           timeout_terminal_result(terminal)
 
         {:ok, capture, :armed} ->
-          receive do
-            {:interaction_response, %{request_id: ^request_id, response: response} = payload} ->
-              metadata = Map.get(payload, :metadata) || Map.get(payload, "metadata") || %{}
-              {:ok, response, metadata}
-          after
-            timeout ->
-              finalize_timeout(capture, request_id)
-          end
+          await_captured_response(capture, request_id, timeout)
 
         :not_found ->
           {:error, :timeout}
@@ -223,12 +216,97 @@ defmodule Arbor.Comms.InteractionRouter do
   @spec pending() :: [Interaction.t()]
   def pending, do: InteractionRegistry.list_pending()
 
-  defp finalize_timeout(capture, request_id) do
-    case InteractionRegistry.finalize_timeout(capture, request_id) do
-      {:ok, terminal} -> timeout_terminal_result(terminal)
-      _ -> {:error, :timeout}
+  defp await_captured_response(capture, request_id, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_captured_response_until(capture, request_id, deadline)
+  end
+
+  defp await_captured_response_until(capture, request_id, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:interaction_response, %{request_id: ^request_id, response: response} = payload} ->
+        metadata = Map.get(payload, :metadata) || Map.get(payload, "metadata") || %{}
+
+        case captured_response_result(capture, request_id, response, metadata) do
+          {:done, result} -> result
+          :continue -> await_captured_response_until(capture, request_id, deadline)
+        end
+    after
+      remaining ->
+        finalize_timeout(capture, request_id)
     end
   end
+
+  defp captured_response_result(capture, request_id, response, metadata) do
+    if durable_capture?(capture) do
+      case InteractionRegistry.reconcile_timeout_capture(capture, request_id) do
+        {:ok, {:terminal, terminal}} -> {:done, timeout_terminal_result(terminal)}
+        {:error, :stale_operation} -> {:done, {:error, :timeout}}
+        _ -> :continue
+      end
+    else
+      {:done, {:ok, response, metadata}}
+    end
+  end
+
+  defp finalize_timeout(capture, request_id) do
+    case InteractionRegistry.finalize_timeout(capture, request_id) do
+      {:ok, terminal} ->
+        timeout_terminal_result(terminal)
+
+      {:error, reason} when reason in [:authority_unavailable, :stale_timeout_capture] ->
+        reconcile_durable_timeout(capture, request_id)
+
+      :not_found ->
+        reconcile_durable_timeout(capture, request_id)
+
+      _other ->
+        {:error, :timeout}
+    end
+  end
+
+  defp reconcile_durable_timeout(capture, request_id) do
+    if durable_capture?(capture) do
+      case InteractionRegistry.capture_timeout_authority(request_id, 0) do
+        {:ok, current_capture, outcome} ->
+          if same_operation?(capture, current_capture) do
+            settle_recaptured_timeout(current_capture, request_id, outcome)
+          else
+            {:error, :timeout}
+          end
+
+        _other ->
+          {:error, :timeout}
+      end
+    else
+      {:error, :timeout}
+    end
+  end
+
+  defp settle_recaptured_timeout(_capture, _request_id, {:terminal, terminal}),
+    do: timeout_terminal_result(terminal)
+
+  defp settle_recaptured_timeout(capture, request_id, :armed) do
+    case InteractionRegistry.finalize_timeout(capture, request_id) do
+      {:ok, terminal} -> timeout_terminal_result(terminal)
+      _other -> {:error, :timeout}
+    end
+  end
+
+  defp durable_capture?(%{operation_id: operation_id, authority_epoch: authority_epoch}),
+    do: is_binary(operation_id) and is_binary(authority_epoch)
+
+  defp durable_capture?(_capture), do: false
+
+  defp same_operation?(
+         %{operation_id: operation_id},
+         %{operation_id: operation_id}
+       )
+       when is_binary(operation_id),
+       do: true
+
+  defp same_operation?(_old_capture, _current_capture), do: false
 
   defp timeout_terminal_result(%{status: :responded, response: response, metadata: metadata}) do
     {:ok, response, metadata || %{}}
@@ -242,20 +320,30 @@ defmodule Arbor.Comms.InteractionRouter do
     adapter_map = Keyword.get(opts, :adapter_map, configured_adapters())
     durability = Keyword.get(opts, :durability, :volatile)
 
-    with {:ok, _} <- InteractionRegistry.put(interaction, durability: durability),
-         :ok <- dispatch(interaction, adapter_map) do
-      emit_signal(:requested, interaction, %{})
-      {:ok, interaction.request_id}
-    else
+    case InteractionRegistry.admit(interaction, durability: durability) do
+      {:ok, :existing, %Interaction{} = stored_interaction} ->
+        {:ok, stored_interaction.request_id}
+
+      {:ok, :inserted, %Interaction{} = stored_interaction} ->
+        dispatch_inserted(stored_interaction, adapter_map)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp dispatch_inserted(interaction, adapter_map) do
+    case dispatch(interaction, adapter_map) do
+      :ok ->
+        emit_signal(:requested, interaction, %{})
+        {:ok, interaction.request_id}
+
       :no_channel ->
         # Already persisted; queue for later when presence becomes
         # available. Adapters that come online can pick up pending
         # interactions targeted at their channel via list_pending.
         emit_signal(:queued, interaction, %{})
         {:ok, interaction.request_id}
-
-      {:error, _} = err ->
-        err
     end
   end
 

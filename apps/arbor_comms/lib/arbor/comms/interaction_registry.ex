@@ -20,6 +20,7 @@ defmodule Arbor.Comms.InteractionRegistry do
   @rpc_timeout_ms 5_000
 
   @type terminal_status :: :responded | :abandoned | :expired
+  @type admission_disposition :: :inserted | :existing
   @type timeout_capture :: %{
           optional(:operation_id) => String.t(),
           optional(:authority_epoch) => String.t(),
@@ -63,17 +64,31 @@ defmodule Arbor.Comms.InteractionRegistry do
   @spec put(Interaction.t(), keyword()) :: {:ok, Interaction.t()} | {:error, term()}
   def put(interaction, opts \\ [])
 
-  def put(%Interaction{request_id: request_id} = interaction, opts) when is_list(opts) do
+  def put(%Interaction{} = interaction, opts) when is_list(opts) do
+    case admit(interaction, opts) do
+      {:ok, _disposition, stored_interaction} -> {:ok, stored_interaction}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def put(_interaction, _opts), do: {:error, :invalid_options}
+
+  @doc """
+  Admit an interaction and report whether the authority inserted it or found
+  the exact pending interaction already present.
+  """
+  @spec admit(Interaction.t(), keyword()) ::
+          {:ok, admission_disposition(), Interaction.t()} | {:error, term()}
+  def admit(interaction, opts \\ [])
+
+  def admit(%Interaction{request_id: request_id} = interaction, opts) when is_list(opts) do
     with {:ok, _durability} <- requested_durability(opts) do
       case authority_for(request_id) do
         :not_found ->
-          route_call(node(), :put, [interaction, opts])
+          route_call(node(), :admit, [interaction, opts])
 
-        {:ok, authority_node} when authority_node == node() ->
-          route_call(node(), :put, [interaction, opts])
-
-        {:ok, _remote_authority} ->
-          {:error, :already_tracked}
+        {:ok, authority_node} ->
+          route_call(authority_node, :admit, [interaction, opts])
 
         {:error, _reason} = error ->
           error
@@ -81,15 +96,23 @@ defmodule Arbor.Comms.InteractionRegistry do
     end
   end
 
-  def put(_interaction, _opts), do: {:error, :invalid_options}
+  def admit(_interaction, _opts), do: {:error, :invalid_options}
 
-  @doc "Return durable interaction backend readiness without changing volatile behavior."
+  @doc "Return backend and completed Authority hydration readiness."
   @spec durable_readiness() :: DurableStore.availability()
-  def durable_readiness, do: DurableStore.readiness()
+  def durable_readiness do
+    with {:ok, details} <- DurableStore.readiness(),
+         :ready <- Authority.durable_readiness() do
+      {:ok, details}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :unavailable}
+    end
+  end
 
   @doc "Return whether node-restart durable interaction admission is available."
   @spec durable_ready?() :: boolean()
-  def durable_ready?, do: DurableStore.ready?()
+  def durable_ready?, do: match?({:ok, _details}, durable_readiness())
 
   @doc "Look up a canonically pending interaction by request ID."
   @spec get(String.t()) :: {:ok, Interaction.t()} | :not_found
@@ -213,6 +236,30 @@ defmodule Arbor.Comms.InteractionRegistry do
   end
 
   def finalize_timeout(_capture, _request_id), do: {:error, :invalid_timeout_capture}
+
+  @doc false
+  @spec reconcile_timeout_capture(timeout_capture(), String.t()) ::
+          {:ok, :pending | {:terminal, map()}}
+          | {:error, term()}
+          | :not_found
+  def reconcile_timeout_capture(
+        %{
+          authority_node: authority_node,
+          authority_pid: authority_pid,
+          request_id: request_id,
+          operation_id: operation_id,
+          authority_epoch: authority_epoch
+        },
+        request_id
+      )
+      when is_atom(authority_node) and is_pid(authority_pid) and
+             node(authority_pid) == authority_node and is_binary(request_id) and
+             is_binary(operation_id) and is_binary(authority_epoch) do
+    with_authority(request_id, :reconcile_operation, [request_id, operation_id])
+  end
+
+  def reconcile_timeout_capture(_capture, _request_id),
+    do: {:error, :invalid_timeout_capture}
 
   @doc "Return the authoritative first terminal transition for an interaction."
   @spec get_terminal(String.t()) :: {:ok, map()} | :not_found
