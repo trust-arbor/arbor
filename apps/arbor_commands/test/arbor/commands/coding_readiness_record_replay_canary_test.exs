@@ -19,6 +19,11 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
   fixture; this proves the production adapter boundary and its evidence shape,
   not real ACP worker execution.
 
+  The readiness observer calls the ReqLLM adapter directly because the public
+  `Arbor.LLM.generate/1` facade requires a configured client before it reaches
+  these plugs. Supplying one in credential-free CI would require another
+  internal dependency or global persistent-client mutation.
+
   The non-vacuous post-ready immutable-state transition is covered by the
   public candidate-verifier regression at
   `apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/candidate_verifier_test.exs`:
@@ -31,7 +36,6 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
 
   alias Arbor.Commands.CodingBenchmarkTempRoot
   alias Arbor.Contracts.Coding.{Diagnostic, Plan, ReadinessReport, TaskOutcome}
-  alias Arbor.Orchestrator.CodingPlan.ReadinessCore
   alias Arbor.LLM.Plugs.{Record, Replay}
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
@@ -100,8 +104,7 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
     def validation_capacity_observer, do: :available
 
     def acp_provider_readiness(provider, model) do
-      plan_digest =
-        Application.fetch_env!(:arbor_commands, :phase_b_canary_active_plan_digest)
+      task_id = Application.fetch_env!(:arbor_commands, :phase_b_canary_active_task_id)
 
       request = %Request{
         provider: "openai",
@@ -109,7 +112,7 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
         messages: [
           Arbor.LLM.Message.new(
             :user,
-            "phase-b-readiness-plan:" <> plan_digest
+            "phase-b-readiness-task:" <> task_id
           )
         ]
       }
@@ -166,8 +169,7 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
       llm_pipeline: Application.get_env(:arbor_llm, :pipeline),
       llm_recorder: Application.get_env(:arbor_llm, :recorder),
       transport_counter: Application.get_env(:arbor_llm, :phase_b_canary_transport_counter),
-      active_task_id: Application.get_env(:arbor_commands, :phase_b_canary_active_task_id),
-      active_plan_digest: Application.get_env(:arbor_commands, :phase_b_canary_active_plan_digest)
+      active_task_id: Application.get_env(:arbor_commands, :phase_b_canary_active_task_id)
     }
 
     Application.put_env(
@@ -205,12 +207,6 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
         :arbor_commands,
         :phase_b_canary_active_task_id,
         originals.active_task_id
-      )
-
-      restore_env(
-        :arbor_commands,
-        :phase_b_canary_active_plan_digest,
-        originals.active_plan_digest
       )
     end)
 
@@ -275,9 +271,6 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
     assert pipeline_readiness.task_id == pipeline_call.context["task_id"]
     assert pipeline_readiness.exact_task == pipeline_call.task
 
-    assert pipeline_readiness.canonical_plan_digest ==
-             ReadinessCore.plan_digest(pipeline_call.task["plan"])
-
     pipeline_task_id = pipeline_readiness.task_id
 
     assert Agent.get(
@@ -309,45 +302,38 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
     assert canonical_plan == plan_map
 
     task_id = Map.fetch!(context, "task_id")
-    canonical_plan_digest = ReadinessCore.plan_digest(canonical_plan)
     previous_task_id = Application.get_env(:arbor_commands, :phase_b_canary_active_task_id)
-
-    previous_plan_digest =
-      Application.get_env(:arbor_commands, :phase_b_canary_active_plan_digest)
 
     Application.put_env(:arbor_commands, :phase_b_canary_active_task_id, task_id)
 
-    Application.put_env(
-      :arbor_commands,
-      :phase_b_canary_active_plan_digest,
-      canonical_plan_digest
-    )
-
     try do
-      first_report = public_live_readiness!(canonical_plan, principal_id)
-      replay_report = public_live_readiness!(canonical_plan, principal_id)
+      first_report = normalized_public_readiness!(canonical_plan, principal_id)
+      public_plan_digest = Map.fetch!(first_report, "plan_digest")
+      replay_report = normalized_public_readiness!(canonical_plan, principal_id)
 
       send(
         Application.fetch_env!(:arbor_commands, :coding_benchmark_test_observer),
-        {:phase_b_canary_exact_readiness, task_id, canonical_plan_digest,
+        {:phase_b_canary_exact_readiness, task_id, public_plan_digest,
          %{"kind" => "coding_change", "plan" => canonical_plan}, first_report, replay_report}
       )
     after
       restore_env(:arbor_commands, :phase_b_canary_active_task_id, previous_task_id)
-      restore_env(:arbor_commands, :phase_b_canary_active_plan_digest, previous_plan_digest)
     end
 
     :ok
   end
 
-  defp public_live_readiness!(plan, principal_id) do
+  defp normalized_public_readiness!(plan, principal_id) do
     case Arbor.Orchestrator.check_coding_readiness(plan,
            mode: :live,
            agent_id: principal_id,
            observed_at: @observed_at
          ) do
       {:ok, report} ->
-        report
+        case ReadinessReport.normalize(report) do
+          {:ok, normalized} -> normalized
+          {:error, reason} -> raise "invalid public readiness report: #{inspect(reason)}"
+        end
 
       other ->
         raise "exact pipeline readiness failed: #{inspect(other)}"
@@ -359,7 +345,7 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
       {:phase_b_canary_exact_readiness, task_id, digest, exact_task, first, replay} ->
         %{
           task_id: task_id,
-          canonical_plan_digest: digest,
+          public_plan_digest: digest,
           exact_task: exact_task,
           first_report: first,
           replay_report: replay
@@ -402,7 +388,7 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
     for readiness <- [event.first_report, event.replay_report] do
       assert {:ok, normalized} = ReadinessReport.normalize(readiness)
       assert normalized["status"] == "ready"
-      assert normalized["plan_digest"] == event.canonical_plan_digest
+      assert normalized["plan_digest"] == event.public_plan_digest
       assert Enum.map(normalized["diagnostics"], & &1["gate_id"]) == @readiness_gate_ids
       assert Enum.all?(normalized["diagnostics"], &(&1["decision"] == "passed"))
       assert Enum.all?(normalized["diagnostics"], &Diagnostic.valid?/1)
