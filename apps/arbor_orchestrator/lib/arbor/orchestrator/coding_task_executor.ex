@@ -66,6 +66,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     TranscriptDescriptor,
     ValidationCapacityHandoff,
     VerificationReport,
+    WorkPacket,
     WorkspaceReleaseDescriptor
   }
 
@@ -1778,15 +1779,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            Profiles.validation_timeout(profile, plan.budgets["wall_clock_ms"]),
          {:ok, validation_test_stage_timeout_ms} <-
            Profiles.validation_test_stage_timeout(profile, plan.budgets["wall_clock_ms"]),
+         {:ok, semantic_preflight_opts} <-
+           execution_boundary_semantic_preflight_opts(
+             plan,
+             validation_timeout_ms,
+             validation_test_stage_timeout_ms
+           ),
          :ok <- Profiles.validate_requirements(profile, compiled_graph),
          :ok <-
-           SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
-             review_profile: plan.review_profile,
-             worker_use_pool: plan.worker["use_pool"],
-             worker_resume_session_id: plan.worker["resume_session_id"],
-             rework_max_cycles: plan.rework["max_cycles"],
-             validation_timeout_ms: validation_timeout_ms,
-             validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
+           SemanticPreflight.validate(
+             compiled_graph,
+             profile["semantic_policy"],
+             semantic_preflight_opts
            ),
          {:ok, live_catalog} <- ActionCatalog.snapshot(),
          {:ok, pinned_action_bindings} <-
@@ -1811,6 +1815,44 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   catch
     kind, reason -> {:error, {:coding_execution_preflight_failed, {kind, reason}}}
   end
+
+  # Re-derive the compiler's complete semantic policy projection from the
+  # normalized plan. Keeping this independent from compiler output makes any
+  # future compile/boundary drift fail closed before the runner is invoked.
+  defp execution_boundary_semantic_preflight_opts(
+         %Plan{} = plan,
+         validation_timeout_ms,
+         validation_test_stage_timeout_ms
+       ) do
+    with {:ok, {checkpoint_policy, checkpoint_work_packet_json}} <-
+           execution_boundary_checkpoint_binding(plan) do
+      {:ok,
+       [
+         review_profile: plan.review_profile,
+         worker_use_pool: plan.worker["use_pool"],
+         worker_resume_session_id: plan.worker["resume_session_id"],
+         worker_permission_mode: plan.worker["permission_mode"],
+         worker_model: plan.worker["model"],
+         checkpoint_policy: checkpoint_policy,
+         checkpoint_work_packet_json: checkpoint_work_packet_json,
+         design_checkpoint_timeout_ms:
+           min(plan.budgets["inactivity_timeout_ms"], plan.budgets["wall_clock_ms"]),
+         rework_max_cycles: plan.rework["max_cycles"],
+         validation_timeout_ms: validation_timeout_ms,
+         validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
+       ]}
+    end
+  end
+
+  defp execution_boundary_checkpoint_binding(%Plan{version: 2, work_packet: work_packet})
+       when is_map(work_packet) do
+    with {:ok, checkpoint_policy} <- Map.fetch(work_packet, "checkpoint_policy"),
+         {:ok, work_packet_json} <- WorkPacket.canonical_bytes(work_packet) do
+      {:ok, {checkpoint_policy, work_packet_json}}
+    end
+  end
+
+  defp execution_boundary_checkpoint_binding(%Plan{}), do: {:ok, {"direct", "{}"}}
 
   defp validate_prepared_execution_compilation(compilation, plan) do
     case Compilation.validate(compilation, plan) do

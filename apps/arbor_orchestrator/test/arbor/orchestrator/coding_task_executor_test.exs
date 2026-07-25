@@ -1713,6 +1713,53 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["artifacts"]["graph_hash"] == opts[:graph_hash]
     end
 
+    test "execution boundary reuses exact compiler checkpoint semantics for non-default budgets" do
+      packet = %{
+        "version" => 1,
+        "success_criteria" => ["focused tests pass"],
+        "non_goals" => ["expand execution authority"],
+        "constraints" => ["preserve existing behavior"],
+        "architecture_refs" => ["apps/arbor_orchestrator"],
+        "required_evidence" => ["full executor test"],
+        "checkpoint_policy" => "design_required"
+      }
+
+      {:ok, packet_digest} = WorkPacket.digest(packet)
+
+      for {wall_clock_ms, inactivity_timeout_ms} <- [
+            {120_000, 45_000},
+            {20_000, 10_000}
+          ] do
+        task =
+          valid_direct_task(%{
+            "version" => 2,
+            "worker" => %{
+              "provider" => "grok",
+              "model" => "grok-4.5",
+              "permission_mode" => "deny"
+            },
+            "budgets" => %{
+              "wall_clock_ms" => wall_clock_ms,
+              "inactivity_timeout_ms" => inactivity_timeout_ms
+            },
+            "work_packet" => packet,
+            "work_packet_digest" => packet_digest
+          })
+
+        assert {:ok, _result} =
+                 CodingTaskExecutor.run(
+                   "agent_checkpoint_#{inactivity_timeout_ms}",
+                   task,
+                   valid_context(%{
+                     "task_id" => "task_checkpoint_#{inactivity_timeout_ms}"
+                   })
+                 )
+
+        {_path, opts} = last_run()
+        assert opts[:timeout] == wall_clock_ms
+      end
+    end
+
     test "rejects direct none review before compiler, archive, or runner" do
       Application.put_env(:arbor_orchestrator, :coding_plan_compiler, ObservedCompiler)
 
