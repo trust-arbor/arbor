@@ -100,6 +100,12 @@ defmodule Arbor.Actions do
     name
     resource_uri
   )
+  @execution_idempotency_classes [
+    :idempotent,
+    :idempotent_with_key,
+    :side_effecting,
+    :read_only
+  ]
   @active_execution_binding_key {__MODULE__, :active_execution_binding}
   @active_action_authorization_key {__MODULE__, :active_action_authorization}
   @action_authorization_resource_key {__MODULE__, :action_authorization_resource}
@@ -1188,6 +1194,44 @@ defmodule Arbor.Actions do
   end
 
   def runtime_descriptor(_action_module), do: {:error, :invalid_action_module}
+
+  @doc """
+  Return the replay class explicitly declared by an action module or name.
+
+  Actions may implement `execution_idempotency/0` and return one of
+  `:idempotent`, `:idempotent_with_key`, `:side_effecting`, or `:read_only`.
+  Missing, malformed, unavailable, raising, and unresolved declarations all
+  fail closed to `:side_effecting`.
+  """
+  @spec execution_idempotency(module() | String.t()) ::
+          :idempotent | :idempotent_with_key | :side_effecting | :read_only
+  def execution_idempotency(action_name) when is_binary(action_name) do
+    case name_to_module(action_name) do
+      {:ok, action_module} -> execution_idempotency(action_module)
+      {:error, _reason} -> :side_effecting
+    end
+  rescue
+    _exception -> :side_effecting
+  catch
+    _kind, _reason -> :side_effecting
+  end
+
+  def execution_idempotency(action_module) when is_atom(action_module) do
+    with {:module, ^action_module} <- Code.ensure_loaded(action_module),
+         true <- function_exported?(action_module, :execution_idempotency, 0),
+         class <- action_module.execution_idempotency(),
+         true <- class in @execution_idempotency_classes do
+      class
+    else
+      _other -> :side_effecting
+    end
+  rescue
+    _exception -> :side_effecting
+  catch
+    _kind, _reason -> :side_effecting
+  end
+
+  def execution_idempotency(_action), do: :side_effecting
 
   @doc """
   Return deterministic nested action names this module may invoke internally.

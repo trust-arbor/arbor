@@ -16,6 +16,41 @@ defmodule Arbor.ActionsTest do
     end
   end
 
+  defmodule ReadOnlyReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: :read_only
+  end
+
+  defmodule IdempotentReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: :idempotent
+  end
+
+  defmodule KeyedReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: :idempotent_with_key
+  end
+
+  defmodule SideEffectingReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: :side_effecting
+  end
+
+  defmodule InvalidReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: "read_only"
+  end
+
+  defmodule RaisingReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: raise("invalid replay declaration")
+  end
+
+  defmodule ThrowingReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: throw(:invalid_replay_declaration)
+  end
+
   describe "list_actions/0" do
     test "returns actions organized by category" do
       actions = Actions.list_actions()
@@ -66,6 +101,25 @@ defmodule Arbor.ActionsTest do
     test "security regression: modules without retrievable BEAM object code fail closed" do
       assert :error = :code.get_object_code(NoObjectCodeAction)
       assert {:error, :action_beam_unavailable} = Actions.runtime_descriptor(NoObjectCodeAction)
+    end
+  end
+
+  describe "execution_idempotency/1" do
+    test "accepts only the closed replay classes" do
+      assert Actions.execution_idempotency(ReadOnlyReplayAction) == :read_only
+      assert Actions.execution_idempotency(IdempotentReplayAction) == :idempotent
+      assert Actions.execution_idempotency(KeyedReplayAction) == :idempotent_with_key
+      assert Actions.execution_idempotency(SideEffectingReplayAction) == :side_effecting
+    end
+
+    test "missing, invalid, raising, throwing, unavailable, and unresolved declarations fail closed" do
+      assert Actions.execution_idempotency(Arbor.Actions.File.Read) == :side_effecting
+      assert Actions.execution_idempotency(InvalidReplayAction) == :side_effecting
+      assert Actions.execution_idempotency(RaisingReplayAction) == :side_effecting
+      assert Actions.execution_idempotency(ThrowingReplayAction) == :side_effecting
+      assert Actions.execution_idempotency(Arbor.Actions.DefinitelyMissing) == :side_effecting
+      assert Actions.execution_idempotency("definitely_missing_action") == :side_effecting
+      assert Actions.execution_idempotency(%{}) == :side_effecting
     end
   end
 

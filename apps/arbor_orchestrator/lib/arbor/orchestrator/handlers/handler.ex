@@ -33,13 +33,14 @@ defmodule Arbor.Orchestrator.Handlers.Handler do
 
   @callback execute(Node.t(), Context.t(), Graph.t(), keyword()) :: Outcome.t()
   @callback idempotency() :: idempotency_class()
+  @callback idempotency(Node.t()) :: idempotency_class()
 
   # Three-phase protocol callbacks
   @callback prepare(Node.t(), Context.t(), keyword()) :: {:ok, term()} | {:error, term()}
   @callback run(term()) :: {:ok, term()} | {:error, term()}
   @callback apply_result(term(), Node.t(), Context.t()) :: {:ok, Outcome.t()} | {:error, term()}
 
-  @optional_callbacks [idempotency: 0, prepare: 3, run: 1, apply_result: 3]
+  @optional_callbacks [idempotency: 0, idempotency: 1, prepare: 3, run: 1, apply_result: 3]
 
   @doc "Returns the idempotency class for a handler module, defaulting to :side_effecting."
   @spec idempotency_of(module()) :: idempotency_class()
@@ -51,6 +52,33 @@ defmodule Arbor.Orchestrator.Handlers.Handler do
     else
       :side_effecting
     end
+  end
+
+  @doc """
+  Returns the idempotency class for a handler and exact node.
+
+  Handlers with target-specific replay behavior may implement `idempotency/1`.
+  Existing handlers continue through `idempotency_of/1`.
+  """
+  @spec idempotency_of(module(), Node.t()) :: idempotency_class()
+  def idempotency_of(handler_module, %Node{} = node) do
+    Code.ensure_loaded(handler_module)
+
+    if function_exported?(handler_module, :idempotency, 1) do
+      case handler_module.idempotency(node) do
+        class when class in [:idempotent, :idempotent_with_key, :side_effecting, :read_only] ->
+          class
+
+        _other ->
+          :side_effecting
+      end
+    else
+      idempotency_of(handler_module)
+    end
+  rescue
+    _exception -> :side_effecting
+  catch
+    _kind, _reason -> :side_effecting
   end
 
   @doc "Returns true if the handler implements all three-phase callbacks."

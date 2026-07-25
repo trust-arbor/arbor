@@ -109,7 +109,7 @@ defmodule Arbor.Orchestrator.IR.Compiler do
       HandlerSchema.validate_attrs(handler_type, prepared_node.attrs) ++
         validate_simulate_explicit(handler_module, prepared_node.attrs)
 
-    idempotency = Handler.idempotency_of(handler_module)
+    idempotency = Handler.idempotency_of(handler_module, prepared_node)
     data_class = resolve_data_classification(prepared_node, schema)
     capabilities = resolve_capabilities(prepared_node, schema)
     taint_profile = resolve_taint_profile(prepared_node, schema)

@@ -782,12 +782,13 @@ defmodule Arbor.Orchestrator.Engine do
     computed_hash = ContentHash.compute(node, context)
     stored_hash = Map.get(state.tracking.content_hashes, node.id)
     handler = Registry.resolve(node)
+    idempotency = Handler.idempotency_of(handler, node)
 
     cached_outcome = Map.get(state.outcomes, node.id)
 
     skip? =
       stored_hash != nil and
-        ContentHash.can_skip?(node, computed_hash, stored_hash, handler, cached_outcome)
+        ContentHash.can_skip?(node, computed_hash, stored_hash, idempotency, cached_outcome)
 
     if skip? do
       emit(state.opts, Event.stage_skipped(node.id, :content_hash_match))
@@ -851,6 +852,7 @@ defmodule Arbor.Orchestrator.Engine do
       execute_node_visit(
         node,
         handler,
+        idempotency,
         context,
         fidelity,
         computed_hash,
@@ -868,6 +870,7 @@ defmodule Arbor.Orchestrator.Engine do
   defp execute_node_visit(
          node,
          handler,
+         idempotency,
          context,
          fidelity,
          computed_hash,
@@ -877,7 +880,6 @@ defmodule Arbor.Orchestrator.Engine do
     emit(state.opts, Event.stage_started(node.id))
     emit(state.opts, Event.fidelity_resolved(node.id, fidelity.mode, fidelity.thread_id))
 
-    idempotency = Handler.idempotency_of(handler)
     journaled? = EffectOwner.journaled?(idempotency)
     run_id = Keyword.get(state.opts, :run_id)
     journal_opts = journal_opts_from(state.opts)

@@ -175,13 +175,35 @@ defmodule Arbor.Orchestrator.Engine.ContentHash do
 
   `:side_effecting` handlers are NEVER skipped — they use the WAL pattern instead.
   """
-  @spec can_skip?(Node.t(), String.t(), String.t(), module(), map() | nil) :: boolean()
-  def can_skip?(node, computed_hash, stored_hash, handler_module, cached_outcome \\ nil)
+  @spec can_skip?(
+          Node.t(),
+          String.t(),
+          String.t(),
+          Handler.idempotency_class() | module(),
+          map() | nil
+        ) :: boolean()
+  def can_skip?(node, computed_hash, stored_hash, idempotency_or_handler, cached_outcome \\ nil)
 
-  def can_skip?(%Node{} = node, computed_hash, stored_hash, handler_module, cached_outcome) do
+  def can_skip?(
+        %Node{} = node,
+        computed_hash,
+        stored_hash,
+        idempotency_or_handler,
+        cached_outcome
+      ) do
     hash_match = computed_hash == stored_hash
 
-    idempotency = Handler.idempotency_of(handler_module)
+    idempotency =
+      if idempotency_or_handler in [
+           :idempotent,
+           :idempotent_with_key,
+           :side_effecting,
+           :read_only
+         ] do
+        idempotency_or_handler
+      else
+        Handler.idempotency_of(idempotency_or_handler)
+      end
 
     safe_class =
       case idempotency do

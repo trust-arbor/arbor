@@ -71,6 +71,17 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   @impl true
   def idempotency, do: :side_effecting
 
+  @impl true
+  def idempotency(node) do
+    case {Map.get(node.attrs, "target", "tool"), Map.get(node.attrs, "action")} do
+      {"action", action_name} when is_binary(action_name) and action_name != "" ->
+        Arbor.Actions.execution_idempotency(action_name)
+
+      _other ->
+        :side_effecting
+    end
+  end
+
   @doc false
   def execution_delegates(node), do: execution_delegates(node, [])
 
