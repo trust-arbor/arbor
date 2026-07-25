@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, Compiler, Profiles, SemanticPreflight}
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
@@ -18,6 +18,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
     Arbor.Actions.Coding.Workspace.RecoverySummary,
+    Arbor.Actions.Coding.DesignCheckpoint.Open,
+    Arbor.Actions.Coding.DesignCheckpoint.Await,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.CrossApp.Validate,
     Arbor.Actions.Mix.Compile,
@@ -90,6 +92,97 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                review_profile: "binding",
                rework_max_cycles: 2
              )
+  end
+
+  test "design-required graph passes exact checkpoint preflight", ctx do
+    plan = v2_plan!()
+    assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    assert :ok =
+             preflight(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               checkpoint_policy: "design_required",
+               checkpoint_work_packet_json: packet_json,
+               design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+             )
+  end
+
+  test "security regression: design checkpoint tampering and implementation bypass fail closed",
+       ctx do
+    plan = v2_plan!()
+    assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    immutable_mutations =
+      for key <- ~w[
+            coding_plan_checkpoint_policy
+            coding_plan_fingerprint
+            coding_plan_version
+            coding_plan_work_packet
+            coding_plan_work_packet_digest
+            task
+          ] do
+        update_in(
+          graph.nodes["hoist_design_response"].attrs,
+          &Map.put(&1, "output_key", key)
+        )
+      end
+
+    mutations =
+      [
+        update_in(
+          graph.nodes["open_design_checkpoint"].attrs,
+          &Map.put(&1, "action", "coding_design_checkpoint_await")
+        ),
+        update_in(
+          graph.nodes["open_design_checkpoint"].attrs,
+          &Map.put(&1, "param.task", plan.task)
+        ),
+        add_edge(graph, "extract_design", "build_implement_prompt", "outcome=success"),
+        replace_edge_target(
+          graph,
+          "check_design_workspace_unchanged",
+          "error_design_modified_workspace",
+          nil,
+          "hoist_design_response"
+        ),
+        replace_edge_target(
+          graph,
+          "open_design_checkpoint",
+          "hoist_design_checkpoint_request_id",
+          "outcome=success",
+          "await_design_checkpoint"
+        ),
+        update_in(graph.nodes["build_design_prompt"].attrs, fn attrs ->
+          Map.update!(attrs, "expression", &String.replace(&1, "MUST NOT edit", "MAY edit"))
+        end)
+      ] ++ immutable_mutations
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"],
+                 review_profile: "binding",
+                 checkpoint_policy: "design_required",
+                 checkpoint_work_packet_json: packet_json,
+                 design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] in [
+                 "action_placement_mismatch",
+                 "design_checkpoint_binding_mismatch",
+                 "design_checkpoint_prompt_violation",
+                 "design_checkpoint_topology_mismatch",
+                 "design_checkpoint_writer_violation",
+                 "immutable_context_writer_violation"
+               ]
+             end)
+    end
   end
 
   test "validation observation bindings and protected writers fail closed", ctx do
@@ -1861,6 +1954,26 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     {:ok, plan} = Plan.new(attrs)
     plan
+  end
+
+  defp v2_plan! do
+    packet = %{
+      "version" => 1,
+      "success_criteria" => ["focused tests pass"],
+      "non_goals" => ["execution authority"],
+      "constraints" => ["touch only owned files"],
+      "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
+      "required_evidence" => ["focused test output"],
+      "checkpoint_policy" => "design_required"
+    }
+
+    {:ok, digest} = WorkPacket.digest(packet)
+
+    plan!(%{
+      "version" => 2,
+      "work_packet" => packet,
+      "work_packet_digest" => digest
+    })
   end
 
   defp security_plan!(overrides \\ %{}) do

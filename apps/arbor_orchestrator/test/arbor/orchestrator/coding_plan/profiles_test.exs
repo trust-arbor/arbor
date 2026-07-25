@@ -115,12 +115,40 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "post_validation_committed_change"
 
       assert "mix_compile" in default["required_actions"]
+      assert "coding_design_checkpoint_open" in default["required_actions"]
+      assert "coding_design_checkpoint_await" in default["required_actions"]
       assert "coding_workspace_inspect" in default["required_actions"]
       assert "coding_workspace_committed_change" in default["required_actions"]
       refute "mix_test" in default["required_actions"]
       assert "coding_security_regression_validate" in security["required_actions"]
       refute "mix_test" in security["required_actions"]
       refute "mix_compile" in security["required_actions"]
+
+      for node <- ~w[
+            await_design_checkpoint
+            check_design_workspace_unchanged
+            init_design_attempt
+            open_design_checkpoint
+            route_design_checkpoint_outcome
+            route_worker_phase
+          ] do
+        assert node in default["required_nodes"]
+        assert node in security["required_nodes"]
+      end
+
+      placements = default["semantic_policy"]["action_placements"]
+
+      assert Enum.count(
+               placements,
+               &(&1["node_id"] == "open_design_checkpoint" and
+                   &1["action"] == "coding_design_checkpoint_open")
+             ) == 1
+
+      assert Enum.count(
+               placements,
+               &(&1["node_id"] == "await_design_checkpoint" and
+                   &1["action"] == "coding_design_checkpoint_await")
+             ) == 1
 
       assert {:ok, cross_app} = Profiles.fetch_executable("cross_app")
       assert cross_app["executable"]

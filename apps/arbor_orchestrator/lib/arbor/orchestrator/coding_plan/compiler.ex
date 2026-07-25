@@ -6,7 +6,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   edges, action names, capabilities, principals, or other execution authority.
   """
 
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
   alias Arbor.Contracts.Security.Classification
 
   alias Arbor.Orchestrator.CodingPlan.{
@@ -59,6 +59,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     snapshot_validation_prior_commit
   ]
   @security_dormant_seed_condition "0=1"
+  @design_checkpoint_seed_condition "context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"
   @allowed_options [:template_path, :template_source, :action_catalog]
   @static_schema_types ~w(string boolean integer number array object)
   @numeric_schema_constraints ~w(minimum maximum exclusiveMinimum exclusiveMaximum)
@@ -113,6 +114,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          validation_test_stage_timeout_ms =
            validation_program["static_parameters"]["test_stage_timeout"],
          :ok <- validate_supported_features(plan),
+         {:ok, work_packet_json} <- canonical_work_packet_json(plan),
          {:ok, action_catalog} <- resolve_action_catalog(opts),
          {:ok, template_source} <- resolve_template_source(opts),
          :ok <- SemanticPreflight.validate_source(template_source),
@@ -125,6 +127,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              plan,
              validation_program,
              plan_fingerprint,
+             work_packet_json,
              action_catalog
            ),
          dot_source = DotSerializer.serialize(generated_graph),
@@ -145,6 +148,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              worker_resume_session_id: plan.worker["resume_session_id"],
              worker_permission_mode: plan.worker["permission_mode"],
              worker_model: plan.worker["model"],
+             checkpoint_policy: checkpoint_policy(plan),
+             checkpoint_work_packet_json: work_packet_json,
+             design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"],
              rework_max_cycles: plan.rework["max_cycles"],
              validation_timeout_ms: validation_timeout_ms,
              validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
@@ -422,6 +428,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          plan,
          validation_program,
          plan_fingerprint,
+         work_packet_json,
          action_catalog
        ) do
     with {:ok, graph} <- rewrite_classification(graph, plan.task_class),
@@ -430,6 +437,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <- rewrite_worker_close(graph, plan.worker),
          {:ok, graph} <- rewrite_prompt_budgets(graph),
          {:ok, graph} <- rewrite_rework_budget(graph, plan.rework["max_cycles"]),
+         {:ok, graph} <- rewrite_design_checkpoint(graph, plan, work_packet_json),
          {:ok, graph} <- rewrite_validation(graph, validation_program),
          {:ok, graph} <- rewrite_profile_flow(graph, plan),
          {:ok, graph} <-
@@ -705,6 +713,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       {"check_operator_rework_total_budget", "legacy_status_operator_approval_rework",
        "context.total_rework_count>=2", "context.total_rework_count>=#{max_cycles}"},
       {"check_operator_rework_total_budget", "inc_operator_rework_count",
+       "context.total_rework_count<2", "context.total_rework_count<#{max_cycles}"},
+      {"check_design_rework_total_budget", "mark_design_rework_exhausted_error",
+       "context.total_rework_count>=2", "context.total_rework_count>=#{max_cycles}"},
+      {"check_design_rework_total_budget", "inc_design_total_rework_count",
        "context.total_rework_count<2", "context.total_rework_count<#{max_cycles}"}
     ]
 
@@ -714,6 +726,158 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         {:error, _reason} = error -> {:halt, error}
       end
     end)
+  end
+
+  defp rewrite_design_checkpoint(graph, plan, work_packet_json) do
+    policy = checkpoint_policy(plan)
+    initial_phase = if policy == "design_required", do: "design", else: "implement"
+
+    with {:ok, graph} <-
+           rewrite_constant_node(graph, "init_worker_phase", "worker_phase", initial_phase),
+         {:ok, graph} <-
+           rewrite_constant_node(
+             graph,
+             "freeze_coding_plan_work_packet_json",
+             "coding_plan_work_packet_json",
+             work_packet_json
+           ),
+         {:ok, graph} <-
+           update_node(graph, "await_design_checkpoint", fn attrs ->
+             with :ok <- require_action_attrs(attrs, "coding_design_checkpoint_await") do
+               {:ok,
+                attrs
+                |> Map.put("param.timeout", plan.budgets["inactivity_timeout_ms"])
+                |> Map.put("max_retries", "0")}
+             end
+           end),
+         :ok <-
+           require_action_node(
+             graph,
+             "open_design_checkpoint",
+             "coding_design_checkpoint_open"
+           ) do
+      activate_design_checkpoint(graph, policy)
+    end
+  end
+
+  defp activate_design_checkpoint(graph, "direct"), do: {:ok, graph}
+
+  defp activate_design_checkpoint(graph, "design_required") do
+    with {:ok, graph} <- remove_design_checkpoint_seed_edges(graph),
+         {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "hoist_worker_provider_session_id",
+             "build_implement_prompt",
+             "init_design_defaults"
+           ),
+         {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "hoist_workspace_fingerprint",
+             "route_turn_progress",
+             "route_worker_phase"
+           ),
+         {:ok, graph} <-
+           rewrite_template_node(graph, "build_design_prompt", design_prompt()),
+         {:ok, graph} <-
+           rewrite_template_node(graph, "build_design_rework_prompt", design_rework_prompt()) do
+      rewrite_template_node(graph, "build_implement_prompt", approved_implementation_prompt())
+    end
+  end
+
+  defp rewrite_constant_node(graph, node_id, output_key, expression) do
+    update_node(graph, node_id, fn attrs ->
+      with :ok <-
+             require_attrs(attrs, %{
+               "type" => "transform",
+               "transform" => "constant",
+               "output_key" => output_key
+             }) do
+        {:ok, Map.put(attrs, "expression", expression)}
+      end
+    end)
+  end
+
+  defp rewrite_template_node(graph, node_id, expression) do
+    update_node(graph, node_id, fn attrs ->
+      with :ok <-
+             require_attrs(attrs, %{
+               "type" => "transform",
+               "transform" => "template",
+               "source_key" => "task",
+               "output_key" => "prompt"
+             }) do
+        {:ok, Map.put(attrs, "expression", expression)}
+      end
+    end)
+  end
+
+  defp remove_design_checkpoint_seed_edges(%Graph{} = graph) do
+    seeds =
+      MapSet.new([
+        {"route_commit_interaction", "init_design_defaults"},
+        {"route_commit_interaction", "route_worker_phase"}
+      ])
+
+    matches =
+      Enum.filter(graph.edges, fn edge ->
+        MapSet.member?(seeds, {edge.from, edge.to}) and
+          Map.get(edge.attrs, "condition") == @design_checkpoint_seed_condition
+      end)
+
+    if MapSet.new(Enum.map(matches, &{&1.from, &1.to})) == seeds and
+         length(matches) == MapSet.size(seeds) do
+      edges =
+        Enum.reject(graph.edges, fn edge ->
+          MapSet.member?(seeds, {edge.from, edge.to}) and
+            Map.get(edge.attrs, "condition") == @design_checkpoint_seed_condition
+        end)
+
+      {:ok, %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
+    else
+      {:error,
+       {:unexpected_design_checkpoint_seed_edges,
+        Enum.sort(Enum.map(matches, &{&1.from, &1.to, Map.get(&1.attrs, "condition")}))}}
+    end
+  end
+
+  defp design_prompt do
+    "DESIGN PHASE ONLY. Exact reviewed task: {value}. " <>
+      "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Produce a concrete implementation design satisfying that packet. " <>
+      "You MUST NOT edit, create, delete, or rename files; MUST NOT run commands that modify " <>
+      "the worktree; and MUST NOT create commits or otherwise change HEAD. " <>
+      "Return ONLY one valid JSON object with exactly two string fields: " <>
+      "{\"design\":\"the exact design text\",\"design_digest\":\"sha256:<64 lowercase hex>\"}. " <>
+      "design_digest MUST be the SHA-256 of the exact UTF-8 bytes of the design field."
+  end
+
+  defp design_rework_prompt do
+    "DESIGN REWORK PHASE ONLY. Exact reviewed task: {value}. " <>
+      "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Design attempt: {ctx.design_attempt}. Operator correction note: {ctx.approval_note}. " <>
+      "Correct the design to satisfy the packet and operator note. " <>
+      "You MUST NOT edit, create, delete, or rename files; MUST NOT run commands that modify " <>
+      "the worktree; and MUST NOT create commits or otherwise change HEAD. " <>
+      "Return ONLY one valid JSON object with exactly two string fields: " <>
+      "{\"design\":\"the exact corrected design text\",\"design_digest\":\"sha256:<64 lowercase hex>\"}. " <>
+      "design_digest MUST be the SHA-256 of the exact UTF-8 bytes of the design field."
+  end
+
+  defp approved_implementation_prompt do
+    "IMPLEMENTATION PHASE. You are implementing an Arbor code change inside worktree " <>
+      "{ctx.worktree_path}. Exact reviewed task: {value}. " <>
+      "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Approved design (exact): {ctx.accepted_design}. " <>
+      "Approved design digest: {ctx.accepted_design_digest}. " <>
+      "Approval request ID: {ctx.accepted_design_request_id}. " <>
+      "Approved evidence JSON: {ctx.accepted_design_evidence_json}. " <>
+      "Implement the approved design in the same worktree and worker session; produce a " <>
+      "reviewable diff; do not merge, push, or open a PR. Respond with ONLY one valid JSON " <>
+      "object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} " <>
+      "or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this " <>
+      "object as advisory only and decides the outcome from the owned workspace."
   end
 
   defp rewrite_review_route(graph, "none", "default") do
@@ -1184,10 +1348,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         {:ok, []}
 
       value when is_binary(value) ->
-        names = value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+        source_keys = value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+        names = Enum.map(source_keys, &context_parameter_name/1)
 
         cond do
-          Enum.any?(names, &(&1 == "")) ->
+          Enum.any?(source_keys, &(&1 == "")) ->
             {:error, {:invalid_action_node, node_id, :empty_context_key}}
 
           length(names) != length(Enum.uniq(names)) ->
@@ -1200,6 +1365,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       _value ->
         {:error, {:invalid_action_node, node_id, :invalid_context_keys}}
     end
+  end
+
+  defp context_parameter_name(context_key) do
+    context_key
+    |> String.split(".")
+    |> List.last()
   end
 
   defp parse_static_params(node_id, attrs) do
@@ -1584,6 +1755,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp bool_string(true), do: "true"
   defp bool_string(false), do: "false"
+
+  defp checkpoint_policy(%Plan{version: 2, work_packet: work_packet}),
+    do: Map.fetch!(work_packet, "checkpoint_policy")
+
+  defp checkpoint_policy(_plan), do: "direct"
+
+  defp canonical_work_packet_json(%Plan{version: 2, work_packet: work_packet}),
+    do: WorkPacket.canonical_bytes(work_packet)
+
+  defp canonical_work_packet_json(_plan), do: {:ok, "{}"}
 
   defp build_manifest(
          plan,

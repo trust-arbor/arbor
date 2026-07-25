@@ -14,6 +14,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   }
 
   alias Arbor.Orchestrator.Dot.Parser
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, Router}
+  alias Arbor.Orchestrator.Handlers.TransformHandler
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
   alias Arbor.Orchestrator.Viz.DotSerializer
 
@@ -27,6 +29,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
     Arbor.Actions.Coding.Workspace.RecoverySummary,
+    Arbor.Actions.Coding.DesignCheckpoint.Open,
+    Arbor.Actions.Coding.DesignCheckpoint.Await,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.CrossApp.Validate,
     Arbor.Actions.Coding.ReviewTree.Read,
@@ -219,6 +223,209 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert compilation.initial_values["coding_plan_work_packet_digest"] == digest
     assert compilation.manifest["work_packet_digest"] == digest
     assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
+  end
+
+  test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
+    graph = parse!(ctx.template_source)
+
+    assert byte_size(ctx.template_source) == 76_921
+    assert map_size(graph.nodes) == 228
+    assert length(graph.edges) == 330
+    assert byte_size(ctx.template_source) <= 262_144
+    assert map_size(graph.nodes) <= 256
+    assert length(graph.edges) <= 512
+  end
+
+  test "v1 and v2 direct plans retain the original worker route and bypass checkpoints", ctx do
+    for plan <- [plan!(), v2_plan!()] do
+      assert {:ok, compilation} = compile(plan, ctx)
+      graph = parse!(compilation.dot_source)
+
+      assert node_attrs(graph, "init_worker_phase")["expression"] == "implement"
+
+      assert edge_target(graph, "hoist_worker_provider_session_id", nil) ==
+               "build_implement_prompt"
+
+      assert edge_target(
+               graph,
+               "route_commit_interaction",
+               "context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"
+             ) in ["init_design_defaults", "route_worker_phase"]
+
+      checkpoint_seed_targets =
+        graph.edges
+        |> Enum.filter(fn edge ->
+          edge.from == "route_commit_interaction" and
+            edge.attrs["condition"] ==
+              "context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"
+        end)
+        |> Enum.map(& &1.to)
+        |> Enum.sort()
+
+      assert checkpoint_seed_targets == ["init_design_defaults", "route_worker_phase"]
+
+      route_commit = Map.fetch!(graph.nodes, "route_commit_interaction")
+
+      context =
+        Context.new(%{
+          "commit" => %{"interaction_outcome" => ""},
+          "coding_plan_checkpoint_policy" =>
+            Map.get(compilation.initial_values, "coding_plan_checkpoint_policy"),
+          "coding_plan_version" => compilation.initial_values["coding_plan_version"]
+        })
+
+      assert {:edge, %{to: "hoist_commit_hash"}} =
+               Router.select_next_step(
+                 route_commit,
+                 %Outcome{status: :success},
+                 context,
+                 graph
+               )
+
+      assert edge_target(graph, "hoist_workspace_fingerprint", nil) ==
+               "route_turn_progress"
+
+      refute Enum.any?(graph.edges, fn edge ->
+               edge.from == "hoist_workspace_fingerprint" and
+                 edge.to == "route_worker_phase"
+             end)
+
+      assert node_attrs(graph, "open_design_checkpoint")["action"] ==
+               "coding_design_checkpoint_open"
+
+      assert node_attrs(graph, "await_design_checkpoint")["action"] ==
+               "coding_design_checkpoint_await"
+    end
+  end
+
+  test "design-required plans activate exact checkpoint topology and canonical prompts", ctx do
+    plan = v2_plan!(%{"checkpoint_policy" => "design_required"})
+    assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    assert node_attrs(graph, "init_worker_phase")["expression"] == "design"
+    assert node_attrs(graph, "freeze_coding_plan_work_packet_json")["expression"] == packet_json
+    assert edge_target(graph, "hoist_worker_provider_session_id", nil) == "init_design_defaults"
+    assert edge_target(graph, "hoist_workspace_fingerprint", nil) == "route_worker_phase"
+
+    refute Enum.any?(graph.edges, fn edge ->
+             edge.attrs["condition"] ==
+               "context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required" and
+               edge.to in ["init_design_defaults", "route_worker_phase"]
+           end)
+
+    open = node_attrs(graph, "open_design_checkpoint")
+    await = node_attrs(graph, "await_design_checkpoint")
+
+    for attrs <- [open, await] do
+      assert attrs["context_keys"] =~ "session.task_id,task"
+      assert attrs["context_keys"] =~ "plan_fingerprint,coding_plan_fingerprint"
+      refute Map.has_key?(attrs, "param.task")
+      refute Map.has_key?(attrs, "param.plan_fingerprint")
+      refute Map.has_key?(attrs, "param.coding_plan_fingerprint")
+    end
+
+    assert await["param.timeout"] == plan.budgets["inactivity_timeout_ms"]
+
+    design_prompt =
+      run_transform(
+        graph,
+        "build_design_prompt",
+        %{
+          "task" => plan.task,
+          "coding_plan_work_packet_json" => packet_json
+        }
+      )
+
+    assert design_prompt =~ packet_json
+    assert design_prompt =~ "MUST NOT edit"
+    assert design_prompt =~ "MUST NOT create commits"
+
+    implementation_prompt =
+      run_transform(
+        graph,
+        "build_implement_prompt",
+        %{
+          "task" => plan.task,
+          "worktree_path" => "/tmp/worktree",
+          "coding_plan_work_packet_json" => packet_json,
+          "accepted_design" => "Use the existing compiler rewrite pattern.",
+          "accepted_design_digest" => "sha256:" <> String.duplicate("a", 64),
+          "accepted_design_request_id" => "coding-design:" <> String.duplicate("b", 64),
+          "accepted_design_evidence_json" => ~s({"approved":true})
+        }
+      )
+
+    assert implementation_prompt =~ packet_json
+    assert implementation_prompt =~ "Use the existing compiler rewrite pattern."
+    assert implementation_prompt =~ "IMPLEMENTATION PHASE"
+  end
+
+  test "design attempt is derived as a JSON integer and increments numerically", ctx do
+    plan = v2_plan!(%{"checkpoint_policy" => "design_required"})
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    defaults = run_transform(graph, "init_design_defaults", %{})
+    assert defaults == ~s({"design_attempt":1})
+
+    attempt = run_transform(graph, "init_design_attempt", %{"design_defaults" => defaults})
+    assert attempt === 1
+
+    next_attempt = run_transform(graph, "inc_design_attempt", %{"design_attempt" => attempt})
+    assert next_attempt === 2
+  end
+
+  test "design checkpoint outcomes route approve, rework, deny, timeout, and exhaustion", ctx do
+    plan =
+      v2_plan!(%{
+        "checkpoint_policy" => "design_required",
+        "rework" => %{"max_cycles" => 1}
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    assert edge_target(
+             graph,
+             "route_design_checkpoint_outcome",
+             "context.design_checkpoint.checkpoint_outcome=approve"
+           ) == "hoist_accepted_design_evidence"
+
+    assert edge_target(
+             graph,
+             "route_design_checkpoint_outcome",
+             "context.design_checkpoint.checkpoint_outcome=rework"
+           ) == "hoist_design_decision_request_id"
+
+    assert edge_target(
+             graph,
+             "route_design_checkpoint_outcome",
+             "context.design_checkpoint.checkpoint_outcome=deny"
+           ) == "hoist_design_decision_request_id"
+
+    assert edge_target(
+             graph,
+             "route_design_checkpoint_outcome",
+             "context.design_checkpoint.checkpoint_outcome=timeout"
+           ) == "error_design_checkpoint_timeout"
+
+    assert edge_target(
+             graph,
+             "check_design_rework_total_budget",
+             "context.total_rework_count>=1"
+           ) == "mark_design_rework_exhausted_error"
+
+    assert edge_target(
+             graph,
+             "check_design_rework_total_budget",
+             "context.total_rework_count<1"
+           ) == "inc_design_total_rework_count"
+
+    assert edge_target(graph, "mark_implementation_phase", nil) == "build_implement_prompt"
+    assert edge_target(graph, "build_implement_prompt", nil) == "capture_pre_turn_workspace"
+    assert edge_target(graph, "build_design_rework_prompt", nil) == "capture_pre_turn_workspace"
   end
 
   test "version 2 compilation rejects missing or tampered packet bindings", ctx do
@@ -1464,6 +1671,19 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   end
 
   defp node_attrs(graph, node_id), do: Map.fetch!(graph.nodes, node_id).attrs
+
+  defp run_transform(graph, node_id, values) do
+    outcome =
+      TransformHandler.execute(
+        Map.fetch!(graph.nodes, node_id),
+        Context.new(values),
+        graph,
+        []
+      )
+
+    assert outcome.status == :success
+    Map.fetch!(outcome.context_updates, node_attrs(graph, node_id)["output_key"])
+  end
 
   defp auto_proceed_target(graph) do
     graph.edges

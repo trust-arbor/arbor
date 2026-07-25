@@ -39,6 +39,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     capture_pre_turn_recovery
                     capture_pre_turn_workspace
                     capture_validation_workspace
+                    check_design_rework_total_budget
+                    check_design_workspace_unchanged
                     check_pre_turn_recovery_exists
                     check_pre_turn_workspace_exists
                     check_worker_delivery_status
@@ -71,7 +73,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     error_worker_turn_no_progress
                     error_workspace_missing
                     error_review_cycle_invalid
+                    error_design_checkpoint_await_failed
+                    error_design_checkpoint_open_failed
+                    error_design_checkpoint_outcome_invalid
+                    error_design_checkpoint_timeout
+                    error_design_modified_workspace
+                    error_design_response_invalid
+                    error_design_worker_phase_invalid
+                    extract_design
+                    extract_design_digest
+                    format_accepted_design_evidence
+                    freeze_coding_plan_work_packet_json
                     hoist_baseline_fingerprint
+                    hoist_accepted_design
+                    hoist_accepted_design_digest
+                    hoist_accepted_design_evidence
+                    hoist_accepted_design_request_id
+                    hoist_design_checkpoint_request_id
+                    hoist_design_decision_note
+                    hoist_design_decision_request_id
+                    hoist_design_response
                     hoist_review_cycle
                     hoist_review_disposition
                     hoist_review_finding_ledger
@@ -89,6 +110,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_worker_provider_session_id_from_message
                     hoist_worker_provider_session_id_from_status
                     implement
+                    inc_design_attempt
+                    inc_design_total_rework_count
                     inc_review_cycle
                     init_delta_diff
                     init_delta_files
@@ -96,15 +119,22 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     init_finding_ledger
                     init_review_cycle
                     init_review_defaults
+                    init_design_attempt
+                    init_design_defaults
+                    init_worker_phase
                     inspect_workspace
                     load_committed_change
                     open_worker
+                    open_design_checkpoint
                     open_recovery_worker
                     prep_release_mode_only
                     prep_release_mode_remove
                     prep_release_mode_discard
                     prep_release_mode_publish_retain
                     prep_release_mode_retain
+                    prep_checkpoint_packet_digest
+                    prep_checkpoint_plan_fingerprint
+                    prep_checkpoint_work_packet
                     prep_review_delta_diff
                     prep_review_delta_files
                     prep_review_delta_ranges
@@ -112,12 +142,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     release_workspace
                     release_workspace_only
                     retry_recovered_send
+                    route_design_checkpoint_outcome
+                    route_design_nonapproval
                     route_no_progress
                     route_release_mode
                     route_completed_review_cycle
                     route_prepared_review
                     route_review_material
                     route_turn_progress
+                    route_worker_phase
                     review_change
                     route_after_commit
                     route_commit_interaction
@@ -125,6 +158,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     route_review
                     route_success_workspace_retention
                     status_approval_denied
+                    await_design_checkpoint
+                    build_design_prompt
+                    build_design_rework_prompt
+                    mark_design_rework_exhausted_error
+                    mark_design_rework_iteration
+                    mark_design_rework_kind
+                    mark_implementation_phase
                     snapshot_operator_prior_commit
                     snapshot_review_prior_candidate_commit
                     snapshot_review_prior_commit
@@ -169,6 +209,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                              coding_reviewed_commit
                              coding_workspace_acquire
                              coding_workspace_committed_change
+                             coding_design_checkpoint_await
+                             coding_design_checkpoint_open
                              coding_workspace_inspect
                              coding_workspace_release
                              council_review_change
@@ -226,6 +268,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                 %{
                                   "node_id" => "acquire_workspace",
                                   "action" => "coding_workspace_acquire",
+                                  "required_dominators" => [],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "await_design_checkpoint",
+                                  "action" => "coding_design_checkpoint_await",
                                   "required_dominators" => [],
                                   "review_required_dominators" => [],
                                   "required_dominator_sets" => []
@@ -328,6 +377,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "required_dominator_sets" => [
                                     ["route_human_review", "route_publish"]
                                   ]
+                                },
+                                %{
+                                  "node_id" => "open_design_checkpoint",
+                                  "action" => "coding_design_checkpoint_open",
+                                  "required_dominators" => [],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
                                 },
                                 %{
                                   "node_id" => "open_worker",
@@ -763,6 +819,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @rework_budget_node_attrs [
     %{
+      "node_id" => "check_design_rework_total_budget",
+      "attrs" => %{
+        "type" => "branch",
+        "shape" => "diamond",
+        "fan_out" => "false"
+      }
+    },
+    %{
       "node_id" => "check_operator_rework_category_budget",
       "attrs" => %{
         "type" => "branch",
@@ -792,6 +856,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "type" => "branch",
         "shape" => "diamond",
         "fan_out" => "false"
+      }
+    },
+    %{
+      "node_id" => "inc_design_total_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "increment",
+        "source_key" => "total_rework_count",
+        "output_key" => "total_rework_count"
       }
     },
     %{
@@ -882,6 +955,24 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "transform" => "constant",
         "expression" => "0",
         "output_key" => "validation_rework_count"
+      }
+    },
+    %{
+      "node_id" => "mark_design_rework_iteration",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "total_rework_count",
+        "output_key" => "rework_iteration"
+      }
+    },
+    %{
+      "node_id" => "mark_design_rework_kind",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "design_checkpoint",
+        "output_key" => "rework_kind"
       }
     },
     %{
@@ -1194,6 +1285,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                  |> Enum.sort_by(& &1["node_id"])
 
   @rework_budget_edges [
+    ["inc_design_attempt", "mark_design_rework_kind", nil],
+    ["inc_design_total_rework_count", "inc_design_attempt", nil],
+    ["mark_design_rework_exhausted_error", "status_rework_exhausted", nil],
+    ["mark_design_rework_iteration", "build_design_rework_prompt", nil],
+    ["mark_design_rework_kind", "mark_design_rework_iteration", nil],
+    ["build_design_rework_prompt", "capture_pre_turn_workspace", nil],
     [
       "check_operator_rework_category_budget",
       "check_operator_rework_total_budget",
@@ -1405,16 +1502,19 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "review_cycle" => ["hoist_review_cycle", "inc_review_cycle", "init_review_cycle"],
       "review_disposition" => ["hoist_review_disposition"],
       "rework_iteration" => [
+        "mark_design_rework_iteration",
         "mark_operator_rework_iteration",
         "mark_review_rework_iteration",
         "mark_validation_rework_iteration"
       ],
       "rework_kind" => [
+        "mark_design_rework_kind",
         "mark_operator_rework_kind",
         "mark_review_rework_kind",
         "mark_validation_rework_kind"
       ],
       "total_rework_count" => [
+        "inc_design_total_rework_count",
         "inc_operator_total_rework_count",
         "inc_review_total_rework_count",
         "inc_validation_total_rework_count",
@@ -1505,16 +1605,19 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       ],
       "review_disposition" => ["hoist_review_disposition"],
       "rework_iteration" => [
+        "mark_design_rework_iteration",
         "mark_operator_rework_iteration",
         "mark_review_rework_iteration",
         "mark_validation_rework_iteration"
       ],
       "rework_kind" => [
+        "mark_design_rework_kind",
         "mark_operator_rework_kind",
         "mark_review_rework_kind",
         "mark_validation_rework_kind"
       ],
       "total_rework_count" => [
+        "inc_design_total_rework_count",
         "inc_operator_total_rework_count",
         "inc_review_total_rework_count",
         "inc_validation_total_rework_count",

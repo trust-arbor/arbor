@@ -153,6 +153,35 @@ digraph CodingChangeV1 {
     output_key="total_rework_count"
   ]
 
+  init_design_defaults [
+    type="transform",
+    transform="constant",
+    expression="{\"design_attempt\":1}",
+    output_key="design_defaults"
+  ]
+
+  init_design_attempt [
+    type="transform",
+    transform="json_extract",
+    source_key="design_defaults",
+    expression="design_attempt",
+    output_key="design_attempt"
+  ]
+
+  init_worker_phase [
+    type="transform",
+    transform="constant",
+    expression="implement",
+    output_key="worker_phase"
+  ]
+
+  freeze_coding_plan_work_packet_json [
+    type="transform",
+    transform="constant",
+    expression="{}",
+    output_key="coding_plan_work_packet_json"
+  ]
+
   init_operator_rework_count [
     type="transform",
     transform="constant",
@@ -275,6 +304,210 @@ digraph CodingChangeV1 {
     transform="template",
     source_key="task",
     expression="You are implementing an Arbor code change inside worktree {ctx.worktree_path}. Task: {value}. Requirements: work only in the worktree; produce a reviewable diff; do not merge, push, or open a PR. For compatibility with archived graphs, respond with ONLY one valid JSON object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this object as advisory only and decides the outcome from the owned workspace.",
+    output_key="prompt"
+  ]
+
+  // CodingPlan v2 design checkpoint. Direct plans route around this entire
+  // subgraph. The compiler replaces the prompt with the canonical frozen work
+  // packet only when checkpoint_policy=design_required.
+  build_design_prompt [
+    type="transform",
+    transform="template",
+    source_key="task",
+    expression="DESIGN phase only. Task: {value}. Do not edit files and do not create commits. Return a design checkpoint envelope.",
+    output_key="prompt"
+  ]
+
+  route_worker_phase [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  check_design_workspace_unchanged [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  hoist_design_response [
+    type="transform",
+    transform="identity",
+    source_key="worker_msg.text",
+    output_key="design_response"
+  ]
+
+  extract_design [
+    type="transform",
+    transform="json_extract",
+    source_key="design_response",
+    expression="design",
+    output_key="design"
+  ]
+
+  extract_design_digest [
+    type="transform",
+    transform="json_extract",
+    source_key="design_response",
+    expression="design_digest",
+    output_key="design_digest"
+  ]
+
+  prep_checkpoint_work_packet [
+    type="transform",
+    transform="identity",
+    source_key="coding_plan_work_packet",
+    output_key="work_packet"
+  ]
+
+  prep_checkpoint_packet_digest [
+    type="transform",
+    transform="identity",
+    source_key="coding_plan_work_packet_digest",
+    output_key="packet_digest"
+  ]
+
+  prep_checkpoint_plan_fingerprint [
+    type="transform",
+    transform="identity",
+    source_key="coding_plan_fingerprint",
+    output_key="plan_fingerprint"
+  ]
+
+  open_design_checkpoint [
+    type="exec",
+    target="action",
+    action="coding_design_checkpoint_open",
+    context_keys="work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest",
+    output_prefix="design_checkpoint_open",
+    max_retries="0"
+  ]
+
+  hoist_design_checkpoint_request_id [
+    type="transform",
+    transform="identity",
+    source_key="design_checkpoint_open.request_id",
+    output_key="request_id"
+  ]
+
+  await_design_checkpoint [
+    type="exec",
+    target="action",
+    action="coding_design_checkpoint_await",
+    context_keys="request_id,work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest",
+    param.timeout=300000,
+    output_prefix="design_checkpoint",
+    max_retries="0"
+  ]
+
+  route_design_checkpoint_outcome [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  hoist_accepted_design_evidence [
+    type="transform",
+    transform="identity",
+    source_key="design_checkpoint.evidence",
+    output_key="accepted_design_evidence"
+  ]
+
+  hoist_accepted_design [
+    type="transform",
+    transform="identity",
+    source_key="design",
+    output_key="accepted_design"
+  ]
+
+  hoist_accepted_design_digest [
+    type="transform",
+    transform="identity",
+    source_key="design_digest",
+    output_key="accepted_design_digest"
+  ]
+
+  hoist_accepted_design_request_id [
+    type="transform",
+    transform="identity",
+    source_key="design_checkpoint.request_id",
+    output_key="accepted_design_request_id"
+  ]
+
+  format_accepted_design_evidence [
+    type="transform",
+    transform="format",
+    source_key="accepted_design_evidence",
+    expression="json",
+    output_key="accepted_design_evidence_json"
+  ]
+
+  mark_implementation_phase [
+    type="transform",
+    transform="constant",
+    expression="implement",
+    output_key="worker_phase"
+  ]
+
+  hoist_design_decision_request_id [
+    type="transform",
+    transform="identity",
+    source_key="design_checkpoint.request_id",
+    output_key="approval_request_id"
+  ]
+
+  hoist_design_decision_note [
+    type="transform",
+    transform="identity",
+    source_key="design_checkpoint.note",
+    output_key="approval_note"
+  ]
+
+  route_design_nonapproval [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  check_design_rework_total_budget [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  inc_design_total_rework_count [
+    type="transform",
+    transform="increment",
+    source_key="total_rework_count",
+    output_key="total_rework_count"
+  ]
+
+  inc_design_attempt [
+    type="transform",
+    transform="increment",
+    source_key="design_attempt",
+    output_key="design_attempt"
+  ]
+
+  mark_design_rework_kind [
+    type="transform",
+    transform="constant",
+    expression="design_checkpoint",
+    output_key="rework_kind"
+  ]
+
+  mark_design_rework_iteration [
+    type="transform",
+    transform="identity",
+    source_key="total_rework_count",
+    output_key="rework_iteration"
+  ]
+
+  build_design_rework_prompt [
+    type="transform",
+    transform="template",
+    source_key="task",
+    expression="DESIGN rework only. Task: {value}. Operator note: {ctx.approval_note}. Do not edit files and do not create commits. Return a corrected design checkpoint envelope.",
     output_key="prompt"
   ]
 
@@ -1350,6 +1583,62 @@ digraph CodingChangeV1 {
     output_key="error"
   ]
 
+  error_design_modified_workspace [
+    type="transform",
+    transform="constant",
+    expression="design_turn_modified_workspace",
+    output_key="error"
+  ]
+
+  error_design_response_invalid [
+    type="transform",
+    transform="constant",
+    expression="design_response_invalid",
+    output_key="error"
+  ]
+
+  error_design_checkpoint_open_failed [
+    type="transform",
+    transform="constant",
+    expression="design_checkpoint_open_failed",
+    output_key="error"
+  ]
+
+  error_design_checkpoint_await_failed [
+    type="transform",
+    transform="constant",
+    expression="design_checkpoint_await_failed",
+    output_key="error"
+  ]
+
+  error_design_checkpoint_timeout [
+    type="transform",
+    transform="constant",
+    expression="design_checkpoint_timeout",
+    output_key="error"
+  ]
+
+  error_design_checkpoint_outcome_invalid [
+    type="transform",
+    transform="constant",
+    expression="design_checkpoint_outcome_invalid",
+    output_key="error"
+  ]
+
+  error_design_worker_phase_invalid [
+    type="transform",
+    transform="constant",
+    expression="design_worker_phase_invalid",
+    output_key="error"
+  ]
+
+  mark_design_rework_exhausted_error [
+    type="transform",
+    transform="constant",
+    expression="design_checkpoint_rework_exhausted",
+    output_key="error"
+  ]
+
   error_worker_send_recovery_exhausted [
     type="transform",
     transform="constant",
@@ -1580,6 +1869,13 @@ digraph CodingChangeV1 {
   error_worker_stop_reason_not_end_turn -> status_pipeline_error_then_close
   error_workspace_missing -> status_pipeline_error_then_close
   error_worker_turn_no_progress -> status_pipeline_error_then_close
+  error_design_modified_workspace -> status_pipeline_error_then_close
+  error_design_response_invalid -> status_pipeline_error_then_close
+  error_design_checkpoint_open_failed -> status_pipeline_error_then_close
+  error_design_checkpoint_await_failed -> status_pipeline_error_then_close
+  error_design_checkpoint_timeout -> status_pipeline_error_then_close
+  error_design_checkpoint_outcome_invalid -> status_pipeline_error_then_close
+  error_design_worker_phase_invalid -> status_pipeline_error_then_close
   status_pipeline_error_then_close -> close_worker
 
   // Owner-observed outcome: successful turns require trusted end_turn, then
@@ -1592,6 +1888,76 @@ digraph CodingChangeV1 {
   hoist_worker_provider_session_id_from_message -> check_worker_stop_reason
   check_worker_stop_reason -> inspect_workspace [condition="context.worker_msg.stop_reason=end_turn"]
   check_worker_stop_reason -> error_worker_stop_reason_not_end_turn
+
+  // Dormant CodingPlan v2 design-checkpoint subgraph. Direct plans retain the
+  // existing hoist->implementation and inspection->progress routes. The two
+  // immutable policy seeds keep every reviewed checkpoint node structurally
+  // reachable without making either checkpoint action executable for v1 or
+  // v2 direct plans.
+  route_commit_interaction -> init_design_defaults [condition="context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"]
+  route_commit_interaction -> route_worker_phase [condition="context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"]
+
+  init_design_defaults -> init_design_attempt -> init_worker_phase
+  init_worker_phase -> freeze_coding_plan_work_packet_json -> build_design_prompt
+  build_design_prompt -> capture_pre_turn_workspace
+  route_worker_phase -> check_design_workspace_unchanged [condition="context.worker_phase=design"]
+  route_worker_phase -> route_turn_progress [condition="context.worker_phase=implement"]
+  route_worker_phase -> error_design_worker_phase_invalid
+
+  // A design turn is admitted only when owner-observed evidence proves no
+  // worktree or HEAD movement. Worker prose is not control authority.
+  check_design_workspace_unchanged -> hoist_design_response [condition="context.turn_progressed=false"]
+  check_design_workspace_unchanged -> error_design_modified_workspace
+  hoist_design_response -> extract_design
+  extract_design -> error_design_response_invalid [condition="outcome=fail"]
+  extract_design -> extract_design_digest [condition="outcome=success"]
+  extract_design_digest -> error_design_response_invalid [condition="outcome=fail"]
+  extract_design_digest -> prep_checkpoint_work_packet [condition="outcome=success"]
+  prep_checkpoint_work_packet -> prep_checkpoint_packet_digest
+  prep_checkpoint_packet_digest -> prep_checkpoint_plan_fingerprint
+  prep_checkpoint_plan_fingerprint -> open_design_checkpoint
+
+  // Open and Await are deliberately separate Engine nodes. The Engine
+  // checkpoints the Open result before the request id is hoisted into Await.
+  open_design_checkpoint -> error_design_checkpoint_open_failed [condition="outcome=fail"]
+  open_design_checkpoint -> hoist_design_checkpoint_request_id [condition="outcome=success"]
+  hoist_design_checkpoint_request_id -> await_design_checkpoint
+  await_design_checkpoint -> error_design_checkpoint_await_failed [condition="outcome=fail"]
+  await_design_checkpoint -> route_design_checkpoint_outcome [condition="outcome=success"]
+
+  route_design_checkpoint_outcome -> hoist_accepted_design_evidence [condition="context.design_checkpoint.checkpoint_outcome=approve"]
+  route_design_checkpoint_outcome -> hoist_design_decision_request_id [condition="context.design_checkpoint.checkpoint_outcome=rework"]
+  route_design_checkpoint_outcome -> hoist_design_decision_request_id [condition="context.design_checkpoint.checkpoint_outcome=deny"]
+  route_design_checkpoint_outcome -> error_design_checkpoint_timeout [condition="context.design_checkpoint.checkpoint_outcome=timeout"]
+  route_design_checkpoint_outcome -> error_design_checkpoint_outcome_invalid
+
+  // Approval freezes exact evidence, switches the shared worker phase, builds
+  // an implementation prompt, and captures a fresh baseline before reusing the
+  // same managed/provider session through the common send path.
+  hoist_accepted_design_evidence -> hoist_accepted_design
+  hoist_accepted_design -> hoist_accepted_design_digest
+  hoist_accepted_design_digest -> hoist_accepted_design_request_id
+  hoist_accepted_design_request_id -> format_accepted_design_evidence
+  format_accepted_design_evidence -> mark_implementation_phase
+  mark_implementation_phase -> build_implement_prompt
+
+  // Deny uses the existing approval_denied terminal. Rework consumes the
+  // shared total budget, increments the numeric attempt, and asks the same
+  // worker in the same workspace/session for a fresh deterministic design.
+  hoist_design_decision_request_id -> hoist_design_decision_note
+  hoist_design_decision_note -> route_design_nonapproval
+  route_design_nonapproval -> mark_approval_denied_error [condition="context.design_checkpoint.checkpoint_outcome=deny"]
+  route_design_nonapproval -> check_design_rework_total_budget [condition="context.design_checkpoint.checkpoint_outcome=rework"]
+  route_design_nonapproval -> error_design_checkpoint_outcome_invalid
+
+  check_design_rework_total_budget -> mark_design_rework_exhausted_error [condition="context.total_rework_count>=2"]
+  check_design_rework_total_budget -> inc_design_total_rework_count [condition="context.total_rework_count<2"]
+  mark_design_rework_exhausted_error -> status_rework_exhausted
+  inc_design_total_rework_count -> inc_design_attempt
+  inc_design_attempt -> mark_design_rework_kind
+  mark_design_rework_kind -> mark_design_rework_iteration
+  mark_design_rework_iteration -> build_design_rework_prompt
+  build_design_rework_prompt -> capture_pre_turn_workspace
 
   // Impossible seed edges keep the reviewed dormant subgraph structurally
   // reachable. The compiler removes them before activating the security profile;

@@ -149,6 +149,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     * `:validation_test_stage_timeout_ms` — optional positive integer for
       profiles with a reviewed aggregate test-stage ceiling (cross_app). When
       present, `param.test_stage_timeout` must match exactly.
+    * `:checkpoint_policy` — `\"direct\"` (default) or `\"design_required\"`.
+      This binds the worker-continuity edge and design-checkpoint topology.
+    * `:checkpoint_work_packet_json` — the contract-canonical frozen packet
+      serialization embedded by the compiler.
+    * `:design_checkpoint_timeout_ms` — exact positive Await timeout.
   """
   @spec validate(Graph.t(), policy(), keyword()) :: :ok | {:error, validate_error()}
   def validate(graph, policy, opts \\ [])
@@ -158,6 +163,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {:ok, policy} <- normalize_policy(policy),
          {:ok, review_profile} <- normalize_review_profile(opts),
          {:ok, worker_continuity} <- normalize_worker_continuity(opts),
+         {:ok, checkpoint} <- normalize_design_checkpoint(opts),
          {:ok, rework_max_cycles} <- normalize_rework_max_cycles(opts),
          {:ok, validation_timeout_ms} <- normalize_validation_timeout_ms(opts),
          {:ok, validation_test_stage_timeout_ms} <-
@@ -172,9 +178,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_operator_approval_routing(graph)
         |> check_forbidden_authority(graph)
         |> check_forbidden_denial_bypass_attrs(graph)
-        |> check_worker_continuity_bindings(graph, worker_continuity)
+        |> check_immutable_context_writers(graph)
+        |> check_worker_continuity_bindings(graph, worker_continuity, checkpoint.policy)
         |> check_worker_recovery_bindings(graph, policy, worker_continuity)
         |> check_review_convergence_bindings(graph, policy, rework_max_cycles)
+        |> check_design_checkpoint_bindings(graph, checkpoint, rework_max_cycles)
         |> check_workspace_cleanup_topology(graph)
         |> check_profile_bindings(
           graph,
@@ -781,6 +789,37 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
+  defp normalize_design_checkpoint(opts) do
+    policy = Keyword.get(opts, :checkpoint_policy, "direct")
+
+    packet_json =
+      case Keyword.fetch(opts, :checkpoint_work_packet_json) do
+        {:ok, value} -> value
+        :error when policy == "direct" -> "{}"
+        :error -> :missing
+      end
+
+    timeout_ms = Keyword.get(opts, :design_checkpoint_timeout_ms, 300_000)
+
+    cond do
+      policy not in ["direct", "design_required"] ->
+        {:error, {:invalid_semantic_policy, {:invalid_checkpoint_policy, policy}}}
+
+      not is_binary(packet_json) or not String.valid?(packet_json) ->
+        {:error, {:invalid_semantic_policy, :invalid_checkpoint_work_packet_json}}
+
+      policy == "design_required" and
+          not match?({:ok, value} when is_map(value), Jason.decode(packet_json)) ->
+        {:error, {:invalid_semantic_policy, :invalid_checkpoint_work_packet_json}}
+
+      not is_integer(timeout_ms) or timeout_ms <= 0 ->
+        {:error, {:invalid_semantic_policy, {:invalid_design_checkpoint_timeout_ms, timeout_ms}}}
+
+      true ->
+        {:ok, %{policy: policy, work_packet_json: packet_json, timeout_ms: timeout_ms}}
+    end
+  end
+
   defp normalize_rework_max_cycles(opts) do
     case Keyword.fetch(opts, :rework_max_cycles) do
       {:ok, max_cycles} when is_integer(max_cycles) and max_cycles in 0..2 ->
@@ -1240,7 +1279,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       ~w(
         route_commit_interaction
         hoist_commit_hash
-        status_approval_denied
         check_operator_rework_category_budget
         check_operator_rework_total_budget
       )
@@ -1260,7 +1298,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     # route_commit_interaction dominates success hoist / deny / rework budgets.
     errors =
       Enum.reduce(
-        ~w(hoist_commit_hash status_approval_denied check_operator_rework_category_budget),
+        ~w(hoist_commit_hash check_operator_rework_category_budget),
         errors,
         fn node_id, acc ->
           require_dominates(
@@ -1509,7 +1547,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       allowed? =
         dominates?(dominators, @commit_approval_node, edge.from) or
           (is_binary(origin) and dominates?(dominators, origin, edge.from)) or
-          (edge.to == @rework_exhaustion_status and edge.from == @rework_exhaustion_marker)
+          (edge.to == @rework_exhaustion_status and edge.from == @rework_exhaustion_marker) or
+          (edge.to == "status_approval_denied" and
+             edge.from == "mark_approval_denied_error") or
+          (edge.to == "status_rework_exhausted" and
+             edge.from == "mark_design_rework_exhausted_error")
 
       if allowed? do
         acc
@@ -1857,7 +1899,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           inc_operator_rework_count
         ))
 
-    allowed_predecessors = MapSet.new([@commit_approval_node, "route_commit_interaction"])
+    allowed_predecessors =
+      MapSet.new([
+        @commit_approval_node,
+        "route_commit_interaction",
+        "mark_approval_denied_error"
+      ])
 
     graph.edges
     |> Enum.reduce(errors, fn edge, acc ->
@@ -1948,7 +1995,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_worker_continuity_bindings(errors, graph, continuity) do
+  defp check_worker_continuity_bindings(errors, graph, continuity, checkpoint_policy) do
+    first_prompt =
+      if checkpoint_policy == "design_required",
+        do: "init_design_defaults",
+        else: "build_implement_prompt"
+
     expected_nodes = [
       {"capture_pre_turn_workspace",
        %{
@@ -2000,7 +2052,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     expected_edges = [
       {"open_worker", "hoist_worker_session_id", "outcome=success"},
       {"hoist_worker_session_id", "hoist_worker_provider_session_id", nil},
-      {"hoist_worker_provider_session_id", "build_implement_prompt", nil},
+      {"hoist_worker_provider_session_id", first_prompt, nil},
       {"build_implement_prompt", "capture_pre_turn_workspace", nil},
       {"capture_pre_turn_workspace", "status_pipeline_error_then_close", "outcome=fail"},
       {"capture_pre_turn_workspace", "check_pre_turn_workspace_exists", "outcome=success"},
@@ -2032,6 +2084,635 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     Enum.reduce(expected_edges, errors, fn {from, to, condition}, acc ->
       require_worker_continuity_edge(acc, graph, from, to, condition)
     end)
+  end
+
+  defp check_immutable_context_writers(errors, graph) do
+    immutable =
+      ~w(
+        coding_plan_checkpoint_policy
+        coding_plan_fingerprint
+        coding_plan_version
+        coding_plan_work_packet
+        coding_plan_work_packet_digest
+        session.task_id
+        task
+        task_id
+      )
+
+    graph.nodes
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce(errors, fn {node_id, node}, acc ->
+      Enum.reduce(["output_key", "output_prefix"], acc, fn attribute, inner ->
+        case Map.get(node.attrs, attribute) do
+          key when is_binary(key) ->
+            case Enum.find(immutable, &context_keys_overlap?(&1, key)) do
+              nil ->
+                inner
+
+              protected ->
+                [
+                  error("immutable_context_writer_violation", node_id, %{
+                    "attribute" => attribute,
+                    "context_key" => key,
+                    "protected_key" => protected
+                  })
+                  | inner
+                ]
+            end
+
+          _other ->
+            inner
+        end
+      end)
+    end)
+  end
+
+  defp context_keys_overlap?(left, right) do
+    left == right or String.starts_with?(left, right <> ".") or
+      String.starts_with?(right, left <> ".")
+  end
+
+  defp check_design_checkpoint_bindings(errors, graph, checkpoint, rework_max_cycles) do
+    context_keys =
+      "work_packet,packet_digest,session.task_id,task,plan_fingerprint," <>
+        "coding_plan_fingerprint,workspace_id,worker_session_id," <>
+        "worker_provider_session_id,design_attempt,design,design_digest"
+
+    expected_nodes = [
+      {"init_design_defaults",
+       %{
+         "type" => "transform",
+         "transform" => "constant",
+         "expression" => ~s({"design_attempt":1}),
+         "output_key" => "design_defaults"
+       }},
+      {"init_design_attempt",
+       %{
+         "type" => "transform",
+         "transform" => "json_extract",
+         "source_key" => "design_defaults",
+         "expression" => "design_attempt",
+         "output_key" => "design_attempt"
+       }},
+      {"freeze_coding_plan_work_packet_json",
+       %{
+         "type" => "transform",
+         "transform" => "constant",
+         "expression" => checkpoint.work_packet_json,
+         "output_key" => "coding_plan_work_packet_json"
+       }},
+      {"check_design_workspace_unchanged",
+       %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+      {"extract_design",
+       %{
+         "type" => "transform",
+         "transform" => "json_extract",
+         "source_key" => "design_response",
+         "expression" => "design",
+         "output_key" => "design"
+       }},
+      {"extract_design_digest",
+       %{
+         "type" => "transform",
+         "transform" => "json_extract",
+         "source_key" => "design_response",
+         "expression" => "design_digest",
+         "output_key" => "design_digest"
+       }},
+      {"hoist_design_response",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "worker_msg.text",
+         "output_key" => "design_response"
+       }},
+      {"prep_checkpoint_work_packet",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "coding_plan_work_packet",
+         "output_key" => "work_packet"
+       }},
+      {"prep_checkpoint_packet_digest",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "coding_plan_work_packet_digest",
+         "output_key" => "packet_digest"
+       }},
+      {"prep_checkpoint_plan_fingerprint",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "coding_plan_fingerprint",
+         "output_key" => "plan_fingerprint"
+       }},
+      {"open_design_checkpoint",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_design_checkpoint_open",
+         "context_keys" => context_keys,
+         "output_prefix" => "design_checkpoint_open",
+         "max_retries" => "0"
+       }},
+      {"hoist_design_checkpoint_request_id",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "design_checkpoint_open.request_id",
+         "output_key" => "request_id"
+       }},
+      {"await_design_checkpoint",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_design_checkpoint_await",
+         "context_keys" => "request_id," <> context_keys,
+         "param.timeout" => checkpoint.timeout_ms,
+         "output_prefix" => "design_checkpoint",
+         "max_retries" => "0"
+       }},
+      {"inc_design_attempt",
+       %{
+         "type" => "transform",
+         "transform" => "increment",
+         "source_key" => "design_attempt",
+         "output_key" => "design_attempt"
+       }},
+      {"hoist_accepted_design_evidence",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "design_checkpoint.evidence",
+         "output_key" => "accepted_design_evidence"
+       }},
+      {"hoist_accepted_design",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "design",
+         "output_key" => "accepted_design"
+       }},
+      {"hoist_accepted_design_digest",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "design_digest",
+         "output_key" => "accepted_design_digest"
+       }},
+      {"hoist_accepted_design_request_id",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "design_checkpoint.request_id",
+         "output_key" => "accepted_design_request_id"
+       }},
+      {"format_accepted_design_evidence",
+       %{
+         "type" => "transform",
+         "transform" => "format",
+         "source_key" => "accepted_design_evidence",
+         "expression" => "json",
+         "output_key" => "accepted_design_evidence_json"
+       }},
+      {"hoist_design_decision_request_id",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "design_checkpoint.request_id",
+         "output_key" => "approval_request_id"
+       }},
+      {"hoist_design_decision_note",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "design_checkpoint.note",
+         "output_key" => "approval_note"
+       }},
+      {"mark_implementation_phase",
+       %{
+         "type" => "transform",
+         "transform" => "constant",
+         "expression" => "implement",
+         "output_key" => "worker_phase"
+       }}
+    ]
+
+    errors =
+      Enum.reduce(expected_nodes, errors, fn {node_id, expected}, acc ->
+        require_design_checkpoint_node_attrs(acc, graph, node_id, expected)
+      end)
+
+    errors
+    |> check_design_checkpoint_writers(graph)
+    |> check_design_checkpoint_prompts(graph, checkpoint)
+    |> check_design_checkpoint_topology(graph, checkpoint.policy, rework_max_cycles)
+  end
+
+  defp require_design_checkpoint_node_attrs(errors, graph, node_id, expected) do
+    case Map.fetch(graph.nodes, node_id) do
+      {:ok, node} ->
+        exact_action? =
+          expected["action"] in [
+            "coding_design_checkpoint_open",
+            "coding_design_checkpoint_await"
+          ]
+
+        actual = if exact_action?, do: node.attrs, else: Map.take(node.attrs, Map.keys(expected))
+
+        if actual == expected do
+          errors
+        else
+          [
+            error("design_checkpoint_binding_mismatch", node_id, %{
+              "expected" => expected,
+              "actual" => actual
+            })
+            | errors
+          ]
+        end
+
+      :error ->
+        [error("design_checkpoint_binding_missing_node", node_id, %{}) | errors]
+    end
+  end
+
+  defp check_design_checkpoint_writers(errors, graph) do
+    expected = %{
+      "accepted_design" => ["hoist_accepted_design"],
+      "accepted_design_digest" => ["hoist_accepted_design_digest"],
+      "accepted_design_evidence" => ["hoist_accepted_design_evidence"],
+      "accepted_design_evidence_json" => ["format_accepted_design_evidence"],
+      "accepted_design_request_id" => ["hoist_accepted_design_request_id"],
+      "coding_plan_work_packet_json" => ["freeze_coding_plan_work_packet_json"],
+      "design" => ["extract_design"],
+      "design_attempt" => ["inc_design_attempt", "init_design_attempt"],
+      "design_digest" => ["extract_design_digest"],
+      "packet_digest" => ["prep_checkpoint_packet_digest"],
+      "plan_fingerprint" => ["prep_checkpoint_plan_fingerprint"],
+      "request_id" => ["hoist_design_checkpoint_request_id"],
+      "worker_phase" => ["init_worker_phase", "mark_implementation_phase"],
+      "work_packet" => ["prep_checkpoint_work_packet"]
+    }
+
+    Enum.reduce(expected, errors, fn {key, expected_nodes}, acc ->
+      actual_nodes = writer_nodes(graph, "output_key", key)
+
+      if actual_nodes == expected_nodes do
+        acc
+      else
+        [
+          error("design_checkpoint_writer_violation", nil, %{
+            "context_key" => key,
+            "expected_nodes" => expected_nodes,
+            "actual_nodes" => actual_nodes
+          })
+          | acc
+        ]
+      end
+    end)
+  end
+
+  defp check_design_checkpoint_prompts(errors, graph, checkpoint) do
+    initial_phase = if checkpoint.policy == "design_required", do: "design", else: "implement"
+
+    errors =
+      require_design_checkpoint_node_attrs(errors, graph, "init_worker_phase", %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => initial_phase,
+        "output_key" => "worker_phase"
+      })
+
+    if checkpoint.policy == "design_required" do
+      prompt_requirements = [
+        {"build_design_prompt",
+         [
+           "DESIGN PHASE ONLY",
+           "{value}",
+           "{ctx.coding_plan_work_packet_json}",
+           "MUST NOT edit",
+           "MUST NOT create commits",
+           "design_digest"
+         ]},
+        {"build_design_rework_prompt",
+         [
+           "DESIGN REWORK PHASE ONLY",
+           "{value}",
+           "{ctx.coding_plan_work_packet_json}",
+           "{ctx.approval_note}",
+           "MUST NOT edit",
+           "MUST NOT create commits",
+           "design_digest"
+         ]},
+        {"build_implement_prompt",
+         [
+           "IMPLEMENTATION PHASE",
+           "{value}",
+           "{ctx.coding_plan_work_packet_json}",
+           "{ctx.accepted_design}",
+           "{ctx.accepted_design_digest}",
+           "{ctx.accepted_design_evidence_json}"
+         ]}
+      ]
+
+      Enum.reduce(prompt_requirements, errors, fn {node_id, required}, acc ->
+        expression =
+          graph.nodes
+          |> Map.get(node_id, %Graph.Node{id: node_id, attrs: %{}})
+          |> then(&Map.get(&1.attrs, "expression"))
+
+        if is_binary(expression) and Enum.all?(required, &String.contains?(expression, &1)) do
+          acc
+        else
+          [
+            error("design_checkpoint_prompt_violation", node_id, %{
+              "required_fragments" => required
+            })
+            | acc
+          ]
+        end
+      end)
+    else
+      errors
+    end
+  end
+
+  defp check_design_checkpoint_topology(errors, graph, policy, rework_max_cycles) do
+    common = [
+      {"init_design_defaults", [{"init_design_attempt", nil}]},
+      {"init_design_attempt", [{"init_worker_phase", nil}]},
+      {"init_worker_phase", [{"freeze_coding_plan_work_packet_json", nil}]},
+      {"freeze_coding_plan_work_packet_json", [{"build_design_prompt", nil}]},
+      {"build_design_prompt", [{"capture_pre_turn_workspace", nil}]},
+      {"route_worker_phase",
+       [
+         {"check_design_workspace_unchanged", "context.worker_phase=design"},
+         {"route_turn_progress", "context.worker_phase=implement"},
+         {"error_design_worker_phase_invalid", nil}
+       ]},
+      {"check_design_workspace_unchanged",
+       [
+         {"error_design_modified_workspace", nil},
+         {"hoist_design_response", "context.turn_progressed=false"}
+       ]},
+      {"hoist_design_response", [{"extract_design", nil}]},
+      {"extract_design",
+       [
+         {"error_design_response_invalid", "outcome=fail"},
+         {"extract_design_digest", "outcome=success"}
+       ]},
+      {"extract_design_digest",
+       [
+         {"error_design_response_invalid", "outcome=fail"},
+         {"prep_checkpoint_work_packet", "outcome=success"}
+       ]},
+      {"prep_checkpoint_work_packet", [{"prep_checkpoint_packet_digest", nil}]},
+      {"prep_checkpoint_packet_digest", [{"prep_checkpoint_plan_fingerprint", nil}]},
+      {"prep_checkpoint_plan_fingerprint", [{"open_design_checkpoint", nil}]},
+      {"open_design_checkpoint",
+       [
+         {"error_design_checkpoint_open_failed", "outcome=fail"},
+         {"hoist_design_checkpoint_request_id", "outcome=success"}
+       ]},
+      {"hoist_design_checkpoint_request_id", [{"await_design_checkpoint", nil}]},
+      {"await_design_checkpoint",
+       [
+         {"error_design_checkpoint_await_failed", "outcome=fail"},
+         {"route_design_checkpoint_outcome", "outcome=success"}
+       ]},
+      {"route_design_checkpoint_outcome",
+       [
+         {"hoist_accepted_design_evidence",
+          "context.design_checkpoint.checkpoint_outcome=approve"},
+         {"hoist_design_decision_request_id",
+          "context.design_checkpoint.checkpoint_outcome=rework"},
+         {"hoist_design_decision_request_id",
+          "context.design_checkpoint.checkpoint_outcome=deny"},
+         {"error_design_checkpoint_timeout",
+          "context.design_checkpoint.checkpoint_outcome=timeout"},
+         {"error_design_checkpoint_outcome_invalid", nil}
+       ]},
+      {"hoist_accepted_design_evidence", [{"hoist_accepted_design", nil}]},
+      {"hoist_accepted_design", [{"hoist_accepted_design_digest", nil}]},
+      {"hoist_accepted_design_digest", [{"hoist_accepted_design_request_id", nil}]},
+      {"hoist_accepted_design_request_id", [{"format_accepted_design_evidence", nil}]},
+      {"format_accepted_design_evidence", [{"mark_implementation_phase", nil}]},
+      {"mark_implementation_phase", [{"build_implement_prompt", nil}]},
+      {"hoist_design_decision_request_id", [{"hoist_design_decision_note", nil}]},
+      {"hoist_design_decision_note", [{"route_design_nonapproval", nil}]},
+      {"route_design_nonapproval",
+       [
+         {"mark_approval_denied_error", "context.design_checkpoint.checkpoint_outcome=deny"},
+         {"check_design_rework_total_budget",
+          "context.design_checkpoint.checkpoint_outcome=rework"},
+         {"error_design_checkpoint_outcome_invalid", nil}
+       ]},
+      {"check_design_rework_total_budget",
+       [
+         {"mark_design_rework_exhausted_error",
+          "context.total_rework_count>=#{rework_max_cycles}"},
+         {"inc_design_total_rework_count", "context.total_rework_count<#{rework_max_cycles}"}
+       ]},
+      {"mark_design_rework_exhausted_error", [{"status_rework_exhausted", nil}]},
+      {"inc_design_total_rework_count", [{"inc_design_attempt", nil}]},
+      {"inc_design_attempt", [{"mark_design_rework_kind", nil}]},
+      {"mark_design_rework_kind", [{"mark_design_rework_iteration", nil}]},
+      {"mark_design_rework_iteration", [{"build_design_rework_prompt", nil}]},
+      {"build_design_rework_prompt", [{"capture_pre_turn_workspace", nil}]}
+    ]
+
+    errors =
+      Enum.reduce(common, errors, fn {node_id, expected}, acc ->
+        require_design_exact_outgoing(acc, graph, node_id, expected)
+      end)
+
+    {first_prompt_edges, post_inspect_edges, seed_count, implementation_predecessors,
+     progress_predecessors} =
+      case policy do
+        "design_required" ->
+          {
+            [{"init_design_defaults", nil}],
+            [{"route_worker_phase", nil}],
+            0,
+            [{"mark_implementation_phase", nil}],
+            [{"route_worker_phase", "context.worker_phase=implement"}]
+          }
+
+        "direct" ->
+          {
+            [{"build_implement_prompt", nil}],
+            [{"route_turn_progress", nil}],
+            2,
+            [
+              {"hoist_worker_provider_session_id", nil},
+              {"mark_implementation_phase", nil}
+            ],
+            [
+              {"hoist_workspace_fingerprint", nil},
+              {"route_worker_phase", "context.worker_phase=implement"}
+            ]
+          }
+      end
+
+    errors
+    |> require_design_exact_outgoing(
+      graph,
+      "hoist_worker_provider_session_id",
+      first_prompt_edges
+    )
+    |> require_design_exact_outgoing(
+      graph,
+      "hoist_workspace_fingerprint",
+      post_inspect_edges
+    )
+    |> require_design_exact_incoming(
+      graph,
+      "build_implement_prompt",
+      implementation_predecessors
+    )
+    |> require_design_exact_incoming(
+      graph,
+      "route_turn_progress",
+      progress_predecessors
+    )
+    |> require_design_exact_incoming(
+      graph,
+      "mark_approval_denied_error",
+      [
+        {"hoist_approval_note", nil},
+        {"route_design_nonapproval", "context.design_checkpoint.checkpoint_outcome=deny"}
+      ]
+    )
+    |> check_design_seed_edges(graph, seed_count)
+    |> check_design_approval_dominance(graph, policy)
+  end
+
+  defp require_design_exact_outgoing(errors, graph, node_id, expected) do
+    actual =
+      graph
+      |> Graph.outgoing_edges(node_id)
+      |> Enum.map(&{&1.to, Map.get(&1.attrs, "condition")})
+      |> Enum.sort()
+
+    expected = Enum.sort(expected)
+
+    if actual == expected do
+      errors
+    else
+      [
+        error("design_checkpoint_topology_mismatch", node_id, %{
+          "direction" => "outgoing",
+          "expected" => Enum.map(expected, &edge_binding_to_json/1),
+          "actual" => Enum.map(actual, &edge_binding_to_json/1)
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp require_design_exact_incoming(errors, graph, node_id, expected) do
+    actual =
+      graph
+      |> Graph.incoming_edges(node_id)
+      |> Enum.map(&{&1.from, Map.get(&1.attrs, "condition")})
+      |> Enum.sort()
+
+    expected = Enum.sort(expected)
+
+    if actual == expected do
+      errors
+    else
+      [
+        error("design_checkpoint_topology_mismatch", node_id, %{
+          "direction" => "incoming",
+          "expected" => Enum.map(expected, &edge_binding_to_json/1),
+          "actual" => Enum.map(actual, &edge_binding_to_json/1)
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp check_design_seed_edges(errors, graph, expected_count) do
+    seeds =
+      MapSet.new([
+        {"route_commit_interaction", "init_design_defaults"},
+        {"route_commit_interaction", "route_worker_phase"}
+      ])
+
+    actual =
+      graph.edges
+      |> Enum.filter(fn edge ->
+        MapSet.member?(seeds, {edge.from, edge.to}) and
+          Map.get(edge.attrs, "condition") ==
+            "context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"
+      end)
+      |> Enum.map(&{&1.from, &1.to, Map.get(&1.attrs, "condition")})
+      |> Enum.sort()
+
+    if length(actual) == expected_count do
+      errors
+    else
+      [
+        error("design_checkpoint_topology_mismatch", nil, %{
+          "checkpoint_seed_count" => length(actual),
+          "expected_checkpoint_seed_count" => expected_count
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp check_design_approval_dominance(errors, _graph, "direct"), do: errors
+
+  defp check_design_approval_dominance(errors, graph, "design_required") do
+    case Graph.find_start_node(graph) do
+      nil ->
+        errors
+
+      start ->
+        reachable = reachable_from(graph, start.id)
+        dominators = compute_dominators(graph, start.id, reachable)
+
+        errors
+        |> require_dominates(
+          "check_design_workspace_unchanged",
+          "open_design_checkpoint",
+          reachable,
+          dominators,
+          "design_checkpoint_workspace_unchanged_gate"
+        )
+        |> require_dominates(
+          "open_design_checkpoint",
+          "await_design_checkpoint",
+          reachable,
+          dominators,
+          "design_checkpoint_open_await_boundary"
+        )
+        |> require_dominates(
+          "await_design_checkpoint",
+          "mark_implementation_phase",
+          reachable,
+          dominators,
+          "design_checkpoint_approval_gate"
+        )
+        |> require_dominates(
+          "hoist_accepted_design_evidence",
+          "mark_implementation_phase",
+          reachable,
+          dominators,
+          "design_checkpoint_accepted_evidence_gate"
+        )
+        |> require_dominates(
+          "mark_implementation_phase",
+          "build_implement_prompt",
+          reachable,
+          dominators,
+          "design_checkpoint_implementation_phase_gate"
+        )
+    end
   end
 
   defp check_worker_recovery_bindings(errors, graph, policy, continuity) do
