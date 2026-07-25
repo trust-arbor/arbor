@@ -151,6 +151,10 @@ config :arbor_comms, :limitless, enabled: false
 config :arbor_comms, :email, enabled: false
 config :arbor_comms, :handler, enabled: false
 
+# Focused durability tests inject private node-restart backends. Ordinary tests
+# must never hydrate or mutate the development interaction journal.
+config :arbor_comms, :durable_interaction_store, backend: nil
+
 # Test database — adapter-aware
 # Note: The Ecto SQLite3 adapter does not support async tests
 # when used with Ecto.Adapters.SQL.Sandbox

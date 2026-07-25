@@ -88,6 +88,13 @@ config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,
   event_log_backend: Arbor.Persistence.EventLog.Postgres
 
+# Durable interaction terminals use the same SQL record store. Despite the
+# backend's historical name, it supports both configured Ecto adapters.
+config :arbor_comms, :durable_interaction_store,
+  backend: Arbor.Persistence.QueryableStore.Postgres,
+  namespace: :durable_interactions,
+  opts: [repo: Arbor.Persistence.Repo]
+
 # Agent — auto-start infrastructure agents on boot.
 #
 # DISABLED 2026-06-22: the at-boot diagnostician seed was broken — its identity
