@@ -2142,7 +2142,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     context_keys =
       "work_packet,packet_digest,session.task_id,task,plan_fingerprint," <>
         "coding_plan_fingerprint,workspace_id,worker_session_id," <>
-        "worker_provider_session_id,design_attempt,design,design_digest"
+        "worker_provider_session_id,design_attempt,design,design_digest," <>
+        "session.run_deadline_unix_ms"
 
     expected_nodes = [
       {"init_design_defaults",
@@ -2219,6 +2220,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "target" => "action",
          "action" => "coding_design_checkpoint_open",
          "context_keys" => context_keys,
+         "param.timeout" => checkpoint.timeout_ms,
          "output_prefix" => "design_checkpoint_open",
          "max_retries" => "0"
        }},
@@ -2234,8 +2236,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "type" => "exec",
          "target" => "action",
          "action" => "coding_design_checkpoint_await",
-         "context_keys" => "request_id," <> context_keys <> ",session.run_deadline_unix_ms",
-         "param.timeout" => checkpoint.timeout_ms,
+         "context_keys" =>
+           "request_id,design_checkpoint_open.operation_id," <>
+             "design_checkpoint_open.owner_deadline_unix_ms,design_checkpoint_open.evidence," <>
+             context_keys,
          "output_prefix" => "design_checkpoint",
          "max_retries" => "0"
        }},
@@ -2362,22 +2366,43 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "work_packet" => ["prep_checkpoint_work_packet"]
     }
 
-    Enum.reduce(expected, errors, fn {key, expected_nodes}, acc ->
-      actual_nodes = writer_nodes(graph, "output_key", key)
+    errors =
+      Enum.reduce(expected, errors, fn {key, expected_nodes}, acc ->
+        actual_nodes = writer_nodes(graph, "output_key", key)
 
-      if actual_nodes == expected_nodes do
-        acc
-      else
-        [
-          error("design_checkpoint_writer_violation", nil, %{
-            "context_key" => key,
-            "expected_nodes" => expected_nodes,
-            "actual_nodes" => actual_nodes
-          })
-          | acc
-        ]
-      end
-    end)
+        if actual_nodes == expected_nodes do
+          acc
+        else
+          [
+            error("design_checkpoint_writer_violation", nil, %{
+              "attribute" => "output_key",
+              "context_key" => key,
+              "expected_nodes" => expected_nodes,
+              "actual_nodes" => actual_nodes
+            })
+            | acc
+          ]
+        end
+      end)
+
+    # Await consumes the Open receipt through this prefix. A second producer
+    # could overwrite request_id, operation_id, deadline, or evidence between
+    # Open and Await, so the prefix is a closed authority boundary.
+    actual_nodes = writer_nodes(graph, "output_prefix", "design_checkpoint_open")
+
+    if actual_nodes == ["open_design_checkpoint"] do
+      errors
+    else
+      [
+        error("design_checkpoint_writer_violation", nil, %{
+          "attribute" => "output_prefix",
+          "context_key" => "design_checkpoint_open",
+          "expected_nodes" => ["open_design_checkpoint"],
+          "actual_nodes" => actual_nodes
+        })
+        | errors
+      ]
+    end
   end
 
   defp check_design_checkpoint_prompts(errors, graph, checkpoint) do

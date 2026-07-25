@@ -106,8 +106,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              "param.fallback_to_fresh_on_resume_unavailable"
            )
 
-    assert graph.nodes["await_design_checkpoint"].attrs["context_keys"] =~
+    assert graph.nodes["open_design_checkpoint"].attrs["context_keys"] =~
              "session.run_deadline_unix_ms"
+
+    assert graph.nodes["await_design_checkpoint"].attrs["context_keys"] =~
+             "design_checkpoint_open.operation_id,design_checkpoint_open.owner_deadline_unix_ms," <>
+               "design_checkpoint_open.evidence"
 
     assert :ok =
              preflight(graph, profile["semantic_policy"],
@@ -144,14 +148,20 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     checkpoint_mutations = [
       update_in(
-        graph.nodes["await_design_checkpoint"].attrs,
+        graph.nodes["open_design_checkpoint"].attrs,
         &Map.update!(&1, "context_keys", fn keys ->
           String.replace(keys, ",session.run_deadline_unix_ms", "")
         end)
       ),
       update_in(
-        graph.nodes["await_design_checkpoint"].attrs,
+        graph.nodes["open_design_checkpoint"].attrs,
         &Map.put(&1, "param.timeout", plan.budgets["inactivity_timeout_ms"] - 1)
+      ),
+      update_in(
+        graph.nodes["await_design_checkpoint"].attrs,
+        &Map.update!(&1, "context_keys", fn keys ->
+          String.replace(keys, "design_checkpoint_open.evidence,", "")
+        end)
       ),
       update_in(
         graph.nodes["open_recovery_worker"].attrs,
@@ -225,6 +235,38 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                ]
              end)
     end
+  end
+
+  test "security regression: only Open may write the durable design receipt prefix", ctx do
+    plan = v2_plan!()
+    assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutated =
+      update_in(
+        graph.nodes["hoist_design_response"].attrs,
+        &Map.put(&1, "output_prefix", "design_checkpoint_open")
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(mutated, profile["semantic_policy"],
+               review_profile: "binding",
+               checkpoint_policy: "design_required",
+               checkpoint_work_packet_json: packet_json,
+               design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+             )
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "design_checkpoint_writer_violation" and
+               error["detail"] == %{
+                 "attribute" => "output_prefix",
+                 "context_key" => "design_checkpoint_open",
+                 "expected_nodes" => ["open_design_checkpoint"],
+                 "actual_nodes" => ["hoist_design_response", "open_design_checkpoint"]
+               }
+           end)
   end
 
   test "validation observation bindings and protected writers fail closed", ctx do

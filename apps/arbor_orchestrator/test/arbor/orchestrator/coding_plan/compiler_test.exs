@@ -228,7 +228,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 76_950
+    assert byte_size(ctx.template_source) == 77_093
     assert map_size(graph.nodes) == 228
     assert length(graph.edges) == 330
     assert byte_size(ctx.template_source) <= 262_144
@@ -342,17 +342,24 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       refute Map.has_key?(attrs, "param.coding_plan_fingerprint")
     end
 
-    assert await["context_keys"] ==
-             "request_id,work_packet,packet_digest,session.task_id,task,plan_fingerprint," <>
+    assert open["context_keys"] ==
+             "work_packet,packet_digest,session.task_id,task,plan_fingerprint," <>
                "coding_plan_fingerprint,workspace_id,worker_session_id," <>
                "worker_provider_session_id,design_attempt,design,design_digest," <>
                "session.run_deadline_unix_ms"
 
-    assert await["param.timeout"] ==
+    assert open["param.timeout"] ==
              min(
                plan.budgets["inactivity_timeout_ms"],
                plan.budgets["wall_clock_ms"]
              )
+
+    assert await["context_keys"] ==
+             "request_id,design_checkpoint_open.operation_id," <>
+               "design_checkpoint_open.owner_deadline_unix_ms,design_checkpoint_open.evidence," <>
+               open["context_keys"]
+
+    refute Map.has_key?(await, "param.timeout")
 
     refute Map.has_key?(
              node_attrs(graph, "open_recovery_worker"),

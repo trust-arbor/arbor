@@ -752,8 +752,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              work_packet_json
            ),
          {:ok, graph} <-
-           update_node(graph, "await_design_checkpoint", fn attrs ->
-             with :ok <- require_action_attrs(attrs, "coding_design_checkpoint_await") do
+           update_node(graph, "open_design_checkpoint", fn attrs ->
+             with :ok <- require_action_attrs(attrs, "coding_design_checkpoint_open") do
                {:ok,
                 attrs
                 |> Map.put("param.timeout", design_checkpoint_timeout_ms(plan))

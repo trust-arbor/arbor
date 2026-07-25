@@ -145,30 +145,25 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   end
 
   @doc """
-  Return the design-checkpoint wait bounded by its static timeout and the
-  executor owner's durable absolute run deadline.
+  Construct the absolute deadline persisted with a durable design request.
 
-  `run_deadline_unix_ms` is mandatory for this pipeline-internal action and
-  must be an integer Unix timestamp in milliseconds. Missing or malformed
-  deadlines fail closed. An elapsed deadline returns `:elapsed`, allowing the
-  Await action to produce its existing structured timeout without consulting
-  Comms. When context contains the owner deadline it is authoritative; the
-  flattened action param is accepted only when context does not carry it. A
-  caller-supplied future deadline can therefore extend neither the owner's
-  remaining time nor the static timeout.
+  Open owns deadline arming: the requested durable deadline is the earlier of
+  the Engine owner's absolute run deadline and `now + timeout`. An already
+  elapsed owner deadline is rejected before Comms is consulted.
   """
-  def await_timeout(context, params) when is_map(context) and is_map(params) do
-    with {:ok, static_timeout} <- timeout(context, params),
-         {:ok, deadline_unix_ms} <- run_deadline_unix_ms(params, context) do
-      remaining_ms = deadline_unix_ms - System.system_time(:millisecond)
+  def durable_request_deadline(context, params, now_ms \\ System.system_time(:millisecond))
 
-      if remaining_ms > 0,
-        do: {:ok, min(static_timeout, remaining_ms)},
-        else: {:ok, :elapsed}
+  def durable_request_deadline(context, params, now_ms)
+      when is_map(context) and is_map(params) and is_integer(now_ms) do
+    with {:ok, static_timeout} <- timeout(context, params),
+         {:ok, owner_deadline_unix_ms} <- run_deadline_unix_ms(params, context),
+         :ok <- future_deadline(owner_deadline_unix_ms, now_ms) do
+      {:ok, min(owner_deadline_unix_ms, now_ms + static_timeout)}
     end
   end
 
-  def await_timeout(_context, _params), do: {:error, :invalid_design_checkpoint_input}
+  def durable_request_deadline(_context, _params, _now_ms),
+    do: {:error, :invalid_design_checkpoint_input}
 
   @doc false
   def comms_boundary(context) when is_map(context) do
@@ -217,6 +212,21 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
 
   def string_value(_value), do: nil
 
+  @doc false
+  def validate_persisted_deadline(deadline) when is_integer(deadline) and deadline > 0,
+    do: {:ok, deadline}
+
+  def validate_persisted_deadline(_deadline),
+    do: {:error, :invalid_design_checkpoint_persisted_deadline}
+
+  @doc false
+  def validate_operation_id(value) do
+    case string_value(value) do
+      value when is_binary(value) -> validate_identifier(value, :operation_id)
+      _ -> {:error, :design_checkpoint_operation_id_required}
+    end
+  end
+
   defp normalize_work_packet(value) do
     case WorkPacket.normalize(value) do
       {:ok, packet} -> {:ok, packet}
@@ -255,6 +265,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
 
   defp validate_run_deadline({:ok, _deadline}),
     do: {:error, :invalid_design_checkpoint_run_deadline}
+
+  defp future_deadline(deadline, now_ms) when deadline > now_ms, do: :ok
+  defp future_deadline(_deadline, _now_ms), do: {:error, :design_checkpoint_run_deadline_elapsed}
 
   defp validate_packet_digest(packet, supplied) do
     with {:ok, expected} <- WorkPacket.digest(packet),
@@ -596,7 +609,17 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
       design_attempt: [type: :integer, required: true, doc: "One-based design attempt"],
       design: [type: :string, required: true, doc: "Exact worker design text"],
       design_digest: [type: :string, required: true, doc: "Exact sha256: design digest"],
-      agent_id: [type: :string, required: false, doc: "Owning agent identity"]
+      agent_id: [type: :string, required: false, doc: "Owning agent identity"],
+      run_deadline_unix_ms: [
+        type: :integer,
+        required: true,
+        doc: "Executor-owned absolute run deadline in Unix milliseconds"
+      ],
+      timeout: [
+        type: :integer,
+        required: true,
+        doc: "Static design-checkpoint timeout in milliseconds"
+      ]
     ]
 
   alias Arbor.Actions.Coding.DesignCheckpoint
@@ -618,7 +641,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
       design_attempt: :control,
       design: :data,
       design_digest: :control,
-      agent_id: :control
+      agent_id: :control,
+      run_deadline_unix_ms: :control,
+      timeout: :control
     }
   end
 
@@ -629,20 +654,25 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
   def run(params, context) when is_map(params) and is_map(context) do
     with {:ok, binding} <- DesignCheckpoint.build_binding(params, context),
          {:ok, agent_id} <- required_agent_id(binding),
+         {:ok, requested_deadline_unix_ms} <-
+           DesignCheckpoint.durable_request_deadline(context, params),
          {:ok, comms} <- DesignCheckpoint.comms_boundary(context),
          :ok <- DesignCheckpoint.durable_ready?(comms),
          {:ok, operator_id} <- operator_id(comms, agent_id),
          {:ok, interaction} <- interaction(binding, agent_id, operator_id),
-         {:ok, returned_id} <-
-           DesignCheckpoint.call(comms, :request_interaction, [
+         {:ok, receipt} <-
+           DesignCheckpoint.call(comms, :request_durable_interaction, [
              interaction,
-             [durability: :node_restart]
+             [owner_deadline_unix_ms: requested_deadline_unix_ms]
            ]),
-         :ok <- same_request_id(returned_id, binding.request_id) do
+         {:ok, operation_id, owner_deadline_unix_ms} <-
+           durable_receipt(receipt, binding.request_id, requested_deadline_unix_ms) do
       {:ok,
        %{
          "checkpoint_outcome" => "pending",
          "request_id" => binding.request_id,
+         "operation_id" => operation_id,
+         "owner_deadline_unix_ms" => owner_deadline_unix_ms,
          "evidence" => binding.evidence
        }}
     else
@@ -687,10 +717,52 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
     end
   end
 
+  defp durable_receipt(receipt, expected_request_id, requested_deadline_unix_ms)
+       when is_map(receipt) do
+    with {:ok, request_id} <- receipt_value(receipt, :request_id),
+         :ok <- same_request_id(request_id, expected_request_id),
+         {:ok, operation_id} <- receipt_value(receipt, :operation_id),
+         {:ok, operation_id} <- DesignCheckpoint.validate_operation_id(operation_id),
+         {:ok, owner_deadline_unix_ms} <- receipt_value(receipt, :owner_deadline_unix_ms),
+         {:ok, owner_deadline_unix_ms} <-
+           DesignCheckpoint.validate_persisted_deadline(owner_deadline_unix_ms),
+         :ok <- no_deadline_extension(owner_deadline_unix_ms, requested_deadline_unix_ms) do
+      {:ok, operation_id, owner_deadline_unix_ms}
+    end
+  end
+
+  defp durable_receipt(_receipt, _expected_request_id, _requested_deadline_unix_ms),
+    do: {:error, :invalid_design_checkpoint_durable_receipt}
+
+  defp receipt_value(receipt, key) do
+    atom_value = Map.get(receipt, key)
+    string_value = Map.get(receipt, Atom.to_string(key))
+
+    cond do
+      is_nil(atom_value) and is_nil(string_value) ->
+        {:error, {:design_checkpoint_durable_receipt_missing, key}}
+
+      not is_nil(atom_value) and not is_nil(string_value) and atom_value !== string_value ->
+        {:error, {:design_checkpoint_durable_receipt_conflict, key}}
+
+      true ->
+        {:ok, atom_value || string_value}
+    end
+  end
+
   defp same_request_id(returned_id, expected) when returned_id === expected, do: :ok
 
   defp same_request_id(_returned_id, _expected),
     do: {:error, :design_checkpoint_request_id_mismatch}
+
+  # A duplicate request may return the earlier persisted deadline, but it may
+  # never widen the cutoff supplied by this Open invocation.
+  defp no_deadline_extension(receipt_deadline, requested_deadline)
+       when receipt_deadline <= requested_deadline,
+       do: :ok
+
+  defp no_deadline_extension(_receipt_deadline, _requested_deadline),
+    do: {:error, :design_checkpoint_durable_deadline_extended}
 end
 
 defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
@@ -698,11 +770,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
   Await the durable CodingPlan v2 design approval and return a structured
   approve, rework, deny, or timeout branch.
 
-  This pipeline-internal action is a local write/wait. It reconstructs all
-  evidence and recomputes the request id before consulting the public comms
-  facade, so a caller-provided id cannot select another approval. It also
-  requires the executor owner's absolute Unix-ms run deadline and never waits
-  longer than either the static DOT timeout or the positive time remaining.
+  This action is observational and replay-safe. Open already persisted the
+  durable interaction identity and deadline; Await verifies that identity
+  against reconstructed evidence before asking Comms to observe the response.
   """
 
   use Jido.Action,
@@ -731,12 +801,22 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       design: [type: :string, required: true, doc: "Exact worker design text"],
       design_digest: [type: :string, required: true, doc: "Exact sha256: design digest"],
       agent_id: [type: :string, required: false, doc: "Owning agent identity"],
+      operation_id: [
+        type: :string,
+        required: true,
+        doc: "Persisted durable interaction operation id"
+      ],
+      owner_deadline_unix_ms: [
+        type: :integer,
+        required: true,
+        doc: "Persisted durable interaction deadline in Unix milliseconds"
+      ],
+      evidence: [type: :map, required: true, doc: "Exact Open evidence envelope"],
       run_deadline_unix_ms: [
         type: :integer,
         required: true,
         doc: "Executor-owned absolute run deadline in Unix milliseconds"
-      ],
-      timeout: [type: :integer, required: false, doc: "Wait timeout in milliseconds"]
+      ]
     ]
 
   alias Arbor.Actions.Coding.DesignCheckpoint
@@ -760,12 +840,15 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       design: :data,
       design_digest: :control,
       agent_id: :control,
-      run_deadline_unix_ms: :control,
-      timeout: :data
+      operation_id: :control,
+      owner_deadline_unix_ms: :control,
+      evidence: :control,
+      run_deadline_unix_ms: :control
     }
   end
 
-  def effect_class, do: :local_write
+  def effect_class, do: :read
+  def execution_idempotency, do: :read_only
 
   @impl true
   def run(params, context) when is_map(params) and is_map(context) do
@@ -774,8 +857,13 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
          {:ok, _validated_id} <- ApprovalAnswer.validate_request_id(supplied_id),
          :ok <- same_request_id(supplied_id, binding.request_id),
          {:ok, agent_id} <- required_agent_id(binding),
-         {:ok, timeout} <- DesignCheckpoint.await_timeout(context, params) do
-      await(timeout, binding, agent_id, context)
+         {:ok, operation_id} <- supplied_operation_id(params, context),
+         {:ok, supplied_evidence} <- supplied_evidence(params, context),
+         :ok <- same_evidence(supplied_evidence, binding.evidence),
+         {:ok, owner_deadline_unix_ms} <- supplied_owner_deadline(params, context),
+         {:ok, run_deadline_unix_ms} <- run_deadline_unix_ms(params, context),
+         :ok <- within_owner_deadline(owner_deadline_unix_ms, run_deadline_unix_ms) do
+      await(binding, agent_id, operation_id, owner_deadline_unix_ms, context)
     else
       {:error, reason} -> {:error, reason}
     end
@@ -799,20 +887,76 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
   defp same_request_id(id, id), do: :ok
   defp same_request_id(_supplied, _expected), do: {:error, :design_checkpoint_request_id_mismatch}
 
-  defp await(:elapsed, binding, _agent_id, _context),
-    do: settle({:error, :timeout}, binding)
+  defp supplied_operation_id(params, context) do
+    params
+    |> value(context, :operation_id)
+    |> DesignCheckpoint.validate_operation_id()
+  end
 
-  defp await(timeout, binding, agent_id, context) when is_integer(timeout) and timeout > 0 do
+  defp supplied_evidence(params, context) do
+    case value(params, context, :evidence) do
+      evidence when is_map(evidence) -> {:ok, evidence}
+      _ -> {:error, :design_checkpoint_evidence_required}
+    end
+  end
+
+  defp supplied_owner_deadline(params, context) do
+    params
+    |> value(context, :owner_deadline_unix_ms)
+    |> DesignCheckpoint.validate_persisted_deadline()
+  end
+
+  defp run_deadline_unix_ms(params, context) do
+    case deadline_input(context) do
+      :missing -> params |> deadline_input() |> validate_run_deadline()
+      context_input -> validate_run_deadline(context_input)
+    end
+  end
+
+  defp await(binding, agent_id, operation_id, owner_deadline_unix_ms, context) do
     with {:ok, comms} <- DesignCheckpoint.comms_boundary(context) do
       result =
-        DesignCheckpoint.call(comms, :await_interaction_response, [
+        DesignCheckpoint.call(comms, :await_durable_interaction_response, [
           binding.request_id,
           agent_id,
-          [timeout: timeout]
+          [operation_id: operation_id, owner_deadline_unix_ms: owner_deadline_unix_ms]
         ])
 
       settle(result, binding)
     end
+  end
+
+  defp same_evidence(evidence, expected) when evidence === expected, do: :ok
+  defp same_evidence(_evidence, _expected), do: {:error, :design_checkpoint_evidence_mismatch}
+
+  defp within_owner_deadline(owner_deadline, run_deadline) when owner_deadline <= run_deadline,
+    do: :ok
+
+  defp within_owner_deadline(_owner_deadline, _run_deadline),
+    do: {:error, :design_checkpoint_owner_deadline_exceeds_run_deadline}
+
+  defp deadline_input(source) do
+    case {Map.fetch(source, :run_deadline_unix_ms), Map.fetch(source, "run_deadline_unix_ms")} do
+      {:error, :error} -> :missing
+      {{:ok, deadline}, :error} -> {:ok, deadline}
+      {:error, {:ok, deadline}} -> {:ok, deadline}
+      {{:ok, deadline}, {:ok, deadline}} -> {:ok, deadline}
+      {{:ok, _atom_deadline}, {:ok, _string_deadline}} -> :conflict
+    end
+  end
+
+  defp validate_run_deadline(:missing), do: {:error, :design_checkpoint_run_deadline_required}
+  defp validate_run_deadline(:conflict), do: {:error, :invalid_design_checkpoint_run_deadline}
+
+  defp validate_run_deadline({:ok, deadline}) when is_integer(deadline) and deadline > 0,
+    do: {:ok, deadline}
+
+  defp validate_run_deadline({:ok, _deadline}),
+    do: {:error, :invalid_design_checkpoint_run_deadline}
+
+  defp value(primary, secondary, key) do
+    Map.get(primary, key) || Map.get(primary, Atom.to_string(key)) || Map.get(secondary, key) ||
+      Map.get(secondary, Atom.to_string(key))
   end
 
   defp settle({:ok, response, metadata}, binding) do

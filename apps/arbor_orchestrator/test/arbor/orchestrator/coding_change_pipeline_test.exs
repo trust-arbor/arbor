@@ -13,6 +13,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   @moduletag :coding_change_pipeline
 
   @pipeline_path "apps/arbor_orchestrator/priv/pipelines/coding-change-v1.dot"
+  @fixture_run_deadline_unix_ms 4_102_444_800_000
 
   @exec_actions ~w(
     coding_workspace_acquire
@@ -356,11 +357,14 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
     defp design_checkpoint_open_response(args) do
       attempt = Map.get(args, "design_attempt") || Map.get(args, :design_attempt)
+      run_deadline = Map.get(args, "run_deadline_unix_ms") || Map.get(args, :run_deadline_unix_ms)
 
       {:ok,
        %{
          checkpoint_outcome: "pending",
          request_id: "irq_design_fixture_#{attempt}",
+         operation_id: "op_design_fixture_#{attempt}",
+         owner_deadline_unix_ms: run_deadline - 100,
          evidence: %{}
        }}
     end
@@ -1251,7 +1255,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "retain_workspace" => "true",
         "submit_review" => "true",
         "session.agent_id" => "agent_fixture",
-        "session.task_id" => "task_fixture"
+        "session.task_id" => "task_fixture",
+        "session.run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
       }
       |> Map.merge(initial_overrides)
 
@@ -1278,7 +1283,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       compilation.initial_values
       |> Map.merge(%{
         "session.agent_id" => "agent_fixture",
-        "session.task_id" => "task_fixture"
+        "session.task_id" => "task_fixture",
+        "session.run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
       })
 
     {result, calls} = run_fixture(scenario, initial, compilation.dot_source)
@@ -1447,6 +1453,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       design_attempt
       design
       design_digest
+      run_deadline_unix_ms
     )
 
     assert Map.take(await_args, identity_keys) == Map.take(open_args, identity_keys)
@@ -1467,7 +1474,13 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
            }
 
     assert await_args["request_id"] == "irq_design_fixture_#{attempt}"
-    assert await_args["timeout"] === plan.budgets["inactivity_timeout_ms"]
+    assert open_args["timeout"] === plan.budgets["inactivity_timeout_ms"]
+    refute Map.has_key?(await_args, "timeout")
+    assert open_args["run_deadline_unix_ms"] == @fixture_run_deadline_unix_ms
+    assert await_args["run_deadline_unix_ms"] == @fixture_run_deadline_unix_ms
+    assert await_args["operation_id"] == "op_design_fixture_#{attempt}"
+    assert await_args["owner_deadline_unix_ms"] == @fixture_run_deadline_unix_ms - 100
+    assert await_args["evidence"] == %{}
   end
 
   defp called?(calls, action_name), do: Enum.any?(calls, fn {n, _} -> n == action_name end)

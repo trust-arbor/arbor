@@ -378,7 +378,8 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="coding_design_checkpoint_open",
-    context_keys="work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest",
+    context_keys="work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest,session.run_deadline_unix_ms",
+    param.timeout=300000,
     output_prefix="design_checkpoint_open",
     max_retries="0"
   ]
@@ -394,8 +395,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="coding_design_checkpoint_await",
-    context_keys="request_id,work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest,session.run_deadline_unix_ms",
-    param.timeout=300000,
+    context_keys="request_id,design_checkpoint_open.operation_id,design_checkpoint_open.owner_deadline_unix_ms,design_checkpoint_open.evidence,work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest,session.run_deadline_unix_ms",
     output_prefix="design_checkpoint",
     max_retries="0"
   ]

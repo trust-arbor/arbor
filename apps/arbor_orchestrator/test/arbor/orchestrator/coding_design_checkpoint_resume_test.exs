@@ -85,8 +85,10 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
       data = lifecycle_data(value)
       effect = data["current_effect"]
 
-      is_map(effect) and effect["status"] == "completed" and effect["node_id"] == node_id and
-        node_id in List.wrap(data["completed_nodes"])
+      node_id in List.wrap(data["completed_nodes"]) and
+        (node_id == "await_design_checkpoint" or
+           (is_map(effect) and effect["status"] == "completed" and
+              effect["node_id"] == node_id))
     end
 
     defp lifecycle_data(%PersistenceRecord{data: data}) when is_map(data), do: data
@@ -117,6 +119,8 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
        %{
          parent: Map.fetch!(opts, :parent),
          request_id: Map.fetch!(opts, :request_id),
+         operation_id: Map.fetch!(opts, :operation_id),
+         owner_deadline_unix_ms: Map.fetch!(opts, :owner_deadline_unix_ms),
          open_evidence: Map.fetch!(opts, :open_evidence),
          terminal_evidence: Map.fetch!(opts, :terminal_evidence),
          await_mode: Map.get(opts, :await_mode, :return),
@@ -135,6 +139,8 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
         %{
           "checkpoint_outcome" => "pending",
           "request_id" => state.request_id,
+          "operation_id" => state.operation_id,
+          "owner_deadline_unix_ms" => state.owner_deadline_unix_ms,
           "evidence" => state.open_evidence
         }}, %{state | events: state.events ++ [event]}}
     end
@@ -216,6 +222,81 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
       do: {:reply, {:error, :injected_checkpoint_outage}, %{state | puts: state.puts + 1}}
   end
 
+  # Blocks the Await outcome checkpoint before either durable-store or local
+  # file persistence. Killing the owner here leaves the prior Open/hoist
+  # checkpoint as the only recovery point, so Await must be safely re-read.
+  defmodule PreAwaitCheckpointHoldStore do
+    @moduledoc false
+    use GenServer
+
+    def child_spec(opts) do
+      %{id: Keyword.fetch!(opts, :name), start: {__MODULE__, :start_link, [opts]}}
+    end
+
+    def durability_class(_opts), do: :node_restart
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, %{data: %{}, parent: Keyword.fetch!(opts, :parent)},
+        name: Keyword.fetch!(opts, :name)
+      )
+    end
+
+    def put(key, value, opts),
+      do: GenServer.call(Keyword.fetch!(opts, :name), {:put, key, value}, :infinity)
+
+    def get(key, opts), do: GenServer.call(Keyword.fetch!(opts, :name), {:get, key})
+    def delete(key, opts), do: GenServer.call(Keyword.fetch!(opts, :name), {:delete, key})
+    def list(opts), do: GenServer.call(Keyword.fetch!(opts, :name), :list)
+    def discard_held_write(name), do: GenServer.call(name, :discard_held_write)
+
+    @impl true
+    def init(state), do: {:ok, Map.merge(%{held_from: nil, held?: false}, state)}
+
+    @impl true
+    def handle_call({:put, key, value}, from, %{held?: false} = state) do
+      if checkpoint_node(value) == "await_design_checkpoint" do
+        send(state.parent, {:await_checkpoint_write_held, "await_design_checkpoint"})
+        {:noreply, %{state | held?: true, held_from: from}}
+      else
+        {:reply, :ok, %{state | data: Map.put(state.data, key, value)}}
+      end
+    end
+
+    def handle_call({:put, key, value}, _from, state) do
+      {:reply, :ok, %{state | data: Map.put(state.data, key, value)}}
+    end
+
+    def handle_call({:get, key}, _from, state) do
+      case Map.fetch(state.data, key) do
+        {:ok, value} -> {:reply, {:ok, value}, state}
+        :error -> {:reply, {:error, :not_found}, state}
+      end
+    end
+
+    def handle_call({:delete, key}, _from, state),
+      do: {:reply, :ok, %{state | data: Map.delete(state.data, key)}}
+
+    def handle_call(:list, _from, state), do: {:reply, {:ok, Map.keys(state.data)}, state}
+
+    def handle_call(:discard_held_write, _from, %{held_from: nil} = state),
+      do: {:reply, :ok, state}
+
+    def handle_call(:discard_held_write, _from, %{held_from: from} = state) do
+      GenServer.reply(from, {:error, :discarded_after_owner_death})
+      {:reply, :ok, %{state | held_from: nil}}
+    end
+
+    defp checkpoint_node(%PersistenceRecord{data: data}) when is_map(data),
+      do: checkpoint_node(data)
+
+    defp checkpoint_node(%{data: data}) when is_map(data), do: checkpoint_node(data)
+
+    defp checkpoint_node(data) when is_map(data),
+      do: Map.get(data, :current_node) || data["current_node"]
+
+    defp checkpoint_node(_), do: nil
+  end
+
   setup_all do
     {:ok, _} =
       Registry.start_link(
@@ -249,6 +330,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
         journal_opts: [server: harness.journal_name],
         identity_private_key: identity,
         resumable: true,
+        initial_values: deadline_values(probe),
         actions_executor: ActionExecutor
       )
 
@@ -272,12 +354,11 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
              )
 
     assert [{:open, _open_args}, {:await, await_args}] = ActionStore.events(probe.key)
-    assert await_args["request_id"] == probe.request_id
-    assert await_args["evidence"] == probe.open_evidence
+    assert_await_identity(await_args, probe)
     assert result.context["accepted_design_evidence"] == probe.terminal_evidence
   end
 
-  test "blocked Await remains indeterminate on owner death and never reopens or re-awaits" do
+  test "blocked read-only Await resumes with the exact durable identity and never reopens" do
     configure_file_only_checkpoints!()
     probe = start_action_store!(await_mode: :block)
     harness = start_journal!("await_pending")
@@ -292,17 +373,16 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
         journal_opts: [server: harness.journal_name],
         identity_private_key: identity,
         resumable: true,
+        initial_values: deadline_values(probe),
         actions_executor: ActionExecutor
       )
 
     assert_receive {:design_checkpoint_action, :await, await_args}, 5_000
-    assert await_args["request_id"] == probe.request_id
-    assert await_args["evidence"] == probe.open_evidence
+    assert_await_identity(await_args, probe)
 
-    pending = PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
-    assert pending.current_effect["status"] == "pending"
-    assert pending.current_effect["node_id"] == "await_design_checkpoint"
-    await_execution_id = pending.current_effect["execution_id"]
+    before_kill = PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
+    refute before_kill.current_effect["node_id"] == "await_design_checkpoint"
+    refute before_kill.current_effect["status"] == "pending"
 
     kill_engine!(engine_pid, mon)
     :ok = ActionStore.unblock(probe.key)
@@ -312,16 +392,70 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
 
     publish_interrupted_for_public_resume!(harness, logs_root, dot)
 
-    assert {:error, {:indeterminate_effect, "await_design_checkpoint", ^await_execution_id}} =
+    assert {:ok, result} =
              Orchestrator.resume(harness.run_id,
                identity_private_key: identity,
                actions_executor: ActionExecutor
              )
 
-    assert [{:open, _}, {:await, ^await_args}] = ActionStore.events(probe.key)
+    assert [{:open, _}, {:await, ^await_args}, {:await, resumed_await_args}] =
+             ActionStore.events(probe.key)
+
+    assert_await_identity(resumed_await_args, probe)
+    assert result.context["accepted_design_evidence"] == probe.terminal_evidence
   end
 
-  test "terminal Await receipt resumes through accepted-evidence transform without replay" do
+  test "terminal Await safely replays when owner dies before its outcome checkpoint" do
+    checkpoint_store = unique_name("await_pre_checkpoint")
+
+    {:ok, _} =
+      start_supervised({PreAwaitCheckpointHoldStore, name: checkpoint_store, parent: self()})
+
+    configure_checkpoint_store!(PreAwaitCheckpointHoldStore, checkpoint_store)
+    probe = start_action_store!()
+    harness = start_journal!("await_pre_checkpoint")
+    identity = :crypto.strong_rand_bytes(32)
+    logs_root = tmp_logs("await_pre_checkpoint")
+    dot = checkpoint_dot(probe.key)
+
+    {engine_pid, mon} =
+      spawn_engine(parse!(dot),
+        run_id: harness.run_id,
+        logs_root: logs_root,
+        journal_opts: [server: harness.journal_name],
+        identity_private_key: identity,
+        resumable: true,
+        initial_values: deadline_values(probe),
+        actions_executor: ActionExecutor
+      )
+
+    assert_receive {:design_checkpoint_action, :await, await_args}, 5_000
+    assert_await_identity(await_args, probe)
+    assert_receive {:await_checkpoint_write_held, "await_design_checkpoint"}, 5_000
+
+    kill_engine!(engine_pid, mon)
+    :ok = PreAwaitCheckpointHoldStore.discard_held_write(checkpoint_store)
+
+    interrupted = PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
+    assert %Record{status: :interrupted} = interrupted
+    refute interrupted.current_effect["node_id"] == "await_design_checkpoint"
+
+    publish_interrupted_for_public_resume!(harness, logs_root, dot)
+
+    assert {:ok, result} =
+             Orchestrator.resume(harness.run_id,
+               identity_private_key: identity,
+               actions_executor: ActionExecutor
+             )
+
+    assert [{:open, _}, {:await, ^await_args}, {:await, resumed_await_args}] =
+             ActionStore.events(probe.key)
+
+    assert_await_identity(resumed_await_args, probe)
+    assert result.context["accepted_design_evidence"] == probe.terminal_evidence
+  end
+
+  test "checkpointed terminal Await resumes through accepted-evidence transform without replay" do
     configure_file_only_checkpoints!()
     probe = start_action_store!()
     harness = start_hold_journal!("await_receipt", "await_design_checkpoint")
@@ -336,19 +470,19 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
         journal_opts: [server: harness.journal_name],
         identity_private_key: identity,
         resumable: true,
+        initial_values: deadline_values(probe),
         actions_executor: ActionExecutor
       )
 
     assert_receive {:design_checkpoint_action, :await, await_args}, 5_000
-    assert await_args["request_id"] == probe.request_id
+    assert_await_identity(await_args, probe)
     assert_receive {:journal_persisted_and_held, "await_design_checkpoint"}, 5_000
 
     kill_engine!(engine_pid, mon)
     :ok = HoldStore.release(harness.store_name)
     interrupted = PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
     assert %Record{status: :interrupted} = interrupted
-    assert interrupted.current_effect["status"] == "completed"
-    assert interrupted.current_effect["node_id"] == "await_design_checkpoint"
+    refute interrupted.current_effect["node_id"] == "await_design_checkpoint"
 
     publish_interrupted_for_public_resume!(harness, logs_root, dot)
 
@@ -384,6 +518,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
                logs_root: logs_root,
                identity_private_key: :crypto.strong_rand_bytes(32),
                resumable: true,
+               initial_values: deadline_values(probe),
                actions_executor: ActionExecutor
              )
 
@@ -395,6 +530,8 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
   defp start_action_store!(opts \\ []) do
     key = "design_checkpoint_probe_#{System.unique_integer([:positive, :monotonic])}"
     request_id = "design_request_#{System.unique_integer([:positive, :monotonic])}"
+    operation_id = "design_operation_#{System.unique_integer([:positive, :monotonic])}"
+    owner_deadline_unix_ms = 4_102_444_800_000
     open_evidence = %{"kind" => "open", "nonce" => key}
     terminal_evidence = %{"kind" => "approved", "nonce" => key}
 
@@ -405,6 +542,8 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
            key: key,
            parent: self(),
            request_id: request_id,
+           operation_id: operation_id,
+           owner_deadline_unix_ms: owner_deadline_unix_ms,
            open_evidence: open_evidence,
            terminal_evidence: terminal_evidence
          ] ++ opts}
@@ -413,6 +552,8 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
     %{
       key: key,
       request_id: request_id,
+      operation_id: operation_id,
+      owner_deadline_unix_ms: owner_deadline_unix_ms,
       open_evidence: open_evidence,
       terminal_evidence: terminal_evidence
     }
@@ -495,6 +636,8 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
         target="action",
         action="coding_design_checkpoint_open",
         param.probe_key="#{probe_key}",
+        param.timeout=300000,
+        context_keys="session.run_deadline_unix_ms",
         output_prefix="design_checkpoint_open"
       ]
       hoist_design_checkpoint_request_id [
@@ -508,7 +651,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
         target="action",
         action="coding_design_checkpoint_await",
         param.probe_key="#{probe_key}",
-        context_keys="request_id,design_checkpoint_open.evidence",
+        context_keys="request_id,design_checkpoint_open.operation_id,design_checkpoint_open.owner_deadline_unix_ms,design_checkpoint_open.evidence,session.run_deadline_unix_ms",
         output_prefix="design_checkpoint"
       ]
       hoist_accepted_design_evidence [
@@ -558,11 +701,31 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
     graph
   end
 
+  defp assert_await_identity(args, probe) do
+    assert args["request_id"] == probe.request_id
+    assert args["operation_id"] == probe.operation_id
+    assert args["owner_deadline_unix_ms"] == probe.owner_deadline_unix_ms
+    assert args["evidence"] == probe.open_evidence
+    assert args["run_deadline_unix_ms"] == probe.owner_deadline_unix_ms
+  end
+
+  defp deadline_values(probe),
+    do: %{"session.run_deadline_unix_ms" => probe.owner_deadline_unix_ms}
+
   defp configure_file_only_checkpoints! do
     Application.put_env(:arbor_orchestrator, :engine_checkpoints,
       store: nil,
       store_name: :unused_design_checkpoint_resume,
       start_store: false
+    )
+  end
+
+  defp configure_checkpoint_store!(store, store_name) do
+    Application.put_env(:arbor_orchestrator, :engine_checkpoints,
+      store: store,
+      store_name: store_name,
+      start_store: false,
+      store_child_opts: []
     )
   end
 
