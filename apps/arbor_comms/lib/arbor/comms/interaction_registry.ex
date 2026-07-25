@@ -74,8 +74,12 @@ defmodule Arbor.Comms.InteractionRegistry do
   def put(_interaction, _opts), do: {:error, :invalid_options}
 
   @doc """
-  Admit an interaction and report whether the authority inserted it or found
-  the exact pending interaction already present.
+  Admit an interaction and return the stored interaction plus dispatch
+  ownership. `:inserted` grants this caller one adapter dispatch attempt;
+  `:existing` means a prior caller already received that attempt.
+
+  A newly persisted durable record whose initial Tracker projection failed
+  retains `:inserted` for the first retry that repairs the projection.
   """
   @spec admit(Interaction.t(), keyword()) ::
           {:ok, admission_disposition(), Interaction.t()} | {:error, term()}

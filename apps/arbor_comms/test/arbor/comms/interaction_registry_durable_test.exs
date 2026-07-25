@@ -100,6 +100,50 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
              )
   end
 
+  test "security regression: generated submission time does not change admission identity" do
+    user_id = "generated_retry_user_#{System.unique_integer([:positive])}"
+    track_dashboard(user_id)
+
+    attrs =
+      interaction_attrs("deterministic design checkpoint",
+        request_id: "irq_generated_submission_retry",
+        user_id: user_id,
+        metadata: %{
+          "task_id" => "task_generated_retry",
+          "evidence" => %{"digest" => "sha256:exact"}
+        },
+        resource_uri: "arbor://action/coding/design_checkpoint",
+        expires_at: ~U[2030-01-01 00:00:00Z]
+      )
+      |> Map.delete(:submitted_at)
+
+    first = build_interaction(attrs)
+    Process.sleep(2)
+    second = build_interaction(attrs)
+    refute first.submitted_at == second.submitted_at
+
+    opts = [durability: :node_restart, adapter_map: %{dashboard: TestAdapter}]
+
+    assert {:ok, first.request_id} == InteractionRouter.request(first, opts)
+    assert_receive {:durable_adapter_called, %Interaction{request_id: first_id}}
+    assert first_id == first.request_id
+
+    assert {:ok, second.request_id} == InteractionRouter.request(second, opts)
+    refute_receive {:durable_adapter_called, _interaction}, 100
+
+    InteractionRegistry.reset()
+
+    assert {:ok, :existing, %Interaction{request_id: "irq_generated_submission_retry"}} =
+             InteractionRegistry.admit(second, durability: :node_restart)
+
+    changed_evidence = put_in(second.metadata["evidence"]["digest"], "sha256:different")
+
+    assert {:error, :already_tracked} =
+             InteractionRegistry.admit(changed_evidence, durability: :node_restart)
+
+    refute_receive {:durable_adapter_called, _interaction}, 100
+  end
+
   test "security regression: volatile to durable admission cannot rebind an existing ID" do
     interaction =
       build_interaction(
@@ -172,6 +216,44 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
     assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
     assert_receive {:durable_adapter_called, %Interaction{request_id: "irq_durable_notify_once"}}
+
+    assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
+    refute_receive {:durable_adapter_called, _interaction}, 100
+  end
+
+  test "security regression: tracker mirror failure preserves one dispatch-eligible retry" do
+    user_id = "mirror_retry_user_#{System.unique_integer([:positive])}"
+    track_dashboard(user_id)
+
+    interaction =
+      build_interaction(
+        interaction_attrs("mirror retry",
+          request_id: "irq_tracker_mirror_retry",
+          user_id: user_id
+        )
+      )
+
+    opts = [durability: :node_restart, adapter_map: %{dashboard: TestAdapter}]
+    original_tracker = :sys.get_state(Authority).tracker
+
+    :sys.replace_state(Authority, fn state ->
+      %{state | tracker: __MODULE__.UnavailableInteractionTracker}
+    end)
+
+    assert {:error, :tracker_unavailable} = InteractionRouter.request(interaction, opts)
+    refute_receive {:durable_adapter_called, _interaction}, 100
+    assert {:ok, %Record{}} = DurableStore.get(interaction.request_id)
+
+    assert %{admission_state: :persisted_unmirrored} =
+             :sys.get_state(Authority).entries[interaction.request_id]
+
+    :sys.replace_state(Authority, fn state -> %{state | tracker: original_tracker} end)
+
+    assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
+    assert_receive {:durable_adapter_called, %Interaction{request_id: "irq_tracker_mirror_retry"}}
+
+    assert %{admission_state: :admitted} =
+             :sys.get_state(Authority).entries[interaction.request_id]
 
     assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
     refute_receive {:durable_adapter_called, _interaction}, 100
@@ -287,7 +369,10 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     assert {:ok, :approved, %{"source" => "persisted"}} = Task.await(waiter, 2_000)
   end
 
-  test "security regression: stale durable waiter cannot bind a reused volatile ID", %{path: path} do
+  test "security regression: degraded hydration rejects durable ID rebinding and late response",
+       %{
+         path: path
+       } do
     request_id = "irq_durable_waiter_reused_id"
 
     durable_interaction =
@@ -321,19 +406,82 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
       end
     end)
 
+    terminal_id = "irq_degraded_terminal_tombstone"
+
+    assert {:ok, ^terminal_id} =
+             InteractionRouter.request(
+               interaction_attrs("terminal before degraded hydration",
+                 request_id: terminal_id,
+                 agent_id: "agent_degraded_terminal"
+               ),
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+
+    assert {:ok, %Interaction{request_id: ^terminal_id}} =
+             InteractionRegistry.resolve(terminal_id,
+               response: :approved,
+               metadata: %{"source" => "before restart"}
+             )
+
+    assert {:ok, pending_before_restart} = DurableStore.get(request_id)
+    assert {:ok, terminal_before_restart} = DurableStore.get(terminal_id)
+
     malformed_id = "irq_reused_id_hydration_failure"
     :ok = Backend.put_raw(malformed_id, Record.new(malformed_id, %{"bad" => true}), path)
     restart_authority()
 
     reused_interaction = %{durable_interaction | description: "unrelated volatile operation"}
 
-    assert {:ok, ^request_id} =
+    assert {:error, :already_tracked} =
              InteractionRouter.request(reused_interaction, adapter_map: %{})
 
-    assert :ok =
-             InteractionRouter.respond(request_id, :rejected, %{"source" => "reused operation"})
+    assert {:error, {:already_terminal, :responded}} =
+             InteractionRouter.request(
+               build_interaction(
+                 interaction_attrs("volatile terminal reuse",
+                   request_id: terminal_id,
+                   agent_id: "agent_degraded_terminal"
+                 )
+               ),
+               adapter_map: %{}
+             )
+
+    assert {:error, :not_found} =
+             InteractionRouter.respond(request_id, :rejected, %{"source" => "late response"})
 
     assert {:error, :timeout} = Task.await(waiter, 2_000)
+    assert {:ok, pending_after_rejection} = DurableStore.get(request_id)
+
+    assert pending_after_rejection.data["operation_id"] ==
+             pending_before_restart.data["operation_id"]
+
+    assert pending_after_rejection.data["interaction"] ==
+             pending_before_restart.data["interaction"]
+
+    assert pending_after_rejection.data["status"] == "pending"
+    assert pending_after_rejection.data["terminal"] == nil
+
+    assert {:ok, terminal_after_rejection} = DurableStore.get(terminal_id)
+
+    assert terminal_after_rejection.data["operation_id"] ==
+             terminal_before_restart.data["operation_id"]
+
+    assert terminal_after_rejection.data["status"] == "responded"
+    assert terminal_after_rejection.data["terminal"] == terminal_before_restart.data["terminal"]
+    assert :not_found = InteractionRegistry.get(request_id)
+  end
+
+  test "security regression: ambiguous configured durable lookup blocks volatile admission" do
+    assert {:error, :durable_unavailable} =
+             InteractionRouter.request(
+               interaction_attrs("ambiguous exact lookup",
+                 request_id: "irq_ambiguous_durable_lookup"
+               ),
+               adapter_map: %{}
+             )
+
+    assert :not_found = InteractionRegistry.get("irq_ambiguous_durable_lookup")
   end
 
   test "durable pending state survives authority restart and claims a fresh epoch" do
@@ -499,7 +647,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     assert text_terminal.metadata == %{"source" => "operator"}
   end
 
-  test "disabled and degraded durable storage fail closed while volatile remains available" do
+  test "disabled storage permits volatile admission while configured degradation fails closed" do
     Application.delete_env(:arbor_comms, :durable_interaction_store)
     restart_authority()
     assert {:error, :disabled} = InteractionRegistry.durable_readiness()
@@ -525,7 +673,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     restart_authority()
     assert {:error, :unsupported} = InteractionRegistry.durable_readiness()
 
-    assert {:ok, _volatile_id} =
+    assert {:error, :durable_unavailable} =
              InteractionRouter.request(
                interaction_attrs("volatile again", request_id: "irq_volatile_2")
              )
@@ -650,6 +798,8 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     end
 
     def durability_class(_opts), do: :node_restart
+
+    def get("irq_ambiguous_durable_lookup", _opts), do: {:error, :backend_unavailable}
 
     def get(key, _opts) do
       Agent.get(__MODULE__, fn state ->

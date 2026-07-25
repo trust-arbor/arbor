@@ -350,7 +350,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       entry.durability != durability ->
         {:reply, {:error, :already_tracked}, state}
 
-      same_interaction?(entry.interaction, interaction, durability) ->
+      same_admission_identity?(entry.interaction, interaction) ->
         admit_existing(state, entry)
 
       true ->
@@ -363,8 +363,17 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
   defp admit_existing(state, %{durability: :node_restart, interaction: interaction} = entry) do
     case mirror_durable_entry(state.tracker, entry) do
-      :ok -> {:reply, {:ok, :existing, interaction}, state}
-      {:error, _reason} -> {:reply, {:error, :tracker_unavailable}, state}
+      :ok ->
+        if Map.get(entry, :admission_state, :admitted) == :persisted_unmirrored do
+          next_entry = Map.put(entry, :admission_state, :admitted)
+          next_state = put_in(state.entries[interaction.request_id], next_entry)
+          {:reply, {:ok, :inserted, interaction}, next_state}
+        else
+          {:reply, {:ok, :existing, interaction}, state}
+        end
+
+      {:error, _reason} ->
+        {:reply, {:error, :tracker_unavailable}, state}
     end
   end
 
@@ -372,14 +381,52 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   defp put_new(state, interaction, :node_restart), do: put_new_durable(state, interaction)
 
   defp put_new_volatile(state, %Interaction{request_id: request_id} = interaction) do
-    case mirror_pending(state.tracker, interaction) do
-      :ok ->
-        entry = volatile_entry(interaction)
-        next_state = put_in(state.entries[request_id], entry) |> expire_due_pending()
-        {:reply, {:ok, :inserted, interaction}, next_state}
+    case durable_truth_status(request_id) do
+      :clear ->
+        case mirror_pending(state.tracker, interaction) do
+          :ok ->
+            entry = volatile_entry(interaction)
+            next_state = put_in(state.entries[request_id], entry) |> expire_due_pending()
+            {:reply, {:ok, :inserted, interaction}, next_state}
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      :pending ->
+        {:reply, {:error, :already_tracked}, state}
+
+      {:terminal, status} ->
+        {:reply, {:error, {:already_terminal, status}}, state}
+
+      :unavailable ->
+        {:reply, {:error, :durable_unavailable}, state}
+    end
+  end
+
+  defp durable_truth_status(request_id) do
+    case DurableStore.readiness() do
+      {:error, :disabled} ->
+        :clear
+
+      {:ok, _details} ->
+        case DurableStore.get(request_id) do
+          {:ok, %Record{data: data}} ->
+            case DurableLifecycleCore.decode(data) do
+              {:ok, %{"status" => "pending"}} -> :pending
+              {:ok, %{"status" => status}} -> {:terminal, status_atom(status)}
+              {:error, _reason} -> :unavailable
+            end
+
+          {:error, :not_found} ->
+            :clear
+
+          {:error, _reason} ->
+            :unavailable
+        end
+
+      {:error, _reason} ->
+        :unavailable
     end
   end
 
@@ -429,7 +476,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
             data["status"] != "pending" ->
               {:reply, {:error, {:already_terminal, status_atom(data["status"])}}, state}
 
-            data["interaction"] != interaction_data(interaction) ->
+            not same_admission_identity?(data["interaction"], interaction) ->
               {:reply, {:error, :already_tracked}, state}
 
             true ->
@@ -484,13 +531,26 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
         with {:ok, projected_interaction} <- DurableLifecycleCore.project_interaction(decoded),
              {:ok, entry} <- durable_entry(data, projected_interaction) do
           entry = %{entry | record: record}
-          next_state = put_in(state.entries[projected_interaction.request_id], entry)
 
           case mirror_durable_entry(state.tracker, entry) do
             :ok ->
+              next_state = put_in(state.entries[projected_interaction.request_id], entry)
               {:reply, {:ok, disposition, projected_interaction}, next_state}
 
             {:error, _reason} ->
+              # Keep the initial dispatch disposition retryable until Tracker
+              # makes the durable record observable. External dispatch itself
+              # is not an outbox and remains outside this Authority transaction.
+              failed_entry =
+                if disposition == :inserted do
+                  Map.put(entry, :admission_state, :persisted_unmirrored)
+                else
+                  entry
+                end
+
+              next_state =
+                put_in(state.entries[projected_interaction.request_id], failed_entry)
+
               {:reply, {:error, :tracker_unavailable}, next_state}
           end
         else
@@ -525,7 +585,8 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
          interaction: interaction,
          status: status,
          terminal: terminal,
-         owner_deadline: data["owner_deadline_unix_ms"]
+         owner_deadline: data["owner_deadline_unix_ms"],
+         admission_state: :admitted
        }}
     end
   end
@@ -1054,24 +1115,32 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
   defp requested_durability(_opts), do: {:error, :invalid_options}
 
-  defp interaction_data(interaction) do
-    case DurableLifecycleCore.serialize_interaction(interaction) do
-      {:ok, data} -> data
-      _ -> nil
-    end
-  end
-
-  defp same_interaction?(existing, incoming, :volatile), do: existing == incoming
-
-  defp same_interaction?(existing, incoming, :node_restart) do
-    case {
-      DurableLifecycleCore.serialize_interaction(existing),
-      DurableLifecycleCore.serialize_interaction(incoming)
-    } do
-      {{:ok, existing_data}, {:ok, incoming_data}} -> existing_data == incoming_data
+  defp same_admission_identity?(left, right) do
+    case {admission_identity(left), admission_identity(right)} do
+      {{:ok, left_identity}, {:ok, right_identity}} -> left_identity == right_identity
       _ -> false
     end
   end
+
+  defp admission_identity(%Interaction{} = interaction) do
+    case DurableLifecycleCore.serialize_interaction(interaction) do
+      {:ok, data} ->
+        {:ok, {:json, Map.delete(data, "submitted_at")}}
+
+      {:error, _reason} ->
+        identity =
+          interaction
+          |> Map.from_struct()
+          |> Map.delete(:submitted_at)
+
+        {:ok, {:term, identity}}
+    end
+  end
+
+  defp admission_identity(serialized) when is_map(serialized),
+    do: {:ok, {:json, Map.delete(serialized, "submitted_at")}}
+
+  defp admission_identity(_value), do: {:error, :invalid_interaction}
 
   defp status_atom("pending"), do: :pending
   defp status_atom("responded"), do: :responded
