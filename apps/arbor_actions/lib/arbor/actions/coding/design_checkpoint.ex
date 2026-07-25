@@ -11,6 +11,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   alias Arbor.Contracts.Coding.WorkPacket
 
   @max_identifier_bytes 256
+  @max_task_bytes 16_384
   @max_design_bytes 16_384
   @max_description_bytes 16_384
   @max_metadata_bytes 32_768
@@ -19,6 +20,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   @request_prefix "irq_design_"
   @evidence_keys ~w(
     task_id
+    task
+    plan_fingerprint
     workspace_id
     worker_session_id
     provider_session_id
@@ -39,6 +42,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
          {:ok, supplied_packet_digest} <- packet_digest_input(params, context),
          {:ok, packet_digest} <- validate_packet_digest(packet, supplied_packet_digest),
          {:ok, task_id} <- required_identifier(params, context, :task_id),
+         {:ok, task} <- required_task(params, context),
+         {:ok, plan_fingerprint} <- plan_fingerprint_input(params, context),
          {:ok, workspace_id} <- required_identifier(params, context, :workspace_id),
          {:ok, worker_session_id} <- required_worker_session(params, context),
          {:ok, provider_session_id} <- optional_identifier(params, context, :provider_session_id),
@@ -47,6 +52,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
          {:ok, design_digest} <- required_design_digest(params, context, design) do
       base_evidence = %{
         "task_id" => task_id,
+        "task" => task,
+        "plan_fingerprint" => plan_fingerprint,
         "workspace_id" => workspace_id,
         "worker_session_id" => worker_session_id,
         "provider_session_id" => provider_session_id,
@@ -57,7 +64,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
       }
 
       with {:ok, request_id} <- request_id(base_evidence),
-           {:ok, description} <- description(packet, task_id, design),
+           {:ok, description} <-
+             description(packet, task_id, task, plan_fingerprint, design),
            {:ok, metadata} <- metadata(base_evidence, packet) do
         {:ok,
          %{
@@ -218,6 +226,76 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     end
   end
 
+  defp required_task(params, context) do
+    case value(params, context, :task) do
+      task
+      when is_binary(task) and byte_size(task) > 0 and byte_size(task) <= @max_task_bytes ->
+        cond do
+          not String.valid?(task) ->
+            {:error, :design_checkpoint_task_invalid_utf8}
+
+          String.trim(task) == "" ->
+            {:error, :design_checkpoint_task_blank}
+
+          has_disallowed_design_control?(task) ->
+            {:error, :design_checkpoint_task_control_character}
+
+          true ->
+            {:ok, task}
+        end
+
+      task when is_binary(task) and byte_size(task) > @max_task_bytes ->
+        {:error, :design_checkpoint_task_too_large}
+
+      _ ->
+        {:error, :design_checkpoint_task_required}
+    end
+  end
+
+  defp plan_fingerprint_input(params, context) do
+    candidates =
+      [
+        Map.get(params, :plan_fingerprint),
+        Map.get(params, "plan_fingerprint"),
+        Map.get(params, :coding_plan_fingerprint),
+        Map.get(params, "coding_plan_fingerprint"),
+        Map.get(context, :plan_fingerprint),
+        Map.get(context, "plan_fingerprint"),
+        Map.get(context, :coding_plan_fingerprint),
+        Map.get(context, "coding_plan_fingerprint")
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    case candidates do
+      [] -> {:error, :design_checkpoint_plan_fingerprint_required}
+      [fingerprint] -> validate_plan_fingerprint(fingerprint)
+      _ -> {:error, :design_checkpoint_plan_fingerprint_mismatch}
+    end
+  end
+
+  defp validate_plan_fingerprint(value) when is_binary(value) do
+    cond do
+      byte_size(value) != 64 ->
+        {:error, :design_checkpoint_plan_fingerprint_invalid}
+
+      not String.valid?(value) ->
+        {:error, :design_checkpoint_plan_fingerprint_invalid_utf8}
+
+      has_ascii_control?(value) ->
+        {:error, :design_checkpoint_plan_fingerprint_control_character}
+
+      not Regex.match?(~r/\A[0-9a-f]{64}\z/, value) ->
+        {:error, :design_checkpoint_plan_fingerprint_invalid}
+
+      true ->
+        {:ok, value}
+    end
+  end
+
+  defp validate_plan_fingerprint(_value),
+    do: {:error, :design_checkpoint_plan_fingerprint_invalid}
+
   defp required_identifier(params, context, key) do
     case string_value(value(params, context, key)) do
       value when is_binary(value) -> validate_identifier(value, key)
@@ -305,11 +383,15 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
       else: {:error, :design_digest_mismatch}
   end
 
-  defp description(packet, task_id, design) do
+  defp description(packet, task_id, task, plan_fingerprint, design) do
     with {:ok, packet_bytes} <- WorkPacket.canonical_bytes(packet),
          description =
            "Design checkpoint for task #{task_id}.\n\nCanonical work-packet intent:\n" <>
-             packet_bytes <> "\n\nWorker design:\n" <> design,
+             packet_bytes <>
+             "\n\nExact coding task:\n" <>
+             task <>
+             "\n\nReviewed plan fingerprint:\n" <>
+             plan_fingerprint <> "\n\nWorker design:\n" <> design,
          true <- String.valid?(description) and byte_size(description) <= @max_description_bytes do
       {:ok, description}
     else
@@ -331,6 +413,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   defp validate_authority_evidence(metadata, request_id, evidence) when is_map(metadata) do
     with :ok <- optional_equal(metadata, :request_id, request_id),
          :ok <- optional_equal(metadata, :task_id, evidence["task_id"]),
+         :ok <- optional_equal(metadata, :task, evidence["task"]),
+         :ok <- optional_equal(metadata, :plan_fingerprint, evidence["plan_fingerprint"]),
          :ok <- optional_equal(metadata, :workspace_id, evidence["workspace_id"]),
          :ok <- optional_equal(metadata, :worker_session_id, evidence["worker_session_id"]),
          :ok <- optional_equal(metadata, :provider_session_id, evidence["provider_session_id"]),
@@ -443,6 +527,13 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
       packet_digest: [type: :string, required: false, doc: "Exact sha256: work-packet digest"],
       work_packet_digest: [type: :string, required: false, doc: "Alias for packet_digest"],
       task_id: [type: :string, required: true, doc: "Coding task identity"],
+      task: [type: :string, required: true, doc: "Exact nonempty reviewed coding task text"],
+      plan_fingerprint: [type: :string, required: true, doc: "Exact compiled plan fingerprint"],
+      coding_plan_fingerprint: [
+        type: :string,
+        required: false,
+        doc: "Canonical graph-context alias for plan_fingerprint"
+      ],
       workspace_id: [type: :string, required: true, doc: "Leased workspace identity"],
       worker_session_id: [type: :string, required: true, doc: "Managed ACP worker handle"],
       provider_session_id: [type: :string, required: false, doc: "Provider session id alias"],
@@ -462,6 +553,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
       packet_digest: :control,
       work_packet_digest: :control,
       task_id: :control,
+      task: :data,
+      plan_fingerprint: :control,
+      coding_plan_fingerprint: :control,
       workspace_id: :control,
       worker_session_id: :control,
       provider_session_id: :control,
@@ -565,6 +659,13 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       packet_digest: [type: :string, required: false, doc: "Exact sha256: work-packet digest"],
       work_packet_digest: [type: :string, required: false, doc: "Alias for packet_digest"],
       task_id: [type: :string, required: true, doc: "Coding task identity"],
+      task: [type: :string, required: true, doc: "Exact nonempty reviewed coding task text"],
+      plan_fingerprint: [type: :string, required: true, doc: "Exact compiled plan fingerprint"],
+      coding_plan_fingerprint: [
+        type: :string,
+        required: false,
+        doc: "Canonical graph-context alias for plan_fingerprint"
+      ],
       workspace_id: [type: :string, required: true, doc: "Leased workspace identity"],
       worker_session_id: [type: :string, required: true, doc: "Managed ACP worker handle"],
       provider_session_id: [type: :string, required: false, doc: "Provider session id alias"],
@@ -586,6 +687,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       packet_digest: :control,
       work_packet_digest: :control,
       task_id: :control,
+      task: :data,
+      plan_fingerprint: :control,
+      coding_plan_fingerprint: :control,
       workspace_id: :control,
       worker_session_id: :control,
       provider_session_id: :control,

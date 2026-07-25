@@ -45,6 +45,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
       work_packet: packet,
       packet_digest: packet_digest,
       task_id: "task-123",
+      task: "Implement the durable design checkpoint actions",
+      plan_fingerprint: String.duplicate("a", 64),
       workspace_id: "workspace-123",
       worker_session_id: "acp_worker_123",
       worker_provider_session_id: "provider-session-123",
@@ -69,11 +71,17 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     assert interaction.kind == :approval
     assert interaction.user_id == "operator-1"
     assert interaction.metadata["work_packet"] == ctx.params.work_packet
+    assert interaction.metadata["task"] == ctx.params.task
+    assert interaction.metadata["plan_fingerprint"] == ctx.params.plan_fingerprint
     assert interaction.metadata["design"] == ctx.params.design
     {:ok, canonical_packet} = WorkPacket.canonical_bytes(ctx.params.work_packet)
     assert interaction.description =~ canonical_packet
+    assert interaction.description =~ ctx.params.task
+    assert interaction.description =~ ctx.params.plan_fingerprint
     assert interaction.description =~ ctx.params.design
     assert first["evidence"]["request_id"] == first["request_id"]
+    assert first["evidence"]["task"] == ctx.params.task
+    assert first["evidence"]["plan_fingerprint"] == ctx.params.plan_fingerprint
   end
 
   test "rejects packet, digest, and policy tampering", ctx do
@@ -113,6 +121,77 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
              Await.run(Map.put(ctx.params, :request_id, opened["request_id"] <> "x"), ctx.context)
 
     refute_received {:await_interaction_response, _, _, _}
+  end
+
+  test "security regression: task and plan fingerprint tampering changes the authority id", ctx do
+    assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+
+    assert {:ok, task_tampered} =
+             Open.run(%{ctx.params | task: "Implement a different task"}, ctx.context)
+
+    assert task_tampered["request_id"] != opened["request_id"]
+
+    assert {:ok, fingerprint_tampered} =
+             Open.run(
+               %{ctx.params | plan_fingerprint: String.duplicate("b", 64)},
+               ctx.context
+             )
+
+    assert fingerprint_tampered["request_id"] != opened["request_id"]
+
+    assert {:error, :design_checkpoint_request_id_mismatch} =
+             Await.run(
+               ctx.params
+               |> Map.put(:request_id, opened["request_id"])
+               |> Map.put(:task, "Tampered task"),
+               ctx.context
+             )
+
+    assert {:error, :design_checkpoint_request_id_mismatch} =
+             Await.run(
+               ctx.params
+               |> Map.put(:request_id, opened["request_id"])
+               |> Map.put(:plan_fingerprint, String.duplicate("b", 64)),
+               ctx.context
+             )
+
+    refute_received {:await_interaction_response, _, _, _}
+  end
+
+  test "requires bounded task and valid compiled plan fingerprint", ctx do
+    assert {:error, :design_checkpoint_task_required} =
+             Open.run(Map.delete(ctx.params, :task), ctx.context)
+
+    assert {:error, :design_checkpoint_plan_fingerprint_required} =
+             Open.run(Map.delete(ctx.params, :plan_fingerprint), ctx.context)
+
+    assert {:error, :design_checkpoint_task_control_character} =
+             Open.run(%{ctx.params | task: "bad\u0000task"}, ctx.context)
+
+    assert {:error, :design_checkpoint_plan_fingerprint_invalid} =
+             Open.run(
+               %{ctx.params | plan_fingerprint: String.duplicate("A", 64)},
+               ctx.context
+             )
+
+    assert {:error, :design_checkpoint_plan_fingerprint_invalid_utf8} =
+             Open.run(
+               %{ctx.params | plan_fingerprint: <<0xFF, String.duplicate("a", 63)::binary>>},
+               ctx.context
+             )
+
+    assert {:error, :design_checkpoint_plan_fingerprint_control_character} =
+             Open.run(
+               %{ctx.params | plan_fingerprint: <<0, String.duplicate("a", 63)::binary>>},
+               ctx.context
+             )
+
+    alias_context = Map.put(ctx.context, :coding_plan_fingerprint, ctx.params.plan_fingerprint)
+
+    assert {:ok, aliased} =
+             Open.run(Map.delete(ctx.params, :plan_fingerprint), alias_context)
+
+    assert aliased["evidence"]["plan_fingerprint"] == ctx.params.plan_fingerprint
   end
 
   test "normalizes approve, rework, and deny into JSON-clean branches", ctx do

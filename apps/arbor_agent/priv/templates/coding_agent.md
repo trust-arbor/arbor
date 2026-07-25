@@ -53,7 +53,7 @@ required_capabilities:
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
 - description: "Open and await the pipeline-internal durable design checkpoint"
-  resource: "arbor://action/coding/design_checkpoint"
+  resource: "arbor://action/coding/design_checkpoint/**"
 - description: "Run the pipeline-internal reviewed commit/adoption gate (orchestration control)"
   resource: "arbor://action/coding/reviewed_commit"
 - description: "Validate a Council-attested security regression against both reviewed revisions"
