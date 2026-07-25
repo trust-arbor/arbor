@@ -5,6 +5,10 @@ defmodule Arbor.Comms.Config do
   Reads from application env under `:arbor_comms`.
   """
 
+  @default_durable_interaction_store_namespace :durable_interactions
+  @default_durable_interaction_store_max_data_bytes 65_536
+  @default_durable_interaction_store_max_items 1_000
+
   @doc "Returns whether a given channel is enabled."
   @spec channel_enabled?(atom()) :: boolean()
   def channel_enabled?(channel) do
@@ -62,6 +66,45 @@ defmodule Arbor.Comms.Config do
     |> Keyword.get(key, default)
   end
 
+  # ============================================================================
+  # Durable interaction store configuration
+  # ============================================================================
+
+  @doc "Returns the configured durable interaction persistence backend, or nil when disabled."
+  @spec durable_interaction_store_backend() :: module() | nil | term()
+  def durable_interaction_store_backend do
+    durable_interaction_store_config()
+    |> Keyword.get(:backend)
+  end
+
+  @doc "Returns the fixed namespace used for durable interaction records."
+  @spec durable_interaction_store_namespace() :: atom() | term()
+  def durable_interaction_store_namespace do
+    durable_interaction_store_config()
+    |> Keyword.get(:namespace, @default_durable_interaction_store_namespace)
+  end
+
+  @doc "Returns backend options supplied by configuration for the durable store."
+  @spec durable_interaction_store_opts() :: keyword() | term()
+  def durable_interaction_store_opts do
+    durable_interaction_store_config()
+    |> Keyword.get(:opts, [])
+  end
+
+  @doc "Returns the closed JSON data byte limit for durable interaction records."
+  @spec durable_interaction_store_max_data_bytes() :: pos_integer() | term()
+  def durable_interaction_store_max_data_bytes do
+    durable_interaction_store_config()
+    |> Keyword.get(:max_data_bytes, @default_durable_interaction_store_max_data_bytes)
+  end
+
+  @doc "Returns the maximum number of keys returned by durable interaction inventory."
+  @spec durable_interaction_store_max_items() :: pos_integer() | term()
+  def durable_interaction_store_max_items do
+    durable_interaction_store_config()
+    |> Keyword.get(:max_items, @default_durable_interaction_store_max_items)
+  end
+
   @doc "Returns whether the message handler is enabled."
   @spec handler_enabled?() :: boolean()
   def handler_enabled? do
@@ -84,6 +127,16 @@ defmodule Arbor.Comms.Config do
   @spec default_response_channel() :: atom()
   def default_response_channel do
     handler_config(:default_response_channel, :signal)
+  end
+
+  defp durable_interaction_store_config do
+    case Application.get_env(:arbor_comms, :durable_interaction_store, []) do
+      config when is_list(config) ->
+        if Keyword.keyword?(config), do: config, else: []
+
+      _ ->
+        []
+    end
   end
 
   @doc "Returns the configured ResponseRouter module."

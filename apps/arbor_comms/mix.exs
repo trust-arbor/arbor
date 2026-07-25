@@ -32,6 +32,7 @@ defmodule ArborComms.MixProject do
     [
       {:arbor_contracts, in_umbrella: true},
       {:arbor_common, in_umbrella: true},
+      {:arbor_persistence, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
       {:jason, "~> 1.4"},
