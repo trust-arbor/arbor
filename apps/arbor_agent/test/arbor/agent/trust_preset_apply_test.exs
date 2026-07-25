@@ -220,7 +220,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
       refute Enum.any?(
                uris,
-               &CapabilityUri.capability_match?(&1, "arbor://approval/answer")
+               &CapabilityUri.prefix_match?("arbor://approval/answer", &1)
              )
 
       assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/coding/reviewed_commit"))
