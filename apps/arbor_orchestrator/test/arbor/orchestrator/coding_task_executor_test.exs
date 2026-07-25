@@ -3142,12 +3142,74 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["verification_report"]["status"] == "passed"
     end
 
-    test "rejects passed verification for contradictory non-success terminals" do
+    test "accepts passed verification for later approval and review terminals" do
       validation = validation_result("default")
 
-      for status <- ~w(rework_exhausted approval_denied cancelled) do
-        assert {:error, {:invalid_terminal_evidence, :verification_terminal_status_mismatch}} =
+      assert {:ok, approval_denied} =
+               run_with_profile_verification("default", validation, %{
+                 "status" => "approval_denied"
+               })
+
+      assert approval_denied["status"] == "approval_denied"
+      assert approval_denied["verification_report"]["status"] == "passed"
+
+      for status <- ~w(review_rejected human_review_required) do
+        assert {:ok, result} =
                  run_with_profile_verification("default", validation, %{"status" => status})
+
+        assert result["status"] == status
+        assert result["canonical_status"] == status
+        assert result["verification_report"]["status"] == "passed"
+      end
+    end
+
+    test "accepts passed verification for legacy review and operator rework exhaustion" do
+      validation = validation_result("default")
+
+      for legacy_status <- ~w(review_requires_rework operator_approval_rework) do
+        assert {:ok, result} =
+                 run_with_profile_verification("default", validation, %{
+                   "status" => "rework_exhausted",
+                   "legacy_status" => legacy_status
+                 })
+
+        assert result["status"] == legacy_status
+        assert result["canonical_status"] == "rework_exhausted"
+        assert result["verification_report"]["status"] == "passed"
+      end
+    end
+
+    test "cancelled remains outside the coding executor terminal vocabulary" do
+      assert {:error, {:unknown_terminal_status, "cancelled"}} =
+               run_with_profile_verification("default", validation_result("default"), %{
+                 "status" => "cancelled"
+               })
+    end
+
+    test "rejects failed or blocked verification for non-validation terminals" do
+      failed_validation =
+        validation_result("default")
+        |> Map.merge(%{
+          "exit_code" => 1,
+          "passed" => false,
+          "feedback" =>
+            validation_check(%{"exit_code" => 1, "passed" => false})
+            |> Map.delete("reason")
+        })
+
+      blocked_validation = %{"passed" => false}
+
+      terminals = [
+        %{"status" => "approval_denied"},
+        %{"status" => "review_rejected"},
+        %{"status" => "human_review_required"},
+        %{"status" => "rework_exhausted", "legacy_status" => "review_requires_rework"},
+        %{"status" => "rework_exhausted", "legacy_status" => "operator_approval_rework"}
+      ]
+
+      for terminal <- terminals, validation <- [failed_validation, blocked_validation] do
+        assert {:error, {:invalid_terminal_evidence, :verification_terminal_status_mismatch}} =
+                 run_with_profile_verification("default", validation, terminal)
       end
     end
 

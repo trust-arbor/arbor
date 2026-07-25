@@ -2236,12 +2236,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:pipeline_error,
           pipeline_error_detail(clean, engine_result, worker_provider, requested_model)}}
 
-      status == "cancelled" and terminal_validation_claimed?(context, status) ->
-        case adapt_terminal_verification(context, clean, status, legacy) do
-          {:error, outcome} -> {:error, {:invalid_terminal_evidence, outcome}}
-          {:ok, _report} -> {:error, {:unknown_terminal_status, status}}
-        end
-
       not OutcomeMapper.terminal_status?(status) ->
         {:error, {:unknown_terminal_status, status}}
 
@@ -2325,17 +2319,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
        do: :ok
 
   defp validate_terminal_verification_consistency(
-         public_status,
-         canonical_status,
+         _public_status,
+         _canonical_status,
          %{"status" => "passed"}
-       ) do
-    if MapSet.member?(@adoptable_statuses, public_status) and
-         MapSet.member?(@adoptable_statuses, canonical_status) do
-      :ok
-    else
-      {:error, :verification_terminal_status_mismatch}
-    end
-  end
+       ),
+       do: :ok
 
   defp validate_terminal_verification_consistency(_public_status, _canonical_status, _report),
     do: {:error, :verification_terminal_status_mismatch}
