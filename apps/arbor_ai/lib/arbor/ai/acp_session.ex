@@ -3570,15 +3570,16 @@ defmodule Arbor.AI.AcpSession do
 
   @response_budget [
     max_bytes: 64_000,
-    max_nodes: 200,
+    max_nodes: 2_048,
     max_depth: 8,
-    max_map_keys: 50,
-    max_list_items: 50,
+    max_map_keys: 512,
+    max_list_items: 256,
     max_string_bytes: 1024
   ]
 
   @max_option_scalar_bytes 256
   @max_config_options 20
+  @max_model_catalog_options 128
 
   defp verify_model_response({:ok, inner}, model) when is_map(inner) do
     case Arbor.LLM.validate_decoded_term(inner, @response_budget) do
@@ -3605,10 +3606,9 @@ defmodule Arbor.AI.AcpSession do
     # options (e.g. Claude SDK's boolean "fast") may carry non-string scalars,
     # so the walk only requires every option to have a bounded string id.
     case bounded_find_model_option(options, 0) do
-      {:ok, %{"currentValue" => value}} when is_binary(value) ->
-        if byte_size(value) > @max_option_scalar_bytes do
-          {:error, {:model_not_confirmed, :oversized_option_scalar}}
-        else
+      {:ok, %{"currentValue" => value} = option} when is_binary(value) ->
+        with :ok <- validate_model_catalog(option),
+             :ok <- validate_model_current_value(value) do
           if value == model, do: :ok, else: {:error, :model_mismatch}
         end
 
@@ -3665,6 +3665,29 @@ defmodule Arbor.AI.AcpSession do
   defp bounded_find_model_option(other, _count) when other != [] do
     {:error, {:model_not_confirmed, :improper_list}}
   end
+
+  # Codex includes a bounded catalog under the model option. Keep that nested
+  # list within a smaller protocol-specific limit than the response budget so
+  # a large but otherwise well-shaped provider response cannot consume the
+  # entire generic tree allowance.
+  defp validate_model_catalog(%{"options" => options}) when is_list(options) do
+    if length(options) <= @max_model_catalog_options do
+      :ok
+    else
+      {:error, {:model_not_confirmed, :model_catalog_too_many}}
+    end
+  end
+
+  defp validate_model_catalog(%{"options" => _other}),
+    do: {:error, {:model_not_confirmed, :invalid_model_catalog_shape}}
+
+  defp validate_model_catalog(_option), do: :ok
+
+  defp validate_model_current_value(value) when byte_size(value) <= @max_option_scalar_bytes,
+    do: :ok
+
+  defp validate_model_current_value(_value),
+    do: {:error, {:model_not_confirmed, :oversized_option_scalar}}
 
   # Every scanned option must carry a bounded string id (ACP canonical key).
   # The currentValue contract is option-specific: only the unique id == "model"

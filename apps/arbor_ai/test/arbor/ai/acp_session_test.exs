@@ -2118,6 +2118,40 @@ defmodule Arbor.AI.AcpSessionTest do
       {:ok, %{"configOptions" => [%{"id" => "model", "currentValue" => model}]}}
     end
 
+    defp codex_catalog_response(model, catalog_size) do
+      catalog =
+        Enum.map(1..catalog_size, fn index ->
+          value = if index == 1, do: model, else: "catalog-model-#{index}"
+
+          %{
+            "value" => value,
+            "name" => value,
+            "description" => "Codex catalog model #{index}"
+          }
+        end)
+
+      {:ok,
+       %{
+         "configOptions" => [
+           %{
+             "id" => "mode",
+             "currentValue" => "workspace-write",
+             "options" => [%{"value" => "workspace-write", "name" => "Workspace write"}]
+           },
+           %{
+             "id" => "model",
+             "currentValue" => model,
+             "options" => catalog
+           },
+           %{
+             "id" => "reasoning_effort",
+             "currentValue" => "medium",
+             "options" => [%{"value" => "medium", "name" => "Medium"}]
+           }
+         ]
+       }}
+    end
+
     defp install_model_select_client(opts) do
       original_client = Application.get_env(:arbor_ai, :acp_client_module)
       Application.put_env(:arbor_ai, :acp_client_module, ModelSelectClient)
@@ -2198,6 +2232,27 @@ defmodule Arbor.AI.AcpSessionTest do
       session = start_model_session("zai-coding-plan/glm-5.2")
       assert :ok = AcpSession.await_ready(session, timeout: 1_000)
       assert %{status: :ready, model: "zai-coding-plan/glm-5.2"} = AcpSession.status(session)
+    end
+
+    test "Codex-sized model catalog confirms the exact requested model at startup" do
+      model = "gpt-5.3-codex-spark"
+      response = codex_catalog_response(model, 128)
+      session = start_model_session(model, model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+      assert {:ok, _info} = AcpSession.create_session(session, timeout: 2_000)
+      assert %{status: :ready, model: ^model} = AcpSession.status(session)
+    end
+
+    test "model catalog just beyond the bounded contract fails closed" do
+      model = "gpt-5.3-codex-spark"
+      response = codex_catalog_response(model, 129)
+      session = start_model_session(model, model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, {:model_not_confirmed, :model_catalog_too_many}}} =
+               AcpSession.create_session(session, timeout: 2_000)
     end
 
     test "no model preserves provider-default behavior (no RPC)" do
