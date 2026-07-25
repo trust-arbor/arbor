@@ -31,7 +31,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   `task_id` / `caller_id` nonblank strings, `timeout` a positive integer when
   present, `metadata` a JSON object when present. Each task receives an
   isolated, path-safe Engine logs directory. A supplied `timeout` is forwarded
-  to Engine handlers and bounds the complete runner invocation.
+  to Engine handlers and bounds the complete runner invocation. Immediately
+  before that runner timeout starts, the executor seeds the owner-generated
+  absolute Unix-ms deadline as `session.run_deadline_unix_ms` in ordinary
+  JSON-clean Engine initial context so checkpoints retain the same authority
+  across resume.
 
   Steering never accepts a worker handle or principal override. It binds the
   persisted control's exact task id to the execution context, embeds the user
@@ -2132,7 +2136,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         runner_opts = Keyword.delete(opts, :signing_authority)
 
         invoke_with_timeout(
-          fn -> runner.run_file_as(graph_path, principal, authority, runner_opts) end,
+          fn bounded_opts ->
+            runner.run_file_as(graph_path, principal, authority, bounded_opts)
+          end,
           runner_opts
         )
 
@@ -2145,15 +2151,22 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     :exit, reason -> {:error, {:pipeline_run_exit, reason}}
   end
 
-  defp invoke_with_timeout(fun, opts) when is_function(fun, 0) do
+  defp invoke_with_timeout(fun, opts) when is_function(fun, 1) do
     case Keyword.fetch(opts, :timeout) do
       :error ->
-        fun.()
+        fun.(opts)
 
       {:ok, timeout} ->
+        deadline_unix_ms = System.system_time(:millisecond) + timeout
+
+        bounded_opts =
+          Keyword.update!(opts, :initial_values, fn initial_values ->
+            Map.put(initial_values, "session.run_deadline_unix_ms", deadline_unix_ms)
+          end)
+
         # The link is intentional: TaskStore cancellation kills this owner,
         # which must also terminate the Engine process and its owned resources.
-        task = Task.async(fn -> capture_runner_result(fun) end)
+        task = Task.async(fn -> capture_runner_result(fn -> fun.(bounded_opts) end) end)
 
         case Task.yield(task, timeout) do
           {:ok, {:ok, result}} ->

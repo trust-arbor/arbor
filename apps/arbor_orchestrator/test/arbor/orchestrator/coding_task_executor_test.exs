@@ -80,6 +80,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       case Keyword.get(opts, :spawning_pid) do
         pid when is_pid(pid) and pid != self() ->
+          send(pid, {:coding_executor_runner_observed_at, System.system_time(:millisecond)})
           send(pid, {:coding_executor_captured_run, path, opts})
 
         _ ->
@@ -2029,6 +2030,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert iv["session.agent_id"] == "agent_trusted"
       assert iv["session.task_id"] == "task_abc"
       assert iv["session.caller_id"] == "human_1"
+      assert is_integer(iv["session.run_deadline_unix_ms"])
+      assert {:ok, _json} = Jason.encode(iv)
       assert iv["task"] == "do work"
       assert iv["repo_path"] == configured_repo_path()
       assert iv["worktree_base_dir"] == configured_worktree_root()
@@ -2191,6 +2194,26 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
     end
 
+    test "owner seeds a bounded absolute deadline immediately before runner invocation" do
+      timeout = 5_000
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_owner_deadline", "timeout" => timeout})
+               )
+
+      assert_receive {:coding_executor_runner_observed_at, observed_at_unix_ms}
+      opts = last_opts()
+      assert opts[:timeout] == timeout
+
+      deadline_unix_ms = opts[:initial_values]["session.run_deadline_unix_ms"]
+      remaining_at_runner_ms = deadline_unix_ms - observed_at_unix_ms
+
+      assert remaining_at_runner_ms in 4_000..timeout
+    end
+
     test "security regression: authority closes after success, runner error, and timeout" do
       assert {:ok, _result} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
       assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
@@ -2240,6 +2263,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       plan_bound_opts = last_opts()
       assert plan_bound_opts[:timeout] == 20_000
       assert plan_bound_opts[:approval_timeout_ms] == 15_000
+      assert_receive {:coding_executor_runner_observed_at, plan_observed_at}
+
+      assert (plan_bound_opts[:initial_values]["session.run_deadline_unix_ms"] -
+                plan_observed_at) in 19_000..20_000
 
       assert {:ok, _result} =
                CodingTaskExecutor.run(
@@ -2251,6 +2278,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       context_bound_opts = last_opts()
       assert context_bound_opts[:timeout] == 12_000
       assert context_bound_opts[:approval_timeout_ms] == 7_000
+      assert_receive {:coding_executor_runner_observed_at, context_observed_at}
+
+      assert (context_bound_opts[:initial_values]["session.run_deadline_unix_ms"] -
+                context_observed_at) in 11_000..12_000
     end
 
     test "terminates the linked runner when the executor owner is cancelled" do

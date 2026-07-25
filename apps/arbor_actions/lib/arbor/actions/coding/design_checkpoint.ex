@@ -144,6 +144,29 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     end
   end
 
+  @doc """
+  Return the design-checkpoint wait bounded by its static timeout and the
+  executor owner's durable absolute run deadline.
+
+  `run_deadline_unix_ms` is mandatory for this pipeline-internal action and
+  must be an integer Unix timestamp in milliseconds. Missing or malformed
+  deadlines fail closed. An elapsed deadline returns `:elapsed`, allowing the
+  Await action to produce its existing structured timeout without consulting
+  Comms. A caller-supplied future deadline can never extend the static timeout.
+  """
+  def await_timeout(context, params) when is_map(context) and is_map(params) do
+    with {:ok, static_timeout} <- timeout(context, params),
+         {:ok, deadline_unix_ms} <- run_deadline_unix_ms(params, context) do
+      remaining_ms = deadline_unix_ms - System.system_time(:millisecond)
+
+      if remaining_ms > 0,
+        do: {:ok, min(static_timeout, remaining_ms)},
+        else: {:ok, :elapsed}
+    end
+  end
+
+  def await_timeout(_context, _params), do: {:error, :invalid_design_checkpoint_input}
+
   @doc false
   def comms_boundary(context) when is_map(context) do
     case Map.get(context, :comms_boundary) || Map.get(context, "comms_boundary") do
@@ -200,6 +223,19 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
 
   defp require_design_policy(%{"checkpoint_policy" => "design_required"}), do: :ok
   defp require_design_policy(_packet), do: {:error, :design_checkpoint_policy_required}
+
+  defp run_deadline_unix_ms(params, context) do
+    case value(params, context, :run_deadline_unix_ms) do
+      nil ->
+        {:error, :design_checkpoint_run_deadline_required}
+
+      deadline when is_integer(deadline) and deadline > 0 ->
+        {:ok, deadline}
+
+      _ ->
+        {:error, :invalid_design_checkpoint_run_deadline}
+    end
+  end
 
   defp validate_packet_digest(packet, supplied) do
     with {:ok, expected} <- WorkPacket.digest(packet),
@@ -645,7 +681,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
 
   This pipeline-internal action is a local write/wait. It reconstructs all
   evidence and recomputes the request id before consulting the public comms
-  facade, so a caller-provided id cannot select another approval.
+  facade, so a caller-provided id cannot select another approval. It also
+  requires the executor owner's absolute Unix-ms run deadline and never waits
+  longer than either the static DOT timeout or the positive time remaining.
   """
 
   use Jido.Action,
@@ -674,6 +712,11 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       design: [type: :string, required: true, doc: "Exact worker design text"],
       design_digest: [type: :string, required: true, doc: "Exact sha256: design digest"],
       agent_id: [type: :string, required: false, doc: "Owning agent identity"],
+      run_deadline_unix_ms: [
+        type: :integer,
+        required: true,
+        doc: "Executor-owned absolute run deadline in Unix milliseconds"
+      ],
       timeout: [type: :integer, required: false, doc: "Wait timeout in milliseconds"]
     ]
 
@@ -698,6 +741,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       design: :data,
       design_digest: :control,
       agent_id: :control,
+      run_deadline_unix_ms: :control,
       timeout: :data
     }
   end
@@ -711,15 +755,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
          {:ok, _validated_id} <- ApprovalAnswer.validate_request_id(supplied_id),
          :ok <- same_request_id(supplied_id, binding.request_id),
          {:ok, agent_id} <- required_agent_id(binding),
-         {:ok, timeout} <- DesignCheckpoint.timeout(context, params),
-         {:ok, comms} <- DesignCheckpoint.comms_boundary(context),
-         result <-
-           DesignCheckpoint.call(comms, :await_interaction_response, [
-             binding.request_id,
-             agent_id,
-             [timeout: timeout]
-           ]) do
-      settle(result, binding)
+         {:ok, timeout} <- DesignCheckpoint.await_timeout(context, params) do
+      await(timeout, binding, agent_id, context)
     else
       {:error, reason} -> {:error, reason}
     end
@@ -742,6 +779,22 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
 
   defp same_request_id(id, id), do: :ok
   defp same_request_id(_supplied, _expected), do: {:error, :design_checkpoint_request_id_mismatch}
+
+  defp await(:elapsed, binding, _agent_id, _context),
+    do: settle({:error, :timeout}, binding)
+
+  defp await(timeout, binding, agent_id, context) when is_integer(timeout) and timeout > 0 do
+    with {:ok, comms} <- DesignCheckpoint.comms_boundary(context) do
+      result =
+        DesignCheckpoint.call(comms, :await_interaction_response, [
+          binding.request_id,
+          agent_id,
+          [timeout: timeout]
+        ])
+
+      settle(result, binding)
+    end
+  end
 
   defp settle({:ok, response, metadata}, binding) do
     case DesignCheckpoint.normalize_response(

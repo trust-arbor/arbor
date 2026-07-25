@@ -56,7 +56,13 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
       agent_id: "agent_123"
     }
 
-    {:ok, params: params, context: %{comms_boundary: FakeComms, agent_id: "agent_123"}}
+    context = %{
+      comms_boundary: FakeComms,
+      agent_id: "agent_123",
+      run_deadline_unix_ms: System.system_time(:millisecond) + 600_000
+    }
+
+    {:ok, params: params, context: context}
   end
 
   test "binds deterministic evidence and opens node-restart durable interaction", ctx do
@@ -230,6 +236,84 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     assert result["note"] == ""
   after
     Process.delete(:await_result)
+  end
+
+  test "await uses the minimum of static timeout and positive deadline remainder", ctx do
+    assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+    request_params = Map.put(ctx.params, :request_id, opened["request_id"])
+
+    static_params = Map.put(request_params, :timeout, 1_234)
+
+    assert {:ok, _result} = Await.run(static_params, ctx.context)
+
+    assert_received {:await_interaction_response, _, "agent_123", [timeout: 1_234]}
+
+    deadline_unix_ms = System.system_time(:millisecond) + 10_000
+    deadline_params = Map.put(request_params, :timeout, 20_000)
+    deadline_context = Map.put(ctx.context, :run_deadline_unix_ms, deadline_unix_ms)
+
+    assert {:ok, _result} = Await.run(deadline_params, deadline_context)
+
+    assert_received {:await_interaction_response, _, "agent_123", [timeout: bounded_timeout]}
+    assert bounded_timeout in 9_000..10_000
+  end
+
+  test "exact numeric static DOT timeout remains authoritative under a later deadline", ctx do
+    assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+
+    params =
+      ctx.params
+      |> Map.put(:request_id, opened["request_id"])
+      |> Map.put(:timeout, 300_000)
+
+    assert {:ok, _result} = Await.run(params, ctx.context)
+
+    assert_received {:await_interaction_response, _, "agent_123", [timeout: 300_000]}
+  end
+
+  test "elapsed owner deadline returns structured timeout without consulting Comms", ctx do
+    assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+
+    params = Map.put(ctx.params, :request_id, opened["request_id"])
+
+    context =
+      Map.put(
+        ctx.context,
+        :run_deadline_unix_ms,
+        System.system_time(:millisecond) - 1
+      )
+
+    assert {:ok, result} = Await.run(params, context)
+    assert result["checkpoint_outcome"] == "timeout"
+    assert result["note"] == ""
+    refute_received {:await_interaction_response, _, _, _}
+  end
+
+  test "missing and malformed owner deadlines fail closed before Comms", ctx do
+    assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+    params = Map.put(ctx.params, :request_id, opened["request_id"])
+
+    assert {:error, :design_checkpoint_run_deadline_required} =
+             Await.run(params, Map.delete(ctx.context, :run_deadline_unix_ms))
+
+    assert {:error, :invalid_design_checkpoint_run_deadline} =
+             Await.run(params, Map.put(ctx.context, :run_deadline_unix_ms, "later"))
+
+    refute_received {:await_interaction_response, _, _, _}
+  end
+
+  test "far-future caller deadline cannot extend the static timeout", ctx do
+    assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+
+    params =
+      ctx.params
+      |> Map.put(:request_id, opened["request_id"])
+      |> Map.put(:timeout, 777)
+      |> Map.put(:run_deadline_unix_ms, System.system_time(:millisecond) + 86_400_000)
+
+    assert {:ok, _result} = Await.run(params, ctx.context)
+
+    assert_received {:await_interaction_response, _, "agent_123", [timeout: 777]}
   end
 
   test "fails closed when durable interactions are unavailable", ctx do
