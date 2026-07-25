@@ -95,6 +95,23 @@ config :arbor_comms, :durable_interaction_store,
   namespace: :durable_interactions,
   opts: [repo: Arbor.Persistence.Repo]
 
+# Coding-run lifecycle and Engine checkpoints must survive the same node restart
+# as durable interactions or a waiting checkpoint cannot be resumed.
+config :arbor_orchestrator, :run_journal,
+  backend: Arbor.Persistence.QueryableStore.Postgres,
+  store_name: :arbor_pipeline_run_lifecycle,
+  backend_opts: [repo: Arbor.Persistence.Repo],
+  start_store: false,
+  durability_class: :node_restart
+
+config :arbor_orchestrator, :engine_checkpoints,
+  store: Arbor.Persistence.QueryableStore.Postgres,
+  store_name: :arbor_orchestrator_checkpoints,
+  store_opts: [repo: Arbor.Persistence.Repo],
+  start_store: false,
+  store_child_opts: [],
+  durability_class: :node_restart
+
 # Agent — auto-start infrastructure agents on boot.
 #
 # DISABLED 2026-06-22: the at-boot diagnostician seed was broken — its identity
