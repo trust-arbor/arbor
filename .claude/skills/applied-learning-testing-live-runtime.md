@@ -4,6 +4,15 @@ Read this when choosing a Mix/test isolation boundary, reloading a live runtime,
 
 ## Retained Applied Learning
 
+<!-- applied-learning: independently-rerun-delegated-verification-against-the-committed-revision -->
+<a id="applied-learning-independently-rerun-delegated-verification-against-the-committed-revision"></a>
+**Independently rerun delegated verification against the committed revision.**
+A worker's reported green run is evidence, not acceptance: it may have selected
+the wrong lines, run before the final commit, or used stale workspace state.
+After integrating a delegated slice, rerun its exact focused suite from an
+independent worktree before treating it as green (found 2026-07-25 when two
+stale Coding Plan fixture expectations survived a reported full-file pass).
+
 <!-- applied-learning: compare-repository-wide-quality-failures-with-the-frozen-starting-revision -->
 <a id="applied-learning-compare-repository-wide-quality-failures-with-the-frozen-starting-revision"></a>
 **Compare repository-wide quality failures with the frozen starting revision.**
