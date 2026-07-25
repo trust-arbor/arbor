@@ -68,13 +68,13 @@ defmodule Arbor.Comms.InteractionRouter do
   def request(attrs_or_interaction, opts \\ [])
 
   def request(%Interaction{} = interaction, opts) do
-    do_request(interaction, opts)
+    with {:ok, _durability} <- requested_durability(opts), do: do_request(interaction, opts)
   end
 
   def request(attrs, opts) when is_map(attrs) or is_list(attrs) do
-    case Interaction.new(attrs) do
-      {:ok, interaction} -> do_request(interaction, opts)
-      {:error, _} = err -> err
+    with {:ok, _durability} <- requested_durability(opts),
+         {:ok, interaction} <- Interaction.new(attrs) do
+      do_request(interaction, opts)
     end
   end
 
@@ -240,8 +240,9 @@ defmodule Arbor.Comms.InteractionRouter do
 
   defp do_request(%Interaction{} = interaction, opts) do
     adapter_map = Keyword.get(opts, :adapter_map, configured_adapters())
+    durability = Keyword.get(opts, :durability, :volatile)
 
-    with {:ok, _} <- InteractionRegistry.put(interaction),
+    with {:ok, _} <- InteractionRegistry.put(interaction, durability: durability),
          :ok <- dispatch(interaction, adapter_map) do
       emit_signal(:requested, interaction, %{})
       {:ok, interaction.request_id}
@@ -257,6 +258,20 @@ defmodule Arbor.Comms.InteractionRouter do
         err
     end
   end
+
+  defp requested_durability(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.get(opts, :durability, :volatile) do
+        :volatile -> {:ok, :volatile}
+        :node_restart -> {:ok, :node_restart}
+        _ -> {:error, :unsupported_durability}
+      end
+    else
+      {:error, :invalid_options}
+    end
+  end
+
+  defp requested_durability(_opts), do: {:error, :invalid_options}
 
   defp dispatch(%Interaction{user_id: user_id} = interaction, adapter_map) do
     case PresenceTracker.primary_channel(user_id) do

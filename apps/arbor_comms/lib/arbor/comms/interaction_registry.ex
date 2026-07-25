@@ -11,7 +11,7 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   use Phoenix.Tracker
 
-  alias Arbor.Comms.InteractionRegistry.{Authority, Routing}
+  alias Arbor.Comms.InteractionRegistry.{Authority, DurableStore, Routing}
   alias Arbor.Comms.InteractionRegistry.Supervisor, as: RegistrySupervisor
   alias Arbor.Contracts.Comms.Interaction
 
@@ -21,6 +21,8 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   @type terminal_status :: :responded | :abandoned | :expired
   @type timeout_capture :: %{
+          optional(:operation_id) => String.t(),
+          optional(:authority_epoch) => String.t(),
           authority_node: node(),
           authority_pid: pid(),
           request_id: String.t()
@@ -59,21 +61,35 @@ defmodule Arbor.Comms.InteractionRegistry do
   authority process. Caller data cannot select or override it.
   """
   @spec put(Interaction.t(), keyword()) :: {:ok, Interaction.t()} | {:error, term()}
-  def put(%Interaction{request_id: request_id} = interaction, _opts \\ []) do
-    case authority_for(request_id) do
-      :not_found ->
-        route_call(node(), :put, [interaction])
+  def put(interaction, opts \\ [])
 
-      {:ok, authority_node} when authority_node == node() ->
-        route_call(node(), :put, [interaction])
+  def put(%Interaction{request_id: request_id} = interaction, opts) when is_list(opts) do
+    with {:ok, _durability} <- requested_durability(opts) do
+      case authority_for(request_id) do
+        :not_found ->
+          route_call(node(), :put, [interaction, opts])
 
-      {:ok, _remote_authority} ->
-        {:error, :already_tracked}
+        {:ok, authority_node} when authority_node == node() ->
+          route_call(node(), :put, [interaction, opts])
 
-      {:error, _reason} = error ->
-        error
+        {:ok, _remote_authority} ->
+          {:error, :already_tracked}
+
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
+
+  def put(_interaction, _opts), do: {:error, :invalid_options}
+
+  @doc "Return durable interaction backend readiness without changing volatile behavior."
+  @spec durable_readiness() :: DurableStore.availability()
+  def durable_readiness, do: DurableStore.readiness()
+
+  @doc "Return whether node-restart durable interaction admission is available."
+  @spec durable_ready?() :: boolean()
+  def durable_ready?, do: DurableStore.ready?()
 
   @doc "Look up a canonically pending interaction by request ID."
   @spec get(String.t()) :: {:ok, Interaction.t()} | :not_found
@@ -134,13 +150,18 @@ defmodule Arbor.Comms.InteractionRegistry do
     case authority_for(request_id) do
       {:ok, authority_node} ->
         case route_call(authority_node, :arm_timeout, [request_id, timeout_ms]) do
-          {:ok, %{authority_pid: authority_pid, outcome: outcome}}
+          {:ok, %{authority_pid: authority_pid, outcome: outcome} = receipt}
           when is_pid(authority_pid) and node(authority_pid) == authority_node ->
             capture = %{
               authority_node: authority_node,
               authority_pid: authority_pid,
               request_id: request_id
             }
+
+            capture =
+              capture
+              |> maybe_put_capture(:operation_id, Map.get(receipt, :operation_id))
+              |> maybe_put_capture(:authority_epoch, Map.get(receipt, :authority_epoch))
 
             {:ok, capture, outcome}
 
@@ -162,6 +183,22 @@ defmodule Arbor.Comms.InteractionRegistry do
   @doc false
   @spec finalize_timeout(timeout_capture(), String.t()) ::
           {:ok, map()} | {:error, term()} | :not_found
+  def finalize_timeout(
+        %{
+          authority_node: authority_node,
+          authority_pid: authority_pid,
+          request_id: request_id,
+          operation_id: operation_id,
+          authority_epoch: authority_epoch
+        },
+        request_id
+      )
+      when is_atom(authority_node) and is_pid(authority_pid) and
+             node(authority_pid) == authority_node and is_binary(request_id) and
+             is_binary(operation_id) and is_binary(authority_epoch) do
+    Authority.finalize_timeout(authority_pid, request_id, operation_id, authority_epoch)
+  end
+
   def finalize_timeout(
         %{
           authority_node: authority_node,
@@ -354,4 +391,21 @@ defmodule Arbor.Comms.InteractionRegistry do
       :error -> Map.get(map, Atom.to_string(key))
     end
   end
+
+  defp requested_durability(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.get(opts, :durability, :volatile) do
+        :volatile -> {:ok, :volatile}
+        :node_restart -> {:ok, :node_restart}
+        _ -> {:error, :unsupported_durability}
+      end
+    else
+      {:error, :invalid_options}
+    end
+  end
+
+  defp requested_durability(_opts), do: {:error, :invalid_options}
+
+  defp maybe_put_capture(capture, _key, value) when not is_binary(value), do: capture
+  defp maybe_put_capture(capture, key, value), do: Map.put(capture, key, value)
 end

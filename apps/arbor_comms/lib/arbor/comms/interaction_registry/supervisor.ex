@@ -13,10 +13,14 @@ defmodule Arbor.Comms.InteractionRegistry.Supervisor do
   @impl true
   def init(opts) do
     children = [
-      Authority,
       %{
         id: InteractionRegistry.Tracker,
         start: {InteractionRegistry, :start_tracker, [opts]},
+        type: :worker
+      },
+      %{
+        id: Authority,
+        start: {Authority, :start_link, [Keyword.put_new(opts, :tracker, InteractionRegistry)]},
         type: :worker
       }
     ]

@@ -33,6 +33,24 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.Config
   alias Arbor.Comms.Dispatcher
 
+  @doc "Request a human interaction through the public comms facade."
+  @spec request_interaction(map() | Arbor.Contracts.Comms.Interaction.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def request_interaction(attrs_or_interaction, opts \\ []) do
+    InteractionRouter.request(attrs_or_interaction, opts)
+  end
+
+  @doc "Return readiness for opt-in node-restart durable interactions."
+  @spec durable_interaction_readiness() :: term()
+  def durable_interaction_readiness, do: Arbor.Comms.InteractionRegistry.durable_readiness()
+
+  @doc "Alias for durable interaction readiness."
+  def durable_readiness, do: durable_interaction_readiness()
+
+  @doc "Return whether opt-in node-restart durable interactions are ready."
+  @spec durable_ready?() :: boolean()
+  def durable_ready?, do: Arbor.Comms.InteractionRegistry.durable_ready?()
+
   @doc """
   Resolve the human operator's `user_id` for routing an interaction
   on behalf of `agent_id`.
