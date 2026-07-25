@@ -6,6 +6,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   """
   use ExUnit.Case, async: false
 
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
+  alias Arbor.Orchestrator.CodingPlan.Compiler
+
   @moduletag :fast
   @moduletag :coding_change_pipeline
 
@@ -17,6 +20,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     coding_workspace_release
     coding_workspace_committed_change
     coding_workspace_recovery_summary
+    coding_design_checkpoint_open
+    coding_design_checkpoint_await
     acp_start_session
     acp_send_message
     acp_session_status
@@ -147,7 +152,13 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           end
 
         "acp_send_message" ->
-          implement_response(scenario, counters, state)
+          worker_response(scenario, counters, state, args)
+
+        "coding_design_checkpoint_open" ->
+          design_checkpoint_open_response(args)
+
+        "coding_design_checkpoint_await" ->
+          design_checkpoint_await_response(scenario, args)
 
         "acp_session_status" ->
           n = Map.get(counters, :status, 0)
@@ -299,6 +310,85 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         true ->
           {:error, "initial resume fixture requires param.session_id"}
       end
+    end
+
+    defp worker_response(scenario, counters, state, args) do
+      prompt = Map.get(args, "prompt") || Map.get(args, :prompt) || ""
+
+      if String.contains?(prompt, "DESIGN PHASE ONLY") or
+           String.contains?(prompt, "DESIGN REWORK PHASE ONLY") do
+        design_response(scenario, counters, state)
+      else
+        implement_response(scenario, counters, state)
+      end
+    end
+
+    defp design_response(scenario, counters, state) do
+      n = Map.get(counters, :design, 0)
+      Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :design, n + 1)} end)
+
+      if scenario == :design_mutates_workspace do
+        Agent.update(state, fn s -> %{s | mutations: s.mutations + 1} end)
+      end
+
+      text =
+        case scenario do
+          :malformed_design_output ->
+            "this is not a design checkpoint envelope"
+
+          _ ->
+            design =
+              "Fixture design attempt #{n + 1}: update the owned module and run focused tests."
+
+            digest = "sha256:" <> (:crypto.hash(:sha256, design) |> Base.encode16(case: :lower))
+            Jason.encode!(%{"design" => design, "design_digest" => digest})
+        end
+
+      {:ok,
+       %{
+         delivery_status: "delivered",
+         text: text,
+         stop_reason: "end_turn",
+         session_id: "sess_1",
+         usage: %{}
+       }}
+    end
+
+    defp design_checkpoint_open_response(args) do
+      attempt = Map.get(args, "design_attempt") || Map.get(args, :design_attempt)
+
+      {:ok,
+       %{
+         checkpoint_outcome: "pending",
+         request_id: "irq_design_fixture_#{attempt}",
+         evidence: %{}
+       }}
+    end
+
+    defp design_checkpoint_await_response(scenario, args) do
+      attempt = Map.get(args, "design_attempt") || Map.get(args, :design_attempt)
+      request_id = Map.get(args, "request_id") || Map.get(args, :request_id)
+
+      {outcome, note} =
+        case {scenario, attempt} do
+          {:design_rework_then_approved, 1} -> {"rework", "Clarify the focused test coverage."}
+          {:design_denied, _} -> {"deny", "Do not proceed with this design."}
+          {:design_timeout, _} -> {"timeout", ""}
+          _ -> {"approve", ""}
+        end
+
+      {:ok,
+       %{
+         checkpoint_outcome: outcome,
+         request_id: request_id,
+         note: note,
+         evidence: %{
+           "approved" => outcome == "approve",
+           "design_attempt" => attempt,
+           "request_id" => request_id,
+           "source" => "fixture-design-checkpoint"
+         }
+       }}
     end
 
     defp implement_response(scenario, counters, state) do
@@ -652,6 +742,19 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     # that re-captures the baseline mid-recovery is observable as no_changes.
     defp fixture_fingerprint(scenario, sends, post_turn?, mutations) do
       case scenario do
+        s
+        when s in [
+               :design_approved,
+               :design_rework_then_approved,
+               :design_denied,
+               :design_timeout,
+               :malformed_design_output
+             ] ->
+          if sends == 0, do: "fp-clean", else: "fp-after-send-#{sends}"
+
+        :design_mutates_workspace ->
+          if mutations == 0, do: "fp-clean", else: "fp-design-mutated-#{mutations}"
+
         s when s in [:no_changes, :narrative_no_changes] ->
           "fp-clean"
 
@@ -1167,6 +1270,60 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     {result, calls}
   end
 
+  defp run_compiled_v2_fixture(scenario, checkpoint_policy, plan_overrides \\ %{}) do
+    plan = v2_plan!(checkpoint_policy, plan_overrides)
+    assert {:ok, compilation} = Compiler.compile(plan)
+
+    initial =
+      compilation.initial_values
+      |> Map.merge(%{
+        "session.agent_id" => "agent_fixture",
+        "session.task_id" => "task_fixture"
+      })
+
+    {result, calls} = run_fixture(scenario, initial, compilation.dot_source)
+    {result, calls, plan, compilation}
+  end
+
+  defp v2_plan!(checkpoint_policy, overrides) do
+    packet = %{
+      "version" => 1,
+      "success_criteria" => ["focused tests pass"],
+      "non_goals" => ["unreviewed execution authority"],
+      "constraints" => ["touch only owned files"],
+      "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
+      "required_evidence" => ["focused test output"],
+      "checkpoint_policy" => checkpoint_policy
+    }
+
+    {:ok, digest} = WorkPacket.digest(packet)
+
+    attrs =
+      %{
+        "version" => 2,
+        "task" => "Implement the compiled v2 fixture change",
+        "repo_root" => "/tmp/arbor-coding-plan-fixture",
+        "worker" => %{"provider" => "codex"},
+        "budgets" => %{"inactivity_timeout_ms" => 123_456},
+        "work_packet" => packet,
+        "work_packet_digest" => digest
+      }
+      |> deep_merge(overrides)
+
+    {:ok, plan} = Plan.new(attrs)
+    plan
+  end
+
+  defp deep_merge(left, right) do
+    Map.merge(left, right, fn _key, left_value, right_value ->
+      if is_map(left_value) and is_map(right_value) do
+        deep_merge(left_value, right_value)
+      else
+        right_value
+      end
+    end)
+  end
+
   defp assert_json_clean_context(context) when is_map(context) do
     Enum.each(context, fn {k, v} ->
       assert is_binary(k) or is_atom(k)
@@ -1262,6 +1419,55 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
   defp action_prompts(calls) do
     for {"acp_send_message", args} <- calls, do: args["prompt"]
+  end
+
+  defp action_calls(calls, action) do
+    for {^action, args} <- calls, do: args
+  end
+
+  defp fixture_design(attempt) do
+    "Fixture design attempt #{attempt}: update the owned module and run focused tests."
+  end
+
+  defp fixture_design_digest(attempt) do
+    "sha256:" <> (:crypto.hash(:sha256, fixture_design(attempt)) |> Base.encode16(case: :lower))
+  end
+
+  defp assert_design_checkpoint_identity(open_args, await_args, plan, compilation, attempt) do
+    identity_keys = ~w(
+      work_packet
+      packet_digest
+      task_id
+      task
+      plan_fingerprint
+      coding_plan_fingerprint
+      workspace_id
+      worker_session_id
+      worker_provider_session_id
+      design_attempt
+      design
+      design_digest
+    )
+
+    assert Map.take(await_args, identity_keys) == Map.take(open_args, identity_keys)
+
+    assert Map.take(open_args, identity_keys) == %{
+             "work_packet" => plan.work_packet,
+             "packet_digest" => plan.work_packet_digest,
+             "task_id" => "task_fixture",
+             "task" => plan.task,
+             "plan_fingerprint" => compilation.plan_fingerprint,
+             "coding_plan_fingerprint" => compilation.plan_fingerprint,
+             "workspace_id" => "ws_fixture_1",
+             "worker_session_id" => "acp_worker_fixture_1",
+             "worker_provider_session_id" => "sess_1",
+             "design_attempt" => attempt,
+             "design" => fixture_design(attempt),
+             "design_digest" => fixture_design_digest(attempt)
+           }
+
+    assert await_args["request_id"] == "irq_design_fixture_#{attempt}"
+    assert await_args["timeout"] === plan.budgets["inactivity_timeout_ms"]
   end
 
   defp called?(calls, action_name), do: Enum.any?(calls, fn {n, _} -> n == action_name end)
@@ -1475,6 +1681,116 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       assert graph.nodes["review_change"].attrs["context_keys"] ==
                "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Compiled CodingPlan v2 design checkpoint behavior
+  # ---------------------------------------------------------------------------
+
+  describe "compiled CodingPlan v2 design checkpoint fixtures" do
+    test "approval freezes the WorkPacket and accepted evidence into implementation" do
+      assert {{:ok, result}, calls, plan, compilation} =
+               run_compiled_v2_fixture(:design_approved, "design_required")
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["accepted_design"] == fixture_design(1)
+      assert result.context["accepted_design_digest"] == fixture_design_digest(1)
+
+      [open_args] = action_calls(calls, "coding_design_checkpoint_open")
+      [await_args] = action_calls(calls, "coding_design_checkpoint_await")
+      assert_design_checkpoint_identity(open_args, await_args, plan, compilation, 1)
+
+      [design_prompt, implementation_prompt] = action_prompts(calls)
+      assert design_prompt =~ "DESIGN PHASE ONLY"
+
+      assert {:ok, work_packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+      assert implementation_prompt =~ "IMPLEMENTATION PHASE"
+      assert implementation_prompt =~ work_packet_json
+      assert implementation_prompt =~ fixture_design(1)
+      assert implementation_prompt =~ fixture_design_digest(1)
+      assert implementation_prompt =~ "fixture-design-checkpoint"
+      assert implementation_prompt =~ "irq_design_fixture_1"
+      assert_closed_and_released(calls)
+    end
+
+    test "design rework reuses worker, provider session, and workspace while incrementing attempts" do
+      assert {{:ok, result}, calls, plan, compilation} =
+               run_compiled_v2_fixture(:design_rework_then_approved, "design_required")
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["design_attempt"] == 2
+      assert result.context["total_rework_count"] == 1
+      assert result.context["rework_kind"] == "design"
+
+      assert [first_open, second_open] = action_calls(calls, "coding_design_checkpoint_open")
+      assert [first_await, second_await] = action_calls(calls, "coding_design_checkpoint_await")
+      assert_design_checkpoint_identity(first_open, first_await, plan, compilation, 1)
+      assert_design_checkpoint_identity(second_open, second_await, plan, compilation, 2)
+
+      for args <- [first_open, second_open] do
+        assert args["workspace_id"] == "ws_fixture_1"
+        assert args["worker_session_id"] == "acp_worker_fixture_1"
+        assert args["worker_provider_session_id"] == "sess_1"
+      end
+
+      assert_single_worker_session(calls, 3)
+      assert_closed_and_released(calls)
+    end
+
+    test "design denial uses the existing approval_denied terminal path" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:design_denied, "design_required")
+
+      assert result.context["status"] == "approval_denied"
+      assert "status_approval_denied" in result.completed_nodes
+      assert length(action_calls(calls, "coding_design_checkpoint_open")) == 1
+      assert length(action_calls(calls, "coding_design_checkpoint_await")) == 1
+      refute called?(calls, "mix_compile")
+      refute called?(calls, "coding_reviewed_commit")
+      assert length(action_prompts(calls)) == 1
+      assert_closed_and_released(calls)
+    end
+
+    test "design checkpoint timeout is a pipeline error" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:design_timeout, "design_required")
+
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "design_checkpoint_timeout"
+      assert "error_design_checkpoint_timeout" in result.completed_nodes
+      assert length(action_calls(calls, "coding_design_checkpoint_open")) == 1
+      assert length(action_calls(calls, "coding_design_checkpoint_await")) == 1
+      refute called?(calls, "mix_compile")
+      assert_closed_and_released(calls)
+    end
+
+    for {scenario, error} <- [
+          {:malformed_design_output, "design_response_invalid"},
+          {:design_mutates_workspace, "design_modified_workspace"}
+        ] do
+      test "#{scenario} fails closed before opening a design checkpoint" do
+        assert {{:ok, result}, calls, _plan, _compilation} =
+                 run_compiled_v2_fixture(unquote(scenario), "design_required")
+
+        assert result.context["status"] == "pipeline_error"
+        assert result.context["error"] == unquote(error)
+        assert action_calls(calls, "coding_design_checkpoint_open") == []
+        assert action_calls(calls, "coding_design_checkpoint_await") == []
+        refute called?(calls, "mix_compile")
+        assert_closed_and_released(calls)
+      end
+    end
+
+    test "version 2 direct policy keeps the existing implementation-only route" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:change_committed, "direct")
+
+      assert result.context["status"] == "change_committed"
+      assert action_calls(calls, "coding_design_checkpoint_open") == []
+      assert action_calls(calls, "coding_design_checkpoint_await") == []
+      assert_single_worker_session(calls, 1)
+      assert_closed_and_released(calls)
     end
   end
 
