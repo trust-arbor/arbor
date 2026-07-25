@@ -1767,7 +1767,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
     for {scenario, error} <- [
           {:malformed_design_output, "design_response_invalid"},
-          {:design_mutates_workspace, "design_modified_workspace"}
+          {:design_mutates_workspace, "design_turn_modified_workspace"}
         ] do
       test "#{scenario} fails closed before opening a design checkpoint" do
         assert {{:ok, result}, calls, _plan, _compilation} =
