@@ -685,7 +685,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                 end
             end
           else
-            spawner_alive = spawning_process_alive?(entry.spawning_pid)
+            spawner_dead = same_node_spawner_dead?(entry)
 
             age_ms =
               if entry.started_at do
@@ -695,14 +695,6 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
               end
 
             cond do
-              entry.spawning_pid != nil and not spawner_alive ->
-                mark_abandoned_entry(candidate, jopts)
-
-                Logger.info(
-                  "[RecoveryCoordinator] Abandoned pipeline #{entry.run_id}: " <>
-                    "spawning process #{inspect(entry.spawning_pid)} is dead"
-                )
-
               (entry.completed_count || 0) == 0 and age_ms > @zero_progress_abandon_ms ->
                 mark_abandoned_entry(candidate, jopts)
 
@@ -711,14 +703,43 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                     "zero progress for #{div(age_ms, 60_000)} min, likely orphaned"
                 )
 
+                []
+
+              spawner_dead ->
+                case mark_interrupted_entry(candidate, jopts) do
+                  :ok ->
+                    [
+                      %{
+                        candidate
+                        | record: %Record{entry | status: :interrupted, owner_node: nil}
+                      }
+                    ]
+
+                  {:error, reason} ->
+                    Logger.warning(
+                      "[RecoveryCoordinator] mark_interrupted failed for #{entry.run_id}: " <>
+                        inspect(reason) <> "; not enqueueing fabricated interrupted candidate"
+                    )
+
+                    []
+
+                  other ->
+                    Logger.warning(
+                      "[RecoveryCoordinator] unexpected mark_interrupted result for " <>
+                        "#{entry.run_id}: #{inspect(other)}; not enqueueing"
+                    )
+
+                    []
+                end
+
               true ->
                 Logger.warning(
                   "[RecoveryCoordinator] Pipeline #{entry.run_id} has stale heartbeat " <>
                     "but owner #{entry.owner_node} is still connected"
                 )
-            end
 
-            []
+                []
+            end
           end
         end)
 
@@ -1892,17 +1913,12 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   @doc false
   def __test_capture_checkpoint_store_opts__, do: capture_checkpoint_store_opts()
 
-  defp spawning_process_alive?(nil), do: false
-
-  defp spawning_process_alive?(pid) when is_pid(pid) do
-    # Tri-state: only treat proven :dead as not alive. :unknown (partition/RPC)
-    # must not drive abandon/interrupt decisions.
-    case Arbor.Orchestrator.PipelineStatus.process_liveness(pid) do
-      :alive -> true
-      :dead -> false
-      :unknown -> true
-    end
+  defp same_node_spawner_dead?(%Record{owner_node: owner_node, spawning_pid: pid})
+       when is_pid(pid) do
+    to_string(owner_node) == to_string(Kernel.node()) and
+      node(pid) == Kernel.node() and
+      PipelineStatus.process_liveness(pid) == :dead
   end
 
-  defp spawning_process_alive?(_), do: false
+  defp same_node_spawner_dead?(_), do: false
 end

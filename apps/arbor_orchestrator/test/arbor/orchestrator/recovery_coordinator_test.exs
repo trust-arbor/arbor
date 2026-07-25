@@ -26,8 +26,17 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest.AppRestartStore do
     GenServer.call(Keyword.fetch!(opts, :name), {:delete, key})
   end
 
+  def set_fail(name, fail?), do: GenServer.call(name, {:set_fail, fail?})
+
   @impl true
-  def init(_opts), do: {:ok, %{data: %{}}}
+  def init(_opts), do: {:ok, %{data: %{}, fail?: false}}
+
+  @impl true
+  def handle_call({:set_fail, fail?}, _from, state), do: {:reply, :ok, %{state | fail?: fail?}}
+
+  def handle_call({:put, _key, _value}, _from, %{fail?: true} = state) do
+    {:reply, {:error, :injected_write_failure}, state}
+  end
 
   @impl true
   def handle_call({:put, key, value}, _from, state) do
@@ -875,6 +884,258 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
     end
   end
 
+  describe "same-node owner-death recovery" do
+    alias Arbor.Orchestrator.RunJournal
+    alias Arbor.Orchestrator.RunLifecycle.Record
+
+    test "proven-dead same-node spawner interrupts and queues a resumable candidate" do
+      run_id = "dead_spawner_#{System.unique_integer([:positive])}"
+      dead_pid = spawn(fn -> :ok end)
+      Process.sleep(20)
+      refute Process.alive?(dead_pid)
+
+      now = DateTime.utc_now()
+
+      legacy_entry = %JobRegistry.Entry{
+        pipeline_id: run_id,
+        run_id: run_id,
+        started_at: now,
+        completed_count: 1,
+        total_nodes: 2,
+        status: :running,
+        owner_node: node(),
+        source_node: node(),
+        last_heartbeat: DateTime.add(now, -120_000, :millisecond),
+        spawning_pid: dead_pid
+      }
+
+      :ok =
+        Arbor.Persistence.BufferedStore.put(
+          run_id,
+          legacy_entry,
+          name: :arbor_orchestrator_jobs
+        )
+
+      on_exit(fn ->
+        Arbor.Persistence.BufferedStore.delete(run_id, name: :arbor_orchestrator_jobs)
+      end)
+
+      {coord_name, coord_pid} = start_test_coordinator()
+      assert Enum.any?(JobRegistry.list_stale_heartbeats(90_000), &(&1.run_id == run_id))
+      assert RecoveryCoordinator.status(coord_name).automatic_recovery == true
+      send(coord_pid, :check_stale_heartbeats)
+
+      assert_eventually(fn -> RecoveryCoordinator.status(coord_name).pending == 1 end)
+      assert JobRegistry.get(run_id).status == :interrupted
+      assert RecoveryCoordinator.status(coord_name).pending == 1
+    end
+
+    test "live same-node spawner does not interrupt or abandon" do
+      run_id = "live_spawner_#{System.unique_integer([:positive])}"
+      now = DateTime.utc_now()
+
+      entry = %JobRegistry.Entry{
+        pipeline_id: run_id,
+        run_id: run_id,
+        started_at: now,
+        completed_count: 1,
+        total_nodes: 2,
+        status: :running,
+        owner_node: node(),
+        source_node: node(),
+        last_heartbeat: DateTime.add(now, -120_000, :millisecond),
+        spawning_pid: self()
+      }
+
+      :ok =
+        Arbor.Persistence.BufferedStore.put(
+          run_id,
+          entry,
+          name: :arbor_orchestrator_jobs
+        )
+
+      on_exit(fn ->
+        Arbor.Persistence.BufferedStore.delete(run_id, name: :arbor_orchestrator_jobs)
+      end)
+
+      {coord_name, coord_pid} = start_test_coordinator()
+      send(coord_pid, :check_stale_heartbeats)
+      Process.sleep(50)
+
+      assert JobRegistry.get(run_id).status == :running
+      assert RecoveryCoordinator.status(coord_name).pending == 0
+    end
+
+    test "unknown remote spawner liveness does not interrupt or abandon" do
+      started_distributed = ensure_distributed_node()
+
+      on_exit(fn ->
+        if started_distributed, do: Node.stop()
+      end)
+
+      peer_name = String.to_atom("rc_peer_#{System.unique_integer([:positive])}")
+      {:ok, peer, peer_node} = :peer.start_link(%{name: peer_name})
+      remote_pid = :rpc.call(peer_node, :erlang, :whereis, [:init])
+      :ok = :peer.stop(peer)
+
+      run_id = "unknown_spawner_#{System.unique_integer([:positive])}"
+      now = DateTime.utc_now()
+
+      entry = %JobRegistry.Entry{
+        pipeline_id: run_id,
+        run_id: run_id,
+        started_at: now,
+        completed_count: 1,
+        total_nodes: 2,
+        status: :running,
+        owner_node: node(),
+        source_node: node(),
+        last_heartbeat: DateTime.add(now, -120_000, :millisecond),
+        spawning_pid: remote_pid
+      }
+
+      :ok =
+        Arbor.Persistence.BufferedStore.put(
+          run_id,
+          entry,
+          name: :arbor_orchestrator_jobs
+        )
+
+      on_exit(fn ->
+        Arbor.Persistence.BufferedStore.delete(run_id, name: :arbor_orchestrator_jobs)
+      end)
+
+      assert Arbor.Orchestrator.PipelineStatus.process_liveness(remote_pid) == :unknown
+
+      {coord_name, coord_pid} = start_test_coordinator()
+      send(coord_pid, :check_stale_heartbeats)
+      Process.sleep(50)
+
+      assert JobRegistry.get(run_id).status == :running
+      assert RecoveryCoordinator.status(coord_name).pending == 0
+    end
+
+    test "current journal liveness correction remains resumable" do
+      suffix = System.unique_integer([:positive, :monotonic])
+      store_name = String.to_atom("rc_dead_current_store_#{suffix}")
+      journal_name = String.to_atom("rc_dead_current_journal_#{suffix}")
+      ets_table = String.to_atom("rc_dead_current_hot_#{suffix}")
+      run_id = "dead_current_#{suffix}"
+      dead_pid = spawn(fn -> :ok end)
+      Process.sleep(20)
+      now = DateTime.utc_now()
+
+      {:ok, _} = start_supervised({AppRestartStore, name: store_name})
+
+      {:ok, _} =
+        start_supervised(%{
+          id: journal_name,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_name,
+                 ets_table: ets_table,
+                 backend: AppRestartStore,
+                 store_name: store_name,
+                 durability_class: :application_restart,
+                 start_store: false
+               ]
+             ]}
+        })
+
+      assert :ok =
+               RunJournal.put(
+                 %Record{
+                   run_id: run_id,
+                   pipeline_id: run_id,
+                   status: :running,
+                   started_at: now,
+                   last_heartbeat: DateTime.add(now, -120_000, :millisecond),
+                   completed_count: 1,
+                   total_nodes: 2,
+                   owner_node: node(),
+                   source_node: node(),
+                   spawning_pid: dead_pid
+                 },
+                 server: journal_name
+               )
+
+      {coord_name, coord_pid} = start_test_coordinator(journal_name)
+      send(coord_pid, :check_stale_heartbeats)
+
+      assert_eventually(fn ->
+        match?(
+          {:ok, %Record{status: :interrupted}},
+          RunJournal.get_record(run_id, server: journal_name)
+        )
+      end)
+
+      send(coord_pid, :discover_interrupted)
+      assert_eventually(fn -> RecoveryCoordinator.status(coord_name).pending == 1 end)
+
+      assert {:ok, %Record{status: :interrupted, owner_node: nil}} =
+               RunJournal.get_record(run_id, server: journal_name)
+    end
+
+    test "current journal persistence failure does not enqueue a fabricated candidate" do
+      suffix = System.unique_integer([:positive, :monotonic])
+      store_name = String.to_atom("rc_fail_current_store_#{suffix}")
+      journal_name = String.to_atom("rc_fail_current_journal_#{suffix}")
+      ets_table = String.to_atom("rc_fail_current_hot_#{suffix}")
+      run_id = "fail_current_#{suffix}"
+      dead_pid = spawn(fn -> :ok end)
+      Process.sleep(20)
+      now = DateTime.utc_now()
+
+      {:ok, _} = start_supervised({AppRestartStore, name: store_name})
+
+      {:ok, _} =
+        start_supervised(%{
+          id: journal_name,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_name,
+                 ets_table: ets_table,
+                 backend: AppRestartStore,
+                 store_name: store_name,
+                 durability_class: :application_restart,
+                 start_store: false
+               ]
+             ]}
+        })
+
+      assert :ok =
+               RunJournal.put(
+                 %Record{
+                   run_id: run_id,
+                   pipeline_id: run_id,
+                   status: :running,
+                   started_at: now,
+                   last_heartbeat: DateTime.add(now, -120_000, :millisecond),
+                   completed_count: 1,
+                   total_nodes: 2,
+                   owner_node: node(),
+                   source_node: node(),
+                   spawning_pid: dead_pid
+                 },
+                 server: journal_name
+               )
+
+      :ok = AppRestartStore.set_fail(store_name, true)
+      {coord_name, coord_pid} = start_test_coordinator(journal_name)
+      send(coord_pid, :check_stale_heartbeats)
+      Process.sleep(50)
+
+      assert RecoveryCoordinator.status(coord_name).pending == 0
+
+      assert {:ok, %Record{status: :running}} =
+               RunJournal.get_record(run_id, server: journal_name)
+    end
+  end
+
   describe "recovery path security and principal" do
     alias Arbor.Orchestrator.PipelineStatus
 
@@ -1261,6 +1522,68 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
     else
       Process.sleep(10)
       assert_eventually(fun, attempts - 1)
+    end
+  end
+
+  defp start_test_coordinator(journal_name \\ nil) do
+    suffix = System.unique_integer([:positive, :monotonic])
+    coord_name = String.to_atom("rc_test_coord_#{suffix}")
+    journal_name = journal_name || start_test_journal(suffix)
+    journal_opts = [server: journal_name]
+
+    {:ok, coord_pid} =
+      start_supervised(%{
+        id: coord_name,
+        start:
+          {RecoveryCoordinator, :start_link,
+           [
+             [
+               name: coord_name,
+               enabled: true,
+               journal_opts: journal_opts,
+               delay_ms: 60_000,
+               max_concurrent: 0
+             ]
+           ]}
+      })
+
+    {coord_name, coord_pid}
+  end
+
+  defp start_test_journal(suffix) do
+    store_name = String.to_atom("rc_test_store_#{suffix}")
+    journal_name = String.to_atom("rc_test_journal_#{suffix}")
+    ets_table = String.to_atom("rc_test_hot_#{suffix}")
+
+    {:ok, _} = start_supervised({AppRestartStore, name: store_name})
+
+    {:ok, _} =
+      start_supervised(%{
+        id: journal_name,
+        start:
+          {Arbor.Orchestrator.RunJournal, :start_link,
+           [
+             [
+               name: journal_name,
+               ets_table: ets_table,
+               backend: AppRestartStore,
+               store_name: store_name,
+               durability_class: :application_restart,
+               start_store: false
+             ]
+           ]}
+      })
+
+    journal_name
+  end
+
+  defp ensure_distributed_node do
+    if Node.alive?() do
+      false
+    else
+      name = String.to_atom("rc_test_#{System.unique_integer([:positive, :monotonic])}")
+      {:ok, _} = :net_kernel.start([name, :shortnames])
+      true
     end
   end
 end
