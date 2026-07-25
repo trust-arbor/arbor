@@ -13,6 +13,17 @@ After integrating a delegated slice, rerun its exact focused suite from an
 independent worktree before treating it as green (found 2026-07-25 when two
 stale Coding Plan fixture expectations survived a reported full-file pass).
 
+<!-- applied-learning: fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety -->
+<a id="applied-learning-fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety"></a>
+**Fault tests must prove the required recovery contract, not only fail-closed
+safety.** A crash regression that replaces an expected resume with a safe
+`indeterminate_effect` can be locally correct while permanently stranding a
+durable workflow. Keep the generic safety invariant, then change the operation
+boundary so the requested recovery is actually safe and assert that behavior
+end to end (found 2026-07-25 when a blocking design-checkpoint Await was
+classified as a generic side effect and could not consume its durable terminal
+after Engine owner death).
+
 <!-- applied-learning: compare-repository-wide-quality-failures-with-the-frozen-starting-revision -->
 <a id="applied-learning-compare-repository-wide-quality-failures-with-the-frozen-starting-revision"></a>
 **Compare repository-wide quality failures with the frozen starting revision.**
