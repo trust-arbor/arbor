@@ -35,6 +35,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   @moduletag :integration
 
   alias Arbor.Agent.{BranchSupervisor, Lifecycle}
+  alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Contracts.TenantContext
   alias Arbor.Persistence.BufferedStore
   alias Arbor.Security.SigningAuthorityBroker
@@ -177,6 +178,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       # Outer reviewed-commit gate is orchestration control (:auto). Exact git
       # commit remains human-gated (:ask) — capability is present either way.
       auto_uris = [
+        "arbor://action/coding/design_checkpoint/open",
+        "arbor://action/coding/design_checkpoint/await",
         "arbor://action/coding/workspace/acquire",
         "arbor://action/coding/workspace/inspect",
         "arbor://action/coding/workspace/committed_change",
@@ -213,6 +216,13 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
       assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
       uris = Enum.map(caps, & &1.resource_uri)
+      assert "arbor://action/coding/design_checkpoint/**" in uris
+
+      refute Enum.any?(
+               uris,
+               &CapabilityUri.capability_match?(&1, "arbor://approval/answer")
+             )
+
       assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/coding/reviewed_commit"))
       assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/git"))
       assert "arbor://action/consensus/decide_review" in uris
