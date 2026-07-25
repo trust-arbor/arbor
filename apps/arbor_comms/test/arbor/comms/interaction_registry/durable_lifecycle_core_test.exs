@@ -154,6 +154,26 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
                DurableLifecycleCore.respond(advanced, :approved, %{}, "node-a", "epoch-1", @now)
     end
 
+    test "response and due settlement reject invalid injected clocks", %{record: record} do
+      assert {:error, :invalid_time} =
+               DurableLifecycleCore.respond(
+                 record,
+                 :approved,
+                 %{},
+                 "node-a",
+                 "epoch-1",
+                 "not-a-clock"
+               )
+
+      assert {:error, :invalid_time} =
+               DurableLifecycleCore.settle_due(
+                 record,
+                 "node-a",
+                 "epoch-1",
+                 "not-a-clock"
+               )
+    end
+
     test "deadline arm is earliest and never extends a pending record", %{record: record} do
       assert {:ok, first} = DurableLifecycleCore.arm_deadline(record, @now + 500, @now + 1)
       assert {:ok, second} = DurableLifecycleCore.arm_deadline(first, @now + 900, @now + 2)
@@ -163,6 +183,40 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
       assert earlier["owner_deadline_unix_ms"] == @now + 100
       refute DurableLifecycleCore.deadline_due?(earlier, @now + 99)
       assert DurableLifecycleCore.deadline_due?(earlier, @now + 100)
+    end
+
+    test "effective deadline is the earliest owner deadline or interaction expiry", %{
+      record: record
+    } do
+      owner_deadline = @now + 500
+
+      assert {:ok, owner_first} =
+               DurableLifecycleCore.arm_deadline(record, owner_deadline, @now + 1)
+
+      assert {:ok, ^owner_deadline} =
+               DurableLifecycleCore.effective_deadline_unix_ms(owner_first)
+
+      expiry_deadline = @now + 100
+
+      expiring_interaction = %{
+        interaction()
+        | expires_at: DateTime.from_unix!(expiry_deadline, :millisecond)
+      }
+
+      assert {:ok, expiry_first} =
+               DurableLifecycleCore.new(
+                 expiring_interaction,
+                 "op-expiry",
+                 "node-a",
+                 "epoch-1",
+                 @now
+               )
+
+      assert {:ok, expiry_first} =
+               DurableLifecycleCore.arm_deadline(expiry_first, @now + 500, @now + 1)
+
+      assert {:ok, ^expiry_deadline} =
+               DurableLifecycleCore.effective_deadline_unix_ms(expiry_first)
     end
 
     test "due helpers distinguish expiry and owner deadline", %{record: record} do
@@ -181,6 +235,58 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
 
       assert DurableLifecycleCore.expiry_due?(expiring, @now)
       assert DurableLifecycleCore.due_decision(expiring, @now) == {:due, :expired}
+    end
+
+    test "security regression: response at owner deadline commits abandonment", %{record: record} do
+      assert {:ok, armed} =
+               DurableLifecycleCore.arm_deadline(record, @now + 50, @now + 1)
+
+      assert {:ok, terminal} =
+               DurableLifecycleCore.respond(
+                 armed,
+                 :approved,
+                 %{},
+                 "node-a",
+                 "epoch-1",
+                 @now + 50
+               )
+
+      assert terminal["status"] == "abandoned"
+      assert terminal["terminal"]["reason"] == "owner_timeout"
+      assert is_nil(terminal["terminal"]["response"])
+    end
+
+    test "security regression: interaction expiry wins over a later response and owner deadline" do
+      expiring_interaction = %{
+        interaction()
+        | expires_at: DateTime.from_unix!(@now + 50, :millisecond)
+      }
+
+      assert {:ok, record} =
+               DurableLifecycleCore.new(
+                 expiring_interaction,
+                 "op-expiry",
+                 "node-a",
+                 "epoch-1",
+                 @now
+               )
+
+      assert {:ok, armed} =
+               DurableLifecycleCore.arm_deadline(record, @now + 500, @now + 1)
+
+      assert {:ok, terminal} =
+               DurableLifecycleCore.respond(
+                 armed,
+                 :approved,
+                 %{},
+                 "node-a",
+                 "epoch-1",
+                 @now + 50
+               )
+
+      assert terminal["status"] == "expired"
+      assert terminal["terminal"]["reason"] == "expires_at_elapsed"
+      assert is_nil(terminal["terminal"]["response"])
     end
   end
 

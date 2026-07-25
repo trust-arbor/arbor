@@ -16,6 +16,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   @terminal_ttl_ms 120_000
   @terminal_max_entries 512
   @max_timer_delay_ms 60_000
+  @deadline_retry_ms 100
 
   @type terminal_status :: :responded | :abandoned | :expired
   @type admission_disposition :: :inserted | :existing
@@ -364,7 +365,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   @impl true
   def handle_info(
         {:durable_owner_deadline, request_id, operation_id, authority_epoch,
-         owner_deadline_unix_ms},
+         scheduled_deadline_unix_ms},
         state
       ) do
     case Map.get(state.entries, request_id) do
@@ -373,14 +374,14 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
         status: :pending,
         operation_id: ^operation_id,
         authority_epoch: ^authority_epoch,
-        owner_deadline: ^owner_deadline_unix_ms
+        timer_deadline: ^scheduled_deadline_unix_ms
       } = entry ->
         {:noreply,
          settle_or_rearm_durable_deadline(
            state,
            request_id,
            entry,
-           owner_deadline_unix_ms
+           scheduled_deadline_unix_ms
          )}
 
       _stale_or_terminal ->
@@ -458,11 +459,23 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
         put_new(state, interaction, durability, owner_deadline_unix_ms)
 
       entry ->
-        classify_existing_admission(state, interaction, durability, entry)
+        classify_existing_admission(
+          state,
+          interaction,
+          durability,
+          entry,
+          owner_deadline_unix_ms
+        )
     end
   end
 
-  defp classify_existing_admission(state, interaction, durability, entry) do
+  defp classify_existing_admission(
+         state,
+         interaction,
+         durability,
+         entry,
+         owner_deadline_unix_ms
+       ) do
     cond do
       entry.status != :pending ->
         {:reply, {:error, {:already_terminal, entry.status}}, state}
@@ -471,17 +484,35 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
         {:reply, {:error, :already_tracked}, state}
 
       same_admission_identity?(entry.interaction, interaction) ->
-        admit_existing(state, entry)
+        admit_existing(state, entry, owner_deadline_unix_ms)
 
       true ->
         {:reply, {:error, :already_tracked}, state}
     end
   end
 
-  defp admit_existing(state, %{durability: :volatile, interaction: interaction}),
+  defp admit_existing(state, %{durability: :volatile, interaction: interaction}, _deadline),
     do: {:reply, {:ok, :existing, interaction}, state}
 
-  defp admit_existing(state, %{durability: :node_restart, interaction: interaction} = entry) do
+  defp admit_existing(
+         state,
+         %{durability: :node_restart} = entry,
+         owner_deadline_unix_ms
+       ) do
+    with {:ok, next_state} <-
+           maybe_shorten_durable_deadline(state, entry, owner_deadline_unix_ms) do
+      current_entry = next_state.entries[entry.interaction.request_id]
+      reply_existing_durable_admission(next_state, current_entry)
+    else
+      {:error, {:already_terminal, status}, next_state} ->
+        {:reply, {:error, {:already_terminal, status}}, next_state}
+
+      {:error, reason, next_state} ->
+        {:reply, {:error, reason}, next_state}
+    end
+  end
+
+  defp reply_existing_durable_admission(state, %{interaction: interaction} = entry) do
     case mirror_durable_entry(state.tracker, entry) do
       :ok ->
         if Map.get(entry, :admission_state, :admitted) == :persisted_unmirrored do
@@ -578,11 +609,21 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
              now_ms
            ),
          {:ok, data} <- arm_initial_deadline(data, owner_deadline_unix_ms, now_ms),
+         {:ok, data} <-
+           DurableLifecycleCore.settle_due(
+             data,
+             authority_node,
+             state.authority_epoch,
+             now_ms
+           ),
          {:ok, record} <- durable_insert(request_id, data) do
       adopt_durable_record(state, record, :inserted)
     else
-      {:error, :conflict} -> durable_duplicate(state, interaction)
-      {:error, _reason} -> {:reply, {:error, :durable_unavailable}, state}
+      {:error, :conflict} ->
+        durable_duplicate(state, interaction, owner_deadline_unix_ms)
+
+      {:error, _reason} ->
+        {:reply, {:error, :durable_unavailable}, state}
     end
   end
 
@@ -599,7 +640,11 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     end
   end
 
-  defp durable_duplicate(state, %Interaction{request_id: request_id} = interaction) do
+  defp durable_duplicate(
+         state,
+         %Interaction{request_id: request_id} = interaction,
+         owner_deadline_unix_ms
+       ) do
     case DurableStore.get(request_id) do
       {:ok, %Record{} = record} ->
         with {:ok, data} <- DurableLifecycleCore.decode(record.data),
@@ -614,7 +659,11 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
             true ->
               case ensure_current_epoch(state, record, data) do
                 {:ok, current_record} ->
-                  adopt_durable_record(state, current_record, :existing)
+                  adopt_durable_duplicate(
+                    state,
+                    current_record,
+                    owner_deadline_unix_ms
+                  )
 
                 {:error, _reason} ->
                   {:reply, {:error, :durable_unavailable}, state}
@@ -627,6 +676,17 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
       {:error, _reason} ->
         {:reply, {:error, :durable_unavailable}, state}
+    end
+  end
+
+  defp adopt_durable_duplicate(state, record, owner_deadline_unix_ms) do
+    case adopt_durable_record(state, record, :existing) do
+      {:reply, {:ok, :existing, _interaction}, next_state} ->
+        entry = next_state.entries[record.key]
+        admit_existing(next_state, entry, owner_deadline_unix_ms)
+
+      other ->
+        other
     end
   end
 
@@ -662,6 +722,74 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   defp arm_initial_deadline(data, owner_deadline_unix_ms, now_ms),
     do: DurableLifecycleCore.arm_deadline(data, owner_deadline_unix_ms, now_ms)
 
+  defp maybe_shorten_durable_deadline(state, _entry, nil), do: {:ok, state}
+
+  defp maybe_shorten_durable_deadline(
+         state,
+         %{owner_deadline: current_deadline},
+         requested_deadline
+       )
+       when is_integer(current_deadline) and requested_deadline >= current_deadline,
+       do: {:ok, state}
+
+  defp maybe_shorten_durable_deadline(state, entry, requested_deadline)
+       when is_integer(requested_deadline) do
+    now = now_ms()
+    authority_node = Atom.to_string(state.authority_node)
+
+    with {:ok, armed} <-
+           DurableLifecycleCore.arm_deadline(entry.record.data, requested_deadline, now),
+         {:ok, data} <-
+           DurableLifecycleCore.settle_due(
+             armed,
+             authority_node,
+             state.authority_epoch,
+             now
+           ) do
+      replacement = Record.update(record_from_entry(entry), data)
+
+      case DurableStore.compare_and_swap(
+             entry.interaction.request_id,
+             record_from_entry(entry),
+             replacement
+           ) do
+        {:ok, %Record{} = stored} ->
+          adopt_shortened_deadline(state, stored)
+
+        {:error, :conflict} ->
+          case adopt_conflicting_terminal(state, entry.interaction.request_id) do
+            {:ok, next_state, terminal} ->
+              {:error, {:already_terminal, terminal.status}, next_state}
+
+            {:error, next_state} ->
+              {:error, :stale_authority, next_state}
+          end
+
+        {:error, _reason} ->
+          {:error, :authority_unavailable, state}
+      end
+    else
+      {:error, _reason} -> {:error, :durable_unavailable, state}
+    end
+  end
+
+  defp adopt_shortened_deadline(state, %Record{} = stored) do
+    case state_after_durable_record(state, stored) do
+      {:ok, next_state} ->
+        case next_state.entries[stored.key] do
+          %{status: :pending} ->
+            {:ok, next_state}
+
+          %{status: status} ->
+            publish_durable_terminal(next_state, stored.key)
+            {:error, {:already_terminal, status}, next_state}
+        end
+
+      {:error, _reason} ->
+        {:error, :durable_unavailable, state}
+    end
+  end
+
   defp adopt_durable_record(state, %Record{data: data} = record, disposition) do
     case DurableLifecycleCore.decode(data) do
       {:ok, decoded} ->
@@ -671,7 +799,12 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
           case mirror_durable_entry(next_state.tracker, next_state.entries[record.key]) do
             :ok ->
-              {:reply, {:ok, disposition, projected_interaction}, next_state}
+              durable_admission_reply(
+                next_state,
+                disposition,
+                projected_interaction,
+                next_state.entries[record.key]
+              )
 
             {:error, _reason} ->
               # Keep the initial dispatch disposition retryable until Tracker
@@ -702,6 +835,17 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     end
   end
 
+  defp durable_admission_reply(
+         state,
+         disposition,
+         interaction,
+         %{status: :pending}
+       ),
+       do: {:reply, {:ok, disposition, interaction}, state}
+
+  defp durable_admission_reply(state, _disposition, _interaction, %{status: status}),
+    do: {:reply, {:error, {:already_terminal, status}}, state}
+
   defp durable_entry(data, %Interaction{} = interaction) do
     terminal =
       case DurableLifecycleCore.project_terminal(data) do
@@ -727,6 +871,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
          terminal: terminal,
          owner_deadline: data["owner_deadline_unix_ms"],
          timer_ref: nil,
+         timer_deadline: nil,
          admission_state: :admitted
        }}
     end
@@ -743,8 +888,11 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
   defp durable_respond(state, request_id, entry, response, metadata) do
     case durable_apply_transition(state, request_id, entry, {:respond, response, metadata}) do
-      {:ok, next_state, _terminal} ->
+      {:ok, next_state, %{status: :responded}} ->
         {:reply, {:ok, entry.interaction}, next_state}
+
+      {:ok, next_state, %{status: status}} ->
+        {:reply, {:error, {:already_terminal, status}}, next_state}
 
       {:already, next_state, status} ->
         {:reply, {:error, {:already_terminal, status}}, next_state}
@@ -978,12 +1126,28 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
   defp install_durable_entry(state, %Record{} = record, entry) do
     request_id = entry.interaction.request_id
-    cancel_entry_timer(Map.get(state.entries, request_id))
+    previous_entry = Map.get(state.entries, request_id)
+    cancel_entry_timer(previous_entry)
 
-    next_entry = %{entry | record: record, timer_ref: nil}
+    next_entry = %{
+      entry
+      | record: record,
+        timer_ref: nil,
+        timer_deadline: nil,
+        admission_state: preserved_admission_state(previous_entry, entry)
+    }
+
     next_state = put_in(state.entries[request_id], next_entry)
     schedule_durable_deadline(next_state, request_id)
   end
+
+  defp preserved_admission_state(
+         %{operation_id: operation_id, admission_state: admission_state},
+         %{operation_id: operation_id}
+       ),
+       do: admission_state
+
+  defp preserved_admission_state(_previous_entry, entry), do: entry.admission_state
 
   defp record_from_entry(%{record: %Record{} = record}), do: record
 
@@ -1008,32 +1172,39 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     end
   end
 
-  defp schedule_durable_deadline(state, request_id) do
+  defp schedule_durable_deadline(state, request_id, minimum_delay_ms \\ 0) do
     case Map.get(state.entries, request_id) do
       %{
         durability: :node_restart,
         status: :pending,
         operation_id: operation_id,
-        authority_epoch: authority_epoch,
-        owner_deadline: owner_deadline_unix_ms
+        authority_epoch: authority_epoch
       } = entry
-      when is_binary(operation_id) and is_binary(authority_epoch) and
-             is_integer(owner_deadline_unix_ms) ->
-        delay =
-          owner_deadline_unix_ms
-          |> Kernel.-(now_ms())
-          |> max(0)
-          |> min(@max_timer_delay_ms)
+      when is_binary(operation_id) and is_binary(authority_epoch) ->
+        case DurableLifecycleCore.effective_deadline_unix_ms(entry.record.data) do
+          {:ok, scheduled_deadline_unix_ms} when is_integer(scheduled_deadline_unix_ms) ->
+            delay =
+              scheduled_deadline_unix_ms
+              |> Kernel.-(now_ms())
+              |> max(minimum_delay_ms)
+              |> min(@max_timer_delay_ms)
 
-        timer_ref =
-          Process.send_after(
-            self(),
-            {:durable_owner_deadline, request_id, operation_id, authority_epoch,
-             owner_deadline_unix_ms},
-            delay
-          )
+            timer_ref =
+              Process.send_after(
+                self(),
+                {:durable_owner_deadline, request_id, operation_id, authority_epoch,
+                 scheduled_deadline_unix_ms},
+                delay
+              )
 
-        put_in(state.entries[request_id], %{entry | timer_ref: timer_ref})
+            put_in(
+              state.entries[request_id],
+              %{entry | timer_ref: timer_ref, timer_deadline: scheduled_deadline_unix_ms}
+            )
+
+          _ ->
+            state
+        end
 
       _ ->
         state
@@ -1044,31 +1215,55 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
          state,
          request_id,
          entry,
-         owner_deadline_unix_ms
+         _scheduled_deadline_unix_ms
        ) do
     cancel_entry_timer(entry)
-    state = put_in(state.entries[request_id].timer_ref, nil)
+
+    state =
+      put_in(
+        state.entries[request_id],
+        %{entry | timer_ref: nil, timer_deadline: nil}
+      )
+
     now = now_ms()
 
-    if now < owner_deadline_unix_ms do
-      schedule_durable_deadline(state, request_id)
-    else
-      case DurableLifecycleCore.due_decision(entry.record.data, now) do
-        {:due, :expired} ->
-          durable_due_transition(
-            state,
-            request_id,
-            entry,
-            :expired,
-            :expires_at_elapsed
+    case DurableLifecycleCore.due_decision(entry.record.data, now) do
+      {:due, :expired} ->
+        settle_due_or_retry(state, request_id, entry, :expired, :expires_at_elapsed)
+
+      {:due, :abandoned} ->
+        settle_due_or_retry(state, request_id, entry, :abandoned, :owner_timeout)
+
+      :not_due ->
+        schedule_durable_deadline(state, request_id)
+    end
+  end
+
+  defp settle_due_or_retry(state, request_id, entry, status, reason) do
+    case durable_due_transition(state, request_id, entry, status, reason) do
+      {:ok, next_state} ->
+        next_state
+
+      {:retry, next_state} ->
+        rearm_durable_deadline(next_state, request_id, @deadline_retry_ms)
+    end
+  end
+
+  defp rearm_durable_deadline(state, request_id, minimum_delay_ms) do
+    case Map.get(state.entries, request_id) do
+      %{status: :pending} = entry ->
+        cancel_entry_timer(entry)
+
+        state =
+          put_in(
+            state.entries[request_id],
+            %{entry | timer_ref: nil, timer_deadline: nil}
           )
 
-        {:due, :abandoned} ->
-          durable_due_transition(state, request_id, entry, :abandoned, :owner_timeout)
+        schedule_durable_deadline(state, request_id, minimum_delay_ms)
 
-        :not_due ->
-          schedule_durable_deadline(state, request_id)
-      end
+      _ ->
+        state
     end
   end
 
@@ -1232,10 +1427,10 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       {request_id, %{status: :pending, durability: :node_restart} = entry}, acc ->
         case DurableLifecycleCore.due_decision(entry.record.data, now_ms) do
           {:due, :expired} ->
-            durable_due_transition(acc, request_id, entry, :expired, :expires_at_elapsed)
+            settle_due_or_retry(acc, request_id, entry, :expired, :expires_at_elapsed)
 
           {:due, :abandoned} ->
-            durable_due_transition(acc, request_id, entry, :abandoned, :owner_timeout)
+            settle_due_or_retry(acc, request_id, entry, :abandoned, :owner_timeout)
 
           :not_due ->
             acc
@@ -1272,9 +1467,10 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     transition = if status == :expired, do: {:expire, reason}, else: {:abandon, reason}
 
     case durable_apply_transition(state, request_id, entry, transition) do
-      {:ok, next_state, _terminal} -> next_state
-      {:conflict, next_state, _status} -> next_state
-      _ -> state
+      {:ok, next_state, _terminal} -> {:ok, next_state}
+      {:already, next_state, _status} -> {:ok, next_state}
+      {:conflict, next_state, _status} -> {:ok, next_state}
+      {:error, _reason, next_state} -> {:retry, next_state}
     end
   end
 

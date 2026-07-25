@@ -219,7 +219,9 @@ defmodule Arbor.Comms.InteractionRouter do
     try do
       case InteractionRegistry.capture_timeout_authority(request_id, timeout) do
         {:ok, _capture, {:terminal, terminal}} ->
-          timeout_terminal_result(terminal)
+          result = timeout_terminal_result(terminal)
+          drain_terminal_notifications(request_id)
+          result
 
         {:ok, capture, :armed} ->
           await_captured_response(capture, request_id, timeout)
@@ -287,12 +289,28 @@ defmodule Arbor.Comms.InteractionRouter do
         metadata = Map.get(payload, :metadata) || Map.get(payload, "metadata") || %{}
 
         case captured_response_result(capture, request_id, response, metadata) do
-          {:done, result} -> result
-          :continue -> await_captured_response_until(capture, request_id, deadline)
+          {:done, result} ->
+            drain_terminal_notifications(request_id)
+            result
+
+          :continue ->
+            await_captured_response_until(capture, request_id, deadline)
+        end
+
+      {:interaction_terminal, %{request_id: ^request_id}} ->
+        case captured_terminal_result(capture, request_id) do
+          {:done, result} ->
+            drain_terminal_notifications(request_id)
+            result
+
+          :continue ->
+            await_captured_response_until(capture, request_id, deadline)
         end
     after
       remaining ->
-        finalize_timeout(capture, request_id)
+        result = finalize_timeout(capture, request_id)
+        drain_terminal_notifications(request_id)
+        result
     end
   end
 
@@ -305,6 +323,28 @@ defmodule Arbor.Comms.InteractionRouter do
       end
     else
       {:done, {:ok, response, metadata}}
+    end
+  end
+
+  defp captured_terminal_result(capture, request_id) do
+    if durable_capture?(capture) do
+      case InteractionRegistry.reconcile_timeout_capture(capture, request_id) do
+        {:ok, {:terminal, %{status: :responded}}} -> :continue
+        {:ok, {:terminal, terminal}} -> {:done, timeout_terminal_result(terminal)}
+        {:error, :stale_operation} -> {:done, {:error, :timeout}}
+        _ -> :continue
+      end
+    else
+      :continue
+    end
+  end
+
+  defp drain_terminal_notifications(request_id) do
+    receive do
+      {:interaction_terminal, %{request_id: ^request_id}} ->
+        drain_terminal_notifications(request_id)
+    after
+      0 -> :ok
     end
   end
 

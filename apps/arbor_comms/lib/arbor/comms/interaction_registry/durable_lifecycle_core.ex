@@ -292,15 +292,24 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
     end
   end
 
+  @doc "Return the earliest persisted owner deadline or interaction expiry."
+  @spec effective_deadline_unix_ms(map()) ::
+          {:ok, non_neg_integer() | nil} | {:error, term()}
+  def effective_deadline_unix_ms(record) do
+    with {:ok, record} <- decode(record),
+         {:ok, expires_at_unix_ms} <- interaction_expiry_unix_ms(record) do
+      {:ok, earliest(record["owner_deadline_unix_ms"], expires_at_unix_ms)}
+    end
+  end
+
   @doc "Return whether the interaction expiry is due at the injected wall-clock time."
   def expiry_due?(record, now_ms) do
     case decode(record) do
-      {:ok, %{"status" => "pending", "interaction" => interaction}} when is_integer(now_ms) ->
-        case decode_datetime(interaction["expires_at"], :expires_at) do
-          {:ok, nil} -> false
-          {:ok, expires_at} -> DateTime.to_unix(expires_at, :millisecond) <= now_ms
-          _ -> false
-        end
+      {:ok, %{"status" => "pending"} = record} when is_integer(now_ms) ->
+        match?(
+          {:ok, expires_at} when is_integer(expires_at) and expires_at <= now_ms,
+          interaction_expiry_unix_ms(record)
+        )
 
       _ ->
         false
@@ -309,14 +318,30 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
 
   @doc "Choose the terminal cause that is due; expiry wins when both clocks elapsed."
   def due_decision(record, now_ms) do
-    cond do
-      expiry_due?(record, now_ms) -> {:due, :expired}
-      deadline_due?(record, now_ms) -> {:due, :abandoned}
-      true -> :not_due
+    case decode(record) do
+      {:ok, record} when is_integer(now_ms) -> due_decision_decoded(record, now_ms)
+      _ -> :not_due
     end
   end
 
   def due?(record, now_ms), do: due_decision(record, now_ms) != :not_due
+
+  @doc "Terminalize a pending record when its earliest durable cutoff is due."
+  @spec settle_due(map(), String.t(), String.t(), non_neg_integer()) ::
+          {:ok, map()} | {:error, term()}
+  def settle_due(record, authority_node, authority_epoch, now_ms) do
+    with {:ok, record} <- decode(record),
+         :ok <- validate_time(now_ms),
+         :ok <- now_not_before_record(record, now_ms) do
+      settle_due_decision(
+        record,
+        due_decision_decoded(record, now_ms),
+        authority_node,
+        authority_epoch,
+        now_ms
+      )
+    end
+  end
 
   @doc "Transition pending to a terminal public authority map, bound to exact node and epoch."
   @spec transition(map(), map(), String.t(), String.t(), non_neg_integer()) ::
@@ -355,21 +380,44 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
 
   @doc "Build and apply a response terminal transition."
   def respond(record, response, metadata, authority_node, authority_epoch, now_ms) do
-    decision = approval_decision(response)
+    with {:ok, record} <- decode(record),
+         :ok <- validate_time(now_ms),
+         :ok <- now_not_before_record(record, now_ms) do
+      case {record["status"], due_decision_decoded(record, now_ms)} do
+        {"pending", :not_due} ->
+          transition(
+            record,
+            %{
+              status: :responded,
+              decision: approval_decision(response),
+              response: response,
+              metadata: metadata,
+              reason: nil
+            },
+            authority_node,
+            authority_epoch,
+            now_ms
+          )
 
-    transition(
-      record,
-      %{
-        status: :responded,
-        decision: decision,
-        response: response,
-        metadata: metadata,
-        reason: nil
-      },
-      authority_node,
-      authority_epoch,
-      now_ms
-    )
+        {"pending", due} ->
+          settle_due_decision(record, due, authority_node, authority_epoch, now_ms)
+
+        {_terminal, _due} ->
+          transition(
+            record,
+            %{
+              status: :responded,
+              decision: approval_decision(response),
+              response: response,
+              metadata: metadata,
+              reason: nil
+            },
+            authority_node,
+            authority_epoch,
+            now_ms
+          )
+      end
+    end
   end
 
   @doc "Build and apply an abandonment terminal transition."
@@ -929,6 +977,59 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
     end
   end
 
+  defp due_decision_decoded(%{"status" => status}, _now_ms) when status != "pending",
+    do: :not_due
+
+  defp due_decision_decoded(record, now_ms) do
+    with {:ok, expires_at_unix_ms} <- interaction_expiry_unix_ms(record) do
+      cond do
+        is_integer(expires_at_unix_ms) and expires_at_unix_ms <= now_ms ->
+          {:due, :expired}
+
+        is_integer(record["owner_deadline_unix_ms"]) and
+            record["owner_deadline_unix_ms"] <= now_ms ->
+          {:due, :abandoned}
+
+        true ->
+          :not_due
+      end
+    else
+      _ -> :not_due
+    end
+  end
+
+  defp settle_due_decision(record, :not_due, _authority_node, _authority_epoch, _now_ms),
+    do: {:ok, record}
+
+  defp settle_due_decision(record, {:due, :expired}, authority_node, authority_epoch, now_ms) do
+    transition(
+      record,
+      %{
+        status: :expired,
+        decision: nil,
+        response: nil,
+        metadata: %{},
+        reason: :expires_at_elapsed
+      },
+      authority_node,
+      authority_epoch,
+      now_ms
+    )
+  end
+
+  defp settle_due_decision(record, {:due, :abandoned}, authority_node, authority_epoch, now_ms) do
+    abandon(record, :owner_timeout, authority_node, authority_epoch, now_ms)
+  end
+
+  defp interaction_expiry_unix_ms(%{"interaction" => interaction}) do
+    case decode_datetime(interaction["expires_at"], :expires_at) do
+      {:ok, nil} -> {:ok, nil}
+      {:ok, expires_at} -> {:ok, DateTime.to_unix(expires_at, :millisecond)}
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp earliest(nil, deadline), do: deadline
+  defp earliest(deadline, nil), do: deadline
   defp earliest(existing, deadline), do: min(existing, deadline)
 end
