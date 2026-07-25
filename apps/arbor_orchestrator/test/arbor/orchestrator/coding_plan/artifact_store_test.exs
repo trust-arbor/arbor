@@ -717,152 +717,165 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     refute Map.has_key?(legacy_evidence, "verification_report")
   end
 
-  test "security regression: verification reports match terminal semantics", %{root: root} do
+  test "security regression: verification reports match candidate validation terminals", %{
+    root: root
+  } do
     File.mkdir_p!(root)
 
-    cases = [
-      {:success, terminal_result(root), verification_report("passed"), :accepted},
-      {
-        :validation_failed_failed,
-        terminal_result_for(
-          root,
-          "validation_failed",
-          "validation_failed",
-          terminal_outcome(
-            "validation_failed",
-            "failed",
-            "validation",
-            "validator",
-            "same_session"
-          )
-        ),
-        verification_report("failed"),
-        :accepted
-      },
-      {
-        :validation_failed_blocked,
-        terminal_result_for(
-          root,
-          "validation_failed",
-          "validation_failed",
-          terminal_outcome(
-            "validation_failed",
-            "failed",
-            "validation",
-            "validator",
-            "same_session"
-          )
-        ),
-        verification_report("blocked"),
-        :accepted
-      },
-      {
-        :validation_failed_with_denied_canonical,
-        terminal_result_for(
-          root,
-          "validation_failed",
-          "approval_denied",
-          terminal_outcome("approval_denied", "rejected", "commit", "operator", "none")
-        ),
-        verification_report("failed"),
-        :rejected
-      },
-      {
-        :validation_capacity_blocked,
-        terminal_result_for(
-          root,
+    validation_failed =
+      terminal_result_for(
+        root,
+        "validation_failed",
+        "validation_failed",
+        terminal_outcome("validation_failed", "failed", "validation", "validator", "same_session")
+      )
+
+    for report_status <- ~w(failed blocked) do
+      assert {:ok, _descriptor} =
+               archive_verification_case(
+                 root,
+                 :validation_failed,
+                 validation_failed,
+                 report_status
+               )
+    end
+
+    assert_verification_mismatch(
+      archive_verification_case(root, :validation_failed, validation_failed, "passed")
+    )
+
+    legacy_validation_failure =
+      terminal_result_for(
+        root,
+        "validation_failed",
+        "rework_exhausted",
+        terminal_outcome("rework_exhausted", "failed", "review", "runtime", "new_session")
+      )
+
+    for report_status <- ~w(failed blocked) do
+      assert {:ok, _descriptor} =
+               archive_verification_case(
+                 root,
+                 :legacy_validation_failure,
+                 legacy_validation_failure,
+                 report_status
+               )
+    end
+
+    assert_verification_mismatch(
+      archive_verification_case(
+        root,
+        :legacy_validation_failure,
+        legacy_validation_failure,
+        "passed"
+      )
+    )
+
+    mismatched_validation_failure =
+      terminal_result_for(
+        root,
+        "validation_failed",
+        "approval_denied",
+        terminal_outcome("approval_denied", "rejected", "commit", "operator", "none")
+      )
+
+    assert_verification_mismatch(
+      archive_verification_case(
+        root,
+        :mismatched_validation_failure,
+        mismatched_validation_failure,
+        "failed"
+      )
+    )
+
+    capacity =
+      terminal_result_for(
+        root,
+        "validation_capacity_exceeded",
+        "validation_capacity_exceeded",
+        terminal_outcome(
           "validation_capacity_exceeded",
-          "validation_capacity_exceeded",
-          terminal_outcome(
-            "validation_capacity_exceeded",
-            "requires_input",
-            "validation",
-            "validator",
-            "after_external_change"
-          )
+          "requires_input",
+          "validation",
+          "validator",
+          "after_external_change"
         )
-        |> Map.put("validation", capacity_validation()),
-        verification_report("blocked"),
-        :accepted
-      },
-      {
-        :rework_exhausted,
-        terminal_result_for(
-          root,
-          "rework_exhausted",
-          "rework_exhausted",
-          terminal_outcome("rework_exhausted", "failed", "review", "runtime", "new_session")
-        ),
-        verification_report("passed"),
-        :rejected
-      },
-      {
-        :legacy_rework_projection,
-        terminal_result_for(
-          root,
-          "validation_failed",
-          "rework_exhausted",
-          terminal_outcome("rework_exhausted", "failed", "review", "runtime", "new_session")
-        ),
-        verification_report("passed"),
-        :rejected
-      },
-      {
-        :approval_denied,
+      )
+      |> Map.put("validation", capacity_validation())
+
+    assert {:ok, _descriptor} =
+             archive_verification_case(root, :validation_capacity, capacity, "blocked")
+
+    for report_status <- ~w(passed failed) do
+      assert_verification_mismatch(
+        archive_verification_case(root, :validation_capacity, capacity, report_status)
+      )
+    end
+
+    non_validation_terminals = [
+      approval_denied:
         terminal_result_for(
           root,
           "approval_denied",
           "approval_denied",
           terminal_outcome("approval_denied", "rejected", "commit", "operator", "none")
         ),
-        verification_report("passed"),
-        :rejected
-      },
-      {
-        :cancelled,
+      review_rejected:
         terminal_result_for(
           root,
-          "cancelled",
-          "change_committed",
-          terminal_outcome("change_committed", "succeeded", "commit", "arbor", "none")
+          "review_rejected",
+          "review_rejected",
+          terminal_outcome("review_rejected", "rejected", "review", "reviewer", "none")
         ),
-        verification_report("passed"),
-        :rejected
-      }
+      human_review_required:
+        terminal_result_for(
+          root,
+          "human_review_required",
+          "human_review_required",
+          terminal_outcome(
+            "human_review_required",
+            "requires_input",
+            "review",
+            "reviewer",
+            "none"
+          )
+        ),
+      review_rework_exhausted:
+        terminal_result_for(
+          root,
+          "review_requires_rework",
+          "rework_exhausted",
+          terminal_outcome("rework_exhausted", "failed", "review", "runtime", "new_session")
+        ),
+      operator_rework_exhausted:
+        terminal_result_for(
+          root,
+          "rework_exhausted",
+          "rework_exhausted",
+          terminal_outcome("rework_exhausted", "failed", "review", "runtime", "new_session")
+        )
+        |> Map.put("error", "operator_approval_rework_exhausted")
     ]
 
-    for {name, result, report, expected} <- cases do
-      case_root = Path.join(root, Atom.to_string(name))
-      File.mkdir_p!(case_root)
+    for {name, result} <- non_validation_terminals do
+      assert {:ok, _descriptor} =
+               archive_verification_case(root, name, result, "passed")
 
-      case expected do
-        :accepted ->
-          case ArtifactStore.archive_terminal_evidence(
-                 case_root,
-                 "task_verification_#{name}",
-                 Map.put(result, "verification_report", report),
-                 []
-               ) do
-            {:ok, _descriptor} -> :ok
-            other -> flunk("expected #{name} to be accepted, got #{inspect(other)}")
-          end
-
-        :rejected ->
-          assert {:error, reason} =
-                   ArtifactStore.archive_terminal_evidence(
-                     case_root,
-                     "task_verification_#{name}",
-                     Map.put(result, "verification_report", report),
-                     []
-                   )
-
-          assert reason in [
-                   {:invalid_terminal_result, :verification_status_mismatch},
-                   {:invalid_terminal_result, :not_successful}
-                 ],
-                 "unexpected rejection for #{name}: #{inspect(reason)}"
+      for report_status <- ~w(failed blocked) do
+        assert_verification_mismatch(archive_verification_case(root, name, result, report_status))
       end
     end
+
+    cancelled =
+      terminal_result_for(
+        root,
+        "cancelled",
+        "change_committed",
+        terminal_outcome("change_committed", "succeeded", "commit", "arbor", "none")
+      )
+
+    assert {:error, {:invalid_terminal_result, :not_successful}} =
+             archive_verification_case(root, :cancelled, cancelled, "passed")
   end
 
   test "archives every canonical task terminal without changing the callback envelope", %{
@@ -1543,6 +1556,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       "canonical_status" => canonical_status,
       "outcome" => outcome
     })
+  end
+
+  defp archive_verification_case(root, name, result, report_status) do
+    case_root = Path.join(root, "#{name}-#{report_status}")
+    File.mkdir_p!(case_root)
+
+    ArtifactStore.archive_terminal_evidence(
+      case_root,
+      "task_verification_#{name}_#{report_status}",
+      Map.put(result, "verification_report", verification_report(report_status)),
+      []
+    )
+  end
+
+  defp assert_verification_mismatch(result) do
+    assert result == {:error, {:invalid_terminal_result, :verification_status_mismatch}}
   end
 
   defp verification_report(status \\ "passed") do

@@ -79,7 +79,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     BranchLifecycleDescriptor,
     ReconciliationManifest,
     TaskEvidenceDescriptor,
-    TaskOutcomeRegistry,
     ValidationCapacityHandoff,
     VerificationReport,
     WorkspaceReleaseDescriptor
@@ -921,19 +920,31 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         :ok
 
       {:ok, %{"status" => report_status}} ->
-        case report_status do
-          "passed" ->
-            if validated_candidate_terminal?(result), do: :ok, else: verification_mismatch()
+        status = Map.get(result, "status")
+        canonical_status = Map.get(result, "canonical_status")
 
-          "failed" ->
-            if validation_failed_terminal?(result), do: :ok, else: verification_mismatch()
+        cond do
+          status == "validation_failed" ->
+            if canonical_status in ~w(validation_failed rework_exhausted) and
+                 report_status in ~w(failed blocked),
+               do: :ok,
+               else: verification_mismatch()
 
-          "blocked" ->
-            if validation_failed_terminal?(result) or validation_capacity_terminal?(result),
-              do: :ok,
-              else: verification_mismatch()
+          canonical_status == "validation_failed" ->
+            verification_mismatch()
 
-          _other ->
+          status == "validation_capacity_exceeded" or
+              canonical_status == "validation_capacity_exceeded" ->
+            if status == "validation_capacity_exceeded" and
+                 canonical_status == "validation_capacity_exceeded" and
+                 report_status == "blocked",
+               do: :ok,
+               else: verification_mismatch()
+
+          report_status == "passed" ->
+            :ok
+
+          true ->
             verification_mismatch()
         end
 
@@ -944,51 +955,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
 
   defp verification_mismatch,
     do: {:error, {:invalid_terminal_result, :verification_status_mismatch}}
-
-  defp validated_candidate_terminal?(result) do
-    successful_candidate_status?(Map.get(result, "status")) and
-      successful_candidate_status?(Map.get(result, "canonical_status"))
-  end
-
-  defp successful_candidate_status?(status) do
-    case TaskOutcomeRegistry.terminal_spec(status) do
-      {:ok, %{disposition: "succeeded", phase: phase}} when phase in ~w(commit adoption) ->
-        true
-
-      _other ->
-        false
-    end
-  end
-
-  defp validation_failed_terminal?(result) do
-    public_validation_failed? =
-      case TaskOutcomeRegistry.terminal_spec(Map.get(result, "status")) do
-        {:ok, %{disposition: "failed", phase: "validation"}} -> true
-        _other -> false
-      end
-
-    public_validation_failed? and
-      canonical_validation_failure?(Map.get(result, "canonical_status"))
-  end
-
-  defp canonical_validation_failure?(status) do
-    case TaskOutcomeRegistry.terminal_spec(status) do
-      {:ok, %{disposition: "failed", phase: "validation"}} ->
-        true
-
-      # `validation_failed` is the legacy public projection for rework exhaustion.
-      {:ok, %{disposition: "failed", phase: "review", origin: "runtime", retry: "new_session"}} ->
-        true
-
-      _other ->
-        false
-    end
-  end
-
-  defp validation_capacity_terminal?(result) do
-    Map.get(result, "status") == "validation_capacity_exceeded" and
-      Map.get(result, "canonical_status") == "validation_capacity_exceeded"
-  end
 
   defp normalize_terminal_verification_report(result) do
     case Map.fetch(result, "verification_report") do
