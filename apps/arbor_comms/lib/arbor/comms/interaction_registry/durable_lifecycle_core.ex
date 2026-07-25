@@ -130,9 +130,10 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
          :ok <- validate_nullable_time(record["owner_deadline_unix_ms"]),
          {:ok, terminal} <- decode_terminal(record["terminal"]),
          :ok <- terminal_status_consistent(record["status"], terminal),
+         :ok <- terminal_authority_consistent(record, terminal),
          :ok <- validate_time(record["admitted_at_unix_ms"]),
          :ok <- validate_time(record["updated_at_unix_ms"]),
-         :ok <- updated_at_is_not_earlier(record),
+         :ok <- timestamp_ordering(record, terminal),
          :ok <- bounded_record?(record) do
       {:ok, record}
     end
@@ -434,7 +435,8 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
          {:ok, reason} <- encode_reason(value(terminal, "reason")),
          :ok <- validate_identifier(authority_node, :authority_node),
          :ok <- terminal_authority_matches(terminal, authority_node),
-         {:ok, resolved_at} <- terminal_time(value(terminal, "resolved_at"), now_ms) do
+         {:ok, resolved_at} <- terminal_time(value(terminal, "resolved_at"), now_ms),
+         :ok <- validate_terminal_shape(status, decision, response, reason) do
       {:ok,
        %{
          "status" => status,
@@ -457,11 +459,18 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
     with :ok <- exact_keys(terminal, @terminal_keys, :terminal),
          :ok <- validate_enum(terminal["status"], @terminal_statuses, :terminal_status),
          :ok <- validate_nullable_decision(terminal["decision"]),
-         {:ok, _response} <- decode_response(terminal["response"]),
+         {:ok, response} <- decode_response(terminal["response"]),
          {:ok, _metadata} <- strict_json_map(terminal["metadata"], @max_metadata_bytes),
          :ok <- validate_nullable_reason(terminal["reason"]),
          :ok <- validate_time(terminal["resolved_at"]),
-         :ok <- validate_identifier(terminal["authority_node"], :authority_node) do
+         :ok <- validate_identifier(terminal["authority_node"], :authority_node),
+         :ok <-
+           validate_terminal_shape(
+             terminal["status"],
+             terminal["decision"],
+             response,
+             terminal["reason"]
+           ) do
       {:ok, terminal}
     end
   end
@@ -759,12 +768,12 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
 
   defp terminal_input_keys(map) do
     required = ["status", "decision", "response", "metadata", "reason"]
-    allowed = @terminal_keys
 
     normalized_keys = Enum.map(Map.keys(map), &normalize_terminal_key/1)
 
     if length(normalized_keys) == length(Enum.uniq(normalized_keys)) and
-         Enum.all?(normalized_keys, &(&1 in allowed)) and
+         length(normalized_keys) == length(required) and
+         Enum.all?(normalized_keys, &(&1 in required)) and
          Enum.all?(required, &(&1 in normalized_keys)) do
       :ok
     else
@@ -842,11 +851,11 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   defp validate_time(value) when is_integer(value) and value >= 0, do: :ok
   defp validate_time(_), do: {:error, :invalid_time}
 
-  defp now_not_before_record(%{"admitted_at_unix_ms" => admitted_at}, now_ms)
-       when is_integer(now_ms) and now_ms >= admitted_at,
+  defp now_not_before_record(%{"updated_at_unix_ms" => updated_at}, now_ms)
+       when is_integer(now_ms) and now_ms >= updated_at,
        do: :ok
 
-  defp now_not_before_record(_record, _now_ms), do: {:error, :time_before_admission}
+  defp now_not_before_record(_record, _now_ms), do: {:error, :time_before_update}
 
   defp validate_nullable_time(nil), do: :ok
   defp validate_nullable_time(value), do: validate_time(value)
@@ -864,17 +873,53 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   defp expected_epoch(_, _), do: {:error, :stale_authority_epoch}
 
   defp terminal_status_consistent("pending", nil), do: :ok
-  defp terminal_status_consistent(status, %{}) when status in @terminal_statuses, do: :ok
-  defp terminal_status_consistent(_, _), do: {:error, :invalid_terminal_state}
 
-  defp updated_at_is_not_earlier(%{
-         "admitted_at_unix_ms" => admitted,
-         "updated_at_unix_ms" => updated
-       })
-       when updated >= admitted,
+  defp terminal_status_consistent(status, %{"status" => status})
+       when status in @terminal_statuses,
        do: :ok
 
-  defp updated_at_is_not_earlier(_), do: {:error, :invalid_updated_at}
+  defp terminal_status_consistent(_, _), do: {:error, :invalid_terminal_state}
+
+  defp terminal_authority_consistent(_record, nil), do: :ok
+
+  defp terminal_authority_consistent(
+         %{"authority_node" => authority_node},
+         %{"authority_node" => authority_node}
+       ),
+       do: :ok
+
+  defp terminal_authority_consistent(_record, _terminal),
+    do: {:error, :terminal_authority_mismatch}
+
+  defp timestamp_ordering(
+         %{
+           "admitted_at_unix_ms" => admitted_at,
+           "updated_at_unix_ms" => updated_at
+         },
+         nil
+       )
+       when updated_at >= admitted_at,
+       do: :ok
+
+  defp timestamp_ordering(
+         %{"admitted_at_unix_ms" => admitted_at, "updated_at_unix_ms" => updated_at},
+         %{"resolved_at" => resolved_at}
+       )
+       when resolved_at >= admitted_at and updated_at >= resolved_at,
+       do: :ok
+
+  defp timestamp_ordering(_record, _terminal), do: {:error, :invalid_timestamp_order}
+
+  defp validate_terminal_shape("responded", decision, response, nil)
+       when decision in [nil, "approved", "rejected"] and not is_nil(response),
+       do: :ok
+
+  defp validate_terminal_shape(status, nil, nil, reason)
+       when status in ["abandoned", "expired"] and is_binary(reason) and byte_size(reason) > 0,
+       do: :ok
+
+  defp validate_terminal_shape(_status, _decision, _response, _reason),
+    do: {:error, :invalid_terminal_shape}
 
   defp bounded_record?(record) do
     case Jason.encode(record) do

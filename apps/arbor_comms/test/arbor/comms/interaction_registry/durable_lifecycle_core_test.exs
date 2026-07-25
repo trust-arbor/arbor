@@ -130,15 +130,28 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
       assert claimed_again["authority_epoch"] == "epoch-3"
     end
 
-    test "does not allow injected time to move updated_at before admission", %{record: record} do
-      assert {:error, :time_before_admission} =
+    test "does not allow injected time to move updated_at before the current update", %{
+      record: record
+    } do
+      assert {:error, :time_before_update} =
                DurableLifecycleCore.arm_deadline(record, @now + 50, @now - 1)
 
-      assert {:error, :time_before_admission} =
+      assert {:error, :time_before_update} =
                DurableLifecycleCore.claim_epoch(record, "node-a", "epoch-2", @now - 1)
 
-      assert {:error, :time_before_admission} =
+      assert {:error, :time_before_update} =
                DurableLifecycleCore.respond(record, :approved, %{}, "node-a", "epoch-1", @now - 1)
+
+      {:ok, advanced} = DurableLifecycleCore.arm_deadline(record, @now + 50, @now + 1)
+
+      assert {:error, :time_before_update} =
+               DurableLifecycleCore.arm_deadline(advanced, @now + 100, @now)
+
+      assert {:error, :time_before_update} =
+               DurableLifecycleCore.claim_epoch(advanced, "node-a", "epoch-2", @now)
+
+      assert {:error, :time_before_update} =
+               DurableLifecycleCore.respond(advanced, :approved, %{}, "node-a", "epoch-1", @now)
     end
 
     test "deadline arm is earliest and never extends a pending record", %{record: record} do
@@ -172,6 +185,84 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
   end
 
   describe "terminal transitions" do
+    test "strict decode binds terminal status and authority to the record" do
+      {:ok, record} = DurableLifecycleCore.new(interaction(), "op-1", "node-a", "epoch-1", @now)
+
+      {:ok, responded} =
+        DurableLifecycleCore.respond(record, :approved, %{}, "node-a", "epoch-1", @now + 1)
+
+      assert {:error, :invalid_terminal_state} =
+               DurableLifecycleCore.decode(%{responded | "status" => "abandoned"})
+
+      authority_mismatch = put_in(responded["terminal"]["authority_node"], "node-b")
+
+      assert {:error, :terminal_authority_mismatch} =
+               DurableLifecycleCore.decode(authority_mismatch)
+    end
+
+    test "strict decode enforces admitted, resolved, and updated timestamp ordering" do
+      {:ok, record} = DurableLifecycleCore.new(interaction(), "op-1", "node-a", "epoch-1", @now)
+
+      {:ok, responded} =
+        DurableLifecycleCore.respond(record, :approved, %{}, "node-a", "epoch-1", @now + 1)
+
+      resolved_before_admission = put_in(responded["terminal"]["resolved_at"], @now - 1)
+
+      assert {:error, :invalid_timestamp_order} =
+               DurableLifecycleCore.decode(resolved_before_admission)
+
+      updated_before_resolved = Map.put(responded, "updated_at_unix_ms", @now)
+
+      assert {:error, :invalid_timestamp_order} =
+               DurableLifecycleCore.decode(updated_before_resolved)
+    end
+
+    test "public terminal input cannot inject authority-owned fields" do
+      {:ok, record} = DurableLifecycleCore.new(interaction(), "op-1", "node-a", "epoch-1", @now)
+
+      public_terminal = %{
+        status: :responded,
+        decision: :approved,
+        response: :approved,
+        metadata: %{},
+        reason: nil
+      }
+
+      assert {:error, {:unknown_fields, :terminal}} =
+               DurableLifecycleCore.transition(
+                 record,
+                 Map.put(public_terminal, :resolved_at, @now + 1),
+                 "node-a",
+                 "epoch-1",
+                 @now + 1
+               )
+
+      assert {:error, {:unknown_fields, :terminal}} =
+               DurableLifecycleCore.transition(
+                 record,
+                 Map.put(public_terminal, :authority_node, "node-b"),
+                 "node-a",
+                 "epoch-1",
+                 @now + 1
+               )
+    end
+
+    test "strict decode enforces terminal status shapes" do
+      {:ok, record} = DurableLifecycleCore.new(interaction(), "op-1", "node-a", "epoch-1", @now)
+
+      {:ok, responded} =
+        DurableLifecycleCore.respond(record, :approved, %{}, "node-a", "epoch-1", @now + 1)
+
+      missing_response = put_in(responded["terminal"]["response"], nil)
+      assert {:error, :invalid_terminal_shape} = DurableLifecycleCore.decode(missing_response)
+
+      {:ok, abandoned} =
+        DurableLifecycleCore.abandon(record, :await_timeout, "node-a", "epoch-1", @now + 1)
+
+      missing_reason = put_in(abandoned["terminal"]["reason"], nil)
+      assert {:error, :invalid_terminal_shape} = DurableLifecycleCore.decode(missing_reason)
+    end
+
     test "response and timeout have one first-terminal winner" do
       {:ok, record} = DurableLifecycleCore.new(interaction(), "op-1", "node-a", "epoch-1", @now)
 
