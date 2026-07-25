@@ -22,28 +22,17 @@ defmodule Arbor.Comms.InteractionRegistry.DurableStore do
   @doc "Returns whether the configured backend is ready for durable interaction use."
   @spec readiness() :: availability()
   def readiness do
-    with {:ok, config} <- validated_config(),
-         true <- Arbor.Persistence.supports_compare_and_swap?(config.backend),
-         true <- Arbor.Persistence.supports_durability_class?(config.backend),
-         {:ok, @durability_class} <-
-           safe_call(fn ->
-             Arbor.Persistence.durability_class(
-               config.namespace,
-               config.backend,
-               config.backend_opts
-             )
-           end) do
-      {:ok,
-       %{
-         backend: config.backend,
-         namespace: config.namespace,
-         durability: @durability_class
-       }}
-    else
-      false -> {:error, :unsupported}
-      {:ok, {:error, _reason}} -> {:error, :unavailable}
-      {:ok, _other} -> {:error, :unsupported}
-      {:error, reason} -> {:error, reason}
+    case ready_config() do
+      {:ok, config} ->
+        {:ok,
+         %{
+           backend: config.backend,
+           namespace: config.namespace,
+           durability: @durability_class
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -163,9 +152,33 @@ defmodule Arbor.Comms.InteractionRegistry.DurableStore do
     do: compare_and_swap(request_key, expected, replacement, opts)
 
   defp ready_config do
-    case readiness() do
-      {:ok, _} -> validated_config()
-      {:error, reason} -> {:error, reason}
+    with {:ok, config} <- validated_config(),
+         :ok <- attest_config(config) do
+      {:ok, config}
+    end
+  end
+
+  defp attest_config(config) do
+    cond do
+      not Arbor.Persistence.supports_compare_and_swap?(config.backend) ->
+        {:error, :unsupported}
+
+      not Arbor.Persistence.supports_durability_class?(config.backend) ->
+        {:error, :unsupported}
+
+      true ->
+        case safe_call(fn ->
+               Arbor.Persistence.durability_class(
+                 config.namespace,
+                 config.backend,
+                 config.backend_opts
+               )
+             end) do
+          {:ok, @durability_class} -> :ok
+          {:ok, {:error, _reason}} -> {:error, :unavailable}
+          {:ok, _other} -> {:error, :unsupported}
+          {:error, _reason} -> {:error, :unavailable}
+        end
     end
   end
 
@@ -215,7 +228,7 @@ defmodule Arbor.Comms.InteractionRegistry.DurableStore do
 
   defp normalize_list_options(opts, configured_max_items) do
     with :ok <- validate_options(opts, @allowed_list_options),
-         max_items = Keyword.get(opts, :max_items, Config.durable_interaction_store_max_items()),
+         max_items = Keyword.get(opts, :max_items, configured_max_items),
          true <- valid_positive_integer?(max_items),
          true <- max_items <= configured_max_items do
       {:ok, %{max_items: max_items}}
@@ -288,13 +301,13 @@ defmodule Arbor.Comms.InteractionRegistry.DurableStore do
        ) do
     with :ok <- validate_key(request_key),
          true <- key == request_key,
-         true <- is_binary(id) and byte_size(id) > 0,
+         true <- valid_key?(id),
+         true <- metadata == %{},
          true <- valid_non_negative_integer?(generation),
          true <- valid_non_negative_integer?(revision),
          true <- valid_datetime?(inserted_at),
          true <- valid_datetime?(updated_at),
-         :ok <- validate_data(data, max_data_bytes),
-         :ok <- validate_metadata(metadata) do
+         :ok <- validate_data(data, max_data_bytes) do
       :ok
     else
       false -> {:error, :malformed_record}
@@ -315,17 +328,6 @@ defmodule Arbor.Comms.InteractionRegistry.DurableStore do
   end
 
   defp validate_data(_data, _max_data_bytes), do: {:error, :invalid_data}
-
-  defp validate_metadata(metadata) when is_map(metadata) do
-    with true <- json_clean?(metadata),
-         {:ok, _encoded} <- safe_json_encode(metadata) do
-      :ok
-    else
-      _ -> {:error, :invalid_metadata}
-    end
-  end
-
-  defp validate_metadata(_metadata), do: {:error, :invalid_metadata}
 
   defp json_clean?(value) when is_map(value) do
     Enum.all?(value, fn {key, nested} -> is_binary(key) and json_clean?(nested) end)

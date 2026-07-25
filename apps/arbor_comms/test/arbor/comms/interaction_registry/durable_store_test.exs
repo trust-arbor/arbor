@@ -7,6 +7,8 @@ defmodule Arbor.Comms.InteractionRegistry.DurableStoreTest do
   alias __MODULE__.DurableBackend
   alias __MODULE__.NoCasBackend
   alias __MODULE__.ProcessLifetimeBackend
+  alias __MODULE__.AlternateBackend
+  alias __MODULE__.SwitchingBackend
 
   @store_config [
     backend: __MODULE__.DurableBackend,
@@ -147,6 +149,35 @@ defmodule Arbor.Comms.InteractionRegistry.DurableStoreTest do
     )
 
     assert {:error, :malformed_record} = DurableStore.get("bad-metadata")
+
+    DurableBackend.put_raw(
+      "bad-id",
+      %Record{Record.new("bad-id", %{}) | id: String.duplicate("i", 257)}
+    )
+
+    assert {:error, :malformed_record} = DurableStore.get("bad-id")
+
+    DurableBackend.put_raw("bad-utf8-id", %Record{Record.new("bad-utf8-id", %{}) | id: <<255>>})
+    assert {:error, :malformed_record} = DurableStore.get("bad-utf8-id")
+  end
+
+  test "uses one config snapshot across readiness attestation and the write" do
+    Application.put_env(
+      :arbor_comms,
+      :durable_interaction_store,
+      backend: SwitchingBackend,
+      namespace: :snapshot_interactions,
+      opts: [observer: self(), switch_to: AlternateBackend],
+      max_data_bytes: 256,
+      max_items: 2
+    )
+
+    assert {:ok, %Record{key: "snapshot-request"}} =
+             DurableStore.insert_once("snapshot-request", %{})
+
+    assert_received :switching_durability_attested
+    assert_received :switching_cas_used
+    refute_received :alternate_cas_used
   end
 
   defp backend_path do
@@ -264,5 +295,42 @@ defmodule Arbor.Comms.InteractionRegistry.DurableStoreTest do
     def durability_class(_opts), do: :node_restart
     def get(_key, _opts), do: {:error, :not_found}
     def list(_opts), do: {:ok, []}
+  end
+
+  defmodule SwitchingBackend do
+    def durability_class(opts) do
+      send(opts[:observer], :switching_durability_attested)
+
+      Application.put_env(
+        :arbor_comms,
+        :durable_interaction_store,
+        backend: opts[:switch_to],
+        namespace: :changed_after_attestation,
+        opts: [],
+        max_data_bytes: 256,
+        max_items: 2
+      )
+
+      :node_restart
+    end
+
+    def get(_key, _opts), do: {:error, :not_found}
+    def list(_opts), do: {:ok, []}
+
+    def compare_and_swap(_key, :not_found, replacement, opts) do
+      send(opts[:observer], :switching_cas_used)
+      {:ok, %{replacement | generation: 1, revision: 1}}
+    end
+  end
+
+  defmodule AlternateBackend do
+    def durability_class(_opts), do: :node_restart
+    def get(_key, _opts), do: {:error, :not_found}
+    def list(_opts), do: {:ok, []}
+
+    def compare_and_swap(_key, _expected, _replacement, _opts) do
+      send(self(), :alternate_cas_used)
+      {:error, :unexpected_backend}
+    end
   end
 end
