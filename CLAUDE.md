@@ -242,7 +242,7 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 
 ## Applied Learning
 
-This section is the always-loaded working set: 12 broad cross-task rules measuring 898 words. The set is deliberately above the roughly 600-word target because these rules recur across roadmap/source verification, planning, toolchain, Git, security URI matching, and patching; subsystem incidents remain behind the index. Read the linked skill before working in a specialized area; the linked files retain every other entry verbatim. The inventory is [`.claude/skills/applied-learning-inventory.json`](.claude/skills/applied-learning-inventory.json), and its validator is [`.claude/validate_applied_learning.rb`](.claude/validate_applied_learning.rb).
+This section is the always-loaded working set: 12 broad cross-task rules measuring 938 words. The set is deliberately above the roughly 600-word target because these rules recur across roadmap/source verification, planning, toolchain, Git, security URI matching, and patching; subsystem incidents remain behind the index. Read the linked skill before working in a specialized area; the linked files retain every other entry verbatim. The inventory is [`.claude/skills/applied-learning-inventory.json`](.claude/skills/applied-learning-inventory.json), and its validator is [`.claude/validate_applied_learning.rb`](.claude/validate_applied_learning.rb).
 
 | Read when | Load this skill |
 | --- | --- |
@@ -274,7 +274,7 @@ This section is the always-loaded working set: 12 broad cross-task rules measuri
 
 <!-- applied-learning: the-recurring-arbor-bug-pattern-is-built-but-unwired-not-broken -->
 <a id="applied-learning-the-recurring-arbor-bug-pattern-is-built-but-unwired-not-broken"></a>
-**The recurring Arbor bug pattern is built-but-unwired, not broken.** When auditing a subsystem, check the LAST MILE first: recall computed then dropped before the prompt (memory), eval data persisted then never read back (compaction thresholds), signing primitives complete but never verified in the engine path. The machinery is usually sound; the wiring and the end-to-end behavior test are what's missing. Audit by tracing one value from producer to consumer before reading any implementation.
+**The recurring Arbor bug pattern is built-but-unwired, not broken.** When auditing a subsystem, check the LAST MILE first: recall computed then dropped before the prompt (memory), eval data persisted then never read back (compaction thresholds), signing primitives complete but never verified in the engine path. The machinery is usually sound; the wiring and the end-to-end behavior test are what's missing. Audit by tracing one value from producer to consumer before reading any implementation. Trace typed executor failures through `TaskStore`'s terminal envelope to MCP; a direct executor test proves only the producing boundary. Match evidence to the phase it proves: candidate validation may pass before a later review or operator terminal rejects the task.
 
 
 <!-- applied-learning: hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed -->
