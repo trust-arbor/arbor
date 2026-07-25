@@ -96,6 +96,9 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
   end
 
   test "outer lifecycle and control codes have exact specs" do
+    assert spec("coding_execution_state_drift") ==
+             {"failed", "preflight", "arbor", "after_external_change"}
+
     assert spec("task_cancelled") == {"cancelled", "control", "operator", "none"}
     assert spec("task_owner_died") == {"failed", "control", "runtime", "new_session"}
     assert spec("task_runner_failed") == {"failed", "control", "runtime", "new_session"}

@@ -69,7 +69,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskInventoryProjection}
-  alias Arbor.Contracts.Coding.TaskTerminalEnvelope
+  alias Arbor.Contracts.Coding.{ReadinessReport, TaskTerminalEnvelope}
 
   @type task_id :: String.t()
   # :waiting_approval is retained for status projection / facade enrichment
@@ -1811,6 +1811,28 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
+  defp terminal_envelope(
+         record,
+         {:runner_result, {:error, {:coding_execution_state_drift, report}}}
+       ) do
+    with {:ok, canonical_report} <- canonical_readiness_report(report),
+         optional_outcome_attrs = readiness_outcome_attrs(canonical_report),
+         {:ok, envelope} <-
+           TaskTerminalEnvelope.from_code(
+             "coding_execution_state_drift",
+             terminal_state(record),
+             %{
+               "kind" => "coding_execution_state_drift",
+               "result" => canonical_report
+             },
+             optional_outcome_attrs
+           ) do
+      envelope
+    else
+      _failure -> invalid_terminal_envelope(record, nil)
+    end
+  end
+
   defp terminal_envelope(record, {:runner_result, {:ok, :pending_approval, approval_id}}),
     do: approval_owner_terminated_envelope(record, approval_id)
 
@@ -1848,6 +1870,37 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp approval_owner_terminated_envelope(record, _approval_id),
     do: invalid_terminal_envelope(record, nil)
+
+  defp canonical_readiness_report(report) when is_map(report) and not is_struct(report) do
+    with {:ok, roundtripped} <- canonicalize_and_roundtrip(report),
+         {:ok, normalized} <- ReadinessReport.normalize(roundtripped),
+         true <- normalized == roundtripped do
+      {:ok, normalized}
+    else
+      _ -> {:error, :invalid_readiness_report}
+    end
+  end
+
+  defp canonical_readiness_report(_report), do: {:error, :invalid_readiness_report}
+
+  defp readiness_outcome_attrs(%{"diagnostics" => diagnostics}) do
+    diagnostic_refs =
+      diagnostics
+      |> Enum.map(&Map.get(&1, "evidence_ref"))
+      |> Enum.filter(&is_binary/1)
+      |> Enum.uniq()
+
+    case diagnostic_refs do
+      [evidence_ref | _rest] ->
+        %{
+          "diagnostic_refs" => diagnostic_refs,
+          "evidence_ref" => evidence_ref
+        }
+
+      [] ->
+        %{}
+    end
+  end
 
   defp invalid_terminal_envelope(_record, result) do
     evidence =

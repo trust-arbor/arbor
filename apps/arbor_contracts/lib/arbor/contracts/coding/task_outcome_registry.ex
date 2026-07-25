@@ -245,6 +245,12 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
   }
 
   @outer_specs %{
+    "coding_execution_state_drift" => %{
+      disposition: "failed",
+      phase: "preflight",
+      origin: "arbor",
+      retry: "after_external_change"
+    },
     "task_cancelled" => %{
       disposition: "cancelled",
       phase: "control",

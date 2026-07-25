@@ -9,13 +9,14 @@ defmodule Arbor.Contracts.Coding.TaskTerminalEnvelope do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Coding.TaskOutcome
+  alias Arbor.Contracts.Coding.{ReadinessReport, TaskOutcome}
 
   @schema_version 1
   @terminal_states ~w(done failed cancelled)
   @fields [:version, :terminal_state, :outcome, :prior_outcome, :evidence]
   @evidence_fields ~w(kind result approval_id truncated)
   @evidence_kinds ~w(
+    coding_execution_state_drift
     executor_result
     pipeline_failure
     task_cancelled
@@ -202,7 +203,7 @@ defmodule Arbor.Contracts.Coding.TaskTerminalEnvelope do
          [] <- Map.keys(evidence) -- @evidence_fields,
          kind when kind in @evidence_kinds <- Map.get(evidence, "kind"),
          :ok <- validate_evidence_shape(kind, evidence),
-         {:ok, bounded_result, truncated} <- normalize_optional_result(evidence) do
+         {:ok, bounded_result, truncated} <- normalize_optional_result(kind, evidence) do
       normalized =
         %{"kind" => kind}
         |> maybe_put("result", bounded_result)
@@ -227,19 +228,29 @@ defmodule Arbor.Contracts.Coding.TaskTerminalEnvelope do
   end
 
   defp validate_evidence_shape(kind, evidence)
-       when kind in ["executor_result", "pipeline_failure"] do
+       when kind in ["coding_execution_state_drift", "executor_result", "pipeline_failure"] do
     if Map.has_key?(evidence, "result"), do: :ok, else: {:error, :missing_result}
   end
 
   defp validate_evidence_shape(_kind, _evidence), do: :ok
 
-  defp normalize_optional_result(%{"result" => result}) do
+  defp normalize_optional_result("coding_execution_state_drift", %{"result" => result}) do
+    with {:ok, report} <- ReadinessReport.normalize(result),
+         {:ok, clean, _nodes_left, false} <- bound_json(report, 0, @max_nodes),
+         {:ok, ^clean} <- ReadinessReport.normalize(clean) do
+      {:ok, clean, false}
+    else
+      _ -> {:error, :invalid_readiness_report}
+    end
+  end
+
+  defp normalize_optional_result(_kind, %{"result" => result}) do
     with {:ok, clean, _nodes_left, truncated} <- bound_json(result, 0, @max_nodes) do
       {:ok, clean, truncated}
     end
   end
 
-  defp normalize_optional_result(_evidence), do: {:ok, nil, false}
+  defp normalize_optional_result(_kind, _evidence), do: {:ok, nil, false}
 
   defp bound_json(_value, _depth, nodes_left) when nodes_left <= 0,
     do: {:ok, nil, 0, true}

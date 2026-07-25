@@ -4,7 +4,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   @moduletag :fast
 
   alias Arbor.Agent.Orchestration.TaskStore
-  alias Arbor.Contracts.Coding.TaskOutcome
+  alias Arbor.Contracts.Coding.{ReadinessReport, TaskOutcome, TaskTerminalEnvelope}
 
   defmodule ControlledRunner do
     def run(agent_id, task, opts) do
@@ -1462,6 +1462,112 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end)
   end
 
+  test "configured executor propagates canonical execution state drift readiness evidence", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+    report = readiness_report()
+    evidence_ref = get_in(report, ["diagnostics", Access.at(0), "evidence_ref"])
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "state drift"},
+               name: store,
+               task_id: "task_execution_state_drift"
+             )
+
+    assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+    send(runner_pid, {:finish, {:error, {:coding_execution_state_drift, report}}})
+
+    assert_receive {:finalize_terminal_task_called, "agent_1", callback_envelope, [], _, _}
+
+    assert callback_envelope["terminal_state"] == "failed"
+    assert callback_envelope["outcome"]["code"] == "coding_execution_state_drift"
+    assert callback_envelope["outcome"]["retry"] == "after_external_change"
+    assert callback_envelope["outcome"]["phase"] == "preflight"
+    assert callback_envelope["outcome"]["origin"] == "arbor"
+    assert callback_envelope["outcome"]["evidence_ref"] == evidence_ref
+    assert callback_envelope["outcome"]["diagnostic_refs"] == [evidence_ref]
+
+    assert callback_envelope["evidence"] == %{
+             "kind" => "coding_execution_state_drift",
+             "result" => report
+           }
+
+    assert {:ok, ^callback_envelope} = TaskTerminalEnvelope.normalize(callback_envelope)
+
+    assert_eventually(fn ->
+      assert {:ok, %{state: :failed, outcome: outcome}} =
+               TaskStore.status(task_id, name: store)
+
+      assert outcome["code"] == "coding_execution_state_drift"
+      assert outcome["retry"] == "after_external_change"
+
+      assert {:ok, envelope} = TaskStore.result(task_id, name: store)
+      assert envelope == callback_envelope
+      assert envelope["evidence"]["result"] == report
+    end)
+  end
+
+  test "state drift regression: malformed and oversized reports fail closed without raw data", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+    oversized_secret = "oversized_state_drift_secret"
+    malformed_secret = "malformed_state_drift_secret"
+
+    oversized_report =
+      readiness_report(12, oversized_secret)
+
+    assert {:ok, ^oversized_report} = ReadinessReport.normalize(oversized_report)
+
+    malformed_report = %{
+      "version" => 1,
+      "status" => "blocked",
+      "plan_digest" => "sha256:malformed",
+      "observed_at" => "2026-07-24T20:00:00Z",
+      "diagnostics" => [%{"secret" => malformed_secret}]
+    }
+
+    for {suffix, report, secret} <- [
+          {"malformed", malformed_report, malformed_secret},
+          {"oversized", oversized_report, oversized_secret}
+        ] do
+      task_id = "task_execution_state_drift_#{suffix}"
+
+      assert {:ok, ^task_id} =
+               TaskStore.dispatch(
+                 "agent_1",
+                 %{"kind" => "coding_change", "input" => suffix},
+                 name: store,
+                 task_id: task_id
+               )
+
+      assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+      send(runner_pid, {:finish, {:error, {:coding_execution_state_drift, report}}})
+
+      assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], _, _}
+      assert envelope["terminal_state"] == "failed"
+      assert envelope["outcome"]["code"] == "invalid_terminal_evidence"
+      assert envelope["evidence"] == %{"kind" => "invalid_terminal_evidence"}
+
+      encoded = Jason.encode!(envelope)
+      refute encoded =~ secret
+      refute encoded =~ "coding_execution_state_drift"
+
+      assert_eventually(fn ->
+        assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+
+        assert {:ok, %{state: :failed, outcome: outcome}} =
+                 TaskStore.status(task_id, name: store)
+
+        assert outcome["code"] == "invalid_terminal_evidence"
+        assert :sys.get_state(store).tasks[task_id].error == :invalid_terminal_evidence
+      end)
+    end
+  end
+
   test "lifecycle regression: all-terminal cancellation publishes task_cancelled", %{
     supervisor: supervisor
   } do
@@ -1550,6 +1656,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       if expected_code == "approval_owner_terminated" do
         assert envelope["evidence"]["approval_id"] == "approval_terminal_1"
       else
+        assert envelope["outcome"]["retry"] == "new_session"
+        assert envelope["evidence"] == %{"kind" => "task_runner_failed"}
         encoded = Jason.encode!(envelope)
         refute encoded =~ "raw_runner_error"
         refute encoded =~ inspect(self())
@@ -4113,6 +4221,32 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   defp registered_outcome(code) do
     {:ok, outcome} = TaskOutcome.from_code(code)
     TaskOutcome.to_map(outcome)
+  end
+
+  defp readiness_report(diagnostic_count \\ 1, diagnostic_code \\ "execution_binding_drift") do
+    diagnostics =
+      for index <- 1..diagnostic_count do
+        %{
+          version: 1,
+          gate_id: "immutable_execution_boundary_#{index}",
+          phase: "preflight",
+          decision: "blocked",
+          code: diagnostic_code,
+          observed_at: "2026-07-24T20:00:00Z",
+          evidence_ref: "sha256:state-drift-evidence-#{index}"
+        }
+      end
+
+    {:ok, report} =
+      ReadinessReport.new(%{
+        version: ReadinessReport.schema_version(),
+        status: "blocked",
+        plan_digest: "sha256:state-drift-plan",
+        observed_at: "2026-07-24T20:00:00Z",
+        diagnostics: diagnostics
+      })
+
+    ReadinessReport.to_map(report)
   end
 
   defp coding_artifacts do
