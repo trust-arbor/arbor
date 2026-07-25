@@ -1470,7 +1470,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
              "worker_provider_session_id" => "sess_1",
              "design_attempt" => attempt,
              "design" => fixture_design(attempt),
-             "design_digest" => fixture_design_digest(attempt)
+             "design_digest" => fixture_design_digest(attempt),
+             "run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
            }
 
     assert await_args["request_id"] == "irq_design_fixture_#{attempt}"
