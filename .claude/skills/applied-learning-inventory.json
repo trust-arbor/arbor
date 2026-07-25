@@ -1533,13 +1533,13 @@
     {
       "source_ordinal": 128,
       "slug": "hot-loading-a-genserver-module-does-not-migrate-its-running-state",
-      "title": "Hot-loading a GenServer module does not migrate its running state.",
+      "title": "Hot-loading a GenServer module does not migrate its running state or stored local function captures.",
       "topic": "otp-ownership-cleanup",
       "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
       "anchor": "applied-learning-hot-loading-a-genserver-module-does-not-migrate-its-running-state",
       "source_date": "2026-07-10",
       "source_incident": "found 2026-07-10 when `Arbor.Trust.Store` lacked newly added durable-backend fields after hot reload).",
-      "content_sha256": "ba973a2f6f57c698158d23f8c13bf933c85126263cef6ab9949a48c4bc0017ff",
+      "content_sha256": "a10a5858c8d24d6ae2cee3d176b27ab11f291a8fa9e39b3a693a4b74dac14dac",
       "always_loaded": false
     },
     {

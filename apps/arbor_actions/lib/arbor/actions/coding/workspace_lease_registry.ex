@@ -718,9 +718,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       retention_blockers: %{},
       retention_blockers_by_target: %{},
       retention_ttl_ms: Config.workspace_retention_ttl_ms(server_opts),
-      retained_archive: Keyword.get(server_opts, :retained_archive, &archive_retained_branch/1),
-      retained_cleanup:
-        Keyword.get(server_opts, :retained_cleanup, &remove_owned_retained_worktree/1),
+      retained_archive: Keyword.get(server_opts, :retained_archive, :default),
+      retained_cleanup: Keyword.get(server_opts, :retained_cleanup, :default),
       retained_cleanup_retry_limit: retained_cleanup_retry_limit(server_opts),
       owner_death_retry_limit: owner_death_retry_limit(server_opts),
       owner_death_retry_base_ms: owner_death_retry_base_ms(server_opts),
@@ -6155,6 +6154,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     kind, reason -> {:error, {:retained_archive_thrown, kind, reason}}
   end
 
+  defp invoke_retained_archive(:default, retained), do: archive_retained_branch(retained)
+
   defp invoke_retained_archive(_archive, _retained),
     do: {:error, :invalid_retained_archive}
 
@@ -6169,6 +6170,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   catch
     kind, reason -> {:error, {:retained_cleanup_thrown, kind, reason}}
   end
+
+  defp invoke_retained_cleanup(:default, retained),
+    do: remove_owned_retained_worktree(retained)
 
   defp invoke_retained_cleanup(_cleanup, _retained), do: {:error, :retained_cleanup_failed}
 

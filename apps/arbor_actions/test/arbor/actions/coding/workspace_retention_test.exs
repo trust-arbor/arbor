@@ -54,6 +54,14 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
              Config.workspace_retention_max_ttl_ms()
   end
 
+  test "default retained lifecycle callbacks are reload-stable data" do
+    server = start_registry(1_000)
+    state = :sys.get_state(server_pid(server))
+
+    assert state.retained_archive == :default
+    assert state.retained_cleanup == :default
+  end
+
   test "owned retain expires and removes only the exact retained worktree", %{tmp_dir: tmp_dir} do
     repo = create_git_repo(Path.join(tmp_dir, "repo"))
     # Config clamps TTL to a 1s minimum; give the eventual assertion headroom.
