@@ -38,6 +38,9 @@ defmodule Arbor.Comms.InteractionRouter do
   alias Arbor.Comms.PresenceTracker
   alias Arbor.Contracts.Comms.Interaction
 
+  @owner_clock_recheck_ms 60_000
+  @owner_settlement_poll_ms 100
+
   @typedoc """
   Adapter registry: a map of `channel_atom => module`. Phase 1 only
   populates `:dashboard`; the router falls back to "no adapter, queue
@@ -77,6 +80,29 @@ defmodule Arbor.Comms.InteractionRouter do
       do_request(interaction, opts)
     end
   end
+
+  @doc false
+  @spec request_durable(Interaction.t(), keyword()) ::
+          {:ok, Arbor.Comms.durable_interaction_receipt()} | {:error, term()}
+  def request_durable(%Interaction{} = interaction, opts) when is_list(opts) do
+    with {:ok, request_opts} <- durable_request_options(opts) do
+      case InteractionRegistry.admit_durable(
+             interaction,
+             request_opts.owner_deadline_unix_ms
+           ) do
+        {:ok, :existing, %Interaction{}, receipt} ->
+          {:ok, receipt}
+
+        {:ok, :inserted, %Interaction{} = stored_interaction, receipt} ->
+          dispatch_inserted_durable(stored_interaction, request_opts.adapter_map, receipt)
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
+  def request_durable(_interaction, _opts), do: {:error, :invalid_options}
 
   @doc """
   Submit a response to a previously-requested interaction. Called by
@@ -208,6 +234,38 @@ defmodule Arbor.Comms.InteractionRouter do
       Phoenix.PubSub.unsubscribe(pubsub, topic)
     end
   end
+
+  @doc false
+  @spec await_durable_response(String.t(), String.t(), keyword()) ::
+          {:ok, term(), map()} | {:error, :timeout | term()}
+  def await_durable_response(request_id, agent_id, opts)
+      when is_binary(request_id) and is_binary(agent_id) and is_list(opts) do
+    with {:ok, observer} <- durable_observer_options(opts),
+         :ok <- subscribe(observer.pubsub, Interaction.response_topic_for_agent(agent_id)) do
+      topic = Interaction.response_topic_for_agent(agent_id)
+
+      try do
+        case observe_durable(request_id, agent_id, observer) do
+          {:ok, :pending} ->
+            await_durable_observation(request_id, agent_id, observer)
+
+          {:ok, {:terminal, terminal}} ->
+            timeout_terminal_result(terminal)
+
+          :not_found ->
+            {:error, :not_found}
+
+          {:error, _reason} = error ->
+            error
+        end
+      after
+        unsubscribe(observer.pubsub, topic)
+      end
+    end
+  end
+
+  def await_durable_response(_request_id, _agent_id, _opts),
+    do: {:error, :invalid_options}
 
   @doc """
   List pending interactions (delegates to the registry). Useful for
@@ -345,6 +403,205 @@ defmodule Arbor.Comms.InteractionRouter do
         emit_signal(:queued, interaction, %{})
         {:ok, interaction.request_id}
     end
+  end
+
+  defp dispatch_inserted_durable(interaction, adapter_map, receipt) do
+    case dispatch(interaction, adapter_map) do
+      :ok ->
+        emit_signal(:requested, interaction, %{})
+        {:ok, receipt}
+
+      :no_channel ->
+        emit_signal(:queued, interaction, %{})
+        {:ok, receipt}
+    end
+  end
+
+  defp durable_request_options(opts) do
+    allowed = [:owner_deadline_unix_ms, :adapter_map]
+
+    with :ok <- validate_keyword_options(opts, allowed),
+         {:ok, deadline} <- required_non_negative_integer(opts, :owner_deadline_unix_ms),
+         adapter_map = Keyword.get(opts, :adapter_map, configured_adapters()),
+         true <- is_map(adapter_map) do
+      {:ok, %{owner_deadline_unix_ms: deadline, adapter_map: adapter_map}}
+    else
+      false -> {:error, :invalid_options}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp durable_observer_options(opts) do
+    allowed = [:operation_id, :owner_deadline_unix_ms, :timeout, :pubsub]
+
+    with :ok <- validate_keyword_options(opts, allowed),
+         {:ok, operation_id} <- required_identifier(opts, :operation_id),
+         {:ok, deadline} <- required_non_negative_integer(opts, :owner_deadline_unix_ms),
+         {:ok, timeout, owner_bound?} <- observer_timeout(opts, deadline) do
+      {:ok,
+       %{
+         operation_id: operation_id,
+         owner_deadline_unix_ms: deadline,
+         timeout: timeout,
+         owner_bound?: owner_bound?,
+         pubsub: Keyword.get(opts, :pubsub, Arbor.Comms.PubSub)
+       }}
+    end
+  end
+
+  defp validate_keyword_options(opts, allowed) do
+    if Keyword.keyword?(opts) do
+      keys = Keyword.keys(opts)
+
+      if length(keys) == length(Enum.uniq(keys)) and Enum.all?(keys, &(&1 in allowed)),
+        do: :ok,
+        else: {:error, :invalid_options}
+    else
+      {:error, :invalid_options}
+    end
+  end
+
+  defp required_identifier(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} when is_binary(value) and byte_size(value) > 0 ->
+        if String.valid?(value), do: {:ok, value}, else: {:error, :invalid_options}
+
+      _ ->
+        {:error, :invalid_options}
+    end
+  end
+
+  defp required_non_negative_integer(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} when is_integer(value) and value >= 0 -> {:ok, value}
+      _ -> {:error, :invalid_options}
+    end
+  end
+
+  defp observer_timeout(opts, owner_deadline_unix_ms) do
+    owner_remaining = max(owner_deadline_unix_ms - System.system_time(:millisecond), 0)
+
+    case Keyword.fetch(opts, :timeout) do
+      :error ->
+        {:ok, owner_remaining, true}
+
+      {:ok, timeout} when is_integer(timeout) and timeout >= 0 ->
+        {:ok, min(timeout, owner_remaining), timeout >= owner_remaining}
+
+      _ ->
+        {:error, :invalid_options}
+    end
+  end
+
+  defp subscribe(pubsub, topic) do
+    Phoenix.PubSub.subscribe(pubsub, topic)
+  rescue
+    _ -> {:error, :authority_unavailable}
+  catch
+    :exit, _ -> {:error, :authority_unavailable}
+  end
+
+  defp unsubscribe(pubsub, topic) do
+    Phoenix.PubSub.unsubscribe(pubsub, topic)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp await_durable_observation(request_id, agent_id, observer) do
+    deadline = System.monotonic_time(:millisecond) + observer.timeout
+    await_durable_observation_until(request_id, agent_id, observer, deadline)
+  end
+
+  defp await_durable_observation_until(request_id, agent_id, observer, deadline) do
+    total_remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+    wait = min(total_remaining, @owner_clock_recheck_ms)
+
+    receive do
+      {:interaction_response, %{request_id: ^request_id}} ->
+        continue_durable_observation(request_id, agent_id, observer, deadline)
+
+      {:interaction_terminal, %{request_id: ^request_id}} ->
+        continue_durable_observation(request_id, agent_id, observer, deadline)
+    after
+      wait ->
+        case observe_durable(request_id, agent_id, observer) do
+          {:ok, {:terminal, terminal}} ->
+            timeout_terminal_result(terminal)
+
+          {:ok, :pending} when total_remaining > wait ->
+            await_durable_observation_until(request_id, agent_id, observer, deadline)
+
+          {:ok, :pending} ->
+            if observer.owner_bound? do
+              await_owner_settlement(request_id, agent_id, observer)
+            else
+              {:error, :timeout}
+            end
+
+          :not_found ->
+            {:error, :not_found}
+
+          {:error, _reason} = error ->
+            error
+        end
+    end
+  end
+
+  defp continue_durable_observation(request_id, agent_id, observer, deadline) do
+    case observe_durable(request_id, agent_id, observer) do
+      {:ok, :pending} ->
+        await_durable_observation_until(request_id, agent_id, observer, deadline)
+
+      {:ok, {:terminal, terminal}} ->
+        timeout_terminal_result(terminal)
+
+      :not_found ->
+        {:error, :not_found}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp await_owner_settlement(request_id, agent_id, observer) do
+    wall_remaining =
+      max(observer.owner_deadline_unix_ms - System.system_time(:millisecond), 0)
+
+    wait =
+      if wall_remaining > 0,
+        do: min(wall_remaining, @owner_clock_recheck_ms),
+        else: @owner_settlement_poll_ms
+
+    receive do
+      {:interaction_response, %{request_id: ^request_id}} ->
+        observe_owner_settlement(request_id, agent_id, observer)
+
+      {:interaction_terminal, %{request_id: ^request_id}} ->
+        observe_owner_settlement(request_id, agent_id, observer)
+    after
+      wait ->
+        observe_owner_settlement(request_id, agent_id, observer)
+    end
+  end
+
+  defp observe_owner_settlement(request_id, agent_id, observer) do
+    case observe_durable(request_id, agent_id, observer) do
+      {:ok, :pending} -> await_owner_settlement(request_id, agent_id, observer)
+      {:ok, {:terminal, terminal}} -> timeout_terminal_result(terminal)
+      :not_found -> {:error, :not_found}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp observe_durable(request_id, agent_id, observer) do
+    InteractionRegistry.observe_durable(
+      request_id,
+      agent_id,
+      observer.operation_id,
+      observer.owner_deadline_unix_ms
+    )
   end
 
   defp requested_durability(opts) when is_list(opts) do

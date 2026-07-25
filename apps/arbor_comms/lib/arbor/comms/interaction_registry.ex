@@ -28,6 +28,11 @@ defmodule Arbor.Comms.InteractionRegistry do
           authority_pid: pid(),
           request_id: String.t()
         }
+  @type durable_receipt :: %{
+          request_id: String.t(),
+          operation_id: String.t(),
+          owner_deadline_unix_ms: non_neg_integer()
+        }
 
   @doc false
   @spec child_spec(keyword()) :: Supervisor.child_spec()
@@ -101,6 +106,26 @@ defmodule Arbor.Comms.InteractionRegistry do
   end
 
   def admit(_interaction, _opts), do: {:error, :invalid_options}
+
+  @doc false
+  @spec admit_durable(Interaction.t(), non_neg_integer()) ::
+          {:ok, admission_disposition(), Interaction.t(), durable_receipt()}
+          | {:error, term()}
+  def admit_durable(%Interaction{request_id: request_id} = interaction, owner_deadline_unix_ms)
+      when is_integer(owner_deadline_unix_ms) and owner_deadline_unix_ms >= 0 do
+    case authority_for(request_id) do
+      :not_found ->
+        route_call(node(), :admit_durable, [interaction, owner_deadline_unix_ms])
+
+      {:ok, authority_node} ->
+        route_call(authority_node, :admit_durable, [interaction, owner_deadline_unix_ms])
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  def admit_durable(_interaction, _owner_deadline_unix_ms), do: {:error, :invalid_options}
 
   @doc "Return backend and completed Authority hydration readiness."
   @spec durable_readiness() :: DurableStore.availability()
@@ -264,6 +289,30 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   def reconcile_timeout_capture(_capture, _request_id),
     do: {:error, :invalid_timeout_capture}
+
+  @doc false
+  @spec observe_durable(
+          String.t(),
+          String.t(),
+          String.t(),
+          non_neg_integer()
+        ) ::
+          {:ok, :pending | {:terminal, map()}}
+          | {:error, term()}
+          | :not_found
+  def observe_durable(request_id, agent_id, operation_id, owner_deadline_unix_ms)
+      when is_binary(request_id) and is_binary(agent_id) and is_binary(operation_id) and
+             is_integer(owner_deadline_unix_ms) and owner_deadline_unix_ms >= 0 do
+    with_authority(request_id, :observe_durable, [
+      request_id,
+      agent_id,
+      operation_id,
+      owner_deadline_unix_ms
+    ])
+  end
+
+  def observe_durable(_request_id, _agent_id, _operation_id, _owner_deadline_unix_ms),
+    do: {:error, :invalid_options}
 
   @doc "Return the authoritative first terminal transition for an interaction."
   @spec get_terminal(String.t()) :: {:ok, map()} | :not_found

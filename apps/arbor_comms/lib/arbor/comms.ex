@@ -40,6 +40,29 @@ defmodule Arbor.Comms do
     InteractionRouter.request(attrs_or_interaction, opts)
   end
 
+  @typedoc "Authoritative identity receipt for a durable interaction operation."
+  @type durable_interaction_receipt :: %{
+          request_id: String.t(),
+          operation_id: String.t(),
+          owner_deadline_unix_ms: non_neg_integer()
+        }
+
+  @doc """
+  Request a durable interaction with an absolute owner deadline.
+
+  The deadline is persisted in the initial durable record before discovery
+  publication or adapter dispatch. Retries return the stored operation identity
+  and deadline without dispatching again.
+  """
+  @spec request_durable_interaction(Arbor.Contracts.Comms.Interaction.t(), keyword()) ::
+          {:ok, durable_interaction_receipt()} | {:error, term()}
+  def request_durable_interaction(%Arbor.Contracts.Comms.Interaction{} = interaction, opts)
+      when is_list(opts) do
+    InteractionRouter.request_durable(interaction, opts)
+  end
+
+  def request_durable_interaction(_interaction, _opts), do: {:error, :invalid_options}
+
   @doc "Return readiness for opt-in node-restart durable interactions."
   @spec durable_interaction_readiness() :: term()
   def durable_interaction_readiness, do: Arbor.Comms.InteractionRegistry.durable_readiness()
@@ -182,6 +205,23 @@ defmodule Arbor.Comms do
       when is_binary(request_id) and is_binary(agent_id) do
     InteractionRouter.await_response(request_id, agent_id, opts)
   end
+
+  @doc """
+  Observe a durable interaction response for one exact operation.
+
+  This observer never arms, extends, or settles the owner deadline. The
+  authority validates the request, agent, operation, and deadline before the
+  observer waits.
+  """
+  @spec await_durable_interaction_response(String.t(), String.t(), keyword()) ::
+          {:ok, term(), map()} | {:error, :timeout | term()}
+  def await_durable_interaction_response(request_id, agent_id, opts)
+      when is_binary(request_id) and is_binary(agent_id) and is_list(opts) do
+    InteractionRouter.await_durable_response(request_id, agent_id, opts)
+  end
+
+  def await_durable_interaction_response(_request_id, _agent_id, _opts),
+    do: {:error, :invalid_options}
 
   @doc """
   Submit a response to a pending interaction.

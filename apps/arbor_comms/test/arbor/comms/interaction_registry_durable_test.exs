@@ -26,6 +26,27 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     def channel_kind, do: :dashboard
   end
 
+  defmodule DeadlineInspectingAdapter do
+    @behaviour Arbor.Contracts.Comms.ChannelAdapter
+
+    def send_interaction(channel_meta, %Interaction{} = interaction) do
+      record = Arbor.Comms.InteractionRegistry.DurableStore.get(interaction.request_id)
+
+      entry =
+        :sys.get_state(Arbor.Comms.InteractionRegistry.Authority).entries[interaction.request_id]
+
+      send(
+        Map.fetch!(channel_meta, :test_pid),
+        {:deadline_adapter_called, interaction, record, entry}
+      )
+
+      :ok
+    end
+
+    def parse_response(_raw), do: :not_interaction
+    def channel_kind, do: :dashboard
+  end
+
   setup do
     path =
       Path.join(System.tmp_dir!(), "arbor-comms-durable-#{System.unique_integer([:positive])}")
@@ -79,6 +100,415 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
                ),
                durability: :process_lifetime
              )
+  end
+
+  test "durable request atomically persists its deadline and arms authority before dispatch" do
+    request_id = "irq_phase_c_atomic_deadline"
+    agent_id = "agent_phase_c_atomic_deadline"
+    user_id = "user_phase_c_atomic_deadline"
+    deadline = now_ms() + 5_000
+    track_dashboard(user_id)
+
+    interaction =
+      build_interaction(
+        interaction_attrs("atomic durable deadline",
+          request_id: request_id,
+          agent_id: agent_id,
+          user_id: user_id
+        )
+      )
+
+    assert {:ok,
+            %{
+              request_id: ^request_id,
+              operation_id: operation_id,
+              owner_deadline_unix_ms: ^deadline
+            } = receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: deadline,
+               adapter_map: %{dashboard: DeadlineInspectingAdapter}
+             )
+
+    assert_receive {:deadline_adapter_called, ^interaction, {:ok, %Record{} = record}, entry}
+    assert record.data["request_id"] == request_id
+    assert record.data["operation_id"] == operation_id
+    assert record.data["owner_deadline_unix_ms"] == deadline
+    assert record.data["status"] == "pending"
+    assert entry.operation_id == operation_id
+    assert entry.owner_deadline == deadline
+    assert is_reference(entry.timer_ref)
+    assert receipt == durable_receipt(record)
+  end
+
+  test "duplicate durable request cannot extend the stored deadline or dispatch twice" do
+    request_id = "irq_phase_c_duplicate_deadline"
+    user_id = "user_phase_c_duplicate_deadline"
+    first_deadline = now_ms() + 5_000
+    later_deadline = first_deadline + 60_000
+    track_dashboard(user_id)
+
+    interaction =
+      build_interaction(
+        interaction_attrs("duplicate durable deadline",
+          request_id: request_id,
+          user_id: user_id
+        )
+      )
+
+    opts = [
+      owner_deadline_unix_ms: first_deadline,
+      adapter_map: %{dashboard: TestAdapter}
+    ]
+
+    assert {:ok, first_receipt} = Arbor.Comms.request_durable_interaction(interaction, opts)
+    assert_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}
+    assert {:ok, first_record} = DurableStore.get(request_id)
+
+    assert {:ok, second_receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: later_deadline,
+               adapter_map: %{dashboard: TestAdapter}
+             )
+
+    refute_receive {:durable_adapter_called, _interaction}, 100
+    assert {:ok, second_record} = DurableStore.get(request_id)
+    assert second_receipt == first_receipt
+    assert second_receipt.owner_deadline_unix_ms == first_deadline
+    assert second_record == first_record
+  end
+
+  test "authority timer settles exactly one terminal without a waiter" do
+    request_id = "irq_phase_c_timer_without_waiter"
+    deadline = now_ms() + 100
+
+    interaction =
+      build_interaction(interaction_attrs("timer owns settlement", request_id: request_id))
+
+    assert {:ok, receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: deadline,
+               adapter_map: %{}
+             )
+
+    assert receipt.owner_deadline_unix_ms == deadline
+
+    assert_eventually(fn ->
+      match?(
+        {:ok,
+         %Record{
+           revision: 2,
+           data: %{
+             "status" => "abandoned",
+             "terminal" => %{"reason" => "owner_timeout"}
+           }
+         }},
+        DurableStore.get(request_id)
+      )
+    end)
+
+    assert {:ok, terminal_record} = DurableStore.get(request_id)
+    Process.sleep(100)
+    assert {:ok, ^terminal_record} = DurableStore.get(request_id)
+  end
+
+  test "owner timer terminal publication wakes a durable observer" do
+    request_id = "irq_phase_c_timer_wakes_observer"
+    agent_id = "agent_phase_c_timer_wakes_observer"
+    deadline = now_ms() + 150
+
+    interaction =
+      build_interaction(
+        interaction_attrs("timer wakes observer", request_id: request_id, agent_id: agent_id)
+      )
+
+    assert {:ok, receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: deadline,
+               adapter_map: %{}
+             )
+
+    assert {:error, :timeout} =
+             Arbor.Comms.await_durable_interaction_response(
+               request_id,
+               agent_id,
+               durable_observer_opts(receipt, [])
+             )
+
+    assert {:ok, record} = DurableStore.get(request_id)
+    assert record.data["status"] == "abandoned"
+    assert record.data["terminal"]["reason"] == "owner_timeout"
+  end
+
+  test "stale timer fences are no-ops and early exact delivery rearms" do
+    request_id = "irq_phase_c_timer_fences"
+    deadline = now_ms() + 300
+    interaction = build_interaction(interaction_attrs("timer fences", request_id: request_id))
+
+    assert {:ok, receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: deadline,
+               adapter_map: %{}
+             )
+
+    first_entry = :sys.get_state(Authority).entries[request_id]
+    assert {:ok, first_record} = DurableStore.get(request_id)
+
+    send(
+      Authority,
+      {:durable_owner_deadline, request_id, "op_stale", first_entry.authority_epoch, deadline}
+    )
+
+    send(
+      Authority,
+      {:durable_owner_deadline, request_id, receipt.operation_id, "epoch_stale", deadline}
+    )
+
+    Process.sleep(20)
+    fenced_entry = :sys.get_state(Authority).entries[request_id]
+    assert fenced_entry.timer_ref == first_entry.timer_ref
+    assert {:ok, ^first_record} = DurableStore.get(request_id)
+
+    send(
+      Authority,
+      {:durable_owner_deadline, request_id, receipt.operation_id, first_entry.authority_epoch,
+       deadline}
+    )
+
+    assert_eventually(fn ->
+      rearmed_entry = :sys.get_state(Authority).entries[request_id]
+      is_reference(rearmed_entry.timer_ref) and rearmed_entry.timer_ref != first_entry.timer_ref
+    end)
+
+    assert {:ok, ^first_record} = DurableStore.get(request_id)
+
+    assert_eventually(fn ->
+      match?(
+        {:ok, %Record{revision: 2, data: %{"status" => "abandoned"}}},
+        DurableStore.get(request_id)
+      )
+    end)
+  end
+
+  test "authority restart rehydrates and rearms the persisted deadline" do
+    request_id = "irq_phase_c_restart_rearm"
+    deadline = now_ms() + 500
+    interaction = build_interaction(interaction_attrs("restart timer", request_id: request_id))
+
+    assert {:ok, receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: deadline,
+               adapter_map: %{}
+             )
+
+    before_entry = :sys.get_state(Authority).entries[request_id]
+    assert is_reference(before_entry.timer_ref)
+    old_epoch = before_entry.authority_epoch
+    restart_authority()
+
+    after_entry = :sys.get_state(Authority).entries[request_id]
+    assert after_entry.operation_id == receipt.operation_id
+    assert after_entry.owner_deadline == deadline
+    refute after_entry.authority_epoch == old_epoch
+    assert is_reference(after_entry.timer_ref)
+
+    assert_eventually(
+      fn ->
+        match?(
+          {:ok, %Record{data: %{"status" => "abandoned"}}},
+          DurableStore.get(request_id)
+        )
+      end,
+      2_000
+    )
+
+    assert {:ok, record} = DurableStore.get(request_id)
+    assert record.data["terminal"]["reason"] == "owner_timeout"
+  end
+
+  test "killed observer can be replaced after the answer was persisted" do
+    request_id = "irq_phase_c_replay_observer"
+    agent_id = "agent_phase_c_replay_observer"
+    deadline = now_ms() + 3_000
+
+    interaction =
+      build_interaction(
+        interaction_attrs("replace observer", request_id: request_id, agent_id: agent_id)
+      )
+
+    assert {:ok, receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: deadline,
+               adapter_map: %{}
+             )
+
+    parent = self()
+
+    observer =
+      spawn(fn ->
+        send(parent, {:observer_started, self()})
+
+        Arbor.Comms.await_durable_interaction_response(
+          request_id,
+          agent_id,
+          durable_observer_opts(receipt, timeout: 2_000)
+        )
+      end)
+
+    monitor = Process.monitor(observer)
+    assert_receive {:observer_started, ^observer}
+    Process.sleep(30)
+    assert Process.alive?(observer)
+    Process.exit(observer, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^observer, :killed}
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request_id, :approved, %{
+               "source" => "persisted"
+             })
+
+    assert {:ok, :approved, %{"source" => "persisted"}} =
+             Arbor.Comms.await_durable_interaction_response(
+               request_id,
+               agent_id,
+               durable_observer_opts(receipt, timeout: 500)
+             )
+
+    assert {:ok, record} = DurableStore.get(request_id)
+    assert record.data["operation_id"] == receipt.operation_id
+    assert record.data["status"] == "responded"
+  end
+
+  test "observer local timeout does not mutate or extend the durable record" do
+    request_id = "irq_phase_c_observer_timeout"
+    agent_id = "agent_phase_c_observer_timeout"
+    deadline = now_ms() + 2_000
+
+    interaction =
+      build_interaction(
+        interaction_attrs("observer timeout", request_id: request_id, agent_id: agent_id)
+      )
+
+    assert {:ok, receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: deadline,
+               adapter_map: %{}
+             )
+
+    assert {:ok, before_record} = DurableStore.get(request_id)
+
+    assert {:error, :timeout} =
+             Arbor.Comms.await_durable_interaction_response(
+               request_id,
+               agent_id,
+               durable_observer_opts(receipt, timeout: 10)
+             )
+
+    assert {:ok, after_record} = DurableStore.get(request_id)
+    assert after_record == before_record
+    assert after_record.data["owner_deadline_unix_ms"] == deadline
+    assert after_record.data["status"] == "pending"
+  end
+
+  test "durable observer identity mismatches fail before waiting" do
+    request_id = "irq_phase_c_observer_identity"
+    agent_id = "agent_phase_c_observer_identity"
+    deadline = now_ms() + 2_000
+
+    interaction =
+      build_interaction(
+        interaction_attrs("observer identity", request_id: request_id, agent_id: agent_id)
+      )
+
+    assert {:ok, receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: deadline,
+               adapter_map: %{}
+             )
+
+    assert {:ok, before_record} = DurableStore.get(request_id)
+
+    assert {:error, :interaction_identity_mismatch} =
+             Arbor.Comms.await_durable_interaction_response(
+               request_id,
+               "agent_wrong",
+               durable_observer_opts(receipt, timeout: 1_000)
+             )
+
+    assert {:error, :interaction_identity_mismatch} =
+             Arbor.Comms.await_durable_interaction_response(
+               request_id,
+               agent_id,
+               durable_observer_opts(%{receipt | operation_id: "op_wrong"}, timeout: 1_000)
+             )
+
+    assert {:error, :interaction_identity_mismatch} =
+             Arbor.Comms.await_durable_interaction_response(
+               request_id,
+               agent_id,
+               durable_observer_opts(
+                 %{receipt | owner_deadline_unix_ms: deadline + 1},
+                 timeout: 1_000
+               )
+             )
+
+    assert {:error, :not_found} =
+             Arbor.Comms.await_durable_interaction_response(
+               "irq_phase_c_missing",
+               agent_id,
+               durable_observer_opts(receipt, timeout: 1_000)
+             )
+
+    assert {:ok, ^before_record} = DurableStore.get(request_id)
+  end
+
+  test "automatic owner timeout and response race preserve the first terminal" do
+    request_id = "irq_phase_c_response_timeout_race"
+    deadline = now_ms() + 150
+    interaction = build_interaction(interaction_attrs("automatic race", request_id: request_id))
+
+    assert {:ok, receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: deadline,
+               adapter_map: %{}
+             )
+
+    responder =
+      Task.async(fn ->
+        Process.sleep(max(deadline - now_ms() - 2, 0))
+        Arbor.Comms.respond_to_interaction(request_id, :approved, %{"winner" => "response"})
+      end)
+
+    response_result = Task.await(responder, 2_000)
+
+    assert_eventually(fn ->
+      match?(
+        {:ok, %Record{data: %{"status" => status}}} when status != "pending",
+        DurableStore.get(request_id)
+      )
+    end)
+
+    assert {:ok, terminal_record} = DurableStore.get(request_id)
+    assert terminal_record.revision == 2
+    assert terminal_record.data["operation_id"] == receipt.operation_id
+    assert terminal_record.data["status"] in ["responded", "abandoned"]
+
+    case terminal_record.data["status"] do
+      "responded" -> assert response_result == :ok
+      "abandoned" -> assert response_result == {:error, {:already_terminal, :abandoned}}
+    end
+
+    send(
+      Authority,
+      {:durable_owner_deadline, request_id, receipt.operation_id,
+       terminal_record.data["authority_epoch"], deadline}
+    )
+
+    assert {:error, {:already_terminal, terminal_status}} =
+             Arbor.Comms.respond_to_interaction(request_id, :rejected, %{"duplicate" => true})
+
+    assert terminal_status in [:responded, :abandoned]
+    Process.sleep(50)
+    assert {:ok, ^terminal_record} = DurableStore.get(request_id)
   end
 
   test "durable admission is idempotent and rejects a different interaction" do
@@ -876,6 +1306,22 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     interaction
   end
 
+  defp durable_receipt(%Record{data: data}) do
+    %{
+      request_id: data["request_id"],
+      operation_id: data["operation_id"],
+      owner_deadline_unix_ms: data["owner_deadline_unix_ms"]
+    }
+  end
+
+  defp durable_observer_opts(receipt, extra_opts) do
+    [
+      operation_id: receipt.operation_id,
+      owner_deadline_unix_ms: receipt.owner_deadline_unix_ms
+    ]
+    |> Keyword.merge(extra_opts)
+  end
+
   defp track_dashboard(user_id) do
     assert {:ok, _ref} =
              PresenceTracker.track(self(), user_id, :dashboard, %{test_pid: self()})
@@ -904,18 +1350,38 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
   end
 
   defp restart_authority do
-    case Process.whereis(Authority) do
-      pid when is_pid(pid) ->
-        Process.exit(pid, :kill)
+    old_pid = Process.whereis(Authority)
 
-        unless wait_for_new_authority(pid, 100) do
-          raise "authority did not restart"
-        end
+    if Process.whereis(Arbor.Comms.Supervisor) do
+      :ok =
+        Supervisor.terminate_child(
+          Arbor.Comms.Supervisor,
+          Arbor.Comms.InteractionRegistry
+        )
 
-      nil ->
-        {:ok, _} = start_supervised(Arbor.Comms.InteractionRegistry)
+      assert_registry_restart(
+        Supervisor.restart_child(
+          Arbor.Comms.Supervisor,
+          Arbor.Comms.InteractionRegistry
+        )
+      )
+    else
+      case old_pid do
+        pid when is_pid(pid) ->
+          Process.exit(pid, :kill)
+
+        nil ->
+          {:ok, _} = start_supervised(Arbor.Comms.InteractionRegistry)
+      end
+    end
+
+    if is_pid(old_pid) and not wait_for_new_authority(old_pid, 100) do
+      raise "authority did not restart"
     end
   end
+
+  defp assert_registry_restart({:ok, _pid}), do: :ok
+  defp assert_registry_restart({:ok, _pid, _info}), do: :ok
 
   defp wait_for_new_authority(_old_pid, 0), do: is_pid(Process.whereis(Authority))
 
