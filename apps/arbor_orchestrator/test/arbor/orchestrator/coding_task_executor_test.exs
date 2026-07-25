@@ -7,10 +7,26 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   @moduletag :fast
 
-  alias Arbor.Contracts.Coding.{Plan, TaskTerminalEnvelope, ValidationCapacityHandoff, WorkPacket}
+  alias Arbor.Contracts.Coding.{
+    Diagnostic,
+    Plan,
+    ReadinessReport,
+    TaskTerminalEnvelope,
+    ValidationCapacityHandoff,
+    WorkPacket
+  }
+
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SigningAuthority
-  alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, Compiler, Profiles, ValidationProgram}
+
+  alias Arbor.Orchestrator.CodingPlan.{
+    ArtifactStore,
+    Compiler,
+    Profiles,
+    ReadinessCore,
+    ValidationProgram
+  }
+
   alias Arbor.Orchestrator.CodingTaskExecutor
   alias Arbor.Orchestrator.Config
   alias Arbor.Security
@@ -414,6 +430,44 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     def archive(_root, _plan, _dot_source, _manifest), do: {:ok, %{"unexpected" => "reply"}}
   end
 
+  defmodule MutatingArchivedArtifactStore do
+    @moduledoc false
+
+    def archive(root, plan, dot_source, manifest) do
+      {:ok, descriptor} =
+        Arbor.Orchestrator.CodingTaskExecutorTest.FakeArtifactStore.archive(
+          root,
+          plan,
+          dot_source,
+          manifest
+        )
+
+      mutation = Process.get(:coding_executor_archived_artifact_mutation)
+      mutate!(mutation, descriptor)
+      send(self(), {:post_readiness_artifact_mutated, mutation, plan})
+      {:ok, descriptor}
+    end
+
+    defp mutate!(:graph, descriptor) do
+      File.write!(descriptor["coding_pipeline_path"], "\n// post-readiness mutation\n", [:append])
+    end
+
+    defp mutate!(:action_binding, descriptor) do
+      path = descriptor["compile_manifest_path"]
+      archived = path |> File.read!() |> Jason.decode!()
+      [first_action | remaining_actions] = get_in(archived, ["execution_manifest", "actions"])
+
+      mutated =
+        put_in(
+          archived,
+          ["execution_manifest", "actions"],
+          [Map.put(first_action, "beam_sha256", String.duplicate("0", 64)) | remaining_actions]
+        )
+
+      File.write!(path, Jason.encode!(mutated))
+    end
+  end
+
   defmodule InvalidTerminalArtifactStoreReply do
     @moduledoc false
     def archive_terminal_evidence(_root, _task_id, _result, _controls),
@@ -791,6 +845,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Process.delete(:coding_executor_invalid_close_attempts)
     Process.delete(:coding_executor_redirected_worktree_base_dir)
     Process.delete(:coding_executor_initial_value_mutation)
+    Process.delete(:coding_executor_archived_artifact_mutation)
     Process.delete(:coding_abandoned_runs)
     Process.delete(:coding_task_control_calls)
     Process.delete(:coding_task_control_reply)
@@ -2438,6 +2493,58 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert Process.get(:coding_executor_last_run) == nil
     end
 
+    test "post-readiness immutable artifact mutations return bounded state drift before runner" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        MutatingArchivedArtifactStore
+      )
+
+      for mutation <- [:graph, :action_binding] do
+        Process.put(:coding_executor_archived_artifact_mutation, mutation)
+        task_id = "task_post_readiness_drift_#{mutation}"
+
+        assert {:error, {:coding_execution_state_drift, report}} =
+                 CodingTaskExecutor.run(
+                   "agent_1",
+                   valid_task(),
+                   valid_context(%{"task_id" => task_id})
+                 )
+
+        assert_receive {:post_readiness_artifact_mutated, ^mutation, admitted_plan}
+
+        assert ReadinessReport.valid?(report)
+        assert report["status"] == "blocked"
+        assert report["plan_digest"] == ReadinessCore.plan_digest(admitted_plan)
+        assert {:ok, _observed_at, 0} = DateTime.from_iso8601(report["observed_at"])
+
+        assert [diagnostic] = report["diagnostics"]
+        assert Diagnostic.valid?(diagnostic)
+        assert diagnostic["gate_id"] == "immutable_execution_boundary"
+        assert diagnostic["code"] == "immutable_artifact_state_drift"
+        assert diagnostic["decision"] == "blocked"
+        assert diagnostic["observed_at"] == report["observed_at"]
+        assert diagnostic["message"] =~ "Readiness observed at "
+
+        assert [_, admitted_observed_at, admitted_evidence_ref] =
+                 Regex.run(
+                   ~r/Readiness observed at ([^ ]+) \((sha256:[0-9a-f]{64})\)/,
+                   diagnostic["message"]
+                 )
+
+        assert {:ok, _admitted_at, 0} = DateTime.from_iso8601(admitted_observed_at)
+        refute admitted_observed_at == report["observed_at"]
+        assert admitted_evidence_ref =~ ~r/\Asha256:[0-9a-f]{64}\z/
+        assert diagnostic["evidence_ref"] =~ ~r/\Asha256:[0-9a-f]{64}\z/
+        assert {:ok, _json} = Jason.encode(report)
+
+        refute inspect(report) =~ "beam_sha256"
+        refute inspect(report) =~ "post-readiness mutation"
+        refute_receive {:coding_executor_captured_run, _path, _opts}
+        assert Process.get(:coding_executor_last_run) == nil
+      end
+    end
+
     test "security regression: compiler cannot redirect the canonical worktree base" do
       outside = Path.join(Process.get(:coding_executor_tmp_dir), "outside-compiler-worktrees")
       marker = Path.join(outside, "runner-created-outside-worktree")
@@ -2543,7 +2650,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute_receive {:coding_executor_captured_run, _path, _opts}
     end
 
-    test "engine/runner failures fail closed" do
+    test "non-drift engine/runner failures keep their existing classification" do
       Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, {
         :error,
         :engine_crashed
@@ -3019,6 +3126,28 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "git-tree:" <> @verification_tree_oid
 
         refute inspect(result["verification_report"]) =~ "ignored raw feedback"
+      end
+    end
+
+    test "accepts passed verification for a validated candidate success terminal" do
+      validation = validation_result("default")
+
+      assert {:ok, result} =
+               run_with_profile_verification("default", validation, %{
+                 "status" => "change_committed"
+               })
+
+      assert result["status"] == "change_committed"
+      assert result["canonical_status"] == "change_committed"
+      assert result["verification_report"]["status"] == "passed"
+    end
+
+    test "rejects passed verification for contradictory non-success terminals" do
+      validation = validation_result("default")
+
+      for status <- ~w(rework_exhausted approval_denied cancelled) do
+        assert {:error, {:invalid_terminal_evidence, :verification_terminal_status_mismatch}} =
+                 run_with_profile_verification("default", validation, %{"status" => status})
       end
     end
 

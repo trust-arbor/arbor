@@ -55,7 +55,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   alias Arbor.Contracts.Coding.{
     BranchLifecycleDescriptor,
+    Diagnostic,
     Plan,
+    ReadinessReport,
     TaskEvidenceDescriptor,
     TranscriptDescriptor,
     ValidationCapacityHandoff,
@@ -275,12 +277,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, authority} <- acquire_signing_authority(security, agent_id) do
       try do
         with {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
-             {:ok, artifacts} <- archive_compilation(logs_root, canonical_plan, compilation),
+             {:ok, artifacts} <-
+               archive_compilation(logs_root, canonical_plan, compilation)
+               |> map_post_readiness_immutable_failure(readiness_report, :archive),
              {:ok, {pinned_action_bindings, pinned_handler_bindings}} <-
                verify_execution_boundary(
                  Map.fetch!(artifacts, "coding_pipeline_path"),
                  canonical_plan,
                  compilation
+               )
+               |> map_post_readiness_immutable_failure(
+                 readiness_report,
+                 :execution_boundary
                ),
              {:ok, opts} <-
                build_engine_opts(
@@ -1465,6 +1473,115 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp admit_readiness(_report),
     do: {:error, {:coding_readiness_blocked, "readiness", "report_invalid"}}
 
+  defp map_post_readiness_immutable_failure({:ok, _value} = result, _report, _stage),
+    do: result
+
+  defp map_post_readiness_immutable_failure({:error, reason} = error, report, stage) do
+    case immutable_drift_code(stage, reason) do
+      nil -> error
+      code -> execution_state_drift_error(report, code)
+    end
+  end
+
+  defp immutable_drift_code(
+         :archive,
+         {:invalid_coding_plan_artifact_store_reply, reason}
+       )
+       when reason in [
+              :artifact_content_mismatch,
+              :descriptor_graph_hash_mismatch,
+              :descriptor_compiler_version_mismatch
+            ],
+       do: "immutable_artifact_state_drift"
+
+  defp immutable_drift_code(
+         :execution_boundary,
+         {:coding_execution_preflight_failed, :archived_graph_mismatch}
+       ),
+       do: "immutable_graph_state_drift"
+
+  defp immutable_drift_code(
+         :execution_boundary,
+         {:coding_execution_preflight_failed, {:prepared_compilation_mismatch, _reason}}
+       ),
+       do: "prepared_compilation_state_drift"
+
+  defp immutable_drift_code(
+         :execution_boundary,
+         {:coding_execution_preflight_failed, reason}
+       ) do
+    if execution_binding_drift?(reason),
+      do: "execution_binding_state_drift",
+      else: nil
+  end
+
+  defp immutable_drift_code(_stage, _reason), do: nil
+
+  defp execution_binding_drift?({:execution_manifest_mismatch, _sections}), do: true
+  defp execution_binding_drift?({:execution_manifest_field_mismatch, _field}), do: true
+  defp execution_binding_drift?({:invalid_execution_manifest_field, _field}), do: true
+  defp execution_binding_drift?(:invalid_execution_manifest), do: true
+  defp execution_binding_drift?(:invalid_action_bindings), do: true
+  defp execution_binding_drift?(:invalid_handler_bindings), do: true
+  defp execution_binding_drift?(_reason), do: false
+
+  defp execution_state_drift_error(admitted_report, code) do
+    observed_at = DateTime.utc_now() |> DateTime.to_iso8601(:extended)
+    admitted_observed_at = Map.fetch!(admitted_report, "observed_at")
+    admitted_evidence_ref = json_evidence_ref(admitted_report)
+
+    evidence_ref =
+      json_evidence_ref(%{
+        "admitted_evidence_ref" => admitted_evidence_ref,
+        "admitted_observed_at" => admitted_observed_at,
+        "code" => code,
+        "gate_id" => "immutable_execution_boundary",
+        "observed_at" => observed_at,
+        "plan_digest" => Map.fetch!(admitted_report, "plan_digest")
+      })
+
+    {:ok, diagnostic} =
+      Diagnostic.new(%{
+        version: Diagnostic.schema_version(),
+        gate_id: "immutable_execution_boundary",
+        phase: "preflight",
+        decision: "blocked",
+        code: code,
+        observed_at: observed_at,
+        message:
+          "Readiness observed at #{admitted_observed_at} (#{admitted_evidence_ref}) no longer matches the immutable execution boundary.",
+        remediation:
+          "Repeat readiness and dispatch with unchanged reviewed artifacts and bindings.",
+        evidence_ref: evidence_ref
+      })
+
+    {:ok, drift_report} =
+      ReadinessReport.new(%{
+        version: ReadinessReport.schema_version(),
+        status: "blocked",
+        plan_digest: Map.fetch!(admitted_report, "plan_digest"),
+        observed_at: observed_at,
+        diagnostics: [Diagnostic.to_map(diagnostic)]
+      })
+
+    {:error, {:coding_execution_state_drift, ReadinessReport.to_map(drift_report)}}
+  end
+
+  defp json_evidence_ref(value) do
+    encoded = value |> canonical_json() |> Jason.encode!()
+    "sha256:" <> sha256(encoded)
+  end
+
+  defp canonical_json(value) when is_map(value) do
+    value
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map(fn {key, nested} -> {key, canonical_json(nested)} end)
+    |> Jason.OrderedObject.new()
+  end
+
+  defp canonical_json(value) when is_list(value), do: Enum.map(value, &canonical_json/1)
+  defp canonical_json(value), do: value
+
   defp resolve_template_path do
     path = Config.coding_pipeline_path()
 
@@ -1646,7 +1763,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp verify_execution_boundary(graph_path, %Plan{} = plan, %Compilation{} = compilation) do
-    with {:ok, dot_source} <- File.read(graph_path),
+    with :ok <- validate_prepared_execution_compilation(compilation, plan),
+         {:ok, dot_source} <- File.read(graph_path),
          true <- dot_source == compilation.dot_source,
          true <- sha256(dot_source) == compilation.graph_hash,
          {:ok, graph} <- parse_execution_graph(dot_source),
@@ -1688,6 +1806,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       {:error, {:coding_execution_preflight_failed, Exception.message(exception)}}
   catch
     kind, reason -> {:error, {:coding_execution_preflight_failed, {kind, reason}}}
+  end
+
+  defp validate_prepared_execution_compilation(compilation, plan) do
+    case Compilation.validate(compilation, plan) do
+      {:ok, ^compilation} -> :ok
+      {:ok, _other} -> {:error, {:prepared_compilation_mismatch, :unexpected_compilation}}
+      {:error, reason} -> {:error, {:prepared_compilation_mismatch, reason}}
+      _other -> {:error, {:prepared_compilation_mismatch, :invalid_validation_result}}
+    end
   end
 
   defp parse_execution_graph(dot_source) do
@@ -2109,6 +2236,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:pipeline_error,
           pipeline_error_detail(clean, engine_result, worker_provider, requested_model)}}
 
+      status == "cancelled" and terminal_validation_claimed?(context, status) ->
+        case adapt_terminal_verification(context, clean, status, legacy) do
+          {:error, outcome} -> {:error, {:invalid_terminal_evidence, outcome}}
+          {:ok, _report} -> {:error, {:unknown_terminal_status, status}}
+        end
+
       not OutcomeMapper.terminal_status?(status) ->
         {:error, {:unknown_terminal_status, status}}
 
@@ -2192,11 +2325,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
        do: :ok
 
   defp validate_terminal_verification_consistency(
-         _public_status,
-         _canonical_status,
+         public_status,
+         canonical_status,
          %{"status" => "passed"}
-       ),
-       do: :ok
+       ) do
+    if MapSet.member?(@adoptable_statuses, public_status) and
+         MapSet.member?(@adoptable_statuses, canonical_status) do
+      :ok
+    else
+      {:error, :verification_terminal_status_mismatch}
+    end
+  end
 
   defp validate_terminal_verification_consistency(_public_status, _canonical_status, _report),
     do: {:error, :verification_terminal_status_mismatch}
