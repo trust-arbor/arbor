@@ -91,6 +91,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     action_catalog_digest: "coding_plan_action_catalog_digest",
     work_packet_digest: "coding_plan_work_packet_digest"
   }
+  @initial_context_keys %{
+    work_packet: "coding_plan_work_packet",
+    checkpoint_policy: "coding_plan_checkpoint_policy"
+  }
 
   @type compile_error :: term()
 
@@ -1543,8 +1547,22 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
     |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
     |> maybe_put("model", plan.worker["model"])
+    |> maybe_put_initial_work_packet(plan)
     |> maybe_put_initial_work_packet_digest(plan)
     |> maybe_put_test_paths(plan)
+  end
+
+  defp maybe_put_initial_work_packet(values, %Plan{version: 2} = plan) do
+    Map.merge(values, %{
+      @initial_context_keys.work_packet => plan.work_packet,
+      @initial_context_keys.checkpoint_policy => Map.fetch!(plan.work_packet, "checkpoint_policy")
+    })
+  end
+
+  defp maybe_put_initial_work_packet(values, _plan) do
+    values
+    |> Map.delete(@initial_context_keys.work_packet)
+    |> Map.delete(@initial_context_keys.checkpoint_policy)
   end
 
   defp maybe_put_initial_work_packet_digest(values, %Plan{version: 2} = plan),

@@ -189,6 +189,25 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              Compilation.validate(divergent, plan)
   end
 
+  test "version 2 binds the canonical work packet and checkpoint policy in initial context",
+       ctx do
+    for {plan, checkpoint_policy} <- [
+          {v2_plan!(), "direct"},
+          {v2_plan!(%{
+             "task_class" => "security_regression",
+             "validation_profile" => "security_regression",
+             "requested_paths" => ["apps/arbor_shell/test/shell_security_test.exs"],
+             "checkpoint_policy" => "design_required"
+           }), "design_required"}
+        ] do
+      assert {:ok, compilation} = compile(plan, ctx)
+
+      assert compilation.initial_values["coding_plan_work_packet"] == plan.work_packet
+      assert compilation.initial_values["coding_plan_checkpoint_policy"] == checkpoint_policy
+      assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
+    end
+  end
+
   test "version 2 binds the validated work packet digest in graph, inputs, and manifest", ctx do
     plan = v2_plan!()
 
@@ -205,6 +224,37 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "version 2 compilation rejects missing or tampered packet bindings", ctx do
     plan = v2_plan!()
     assert {:ok, compilation} = compile(plan, ctx)
+
+    tampered_packet =
+      put_in(
+        compilation.initial_values,
+        ["coding_plan_work_packet", "success_criteria"],
+        ["tampered"]
+      )
+
+    assert {:error, {:compilation_field_mismatch, "initial_values"}} =
+             Compilation.validate(%{compilation | initial_values: tampered_packet}, plan)
+
+    tampered_policy =
+      Map.put(compilation.initial_values, "coding_plan_checkpoint_policy", "design_required")
+
+    assert {:error, {:compilation_field_mismatch, "initial_values"}} =
+             Compilation.validate(%{compilation | initial_values: tampered_policy}, plan)
+
+    missing_packet = Map.delete(compilation.initial_values, "coding_plan_work_packet")
+
+    assert {:error, {:compilation_field_mismatch, "initial_values"}} =
+             Compilation.validate(%{compilation | initial_values: missing_packet}, plan)
+
+    missing_policy = Map.delete(compilation.initial_values, "coding_plan_checkpoint_policy")
+
+    assert {:error, {:compilation_field_mismatch, "initial_values"}} =
+             Compilation.validate(%{compilation | initial_values: missing_policy}, plan)
+
+    extra_binding = Map.put(compilation.initial_values, "coding_plan_unreviewed_scope", %{})
+
+    assert {:error, {:compilation_field_mismatch, "initial_values"}} =
+             Compilation.validate(%{compilation | initial_values: extra_binding}, plan)
 
     missing_initial = %{
       compilation
@@ -248,6 +298,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph = parse!(compilation.dot_source)
 
     refute Map.has_key?(graph.attrs, "coding_plan_work_packet_digest")
+    refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet")
+    refute Map.has_key?(compilation.initial_values, "coding_plan_checkpoint_policy")
     refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet_digest")
     refute Map.has_key?(compilation.manifest, "work_packet_digest")
     assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
@@ -1358,19 +1410,29 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     }
   end
 
-  defp v2_plan! do
-    packet = %{
-      "version" => 1,
-      "success_criteria" => ["focused tests pass"],
-      "non_goals" => ["execution authority"],
-      "constraints" => ["touch only owned files"],
-      "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
-      "required_evidence" => ["focused test output"],
-      "checkpoint_policy" => "direct"
-    }
+  defp v2_plan!(overrides \\ %{}) do
+    packet =
+      %{
+        "version" => 1,
+        "success_criteria" => ["focused tests pass"],
+        "non_goals" => ["execution authority"],
+        "constraints" => ["touch only owned files"],
+        "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
+        "required_evidence" => ["focused test output"],
+        "checkpoint_policy" => "direct"
+      }
+      |> Map.merge(Map.take(overrides, ["checkpoint_policy"]))
+
+    plan_overrides = Map.drop(overrides, ["checkpoint_policy"])
 
     {:ok, digest} = WorkPacket.digest(packet)
-    plan!(%{version: 2, work_packet: packet, work_packet_digest: digest})
+
+    plan!(
+      Map.merge(
+        %{version: 2, work_packet: packet, work_packet_digest: digest},
+        plan_overrides
+      )
+    )
   end
 
   defp deep_merge(left, right) do
