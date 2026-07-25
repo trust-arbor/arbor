@@ -369,6 +369,163 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     assert {:ok, :approved, %{"source" => "persisted"}} = Task.await(waiter, 2_000)
   end
 
+  test "security regression: owner waiter death preserves the durable operation for a replacement waiter" do
+    request_id = "irq_durable_owner_waiter_death"
+    agent_id = "agent_durable_owner_waiter_death"
+
+    assert {:ok, ^request_id} =
+             Arbor.Comms.request_interaction(
+               interaction_attrs("owner waiter can die without losing authority",
+                 request_id: request_id,
+                 agent_id: agent_id
+               ),
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+
+    parent = self()
+
+    owner_waiter =
+      spawn(fn ->
+        send(parent, {:owner_waiter_started, self()})
+
+        Arbor.Comms.await_interaction_response(request_id, agent_id, timeout: 5_000)
+      end)
+
+    owner_monitor = Process.monitor(owner_waiter)
+    assert_receive {:owner_waiter_started, ^owner_waiter}
+
+    assert_eventually(fn ->
+      match?(
+        {:ok, %Record{data: %{"status" => "pending", "owner_deadline_unix_ms" => deadline}}}
+        when is_integer(deadline),
+        DurableStore.get(request_id)
+      )
+    end)
+
+    assert {:ok, before_owner_death} = DurableStore.get(request_id)
+    operation_id = before_owner_death.data["operation_id"]
+    owner_deadline = before_owner_death.data["owner_deadline_unix_ms"]
+
+    Process.exit(owner_waiter, :kill)
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner_waiter, :killed}
+
+    assert {:ok, after_owner_death} = DurableStore.get(request_id)
+    assert after_owner_death.data["operation_id"] == operation_id
+    assert after_owner_death.data["owner_deadline_unix_ms"] == owner_deadline
+    assert after_owner_death.data["status"] == "pending"
+
+    replacement_waiter =
+      Task.async(fn ->
+        send(parent, :replacement_waiter_started)
+        Arbor.Comms.await_interaction_response(request_id, agent_id, timeout: 5_000)
+      end)
+
+    assert_receive :replacement_waiter_started
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request_id, :approved, %{
+               "source" => "replacement"
+             })
+
+    assert {:ok, :approved, %{"source" => "replacement"}} =
+             Task.await(replacement_waiter, 2_000)
+
+    assert {:ok, terminal_record} = DurableStore.get(request_id)
+    assert terminal_record.data["operation_id"] == operation_id
+    assert terminal_record.data["status"] == "responded"
+  end
+
+  test "security regression: duplicate durable answers have one terminal winner across restart" do
+    request_id = "irq_durable_duplicate_answers"
+
+    assert {:ok, ^request_id} =
+             Arbor.Comms.request_interaction(
+               interaction_attrs("conflicting operator answers", request_id: request_id),
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+
+    parent = self()
+
+    answer_task = fn response ->
+      Task.async(fn ->
+        send(parent, {:duplicate_answer_ready, response})
+
+        receive do
+          :submit_answer ->
+            Arbor.Comms.respond_to_interaction(request_id, response, %{
+              "answer" => Atom.to_string(response)
+            })
+        end
+      end)
+    end
+
+    approved = answer_task.(:approved)
+    rejected = answer_task.(:rejected)
+
+    assert_receive {:duplicate_answer_ready, :approved}
+    assert_receive {:duplicate_answer_ready, :rejected}
+    send(approved.pid, :submit_answer)
+    send(rejected.pid, :submit_answer)
+
+    results = [approved: Task.await(approved), rejected: Task.await(rejected)]
+
+    assert [{winner, :ok}] = Enum.filter(results, fn {_answer, result} -> result == :ok end)
+
+    assert [{loser, {:error, {:already_terminal, :responded}}}] =
+             Enum.reject(results, fn {_answer, result} -> result == :ok end)
+
+    refute winner == loser
+
+    assert {:ok, %{response: ^winner, metadata: %{"answer" => winner_metadata}}} =
+             Arbor.Comms.get_interaction_response(request_id)
+
+    assert winner_metadata == Atom.to_string(winner)
+    assert {:ok, before_restart} = DurableStore.get(request_id)
+
+    restart_authority()
+
+    assert {:ok, %{response: ^winner, metadata: %{"answer" => ^winner_metadata}}} =
+             Arbor.Comms.get_interaction_response(request_id)
+
+    assert {:ok, after_restart} = DurableStore.get(request_id)
+    assert after_restart.data["operation_id"] == before_restart.data["operation_id"]
+    assert after_restart.data["status"] == "responded"
+    assert after_restart.data["terminal"] == before_restart.data["terminal"]
+  end
+
+  test "security regression: a durable timeout rejects a late answer after authority restart" do
+    request_id = "irq_durable_timeout_late_answer"
+    agent_id = "agent_durable_timeout_late_answer"
+
+    assert {:ok, ^request_id} =
+             Arbor.Comms.request_interaction(
+               interaction_attrs("late answer after timeout",
+                 request_id: request_id,
+                 agent_id: agent_id
+               ),
+               durability: :node_restart,
+               adapter_map: %{}
+             )
+
+    assert {:error, :timeout} =
+             Arbor.Comms.await_interaction_response(request_id, agent_id, timeout: 0)
+
+    assert {:ok, before_restart} = DurableStore.get(request_id)
+    assert before_restart.data["status"] == "abandoned"
+
+    restart_authority()
+
+    assert {:error, {:already_terminal, :abandoned}} =
+             Arbor.Comms.respond_to_interaction(request_id, :approved, %{"source" => "late"})
+
+    assert {:ok, after_restart} = DurableStore.get(request_id)
+    assert after_restart.data["operation_id"] == before_restart.data["operation_id"]
+    assert after_restart.data["status"] == "abandoned"
+    assert after_restart.data["terminal"] == before_restart.data["terminal"]
+  end
+
   test "security regression: degraded hydration rejects durable ID rebinding and late response",
        %{
          path: path
