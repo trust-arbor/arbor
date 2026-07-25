@@ -52,6 +52,8 @@ relationship_style:
 required_capabilities:
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
+- description: "Open and await the pipeline-internal durable design checkpoint"
+  resource: "arbor://action/coding/design_checkpoint"
 - description: "Run the pipeline-internal reviewed commit/adoption gate (orchestration control)"
   resource: "arbor://action/coding/reviewed_commit"
 - description: "Validate a Council-attested security regression against both reviewed revisions"
@@ -91,6 +93,7 @@ trust_preset:
   baseline: block
   rules:
     "arbor://orchestrator/execute": auto
+    "arbor://action/coding/design_checkpoint": auto
     "arbor://action/coding/reviewed_commit": auto
     "arbor://action/coding/security_regression/validate": ask
     "arbor://action/coding/cross_app/validate": ask

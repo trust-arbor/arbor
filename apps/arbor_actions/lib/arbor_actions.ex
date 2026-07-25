@@ -1475,6 +1475,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.Acp.CloseSession
       ],
       coding: [
+        Arbor.Actions.Coding.DesignCheckpoint.Open,
+        Arbor.Actions.Coding.DesignCheckpoint.Await,
         Arbor.Actions.Coding.ReviewedCommit,
         Arbor.Actions.Coding.SecurityRegression.Validate,
         Arbor.Actions.Coding.CrossApp.Validate,
@@ -2508,6 +2510,9 @@ defmodule Arbor.Actions do
     Arbor.Actions.Acp.CloseSession => "arbor://acp/tool",
 
     # Pipeline-internal commit/adoption gate (not an ordinary LLM tool).
+    Arbor.Actions.Coding.DesignCheckpoint.Open => "arbor://action/coding/design_checkpoint/open",
+    Arbor.Actions.Coding.DesignCheckpoint.Await =>
+      "arbor://action/coding/design_checkpoint/await",
     Arbor.Actions.Coding.ReviewedCommit => "arbor://action/coding/reviewed_commit",
     Arbor.Actions.Coding.SecurityRegression.Validate =>
       "arbor://action/coding/security_regression/validate",

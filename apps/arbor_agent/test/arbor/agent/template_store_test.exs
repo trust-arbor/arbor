@@ -310,6 +310,8 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "arbor://action/coding/review_tree/read" in resources
       assert "arbor://action/coding/review_tree/search" in resources
       assert "arbor://action/coding/review/submit" in resources
+      assert "arbor://action/coding/design_checkpoint" in resources
+      refute "arbor://approval/answer" in resources
       assert "arbor://acp/tool/**" in resources
       assert "arbor://action/git/**" in resources
       assert "arbor://action/mix/**" in resources
@@ -341,6 +343,8 @@ defmodule Arbor.Agent.TemplateStoreTest do
       preset = data["trust_preset"]
       assert preset["baseline"] == "block"
       assert preset["rules"]["arbor://orchestrator/execute"] == "auto"
+      assert preset["rules"]["arbor://action/coding/design_checkpoint"] == "auto"
+      refute Map.has_key?(preset["rules"], "arbor://approval/answer")
       refute Map.has_key?(preset["rules"], "arbor://action/coding/produce_reviewable_change")
       assert preset["rules"]["arbor://action/coding/security_regression/validate"] == "ask"
       assert preset["rules"]["arbor://action/coding/cross_app/validate"] == "ask"
