@@ -5964,7 +5964,7 @@
       "anchor": "applied-learning-requested-acp-model-metadata-is-a-claim-until-the-provider-confirms-it",
       "source_date": "2026-07-21",
       "source_incident": "found 2026-07-21 during managed-branch lifecycle integration).",
-      "content_sha256": "6c453404c010130045bdb6121c76ea6af3f1a5a6e62cf18803fb4416cb27887f",
+      "content_sha256": "3b6ab51e9ecbdc803cb8119edea494515d30c45bbddb303ca699e0f332570491",
       "always_loaded": false
     },
     {
