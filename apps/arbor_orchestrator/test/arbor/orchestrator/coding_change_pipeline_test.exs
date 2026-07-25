@@ -1721,7 +1721,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["status"] == "change_committed"
       assert result.context["design_attempt"] == 2
       assert result.context["total_rework_count"] == 1
-      assert result.context["rework_kind"] == "design"
+      assert result.context["rework_kind"] == "design_checkpoint"
 
       assert [first_open, second_open] = action_calls(calls, "coding_design_checkpoint_open")
       assert [first_await, second_await] = action_calls(calls, "coding_design_checkpoint_await")
