@@ -152,7 +152,10 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   must be an integer Unix timestamp in milliseconds. Missing or malformed
   deadlines fail closed. An elapsed deadline returns `:elapsed`, allowing the
   Await action to produce its existing structured timeout without consulting
-  Comms. A caller-supplied future deadline can never extend the static timeout.
+  Comms. When context contains the owner deadline it is authoritative; the
+  flattened action param is accepted only when context does not carry it. A
+  caller-supplied future deadline can therefore extend neither the owner's
+  remaining time nor the static timeout.
   """
   def await_timeout(context, params) when is_map(context) and is_map(params) do
     with {:ok, static_timeout} <- timeout(context, params),
@@ -225,17 +228,33 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   defp require_design_policy(_packet), do: {:error, :design_checkpoint_policy_required}
 
   defp run_deadline_unix_ms(params, context) do
-    case value(params, context, :run_deadline_unix_ms) do
-      nil ->
-        {:error, :design_checkpoint_run_deadline_required}
-
-      deadline when is_integer(deadline) and deadline > 0 ->
-        {:ok, deadline}
-
-      _ ->
-        {:error, :invalid_design_checkpoint_run_deadline}
+    case deadline_input(context) do
+      :missing -> params |> deadline_input() |> validate_run_deadline()
+      context_input -> validate_run_deadline(context_input)
     end
   end
+
+  defp deadline_input(source) do
+    case {
+      Map.fetch(source, :run_deadline_unix_ms),
+      Map.fetch(source, "run_deadline_unix_ms")
+    } do
+      {:error, :error} -> :missing
+      {{:ok, deadline}, :error} -> {:ok, deadline}
+      {:error, {:ok, deadline}} -> {:ok, deadline}
+      {{:ok, deadline}, {:ok, deadline}} -> {:ok, deadline}
+      {{:ok, _atom_deadline}, {:ok, _string_deadline}} -> :conflict
+    end
+  end
+
+  defp validate_run_deadline(:missing), do: {:error, :design_checkpoint_run_deadline_required}
+  defp validate_run_deadline(:conflict), do: {:error, :invalid_design_checkpoint_run_deadline}
+
+  defp validate_run_deadline({:ok, deadline}) when is_integer(deadline) and deadline > 0,
+    do: {:ok, deadline}
+
+  defp validate_run_deadline({:ok, _deadline}),
+    do: {:error, :invalid_design_checkpoint_run_deadline}
 
   defp validate_packet_digest(packet, supplied) do
     with {:ok, expected} <- WorkPacket.digest(packet),

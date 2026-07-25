@@ -302,18 +302,23 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     refute_received {:await_interaction_response, _, _, _}
   end
 
-  test "far-future caller deadline cannot extend the static timeout", ctx do
+  test "far-future caller param cannot override a shorter owner context deadline", ctx do
     assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+
+    owner_deadline_unix_ms = System.system_time(:millisecond) + 3_000
 
     params =
       ctx.params
       |> Map.put(:request_id, opened["request_id"])
-      |> Map.put(:timeout, 777)
+      |> Map.put(:timeout, 20_000)
       |> Map.put(:run_deadline_unix_ms, System.system_time(:millisecond) + 86_400_000)
 
-    assert {:ok, _result} = Await.run(params, ctx.context)
+    context = Map.put(ctx.context, :run_deadline_unix_ms, owner_deadline_unix_ms)
 
-    assert_received {:await_interaction_response, _, "agent_123", [timeout: 777]}
+    assert {:ok, _result} = Await.run(params, context)
+
+    assert_received {:await_interaction_response, _, "agent_123", [timeout: bounded_timeout]}
+    assert bounded_timeout in 2_000..3_000
   end
 
   test "fails closed when durable interactions are unavailable", ctx do
