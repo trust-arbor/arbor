@@ -101,6 +101,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     graph = compiled_graph!(compilation.dot_source)
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
+    refute Map.has_key?(
+             graph.nodes["open_recovery_worker"].attrs,
+             "param.fallback_to_fresh_on_resume_unavailable"
+           )
+
+    assert graph.nodes["await_design_checkpoint"].attrs["context_keys"] =~
+             "session.run_deadline_unix_ms"
+
     assert :ok =
              preflight(graph, profile["semantic_policy"],
                review_profile: "binding",
@@ -125,12 +133,45 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
             coding_plan_version
             coding_plan_work_packet
             coding_plan_work_packet_digest
+            session.run_deadline_unix_ms
             task
           ] do
         update_in(
           graph.nodes["hoist_design_response"].attrs,
           &Map.put(&1, "output_key", key)
         )
+      end
+
+    checkpoint_mutations = [
+      update_in(
+        graph.nodes["await_design_checkpoint"].attrs,
+        &Map.update!(&1, "context_keys", fn keys ->
+          String.replace(keys, ",session.run_deadline_unix_ms", "")
+        end)
+      ),
+      update_in(
+        graph.nodes["await_design_checkpoint"].attrs,
+        &Map.put(&1, "param.timeout", plan.budgets["inactivity_timeout_ms"] - 1)
+      ),
+      update_in(
+        graph.nodes["open_recovery_worker"].attrs,
+        &Map.put(&1, "param.fallback_to_fresh_on_resume_unavailable", true)
+      ),
+      update_in(
+        graph.nodes["open_recovery_worker"].attrs,
+        &Map.put(&1, "param.fallback_to_fresh_on_resume_unavailable", false)
+      )
+    ]
+
+    prompt_mutations =
+      for {node_id, fragment} <- [
+            {"build_validation_rework_prompt", "{ctx.coding_plan_work_packet_json}"},
+            {"build_review_rework_prompt", "{ctx.accepted_design_request_id}"},
+            {"build_operator_rework_prompt", "{ctx.accepted_design_evidence_json}"}
+          ] do
+        update_in(graph.nodes[node_id].attrs, fn attrs ->
+          Map.update!(attrs, "expression", &String.replace(&1, fragment, "[removed]"))
+        end)
       end
 
     mutations =
@@ -161,7 +202,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         update_in(graph.nodes["build_design_prompt"].attrs, fn attrs ->
           Map.update!(attrs, "expression", &String.replace(&1, "MUST NOT edit", "MAY edit"))
         end)
-      ] ++ immutable_mutations
+      ] ++ checkpoint_mutations ++ prompt_mutations ++ immutable_mutations
 
     for mutated <- mutations do
       assert {:error, {:semantic_preflight_failed, errors}} =
@@ -179,7 +220,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                  "design_checkpoint_prompt_violation",
                  "design_checkpoint_topology_mismatch",
                  "design_checkpoint_writer_violation",
-                 "immutable_context_writer_violation"
+                 "immutable_context_writer_violation",
+                 "worker_recovery_start_binding_mismatch"
                ]
              end)
     end

@@ -180,7 +180,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_forbidden_denial_bypass_attrs(graph)
         |> check_immutable_context_writers(graph)
         |> check_worker_continuity_bindings(graph, worker_continuity, checkpoint.policy)
-        |> check_worker_recovery_bindings(graph, policy, worker_continuity)
+        |> check_worker_recovery_bindings(
+          graph,
+          policy,
+          worker_continuity,
+          checkpoint.policy
+        )
         |> check_review_convergence_bindings(graph, policy, rework_max_cycles)
         |> check_design_checkpoint_bindings(graph, checkpoint, rework_max_cycles)
         |> check_workspace_cleanup_topology(graph)
@@ -2094,6 +2099,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         coding_plan_version
         coding_plan_work_packet
         coding_plan_work_packet_digest
+        session.run_deadline_unix_ms
         session.task_id
         task
         task_id
@@ -2228,7 +2234,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "type" => "exec",
          "target" => "action",
          "action" => "coding_design_checkpoint_await",
-         "context_keys" => "request_id," <> context_keys,
+         "context_keys" => "request_id," <> context_keys <> ",session.run_deadline_unix_ms",
          "param.timeout" => checkpoint.timeout_ms,
          "output_prefix" => "design_checkpoint",
          "max_retries" => "0"
@@ -2413,7 +2419,41 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "{ctx.coding_plan_work_packet_json}",
            "{ctx.accepted_design}",
            "{ctx.accepted_design_digest}",
+           "{ctx.accepted_design_request_id}",
            "{ctx.accepted_design_evidence_json}"
+         ]},
+        {"build_validation_rework_prompt",
+         [
+           "VALIDATION REWORK",
+           "{value}",
+           "{ctx.coding_plan_work_packet_json}",
+           "{ctx.accepted_design}",
+           "{ctx.accepted_design_digest}",
+           "{ctx.accepted_design_request_id}",
+           "{ctx.accepted_design_evidence_json}",
+           "{ctx.validation.feedback_json}"
+         ]},
+        {"build_review_rework_prompt",
+         [
+           "COUNCIL REVIEW REWORK",
+           "{value}",
+           "{ctx.coding_plan_work_packet_json}",
+           "{ctx.accepted_design}",
+           "{ctx.accepted_design_digest}",
+           "{ctx.accepted_design_request_id}",
+           "{ctx.accepted_design_evidence_json}",
+           "{ctx.review.feedback_json}"
+         ]},
+        {"build_operator_rework_prompt",
+         [
+           "OPERATOR REWORK",
+           "{value}",
+           "{ctx.coding_plan_work_packet_json}",
+           "{ctx.accepted_design}",
+           "{ctx.accepted_design_digest}",
+           "{ctx.accepted_design_request_id}",
+           "{ctx.accepted_design_evidence_json}",
+           "{ctx.approval_note}"
          ]}
       ]
 
@@ -2715,7 +2755,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_worker_recovery_bindings(errors, graph, policy, continuity) do
+  defp check_worker_recovery_bindings(
+         errors,
+         graph,
+         policy,
+         continuity,
+         checkpoint_policy
+       ) do
     recovery = policy["worker_recovery"]
 
     errors =
@@ -2789,7 +2835,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         end
       )
 
-    check_worker_recovery_start_nodes(errors, graph, continuity)
+    check_worker_recovery_start_nodes(errors, graph, continuity, checkpoint_policy)
   end
 
   defp check_review_convergence_bindings(errors, graph, policy, rework_max_cycles) do
@@ -2962,13 +3008,32 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp recovery_edge_json({from, to, condition}), do: [from, to, condition]
 
-  defp check_worker_recovery_start_nodes(errors, graph, continuity) do
+  defp check_worker_recovery_start_nodes(errors, graph, continuity, checkpoint_policy) do
     errors
-    |> require_recovery_start_attrs(graph, "open_worker", false, continuity)
-    |> require_recovery_start_attrs(graph, "open_recovery_worker", true, continuity)
+    |> require_recovery_start_attrs(
+      graph,
+      "open_worker",
+      false,
+      continuity,
+      checkpoint_policy
+    )
+    |> require_recovery_start_attrs(
+      graph,
+      "open_recovery_worker",
+      true,
+      continuity,
+      checkpoint_policy
+    )
   end
 
-  defp require_recovery_start_attrs(errors, graph, node_id, recovery?, continuity) do
+  defp require_recovery_start_attrs(
+         errors,
+         graph,
+         node_id,
+         recovery?,
+         continuity,
+         checkpoint_policy
+       ) do
     case Map.fetch(graph.nodes, node_id) do
       :error ->
         [error("worker_recovery_missing_node", node_id, %{}) | errors]
@@ -2983,6 +3048,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         # or recovery reopen; absent for ordinary fresh open_worker.
         expected_fallback =
           cond do
+            recovery? and checkpoint_policy == "design_required" ->
+              nil
+
             recovery? ->
               true
 
@@ -3032,11 +3100,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
             end
           end)
 
-        cond do
-          recovery? and not Map.has_key?(attrs, "param.session_id") ->
-            errors
-
-          recovery? ->
+        errors =
+          if recovery? and Map.has_key?(attrs, "param.session_id") do
             [
               error("worker_recovery_dynamic_session_id_violation", node_id, %{
                 "attribute" => "param.session_id",
@@ -3045,21 +3110,24 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
               })
               | errors
             ]
-
-          # Ordinary fresh open_worker: flag must be absent (forged true/false fails).
-          is_nil(expected_fallback) and
-              Map.has_key?(attrs, "param.fallback_to_fresh_on_resume_unavailable") ->
-            [
-              error("worker_recovery_start_binding_mismatch", node_id, %{
-                "attribute" => "param.fallback_to_fresh_on_resume_unavailable",
-                "expected" => nil,
-                "actual" => Map.get(attrs, "param.fallback_to_fresh_on_resume_unavailable")
-              })
-              | errors
-            ]
-
-          true ->
+          else
             errors
+          end
+
+        # Fresh open_worker and design-required recovery must not silently
+        # replace the provider session. A forged true or false flag fails.
+        if is_nil(expected_fallback) and
+             Map.has_key?(attrs, "param.fallback_to_fresh_on_resume_unavailable") do
+          [
+            error("worker_recovery_start_binding_mismatch", node_id, %{
+              "attribute" => "param.fallback_to_fresh_on_resume_unavailable",
+              "expected" => nil,
+              "actual" => Map.get(attrs, "param.fallback_to_fresh_on_resume_unavailable")
+            })
+            | errors
+          ]
+        else
+          errors
         end
     end
   end

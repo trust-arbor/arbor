@@ -228,7 +228,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 76_921
+    assert byte_size(ctx.template_source) == 76_950
     assert map_size(graph.nodes) == 228
     assert length(graph.edges) == 330
     assert byte_size(ctx.template_source) <= 262_144
@@ -237,6 +237,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   end
 
   test "v1 and v2 direct plans retain the original worker route and bypass checkpoints", ctx do
+    template_graph = parse!(ctx.template_source)
+
     for plan <- [plan!(), v2_plan!()] do
       assert {:ok, compilation} = compile(plan, ctx)
       graph = parse!(compilation.dot_source)
@@ -295,11 +297,25 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
       assert node_attrs(graph, "await_design_checkpoint")["action"] ==
                "coding_design_checkpoint_await"
+
+      for node_id <- ~w[
+            build_validation_rework_prompt
+            build_review_rework_prompt
+            build_operator_rework_prompt
+          ] do
+        assert node_attrs(graph, node_id)["expression"] ==
+                 node_attrs(template_graph, node_id)["expression"]
+      end
     end
   end
 
   test "design-required plans activate exact checkpoint topology and canonical prompts", ctx do
-    plan = v2_plan!(%{"checkpoint_policy" => "design_required"})
+    plan =
+      v2_plan!(%{
+        "checkpoint_policy" => "design_required",
+        "budgets" => %{"wall_clock_ms" => 120_000}
+      })
+
     assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
     assert {:ok, compilation} = compile(plan, ctx)
     graph = parse!(compilation.dot_source)
@@ -326,7 +342,22 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       refute Map.has_key?(attrs, "param.coding_plan_fingerprint")
     end
 
-    assert await["param.timeout"] == plan.budgets["inactivity_timeout_ms"]
+    assert await["context_keys"] ==
+             "request_id,work_packet,packet_digest,session.task_id,task,plan_fingerprint," <>
+               "coding_plan_fingerprint,workspace_id,worker_session_id," <>
+               "worker_provider_session_id,design_attempt,design,design_digest," <>
+               "session.run_deadline_unix_ms"
+
+    assert await["param.timeout"] ==
+             min(
+               plan.budgets["inactivity_timeout_ms"],
+               plan.budgets["wall_clock_ms"]
+             )
+
+    refute Map.has_key?(
+             node_attrs(graph, "open_recovery_worker"),
+             "param.fallback_to_fresh_on_resume_unavailable"
+           )
 
     design_prompt =
       run_transform(
@@ -360,6 +391,58 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert implementation_prompt =~ packet_json
     assert implementation_prompt =~ "Use the existing compiler rewrite pattern."
     assert implementation_prompt =~ "IMPLEMENTATION PHASE"
+
+    scope = %{
+      "task" => plan.task,
+      "coding_plan_work_packet_json" => packet_json,
+      "accepted_design" => "Use the existing compiler rewrite pattern.",
+      "accepted_design_digest" => "sha256:" <> String.duplicate("a", 64),
+      "accepted_design_request_id" => "coding-design:" <> String.duplicate("b", 64),
+      "accepted_design_evidence_json" => ~s({"approved":true}),
+      "validation.feedback_json" => ~s({"errors":["compile failed"]}),
+      "review.feedback_json" => ~s({"findings":["scope drift"]}),
+      "approval_note" => "Keep the implementation inside the approved scope."
+    }
+
+    for {node_id, feedback} <- [
+          {"build_validation_rework_prompt", scope["validation.feedback_json"]},
+          {"build_review_rework_prompt", scope["review.feedback_json"]},
+          {"build_operator_rework_prompt", scope["approval_note"]}
+        ] do
+      prompt = run_transform(graph, node_id, scope)
+
+      assert prompt =~ packet_json
+      assert prompt =~ scope["accepted_design"]
+      assert prompt =~ scope["accepted_design_digest"]
+      assert prompt =~ scope["accepted_design_request_id"]
+      assert prompt =~ scope["accepted_design_evidence_json"]
+      assert prompt =~ feedback
+    end
+  end
+
+  test "design-required security validation rework retains approved scope after profile rewrite",
+       ctx do
+    plan =
+      v2_plan!(%{
+        "checkpoint_policy" => "design_required",
+        "task_class" => "security_regression",
+        "validation_profile" => "security_regression",
+        "requested_paths" => ["apps/arbor_shell/test/shell_security_test.exs"]
+      })
+
+    assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+    expression = node_attrs(graph, "build_validation_rework_prompt")["expression"]
+
+    assert expression =~ "SECURITY REGRESSION VALIDATION REWORK"
+    assert expression =~ "{ctx.validation.feedback_json}"
+    assert expression =~ "{ctx.coding_plan_work_packet_json}"
+    assert expression =~ "{ctx.accepted_design}"
+    assert expression =~ "{ctx.accepted_design_digest}"
+    assert expression =~ "{ctx.accepted_design_request_id}"
+    assert expression =~ "{ctx.accepted_design_evidence_json}"
+    assert node_attrs(graph, "freeze_coding_plan_work_packet_json")["expression"] == packet_json
   end
 
   test "design attempt is derived as a JSON integer and increments numerically", ctx do

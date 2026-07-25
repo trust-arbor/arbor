@@ -150,7 +150,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              worker_model: plan.worker["model"],
              checkpoint_policy: checkpoint_policy(plan),
              checkpoint_work_packet_json: work_packet_json,
-             design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"],
+             design_checkpoint_timeout_ms: design_checkpoint_timeout_ms(plan),
              rework_max_cycles: plan.rework["max_cycles"],
              validation_timeout_ms: validation_timeout_ms,
              validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
@@ -433,13 +433,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
        ) do
     with {:ok, graph} <- rewrite_classification(graph, plan.task_class),
          {:ok, graph} <- rewrite_worker_open(graph, plan.worker),
-         {:ok, graph} <- rewrite_worker_recovery_open(graph, plan.worker),
+         {:ok, graph} <-
+           rewrite_worker_recovery_open(graph, plan.worker, checkpoint_policy(plan)),
          {:ok, graph} <- rewrite_worker_close(graph, plan.worker),
          {:ok, graph} <- rewrite_prompt_budgets(graph),
          {:ok, graph} <- rewrite_rework_budget(graph, plan.rework["max_cycles"]),
          {:ok, graph} <- rewrite_design_checkpoint(graph, plan, work_packet_json),
          {:ok, graph} <- rewrite_validation(graph, validation_program),
          {:ok, graph} <- rewrite_profile_flow(graph, plan),
+         {:ok, graph} <- rewrite_design_rework_prompts(graph, plan),
          {:ok, graph} <-
            rewrite_review_route(graph, plan.review_profile, plan.validation_profile),
          :ok <- require_action_node(graph, "review_change", "council_review_change") do
@@ -487,7 +489,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end)
   end
 
-  defp rewrite_worker_recovery_open(graph, worker) do
+  defp rewrite_worker_recovery_open(graph, worker, checkpoint_policy) do
     update_node(graph, "open_recovery_worker", fn attrs ->
       with :ok <- require_action_attrs(attrs, "acp_start_session") do
         context_keys =
@@ -495,15 +497,23 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
             do: "provider,cwd,workspace_id,session_id",
             else: "provider,cwd,workspace_id,session_id,model"
 
-        {:ok,
-         attrs
-         |> Map.put("context_keys", context_keys)
-         |> Map.put("param.permission_mode", worker["permission_mode"])
-         |> Map.put("param.use_pool", bool_string(worker["use_pool"]))
-         |> Map.put("param.fallback_to_fresh_on_resume_unavailable", true)
-         |> Map.put("output_prefix", "worker")
-         |> Map.put("max_retries", "0")
-         |> Map.delete("param.session_id")}
+        attrs =
+          attrs
+          |> Map.put("context_keys", context_keys)
+          |> Map.put("param.permission_mode", worker["permission_mode"])
+          |> Map.put("param.use_pool", bool_string(worker["use_pool"]))
+          |> Map.put("output_prefix", "worker")
+          |> Map.put("max_retries", "0")
+          |> Map.delete("param.session_id")
+
+        attrs =
+          if checkpoint_policy == "design_required" do
+            Map.delete(attrs, "param.fallback_to_fresh_on_resume_unavailable")
+          else
+            Map.put(attrs, "param.fallback_to_fresh_on_resume_unavailable", true)
+          end
+
+        {:ok, attrs}
       end
     end)
   end
@@ -746,7 +756,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              with :ok <- require_action_attrs(attrs, "coding_design_checkpoint_await") do
                {:ok,
                 attrs
-                |> Map.put("param.timeout", plan.budgets["inactivity_timeout_ms"])
+                |> Map.put("param.timeout", design_checkpoint_timeout_ms(plan))
                 |> Map.put("max_retries", "0")}
              end
            end),
@@ -783,6 +793,34 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <-
            rewrite_template_node(graph, "build_design_rework_prompt", design_rework_prompt()) do
       rewrite_template_node(graph, "build_implement_prompt", approved_implementation_prompt())
+    end
+  end
+
+  defp rewrite_design_rework_prompts(graph, %Plan{} = plan) do
+    if checkpoint_policy(plan) == "design_required" do
+      validation_prompt =
+        approved_validation_rework_prompt(plan.validation_profile)
+
+      with {:ok, graph} <-
+             rewrite_template_node(
+               graph,
+               "build_validation_rework_prompt",
+               validation_prompt
+             ),
+           {:ok, graph} <-
+             rewrite_template_node(
+               graph,
+               "build_review_rework_prompt",
+               approved_review_rework_prompt()
+             ) do
+        rewrite_template_node(
+          graph,
+          "build_operator_rework_prompt",
+          approved_operator_rework_prompt()
+        )
+      end
+    else
+      {:ok, graph}
     end
   end
 
@@ -877,6 +915,49 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "reviewable diff; do not merge, push, or open a PR. Respond with ONLY one valid JSON " <>
       "object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} " <>
       "or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this " <>
+      "object as advisory only and decides the outcome from the owned workspace."
+  end
+
+  defp approved_validation_rework_prompt("security_regression") do
+    approved_scope_prompt("SECURITY REGRESSION VALIDATION REWORK", "{value}") <>
+      "Structured validation feedback JSON: {ctx.validation.feedback_json}. " <>
+      "Fix the security regression validation issues in the same worktree and leave a fresh " <>
+      "commit or uncommitted change. " <> implementation_response_contract()
+  end
+
+  defp approved_validation_rework_prompt(_validation_profile) do
+    approved_scope_prompt("VALIDATION REWORK", "{value}") <>
+      "Structured validation feedback JSON: {ctx.validation.feedback_json}. " <>
+      "Fix the validation issues in the same worktree. " <> implementation_response_contract()
+  end
+
+  defp approved_review_rework_prompt do
+    approved_scope_prompt("COUNCIL REVIEW REWORK", "{value}") <>
+      "Structured review feedback JSON: {ctx.review.feedback_json}. " <>
+      "Address the council review feedback in the same worktree. " <>
+      implementation_response_contract()
+  end
+
+  defp approved_operator_rework_prompt do
+    approved_scope_prompt("OPERATOR REWORK", "{value}") <>
+      "Operator note: {ctx.approval_note}. " <>
+      "Address the operator feedback in the same worktree. " <>
+      implementation_response_contract()
+  end
+
+  defp approved_scope_prompt(phase, task_placeholder) do
+    "#{phase}. Exact reviewed task: #{task_placeholder}. " <>
+      "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Approved design (exact): {ctx.accepted_design}. " <>
+      "Approved design digest: {ctx.accepted_design_digest}. " <>
+      "Approval request ID: {ctx.accepted_design_request_id}. " <>
+      "Approved evidence JSON: {ctx.accepted_design_evidence_json}. "
+  end
+
+  defp implementation_response_contract do
+    "For compatibility with archived graphs, respond with ONLY one valid JSON object and no " <>
+      "prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} or " <>
+      "{\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this " <>
       "object as advisory only and decides the outcome from the owned workspace."
   end
 
@@ -1760,6 +1841,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     do: Map.fetch!(work_packet, "checkpoint_policy")
 
   defp checkpoint_policy(_plan), do: "direct"
+
+  defp design_checkpoint_timeout_ms(%Plan{} = plan) do
+    min(plan.budgets["inactivity_timeout_ms"], plan.budgets["wall_clock_ms"])
+  end
 
   defp canonical_work_packet_json(%Plan{version: 2, work_packet: work_packet}),
     do: WorkPacket.canonical_bytes(work_packet)
