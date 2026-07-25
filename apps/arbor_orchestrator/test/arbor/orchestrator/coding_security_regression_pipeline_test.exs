@@ -85,32 +85,62 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     end
 
     defp dispatch("coding_workspace_inspect", args, scenario, state) do
-      inspect_index = bump(state, :inspect)
-      implement_count = Agent.get(state, fn s -> Map.get(s.counters, :implement, 0) end)
       baseline = args["baseline_fingerprint"] || args[:baseline_fingerprint]
       post_turn? = is_binary(baseline) and baseline != ""
+      include_committable_tree? = args["include_committable_tree"] in [true, "true"]
 
-      {dirty, head_commit, fingerprint} =
-        security_inspect_view(scenario, implement_count, post_turn?, inspect_index)
+      Agent.get_and_update(state, fn current ->
+        inspect_index = Map.get(current.counters, :inspect, 0) + 1
+        implement_count = Map.get(current.counters, :implement, 0)
 
-      turn_progressed =
-        if post_turn?, do: fingerprint != baseline, else: true
+        {dirty, head_commit, fingerprint} =
+          security_inspect_view(scenario, implement_count, post_turn?, inspect_index)
 
-      {:ok,
-       %{
-         workspace_id: "ws_security_fixture",
-         worktree_path: "/tmp/ws_security_fixture",
-         branch: "arbor/security-fixture",
-         base_commit: "base-commit",
-         ownership: "owned",
-         active: true,
-         exists: true,
-         dirty: dirty,
-         head_commit: head_commit,
-         changed_from_base: head_commit != "base-commit" or dirty,
-         fingerprint: fingerprint,
-         turn_progressed: turn_progressed
-       }}
+        turn_progressed =
+          if post_turn?, do: fingerprint != baseline, else: true
+
+        response =
+          %{
+            workspace_id: "ws_security_fixture",
+            worktree_path: "/tmp/ws_security_fixture",
+            branch: "arbor/security-fixture",
+            base_commit: "base-commit",
+            ownership: "owned",
+            active: true,
+            exists: true,
+            dirty: dirty,
+            head_commit: head_commit,
+            changed_from_base: head_commit != "base-commit" or dirty,
+            fingerprint: fingerprint,
+            turn_progressed: turn_progressed
+          }
+          |> maybe_add_committable_tree(
+            include_committable_tree?,
+            length(current.validation_captures) + 1
+          )
+
+        updated = %{
+          current
+          | counters: Map.put(current.counters, :inspect, inspect_index),
+            validation_captures:
+              if(include_committable_tree?,
+                do: current.validation_captures ++ [response],
+                else: current.validation_captures
+              )
+        }
+
+        {{:ok, response}, updated}
+      end)
+    end
+
+    defp maybe_add_committable_tree(view, false, _attempt), do: view
+
+    defp maybe_add_committable_tree(view, true, attempt) do
+      Map.merge(view, %{
+        committable_tree_oid: String.pad_leading(Integer.to_string(attempt, 16), 40, "b"),
+        committable_tree_observed_at:
+          "2026-07-25T13:00:#{String.pad_leading(Integer.to_string(attempt), 2, "0")}Z"
+      })
     end
 
     # implement_count is the number of completed ACP sends when this inspect runs.
@@ -457,6 +487,27 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     }
   end
 
+  test "compiled security-attested route uses action-owned validation evidence", ctx do
+    assert {{:ok, result}, calls} =
+             run_fixture(:auto_success, ctx, "binding", %{
+               "validation_candidate_tree_oid" => "synthetic-final-tree",
+               "validation_observed_at" => "synthetic-final-time"
+             })
+
+    assert result.context["status"] == "change_committed"
+    assert "route_security_attested_auto" in result.completed_nodes
+    assert "capture_validation_workspace" in result.completed_nodes
+    assert called?(calls, "coding_workspace_inspect")
+
+    assert [capture] = validation_captures()
+    assert capture[:committable_tree_oid] == String.duplicate("b", 39) <> "1"
+    assert capture[:committable_tree_observed_at] == "2026-07-25T13:00:01Z"
+    assert result.context["validation_candidate_tree_oid"] == capture[:committable_tree_oid]
+    assert result.context["validation_observed_at"] == capture[:committable_tree_observed_at]
+    refute result.context["validation_candidate_tree_oid"] == "synthetic-final-tree"
+    refute result.context["validation_observed_at"] == "synthetic-final-time"
+  end
+
   test "default plan budget pins the standard validator timeout", ctx do
     assert {{:ok, result}, calls} = run_fixture(:auto_success, ctx)
 
@@ -623,12 +674,17 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     refute "status_change_committed" in result.completed_nodes
   end
 
-  defp run_fixture(scenario, ctx, review_profile \\ "binding") do
-    {:ok, state} = Agent.start_link(fn -> %{scenario: scenario, calls: [], counters: %{}} end)
+  defp run_fixture(scenario, ctx, review_profile \\ "binding", initial_overrides \\ %{}) do
+    {:ok, state} =
+      Agent.start_link(fn ->
+        %{scenario: scenario, calls: [], counters: %{}, validation_captures: []}
+      end)
+
     Process.put(:coding_security_pipeline_state, state)
 
     on_exit(fn ->
       Process.delete(:coding_security_pipeline_state)
+      Process.delete(:coding_security_validation_captures)
       if Process.alive?(state), do: Agent.stop(state)
     end)
 
@@ -658,6 +714,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
         "session.agent_id" => "agent-security-fixture",
         "session.task_id" => "task-security-fixture"
       })
+      |> Map.merge(initial_overrides)
 
     result =
       Arbor.Orchestrator.run(compilation.dot_source,
@@ -668,11 +725,17 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
         sleep_fn: fn _milliseconds -> :ok end
       )
 
-    calls = Agent.get(state, & &1.calls)
+    snapshot = Agent.get(state, & &1)
+    Process.put(:coding_security_validation_captures, snapshot.validation_captures)
+    calls = snapshot.calls
     {result, calls}
   end
 
   defp calls_for(calls, action), do: Enum.filter(calls, fn {name, _args} -> name == action end)
+
+  defp validation_captures do
+    Process.get(:coding_security_validation_captures, [])
+  end
 
   defp called?(calls, action, count \\ nil) do
     actual = length(calls_for(calls, action))

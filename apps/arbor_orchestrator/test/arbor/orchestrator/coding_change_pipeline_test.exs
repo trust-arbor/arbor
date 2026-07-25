@@ -527,89 +527,122 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
        }}
     end
 
-    defp inspect_response(scenario, counters, state, args) do
-      n = Map.get(counters, :inspect, 0)
-      Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :inspect, n + 1)} end)
-
+    defp inspect_response(scenario, _counters, state, args) do
       baseline =
         Map.get(args, "baseline_fingerprint") || Map.get(args, :baseline_fingerprint)
 
       post_turn? = is_binary(baseline) and baseline != ""
-      # Implement counter is incremented in implement_response before post-turn inspect.
-      sends = Map.get(counters, :implement, 0)
 
-      case scenario do
-        :inspect_hard_fail when post_turn? ->
-          {:error, "inspect failed"}
+      include_committable_tree? =
+        (Map.get(args, "include_committable_tree") ||
+           Map.get(args, :include_committable_tree)) in [true, "true"]
 
-        _ ->
-          base = %{
-            workspace_id: "ws_fixture_1",
-            worktree_path: "/tmp/ws_fixture_1",
-            branch: "arbor/coding-agent/fixture",
-            base_commit: "basecommit0001",
-            ownership: "owned",
-            active: true,
-            exists: true
-          }
+      response =
+        Agent.get_and_update(state, fn current ->
+          inspect_index = Map.get(current.counters, :inspect, 0)
+          sends = Map.get(current.counters, :implement, 0)
 
-          fingerprint =
-            fixture_fingerprint(scenario, sends, post_turn?, Agent.get(state, & &1.mutations))
+          if scenario == :inspect_hard_fail and post_turn? do
+            {{:error, "inspect failed"},
+             %{current | counters: Map.put(current.counters, :inspect, inspect_index + 1)}}
+          else
+            base = %{
+              workspace_id: "ws_fixture_1",
+              worktree_path: "/tmp/ws_fixture_1",
+              branch: "arbor/coding-agent/fixture",
+              base_commit: "basecommit0001",
+              ownership: "owned",
+              active: true,
+              exists: true
+            }
 
-          view =
-            case scenario do
-              scenario when scenario in [:no_changes, :narrative_no_changes] ->
-                Map.merge(base, %{
-                  dirty: false,
-                  head_commit: "basecommit0001",
-                  changed_from_base: false,
-                  fingerprint: fingerprint
-                })
+            fingerprint = fixture_fingerprint(scenario, sends, post_turn?, current.mutations)
 
-              :missing_workspace when post_turn? ->
-                Map.merge(base, %{
-                  exists: false,
-                  dirty: false,
-                  head_commit: nil,
-                  changed_from_base: false,
-                  fingerprint: fingerprint
-                })
+            view =
+              case scenario do
+                scenario when scenario in [:no_changes, :narrative_no_changes] ->
+                  Map.merge(base, %{
+                    dirty: false,
+                    head_commit: "basecommit0001",
+                    changed_from_base: false,
+                    fingerprint: fingerprint
+                  })
 
-              :missing_workspace_before_send when not post_turn? ->
-                Map.merge(base, %{
-                  exists: false,
-                  dirty: false,
-                  head_commit: nil,
-                  changed_from_base: false,
-                  fingerprint: fingerprint
-                })
+                :missing_workspace when post_turn? ->
+                  Map.merge(base, %{
+                    exists: false,
+                    dirty: false,
+                    head_commit: nil,
+                    changed_from_base: false,
+                    fingerprint: fingerprint
+                  })
 
-              :self_commit_adopt ->
-                Map.merge(base, %{
-                  dirty: false,
-                  head_commit: "selfcommit9999",
-                  changed_from_base: true,
-                  fingerprint: fingerprint
-                })
+                :missing_workspace_before_send when not post_turn? ->
+                  Map.merge(base, %{
+                    exists: false,
+                    dirty: false,
+                    head_commit: nil,
+                    changed_from_base: false,
+                    fingerprint: fingerprint
+                  })
 
-              _ ->
-                Map.merge(base, %{
-                  dirty: fingerprint != "fp-clean",
-                  head_commit: "basecommit0001",
-                  changed_from_base: fingerprint != "fp-clean",
-                  fingerprint: fingerprint
-                })
-            end
+                :self_commit_adopt ->
+                  Map.merge(base, %{
+                    dirty: false,
+                    head_commit: "selfcommit9999",
+                    changed_from_base: true,
+                    fingerprint: fingerprint
+                  })
 
-          turn_progressed =
-            if post_turn? do
-              view.fingerprint != baseline
-            else
-              true
-            end
+                _ ->
+                  Map.merge(base, %{
+                    dirty: fingerprint != "fp-clean",
+                    head_commit: "basecommit0001",
+                    changed_from_base: fingerprint != "fp-clean",
+                    fingerprint: fingerprint
+                  })
+              end
 
-          {:ok, Map.put(view, :turn_progressed, turn_progressed)}
-      end
+            turn_progressed =
+              if post_turn? do
+                view.fingerprint != baseline
+              else
+                true
+              end
+
+            response =
+              view
+              |> Map.put(:turn_progressed, turn_progressed)
+              |> maybe_add_committable_tree(
+                include_committable_tree?,
+                length(current.validation_captures) + 1
+              )
+
+            updated = %{
+              current
+              | counters: Map.put(current.counters, :inspect, inspect_index + 1),
+                validation_captures:
+                  if(include_committable_tree?,
+                    do: current.validation_captures ++ [response],
+                    else: current.validation_captures
+                  )
+            }
+
+            {{:ok, response}, updated}
+          end
+        end)
+
+      response
+    end
+
+    defp maybe_add_committable_tree(view, false, _attempt), do: view
+
+    defp maybe_add_committable_tree(view, true, attempt) do
+      Map.merge(view, %{
+        committable_tree_oid: String.pad_leading(Integer.to_string(attempt, 16), 40, "a"),
+        committable_tree_observed_at:
+          "2026-07-25T12:00:#{String.pad_leading(Integer.to_string(attempt), 2, "0")}Z"
+      })
     end
 
     # Fingerprints are relative to completed ACP sends so pre-turn capture and
@@ -1089,13 +1122,14 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   defp run_fixture(scenario, initial_overrides \\ %{}, dot_source \\ load_dot()) do
     {:ok, state} =
       Agent.start_link(fn ->
-        %{scenario: scenario, calls: [], counters: %{}, mutations: 0}
+        %{scenario: scenario, calls: [], counters: %{}, mutations: 0, validation_captures: []}
       end)
 
     Process.put(:coding_change_fake_state, state)
 
     on_exit(fn ->
       Process.delete(:coding_change_fake_state)
+      Process.delete(:coding_change_validation_captures)
       if Process.alive?(state), do: Agent.stop(state)
     end)
 
@@ -1127,7 +1161,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     ]
 
     result = Arbor.Orchestrator.run(dot_source, opts)
-    calls = Agent.get(state, & &1.calls)
+    snapshot = Agent.get(state, & &1)
+    Process.put(:coding_change_validation_captures, snapshot.validation_captures)
+    calls = snapshot.calls
     {result, calls}
   end
 
@@ -1218,6 +1254,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
     assert length(inspect_calls) == attempts * 3
     assert length(validation_captures) == attempts
+  end
+
+  defp validation_captures do
+    Process.get(:coding_change_validation_captures, [])
   end
 
   defp action_prompts(calls) do
@@ -2039,7 +2079,11 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     end
 
     test "narrative validation rework continues through owner-observed inspection" do
-      assert {{:ok, result}, calls} = run_fixture(:narrative_validation_rework)
+      assert {{:ok, result}, calls} =
+               run_fixture(:narrative_validation_rework, %{
+                 "validation_candidate_tree_oid" => "synthetic-final-tree",
+                 "validation_observed_at" => "synthetic-final-time"
+               })
 
       assert result.context["status"] == "change_committed"
       assert result.context["protocol_retry_count"] == "0"
@@ -2055,6 +2099,25 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
       # Every turn performs pre-turn, post-turn, and fresh validation inspection.
       assert_validation_inspections(calls, 2)
+
+      assert [first_capture, second_capture] = validation_captures()
+      assert first_capture[:committable_tree_oid] == String.duplicate("a", 39) <> "1"
+      assert first_capture[:committable_tree_observed_at] == "2026-07-25T12:00:01Z"
+      assert second_capture[:committable_tree_oid] == String.duplicate("a", 39) <> "2"
+      assert second_capture[:committable_tree_observed_at] == "2026-07-25T12:00:02Z"
+      refute first_capture[:committable_tree_oid] == second_capture[:committable_tree_oid]
+
+      refute first_capture[:committable_tree_observed_at] ==
+               second_capture[:committable_tree_observed_at]
+
+      assert result.context["validation_candidate_tree_oid"] ==
+               second_capture[:committable_tree_oid]
+
+      assert result.context["validation_observed_at"] ==
+               second_capture[:committable_tree_observed_at]
+
+      refute result.context["validation_candidate_tree_oid"] == "synthetic-final-tree"
+      refute result.context["validation_observed_at"] == "synthetic-final-time"
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
     end
