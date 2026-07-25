@@ -19,7 +19,13 @@ defmodule Arbor.Orchestrator.Engine.Executor do
 
   @doc false
   def execute_with_retry(node, context, graph, retries, opts) do
-    case resolve_placement(node, opts) do
+    {handler, node} = resolve_handler(node)
+    execute_with_retry(handler, node, context, graph, retries, opts)
+  end
+
+  @doc false
+  def execute_with_retry(handler, node, context, graph, retries, opts) do
+    case resolve_placement(node, opts, handler) do
       {:remote, target_node, handler} ->
         # Execute on remote node — placement resolution succeeded
         outcome = Placement.remote_execute(target_node, handler, node, context, graph, opts)
@@ -27,7 +33,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
 
       :local ->
         # Normal local execution path
-        do_local_execute_with_retry(node, context, graph, retries, opts)
+        do_local_execute_with_retry(handler, node, context, graph, retries, opts)
 
       {:error, reason} ->
         # Placement resolution failed
@@ -40,7 +46,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
     end
   end
 
-  defp resolve_placement(node, opts) do
+  defp resolve_placement(node, opts, handler) do
     placement_str = node.placement || Map.get(node.attrs, "placement")
 
     case Placement.parse(placement_str) do
@@ -51,12 +57,12 @@ defmodule Arbor.Orchestrator.Engine.Executor do
         if authorized_explicit_remote?(parsed, opts) do
           {:error, :authorized_remote_placement_requires_signed_lease}
         else
-          resolve_parsed_placement(parsed, node, opts)
+          resolve_parsed_placement(parsed, node, opts, handler)
         end
     end
   end
 
-  defp resolve_parsed_placement(parsed, node, opts) do
+  defp resolve_parsed_placement(parsed, node, opts, handler) do
     case Placement.resolve(parsed) do
       nil ->
         :local
@@ -68,7 +74,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
           if Keyword.get(opts, :authorization, false) do
             {:error, :authorized_remote_placement_requires_signed_lease}
           else
-            resolve_remote_handler(target_node, node)
+            resolve_remote_handler(target_node, node, handler)
           end
         end
 
@@ -85,9 +91,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
     end
   end
 
-  defp resolve_remote_handler(target_node, node) do
-    {handler, _node} = resolve_handler(node)
-
+  defp resolve_remote_handler(target_node, node, handler) do
     if is_atom(handler) do
       {:remote, target_node, handler}
     else
@@ -112,8 +116,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
     node_string != Atom.to_string(Node.self())
   end
 
-  defp do_local_execute_with_retry(node, context, graph, retries, opts) do
-    {handler, node} = resolve_handler(node)
+  defp do_local_execute_with_retry(handler, node, context, graph, retries, opts) do
     max_attempts = parse_max_attempts(node, graph)
     current_retry_count = parse_int(Map.get(retries, node.id, 0), 0)
 
@@ -300,19 +303,12 @@ defmodule Arbor.Orchestrator.Engine.Executor do
     end
   end
 
-  # Fast path: use pre-resolved handler module from IR compilation.
-  # Always check custom handlers first — they override compiled modules at runtime.
-  defp resolve_handler(%{handler_module: mod} = node) when not is_nil(mod) do
-    raw_type = Registry.node_type(node)
-
-    case Registry.custom_handler_for(raw_type) do
-      nil -> {mod, node}
-      custom -> {custom, node}
-    end
-  end
-
-  # Fallback: resolve via Registry for uncompiled graphs
-  defp resolve_handler(node), do: Registry.resolve_with_attrs(node)
+  # Resolve once from executable attrs. A caller-supplied compiled graph may
+  # contain a stale or forged handler_module; it is static-analysis output, not
+  # runtime authority. The returned handler is carried through classification,
+  # placement, authorization, and every retry without another registry lookup.
+  @doc false
+  def resolve_handler(node), do: Registry.resolve_with_attrs(node)
 
   defp emit_stage_terminal(opts, node_id, %Outcome{status: :fail, failure_reason: reason}) do
     duration_ms = System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)

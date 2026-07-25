@@ -33,6 +33,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
     egress_declared
     egress_destination_resolver
     egress_tier_resolver
+    execution_idempotency
     module
     name
     resource_uri
@@ -68,6 +69,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   @effect_classes Classification.effect_classes()
                   |> Enum.map(&Atom.to_string/1)
                   |> Enum.sort()
+  @execution_idempotency_classes ~w(
+    idempotent
+    idempotent_with_key
+    read_only
+    side_effecting
+  )
 
   @type json_value ::
           nil | boolean() | number() | String.t() | [json_value()] | %{String.t() => json_value()}
@@ -1120,6 +1127,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
          true <- is_map(action["parameters_schema"]),
          :ok <- validate_nonblank(action["resource_uri"], :action_resource_uri),
          true <- action["effect_class"] in @effect_classes,
+         true <- action["execution_idempotency"] in @execution_idempotency_classes,
+         true <-
+           replay_effect_consistent?(
+             action["effect_class"],
+             action["execution_idempotency"]
+           ),
          true <- is_boolean(action["egress_declared"]),
          true <- is_boolean(action["egress_tier_resolver"]),
          true <- is_boolean(action["egress_destination_resolver"]),
@@ -1132,6 +1145,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   end
 
   defp validate_action(_action), do: {:error, :invalid_action_binding}
+
+  defp replay_effect_consistent?("read", _execution_idempotency), do: true
+
+  defp replay_effect_consistent?(_effect_class, execution_idempotency),
+    do: execution_idempotency in ["idempotent_with_key", "side_effecting"]
 
   defp validate_handlers(handlers) when is_list(handlers) do
     with :ok <- validate_entries(handlers, &validate_handler/1, :handlers),

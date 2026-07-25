@@ -184,6 +184,26 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
   defmodule ActionExecutor do
     @moduledoc false
 
+    def resolve_execution_binding(name, opts) do
+      with {:ok, binding} <-
+             Arbor.Orchestrator.ActionsExecutor.resolve_execution_binding(name, opts) do
+        {:ok,
+         binding
+         |> Map.put(:executor, __MODULE__)
+         |> Map.put(:bound_executor, true)}
+      end
+    end
+
+    def execute_bound(name, args, workdir, binding, opts) do
+      case binding do
+        %{executor: __MODULE__, action_name: ^name, bound_executor: true} ->
+          execute(name, args, workdir, opts)
+
+        _other ->
+          {:error, "invalid test action execution binding"}
+      end
+    end
+
     def execute("coding_design_checkpoint_open", %{"probe_key" => key} = args, _workdir, _opts),
       do: ActionStore.open(key, args)
 

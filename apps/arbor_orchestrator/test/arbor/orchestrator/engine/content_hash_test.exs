@@ -134,9 +134,9 @@ defmodule Arbor.Orchestrator.Engine.ContentHashTest do
       assert ContentHash.can_skip?(node, "abc", "abc", IdempotentHandler)
     end
 
-    test "allows skip for read-only handler" do
+    test "security regression: read-only handlers observing mutable state are never skipped" do
       node = Node.from_attrs("test", %{"type" => "codergen"})
-      assert ContentHash.can_skip?(node, "abc", "abc", ReadOnlyHandler)
+      refute ContentHash.can_skip?(node, "abc", "abc", ReadOnlyHandler)
     end
 
     test "denies skip when hashes differ" do

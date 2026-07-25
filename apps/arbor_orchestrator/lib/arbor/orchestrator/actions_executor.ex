@@ -23,6 +23,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   require Logger
 
+  alias Arbor.Actions.Taint, as: ActionTaint
   alias Arbor.Common.SafePath
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
   alias Arbor.Orchestrator.Engine.RunAuthorization
@@ -60,6 +61,49 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     execute_with_result_mode(name, args, workdir, opts, :structured)
   end
 
+  @doc false
+  @spec resolve_execution_binding(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def resolve_execution_binding(name, opts \\ [])
+
+  def resolve_execution_binding(name, opts) when is_binary(name) do
+    with {:ok, action_module} <- resolve_action_module(name),
+         {:ok, descriptor} <- Arbor.Actions.runtime_descriptor(action_module),
+         {:ok, pinned_binding} <- verify_pinned_action(action_module, name, opts) do
+      {:ok,
+       %{
+         executor: __MODULE__,
+         action_name: name,
+         action_module: action_module,
+         descriptor: descriptor,
+         pinned_binding: pinned_binding
+       }}
+    end
+  rescue
+    _exception -> {:error, :action_execution_binding_unavailable}
+  catch
+    _kind, _reason -> {:error, :action_execution_binding_unavailable}
+  end
+
+  def resolve_execution_binding(_name, _opts), do: {:error, :invalid_action_name}
+
+  @doc false
+  @spec execute_bound(String.t(), map(), String.t(), map(), keyword()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def execute_bound(name, args, workdir, binding, opts \\ []) do
+    execute_bound_with_result_mode(name, args, workdir, binding, opts, :formatted)
+  end
+
+  @doc false
+  @spec output_taint_bound(map(), map()) :: atom() | nil
+  def output_taint_bound(binding, params) when is_map(params) do
+    case verify_execution_binding(Map.get(binding, :action_name), binding) do
+      {:ok, action_module} -> ActionTaint.output_taint_for(action_module, params)
+      _other -> nil
+    end
+  end
+
+  def output_taint_bound(_binding, _params), do: nil
+
   defp execute_with_result_mode(name, args, workdir, opts, result_mode)
        when result_mode in [:formatted, :structured] do
     agent_id = Keyword.get(opts, :agent_id, "system")
@@ -73,19 +117,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
     run_action(fn ->
       with :ok <- reject_mixed_signing_credentials(opts, args) do
-        # Try ActionRegistry first (O(1) ETS lookup), fall back to build_action_map
-        normalized = normalize_name(name)
-
-        action_module =
-          resolve_via_registry(normalized) ||
-            resolve_via_registry(name) ||
-            resolve_via_action_map(normalized, name)
-
-        case action_module do
-          nil ->
-            {:error, "Unknown action: #{name}"}
-
-          action_module ->
+        case resolve_action_module(name) do
+          {:ok, action_module} ->
             execute_resolved_action(
               name,
               args,
@@ -101,6 +134,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               signer,
               result_mode
             )
+
+          {:error, :unknown_action} ->
+            {:error, "Unknown action: #{name}"}
         end
       else
         {:error, reason} ->
@@ -110,6 +146,46 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp execute_with_result_mode(_name, _args, _workdir, _opts, result_mode) do
+    raise ArgumentError, "unsupported action result mode: #{inspect(result_mode)}"
+  end
+
+  defp execute_bound_with_result_mode(name, args, workdir, binding, opts, result_mode)
+       when result_mode in [:formatted, :structured] do
+    agent_id = Keyword.get(opts, :agent_id, "system")
+    signed_request = Keyword.get(opts, :signed_request)
+    signer = Keyword.get(opts, :signer)
+    task_id = Keyword.get(opts, :task_id)
+    session_id = Keyword.get(opts, :session_id)
+    caller_id = Keyword.get(opts, :caller_id)
+    author_id = Keyword.get(opts, :author_id)
+    workdir = normalize_workdir(workdir)
+
+    run_action(fn ->
+      with :ok <- reject_mixed_signing_credentials(opts, args),
+           {:ok, action_module} <- verify_execution_binding(name, binding) do
+        execute_resolved_action(
+          name,
+          args,
+          workdir,
+          opts,
+          action_module,
+          agent_id,
+          caller_id,
+          author_id,
+          task_id,
+          session_id,
+          signed_request,
+          signer,
+          result_mode
+        )
+      else
+        {:error, reason} ->
+          {:error, "Action #{name} execution binding rejected: #{inspect(reason)}"}
+      end
+    end)
+  end
+
+  defp execute_bound_with_result_mode(_name, _args, _workdir, _binding, _opts, result_mode) do
     raise ArgumentError, "unsupported action result mode: #{inspect(result_mode)}"
   end
 
@@ -187,6 +263,38 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   # ============================================================================
   # Private
   # ============================================================================
+
+  defp verify_execution_binding(
+         name,
+         %{
+           executor: __MODULE__,
+           action_name: name,
+           action_module: action_module,
+           descriptor: expected_descriptor
+         }
+       )
+       when is_binary(name) and is_atom(action_module) and is_map(expected_descriptor) do
+    with {:ok, actual_descriptor} <- Arbor.Actions.runtime_descriptor(action_module),
+         true <- actual_descriptor == expected_descriptor do
+      {:ok, action_module}
+    else
+      false -> {:error, {:action_runtime_binding_drift, name}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp verify_execution_binding(_name, _binding), do: {:error, :invalid_action_execution_binding}
+
+  defp resolve_action_module(name) when is_binary(name) do
+    normalized = normalize_name(name)
+
+    case resolve_via_registry(normalized) ||
+           resolve_via_registry(name) ||
+           resolve_via_action_map(normalized, name) do
+      nil -> {:error, :unknown_action}
+      action_module -> {:ok, action_module}
+    end
+  end
 
   defp execute_resolved_action(
          name,
@@ -1035,7 +1143,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
     # arbor_actions is a hard dep — Arbor.Actions.Taint is called directly.
     if module do
-      Arbor.Actions.Taint.output_taint_for(module, params)
+      ActionTaint.output_taint_for(module, params)
     end
   end
 

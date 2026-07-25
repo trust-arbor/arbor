@@ -70,6 +70,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     assert action["name"] == "binding_action"
     assert action["module"] == Atom.to_string(BindingOriginalAction)
     assert action["beam_sha256"] =~ ~r/^[0-9a-f]{64}$/
+    assert action["execution_idempotency"] == "side_effecting"
 
     assert first["capability_uris"] == [
              "arbor://action/test_fixtures/binding_original_action"

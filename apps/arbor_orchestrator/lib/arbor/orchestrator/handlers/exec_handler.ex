@@ -30,6 +30,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
   require Logger
 
+  alias Arbor.Orchestrator.ActionsExecutor
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
   alias Arbor.Orchestrator.Handlers.{
@@ -79,6 +80,59 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
       _other ->
         :side_effecting
+    end
+  end
+
+  @impl true
+  def execution_classification(node, opts) do
+    target = Map.get(node.attrs, "target", "tool")
+    action_name = Map.get(node.attrs, "action")
+
+    with "action" <- target,
+         true <- is_binary(action_name) and action_name != "",
+         {:ok, [{_slot, executor}]} <- execution_delegates(node, opts) do
+      if executor == ActionsExecutor do
+        classify_bound_action(executor, action_name, opts)
+      else
+        classify_injected_action(executor, action_name, opts)
+      end
+    else
+      _other -> {:ok, %{idempotency: :side_effecting, binding: nil}}
+    end
+  end
+
+  defp classify_injected_action(executor, action_name, opts) do
+    if is_atom(executor) and Code.ensure_loaded?(executor) and
+         function_exported?(executor, :resolve_execution_binding, 2) and
+         function_exported?(executor, :execute_bound, 5) do
+      classify_bound_action(executor, action_name, opts)
+    else
+      {:ok,
+       %{
+         idempotency: :side_effecting,
+         binding: %{
+           executor: executor,
+           action_name: action_name,
+           injected_executor: true
+         }
+       }}
+    end
+  end
+
+  defp classify_bound_action(executor, action_name, opts) do
+    with {:ok,
+          %{
+            executor: ^executor,
+            action_name: ^action_name,
+            descriptor: descriptor
+          } = binding} <- executor.resolve_execution_binding(action_name, opts),
+         true <- is_map(descriptor),
+         {:ok, idempotency} <-
+           descriptor_idempotency(descriptor["execution_idempotency"]) do
+      {:ok, %{idempotency: idempotency, binding: binding}}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_bound_action_executor_classification}
     end
   end
 
@@ -182,7 +236,15 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
             |> maybe_put_transcript_sink(opts)
 
           try do
-            case executor.execute(action_name, action_args, workdir, executor_opts) do
+            case invoke_action_executor(
+                   executor,
+                   action_name,
+                   action_args,
+                   workdir,
+                   executor_opts,
+                   opts,
+                   node
+                 ) do
               {:ok, result} ->
                 %Outcome{
                   status: :success,
@@ -194,7 +256,13 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
                   # fetch -> :untrusted, or a foreign-path file read), label its
                   # output keys so downstream nodes that consume them are gated at
                   # control params. Params let path-based actions decide provenance.
-                  output_taint: action_output_taint(executor, action_name, action_args)
+                  output_taint:
+                    action_output_taint(
+                      executor,
+                      action_name,
+                      action_args,
+                      Keyword.get(opts, :replay_execution_binding)
+                    )
                 }
 
               {:error, reason} ->
@@ -480,13 +548,80 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   defp maybe_put_executor_opt(opts, _key, nil), do: opts
   defp maybe_put_executor_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
+  defp invoke_action_executor(
+         executor,
+         action_name,
+         args,
+         workdir,
+         executor_opts,
+         handler_opts,
+         node
+       ) do
+    case Keyword.get(handler_opts, :replay_execution_binding) do
+      %{
+        executor: ^executor,
+        action_name: ^action_name,
+        injected_executor: true
+      } ->
+        executor.execute(action_name, args, workdir, executor_opts)
+
+      %{executor: ^executor, action_name: ^action_name} = binding
+      when executor == ActionsExecutor ->
+        executor.execute_bound(action_name, args, workdir, binding, executor_opts)
+
+      %{
+        executor: ^executor,
+        action_name: ^action_name,
+        bound_executor: true
+      } = binding ->
+        executor.execute_bound(action_name, args, workdir, binding, executor_opts)
+
+      nil ->
+        with {:ok, %{binding: binding}} <-
+               execution_classification(
+                 node,
+                 Keyword.put(handler_opts, :actions_executor, executor)
+               ),
+             true <- is_map(binding) do
+          invoke_action_executor(
+            executor,
+            action_name,
+            args,
+            workdir,
+            executor_opts,
+            Keyword.put(handler_opts, :replay_execution_binding, binding),
+            node
+          )
+        else
+          _other -> {:error, "missing action replay execution binding"}
+        end
+
+      _other ->
+        {:error, "action replay execution binding mismatch"}
+    end
+  end
+
+  defp descriptor_idempotency("idempotent"), do: {:ok, :idempotent}
+  defp descriptor_idempotency("idempotent_with_key"), do: {:ok, :idempotent_with_key}
+  defp descriptor_idempotency("side_effecting"), do: {:ok, :side_effecting}
+  defp descriptor_idempotency("read_only"), do: {:ok, :read_only}
+  defp descriptor_idempotency(_other), do: {:error, :invalid_action_execution_idempotency}
+
   # Provenance taint this action assigns to its own output, via the executor's
   # output_taint/1 resolver (nil for non-ingress actions or standalone mode).
-  defp action_output_taint(executor, action_name, params) do
+  defp action_output_taint(executor, action_name, params, binding) do
     cond do
-      function_exported?(executor, :output_taint, 2) -> executor.output_taint(action_name, params)
-      function_exported?(executor, :output_taint, 1) -> executor.output_taint(action_name)
-      true -> nil
+      function_exported?(executor, :output_taint_bound, 2) and is_map(binding) ->
+        executor.output_taint_bound(binding, params)
+
+      function_exported?(executor, :output_taint, 2) ->
+        executor.output_taint(action_name, params)
+
+      function_exported?(executor, :output_taint, 1) ->
+        executor.output_taint(action_name)
+
+      true ->
+        nil
     end
   end
 

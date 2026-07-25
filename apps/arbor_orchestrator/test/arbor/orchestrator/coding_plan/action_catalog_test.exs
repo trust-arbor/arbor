@@ -75,6 +75,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
                    egress_destination_resolver
                    egress_tier_resolver
                    execution_dependencies
+                   execution_idempotency
                    module
                    name
                    parameters_schema

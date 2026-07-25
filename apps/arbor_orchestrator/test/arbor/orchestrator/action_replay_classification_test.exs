@@ -4,6 +4,7 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
   @moduletag :fast
 
   alias Arbor.Actions.TestFixtures.{
+    ReplayContradictoryWriteAction,
     ReplayDefaultAction,
     ReplayDriftOriginalAction,
     ReplayDriftReplacementAction,
@@ -11,10 +12,11 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
   }
 
   alias Arbor.Common.ActionRegistry
+  alias Arbor.Orchestrator.ActionsExecutor
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Engine
-  alias Arbor.Orchestrator.Engine.{Context, EffectOwner, RunAuthorization}
+  alias Arbor.Orchestrator.Engine.{ContentHash, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Handlers.{ExecHandler, Handler}
   alias Arbor.Orchestrator.IR.Compiler
   alias Arbor.Orchestrator.PipelineStatus
@@ -22,6 +24,7 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
   alias Arbor.Orchestrator.TestFixtures.ReplayActionsExecutor
 
   @fixture_bindings %{
+    "test_replay_contradictory_write" => ReplayContradictoryWriteAction,
     "test_replay_default" => ReplayDefaultAction,
     "test_replay_drift" => ReplayDriftOriginalAction,
     "test_replay_read_only" => ReplayReadOnlyAction
@@ -78,7 +81,46 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
     end
   end
 
-  test "declared read-only action executes without an effect while default action is journaled" do
+  test "security regression: read-only actions are replayable but never content-hash skipped" do
+    graph = compiled_graph!(action_dot("test_replay_read_only"))
+    node = graph.nodes["task"]
+
+    assert {:ok, %{idempotency: :read_only, binding: binding}} =
+             Handler.execution_classification(ExecHandler, node, [])
+
+    assert binding.action_module == ReplayReadOnlyAction
+
+    refute ContentHash.can_skip?(
+             node,
+             "same",
+             "same",
+             :read_only,
+             %Outcome{status: :success}
+           )
+  end
+
+  test "security regression: contradictory action declarations fail before effect preparation" do
+    journal = start_isolated_journal("action_replay_contradiction")
+    jopts = [server: journal.name]
+    graph = compiled_graph!(action_dot("test_replay_contradictory_write"))
+
+    assert graph.nodes["task"].idempotency == :side_effecting
+
+    assert {:error,
+            {:execution_classification_failed, "task",
+             :execution_idempotency_effect_class_conflict}} =
+             Engine.run(graph,
+               run_id: journal.run_id,
+               logs_root: tmp_logs("action_replay_contradiction"),
+               journal_opts: jopts
+             )
+
+    record = PipelineStatus.get_record(journal.run_id, jopts)
+    assert record.current_effect == nil
+    refute_received :replay_contradictory_write_executed
+  end
+
+  test "security regression: injected executors and forged IR cannot bypass journaling" do
     journal = start_isolated_journal("action_replay")
     jopts = [server: journal.name]
 
@@ -90,17 +132,31 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
                run_id: journal.run_id <> "_read",
                logs_root: tmp_logs("action_replay_read"),
                journal_opts: jopts,
-               actions_executor: ReplayActionsExecutor
+               actions_executor: ReplayActionsExecutor,
+               replay_execution_binding: %{
+                 executor: ReplayActionsExecutor,
+                 action_name: "spoofed_action",
+                 injected_executor: true
+               }
              )
 
-    assert_receive :replay_read_only_classified
-    refute_receive :replay_read_only_classified
-    assert_receive {:replay_executor_called, "test_replay_read_only", nil}
+    assert_receive {:replay_executor_called, "test_replay_read_only", read_execution_id}
+    assert is_binary(read_execution_id)
 
     read_record = PipelineStatus.get_record(journal.run_id <> "_read", jopts)
-    assert read_record.current_effect == nil
+    assert read_record.current_effect["status"] == "settled"
+    assert read_record.current_effect["idempotency_class"] == "side_effecting"
+    assert read_record.current_effect["execution_id"] == read_execution_id
 
     default_graph = compiled_graph!(action_dot("test_replay_default"))
+    default_node = default_graph.nodes["task"]
+
+    default_graph =
+      put_in(default_graph.nodes["task"], %{
+        default_node
+        | handler_module: Arbor.Orchestrator.Handlers.StartHandler,
+          idempotency: :idempotent
+      })
 
     assert {:ok, _result} =
              Engine.run(default_graph,
@@ -119,7 +175,7 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
     assert default_record.current_effect["execution_id"] == execution_id
   end
 
-  test "pinned registry drift is rejected before an unjournaled action can execute" do
+  test "security regression: replay classification pins the exact action across registry drift" do
     graph = compiled_graph!(action_dot("test_replay_drift"))
     node = graph.nodes["task"]
     assert node.idempotency == :read_only
@@ -145,23 +201,44 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
       replace_fixture_binding!("test_replay_drift", ReplayDriftReplacementAction)
     end)
 
-    idempotency = Handler.idempotency_of(ExecHandler, node)
-    assert idempotency == :read_only
-    refute EffectOwner.journaled?(idempotency)
+    binding_opts = [
+      execution_manifest: manifest,
+      execution_manifest_digest: digest,
+      pinned_action_bindings: authority.pinned_action_bindings
+    ]
+
+    assert {:ok, %{idempotency: :read_only, binding: binding}} =
+             Handler.execution_classification(ExecHandler, node, binding_opts)
+
+    assert binding.action_module == ReplayDriftOriginalAction
+    assert binding.descriptor["execution_idempotency"] == "read_only"
     assert {:ok, ReplayDriftReplacementAction} = ActionRegistry.resolve("test_replay_drift")
 
-    outcome =
-      ExecHandler.execute(
-        node,
-        Context.new(),
-        graph,
-        authorization: true,
-        run_authorization: authority
-      )
+    :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
 
-    assert outcome.status == :fail
-    assert outcome.failure_reason =~ "action_binding_mismatch"
-    refute_received :replay_drift_original_executed
+    on_exit(fn ->
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+    end)
+
+    tracer = self()
+
+    Task.async(fn ->
+      :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+      ActionsExecutor.execute_bound(
+        "test_replay_drift",
+        %{},
+        root,
+        binding,
+        Keyword.merge(binding_opts, agent_id: "system")
+      )
+    end)
+    |> Task.await()
+
+    assert_receive {:trace, _pid, :call,
+                    {Arbor.Actions, :authorize_and_execute,
+                     ["system", ReplayDriftOriginalAction, %{}, _context]}}
+
     refute_received :replay_drift_replacement_executed
   end
 

@@ -31,6 +31,16 @@ defmodule Arbor.Orchestrator.Handlers.HandlerIdempotencyTest do
     ManagerLoopHandler
   ]
 
+  defmodule InvalidLegacyHandler do
+    def idempotency, do: "read_only"
+    def idempotency(_node), do: {:ok, :read_only}
+  end
+
+  defmodule RaisingLegacyHandler do
+    def idempotency, do: raise("bad legacy declaration")
+    def idempotency(_node), do: throw(:bad_legacy_declaration)
+  end
+
   describe "idempotency declarations" do
     test "all handlers declare idempotency" do
       all_handlers =
@@ -86,6 +96,18 @@ defmodule Arbor.Orchestrator.Handlers.HandlerIdempotencyTest do
 
     test "returns :side_effecting for unknown modules" do
       assert Handler.idempotency_of(String) == :side_effecting
+    end
+
+    test "security regression: malformed and raising legacy declarations fail closed" do
+      node = %Arbor.Orchestrator.Graph.Node{id: "legacy", attrs: %{"type" => "legacy"}}
+
+      assert Handler.idempotency_of(InvalidLegacyHandler) == :side_effecting
+      assert Handler.idempotency_of(InvalidLegacyHandler, node) == :side_effecting
+      assert Handler.idempotency_of(RaisingLegacyHandler) == :side_effecting
+      assert Handler.idempotency_of(RaisingLegacyHandler, node) == :side_effecting
+
+      assert {:ok, %{idempotency: :side_effecting, binding: nil}} =
+               Handler.execution_classification(RaisingLegacyHandler, node, [])
     end
   end
 end

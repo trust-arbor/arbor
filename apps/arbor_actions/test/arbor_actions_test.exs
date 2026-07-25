@@ -3,6 +3,7 @@ defmodule Arbor.ActionsTest do
   @moduletag :fast
 
   alias Arbor.Actions
+  alias Arbor.Actions.TestFixtures.ContradictoryWriteReplayActionForActionsTest
 
   defmodule NoObjectCodeAction do
     @moduledoc false
@@ -90,6 +91,7 @@ defmodule Arbor.ActionsTest do
                  beam |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower),
                "resource_uri" => "arbor://fs/read",
                "effect_class" => "read",
+               "execution_idempotency" => "side_effecting",
                "egress_declared" => false,
                "egress_tier_resolver" => false,
                "egress_destination_resolver" => false
@@ -101,6 +103,14 @@ defmodule Arbor.ActionsTest do
     test "security regression: modules without retrievable BEAM object code fail closed" do
       assert :error = :code.get_object_code(NoObjectCodeAction)
       assert {:error, :action_beam_unavailable} = Actions.runtime_descriptor(NoObjectCodeAction)
+    end
+
+    test "security regression: non-journaled write declarations are rejected" do
+      assert Actions.execution_idempotency(ContradictoryWriteReplayActionForActionsTest) ==
+               :side_effecting
+
+      assert {:error, :execution_idempotency_effect_class_conflict} =
+               Actions.runtime_descriptor(ContradictoryWriteReplayActionForActionsTest)
     end
   end
 

@@ -30,17 +30,30 @@ defmodule Arbor.Orchestrator.Handlers.Handler do
   alias Arbor.Orchestrator.Graph.Node
 
   @type idempotency_class :: :idempotent | :idempotent_with_key | :side_effecting | :read_only
+  @type execution_classification :: %{
+          required(:idempotency) => idempotency_class(),
+          required(:binding) => term()
+        }
 
   @callback execute(Node.t(), Context.t(), Graph.t(), keyword()) :: Outcome.t()
   @callback idempotency() :: idempotency_class()
   @callback idempotency(Node.t()) :: idempotency_class()
+  @callback execution_classification(Node.t(), keyword()) ::
+              {:ok, execution_classification()} | {:error, term()}
 
   # Three-phase protocol callbacks
   @callback prepare(Node.t(), Context.t(), keyword()) :: {:ok, term()} | {:error, term()}
   @callback run(term()) :: {:ok, term()} | {:error, term()}
   @callback apply_result(term(), Node.t(), Context.t()) :: {:ok, Outcome.t()} | {:error, term()}
 
-  @optional_callbacks [idempotency: 0, idempotency: 1, prepare: 3, run: 1, apply_result: 3]
+  @optional_callbacks [
+    idempotency: 0,
+    idempotency: 1,
+    execution_classification: 2,
+    prepare: 3,
+    run: 1,
+    apply_result: 3
+  ]
 
   @doc "Returns the idempotency class for a handler module, defaulting to :side_effecting."
   @spec idempotency_of(module()) :: idempotency_class()
@@ -48,10 +61,14 @@ defmodule Arbor.Orchestrator.Handlers.Handler do
     Code.ensure_loaded(handler_module)
 
     if function_exported?(handler_module, :idempotency, 0) do
-      handler_module.idempotency()
+      normalize_idempotency(handler_module.idempotency())
     else
       :side_effecting
     end
+  rescue
+    _exception -> :side_effecting
+  catch
+    _kind, _reason -> :side_effecting
   end
 
   @doc """
@@ -65,13 +82,7 @@ defmodule Arbor.Orchestrator.Handlers.Handler do
     Code.ensure_loaded(handler_module)
 
     if function_exported?(handler_module, :idempotency, 1) do
-      case handler_module.idempotency(node) do
-        class when class in [:idempotent, :idempotent_with_key, :side_effecting, :read_only] ->
-          class
-
-        _other ->
-          :side_effecting
-      end
+      normalize_idempotency(handler_module.idempotency(node))
     else
       idempotency_of(handler_module)
     end
@@ -79,6 +90,29 @@ defmodule Arbor.Orchestrator.Handlers.Handler do
     _exception -> :side_effecting
   catch
     _kind, _reason -> :side_effecting
+  end
+
+  @doc """
+  Resolve the replay class and any process-local binding used to derive it.
+
+  Dynamic handlers can return an executor/action binding that the Engine carries
+  into the exact execution attempt. Legacy declarations are normalized through
+  `idempotency_of/2`; malformed or raising declarations fail closed.
+  """
+  @spec execution_classification(module(), Node.t(), keyword()) ::
+          {:ok, execution_classification()} | {:error, term()}
+  def execution_classification(handler_module, %Node{} = node, opts) do
+    Code.ensure_loaded(handler_module)
+
+    if function_exported?(handler_module, :execution_classification, 2) do
+      normalize_execution_classification(handler_module.execution_classification(node, opts))
+    else
+      {:ok, %{idempotency: idempotency_of(handler_module, node), binding: nil}}
+    end
+  rescue
+    _exception -> {:ok, %{idempotency: :side_effecting, binding: nil}}
+  catch
+    _kind, _reason -> {:ok, %{idempotency: :side_effecting, binding: nil}}
   end
 
   @doc "Returns true if the handler implements all three-phase callbacks."
@@ -128,4 +162,25 @@ defmodule Arbor.Orchestrator.Handlers.Handler do
 
   defp format_error(reason) when is_binary(reason), do: reason
   defp format_error(reason), do: inspect(reason)
+
+  defp normalize_execution_classification({:ok, %{idempotency: idempotency, binding: binding}}) do
+    case normalize_idempotency(idempotency) do
+      :side_effecting when idempotency != :side_effecting ->
+        {:ok, %{idempotency: :side_effecting, binding: nil}}
+
+      normalized ->
+        {:ok, %{idempotency: normalized, binding: binding}}
+    end
+  end
+
+  defp normalize_execution_classification({:error, _reason} = error), do: error
+
+  defp normalize_execution_classification(_other),
+    do: {:ok, %{idempotency: :side_effecting, binding: nil}}
+
+  defp normalize_idempotency(class)
+       when class in [:idempotent, :idempotent_with_key, :side_effecting, :read_only],
+       do: class
+
+  defp normalize_idempotency(_other), do: :side_effecting
 end

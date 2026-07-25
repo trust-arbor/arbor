@@ -207,8 +207,13 @@ defmodule Arbor.Orchestrator.Engine.ContentHash do
 
     safe_class =
       case idempotency do
-        class when class in [:idempotent, :read_only] ->
+        :idempotent ->
           not Node.side_effecting?(node)
+
+        # Read-only handlers may observe mutable external state. Replaying them
+        # is safe, but substituting a cached outcome is not.
+        :read_only ->
+          false
 
         :idempotent_with_key ->
           # Only skip if the cached outcome was successful — re-execute on failure

@@ -96,6 +96,7 @@ defmodule Arbor.Actions do
     egress_declared
     egress_destination_resolver
     egress_tier_resolver
+    execution_idempotency
     module
     name
     resource_uri
@@ -1170,6 +1171,8 @@ defmodule Arbor.Actions do
          {:ok, action_name} <- runtime_action_name(action_module),
          {:ok, beam_sha256} <- loaded_beam_sha256(action_module),
          {:ok, effect_class} <- runtime_effect_class(action_module),
+         {:ok, execution_idempotency} <-
+           runtime_execution_idempotency(action_module, effect_class),
          {:ok, resource_uri} <- runtime_resource_uri(action_module) do
       {:ok,
        %{
@@ -1178,6 +1181,7 @@ defmodule Arbor.Actions do
          "beam_sha256" => beam_sha256,
          "resource_uri" => resource_uri,
          "effect_class" => Atom.to_string(effect_class),
+         "execution_idempotency" => Atom.to_string(execution_idempotency),
          "egress_declared" => effect_class == :network_egress,
          "egress_tier_resolver" => function_exported?(action_module, :egress_tier, 2),
          "egress_destination_resolver" =>
@@ -1217,10 +1221,8 @@ defmodule Arbor.Actions do
   end
 
   def execution_idempotency(action_module) when is_atom(action_module) do
-    with {:module, ^action_module} <- Code.ensure_loaded(action_module),
-         true <- function_exported?(action_module, :execution_idempotency, 0),
-         class <- action_module.execution_idempotency(),
-         true <- class in @execution_idempotency_classes do
+    with {:ok, effect_class} <- runtime_effect_class(action_module),
+         {:ok, class} <- runtime_execution_idempotency(action_module, effect_class) do
       class
     else
       _other -> :side_effecting
@@ -1348,6 +1350,31 @@ defmodule Arbor.Actions do
     if effect_class in Classification.effect_classes(),
       do: {:ok, effect_class},
       else: {:error, :invalid_effect_class}
+  end
+
+  defp runtime_execution_idempotency(action_module, effect_class) do
+    class = declared_execution_idempotency(action_module)
+
+    if effect_class != :read and class in [:idempotent, :read_only] do
+      {:error, :execution_idempotency_effect_class_conflict}
+    else
+      {:ok, class}
+    end
+  end
+
+  defp declared_execution_idempotency(action_module) do
+    with {:module, ^action_module} <- Code.ensure_loaded(action_module),
+         true <- function_exported?(action_module, :execution_idempotency, 0),
+         class <- action_module.execution_idempotency(),
+         true <- class in @execution_idempotency_classes do
+      class
+    else
+      _other -> :side_effecting
+    end
+  rescue
+    _exception -> :side_effecting
+  catch
+    _kind, _reason -> :side_effecting
   end
 
   defp runtime_resource_uri(action_module) do

@@ -31,7 +31,7 @@ defmodule Arbor.Orchestrator.Engine do
   alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
-  alias Arbor.Orchestrator.Handlers.{Handler, Registry}
+  alias Arbor.Orchestrator.Handlers.Handler
   alias Arbor.Orchestrator.JsonSafe
   alias Arbor.Orchestrator.PipelineStatus
   alias Arbor.Orchestrator.RunLifecycle.Adapter, as: RunLifecycleAdapter
@@ -778,87 +778,96 @@ defmodule Arbor.Orchestrator.Engine do
       |> Context.set("internal.fidelity.mode", fidelity.mode, node.id, step_now)
       |> maybe_set_fidelity_thread(fidelity, node.id, step_now)
 
-    # Content-hash skip check
-    computed_hash = ContentHash.compute(node, context)
-    stored_hash = Map.get(state.tracking.content_hashes, node.id)
-    handler = Registry.resolve(node)
-    idempotency = Handler.idempotency_of(handler, node)
+    {handler, node} = Executor.resolve_handler(node)
 
-    cached_outcome = Map.get(state.outcomes, node.id)
+    case Handler.execution_classification(handler, node, state.opts) do
+      {:error, reason} ->
+        fail_from_engine_state(
+          state,
+          {:execution_classification_failed, node.id, reason}
+        )
 
-    skip? =
-      stored_hash != nil and
-        ContentHash.can_skip?(node, computed_hash, stored_hash, idempotency, cached_outcome)
+      {:ok, %{idempotency: idempotency, binding: execution_binding}} ->
+        # Content-hash skip check
+        computed_hash = ContentHash.compute(node, context)
+        stored_hash = Map.get(state.tracking.content_hashes, node.id)
+        cached_outcome = Map.get(state.outcomes, node.id)
 
-    if skip? do
-      emit(state.opts, Event.stage_skipped(node.id, :content_hash_match))
+        skip? =
+          stored_hash != nil and
+            ContentHash.can_skip?(node, computed_hash, stored_hash, idempotency, cached_outcome)
 
-      # Restore the previous outcome if available, otherwise success
-      outcome = Map.get(state.outcomes, node.id, %Outcome{status: :skipped})
-      completed = [node.id | state.completed]
+        if skip? do
+          emit(state.opts, Event.stage_skipped(node.id, :content_hash_match))
 
-      # Re-apply the cached outcome's context updates. Skipping the WORK
-      # must still produce the EFFECT — otherwise a loop that revisits an
-      # idempotent node loses that node's output_key writes if another
-      # node clobbered the slot between visits. Mirrors the apply_updates
-      # call in the normal-execution path.
-      context =
-        context
-        |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
-        |> record_node_taint(node, outcome)
-        |> apply_taint_reductions(node, outcome)
-        |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
-        |> Context.set("__completed_nodes__", completed, node.id, step_now)
+          # Restore the previous outcome if available, otherwise success
+          outcome = Map.get(state.outcomes, node.id, %Outcome{status: :skipped})
+          completed = [node.id | state.completed]
 
-      tracking =
-        state.tracking
-        |> put_in([:content_hashes, node.id], computed_hash)
+          # Re-apply the cached outcome's context updates. Skipping the WORK
+          # must still produce the EFFECT — otherwise a loop that revisits an
+          # idempotent node loses that node's output_key writes if another
+          # node clobbered the slot between visits. Mirrors the apply_updates
+          # call in the normal-execution path.
+          context =
+            context
+            |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
+            |> record_node_taint(node, outcome)
+            |> apply_taint_reductions(node, outcome)
+            |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
+            |> Context.set("__completed_nodes__", completed, node.id, step_now)
 
-      if resumable?(state.opts) do
-        checkpoint =
-          Checkpoint.from_state(
-            node.id,
-            Enum.reverse(completed),
-            state.retries,
+          tracking =
+            state.tracking
+            |> put_in([:content_hashes, node.id], computed_hash)
+
+          if resumable?(state.opts) do
+            checkpoint =
+              Checkpoint.from_state(
+                node.id,
+                Enum.reverse(completed),
+                state.retries,
+                context,
+                state.outcomes,
+                content_hashes: tracking.content_hashes,
+                run_id: Keyword.get(state.opts, :run_id),
+                graph_hash: Keyword.get(state.opts, :graph_hash),
+                pending_intents: state.tracking.pending_intents,
+                execution_digests: state.tracking.execution_digests,
+                pipeline_started_at: Context.pipeline_started_at(context),
+                run_authorization: RunAuthorization.projection(state.run_authorization)
+              )
+
+            :ok =
+              Checkpoint.write(
+                checkpoint,
+                state.logs_root,
+                checkpoint_call_opts(state.opts,
+                  hmac_secret: Keyword.get(state.opts, :hmac_secret)
+                )
+              )
+          end
+
+          updated_state = %{state | context: context, completed: completed, tracking: tracking}
+
+          if Router.terminal?(node) do
+            handle_terminal(node, outcome, updated_state)
+          else
+            advance_with_fan_in(node, outcome, updated_state)
+          end
+        else
+          execute_node_visit(
+            node,
+            handler,
+            idempotency,
+            execution_binding,
             context,
-            state.outcomes,
-            content_hashes: tracking.content_hashes,
-            run_id: Keyword.get(state.opts, :run_id),
-            graph_hash: Keyword.get(state.opts, :graph_hash),
-            pending_intents: state.tracking.pending_intents,
-            execution_digests: state.tracking.execution_digests,
-            pipeline_started_at: Context.pipeline_started_at(context),
-            run_authorization: RunAuthorization.projection(state.run_authorization)
+            fidelity,
+            computed_hash,
+            step_now,
+            state
           )
-
-        :ok =
-          Checkpoint.write(
-            checkpoint,
-            state.logs_root,
-            checkpoint_call_opts(state.opts,
-              hmac_secret: Keyword.get(state.opts, :hmac_secret)
-            )
-          )
-      end
-
-      updated_state = %{state | context: context, completed: completed, tracking: tracking}
-
-      if Router.terminal?(node) do
-        handle_terminal(node, outcome, updated_state)
-      else
-        advance_with_fan_in(node, outcome, updated_state)
-      end
-    else
-      execute_node_visit(
-        node,
-        handler,
-        idempotency,
-        context,
-        fidelity,
-        computed_hash,
-        step_now,
-        state
-      )
+        end
     end
   end
 
@@ -871,6 +880,7 @@ defmodule Arbor.Orchestrator.Engine do
          node,
          handler,
          idempotency,
+         execution_binding,
          context,
          fidelity,
          computed_hash,
@@ -921,6 +931,7 @@ defmodule Arbor.Orchestrator.Engine do
               state.opts
               |> Keyword.put_new(:logs_root, state.logs_root)
               |> Keyword.put(:stage_started_at, stage_started_at)
+              |> Keyword.put(:replay_execution_binding, execution_binding)
               |> then(fn opts ->
                 if execution_id, do: Keyword.put(opts, :execution_id, execution_id), else: opts
               end)
@@ -942,6 +953,7 @@ defmodule Arbor.Orchestrator.Engine do
             {outcome, retries} =
               with_in_call_heartbeat(run_id, journal_opts, fn ->
                 Executor.execute_with_retry(
+                  handler,
                   node,
                   handler_context,
                   state.graph,

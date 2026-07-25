@@ -45,6 +45,30 @@ defmodule Arbor.Actions.TestFixtures.ReplayDefaultAction do
   end
 end
 
+defmodule Arbor.Actions.TestFixtures.ReplayContradictoryWriteAction do
+  @moduledoc false
+
+  use Jido.Action,
+    name: "test_replay_contradictory_write",
+    description: "Contradictory replay classification fixture",
+    schema: []
+
+  def effect_class, do: :local_write
+  def execution_idempotency, do: :read_only
+
+  @impl true
+  def run(_params, _context) do
+    notify(:replay_contradictory_write_executed)
+    {:ok, %{fixture: :contradictory_write}}
+  end
+
+  defp notify(message) do
+    if pid = Application.get_env(:arbor_orchestrator, :action_replay_test_pid) do
+      send(pid, message)
+    end
+  end
+end
+
 defmodule Arbor.Actions.TestFixtures.ReplayDriftOriginalAction do
   @moduledoc false
 
