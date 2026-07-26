@@ -344,9 +344,11 @@ defmodule Arbor.Orchestrator do
   @spec compile(String.t() | Graph.t(), keyword()) ::
           {:ok, Graph.t()} | {:error, term()}
   def compile(source_or_graph, opts \\ []) do
-    # ensure_graph/2 runs built-ins, compiles the cached base graph, applies
-    # caller transforms, and recompiles any transformed graph so executable
-    # handler bindings and static analysis describe the same node attributes.
+    # ensure_graph/2 already runs built-ins -> IR.Compiler (once) -> custom
+    # transforms. A second IR.Compiler.compile/1 would re-inject alias defaults
+    # and recompute static analysis from post-IR mutations, violating the
+    # documented contract that custom transforms cannot influence compiler
+    # analyses (and wasting O(nodes+edges) work on cache hits).
     ensure_graph(source_or_graph, opts)
   end
 
@@ -1304,7 +1306,7 @@ defmodule Arbor.Orchestrator do
     end
   end
 
-  # Already compiled — apply caller-supplied custom transforms and recompile.
+  # Already compiled -- just apply caller-supplied custom transforms.
   # Built-in transforms (VariableExpansion, ModelStylesheet) are assumed to
   # have already been applied before the caller compiled the graph. Callers
   # that pass a `compiled: true` graph are responsible for the transform-
@@ -1313,8 +1315,12 @@ defmodule Arbor.Orchestrator do
   defp ensure_graph(%Graph{compiled: true} = graph, opts),
     do: apply_custom_transforms(graph, opts)
 
-  # Uncompiled Graph struct — built-in transforms first, then the cacheable IR
-  # base, then caller transforms followed by a final IR compile.
+  # Uncompiled Graph struct -- built-in transforms FIRST, then IR.Compile,
+  # then any caller-supplied custom transforms. Compiler analyses (capability
+  # aggregation, taint, classification, schema validation) read the
+  # post-built-in/pre-custom graph. Caller transforms mutate compiled output
+  # without recomputing those analyses; the Engine resolves executable handlers
+  # from the transformed attrs at runtime.
   defp ensure_graph(%Graph{} = graph, opts) do
     with {:ok, transformed} <- apply_pre_compile_transforms(graph, opts),
          {:ok, compiled} <- IR.Compiler.compile(transformed) do
@@ -1375,18 +1381,14 @@ defmodule Arbor.Orchestrator do
     run_transforms(graph, [VariableExpansion, ModelStylesheet])
   end
 
-  # Caller transforms run on the compiled base so they retain the established
-  # API, then IR is rebuilt. This prevents transformed attrs/type fields from
-  # diverging from handler_module, replay class, and graph-level analysis.
+  # Caller-supplied transforms applied AFTER IR.Compile. These are the
+  # extensibility hook for downstream callers that want to mutate a
+  # compiled graph -- they cannot influence the compiler's analyses by
+  # design (would invalidate the cache otherwise).
   defp apply_custom_transforms(graph, opts) do
     case Keyword.get(opts, :transforms, []) do
-      [] ->
-        {:ok, graph}
-
-      custom ->
-        with {:ok, transformed} <- run_transforms(graph, custom) do
-          IR.Compiler.compile(transformed)
-        end
+      [] -> {:ok, graph}
+      custom -> run_transforms(graph, custom)
     end
   end
 

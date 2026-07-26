@@ -82,6 +82,77 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     assert Enum.any?(first["handlers"], &(&1["handler_type"] == "exec"))
   end
 
+  test "regression: archived v2/v3 action bindings remain valid after replay metadata addition" do
+    v2_catalog = catalog!([BindingOriginalAction])
+
+    v3_catalog =
+      catalog!([
+        DecideReview,
+        Read,
+        Search,
+        SubmitReviewReport,
+        BindingOriginalAction
+      ])
+
+    for {dot, catalog} <- [{@dot, v2_catalog}, {@nested_parent_dot, v3_catalog}] do
+      graph = compiled_graph!(dot)
+      graph_hash = sha256(dot)
+
+      assert {:ok, {current, _current_digest}} =
+               ExecutionManifest.build(graph, catalog, graph_hash)
+
+      assert Enum.all?(manifest_actions(current), fn action ->
+               action["execution_idempotency"] in ~w(idempotent idempotent_with_key read_only side_effecting)
+             end)
+
+      rebound = update_in(current["actions"], &rebind_first_action/1)
+      assert {:ok, rebound_digest} = ExecutionManifest.digest(rebound)
+      assert :ok = ExecutionManifest.validate(rebound, rebound_digest, graph_hash)
+
+      assert {:error, {:execution_manifest_mismatch, rebound_sections}} =
+               ExecutionManifest.verify(rebound, rebound_digest, graph, catalog, graph_hash)
+
+      assert "actions" in rebound_sections
+
+      legacy = legacy_manifest(current)
+      assert Enum.all?(manifest_actions(legacy), &(!Map.has_key?(&1, "execution_idempotency")))
+      assert {:ok, legacy_digest} = ExecutionManifest.digest(legacy)
+
+      assert :ok = ExecutionManifest.validate(legacy, legacy_digest, graph_hash)
+
+      assert {:ok, legacy_bindings} =
+               ExecutionManifest.verify(legacy, legacy_digest, graph, catalog, graph_hash)
+
+      assert {:ok, legacy_binding} =
+               ExecutionManifest.verify_action_module(
+                 "binding_action",
+                 BindingOriginalAction,
+                 legacy_bindings
+               )
+
+      refute Map.has_key?(legacy_binding, "execution_idempotency")
+
+      case Enum.find_index(current["actions"], &(&1["effect_class"] != "read")) do
+        nil ->
+          :ok
+
+        index ->
+          inconsistent =
+            update_in(
+              current,
+              ["actions", Access.at(index), "execution_idempotency"],
+              fn _current -> "idempotent" end
+            )
+
+          assert {:ok, inconsistent_digest} = ExecutionManifest.digest(inconsistent)
+
+          assert {:error,
+                  {:invalid_execution_manifest_entry, :actions, ^index, :invalid_action_binding}} =
+                   ExecutionManifest.validate(inconsistent, inconsistent_digest, graph_hash)
+      end
+    end
+  end
+
   test "declared nested graph closure binds its source, topology, capabilities, and egress" do
     graph = compiled_graph!(@nested_parent_dot)
     graph_hash = sha256(@nested_parent_dot)
@@ -658,6 +729,52 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
   defp catalog!(modules) do
     {:ok, catalog} = ActionCatalog.snapshot(modules: modules)
     catalog
+  end
+
+  defp legacy_manifest(manifest) do
+    manifest
+    |> Map.update!("actions", fn actions ->
+      Enum.map(actions, &Map.delete(&1, "execution_idempotency"))
+    end)
+    |> then(fn
+      %{"nested_graphs" => nested_graphs} = manifest ->
+        Map.put(
+          manifest,
+          "nested_graphs",
+          Enum.map(nested_graphs, fn nested_graph ->
+            execution_manifest = legacy_manifest(nested_graph["execution_manifest"])
+            {:ok, digest} = ExecutionManifest.digest(execution_manifest)
+
+            nested_graph
+            |> Map.put("execution_manifest", execution_manifest)
+            |> Map.put("execution_manifest_digest", digest)
+          end)
+        )
+
+      manifest ->
+        manifest
+    end)
+  end
+
+  defp manifest_actions(manifest) do
+    nested_actions =
+      manifest
+      |> Map.get("nested_graphs", [])
+      |> Enum.flat_map(&manifest_actions(&1["execution_manifest"]))
+
+    manifest["actions"] ++ nested_actions
+  end
+
+  defp rebind_first_action([first | rest]) do
+    compatible_classes =
+      if first["effect_class"] == "read",
+        do: ~w(idempotent idempotent_with_key read_only side_effecting),
+        else: ~w(idempotent_with_key side_effecting)
+
+    replacement =
+      Enum.find(compatible_classes, &(&1 != first["execution_idempotency"]))
+
+    [Map.put(first, "execution_idempotency", replacement) | rest]
   end
 
   defp sha256(value) do

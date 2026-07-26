@@ -45,6 +45,30 @@ defmodule Arbor.Actions.TestFixtures.ReplayDefaultAction do
   end
 end
 
+defmodule Arbor.Actions.TestFixtures.ReplayIdempotentAction do
+  @moduledoc false
+
+  use Jido.Action,
+    name: "test_replay_idempotent",
+    description: "Idempotent action authorization replay fixture",
+    schema: []
+
+  def effect_class, do: :read
+  def execution_idempotency, do: :idempotent
+
+  @impl true
+  def run(_params, _context) do
+    notify(:replay_idempotent_action_executed)
+    {:ok, %{fixture: :idempotent}}
+  end
+
+  defp notify(message) do
+    if pid = Application.get_env(:arbor_orchestrator, :action_replay_test_pid) do
+      send(pid, message)
+    end
+  end
+end
+
 defmodule Arbor.Actions.TestFixtures.ReplayContradictoryWriteAction do
   @moduledoc false
 
@@ -120,6 +144,30 @@ defmodule Arbor.Actions.TestFixtures.ReplayDriftReplacementAction do
       send(pid, message)
     end
   end
+end
+
+defmodule Arbor.Orchestrator.TestFixtures.ReplayRevocableCapabilitySecurity do
+  @moduledoc false
+
+  def authorize(
+        _agent_id,
+        "arbor://orchestrator/execute/extract",
+        :execute,
+        _opts
+      ) do
+    case Application.get_env(:arbor_orchestrator, :replay_capability_counter) do
+      counter when is_pid(counter) ->
+        case Agent.get_and_update(counter, fn count -> {count + 1, count + 1} end) do
+          1 -> {:ok, :authorized}
+          _later -> {:error, :revoked}
+        end
+
+      _other ->
+        {:error, :missing_test_capability_counter}
+    end
+  end
+
+  def authorize(_agent_id, _resource, :execute, _opts), do: {:ok, :authorized}
 end
 
 defmodule Arbor.Orchestrator.TestFixtures.ReplayActionsExecutor do

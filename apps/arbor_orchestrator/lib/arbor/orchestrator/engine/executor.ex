@@ -1,3 +1,22 @@
+defmodule Arbor.Orchestrator.Engine.Executor.AuthorizationProbe do
+  @moduledoc false
+
+  use Arbor.Orchestrator.Middleware
+
+  alias Arbor.Orchestrator.Engine.Outcome
+  alias Arbor.Orchestrator.Middleware.Token
+
+  @marker "cached-node-authorization-validated"
+
+  @impl true
+  def before_node(token) do
+    Token.halt(token, @marker, %Outcome{status: :success, notes: @marker})
+  end
+
+  def authorized?(%Outcome{status: :success, notes: @marker}), do: true
+  def authorized?(_outcome), do: false
+end
+
 defmodule Arbor.Orchestrator.Engine.Executor do
   @moduledoc """
   Execution and retry logic for the pipeline engine.
@@ -9,6 +28,7 @@ defmodule Arbor.Orchestrator.Engine.Executor do
   require Logger
 
   alias Arbor.Orchestrator.Engine.{Authorization, Backoff, Outcome, Placement}
+  alias Arbor.Orchestrator.Engine.Executor.AuthorizationProbe
   alias Arbor.Orchestrator.Event
   alias Arbor.Orchestrator.EventEmitter
   alias Arbor.Orchestrator.Handlers.Registry
@@ -46,6 +66,32 @@ defmodule Arbor.Orchestrator.Engine.Executor do
     end
   end
 
+  @doc false
+  def authorize_cached(handler, node, context, graph, opts) do
+    middleware = Keyword.get(opts, :middleware, []) |> List.wrap()
+
+    # Chain.build/3 prepends every mandatory middleware before Engine-provided
+    # middleware. The probe therefore halts only after all mandatory before-node
+    # gates, including canonical action capability derivation, have passed.
+    opts = Keyword.put(opts, :middleware, [AuthorizationProbe | middleware])
+
+    case Authorization.authorize_and_execute(handler, node, context, graph, opts) do
+      %Outcome{} = outcome ->
+        if AuthorizationProbe.authorized?(outcome),
+          do: :ok,
+          else: {:error, cached_authorization_failure(outcome)}
+
+      other ->
+        {:error, "cached authorization returned invalid result: #{inspect(other)}"}
+    end
+  rescue
+    exception ->
+      {:error, "cached authorization raised: #{Exception.message(exception)}"}
+  catch
+    kind, reason ->
+      {:error, "cached authorization #{kind}: #{inspect(reason)}"}
+  end
+
   defp resolve_placement(node, opts, handler) do
     placement_str = node.placement || Map.get(node.attrs, "placement")
 
@@ -61,6 +107,13 @@ defmodule Arbor.Orchestrator.Engine.Executor do
         end
     end
   end
+
+  defp cached_authorization_failure(%Outcome{failure_reason: reason})
+       when is_binary(reason) and reason != "",
+       do: reason
+
+  defp cached_authorization_failure(%Outcome{} = outcome),
+    do: "cached authorization denied: #{inspect(outcome)}"
 
   defp resolve_parsed_placement(parsed, node, opts, handler) do
     case Placement.resolve(parsed) do

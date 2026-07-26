@@ -8,25 +8,33 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
     ReplayDefaultAction,
     ReplayDriftOriginalAction,
     ReplayDriftReplacementAction,
+    ReplayIdempotentAction,
     ReplayReadOnlyAction
   }
 
   alias Arbor.Common.ActionRegistry
+  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Security.CapabilityStore
   alias Arbor.Orchestrator.ActionsExecutor
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.{ContentHash, Outcome, RunAuthorization}
-  alias Arbor.Orchestrator.Handlers.{ExecHandler, Handler}
+  alias Arbor.Orchestrator.Handlers.{ExecHandler, ExtractHandler, Handler}
   alias Arbor.Orchestrator.IR.Compiler
   alias Arbor.Orchestrator.PipelineStatus
   alias Arbor.Orchestrator.RunJournal
-  alias Arbor.Orchestrator.TestFixtures.ReplayActionsExecutor
+
+  alias Arbor.Orchestrator.TestFixtures.{
+    ReplayActionsExecutor,
+    ReplayRevocableCapabilitySecurity
+  }
 
   @fixture_bindings %{
     "test_replay_contradictory_write" => ReplayContradictoryWriteAction,
     "test_replay_default" => ReplayDefaultAction,
     "test_replay_drift" => ReplayDriftOriginalAction,
+    "test_replay_idempotent" => ReplayIdempotentAction,
     "test_replay_read_only" => ReplayReadOnlyAction
   }
 
@@ -37,13 +45,25 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
 
     previous_pid = Application.get_env(:arbor_orchestrator, :action_replay_test_pid)
     previous_hook = Application.get_env(:arbor_orchestrator, :action_replay_drift_hook)
+    previous_security = Application.get_env(:arbor_orchestrator, :security_module)
+
+    previous_security_available =
+      Application.get_env(:arbor_orchestrator, :security_available_override)
+
+    previous_capability_counter =
+      Application.get_env(:arbor_orchestrator, :replay_capability_counter)
+
     Application.put_env(:arbor_orchestrator, :action_replay_test_pid, self())
     Application.delete_env(:arbor_orchestrator, :action_replay_drift_hook)
+    Application.delete_env(:arbor_orchestrator, :replay_capability_counter)
 
     on_exit(fn ->
       if Process.whereis(ActionRegistry), do: ActionRegistry.restore(snapshot)
       restore_env(:action_replay_test_pid, previous_pid)
       restore_env(:action_replay_drift_hook, previous_hook)
+      restore_env(:security_module, previous_security)
+      restore_env(:security_available_override, previous_security_available)
+      restore_env(:replay_capability_counter, previous_capability_counter)
     end)
 
     :ok
@@ -175,6 +195,135 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
     assert default_record.current_effect["execution_id"] == execution_id
   end
 
+  test "security regression: handler binding drift denies a would-be content-hash skip" do
+    graph = cacheable_loop_graph!()
+    test_pid = self()
+
+    {ExtractHandler, original_beam, original_filename} =
+      :code.get_object_code(ExtractHandler)
+
+    on_exit(fn -> restore_loaded_module!(ExtractHandler, original_filename, original_beam) end)
+
+    on_event = fn
+      %{type: :stage_completed, node_id: "cache"} ->
+        send(test_pid, :replay_cacheable_handler_executed)
+
+      %{type: :stage_completed, node_id: "mark"} ->
+        replace_extract_handler!()
+
+      _event ->
+        :ok
+    end
+
+    opts =
+      graph
+      |> cacheable_execution_opts("cache_handler_drift")
+      |> Keyword.put(:on_event, on_event)
+
+    assert {:error, {:cached_node_authorization_failed, "cache", reason}} =
+             Engine.run(graph, opts)
+
+    assert reason =~ "execution_module_loaded_code_mismatch"
+    assert_receive :replay_cacheable_handler_executed
+    refute_receive :replay_cacheable_handler_executed
+    refute_received :replay_cacheable_replacement_executed
+  end
+
+  test "security regression: capability denial denies a would-be content-hash skip" do
+    graph = cacheable_loop_graph!()
+    test_pid = self()
+    {:ok, capability_counter} = Agent.start_link(fn -> 0 end)
+    {:ok, authorizer_counter} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(capability_counter), do: Agent.stop(capability_counter)
+      if Process.alive?(authorizer_counter), do: Agent.stop(authorizer_counter)
+    end)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :security_module,
+      ReplayRevocableCapabilitySecurity
+    )
+
+    Application.put_env(:arbor_orchestrator, :security_available_override, true)
+    Application.put_env(:arbor_orchestrator, :replay_capability_counter, capability_counter)
+
+    authorizer = fn _principal, handler_type ->
+      if handler_type == "extract" do
+        Agent.update(authorizer_counter, &(&1 + 1))
+      end
+
+      :ok
+    end
+
+    on_event = fn
+      %{type: :stage_completed, node_id: "cache"} ->
+        send(test_pid, :replay_cacheable_handler_executed)
+
+      _event ->
+        :ok
+    end
+
+    opts =
+      graph
+      |> cacheable_execution_opts("cache_capability_denial")
+      |> Keyword.put(:authorizer, authorizer)
+      |> Keyword.put(:on_event, on_event)
+
+    assert {:error, {:cached_node_authorization_failed, "cache", reason}} =
+             Engine.run(graph, opts)
+
+    assert reason =~ "Capability check failed"
+    assert Agent.get(authorizer_counter, & &1) == 2
+    assert Agent.get(capability_counter, & &1) == 2
+    assert_receive :replay_cacheable_handler_executed
+    refute_receive :replay_cacheable_handler_executed
+  end
+
+  test "security regression: revoked action capability denies a would-be content-hash skip" do
+    graph = cacheable_action_loop_graph!()
+    agent_id = "agent_replay_cache_#{System.unique_integer([:positive, :monotonic])}"
+    resource = Arbor.Actions.canonical_uri_for(ReplayIdempotentAction, %{})
+    :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(agent_id)
+
+    {:ok, action_capability} =
+      Capability.new(
+        resource_uri: resource,
+        principal_id: agent_id,
+        delegation_depth: 0,
+        constraints: %{},
+        metadata: %{test: true}
+      )
+
+    assert {:ok, :stored} = CapabilityStore.put(action_capability)
+    on_exit(fn -> Arbor.Orchestrator.TestCapabilities.revoke_all(agent_id) end)
+
+    on_event = fn
+      %{type: :stage_completed, node_id: "cache"} ->
+        :ok = Arbor.Security.revoke(action_capability.id)
+
+      _event ->
+        :ok
+    end
+
+    opts =
+      graph
+      |> cacheable_execution_opts(
+        "cache_action_capability_denial",
+        action_catalog!([ReplayIdempotentAction]),
+        agent_id
+      )
+      |> Keyword.put(:on_event, on_event)
+
+    assert {:error, {:cached_node_authorization_failed, "cache", reason}} =
+             Engine.run(graph, opts)
+
+    assert reason == "Capability check failed: #{resource} (:unauthorized)"
+    assert_receive :replay_idempotent_action_executed
+    refute_receive :replay_idempotent_action_executed
+  end
+
   test "security regression: replay classification pins the exact action across registry drift" do
     graph = compiled_graph!(action_dot("test_replay_drift"))
     node = graph.nodes["task"]
@@ -261,6 +410,92 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
     compiled
   end
 
+  defp cacheable_loop_graph! do
+    compiled_graph!("""
+    digraph CacheAuthorization {
+      start [shape=Mdiamond]
+      cache [type="extract", source_key="source", output_key="clean", enum="safe"]
+      check [type="gate", shape=diamond, predicate="expression", expression="done"]
+      mark [type="transform", transform="identity", source_key="true_value", output_key="done"]
+      done [shape=Msquare]
+
+      start -> cache -> check
+      check -> done [condition="context.done=true"]
+      check -> mark [condition="context.done!=true"]
+      mark -> cache
+    }
+    """)
+  end
+
+  defp cacheable_action_loop_graph! do
+    compiled_graph!("""
+    digraph CacheActionAuthorization {
+      start [shape=Mdiamond]
+      cache [type="exec", target="action", action="test_replay_idempotent"]
+      check [type="gate", shape=diamond, predicate="expression", expression="done"]
+      mark [type="transform", transform="identity", source_key="true_value", output_key="done"]
+      done [shape=Msquare]
+
+      start -> cache -> check
+      check -> done [condition="context.done=true"]
+      check -> mark [condition="context.done!=true"]
+      mark -> cache
+    }
+    """)
+  end
+
+  defp cacheable_execution_opts(
+         graph,
+         label,
+         catalog \\ %{"actions" => []},
+         agent_id \\ "agent_test"
+       ) do
+    root = tmp_logs(label)
+    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    graph_hash = RunAuthorization.graph_hash(graph)
+
+    {:ok, {manifest, digest}} =
+      ExecutionManifest.build(graph, catalog, graph_hash)
+
+    [
+      authorization: true,
+      agent_id: agent_id,
+      authorizer: fn _principal, _handler_type -> :ok end,
+      execution_manifest: manifest,
+      execution_manifest_digest: digest,
+      initial_values: %{"done" => false, "source" => "safe", "true_value" => true},
+      logs_root: root,
+      resumable: false,
+      run_id: "#{label}_#{System.unique_integer([:positive, :monotonic])}",
+      workdir: root
+    ]
+  end
+
+  defp action_catalog!(modules) do
+    {:ok, catalog} = ActionCatalog.snapshot(modules: modules)
+    catalog
+  end
+
+  defp replace_extract_handler! do
+    Code.compile_string("""
+    defmodule #{inspect(ExtractHandler)} do
+      @behaviour Arbor.Orchestrator.Handlers.Handler
+
+      def execute(_node, _context, _graph, _opts) do
+        if pid = Application.get_env(:arbor_orchestrator, :action_replay_test_pid) do
+          send(pid, :replay_cacheable_replacement_executed)
+        end
+
+        %Arbor.Orchestrator.Engine.Outcome{status: :success}
+      end
+
+      def idempotency, do: :idempotent
+    end
+    """)
+
+    :ok
+  end
+
   defp ensure_action_registry_started! do
     unless Process.whereis(ActionRegistry) do
       start_supervised!({ActionRegistry, []})
@@ -319,6 +554,13 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
     File.mkdir_p!(path)
     on_exit(fn -> File.rm_rf(path) end)
     path
+  end
+
+  defp restore_loaded_module!(module, filename, beam) do
+    :code.purge(module)
+    {:module, ^module} = :code.load_binary(module, filename, beam)
+    :code.purge(module)
+    :ok
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_orchestrator, key)

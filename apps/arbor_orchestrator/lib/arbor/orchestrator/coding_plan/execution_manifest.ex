@@ -27,18 +27,19 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
   @nested_graph_identifier_pattern ~r/\A[a-z][a-z0-9_]*\z/
 
-  @runtime_action_keys ~w(
+  @legacy_runtime_action_keys ~w(
     beam_sha256
     effect_class
     egress_declared
     egress_destination_resolver
     egress_tier_resolver
-    execution_idempotency
     module
     name
     resource_uri
   )
 
+  @runtime_action_keys Enum.sort(["execution_idempotency" | @legacy_runtime_action_keys])
+  @legacy_action_keys Enum.sort(@legacy_runtime_action_keys ++ ~w(description parameters_schema))
   @action_keys Enum.sort(@runtime_action_keys ++ ~w(description parameters_schema))
   @handler_keys ~w(beam_sha256 handler_type module)
   @stack_entry_keys ~w(beam_sha256 module slot)
@@ -911,17 +912,114 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   end
 
   defp compare(expected, expected_digest, actual, actual_digest) do
-    if expected == actual and expected_digest == actual_digest do
+    projected_actual = project_runtime_compatibility(expected, actual)
+
+    if expected == projected_actual and
+         match?({:ok, ^expected_digest}, digest(projected_actual)) and
+         match?({:ok, ^actual_digest}, digest(actual)) do
       :ok
     else
       sections =
         @v3_manifest_keys
-        |> Enum.reject(&(Map.get(expected, &1) == Map.get(actual, &1)))
+        |> Enum.reject(&(Map.get(expected, &1) == Map.get(projected_actual, &1)))
         |> Enum.sort()
 
       {:error, {:execution_manifest_mismatch, sections}}
     end
   end
+
+  # execution_idempotency was added to action descriptors after v2/v3 shipped.
+  # Project only that field out of freshly derived manifests when the reviewed
+  # entry is legacy, then rebuild nested digests over the projected children.
+  defp project_runtime_compatibility(expected, actual)
+       when is_map(expected) and is_map(actual) do
+    actual
+    |> Map.update(
+      "actions",
+      Map.get(actual, "actions"),
+      &project_action_bindings(Map.get(expected, "actions"), &1)
+    )
+    |> project_nested_graph_bindings(expected)
+  end
+
+  defp project_runtime_compatibility(_expected, actual), do: actual
+
+  defp project_action_bindings(expected, actual)
+       when is_list(expected) and is_list(actual) do
+    expected_by_name = Map.new(expected, &{Map.get(&1, "name"), &1})
+
+    Enum.map(actual, fn action ->
+      case Map.get(expected_by_name, Map.get(action, "name")) do
+        %{} = expected_action ->
+          if Map.has_key?(expected_action, "execution_idempotency"),
+            do: action,
+            else: Map.delete(action, "execution_idempotency")
+
+        _missing ->
+          action
+      end
+    end)
+  end
+
+  defp project_action_bindings(_expected, actual), do: actual
+
+  defp project_nested_graph_bindings(actual, expected) do
+    case {Map.get(expected, "nested_graphs"), Map.get(actual, "nested_graphs")} do
+      {expected_nested, actual_nested}
+      when is_list(expected_nested) and is_list(actual_nested) ->
+        expected_by_id = Map.new(expected_nested, &{Map.get(&1, "id"), &1})
+
+        projected =
+          Enum.map(actual_nested, fn nested_graph ->
+            case Map.get(expected_by_id, Map.get(nested_graph, "id")) do
+              %{} = expected_graph ->
+                project_nested_graph_binding(expected_graph, nested_graph)
+
+              _missing ->
+                nested_graph
+            end
+          end)
+
+        Map.put(actual, "nested_graphs", projected)
+
+      _other ->
+        actual
+    end
+  end
+
+  defp project_nested_graph_binding(expected, actual)
+       when is_map(expected) and is_map(actual) do
+    projected_manifest =
+      project_runtime_compatibility(
+        Map.get(expected, "execution_manifest"),
+        Map.get(actual, "execution_manifest")
+      )
+
+    case digest(projected_manifest) do
+      {:ok, projected_digest} ->
+        actual
+        |> Map.put("execution_manifest", projected_manifest)
+        |> Map.put("execution_manifest_digest", projected_digest)
+
+      {:error, _reason} ->
+        actual
+    end
+  end
+
+  defp project_nested_graph_binding(_expected, actual), do: actual
+
+  defp compatible_manifest?(expected, actual) do
+    expected == project_runtime_compatibility(expected, actual)
+  end
+
+  defp compatible_action_binding?(expected, actual)
+       when is_map(expected) and is_map(actual) do
+    if Map.has_key?(expected, "execution_idempotency"),
+      do: expected == actual,
+      else: expected == Map.delete(actual, "execution_idempotency")
+  end
+
+  defp compatible_action_binding?(_expected, _actual), do: false
 
   defp fetch_binding(bindings, action_name) do
     case Map.fetch(bindings, action_name) do
@@ -983,18 +1081,26 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   end
 
   defp compare_action_runtime_binding(action_name, expected, actual) do
-    expected_runtime = Map.take(expected, @runtime_action_keys)
+    keys = runtime_action_keys(expected)
+    expected_runtime = Map.take(expected, keys)
+    actual_runtime = Map.take(actual, keys)
 
-    if expected_runtime == actual do
+    if expected_runtime == actual_runtime do
       :ok
     else
       fields =
-        @runtime_action_keys
-        |> Enum.reject(&(Map.get(expected_runtime, &1) == Map.get(actual, &1)))
+        keys
+        |> Enum.reject(&(Map.get(expected_runtime, &1) == Map.get(actual_runtime, &1)))
         |> Enum.sort()
 
       {:error, {:action_binding_mismatch, action_name, fields}}
     end
+  end
+
+  defp runtime_action_keys(binding) do
+    if Map.has_key?(binding, "execution_idempotency"),
+      do: @runtime_action_keys,
+      else: @legacy_runtime_action_keys
   end
 
   defp compare_handler_runtime_binding(handler_type, expected, actual) do
@@ -1020,6 +1126,21 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
         |> Enum.sort()
 
       {:error, {:execution_delegate_binding_mismatch, node_id, slot, fields}}
+    end
+  end
+
+  defp require_index_subset(child, parent, :action) do
+    case Enum.find(child, fn {name, child_binding} ->
+           case Map.fetch(parent, name) do
+             {:ok, parent_binding} ->
+               not compatible_action_binding?(parent_binding, child_binding)
+
+             :error ->
+               true
+           end
+         end) do
+      nil -> :ok
+      {name, _binding} -> {:error, {:child_binding_not_pinned_by_parent, :action, name}}
     end
   end
 
@@ -1103,8 +1224,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
            "compiled_graph_hash" => compiled_graph_hash
          } = child
        ) do
-    execution_manifest == child and
-      match?({:ok, ^nested_manifest_digest}, digest(child))
+    compatible_manifest?(execution_manifest, child) and
+      match?({:ok, ^nested_manifest_digest}, digest(execution_manifest))
   end
 
   defp declares_child_graph?(_nested_graph, _child), do: false
@@ -1119,7 +1240,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   defp validate_actions(_actions), do: {:error, {:invalid_execution_manifest_field, :actions}}
 
   defp validate_action(action) when is_map(action) do
-    with :ok <- require_exact_keys(action, @action_keys, :action),
+    with :ok <- require_action_keys(action),
          :ok <- validate_nonblank(action["name"], :action_name),
          :ok <- validate_nonblank(action["module"], :action_module),
          :ok <- validate_sha256(action["beam_sha256"], :action_beam_sha256),
@@ -1127,12 +1248,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
          true <- is_map(action["parameters_schema"]),
          :ok <- validate_nonblank(action["resource_uri"], :action_resource_uri),
          true <- action["effect_class"] in @effect_classes,
-         true <- action["execution_idempotency"] in @execution_idempotency_classes,
-         true <-
-           replay_effect_consistent?(
-             action["effect_class"],
-             action["execution_idempotency"]
-           ),
+         :ok <- validate_action_replay_binding(action),
          true <- is_boolean(action["egress_declared"]),
          true <- is_boolean(action["egress_tier_resolver"]),
          true <- is_boolean(action["egress_destination_resolver"]),
@@ -1145,6 +1261,30 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   end
 
   defp validate_action(_action), do: {:error, :invalid_action_binding}
+
+  defp require_action_keys(action) do
+    keys = Map.keys(action) |> Enum.sort()
+
+    if keys in [@legacy_action_keys, @action_keys],
+      do: :ok,
+      else: {:error, {:unexpected_execution_manifest_keys, :action}}
+  end
+
+  defp validate_action_replay_binding(action) do
+    case Map.fetch(action, "execution_idempotency") do
+      :error ->
+        :ok
+
+      {:ok, execution_idempotency}
+      when execution_idempotency in @execution_idempotency_classes ->
+        if replay_effect_consistent?(action["effect_class"], execution_idempotency),
+          do: :ok,
+          else: {:error, :invalid_action_binding}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_action_binding}
+    end
+  end
 
   defp replay_effect_consistent?("read", _execution_idempotency), do: true
 
@@ -1236,10 +1376,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
       else: :ok
   end
 
-  defp require_nested_graph_closure(nested_graph, nested_graph), do: :ok
+  defp require_nested_graph_closure(%{"id" => id} = nested_graph, authoritative_nested_graph) do
+    if nested_graph == project_nested_graph_binding(nested_graph, authoritative_nested_graph),
+      do: :ok,
+      else: {:error, {:nested_graph_closure_mismatch, id}}
+  end
 
-  defp require_nested_graph_closure(%{"id" => id}, _authoritative_nested_graph),
-    do: {:error, {:nested_graph_closure_mismatch, id}}
+  defp require_nested_graph_closure(_nested_graph, _authoritative_nested_graph),
+    do: {:error, :invalid_nested_graph_binding}
 
   defp validate_nested_graph_id(id) do
     if nested_graph_identifier?(id),

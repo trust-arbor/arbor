@@ -798,63 +798,14 @@ defmodule Arbor.Orchestrator.Engine do
             ContentHash.can_skip?(node, computed_hash, stored_hash, idempotency, cached_outcome)
 
         if skip? do
-          emit(state.opts, Event.stage_skipped(node.id, :content_hash_match))
-
-          # Restore the previous outcome if available, otherwise success
-          outcome = Map.get(state.outcomes, node.id, %Outcome{status: :skipped})
-          completed = [node.id | state.completed]
-
-          # Re-apply the cached outcome's context updates. Skipping the WORK
-          # must still produce the EFFECT — otherwise a loop that revisits an
-          # idempotent node loses that node's output_key writes if another
-          # node clobbered the slot between visits. Mirrors the apply_updates
-          # call in the normal-execution path.
-          context =
-            context
-            |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
-            |> record_node_taint(node, outcome)
-            |> apply_taint_reductions(node, outcome)
-            |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
-            |> Context.set("__completed_nodes__", completed, node.id, step_now)
-
-          tracking =
-            state.tracking
-            |> put_in([:content_hashes, node.id], computed_hash)
-
-          if resumable?(state.opts) do
-            checkpoint =
-              Checkpoint.from_state(
-                node.id,
-                Enum.reverse(completed),
-                state.retries,
-                context,
-                state.outcomes,
-                content_hashes: tracking.content_hashes,
-                run_id: Keyword.get(state.opts, :run_id),
-                graph_hash: Keyword.get(state.opts, :graph_hash),
-                pending_intents: state.tracking.pending_intents,
-                execution_digests: state.tracking.execution_digests,
-                pipeline_started_at: Context.pipeline_started_at(context),
-                run_authorization: RunAuthorization.projection(state.run_authorization)
-              )
-
-            :ok =
-              Checkpoint.write(
-                checkpoint,
-                state.logs_root,
-                checkpoint_call_opts(state.opts,
-                  hmac_secret: Keyword.get(state.opts, :hmac_secret)
-                )
-              )
-          end
-
-          updated_state = %{state | context: context, completed: completed, tracking: tracking}
-
-          if Router.terminal?(node) do
-            handle_terminal(node, outcome, updated_state)
-          else
-            advance_with_fan_in(node, outcome, updated_state)
-          end
+          authorize_and_accept_cached_outcome(
+            node,
+            handler,
+            context,
+            computed_hash,
+            step_now,
+            state
+          )
         else
           execute_node_visit(
             node,
@@ -868,6 +819,90 @@ defmodule Arbor.Orchestrator.Engine do
             state
           )
         end
+    end
+  end
+
+  defp authorize_and_accept_cached_outcome(
+         node,
+         handler,
+         context,
+         computed_hash,
+         step_now,
+         %State{} = state
+       ) do
+    authorization_opts = Keyword.put_new(state.opts, :logs_root, state.logs_root)
+
+    case Executor.authorize_cached(
+           handler,
+           node,
+           context,
+           state.graph,
+           authorization_opts
+         ) do
+      :ok ->
+        accept_cached_outcome(node, context, computed_hash, step_now, state)
+
+      {:error, reason} ->
+        fail_from_engine_state(
+          state,
+          {:cached_node_authorization_failed, node.id, reason}
+        )
+    end
+  end
+
+  defp accept_cached_outcome(node, context, computed_hash, step_now, %State{} = state) do
+    emit(state.opts, Event.stage_skipped(node.id, :content_hash_match))
+
+    # Restore the previous outcome if available, otherwise success.
+    outcome = Map.get(state.outcomes, node.id, %Outcome{status: :skipped})
+    completed = [node.id | state.completed]
+
+    # Skipping the work must still reproduce its context effects.
+    context =
+      context
+      |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
+      |> record_node_taint(node, outcome)
+      |> apply_taint_reductions(node, outcome)
+      |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
+      |> Context.set("__completed_nodes__", completed, node.id, step_now)
+
+    tracking =
+      state.tracking
+      |> put_in([:content_hashes, node.id], computed_hash)
+
+    if resumable?(state.opts) do
+      checkpoint =
+        Checkpoint.from_state(
+          node.id,
+          Enum.reverse(completed),
+          state.retries,
+          context,
+          state.outcomes,
+          content_hashes: tracking.content_hashes,
+          run_id: Keyword.get(state.opts, :run_id),
+          graph_hash: Keyword.get(state.opts, :graph_hash),
+          pending_intents: state.tracking.pending_intents,
+          execution_digests: state.tracking.execution_digests,
+          pipeline_started_at: Context.pipeline_started_at(context),
+          run_authorization: RunAuthorization.projection(state.run_authorization)
+        )
+
+      :ok =
+        Checkpoint.write(
+          checkpoint,
+          state.logs_root,
+          checkpoint_call_opts(state.opts,
+            hmac_secret: Keyword.get(state.opts, :hmac_secret)
+          )
+        )
+    end
+
+    updated_state = %{state | context: context, completed: completed, tracking: tracking}
+
+    if Router.terminal?(node) do
+      handle_terminal(node, outcome, updated_state)
+    else
+      advance_with_fan_in(node, outcome, updated_state)
     end
   end
 

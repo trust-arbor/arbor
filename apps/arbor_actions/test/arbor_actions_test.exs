@@ -3,7 +3,11 @@ defmodule Arbor.ActionsTest do
   @moduletag :fast
 
   alias Arbor.Actions
-  alias Arbor.Actions.TestFixtures.ContradictoryWriteReplayActionForActionsTest
+
+  alias Arbor.Actions.TestFixtures.{
+    BoundNestedInnerAction,
+    ContradictoryWriteReplayActionForActionsTest
+  }
 
   defmodule NoObjectCodeAction do
     @moduledoc false
@@ -111,6 +115,29 @@ defmodule Arbor.ActionsTest do
 
       assert {:error, :execution_idempotency_effect_class_conflict} =
                Actions.runtime_descriptor(ContradictoryWriteReplayActionForActionsTest)
+    end
+
+    test "regression: legacy runtime bindings ignore additive replay metadata" do
+      assert {:ok, current} = Actions.runtime_descriptor(BoundNestedInnerAction)
+      legacy = Map.delete(current, "execution_idempotency")
+      bindings = %{legacy["name"] => legacy}
+      manifest = %{"actions" => [legacy]}
+
+      assert {:ok, manifest_digest} = Actions.execution_binding_digest(manifest)
+      assert {:ok, bindings_digest} = Actions.execution_binding_digest(bindings)
+
+      context = %{
+        execution_manifest: manifest,
+        execution_manifest_digest: manifest_digest,
+        pinned_action_bindings: bindings,
+        pinned_action_bindings_digest: bindings_digest,
+        test_pid: self()
+      }
+
+      assert {:ok, %{inner: true}} =
+               Actions.execute_action(BoundNestedInnerAction, %{}, context)
+
+      assert_receive :bound_nested_inner_executed
     end
   end
 

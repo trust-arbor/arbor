@@ -90,17 +90,20 @@ defmodule Arbor.Actions do
     "code_review_council" => "priv/pipelines/code-review-council.dot"
   }
 
-  @runtime_action_descriptor_keys ~w(
+  @legacy_runtime_action_descriptor_keys ~w(
     beam_sha256
     effect_class
     egress_declared
     egress_destination_resolver
     egress_tier_resolver
-    execution_idempotency
     module
     name
     resource_uri
   )
+  @runtime_action_descriptor_keys Enum.sort([
+                                    "execution_idempotency"
+                                    | @legacy_runtime_action_descriptor_keys
+                                  ])
   @execution_idempotency_classes [
     :idempotent,
     :idempotent_with_key,
@@ -1057,11 +1060,10 @@ defmodule Arbor.Actions do
     |> Enum.sort_by(fn {name, _binding} -> name end)
     |> Enum.reduce_while(:ok, fn {name, child_binding}, :ok ->
       case Map.fetch(parent_bindings, name) do
-        {:ok, ^child_binding} ->
-          {:cont, :ok}
-
-        {:ok, _different_binding} ->
-          {:halt, {:error, {:nested_action_binding_changed, name}}}
+        {:ok, parent_binding} ->
+          if compatible_action_binding?(parent_binding, child_binding),
+            do: {:cont, :ok},
+            else: {:halt, {:error, {:nested_action_binding_changed, name}}}
 
         :error ->
           {:halt, {:error, {:nested_action_binding_expanded, name}}}
@@ -1073,8 +1075,11 @@ defmodule Arbor.Actions do
     with {:ok, actual} <- runtime_descriptor(action_module),
          action_name = actual["name"],
          {:ok, expected} <- fetch_action_binding(bindings, action_name),
-         expected_runtime = Map.take(expected, @runtime_action_descriptor_keys),
-         :ok <- compare_runtime_action_binding(action_name, expected_runtime, actual) do
+         keys = runtime_action_descriptor_keys(expected),
+         expected_runtime = Map.take(expected, keys),
+         actual_runtime = Map.take(actual, keys),
+         :ok <-
+           compare_runtime_action_binding(action_name, expected_runtime, actual_runtime, keys) do
       :ok
     end
   end
@@ -1086,18 +1091,33 @@ defmodule Arbor.Actions do
     end
   end
 
-  defp compare_runtime_action_binding(action_name, expected, actual) do
+  defp compare_runtime_action_binding(action_name, expected, actual, keys) do
     if expected == actual do
       :ok
     else
       fields =
-        @runtime_action_descriptor_keys
+        keys
         |> Enum.reject(&(Map.get(expected, &1) == Map.get(actual, &1)))
         |> Enum.sort()
 
       {:error, {:action_binding_mismatch, action_name, fields}}
     end
   end
+
+  defp runtime_action_descriptor_keys(binding) do
+    if Map.has_key?(binding, "execution_idempotency"),
+      do: @runtime_action_descriptor_keys,
+      else: @legacy_runtime_action_descriptor_keys
+  end
+
+  defp compatible_action_binding?(expected, actual)
+       when is_map(expected) and is_map(actual) do
+    if Map.has_key?(expected, "execution_idempotency"),
+      do: expected == actual,
+      else: expected == Map.delete(actual, "execution_idempotency")
+  end
+
+  defp compatible_action_binding?(_expected, _actual), do: false
 
   defp valid_execution_manifest_digest?(digest) when is_binary(digest),
     do: Regex.match?(~r/\A[0-9a-f]{64}\z/, digest)
