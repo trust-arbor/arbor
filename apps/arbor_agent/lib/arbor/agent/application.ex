@@ -7,6 +7,8 @@ defmodule Arbor.Agent.Application do
   def start(_type, _args) do
     children =
       if Application.get_env(:arbor_agent, :start_children, true) do
+        profile_backend = profile_backend()
+
         [
           # Process groups for cluster-wide agent discovery
           %{id: :arbor_agents_pg, start: {:pg, :start_link, [:arbor_agents]}},
@@ -20,9 +22,10 @@ defmodule Arbor.Agent.Application do
           Supervisor.child_spec(
             {Arbor.Persistence.BufferedStore,
              name: :arbor_agent_profiles,
-             backend: profile_backend(),
+             backend: profile_backend,
              backend_opts: [repo: Arbor.Persistence.Repo],
              write_mode: :sync,
+             ack_mode: profile_ack_mode(profile_backend),
              collection: "agent_profiles"},
             id: :arbor_agent_profiles
           ),
@@ -113,4 +116,7 @@ defmodule Arbor.Agent.Application do
   defp default_profile_backend do
     Arbor.Persistence.QueryableStore.Postgres
   end
+
+  defp profile_ack_mode(nil), do: :cache
+  defp profile_ack_mode(_backend), do: :backend
 end

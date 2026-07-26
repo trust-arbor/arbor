@@ -50,7 +50,7 @@ defmodule Arbor.Security.SigningKeyStore do
       }
 
       # Wrap in Record so JSONFile backend can persist (it pattern-matches on %Record{})
-      record = %Record{id: agent_id, key: agent_id, data: data, metadata: %{}}
+      record = Record.new(agent_id, data, id: "signing_key:#{agent_id}")
 
       if available?() do
         apply(@buffered_store, :put, [agent_id, record, [name: @store_name]])
@@ -140,7 +140,7 @@ defmodule Arbor.Security.SigningKeyStore do
         "tag" => Base.encode64(tag)
       }
 
-      record = %Record{id: agent_id, key: agent_id, data: data, metadata: %{}}
+      record = Record.new(agent_id, data, id: "signing_key:#{agent_id}")
 
       if available?() do
         apply(@buffered_store, :put, [agent_id, record, [name: @store_name]])

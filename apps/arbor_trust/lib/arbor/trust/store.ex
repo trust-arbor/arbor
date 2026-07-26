@@ -515,12 +515,10 @@ defmodule Arbor.Trust.Store do
   defp persist_profile(_profile, %{persistence_mode: :memory}), do: :ok
 
   defp persist_profile(profile, state) do
-    record = %Arbor.Contracts.Persistence.Record{
-      id: profile.agent_id,
-      key: profile.agent_id,
-      data: serialize_profile(profile),
-      metadata: %{}
-    }
+    record =
+      Arbor.Contracts.Persistence.Record.new(profile.agent_id, serialize_profile(profile),
+        id: "trust_profile:#{profile.agent_id}"
+      )
 
     durable_put(profile.agent_id, record, state)
   end

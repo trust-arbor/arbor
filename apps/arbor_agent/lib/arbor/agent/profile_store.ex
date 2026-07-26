@@ -37,12 +37,8 @@ defmodule Arbor.Agent.ProfileStore do
   @spec store_profile(Profile.t()) :: :ok | {:error, term()}
   def store_profile(%Profile{agent_id: agent_id} = profile) do
     if available?() do
-      record = %Record{
-        id: agent_id,
-        key: agent_id,
-        data: Profile.serialize(profile),
-        metadata: %{}
-      }
+      record =
+        Record.new(agent_id, Profile.serialize(profile), id: "agent_profile:#{agent_id}")
 
       BufferedStore.put(agent_id, record, name: @store_name)
     else

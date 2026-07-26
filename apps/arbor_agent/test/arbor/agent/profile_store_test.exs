@@ -11,6 +11,23 @@ defmodule Arbor.Agent.ProfileStoreTest do
                      "arbor_profile_store_test_#{System.unique_integer([:positive])}"
                    )
 
+  defmodule FailingProfileBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @impl true
+    def put(_key, _value, _opts), do: {:error, :profile_write_failed}
+
+    @impl true
+    def get(_key, _opts), do: {:error, :not_found}
+
+    @impl true
+    def delete(_key, _opts), do: :ok
+
+    @impl true
+    def list(_opts), do: {:ok, []}
+  end
+
   setup do
     # Start a BufferedStore instance for tests (ETS-only, no backend)
     start_supervised!(
@@ -67,6 +84,44 @@ defmodule Arbor.Agent.ProfileStoreTest do
 
       assert {:ok, loaded} = ProfileStore.load_profile("overwrite-1")
       assert loaded.display_name == "Version 2"
+    end
+
+    test "durability regression: logical record id is domain-scoped, not the agent key" do
+      agent_id = "agent_profile_record_identity"
+      profile = make_profile(agent_id)
+
+      assert :ok = ProfileStore.store_profile(profile)
+
+      assert {:ok, %Arbor.Contracts.Persistence.Record{} = record} =
+               BufferedStore.get(agent_id, name: @store_name)
+
+      assert record.key == agent_id
+      assert record.id == "agent_profile:#{agent_id}"
+    end
+
+    test "durability regression: backend failure is returned without a volatile profile" do
+      assert :ok = stop_supervised(@store_name)
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {BufferedStore,
+           name: @store_name,
+           backend: FailingProfileBackend,
+           write_mode: :sync,
+           ack_mode: :backend},
+          id: @store_name
+        )
+      )
+
+      agent_id = "agent_profile_failed_durable_write"
+
+      assert {:error, :profile_write_failed} =
+               agent_id
+               |> make_profile()
+               |> ProfileStore.store_profile()
+
+      assert {:error, :not_found} =
+               BufferedStore.get(agent_id, name: @store_name)
     end
 
     test "not found error for nonexistent profile" do

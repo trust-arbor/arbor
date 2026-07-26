@@ -161,6 +161,27 @@ defmodule Arbor.Trust.StoreTest do
 
       assert {:error, :not_found} = Store.get_profile(profile.agent_id)
     end
+
+    test "durability regression: trust record id is domain-scoped, not the agent key", %{
+      pid: pid,
+      profile: profile
+    } do
+      GenServer.stop(pid, :normal)
+      DurableBackend.reset()
+
+      {:ok, durable_pid} =
+        Store.start_link(persistence: :durable, durable_backend: DurableBackend)
+
+      on_exit(fn -> if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal) end)
+
+      assert :ok = Store.store_profile(profile)
+
+      assert {:ok, %Arbor.Contracts.Persistence.Record{} = record} =
+               DurableBackend.get(profile.agent_id, [])
+
+      assert record.key == profile.agent_id
+      assert record.id == "trust_profile:#{profile.agent_id}"
+    end
   end
 
   describe "profile_exists?/1" do

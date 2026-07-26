@@ -11,7 +11,8 @@ defmodule Arbor.Persistence.BufferedStore do
   - **Reads**: Direct ETS lookup — bypass GenServer for maximum throughput
   - **Writes**: Serialized through GenServer, then ETS + backend
   - **Init**: Loads all data from backend into ETS (backend failure → start empty)
-  - **Graceful degradation**: Backend failures are logged but don't crash
+  - **Graceful degradation**: Cache-acknowledged backend failures are logged but don't crash
+  - **Backend acknowledgement**: Critical stores can require backend success before cache mutation
 
   ## Options
 
@@ -20,6 +21,7 @@ defmodule Arbor.Persistence.BufferedStore do
         backend:      QueryableStore.Postgres, # nil = ETS-only
         backend_opts: [repo: Repo],           # extra opts passed to backend calls
         write_mode:   :async,                 # :async | :sync
+        ack_mode:     :cache,                 # :cache | :backend
         collection:   "my_collection",        # passed as name: to backend
         distributed:  true}                   # enable cross-node cache invalidation
 
@@ -163,6 +165,8 @@ defmodule Arbor.Persistence.BufferedStore do
   - `:backend` — module implementing Store behaviour (nil = ETS-only)
   - `:backend_opts` — extra opts merged into backend calls
   - `:write_mode` — `:async` (default) or `:sync`
+  - `:ack_mode` — `:cache` (default) or `:backend`; backend acknowledgement
+    requires synchronous writes and mutates ETS only after backend success
   - `:collection` — string passed as `name:` to backend (defaults to stringified name)
   """
   def start_link(opts) do
@@ -205,8 +209,11 @@ defmodule Arbor.Persistence.BufferedStore do
     backend = Keyword.get(opts, :backend)
     backend_opts = Keyword.get(opts, :backend_opts, [])
     write_mode = Keyword.get(opts, :write_mode, :async)
+    ack_mode = Keyword.get(opts, :ack_mode, :cache)
     collection = Keyword.get(opts, :collection, to_string(name))
     distributed = Keyword.get(opts, :distributed, false)
+
+    validate_write_options!(write_mode, ack_mode)
 
     # Create ETS table — public for direct reads from any process
     table =
@@ -217,6 +224,7 @@ defmodule Arbor.Persistence.BufferedStore do
       backend: backend,
       backend_opts: backend_opts,
       write_mode: write_mode,
+      ack_mode: ack_mode,
       collection: collection,
       distributed: distributed
     }
@@ -237,19 +245,47 @@ defmodule Arbor.Persistence.BufferedStore do
     if Revision.key_mismatch?(key, value) do
       {:reply, {:error, :key_mismatch}, state}
     else
-      :ets.insert(state.table, {key, value})
-      backend_put(state, key, value)
-      emit_distributed_signal(state, :cache_put, key)
-      {:reply, :ok, state}
+      case state.ack_mode do
+        :cache ->
+          :ets.insert(state.table, {key, value})
+          backend_put(state, key, value)
+          emit_distributed_signal(state, :cache_put, key)
+          {:reply, :ok, state}
+
+        :backend ->
+          case backend_put(state, key, value) do
+            :ok ->
+              :ets.insert(state.table, {key, value})
+              emit_distributed_signal(state, :cache_put, key)
+              {:reply, :ok, state}
+
+            {:error, _reason} = error ->
+              {:reply, error, state}
+          end
+      end
     end
   end
 
   @impl true
   def handle_call({:delete, key}, _from, state) do
-    :ets.delete(state.table, key)
-    backend_delete(state, key)
-    emit_distributed_signal(state, :cache_delete, key)
-    {:reply, :ok, state}
+    case state.ack_mode do
+      :cache ->
+        :ets.delete(state.table, key)
+        backend_delete(state, key)
+        emit_distributed_signal(state, :cache_delete, key)
+        {:reply, :ok, state}
+
+      :backend ->
+        case backend_delete(state, key) do
+          :ok ->
+            :ets.delete(state.table, key)
+            emit_distributed_signal(state, :cache_delete, key)
+            {:reply, :ok, state}
+
+          {:error, _reason} = error ->
+            {:reply, error, state}
+        end
+    end
   end
 
   @impl true
@@ -337,6 +373,9 @@ defmodule Arbor.Persistence.BufferedStore do
       Logger.warning("BufferedStore: backend load throw: #{inspect(value)}")
   end
 
+  defp backend_put(%{backend: nil, ack_mode: :backend}, _key, _value),
+    do: {:error, :backend_not_configured}
+
   defp backend_put(%{backend: nil}, _key, _value), do: :ok
 
   defp backend_put(
@@ -364,33 +403,33 @@ defmodule Arbor.Persistence.BufferedStore do
     end
   end
 
-  # A genuine backend failure must NOT be silent: ETS is authoritative for reads
-  # and the next write retries, so we keep returning `:ok` (don't crash the store),
-  # but we elevate the failure to `Logger.error` so it's visible and actionable
-  # rather than buried at warning level. (Pre-2026-06-25 this swallowed the error
-  # at warning level, hiding the spurious `records_pkey` upsert race.)
+  # Cache-acknowledged callers keep their historical best-effort behavior.
+  # Backend-acknowledged callers receive this error and do not mutate ETS.
   defp do_backend_put(backend, key, value, opts) do
     case backend.put(key, value, opts) do
       :ok ->
         :ok
 
-      {:error, reason} ->
+      {:error, reason} = error ->
         Logger.error("BufferedStore: backend put failed for #{key}: #{inspect(reason)}")
-        :ok
+        error
     end
   rescue
     e ->
       Logger.error("BufferedStore: backend put error for #{key}: #{inspect(e)}")
-      :ok
+      {:error, {:backend_exception, Exception.message(e)}}
   catch
     :exit, reason ->
       Logger.error("BufferedStore: backend put exit for #{key}: #{inspect(reason)}")
-      :ok
+      {:error, {:backend_exit, reason}}
 
     :throw, value ->
       Logger.error("BufferedStore: backend put throw for #{key}: #{inspect(value)}")
-      :ok
+      {:error, {:backend_throw, value}}
   end
+
+  defp backend_delete(%{backend: nil, ack_mode: :backend}, _key),
+    do: {:error, :backend_not_configured}
 
   defp backend_delete(%{backend: nil}, _key), do: :ok
 
@@ -423,22 +462,36 @@ defmodule Arbor.Persistence.BufferedStore do
       :ok ->
         :ok
 
-      {:error, reason} ->
+      {:error, reason} = error ->
         Logger.warning("BufferedStore: backend delete failed for #{key}: #{inspect(reason)}")
-        :ok
+        error
     end
   rescue
     e ->
       Logger.warning("BufferedStore: backend delete error for #{key}: #{inspect(e)}")
-      :ok
+      {:error, {:backend_exception, Exception.message(e)}}
   catch
     :exit, reason ->
       Logger.warning("BufferedStore: backend delete exit for #{key}: #{inspect(reason)}")
-      :ok
+      {:error, {:backend_exit, reason}}
 
     :throw, value ->
       Logger.warning("BufferedStore: backend delete throw for #{key}: #{inspect(value)}")
-      :ok
+      {:error, {:backend_throw, value}}
+  end
+
+  defp validate_write_options!(write_mode, ack_mode) do
+    unless write_mode in [:async, :sync] do
+      raise ArgumentError, "write_mode must be :async or :sync"
+    end
+
+    unless ack_mode in [:cache, :backend] do
+      raise ArgumentError, "ack_mode must be :cache or :backend"
+    end
+
+    if ack_mode == :backend and write_mode != :sync do
+      raise ArgumentError, "ack_mode :backend requires write_mode :sync"
+    end
   end
 
   # ===========================================================================

@@ -35,7 +35,7 @@ defmodule Arbor.Memory.MemoryStore do
     if available?() do
       composite_key = "#{namespace}:#{key}"
       metadata = build_taint_metadata(opts)
-      record = Record.new(composite_key, data, id: composite_key, metadata: metadata)
+      record = Record.new(composite_key, data, id: "memory:#{composite_key}", metadata: metadata)
       BufferedStore.put(composite_key, record, name: @store_name)
     end
 

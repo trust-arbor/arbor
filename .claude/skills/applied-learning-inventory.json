@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 523,
+  "entry_count": 526,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5573,8 +5573,8 @@
       "destination": ".claude/skills/applied-learning-persistence-database.md",
       "anchor": "applied-learning-trust-the-store-s-advertised-durability-class-not-its-configured-backend",
       "source_date": "2026-07-20",
-      "source_incident": "found 2026-07-20 while designing terminal coding-task artifact retention).",
-      "content_sha256": "1f8e525758557a58ba11e6036cfec55ebef8ebd37a17a84ce40166a8bde663fe",
+      "source_incident": "found 2026-07-20 while designing terminal coding-task artifact retention; refined 2026-07-26 after agent creation reported success for a failed profile write).",
+      "content_sha256": "82077f7ceb957c3d467213fe580cbb5dfec4f8fca921bcdb3698f5c7f44f1b5e",
       "always_loaded": false
     },
     {
@@ -6343,8 +6343,47 @@
       "source_incident": "found 2026-07-24 after the aggregate software-factory gate exposed Trust-dependent Gateway decisions and a dispatcher `:already_started` race).",
       "content_sha256": "3d87c89f5710e864c007780ff339279d9c42876f012374e022e03553e21a103f",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 524,
+      "source_kind": "post-migration",
+      "slug": "independently-rerun-delegated-verification-against-the-committed-revision",
+      "title": "Independently rerun delegated verification against the committed revision.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-independently-rerun-delegated-verification-against-the-committed-revision",
+      "source_date": "2026-07-25",
+      "source_incident": "found 2026-07-25 when two stale Coding Plan fixture expectations survived a reported full-file pass).",
+      "content_sha256": "fbad28f986c6f6d4a0cfbf88d869894ad4c514372e92b5e5041e32c32f94a811",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 525,
+      "source_kind": "post-migration",
+      "slug": "fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety",
+      "title": "Fault tests must prove the required recovery contract, not only fail-closed safety.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-fault-tests-must-prove-the-required-recovery-contract-not-only-fail-closed-safety",
+      "source_date": "2026-07-25",
+      "source_incident": "found 2026-07-25 when a blocking design-checkpoint Await was classified as a generic side effect and could not consume its durable terminal after Engine owner death).",
+      "content_sha256": "ae1e645d4253cc05b897c042a54d99e85f0c175f74b9b39403bcdfc458b7aecc",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 526,
+      "source_kind": "post-migration",
+      "slug": "persistence-record-logical-ids-are-global-across-the-shared-records-table",
+      "title": "Persistence Record logical IDs are global across the shared `records` table.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-persistence-record-logical-ids-are-global-across-the-shared-records-table",
+      "source_date": "2026-07-26",
+      "source_incident": "found 2026-07-26 when a fresh coding agent survived in trust state but its agent profile disappeared on restart).",
+      "content_sha256": "6171a787b2054a2859706abba74bc60ee378ffffd9e36d3eed46367f47b220b6",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 62
+  "post_migration_entry_count": 65
 }

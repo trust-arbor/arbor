@@ -61,6 +61,23 @@ defmodule Arbor.Persistence.BufferedStoreTest do
     end
   end
 
+  defmodule DeleteFailingBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @impl true
+    def put(_key, _value, _opts), do: :ok
+
+    @impl true
+    def get(_key, _opts), do: {:error, :not_found}
+
+    @impl true
+    def delete(_key, _opts), do: {:error, :delete_failed}
+
+    @impl true
+    def list(_opts), do: {:ok, []}
+  end
+
   describe "ETS-only mode (nil backend)" do
     setup do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
@@ -320,6 +337,59 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       # Should succeed — backend failure is logged but doesn't fail the call
       assert :ok = BufferedStore.put("key1", record, name: name)
       assert {:ok, ^record} = BufferedStore.get("key1", name: name)
+    end
+  end
+
+  describe "backend acknowledgement" do
+    test "durability regression: failed put is returned without mutating the cache" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_backend_ack_put_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {BufferedStore,
+         name: name,
+         backend: Arbor.Persistence.TestBackends.FailingStore,
+         write_mode: :sync,
+         ack_mode: :backend}
+      )
+
+      record = Record.new("key1", %{"v" => 1})
+
+      assert {:error, :write_failed} = BufferedStore.put("key1", record, name: name)
+      assert {:error, :not_found} = BufferedStore.get("key1", name: name)
+      assert Process.alive?(Process.whereis(name))
+    end
+
+    test "durability regression: failed delete preserves the acknowledged cache entry" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_backend_ack_delete_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {BufferedStore,
+         name: name, backend: DeleteFailingBackend, write_mode: :sync, ack_mode: :backend}
+      )
+
+      record = Record.new("key1", %{"v" => 1})
+      assert :ok = BufferedStore.put("key1", record, name: name)
+
+      assert {:error, :delete_failed} = BufferedStore.delete("key1", name: name)
+      assert {:ok, ^record} = BufferedStore.get("key1", name: name)
+    end
+
+    test "backend acknowledgement rejects writes when no backend is configured" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_backend_ack_nil_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {BufferedStore, name: name, backend: nil, write_mode: :sync, ack_mode: :backend}
+      )
+
+      record = Record.new("key1", %{"v" => 1})
+
+      assert {:error, :backend_not_configured} =
+               BufferedStore.put("key1", record, name: name)
+
+      assert {:error, :not_found} = BufferedStore.get("key1", name: name)
     end
   end
 

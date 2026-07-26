@@ -244,12 +244,7 @@ defmodule Arbor.Agent.UserConfig do
   end
 
   defp store_config_map(principal_id, config) when is_map(config) do
-    record = %Record{
-      id: principal_id,
-      key: principal_id,
-      data: config,
-      metadata: %{}
-    }
+    record = Record.new(principal_id, config, id: "user_config:#{principal_id}")
 
     BufferedStore.put(principal_id, record, name: @store_name)
   end

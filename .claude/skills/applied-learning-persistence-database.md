@@ -8,12 +8,30 @@ Read this when changing durable stores, checkpoints, journals, migrations, recov
 <a id="applied-learning-trust-the-store-s-advertised-durability-class-not-its-configured-backend"></a>
 **Trust the store's advertised durability class, not its configured backend.**
 `Arbor.Persistence.BufferedStore` reports `:process_lifetime` even when it fronts
-a database, because its cache-first writes deliberately absorb backend failures
-and cannot guarantee that every acknowledged value survives restart. Do not call
-such data durable merely because `backend: Postgres` is configured; use
+a database, because its default `ack_mode: :cache` writes deliberately absorb
+backend failures and cannot guarantee that every acknowledged value survives
+restart. `write_mode: :sync` changes scheduling, not that acknowledgement
+contract. Authority-critical single writes may opt into `ack_mode: :backend`,
+which requires synchronous writes and mutates the cache only after backend
+success, but the generic BufferedStore still advertises its conservative class.
+Do not call data durable merely because `backend: Postgres` is configured; use
 `Arbor.Persistence.durability_class/3` through the facade and select a store whose
 contract matches the recovery claim (found 2026-07-20 while designing terminal
-coding-task artifact retention).
+coding-task artifact retention; refined 2026-07-26 after agent creation reported
+success for a failed profile write).
+
+<!-- applied-learning: persistence-record-logical-ids-are-global-across-the-shared-records-table -->
+<a id="applied-learning-persistence-record-logical-ids-are-global-across-the-shared-records-table"></a>
+**Persistence Record logical IDs are global across the shared `records` table.**
+Postgres uses `(namespace, key)` as physical identity but retains `Record.id` as
+the table primary key, so reusing an agent/principal key as the logical ID in
+trust, profile, user-config, or memory namespaces causes cross-namespace
+`records_pkey` failures. Give domain records stable domain-scoped logical IDs
+(`trust_profile:<agent>`, `agent_profile:<agent>`, etc.) while keeping
+`Record.key` equal to the physical store key. Never rewrite IDs inside the
+backend: CAS and record-incarnation semantics require it to preserve the
+caller's logical identity (found 2026-07-26 when a fresh coding agent survived
+in trust state but its agent profile disappeared on restart).
 
 <!-- applied-learning: run-postgres-specific-tests-with-the-postgres-test-adapter -->
 <a id="applied-learning-run-postgres-specific-tests-with-the-postgres-test-adapter"></a>

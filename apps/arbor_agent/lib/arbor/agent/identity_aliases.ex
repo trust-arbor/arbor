@@ -175,12 +175,10 @@ defmodule Arbor.Agent.IdentityAliases do
 
     if available?() do
       # Store the alias mapping
-      record = %Record{
-        id: alias_key,
-        key: alias_key,
-        data: %{primary_id: primary_id, secondary_id: secondary_id},
-        metadata: %{}
-      }
+      record =
+        Record.new(alias_key, %{primary_id: primary_id, secondary_id: secondary_id},
+          id: "identity_alias:#{secondary_id}"
+        )
 
       BufferedStore.put(alias_key, record, name: @store_name)
 

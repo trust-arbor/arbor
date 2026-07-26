@@ -2,6 +2,8 @@ defmodule Arbor.Agent.UserConfigTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Agent.UserConfig
+  alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
@@ -39,6 +41,18 @@ defmodule Arbor.Agent.UserConfigTest do
       UserConfig.put("human_test4", :timezone, "UTC")
       assert "model-a" == UserConfig.get("human_test4", :default_model)
       assert "UTC" == UserConfig.get("human_test4", :timezone)
+    end
+
+    test "durability regression: logical record id is scoped independently from the user key" do
+      principal_id = "human_record_identity"
+
+      assert :ok = UserConfig.put(principal_id, :timezone, "UTC")
+
+      assert {:ok, %Record{} = record} =
+               BufferedStore.get(principal_id, name: :arbor_user_config)
+
+      assert record.key == principal_id
+      assert record.id == "user_config:#{principal_id}"
     end
   end
 
