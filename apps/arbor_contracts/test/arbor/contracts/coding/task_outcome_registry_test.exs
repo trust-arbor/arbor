@@ -42,6 +42,14 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
              worker_stop_reason_not_end_turn
              worker_turn_no_progress
              workspace_missing
+             design_turn_modified_workspace
+             design_response_invalid
+             design_checkpoint_open_failed
+             design_checkpoint_await_failed
+             design_checkpoint_timeout
+             design_checkpoint_outcome_invalid
+             design_worker_phase_invalid
+             design_checkpoint_rework_exhausted
            )
   end
 
@@ -108,6 +116,26 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
 
     assert spec("task_finalization_failed") ==
              {"failed", "cleanup", "runtime", "after_external_change"}
+  end
+
+  test "design pipeline codes have exact closed semantics" do
+    expected = [
+      {"design_turn_modified_workspace", {"failed", "design", "worker", "new_session"}},
+      {"design_response_invalid", {"failed", "design", "worker", "same_session"}},
+      {"design_checkpoint_open_failed", {"failed", "design", "arbor", "after_external_change"}},
+      {"design_checkpoint_await_failed", {"failed", "design", "arbor", "after_external_change"}},
+      {"design_checkpoint_timeout",
+       {"requires_input", "design", "operator", "after_external_change"}},
+      {"design_checkpoint_outcome_invalid", {"failed", "design", "runtime", "none"}},
+      {"design_worker_phase_invalid", {"failed", "design", "runtime", "none"}},
+      {"design_checkpoint_rework_exhausted", {"failed", "design", "runtime", "new_session"}}
+    ]
+
+    for {code, semantics} <- expected do
+      assert TaskOutcomeRegistry.pipeline_error_code?(code)
+      assert spec(code) == semantics
+      assert {:ok, %TaskOutcome{phase: "design"}} = TaskOutcome.from_code(code)
+    end
   end
 
   test "unknown status and code queries fail closed" do

@@ -17,6 +17,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcome do
     preflight
     workspace
     worker_start
+    design
     worker_turn
     validation
     review

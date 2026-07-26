@@ -19,7 +19,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeTest do
     assert TaskOutcome.dispositions() == ~w(succeeded requires_input rejected failed cancelled)
 
     assert TaskOutcome.phases() ==
-             ~w(preflight workspace worker_start worker_turn validation review commit adoption cleanup control)
+             ~w(preflight workspace worker_start design worker_turn validation review commit adoption cleanup control)
 
     assert TaskOutcome.origins() ==
              ~w(arbor security acp_transport provider worker validator reviewer operator runtime)

@@ -60,6 +60,14 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     worker_stop_reason_not_end_turn
     worker_turn_no_progress
     workspace_missing
+    design_turn_modified_workspace
+    design_response_invalid
+    design_checkpoint_open_failed
+    design_checkpoint_await_failed
+    design_checkpoint_timeout
+    design_checkpoint_outcome_invalid
+    design_worker_phase_invalid
+    design_checkpoint_rework_exhausted
   )
 
   @transcript_terminal_statuses ~w(
@@ -241,6 +249,54 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
       phase: "workspace",
       origin: "arbor",
       retry: "after_external_change"
+    },
+    "design_turn_modified_workspace" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "worker",
+      retry: "new_session"
+    },
+    "design_response_invalid" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "worker",
+      retry: "same_session"
+    },
+    "design_checkpoint_open_failed" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "arbor",
+      retry: "after_external_change"
+    },
+    "design_checkpoint_await_failed" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "arbor",
+      retry: "after_external_change"
+    },
+    "design_checkpoint_timeout" => %{
+      disposition: "requires_input",
+      phase: "design",
+      origin: "operator",
+      retry: "after_external_change"
+    },
+    "design_checkpoint_outcome_invalid" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "runtime",
+      retry: "none"
+    },
+    "design_worker_phase_invalid" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "runtime",
+      retry: "none"
+    },
+    "design_checkpoint_rework_exhausted" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "runtime",
+      retry: "new_session"
     }
   }
 
