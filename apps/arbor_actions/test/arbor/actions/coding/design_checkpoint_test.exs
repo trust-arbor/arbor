@@ -129,9 +129,245 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
                      [owner_deadline_unix_ms: requested_deadline]}
 
     assert interaction.request_id == binding.request_id
+    assert interaction.kind == :approval
+    assert interaction.agent_id == "agent_123"
+    assert interaction.user_id == "operator-1"
+    assert interaction.metadata["work_packet"] == ctx.params.work_packet
+    assert interaction.metadata["task"] == ctx.params.task
+    assert interaction.metadata["plan_fingerprint"] == ctx.params.plan_fingerprint
+    assert interaction.metadata["design"] == ctx.params.design
+
+    {:ok, canonical_packet} = WorkPacket.canonical_bytes(ctx.params.work_packet)
+    assert interaction.description =~ canonical_packet
+    assert interaction.description =~ ctx.params.task
+    assert interaction.description =~ ctx.params.plan_fingerprint
+    assert interaction.description =~ ctx.params.design
+    assert opened["evidence"]["request_id"] == opened["request_id"]
+    assert opened["evidence"]["task"] == ctx.params.task
+    assert opened["evidence"]["plan_fingerprint"] == ctx.params.plan_fingerprint
     assert requested_deadline <= ctx.context.run_deadline_unix_ms
     assert requested_deadline > earlier_deadline
     refute_received :legacy_request_interaction_called
+  after
+    Process.delete(:durable_receipt)
+    Process.delete(:persisted_durable_receipt)
+  end
+
+  test "Open rejects work-packet, digest, design-digest, and policy tampering", ctx do
+    tampered_packet = Map.put(ctx.params.work_packet, "success_criteria", ["tampered"])
+
+    assert {:error, :work_packet_digest_mismatch} =
+             Open.run(%{ctx.params | work_packet: tampered_packet}, ctx.context)
+
+    assert {:error, :work_packet_digest_mismatch} =
+             Open.run(%{ctx.params | packet_digest: digest("wrong")}, ctx.context)
+
+    assert {:error, :design_digest_mismatch} =
+             Open.run(%{ctx.params | design_digest: digest("wrong")}, ctx.context)
+
+    assert {:error, :design_digest_mismatch} =
+             Open.run(%{ctx.params | design: ctx.params.design <> " Tampered."}, ctx.context)
+
+    direct_packet = Map.put(ctx.params.work_packet, "checkpoint_policy", "direct")
+    {:ok, direct_digest} = WorkPacket.digest(direct_packet)
+
+    assert {:error, :design_checkpoint_policy_required} =
+             Open.run(
+               %{ctx.params | work_packet: direct_packet, packet_digest: direct_digest},
+               ctx.context
+             )
+
+    refute_received {:request_durable_interaction, _, _}
+  end
+
+  test "Open fails closed when exact design evidence exceeds durable bounds", ctx do
+    oversized_design = String.duplicate("x", DesignCheckpoint.max_design_bytes() + 1)
+
+    assert {:error, :design_checkpoint_design_too_large} =
+             Open.run(
+               %{
+                 ctx.params
+                 | design: oversized_design,
+                   design_digest: digest(oversized_design)
+               },
+               ctx.context
+             )
+
+    bounded_design = String.duplicate("x", DesignCheckpoint.max_design_bytes())
+
+    assert {:error, :design_checkpoint_description_too_large} =
+             Open.run(
+               %{ctx.params | design: bounded_design, design_digest: digest(bounded_design)},
+               ctx.context
+             )
+
+    refute_received {:request_durable_interaction, _, _}
+  end
+
+  test "Open requires a bounded task and a strict compiled plan fingerprint", ctx do
+    assert {:error, :design_checkpoint_task_required} =
+             Open.run(Map.delete(ctx.params, :task), ctx.context)
+
+    assert {:error, :design_checkpoint_task_blank} =
+             Open.run(%{ctx.params | task: " \n\t "}, ctx.context)
+
+    assert {:error, :design_checkpoint_task_invalid_utf8} =
+             Open.run(%{ctx.params | task: <<0xFF>>}, ctx.context)
+
+    assert {:error, :design_checkpoint_task_control_character} =
+             Open.run(%{ctx.params | task: "bad\u0000task"}, ctx.context)
+
+    assert {:error, :design_checkpoint_task_too_large} =
+             Open.run(%{ctx.params | task: String.duplicate("x", 16_385)}, ctx.context)
+
+    assert {:error, :design_checkpoint_plan_fingerprint_required} =
+             Open.run(Map.delete(ctx.params, :plan_fingerprint), ctx.context)
+
+    assert {:error, :design_checkpoint_plan_fingerprint_invalid} =
+             Open.run(
+               %{ctx.params | plan_fingerprint: String.duplicate("a", 63)},
+               ctx.context
+             )
+
+    assert {:error, :design_checkpoint_plan_fingerprint_invalid} =
+             Open.run(
+               %{ctx.params | plan_fingerprint: String.duplicate("A", 64)},
+               ctx.context
+             )
+
+    assert {:error, :design_checkpoint_plan_fingerprint_invalid_utf8} =
+             Open.run(
+               %{ctx.params | plan_fingerprint: <<0xFF, String.duplicate("a", 63)::binary>>},
+               ctx.context
+             )
+
+    assert {:error, :design_checkpoint_plan_fingerprint_control_character} =
+             Open.run(
+               %{ctx.params | plan_fingerprint: <<0, String.duplicate("a", 63)::binary>>},
+               ctx.context
+             )
+
+    alias_context = Map.put(ctx.context, :coding_plan_fingerprint, ctx.params.plan_fingerprint)
+
+    assert {:ok, aliased} =
+             Open.run(Map.delete(ctx.params, :plan_fingerprint), alias_context)
+
+    assert aliased["evidence"]["plan_fingerprint"] == ctx.params.plan_fingerprint
+
+    assert {:error, :design_checkpoint_plan_fingerprint_mismatch} =
+             Open.run(
+               Map.put(ctx.params, :coding_plan_fingerprint, String.duplicate("b", 64)),
+               ctx.context
+             )
+  after
+    Process.delete(:persisted_durable_receipt)
+  end
+
+  test "Open derives deterministic authority ids that bind task and plan fingerprint", ctx do
+    assert {:ok, first} = Open.run(ctx.params, ctx.context)
+    assert {:ok, repeated} = Open.run(ctx.params, ctx.context)
+    assert first["request_id"] == repeated["request_id"]
+    assert String.match?(first["request_id"], ~r/^irq_design_[0-9a-f]{64}$/)
+
+    assert {:ok, task_changed} =
+             Open.run(%{ctx.params | task: "Implement a different task"}, ctx.context)
+
+    assert task_changed["request_id"] != first["request_id"]
+
+    assert {:ok, fingerprint_changed} =
+             Open.run(
+               %{ctx.params | plan_fingerprint: String.duplicate("b", 64)},
+               ctx.context
+             )
+
+    assert fingerprint_changed["request_id"] != first["request_id"]
+    assert fingerprint_changed["request_id"] != task_changed["request_id"]
+  after
+    Process.delete(:persisted_durable_receipt)
+  end
+
+  test "Open rejects widened and malformed durable receipts", ctx do
+    assert {:ok, binding} = DesignCheckpoint.build_binding(ctx.params, ctx.context)
+
+    base_receipt = %{
+      request_id: binding.request_id,
+      operation_id: "op_receipt_1",
+      owner_deadline_unix_ms: 1
+    }
+
+    Process.put(:durable_receipt, %{base_receipt | request_id: "irq_design_wrong"})
+
+    assert {:error, :design_checkpoint_request_id_mismatch} =
+             Open.run(ctx.params, ctx.context)
+
+    Process.put(:durable_receipt, %{base_receipt | operation_id: 123})
+
+    assert {:error, :design_checkpoint_operation_id_required} =
+             Open.run(ctx.params, ctx.context)
+
+    Process.put(:durable_receipt, %{base_receipt | operation_id: ""})
+
+    assert {:error, {:design_checkpoint_identifier_invalid, "operation_id"}} =
+             Open.run(ctx.params, ctx.context)
+
+    Process.put(:durable_receipt, %{base_receipt | owner_deadline_unix_ms: "later"})
+
+    assert {:error, :invalid_design_checkpoint_persisted_deadline} =
+             Open.run(ctx.params, ctx.context)
+
+    Process.put(:durable_receipt, %{base_receipt | owner_deadline_unix_ms: 0})
+
+    assert {:error, :invalid_design_checkpoint_persisted_deadline} =
+             Open.run(ctx.params, ctx.context)
+
+    Process.put(:durable_receipt, %{
+      base_receipt
+      | owner_deadline_unix_ms: ctx.context.run_deadline_unix_ms + 1
+    })
+
+    assert {:error, :design_checkpoint_durable_deadline_extended} =
+             Open.run(ctx.params, ctx.context)
+
+    Process.put(:durable_receipt, "not-a-receipt")
+
+    assert {:error, :invalid_design_checkpoint_durable_receipt} =
+             Open.run(ctx.params, ctx.context)
+  after
+    Process.delete(:durable_receipt)
+    Process.delete(:persisted_durable_receipt)
+  end
+
+  test "Open rejects missing and conflicting durable receipt fields", ctx do
+    assert {:ok, binding} = DesignCheckpoint.build_binding(ctx.params, ctx.context)
+
+    receipt = %{
+      request_id: binding.request_id,
+      operation_id: "op_receipt_1",
+      owner_deadline_unix_ms: 1
+    }
+
+    for key <- [:request_id, :operation_id, :owner_deadline_unix_ms] do
+      Process.put(:durable_receipt, Map.delete(receipt, key))
+
+      assert {:error, {:design_checkpoint_durable_receipt_missing, ^key}} =
+               Open.run(ctx.params, ctx.context)
+    end
+
+    conflicts = %{
+      request_id: "irq_design_conflict",
+      operation_id: "op_receipt_conflict",
+      owner_deadline_unix_ms: 2
+    }
+
+    for {key, conflicting_value} <- conflicts do
+      Process.put(
+        :durable_receipt,
+        Map.put(receipt, Atom.to_string(key), conflicting_value)
+      )
+
+      assert {:error, {:design_checkpoint_durable_receipt_conflict, ^key}} =
+               Open.run(ctx.params, ctx.context)
+    end
   after
     Process.delete(:durable_receipt)
     Process.delete(:persisted_durable_receipt)
@@ -148,6 +384,16 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
              Open.run(ctx.params, %{ctx.context | run_deadline_unix_ms: "tomorrow"})
 
     refute_received {:request_durable_interaction, _, _}
+  end
+
+  test "Open fails closed when durable interactions are unavailable", ctx do
+    Process.put(:durable_ready, false)
+
+    assert {:error, :durable_interaction_unavailable} = Open.run(ctx.params, ctx.context)
+    refute_received {:operator_for_agent, _}
+    refute_received {:request_durable_interaction, _, _}
+  after
+    Process.delete(:durable_ready)
   end
 
   test "Await observes the exact durable identity and never calls a legacy mutating await", ctx do
@@ -168,6 +414,44 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
            ]
 
     refute_received :legacy_await_interaction_response_called
+  after
+    Process.delete(:await_result)
+    Process.delete(:persisted_durable_receipt)
+  end
+
+  test "Await normalizes approve, rework, deny, and timeout outcomes", ctx do
+    assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+    params = await_params(ctx.params, opened)
+
+    for {await_result, expected_outcome, expected_note} <- [
+          {{:ok, :approved, authority_metadata(opened)}, "approve", ""},
+          {{:ok, :rejected,
+            Map.merge(authority_metadata(opened), %{
+              decision: :rework,
+              note: "Please add the rollback test."
+            })}, "rework", "Please add the rollback test."},
+          {{:ok, :rejected,
+            Map.merge(authority_metadata(opened), %{
+              decision: :deny,
+              note: "Scope is too broad."
+            })}, "deny", "Scope is too broad."}
+        ] do
+      Process.put(:await_result, await_result)
+
+      assert {:ok, result} = Await.run(params, ctx.context)
+      assert result["checkpoint_outcome"] == expected_outcome
+      assert result["note"] == expected_note
+      assert result["request_id"] == opened["request_id"]
+      assert result["evidence"] == opened["evidence"]
+    end
+
+    Process.put(:await_result, {:error, :timeout})
+
+    assert {:ok, timeout} = Await.run(params, ctx.context)
+    assert timeout["checkpoint_outcome"] == "timeout"
+    assert timeout["note"] == ""
+    assert timeout["request_id"] == opened["request_id"]
+    assert timeout["evidence"] == opened["evidence"]
   after
     Process.delete(:await_result)
     Process.delete(:persisted_durable_receipt)
@@ -210,12 +494,61 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     Process.delete(:persisted_durable_receipt)
   end
 
-  test "validates evidence-derived request ids and action catalog placement", ctx do
+  test "Await rejects task and fingerprint changes under an existing authority id", ctx do
     assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+    params = await_params(ctx.params, opened)
 
     assert {:error, :design_checkpoint_request_id_mismatch} =
-             Await.run(%{await_params(ctx.params, opened) | task: "tampered"}, ctx.context)
+             Await.run(%{params | task: "tampered"}, ctx.context)
 
+    assert {:error, :design_checkpoint_request_id_mismatch} =
+             Await.run(
+               %{params | plan_fingerprint: String.duplicate("b", 64)},
+               ctx.context
+             )
+
+    refute_received {:await_durable_interaction_response, _, _, _}
+  after
+    Process.delete(:persisted_durable_receipt)
+  end
+
+  test "Await rejects malformed or mismatched terminal authority evidence", ctx do
+    assert {:ok, opened} = Open.run(ctx.params, ctx.context)
+    params = await_params(ctx.params, opened)
+
+    Process.put(:await_result, {:ok, :approved, %{"request_id" => "irq_design_wrong"}})
+
+    assert {:error, {:design_checkpoint_authority_mismatch, "request_id"}} =
+             Await.run(params, ctx.context)
+
+    Process.put(:await_result, {:ok, :approved, %{"task" => "tampered"}})
+
+    assert {:error, {:design_checkpoint_authority_mismatch, "task"}} =
+             Await.run(params, ctx.context)
+
+    Process.put(:await_result, {:ok, :approved, %{"evidence" => "not-a-map"}})
+
+    assert {:error, :malformed_design_checkpoint_authority_evidence} =
+             Await.run(params, ctx.context)
+
+    Process.put(
+      :await_result,
+      {:ok, :approved, %{"evidence" => Map.put(opened["evidence"], "task", "tampered")}}
+    )
+
+    assert {:error, :design_checkpoint_authority_mismatch} =
+             Await.run(params, ctx.context)
+
+    Process.put(:await_result, {:ok, :approved, "not-metadata"})
+
+    assert {:error, :malformed_design_checkpoint_authority_evidence} =
+             Await.run(params, ctx.context)
+  after
+    Process.delete(:await_result)
+    Process.delete(:persisted_durable_receipt)
+  end
+
+  test "catalogs canonical internal actions without exposing them" do
     assert Open in Arbor.Actions.list_actions()[:coding]
     assert Await in Arbor.Actions.list_actions()[:coding]
     assert Open.effect_class() == :network_egress
@@ -223,8 +556,15 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     assert Await.execution_idempotency() == :read_only
     assert Arbor.Actions.pipeline_internal_action?(Open)
     assert Arbor.Actions.pipeline_internal_action?(Await)
-  after
-    Process.delete(:persisted_durable_receipt)
+
+    assert Arbor.Actions.canonical_uri_for(Open, %{}) ==
+             "arbor://action/coding/design_checkpoint/open"
+
+    assert Arbor.Actions.canonical_uri_for(Await, %{}) ==
+             "arbor://action/coding/design_checkpoint/await"
+
+    refute Open in Arbor.Actions.exposed_actions()
+    refute Await in Arbor.Actions.exposed_actions()
   end
 
   defp await_params(params, opened) do
