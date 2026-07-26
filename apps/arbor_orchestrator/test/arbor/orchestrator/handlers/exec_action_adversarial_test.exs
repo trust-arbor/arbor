@@ -13,9 +13,9 @@ defmodule Arbor.Orchestrator.Handlers.ExecActionAdversarialTest do
     3. **Resilience** — exceptions raised inside the handler must
        become Outcome failures, not engine crashes.
 
-  All cases assert that the engine completes (no crash), the outcome
-  is a fail (not silent success), and the failure_reason mentions the
-  underlying problem.
+  All cases assert that the engine fails cleanly rather than crashing or
+  silently succeeding. Errors discovered while binding replay semantics fail
+  before execution; runtime action failures produce a failed outcome envelope.
   """
 
   use ExUnit.Case, async: true
@@ -108,12 +108,8 @@ defmodule Arbor.Orchestrator.Handlers.ExecActionAdversarialTest do
       }
       """
 
-      assert {:ok, result} = run_dot(dot)
-      assert result.final_outcome.status == :fail
-      reason = final_failure_reason(result)
-      assert is_binary(reason)
-      assert reason =~ "Unknown action"
-      assert reason =~ "nonexistent.fake_action"
+      assert {:error, {:execution_classification_failed, "runit", :unknown_action}} =
+               run_dot(dot)
     end
 
     test "action name with invalid module characters (control chars)" do
@@ -128,9 +124,9 @@ defmodule Arbor.Orchestrator.Handlers.ExecActionAdversarialTest do
       }
       """
 
-      # Should fail cleanly (Unknown action), not crash.
-      assert {:ok, result} = run_dot(dot)
-      assert result.final_outcome.status == :fail
+      # Unknown actions fail while binding replay semantics, before execution.
+      assert {:error, {:execution_classification_failed, "runit", :unknown_action}} =
+               run_dot(dot)
     end
   end
 

@@ -1184,7 +1184,7 @@ defmodule Arbor.Orchestrator.RunJournalFencedClaimL4Test do
       assert {:error, :not_found} = RunJournal.get_record(legacy_run, server: journal_name)
     end
 
-    test "fenced capability preserves local legacy stale cleanup", %{suffix: suffix} do
+    test "fenced capability preserves local legacy stale recovery", %{suffix: suffix} do
       store_name = :"l4b_local_legacy_store_#{suffix}"
       journal_name = :"l4b_local_legacy_journal_#{suffix}"
       coord_name = :"l4b_local_legacy_coord_#{suffix}"
@@ -1267,7 +1267,9 @@ defmodule Arbor.Orchestrator.RunJournalFencedClaimL4Test do
       send(coord, :check_stale_heartbeats)
       _ = RecoveryCoordinator.status(coord_name)
 
-      assert %JobRegistry.Entry{status: :abandoned} = JobRegistry.get(legacy_run)
+      assert %JobRegistry.Entry{status: :interrupted, owner_node: nil} =
+               JobRegistry.get(legacy_run)
+
       assert {:error, :not_found} = RunJournal.get_record(legacy_run, server: journal_name)
     end
   end
