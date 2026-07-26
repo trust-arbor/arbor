@@ -2029,6 +2029,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     attrs =
       Map.merge(
         %{
+          "version" => 1,
           "task" => "Implement a focused reviewed change",
           "repo_root" => "/tmp/arbor-coding-plan",
           "worker" => %{"provider" => "grok"}

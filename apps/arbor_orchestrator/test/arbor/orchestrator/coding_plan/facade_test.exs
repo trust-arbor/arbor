@@ -67,6 +67,7 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
     template_path: template_path
   } do
     attrs = %{
+      "version" => 1,
       "task" => "Add a focused facade",
       "repo_root" => "/tmp/repo",
       "worker" => %{"provider" => "grok"}
@@ -100,7 +101,12 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
   end
 
   test "accepts keyword input supported by Plan.new/1" do
-    attrs = [task: "Compile keywords", repo_root: "/tmp/repo", worker: [provider: "grok"]]
+    attrs = [
+      version: 1,
+      task: "Compile keywords",
+      repo_root: "/tmp/repo",
+      worker: [provider: "grok"]
+    ]
 
     assert {:ok, _result} = Arbor.Orchestrator.compile_coding_plan(attrs)
     assert_receive {:coding_plan_compile_called, %Plan{task: "Compile keywords"}, _opts}
@@ -109,6 +115,7 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
   test "passes an existing Plan through unchanged", %{template_path: template_path} do
     assert {:ok, plan} =
              Plan.new(%{
+               version: 1,
                task: "Use an existing plan",
                repo_root: "/tmp/repo",
                worker: %{provider: "grok", permission_mode: "deny"}
@@ -210,6 +217,7 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
   test "forwards plan errors and bounds compiler tagged errors" do
     assert {:error, {:missing_field, "task"}} =
              Arbor.Orchestrator.compile_coding_plan(%{
+               version: 1,
                repo_root: "/tmp/repo",
                worker: %{provider: "grok"}
              })
@@ -444,6 +452,7 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
 
   defp valid_attrs do
     %{
+      "version" => 1,
       "task" => "Compile a reviewed plan",
       "repo_root" => "/tmp/repo",
       "worker" => %{"provider" => "grok"}

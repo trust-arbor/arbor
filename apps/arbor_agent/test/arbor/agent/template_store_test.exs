@@ -5,6 +5,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
 
   alias Arbor.Agent.{Character, TemplateStore}
   alias Arbor.Agent.Template.File, as: TemplateFile
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
 
   @test_dir Path.join(
               System.tmp_dir!(),
@@ -398,6 +399,10 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert joined =~ "DOT pipeline"
       assert joined =~ ~s({"kind":"coding_change","plan":{...}})
       assert joined =~ "worker.provider"
+      assert joined =~ "version 2"
+      assert joined =~ "canonical work_packet"
+      assert joined =~ "work_packet_digest"
+      assert joined =~ "checkpoint_policy `design_required`"
 
       refute joined =~ "coding_produce_reviewable_change"
       refute joined =~ "compatibility/rollback"
@@ -522,15 +527,35 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert map_size(rules) == length(blocked) + 3
     end
 
-    test "requires strict CodingPlan v1 output and keeps raw DOT proposal-only" do
+    test "requires trusted digest binding for CodingPlan v2 and keeps raw DOT proposal-only" do
       assert {:ok, data} = TemplateStore.resolve("pipeline_architect")
       instructions = data["character"]["instructions"]
 
-      assert data["domain_context"] =~ "CodingPlan v1 is a closed object"
+      assert data["domain_context"] =~ "CodingPlan v2 is a closed object"
       assert data["domain_context"] =~ "A separate caller-bound executor"
-      assert Enum.any?(instructions, &String.contains?(&1, "strict CodingPlan v1 object"))
+      assert data["domain_context"] =~ "`work_packet_digest`"
+      assert data["domain_context"] =~ "`design_required`"
+      assert data["domain_context"] =~ "has no hashing tool"
+      assert data["domain_context"] =~ "always leaves `work_packet_digest` null"
+      assert data["domain_context"] =~ "The raw proposal is not an"
+      assert data["domain_context"] =~ "admissible plan"
+      assert Enum.any?(instructions, &String.contains?(&1, "CodingPlan v2 proposal"))
+      assert Enum.any?(instructions, &String.contains?(&1, "unbound null"))
       assert Enum.any?(instructions, &String.contains?(&1, "NON-EXECUTABLE PROPOSAL"))
       assert Enum.any?(instructions, &String.contains?(&1, "never run, validate, compile"))
+
+      assert [_, json] = Regex.run(~r/```json\n(.*?)\n```/s, data["domain_context"])
+      assert {:ok, attrs} = Jason.decode(json)
+      assert attrs["version"] == 2
+      assert attrs["work_packet_digest"] == nil
+
+      assert {:error, {:invalid_field, "work_packet_digest", :digest_mismatch}} =
+               Plan.new(attrs)
+
+      assert {:ok, digest} = WorkPacket.digest(attrs["work_packet"])
+
+      assert {:ok, %Plan{version: 2, work_packet_digest: ^digest}} =
+               attrs |> Map.put("work_packet_digest", digest) |> Plan.new()
     end
   end
 

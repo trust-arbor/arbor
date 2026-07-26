@@ -2,7 +2,7 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
   @moduledoc false
 
   alias Arbor.Commands.CodingBenchmark.{ApprovalObservations, Git, Runtime}
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
   alias Arbor.Shell
 
   @app :arbor_commands
@@ -365,34 +365,67 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     do: setup_error(:pipeline_budget_timeout_insufficient)
 
   defp pipeline_plan_task(request, scope, wall_clock_ms) do
-    plan_attrs = %{
-      "version" => Plan.schema_version(),
-      "task" => task_text(request["normalized_input"]),
-      "repo_root" => request["workdir"],
-      "base_ref" => request["base_commit_oid"],
-      "workspace_policy" => %{
-        "mode" => "isolated",
-        "branch_name" => scope.branch_name,
-        "worktree_base_dir" => scope.worktree_root
-      },
-      "worker" => %{"provider" => request["acp_agent"]},
-      "review_profile" => "binding",
-      "budgets" => %{"wall_clock_ms" => wall_clock_ms},
-      "output" => %{"draft_pr" => false}
-    }
+    normalized_input = request["normalized_input"]
 
-    case Plan.new(plan_attrs) do
-      {:ok, plan} ->
-        canonical = Plan.to_map(plan)
+    with {:ok, {work_packet, work_packet_digest}} <-
+           benchmark_work_packet(normalized_input) do
+      plan_attrs = %{
+        "version" => Plan.latest_schema_version(),
+        "task" => task_text(normalized_input),
+        "repo_root" => request["workdir"],
+        "base_ref" => request["base_commit_oid"],
+        "workspace_policy" => %{
+          "mode" => "isolated",
+          "branch_name" => scope.branch_name,
+          "worktree_base_dir" => scope.worktree_root
+        },
+        "worker" => %{"provider" => request["acp_agent"]},
+        "review_profile" => "binding",
+        "budgets" => %{"wall_clock_ms" => wall_clock_ms},
+        "output" => %{"draft_pr" => false},
+        "work_packet" => work_packet,
+        "work_packet_digest" => work_packet_digest
+      }
 
-        if canonical["budgets"]["wall_clock_ms"] == wall_clock_ms do
-          {:ok, %{"kind" => "coding_change", "plan" => canonical}}
-        else
-          setup_error(:pipeline_budget_mismatch)
-        end
+      case Plan.new(plan_attrs) do
+        {:ok, plan} ->
+          canonical = Plan.to_map(plan)
 
-      {:error, reason} ->
-        setup_error({:invalid_pipeline_plan, reason})
+          if canonical["budgets"]["wall_clock_ms"] == wall_clock_ms do
+            {:ok, %{"kind" => "coding_change", "plan" => canonical}}
+          else
+            setup_error(:pipeline_budget_mismatch)
+          end
+
+        {:error, reason} ->
+          setup_error({:invalid_pipeline_plan, reason})
+      end
+    end
+  end
+
+  defp benchmark_work_packet(%{
+         "objective" => objective,
+         "acceptance_criteria" => acceptance_criteria
+       }) do
+    success_criteria =
+      case acceptance_criteria do
+        [] -> [objective]
+        criteria -> criteria
+      end
+
+    with {:ok, packet} <-
+           WorkPacket.normalize(%{
+             "success_criteria" => success_criteria,
+             "non_goals" => [],
+             "constraints" => [],
+             "architecture_refs" => [],
+             "required_evidence" => [],
+             "checkpoint_policy" => "direct"
+           }),
+         {:ok, digest} <- WorkPacket.digest(packet) do
+      {:ok, {packet, digest}}
+    else
+      {:error, reason} -> setup_error({:invalid_pipeline_work_packet, reason})
     end
   end
 

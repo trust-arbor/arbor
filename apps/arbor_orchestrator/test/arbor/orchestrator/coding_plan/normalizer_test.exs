@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
   alias Arbor.Orchestrator.CodingPlan.Normalizer
 
   @moduletag :fast
@@ -44,6 +44,7 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
                Normalizer.normalize_task(%{@legacy_task | "task" => task_text})
 
       assert plan.task == task_text
+      assert plan.version == 2
       assert plan.repo_root == "/workspace/arbor"
       assert plan.base_ref == "HEAD"
 
@@ -63,6 +64,19 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
              }
 
       assert plan.review_profile == "binding"
+
+      assert plan.work_packet == %{
+               "version" => 1,
+               "success_criteria" => [task_text],
+               "non_goals" => [],
+               "constraints" => [],
+               "architecture_refs" => [],
+               "required_evidence" => [],
+               "checkpoint_policy" => "direct"
+             }
+
+      assert {:ok, digest} = WorkPacket.digest(plan.work_packet)
+      assert plan.work_packet_digest == digest
 
       assert plan.output == %{
                "commit" => true,
@@ -164,13 +178,13 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
     test "round-trips a complete string-keyed versioned plan" do
       direct_plan = %{
         "version" => 1,
-        "task" => "Add a security regression test",
+        "task" => "Update coding dispatch documentation",
         "repo_root" => "/workspace/arbor",
         "base_ref" => "main",
-        "task_class" => "security_regression",
+        "task_class" => "docs_only",
         "workspace_policy" => %{
           "mode" => "isolated",
-          "branch_name" => "test/security-regression",
+          "branch_name" => "docs/coding-dispatch",
           "worktree_base_dir" => "/tmp/worktrees"
         },
         "worker" => %{
@@ -181,7 +195,7 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
           "resume_provider" => "grok",
           "resume_session_id" => "provider-session-123"
         },
-        "validation_profile" => "security_regression",
+        "validation_profile" => "docs_only",
         "review_profile" => "human_required",
         "overlays" => [],
         "rework" => %{"max_cycles" => 1, "stop_conditions" => ["validation_failed"]},
@@ -192,7 +206,7 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
           "parallelism" => 1
         },
         "output" => %{"commit" => true, "draft_pr" => true, "retain_workspace" => true},
-        "requested_paths" => ["apps/arbor_security/test/security_regression_test.exs"]
+        "requested_paths" => ["docs/arbor/CODING_TASK_DISPATCH.md"]
       }
 
       assert {:ok, plan} =
@@ -201,10 +215,30 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
       assert Plan.to_map(plan) == direct_plan
     end
 
+    test "rejects explicit version 1 high-risk plans at the new-task admission boundary" do
+      for task_class <-
+            ~w(security_regression contract_change cross_app database_migration frontend_visual) do
+        task = %{
+          "kind" => "coding_change",
+          "plan" => %{
+            "version" => 1,
+            "task" => "high-risk change",
+            "repo_root" => "/workspace/arbor",
+            "task_class" => task_class,
+            "worker" => %{"provider" => "grok"}
+          }
+        }
+
+        assert {:error, {:legacy_coding_plan_not_allowed_for_task_class, ^task_class}} =
+                 Normalizer.normalize_task(task)
+      end
+    end
+
     test "returns Plan validation errors without losing detail" do
       task = %{
         "kind" => "coding_change",
         "plan" => %{
+          "version" => 1,
           "task" => "test",
           "repo_root" => "/workspace/arbor",
           "worker" => %{"provider" => "grok"},
@@ -220,6 +254,7 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
       task = %{
         "kind" => "coding_change",
         "plan" => %{
+          "version" => 1,
           "task" => "test",
           "repo_root" => "/workspace/arbor",
           "worker" => %{"provider" => "grok"},
@@ -236,6 +271,7 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
         task = %{
           "kind" => "coding_change",
           "plan" => %{
+            "version" => 1,
             "task" => "test",
             "repo_root" => "/workspace/arbor",
             "worker" => %{"provider" => "grok"},

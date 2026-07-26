@@ -1781,6 +1781,33 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute File.exists?(Config.coding_pipeline_logs_root())
     end
 
+    test "security regression: rejects new high-risk version 1 before compilation or workspace" do
+      Application.put_env(:arbor_orchestrator, :coding_plan_compiler, ObservedCompiler)
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        ObservedArtifactStore
+      )
+
+      task =
+        valid_direct_task(%{
+          "task_class" => "security_regression",
+          "validation_profile" => "security_regression",
+          "requested_paths" => ["apps/arbor_security/test/security_regression_test.exs"]
+        })
+
+      assert {:error, {:legacy_coding_plan_not_allowed_for_task_class, "security_regression"}} =
+               CodingTaskExecutor.run("agent_direct", task, valid_context())
+
+      refute_receive :coding_plan_compiler_called
+      refute_receive :coding_plan_artifact_store_called
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
+      refute File.exists?(Config.coding_pipeline_logs_root())
+      assert File.ls!(configured_worktree_root()) == []
+    end
+
     test "prepares the exact compilation once before archive and runner" do
       Application.put_env(:arbor_orchestrator, :coding_plan_compiler, ObservedCompiler)
 
@@ -2122,15 +2149,30 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert artifacts["graph_hash"] ==
                :crypto.hash(:sha256, dot_source) |> Base.encode16(case: :lower)
 
+      work_packet = %{
+        "version" => 1,
+        "success_criteria" => ["add a feature"],
+        "non_goals" => [],
+        "constraints" => [],
+        "architecture_refs" => [],
+        "required_evidence" => [],
+        "checkpoint_policy" => "direct"
+      }
+
+      {:ok, work_packet_digest} = WorkPacket.digest(work_packet)
+
       {:ok, expected_plan} =
         Plan.new(%{
+          "version" => 2,
           "task" => "add a feature",
           "repo_root" => configured_repo_path(),
           "worker" => %{"provider" => "codex"},
           "workspace_policy" => %{
             "mode" => "isolated",
             "worktree_base_dir" => configured_worktree_root()
-          }
+          },
+          "work_packet" => work_packet,
+          "work_packet_digest" => work_packet_digest
         })
 
       assert Jason.decode!(File.read!(artifacts["coding_plan_path"])) ==

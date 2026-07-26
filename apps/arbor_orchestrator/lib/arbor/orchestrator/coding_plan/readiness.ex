@@ -156,7 +156,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
               plan_error_code(reason),
               observed_at,
               "The coding plan does not satisfy the versioned plan contract.",
-              "Provide a valid version 1 plan with a task, repo_root, and worker provider."
+              "Provide a valid version 2 plan with task, repo_root, worker provider, " <>
+                "work_packet, and work_packet_digest; use explicit version 1 only for " <>
+                "legacy compatibility."
             )
           ]
         )

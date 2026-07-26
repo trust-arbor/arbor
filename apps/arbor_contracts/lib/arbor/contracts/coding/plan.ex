@@ -20,6 +20,7 @@ defmodule Arbor.Contracts.Coding.Plan do
 
   ## Defaults and bounds
 
+  * schema version: latest supported version (`2`)
   * base ref: `HEAD`
   * isolated workspace, with generated branch/worktree locations
   * pooled ACP worker execution, with no provider session resumed by default
@@ -132,7 +133,7 @@ defmodule Arbor.Contracts.Coding.Plan do
   typedstruct enforce: true do
     @typedoc "A normalized coding plan with no embedded execution authority."
 
-    field(:version, pos_integer(), default: @schema_version)
+    field(:version, pos_integer(), default: @latest_schema_version)
     field(:task, String.t())
     field(:repo_root, String.t())
     field(:base_ref, String.t(), default: @default_base_ref)
@@ -162,6 +163,11 @@ defmodule Arbor.Contracts.Coding.Plan do
   @spec supported_schema_versions() :: [pos_integer()]
   def supported_schema_versions, do: @supported_schema_versions
 
+  @doc "Return whether the task class requires a reviewed design checkpoint."
+  @spec design_checkpoint_required?(term()) :: boolean()
+  def design_checkpoint_required?(task_class),
+    do: task_class in @design_required_task_classes
+
   @doc "Return all coding profile IDs accepted by this contract."
   @spec profile_ids() :: [String.t()]
   def profile_ids, do: Enum.sort(@profile_ids)
@@ -169,15 +175,17 @@ defmodule Arbor.Contracts.Coding.Plan do
   @doc """
   Construct and validate a coding plan.
 
-  Required input is limited to `task`, `repo_root`, and a `worker` object with
-  a provider. All omitted policy fields are filled with canonical defaults.
-  Known enum atoms are accepted for ergonomic keyword construction and are
-  normalized to strings.
+  Version omission selects the latest schema. Version 2 additionally requires
+  an exact `work_packet` and matching `work_packet_digest`. Explicit version 1
+  remains accepted for archived compatibility data. All omitted policy fields
+  are filled with canonical defaults. Known enum atoms are accepted for
+  ergonomic keyword construction and are normalized to strings.
   """
   @spec new(map() | keyword()) :: {:ok, t()} | {:error, term()}
   def new(attrs) do
     with {:ok, attrs} <- normalize_object(attrs, @top_fields, []),
-         {:ok, version} <- normalize_version(Map.get(attrs, :version, @schema_version)),
+         {:ok, version} <-
+           normalize_version(Map.get(attrs, :version, @latest_schema_version)),
          {:ok, {work_packet, work_packet_digest}} <-
            normalize_work_packet_fields(attrs, version),
          {:ok, task} <- fetch_nonblank_string(attrs, :task, []),

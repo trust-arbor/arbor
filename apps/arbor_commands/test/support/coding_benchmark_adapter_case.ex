@@ -10,7 +10,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
   alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
   alias Arbor.Commands.CodingBenchmarkTempRoot
   alias Arbor.Common.SafePath
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
 
   using do
     quote do
@@ -28,7 +28,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
       alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
       alias Arbor.Commands.CodingBenchmarkTempRoot
       alias Arbor.Common.SafePath
-      alias Arbor.Contracts.Coding.Plan
+      alias Arbor.Contracts.Coding.{Plan, WorkPacket}
 
       alias Arbor.Commands.CodingBenchmarkAdapterCase.{
         ArtifactSwapVerifier,
@@ -619,12 +619,19 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
         assert task["kind"] == "coding_change"
         plan = task["plan"]
         assert is_map(plan) and not is_struct(plan)
-        assert plan["version"] == Plan.schema_version()
+        assert plan["version"] == Plan.latest_schema_version()
         assert plan["task"] == task_text
         assert plan["repo_root"] == request["workdir"]
         assert plan["base_ref"] == request["base_commit_oid"]
         assert plan["review_profile"] == "binding"
         assert plan["worker"]["provider"] == "codex"
+
+        assert plan["work_packet"]["success_criteria"] ==
+                 request["normalized_input"]["acceptance_criteria"]
+
+        assert plan["work_packet"]["checkpoint_policy"] == "direct"
+        assert {:ok, packet_digest} = WorkPacket.digest(plan["work_packet"])
+        assert plan["work_packet_digest"] == packet_digest
 
         assert plan["workspace_policy"] == %{
                  "mode" => "isolated",
@@ -1153,6 +1160,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
 
     assert {:ok, plan} =
              Plan.new(%{
+               "version" => 1,
                "base_ref" => fields["base_ref"],
                "repo_root" => fields["repo_path"],
                "task" => fields["task"],

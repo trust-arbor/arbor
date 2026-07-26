@@ -12,6 +12,8 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     Arbor.Actions.Acp.SendMessage,
     Arbor.Actions.Acp.SessionStatus,
     Arbor.Actions.Acp.CloseSession,
+    Arbor.Actions.Coding.DesignCheckpoint.Open,
+    Arbor.Actions.Coding.DesignCheckpoint.Await,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.ReviewTree.Read,
     Arbor.Actions.Coding.ReviewTree.Search,
@@ -690,6 +692,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
 
     {:ok, plan} =
       Plan.new(%{
+        "version" => 1,
         "task" => "Prove a reviewed security regression",
         "repo_root" => "/tmp/security-profile-repo",
         "worker" => %{"provider" => "codex"},

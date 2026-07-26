@@ -317,8 +317,12 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
       desc = dispatch_tool.description
       assert desc =~ ~s({"kind":"coding_change","plan":{...}})
-      assert desc =~ "version is 1"
+      assert desc =~ "new plans use version 2"
       assert desc =~ "task, repo_root, and worker.provider"
+      assert desc =~ "work_packet"
+      assert desc =~ "work_packet_digest"
+      assert desc =~ "omitted version selects 2"
+      assert desc =~ "high-risk work"
       assert desc =~ "validation_profile"
       assert desc =~ "review_profile"
       assert desc =~ "compiled DOT pipeline by default"
@@ -335,10 +339,12 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       refute is_nil(object_branch)
 
       assert object_branch.description =~ ~s({"kind":"coding_change","plan":)
-      assert object_branch.description =~ ~s("version":1)
+      assert object_branch.description =~ ~s("version":2)
       assert object_branch.description =~ ~s("task":)
       assert object_branch.description =~ ~s("repo_root":)
       assert object_branch.description =~ ~s("worker":{"provider")
+      assert object_branch.description =~ ~s("work_packet":)
+      assert object_branch.description =~ ~s("work_packet_digest":)
       assert object_branch.description =~ "validation_profile"
       assert object_branch.description =~ "review_profile"
 
@@ -348,6 +354,10 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert plan_desc =~ "task"
       assert plan_desc =~ "repo_root"
       assert plan_desc =~ "worker.provider"
+      assert plan_desc =~ "work_packet"
+      assert plan_desc =~ "work_packet_digest"
+      assert plan_desc =~ "design_required"
+      assert plan_desc =~ "legacy compatibility"
       assert plan_desc =~ "validation_profile"
       assert plan_desc =~ "review_profile"
 

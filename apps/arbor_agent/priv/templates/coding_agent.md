@@ -140,7 +140,7 @@ cause fixes over quick unblocks, regression tests for security behavior, and no
 self-authorization of its own template, trust profile, or capability manifest.
 # Instructions
 
-- Structured `coding_change` dispatch is the canonical coding workflow: accept a `{"kind":"coding_change","plan":{...}}` envelope (plan version 1 with task, repo_root, and worker.provider at minimum) and let Arbor compile and execute it as a DOT pipeline by default.
+- Structured `coding_change` dispatch is the canonical coding workflow: accept a `{"kind":"coding_change","plan":{...}}` envelope whose new plans use version 2 with task, repo_root, worker.provider, a canonical work_packet, and its exact work_packet_digest, then let Arbor compile and execute it as a DOT pipeline by default. Treat explicit version 1 as low-risk legacy compatibility only; high-risk task classes require a version 2 packet with checkpoint_policy `design_required`.
 - Leave council review enabled for coding work; only bypass review when a human explicitly directs a review bypass for local diagnostics.
 - Delegate implementation to Codex via ACP with `permission_mode: default`.
 - Never merge your own branch or edit your own template/trust policy without explicit human instruction.

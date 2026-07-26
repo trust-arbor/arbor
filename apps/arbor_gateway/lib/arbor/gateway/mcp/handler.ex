@@ -263,7 +263,9 @@ defmodule Arbor.Gateway.MCP.Handler do
             "Accepts ordinary string prompts and generic object tasks. " <>
             "Stable structured coding path: " <>
             ~s({"kind":"coding_change","plan":{...}}) <>
-            " - plan version is 1 and minimally requires task, repo_root, and worker.provider; " <>
+            " - new plans use version 2 and require task, repo_root, and worker.provider, " <>
+            "plus a canonical work_packet and its work_packet_digest; omitted version selects 2. " <>
+            "Explicit version 1 is legacy compatibility only and cannot admit high-risk work. " <>
             "validation_profile and review_profile are optional reviewed selectors. " <>
             "Structured coding_change dispatch runs the compiled DOT pipeline by default.",
         inputSchema: %{
@@ -283,7 +285,7 @@ defmodule Arbor.Gateway.MCP.Handler do
                   type: "object",
                   description:
                     "Structured task payload. Canonical coding example: " <>
-                      ~s({"kind":"coding_change","plan":{"version":1,"task":"...","repo_root":"/path/to/repo","worker":{"provider":"codex"}}}) <>
+                      ~s({"kind":"coding_change","plan":{"version":2,"task":"...","repo_root":"/path/to/repo","worker":{"provider":"codex"},"work_packet":{"version":1,"success_criteria":["..."],"non_goals":[],"constraints":[],"architecture_refs":[],"required_evidence":[],"checkpoint_policy":"direct"},"work_packet_digest":"sha256:<64 lowercase hex>"}}) <>
                       ". Optional plan fields include validation_profile and review_profile.",
                   properties: %{
                     kind: %{
@@ -293,9 +295,11 @@ defmodule Arbor.Gateway.MCP.Handler do
                     plan: %{
                       type: "object",
                       description:
-                        "Version-1 coding plan. Minimally requires task, repo_root, and " <>
-                          "worker.provider. Optional reviewed selectors: validation_profile, " <>
-                          "review_profile."
+                        "Version-2 coding plan. Requires task, repo_root, worker.provider, " <>
+                          "work_packet, and its canonical work_packet_digest. High-risk task " <>
+                          "classes require work_packet.checkpoint_policy=design_required. " <>
+                          "validation_profile and review_profile are optional reviewed selectors. " <>
+                          "Explicit version 1 is retained only for low-risk legacy compatibility."
                     }
                   }
                 }

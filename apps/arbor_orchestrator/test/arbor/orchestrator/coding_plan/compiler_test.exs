@@ -1369,7 +1369,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              compile(plan!(%{"budgets" => %{"parallelism" => 2}}), ctx)
   end
 
-  test "specialized task class cannot select weaker validation", ctx do
+  test "explicit archived version 1 specialized plans still verify without weaker validation",
+       ctx do
     mismatch =
       plan!(%{
         "task_class" => "docs_only",
@@ -1701,6 +1702,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
   defp base_plan_attrs do
     %{
+      "version" => 1,
       "task" => "Implement a focused reviewed change",
       "repo_root" => "/tmp/arbor-coding-plan",
       "worker" => %{"provider" => "grok"}
@@ -1726,7 +1728,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     plan!(
       Map.merge(
-        %{version: 2, work_packet: packet, work_packet_digest: digest},
+        %{
+          "version" => 2,
+          "work_packet" => packet,
+          "work_packet_digest" => digest
+        },
         plan_overrides
       )
     )

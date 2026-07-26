@@ -40,6 +40,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     Arbor.Actions.Acp.SendMessage,
     Arbor.Actions.Acp.SessionStatus,
     Arbor.Actions.Acp.CloseSession,
+    Arbor.Actions.Coding.DesignCheckpoint.Open,
+    Arbor.Actions.Coding.DesignCheckpoint.Await,
     Arbor.Actions.Coding.Workspace.Acquire,
     Arbor.Actions.Coding.Workspace.Inspect,
     Arbor.Actions.Coding.Workspace.Release,
@@ -606,6 +608,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     attrs =
       Map.merge(
         %{
+          "version" => 1,
           "task" => "Check coding readiness",
           "repo_root" => repo,
           "worker" => %{"provider" => "grok"}

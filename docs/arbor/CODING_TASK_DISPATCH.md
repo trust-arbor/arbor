@@ -78,22 +78,39 @@ Dispatch with a signed MCP request. The stable coding envelope is:
   "task": {
     "kind": "coding_change",
     "plan": {
-      "version": 1,
+      "version": 2,
       "task": "Implement the requested change with tests",
       "repo_root": "/absolute/path/to/repo",
-      "worker": { "provider": "codex" }
+      "worker": { "provider": "codex" },
+      "work_packet": {
+        "version": 1,
+        "success_criteria": ["Implement the requested change with tests"],
+        "non_goals": [],
+        "constraints": [],
+        "architecture_refs": [],
+        "required_evidence": [],
+        "checkpoint_policy": "direct"
+      },
+      "work_packet_digest": "sha256:15070222bcf40d76aecc100d459df6f873178037400e5dfe9e2f9802833ebdae"
     }
   }
 }
 ```
 
-Plan version is **1**. Minimally required plan fields:
+New plans use version **2**. Omitting `version` also selects version 2; it does
+not opt into legacy behavior. Minimally required plan fields:
 
 | Field | Notes |
 | --- | --- |
 | `task` | Non-blank work description |
 | `repo_root` | Absolute repository path inside configured workspace roots |
 | `worker.provider` | Worker provider id (for example `codex`) |
+| `work_packet` | Canonical bounded work intent; high-risk classes require `checkpoint_policy: "design_required"` |
+| `work_packet_digest` | Exact `sha256:` digest of the canonical packet |
+
+Explicit version 1 remains readable and compilable for archived compatibility.
+New high-risk version-1 dispatch is rejected before compilation or workspace
+acquisition.
 
 Reviewed coding plans use the ACP pool by default (`worker.use_pool: true`).
 The workflow returns a pooled process after use while invalidating its

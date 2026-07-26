@@ -7,6 +7,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
   alias Arbor.Contracts.Coding.WorkPacket
 
   @minimal_attrs %{
+    version: 1,
     task: "Implement the Phase 4 coding plan contract",
     repo_root: "/workspace/arbor",
     worker: %{provider: "codex"}
@@ -73,7 +74,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
   )
 
   describe "new/1 and defaults" do
-    test "constructs an enforced plan with complete normalized defaults" do
+    test "constructs an explicit version 1 plan with complete normalized defaults" do
       assert {:ok, %Plan{} = plan} = Plan.new(@minimal_attrs)
 
       assert plan.version == 1
@@ -117,6 +118,21 @@ defmodule Arbor.Contracts.Coding.PlanTest do
 
       assert plan.requested_paths == []
       assert Plan.schema_version() == 1
+    end
+
+    test "version omission selects version 2 and never silently constructs version 1" do
+      omitted_version = Map.delete(@minimal_attrs, :version)
+
+      assert {:error, {:missing_field, "work_packet"}} = Plan.new(omitted_version)
+
+      attrs =
+        omitted_version
+        |> Map.put(:work_packet, @work_packet)
+        |> Map.put(:work_packet_digest, elem(WorkPacket.digest(@work_packet), 1))
+
+      assert {:ok, %Plan{version: 2} = plan} = Plan.new(attrs)
+      assert plan.work_packet == @work_packet
+      assert plan.work_packet_digest == elem(WorkPacket.digest(@work_packet), 1)
     end
 
     test "pins the exact version 1 to_map representation" do
@@ -176,6 +192,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
 
     test "accepts keyword objects and normalizes known enum atoms" do
       attrs = [
+        version: 1,
         task: "Add a contract",
         repo_root: "/workspace/arbor",
         task_class: :contract_change,
@@ -462,6 +479,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
 
     test "rejects repeated keyword keys before they can be overwritten" do
       attrs = [
+        version: 1,
         task: "first",
         task: "second",
         repo_root: "/workspace/arbor",
@@ -471,6 +489,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       assert {:error, {:duplicate_fields, ["task"]}} = Plan.new(attrs)
 
       attrs = [
+        version: 1,
         task: "work",
         repo_root: "/workspace/arbor",
         worker: [provider: "codex", provider: "grok"]

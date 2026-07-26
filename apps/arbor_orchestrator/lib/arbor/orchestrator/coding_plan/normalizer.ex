@@ -9,7 +9,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
   with the executor.
   """
 
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
 
   @kind "coding_change"
 
@@ -51,11 +51,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
   ))
 
   @doc """
-  Normalize a strict string-keyed JSON coding task into `Plan` version 1.
+  Normalize a strict string-keyed JSON coding task into a coding `Plan`.
 
-  Legacy optional `nil` values are treated as omitted for compatibility. Direct
-  plans are validated without key or value coercion, and cannot select the
-  legacy-only `none` review profile.
+  Legacy flat tasks are upgraded to canonical version 2 plans with a
+  deterministic direct-checkpoint work packet. Direct plans are validated
+  without key or value coercion, cannot select the legacy-only `none` review
+  profile, and cannot admit high-risk work through explicit version 1.
   """
   @spec normalize_task(term()) :: {:ok, Plan.t()} | {:error, term()}
   def normalize_task(task) when is_map(task) and not is_struct(task) do
@@ -81,6 +82,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
 
       true ->
         with {:ok, plan} <- Plan.new(plan),
+             :ok <- reject_high_risk_legacy_plan(plan),
              :ok <- reject_legacy_only_review_profile(plan) do
           {:ok, plan}
         end
@@ -96,7 +98,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
          {:ok, branch_name} <- optional_trimmed_string(task, "branch_name"),
          {:ok, worktree_base_dir} <- optional_trimmed_string(task, "worktree_base_dir"),
          {:ok, draft_pr} <- optional_boolean(task, "open_pr", false),
-         {:ok, submit_review} <- optional_boolean(task, "submit_review", true) do
+         {:ok, submit_review} <- optional_boolean(task, "submit_review", true),
+         {:ok, {work_packet, work_packet_digest}} <- legacy_work_packet(task_text) do
       workspace_policy =
         %{"mode" => "isolated"}
         |> put_optional("branch_name", branch_name)
@@ -104,19 +107,47 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
 
       plan_attrs =
         %{
-          "version" => Plan.schema_version(),
+          "version" => Plan.latest_schema_version(),
           "task" => task_text,
           "repo_root" => repo_root,
           "worker" => %{"provider" => provider},
           "workspace_policy" => workspace_policy,
           "review_profile" => if(submit_review, do: "binding", else: "none"),
-          "output" => %{"draft_pr" => draft_pr}
+          "output" => %{"draft_pr" => draft_pr},
+          "work_packet" => work_packet,
+          "work_packet_digest" => work_packet_digest
         }
         |> put_optional("base_ref", base_ref)
 
       Plan.new(plan_attrs)
     end
   end
+
+  defp legacy_work_packet(task_text) do
+    packet_attrs = %{
+      "success_criteria" => [task_text],
+      "non_goals" => [],
+      "constraints" => [],
+      "architecture_refs" => [],
+      "required_evidence" => [],
+      "checkpoint_policy" => "direct"
+    }
+
+    with {:ok, packet} <- WorkPacket.normalize(packet_attrs),
+         {:ok, digest} <- WorkPacket.digest(packet) do
+      {:ok, {packet, digest}}
+    end
+  end
+
+  defp reject_high_risk_legacy_plan(%Plan{version: 1, task_class: task_class}) do
+    if Plan.design_checkpoint_required?(task_class) do
+      {:error, {:legacy_coding_plan_not_allowed_for_task_class, task_class}}
+    else
+      :ok
+    end
+  end
+
+  defp reject_high_risk_legacy_plan(%Plan{}), do: :ok
 
   defp require_kind(%{"kind" => @kind}), do: :ok
 
