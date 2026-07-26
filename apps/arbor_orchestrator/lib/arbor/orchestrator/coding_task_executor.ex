@@ -144,6 +144,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     "worker_recovery_send_failed" => "retry_recovered_send"
   }
 
+  @generic_pipeline_failure_nodes ~w(
+    acquire_workspace
+    open_worker
+    capture_pre_turn_workspace
+    capture_pre_turn_recovery
+    inspect_workspace
+    capture_validation_workspace
+    hoist_validation_candidate_tree_oid
+    hoist_validation_observed_at
+    commit_change
+  )
+
   @terminal_control_errors MapSet.new([
                              :unsupported,
                              :not_supported,
@@ -2760,9 +2772,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp terminal_status_pair(status, _legacy_status), do: {status, status}
 
   defp pipeline_error_detail(context, engine_result, worker_provider, requested_model) do
+    error_code = context_get(context, "error") || "pipeline_error"
+
     {:ok, outcome} =
       OutcomeMapper.map_pipeline_error(
-        context_get(context, "error"),
+        error_code,
         context,
         requested_model: requested_model,
         worker_provider: worker_provider
@@ -2770,7 +2784,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
     %{
       "status" => "pipeline_error",
-      "error" => context_get(context, "error"),
+      "error" => error_code,
       "workspace_id" => context_get(context, "workspace_id"),
       "worker_provider" => worker_provider,
       "worker_session_id" => context_get(context, "worker_session_id"),
@@ -2779,25 +2793,49 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     }
     |> Map.merge(workspace_release_projection(context))
     |> reject_nil_values()
-    |> maybe_put_pipeline_failure_reason(context_get(context, "error"), engine_result)
+    |> maybe_put_pipeline_failure_reason(error_code, engine_result)
     |> maybe_put_worker_provider_account_exhausted_reason(
-      context_get(context, "error"),
+      error_code,
       context
     )
+  end
+
+  defp maybe_put_pipeline_failure_reason(detail, "pipeline_error", engine_result) do
+    with reasons when is_map(reasons) and not is_struct(reasons) <-
+           engine_result_field(engine_result, :node_failure_reasons, "node_failure_reasons"),
+         reason when is_binary(reason) <-
+           Enum.find_value(@generic_pipeline_failure_nodes, &Map.get(reasons, &1)) do
+      put_bounded_pipeline_failure_reason(detail, reason)
+    else
+      _other -> detail
+    end
   end
 
   defp maybe_put_pipeline_failure_reason(detail, error_code, engine_result) do
     with node_id when is_binary(node_id) <- Map.get(@pipeline_error_failure_nodes, error_code),
          reasons when is_map(reasons) and not is_struct(reasons) <-
            engine_result_field(engine_result, :node_failure_reasons, "node_failure_reasons"),
-         reason when is_binary(reason) <- Map.get(reasons, node_id),
-         true <-
-           byte_size(reason) in 1..@max_pipeline_failure_reason_bytes and String.valid?(reason),
-         bounded when is_binary(bounded) and bounded != "" <-
-           RunLifecycleAdapter.bound_failure_reason(reason) do
-      Map.put(detail, "failure_reason", bounded)
+         reason when is_binary(reason) <- Map.get(reasons, node_id) do
+      put_bounded_pipeline_failure_reason(detail, reason)
     else
       _other -> detail
+    end
+  end
+
+  defp put_bounded_pipeline_failure_reason(detail, reason) do
+    valid =
+      byte_size(reason) in 1..@max_pipeline_failure_reason_bytes and String.valid?(reason)
+
+    if valid do
+      case RunLifecycleAdapter.bound_failure_reason(reason) do
+        bounded when is_binary(bounded) and bounded != "" ->
+          Map.put(detail, "failure_reason", bounded)
+
+        _other ->
+          detail
+      end
+    else
+      detail
     end
   end
 

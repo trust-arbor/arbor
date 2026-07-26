@@ -3686,23 +3686,31 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
              ]
     end
 
-    test "pipeline_error and missing/unknown status are task errors" do
+    test "generic pipeline_error fallback preserves the matched Engine failure" do
+      authorization_failure =
+        "Action coding_workspace_acquire failed: policy denied workspace authority"
+
       assert {:error, {:pipeline_error, detail}} =
-               run_with_context(%{
-                 "status" => "pipeline_error",
-                 "error" => "acquire failed",
-                 "workspace_id" => "ws_x",
-                 "worker_session_id" => "closed-worker-handle",
-                 "worker_provider_session_id" => "provider-session-failure-1"
-               })
+               run_with_engine_result(
+                 %{
+                   "status" => "pipeline_error",
+                   "workspace_id" => "ws_x",
+                   "worker_session_id" => "closed-worker-handle",
+                   "worker_provider_session_id" => "provider-session-failure-1"
+                 },
+                 %{node_failure_reasons: %{"acquire_workspace" => authorization_failure}}
+               )
 
       assert detail["status"] == "pipeline_error"
-      assert detail["error"] == "acquire failed"
+      assert detail["error"] == "pipeline_error"
+      assert detail["failure_reason"] == authorization_failure
       assert detail["worker_provider"] == "codex"
       assert detail["worker_session_id"] == "closed-worker-handle"
       assert detail["worker_provider_session_id"] == "provider-session-failure-1"
-      assert detail["outcome"]["code"] == "invalid_terminal_evidence"
+      assert detail["outcome"]["code"] == "pipeline_error"
+    end
 
+    test "missing and unknown terminal statuses are task errors" do
       assert {:error, :missing_terminal_status} = run_with_context(%{"branch" => "b1"})
 
       assert {:error, {:unknown_terminal_status, "weird"}} =
