@@ -50,6 +50,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.CodingPlan.ActionCatalog
   alias Arbor.Orchestrator.CodingPlan.CandidateVerifier
   alias Arbor.Orchestrator.CodingPlan.Compilation
+  alias Arbor.Orchestrator.CodingPlan.Compiler
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
   alias Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier
   alias Arbor.Orchestrator.CodingPlan.Profiles
@@ -480,15 +481,18 @@ defmodule Arbor.Orchestrator do
            Profiles.validation_timeout(profile, plan.budgets["wall_clock_ms"]),
          {:ok, validation_test_stage_timeout_ms} <-
            Profiles.validation_test_stage_timeout(profile, plan.budgets["wall_clock_ms"]),
+         {:ok, semantic_preflight_opts} <-
+           Compiler.semantic_preflight_options(
+             plan,
+             validation_timeout_ms,
+             validation_test_stage_timeout_ms
+           ),
          :ok <- Profiles.validate_requirements(profile, compiled_graph),
          :ok <-
-           SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
-             review_profile: plan.review_profile,
-             worker_use_pool: plan.worker["use_pool"],
-             worker_resume_session_id: plan.worker["resume_session_id"],
-             rework_max_cycles: plan.rework["max_cycles"],
-             validation_timeout_ms: validation_timeout_ms,
-             validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
+           SemanticPreflight.validate(
+             compiled_graph,
+             profile["semantic_policy"],
+             semantic_preflight_opts
            ),
          {:ok, live_catalog} <- ActionCatalog.snapshot(),
          {:ok, _action_bindings} <-

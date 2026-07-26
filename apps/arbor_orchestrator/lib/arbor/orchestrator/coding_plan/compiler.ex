@@ -116,6 +116,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            validation_program["static_parameters"]["test_stage_timeout"],
          :ok <- validate_supported_features(plan),
          {:ok, work_packet_json} <- canonical_work_packet_json(plan),
+         {:ok, semantic_preflight_opts} <-
+           semantic_preflight_options(
+             plan,
+             validation_timeout_ms,
+             validation_test_stage_timeout_ms
+           ),
          {:ok, action_catalog} <- resolve_action_catalog(opts),
          {:ok, template_source} <- resolve_template_source(opts),
          :ok <- SemanticPreflight.validate_source(template_source),
@@ -143,18 +149,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          :ok <- validate_typed_graph(compiled_graph),
          :ok <- Profiles.validate_requirements(profile, compiled_graph),
          :ok <-
-           SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
-             review_profile: plan.review_profile,
-             worker_use_pool: plan.worker["use_pool"],
-             worker_resume_session_id: plan.worker["resume_session_id"],
-             worker_permission_mode: plan.worker["permission_mode"],
-             worker_model: plan.worker["model"],
-             checkpoint_policy: checkpoint_policy(plan),
-             checkpoint_work_packet_json: work_packet_json,
-             design_checkpoint_timeout_ms: design_checkpoint_timeout_ms(plan),
-             rework_max_cycles: plan.rework["max_cycles"],
-             validation_timeout_ms: validation_timeout_ms,
-             validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
+           SemanticPreflight.validate(
+             compiled_graph,
+             profile["semantic_policy"],
+             semantic_preflight_opts
            ),
          graph_hash = sha256(dot_source),
          {:ok, {execution_manifest, execution_manifest_digest}} <-
@@ -1842,6 +1840,32 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     do: Map.fetch!(work_packet, "checkpoint_policy")
 
   defp checkpoint_policy(_plan), do: "direct"
+
+  @doc false
+  @spec semantic_preflight_options(Plan.t(), pos_integer(), pos_integer() | nil) ::
+          {:ok, keyword()} | {:error, term()}
+  def semantic_preflight_options(
+        %Plan{} = plan,
+        validation_timeout_ms,
+        validation_test_stage_timeout_ms
+      ) do
+    with {:ok, work_packet_json} <- canonical_work_packet_json(plan) do
+      {:ok,
+       [
+         review_profile: plan.review_profile,
+         worker_use_pool: plan.worker["use_pool"],
+         worker_resume_session_id: plan.worker["resume_session_id"],
+         worker_permission_mode: plan.worker["permission_mode"],
+         worker_model: plan.worker["model"],
+         checkpoint_policy: checkpoint_policy(plan),
+         checkpoint_work_packet_json: work_packet_json,
+         design_checkpoint_timeout_ms: design_checkpoint_timeout_ms(plan),
+         rework_max_cycles: plan.rework["max_cycles"],
+         validation_timeout_ms: validation_timeout_ms,
+         validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
+       ]}
+    end
+  end
 
   defp design_checkpoint_timeout_ms(%Plan{} = plan) do
     min(plan.budgets["inactivity_timeout_ms"], plan.budgets["wall_clock_ms"])

@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
   alias Arbor.Orchestrator.CodingPlan.Compiler
   alias Arbor.Orchestrator.Config
 
@@ -160,6 +160,59 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
                compilation["dot_source"] <> "\n// changed after compilation\n",
                compilation["manifest"]
              )
+  end
+
+  test "public provenance verification reuses exact version 2 semantic bindings" do
+    Application.delete_env(:arbor_orchestrator, :coding_pipeline_path)
+    Application.delete_env(:arbor_orchestrator, :coding_plan_compiler)
+
+    for {task_class, checkpoint_policy} <- [
+          {"default", "direct"},
+          {"security_regression", "design_required"}
+        ] do
+      packet = %{
+        "version" => 1,
+        "success_criteria" => ["The version 2 provenance remains verifiable"],
+        "non_goals" => [],
+        "constraints" => [],
+        "architecture_refs" => [],
+        "required_evidence" => ["Focused provenance tests pass"],
+        "checkpoint_policy" => checkpoint_policy
+      }
+
+      assert {:ok, packet_digest} = WorkPacket.digest(packet)
+
+      attrs = %{
+        "version" => 2,
+        "task" => "Verify #{checkpoint_policy} plan provenance",
+        "repo_root" => "/tmp/repo",
+        "task_class" => task_class,
+        "validation_profile" => task_class,
+        "requested_paths" =>
+          if(task_class == "security_regression",
+            do: ["apps/arbor_security/test/security_regression_test.exs"],
+            else: []
+          ),
+        "worker" => %{"provider" => "grok", "permission_mode" => "deny"},
+        "work_packet" => packet,
+        "work_packet_digest" => packet_digest
+      }
+
+      assert {:ok, compilation} = Arbor.Orchestrator.compile_coding_plan(attrs)
+      expected_compiler_version = compilation["compiler_version"]
+      expected_graph_hash = compilation["graph_hash"]
+
+      assert {:ok,
+              %{
+                "compiler_version" => ^expected_compiler_version,
+                "graph_hash" => ^expected_graph_hash
+              }} =
+               Arbor.Orchestrator.verify_coding_provenance(
+                 compilation["plan_map"],
+                 compilation["dot_source"],
+                 compilation["manifest"]
+               )
+    end
   end
 
   test "fails closed when the configured template is unavailable", %{tmp_dir: tmp_dir} do
