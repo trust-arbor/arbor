@@ -445,3 +445,15 @@ reserve provider-session resume for a rework path that can reopen the original w
 <!-- applied-learning: readiness-and-execution-must-share-the-same-canonicalizer -->
 <a id="applied-learning-readiness-and-execution-must-share-the-same-canonicalizer"></a>
 **Readiness and execution must share the same canonicalizer.** A preflight that merely proves a requested repository path is an existing directory inside an admitted root can report success even though execution later rejects it because it is not a Git repository, resolves to a different Git top-level, or chooses a different default worktree root. Extract the exact non-mutating workspace-scope normalization used by execution, bind the readiness digest to its canonical plan, and regress a plain directory plus a nested Git path through both entry points. Duplicating a weaker approximation creates false-green readiness evidence (found 2026-07-22 while reviewing the first static coding-readiness slice).
+
+<!-- applied-learning: treat-acp-streamed-text-as-transcript-evidence-not-a-terminal-structured-envelope -->
+<a id="applied-learning-treat-acp-streamed-text-as-transcript-evidence-not-a-terminal-structured-envelope"></a>
+**Treat ACP streamed text as transcript evidence, not a terminal structured envelope.**
+Providers can emit progress chunks, context-compaction notices, and duplicate the
+final payload into one accumulated text field. A coding control parser must be
+domain-specific and bounded: scan for the exact envelope schema, accept one unique
+valid envelope, tolerate identical duplicates, reject conflicting valid envelopes
+or malformed fields, and preserve the raw transcript separately for audit. Do not
+weaken generic JSON parsing to make one provider transcript pass (found 2026-07-26
+after Codex Spark returned progress prose plus two adjacent valid design checkpoint
+envelopes).

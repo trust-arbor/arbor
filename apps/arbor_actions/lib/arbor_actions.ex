@@ -1566,6 +1566,7 @@ defmodule Arbor.Actions do
         Arbor.Actions.Acp.CloseSession
       ],
       coding: [
+        Arbor.Actions.Coding.DesignCheckpoint.Parse,
         Arbor.Actions.Coding.DesignCheckpoint.Open,
         Arbor.Actions.Coding.DesignCheckpoint.Await,
         Arbor.Actions.Coding.ReviewedCommit,
@@ -2600,7 +2601,9 @@ defmodule Arbor.Actions do
     Arbor.Actions.Acp.SessionStatus => "arbor://acp/tool",
     Arbor.Actions.Acp.CloseSession => "arbor://acp/tool",
 
-    # Pipeline-internal commit/adoption gate (not an ordinary LLM tool).
+    # Pipeline-internal coding gates and transforms (not ordinary LLM tools).
+    Arbor.Actions.Coding.DesignCheckpoint.Parse =>
+      "arbor://action/coding/design_checkpoint/parse",
     Arbor.Actions.Coding.DesignCheckpoint.Open => "arbor://action/coding/design_checkpoint/open",
     Arbor.Actions.Coding.DesignCheckpoint.Await =>
       "arbor://action/coding/design_checkpoint/await",

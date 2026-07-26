@@ -2,7 +2,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Actions.Coding.DesignCheckpoint
-  alias Arbor.Actions.Coding.DesignCheckpoint.{Await, Open}
+  alias Arbor.Actions.Coding.DesignCheckpoint.{Await, Open, Parse}
   alias Arbor.Contracts.Coding.WorkPacket
 
   @moduletag :fast
@@ -151,6 +151,84 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
   after
     Process.delete(:durable_receipt)
     Process.delete(:persisted_durable_receipt)
+  end
+
+  test "Parse extracts progress-wrapped adjacent identical terminal envelopes", ctx do
+    envelope = %{
+      "design" => ctx.params.design <> ~s(\nPreserve map syntax like %{"key" => "{value}"}.),
+      "design_digest" =>
+        digest(ctx.params.design <> ~s(\nPreserve map syntax like %{"key" => "{value}"}.))
+    }
+
+    encoded = Jason.encode!(envelope)
+
+    text = """
+    I am checking the owned files first.
+    {"event":"progress","message":"unrelated JSON is not the terminal envelope"}
+    The final design follows:
+    #{encoded}#{encoded}
+    """
+
+    assert {:ok, ^envelope} = Parse.run(%{text: text}, %{})
+  end
+
+  test "Parse rejects conflicting valid terminal envelopes", ctx do
+    first = design_envelope(ctx.params.design)
+    second = design_envelope(ctx.params.design <> " Use a different implementation.")
+
+    assert {:error, :conflicting_design_envelopes} =
+             Parse.run(%{text: Jason.encode!(first) <> Jason.encode!(second)}, %{})
+  end
+
+  test "Parse rejects candidate-like objects with missing, extra, or duplicate fields", ctx do
+    missing = Jason.encode!(%{"design" => ctx.params.design})
+    extra = Jason.encode!(Map.put(design_envelope(ctx.params.design), "commentary", "done"))
+
+    duplicate =
+      ~s({"design":#{Jason.encode!(ctx.params.design)},"design":#{Jason.encode!(ctx.params.design)},"design_digest":#{Jason.encode!(ctx.params.design_digest)}})
+
+    for candidate <- [missing, extra, duplicate] do
+      assert {:error, :invalid_design_envelope_fields} = Parse.run(%{text: candidate}, %{})
+    end
+  end
+
+  test "Parse rejects digest mismatch and invalid or oversized designs", ctx do
+    wrong_digest =
+      Jason.encode!(%{
+        "design" => ctx.params.design,
+        "design_digest" => digest("different design")
+      })
+
+    assert {:error, :design_digest_mismatch} = Parse.run(%{text: wrong_digest}, %{})
+
+    for invalid_design <- [" \n\t ", "invalid\u0000control"] do
+      encoded = Jason.encode!(design_envelope(invalid_design))
+
+      assert {:error, reason} = Parse.run(%{text: encoded}, %{})
+
+      assert reason in [
+               :design_checkpoint_design_blank,
+               :design_checkpoint_design_control_character
+             ]
+    end
+
+    oversized = String.duplicate("x", DesignCheckpoint.max_design_bytes() + 1)
+
+    assert {:error, :design_checkpoint_design_too_large} =
+             Parse.run(%{text: Jason.encode!(design_envelope(oversized))}, %{})
+  end
+
+  test "Parse bounds response bytes and JSON scanning attempts" do
+    oversized_response =
+      String.duplicate("x", DesignCheckpoint.max_terminal_response_bytes() + 1)
+
+    assert {:error, :design_envelope_response_too_large} =
+             Parse.run(%{text: oversized_response}, %{})
+
+    excessive_candidates = String.duplicate("{", DesignCheckpoint.max_json_scan_attempts() + 1)
+
+    assert {:error, :design_envelope_scan_limit_exceeded} =
+             Parse.run(%{text: excessive_candidates}, %{})
   end
 
   test "Open rejects work-packet, digest, design-digest, and policy tampering", ctx do
@@ -549,13 +627,20 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
   end
 
   test "catalogs canonical internal actions without exposing them" do
+    assert Parse in Arbor.Actions.list_actions()[:coding]
     assert Open in Arbor.Actions.list_actions()[:coding]
     assert Await in Arbor.Actions.list_actions()[:coding]
+    assert Parse.effect_class() == :read
+    assert Parse.execution_idempotency() == :read_only
     assert Open.effect_class() == :network_egress
     assert Await.effect_class() == :read
     assert Await.execution_idempotency() == :read_only
+    assert Arbor.Actions.pipeline_internal_action?(Parse)
     assert Arbor.Actions.pipeline_internal_action?(Open)
     assert Arbor.Actions.pipeline_internal_action?(Await)
+
+    assert Arbor.Actions.canonical_uri_for(Parse, %{}) ==
+             "arbor://action/coding/design_checkpoint/parse"
 
     assert Arbor.Actions.canonical_uri_for(Open, %{}) ==
              "arbor://action/coding/design_checkpoint/open"
@@ -563,6 +648,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     assert Arbor.Actions.canonical_uri_for(Await, %{}) ==
              "arbor://action/coding/design_checkpoint/await"
 
+    refute Parse in Arbor.Actions.exposed_actions()
     refute Open in Arbor.Actions.exposed_actions()
     refute Await in Arbor.Actions.exposed_actions()
   end
@@ -580,4 +666,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
 
   defp digest(value),
     do: "sha256:" <> (:crypto.hash(:sha256, value) |> Base.encode16(case: :lower))
+
+  defp design_envelope(design),
+    do: %{"design" => design, "design_digest" => digest(design)}
 end

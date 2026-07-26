@@ -21,6 +21,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     coding_workspace_release
     coding_workspace_committed_change
     coding_workspace_recovery_summary
+    coding_design_envelope_parse
     coding_design_checkpoint_open
     coding_design_checkpoint_await
     acp_start_session
@@ -154,6 +155,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
         "acp_send_message" ->
           worker_response(scenario, counters, state, args)
+
+        "coding_design_envelope_parse" ->
+          Arbor.Actions.Coding.DesignCheckpoint.Parse.run(args, %{})
 
         "coding_design_checkpoint_open" ->
           design_checkpoint_open_response(args)
@@ -317,7 +321,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       prompt = Map.get(args, "prompt") || Map.get(args, :prompt) || ""
 
       if String.contains?(prompt, "DESIGN PHASE ONLY") or
-           String.contains?(prompt, "DESIGN REWORK PHASE ONLY") do
+           String.contains?(prompt, "DESIGN REWORK PHASE ONLY") or
+           String.contains?(prompt, "DESIGN ENVELOPE REPAIR ONLY") do
         design_response(scenario, counters, state)
       else
         implement_response(scenario, counters, state)
@@ -333,16 +338,33 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       end
 
       text =
-        case scenario do
-          :malformed_design_output ->
+        case {scenario, n} do
+          {:malformed_design_output, _} ->
+            "this is not a design checkpoint envelope"
+
+          {:malformed_design_then_valid_repair, 0} ->
             "this is not a design checkpoint envelope"
 
           _ ->
+            attempt =
+              if scenario == :malformed_design_then_valid_repair do
+                1
+              else
+                n + 1
+              end
+
             design =
-              "Fixture design attempt #{n + 1}: update the owned module and run focused tests."
+              "Fixture design attempt #{attempt}: update the owned module and run focused tests."
 
             digest = "sha256:" <> (:crypto.hash(:sha256, design) |> Base.encode16(case: :lower))
-            Jason.encode!(%{"design" => design, "design_digest" => digest})
+            envelope = Jason.encode!(%{"design" => design, "design_digest" => digest})
+
+            if scenario == :design_streamed_duplicate_envelope do
+              "I inspected the task and will now return the required payload." <>
+                envelope <> envelope
+            else
+              envelope
+            end
         end
 
       {:ok,
@@ -752,7 +774,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                :design_rework_then_approved,
                :design_denied,
                :design_timeout,
-               :malformed_design_output
+               :malformed_design_output,
+               :malformed_design_then_valid_repair,
+               :design_streamed_duplicate_envelope
              ] ->
           if sends == 0, do: "fp-clean", else: "fp-after-send-#{sends}"
 
@@ -1728,12 +1752,49 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_closed_and_released(calls)
     end
 
+    test "ACP progress prose plus an identical duplicated terminal envelope reaches approval" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:design_streamed_duplicate_envelope, "design_required")
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["accepted_design"] == fixture_design(1)
+      assert result.context["accepted_design_digest"] == fixture_design_digest(1)
+      assert length(action_calls(calls, "coding_design_envelope_parse")) == 1
+      assert length(action_calls(calls, "coding_design_checkpoint_open")) == 1
+      assert length(action_calls(calls, "coding_design_checkpoint_await")) == 1
+      assert_closed_and_released(calls)
+    end
+
+    test "malformed design envelope is repaired once in the same worker session" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:malformed_design_then_valid_repair, "design_required")
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["accepted_design"] == fixture_design(1)
+      assert result.context["accepted_design_digest"] == fixture_design_digest(1)
+      assert result.context["design_attempt"] == 1
+      assert result.context["design_envelope_retry_count"] == 1
+
+      [initial_prompt, repair_prompt, implementation_prompt] = action_prompts(calls)
+      assert initial_prompt =~ "DESIGN PHASE ONLY"
+      assert repair_prompt =~ "DESIGN ENVELOPE REPAIR ONLY"
+      assert implementation_prompt =~ "IMPLEMENTATION PHASE"
+
+      assert length(action_calls(calls, "coding_design_envelope_parse")) == 2
+      assert length(action_calls(calls, "coding_design_checkpoint_open")) == 1
+      assert length(action_calls(calls, "coding_design_checkpoint_await")) == 1
+      assert length(action_calls(calls, "acp_close_session")) == 1
+      assert_single_worker_session(calls, 3)
+      assert_closed_and_released(calls)
+    end
+
     test "design rework reuses worker, provider session, and workspace while incrementing attempts" do
       assert {{:ok, result}, calls, plan, compilation} =
                run_compiled_v2_fixture(:design_rework_then_approved, "design_required")
 
       assert result.context["status"] == "change_committed"
       assert result.context["design_attempt"] == 2
+      assert result.context["design_envelope_retry_count"] == 0
       assert result.context["total_rework_count"] == 1
       assert result.context["rework_kind"] == "design_checkpoint"
 
@@ -1779,21 +1840,35 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_closed_and_released(calls)
     end
 
-    for {scenario, error} <- [
-          {:malformed_design_output, "design_response_invalid"},
-          {:design_mutates_workspace, "design_turn_modified_workspace"}
-        ] do
-      test "#{scenario} fails closed before opening a design checkpoint" do
-        assert {{:ok, result}, calls, _plan, _compilation} =
-                 run_compiled_v2_fixture(unquote(scenario), "design_required")
+    test "two malformed design envelopes exhaust the repair budget and fail closed" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:malformed_design_output, "design_required")
 
-        assert result.context["status"] == "pipeline_error"
-        assert result.context["error"] == unquote(error)
-        assert action_calls(calls, "coding_design_checkpoint_open") == []
-        assert action_calls(calls, "coding_design_checkpoint_await") == []
-        refute called?(calls, "mix_compile")
-        assert_closed_and_released(calls)
-      end
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "design_response_invalid"
+      assert result.context["design_attempt"] == 1
+      assert result.context["design_envelope_retry_count"] == 1
+      assert length(action_calls(calls, "coding_design_envelope_parse")) == 2
+      assert action_calls(calls, "coding_design_checkpoint_open") == []
+      assert action_calls(calls, "coding_design_checkpoint_await") == []
+      assert length(action_calls(calls, "acp_close_session")) == 1
+      assert_single_worker_session(calls, 2)
+      refute called?(calls, "mix_compile")
+      assert_closed_and_released(calls)
+    end
+
+    test "design workspace mutation fails closed before envelope repair or checkpoint open" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:design_mutates_workspace, "design_required")
+
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "design_turn_modified_workspace"
+      assert action_calls(calls, "coding_design_envelope_parse") == []
+      assert action_calls(calls, "coding_design_checkpoint_open") == []
+      assert action_calls(calls, "coding_design_checkpoint_await") == []
+      assert_single_worker_session(calls, 1)
+      refute called?(calls, "mix_compile")
+      assert_closed_and_released(calls)
     end
 
     test "version 2 direct policy keeps the existing implementation-only route" do

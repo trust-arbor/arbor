@@ -156,7 +156,7 @@ digraph CodingChangeV1 {
   init_design_defaults [
     type="transform",
     transform="constant",
-    expression="{\"design_attempt\":1}",
+    expression="{\"design_attempt\":1,\"design_envelope_retry_count\":0}",
     output_key="design_defaults"
   ]
 
@@ -166,6 +166,14 @@ digraph CodingChangeV1 {
     source_key="design_defaults",
     expression="design_attempt",
     output_key="design_attempt"
+  ]
+
+  init_design_envelope_retry_count [
+    type="transform",
+    transform="json_extract",
+    source_key="design_defaults",
+    expression="design_envelope_retry_count",
+    output_key="design_envelope_retry_count"
   ]
 
   init_worker_phase [
@@ -330,26 +338,47 @@ digraph CodingChangeV1 {
     fan_out="false"
   ]
 
-  hoist_design_response [
+  parse_design_response [
+    type="exec",
+    target="action",
+    action="coding_design_envelope_parse",
+    context_keys="worker_msg.text",
+    output_prefix="design_response",
+    max_retries="0"
+  ]
+
+  check_design_envelope_retry_budget [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  inc_design_envelope_retry_count [
     type="transform",
-    transform="identity",
-    source_key="worker_msg.text",
-    output_key="design_response"
+    transform="increment",
+    source_key="design_envelope_retry_count",
+    output_key="design_envelope_retry_count"
+  ]
+
+  build_design_envelope_repair_prompt [
+    type="transform",
+    transform="template",
+    source_key="task",
+    expression="DESIGN envelope repair only. Task: {value}. Do not edit files and do not create commits. Return the prior design as a valid design checkpoint envelope.",
+    output_key="prompt"
   ]
 
   extract_design [
     type="transform",
-    transform="json_extract",
-    source_key="design_response",
-    expression="design",
+    transform="identity",
+    source_key="design_response.design",
     output_key="design"
   ]
 
   extract_design_digest [
     type="transform",
-    transform="json_extract",
-    source_key="design_response",
-    expression="design_digest",
+    transform="identity",
+    source_key="design_response.design_digest",
     output_key="design_digest"
   ]
 
@@ -487,6 +516,14 @@ digraph CodingChangeV1 {
     transform="increment",
     source_key="design_attempt",
     output_key="design_attempt"
+  ]
+
+  reset_design_envelope_retry_count [
+    type="transform",
+    transform="json_extract",
+    source_key="design_defaults",
+    expression="design_envelope_retry_count",
+    output_key="design_envelope_retry_count"
   ]
 
   mark_design_rework_kind [
@@ -1897,7 +1934,7 @@ digraph CodingChangeV1 {
   route_commit_interaction -> init_design_defaults [condition="context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"]
   route_commit_interaction -> route_worker_phase [condition="context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"]
 
-  init_design_defaults -> init_design_attempt -> init_worker_phase
+  init_design_defaults -> init_design_attempt -> init_design_envelope_retry_count -> init_worker_phase
   init_worker_phase -> freeze_coding_plan_work_packet_json -> build_design_prompt
   build_design_prompt -> capture_pre_turn_workspace
   route_worker_phase -> check_design_workspace_unchanged [condition="context.worker_phase=design"]
@@ -1906,9 +1943,14 @@ digraph CodingChangeV1 {
 
   // A design turn is admitted only when owner-observed evidence proves no
   // worktree or HEAD movement. Worker prose is not control authority.
-  check_design_workspace_unchanged -> hoist_design_response [condition="context.turn_progressed=false"]
+  check_design_workspace_unchanged -> parse_design_response [condition="context.turn_progressed=false"]
   check_design_workspace_unchanged -> error_design_modified_workspace
-  hoist_design_response -> extract_design
+  parse_design_response -> check_design_envelope_retry_budget [condition="outcome=fail"]
+  parse_design_response -> extract_design [condition="outcome=success"]
+  check_design_envelope_retry_budget -> error_design_response_invalid [condition="context.design_envelope_retry_count>=1"]
+  check_design_envelope_retry_budget -> inc_design_envelope_retry_count [condition="context.design_envelope_retry_count<1"]
+  inc_design_envelope_retry_count -> build_design_envelope_repair_prompt
+  build_design_envelope_repair_prompt -> capture_pre_turn_workspace
   extract_design -> error_design_response_invalid [condition="outcome=fail"]
   extract_design -> extract_design_digest [condition="outcome=success"]
   extract_design_digest -> error_design_response_invalid [condition="outcome=fail"]
@@ -1954,7 +1996,8 @@ digraph CodingChangeV1 {
   check_design_rework_total_budget -> inc_design_total_rework_count [condition="context.total_rework_count<2"]
   mark_design_rework_exhausted_error -> status_rework_exhausted
   inc_design_total_rework_count -> inc_design_attempt
-  inc_design_attempt -> mark_design_rework_kind
+  inc_design_attempt -> reset_design_envelope_retry_count
+  reset_design_envelope_retry_count -> mark_design_rework_kind
   mark_design_rework_kind -> mark_design_rework_iteration
   mark_design_rework_iteration -> build_design_rework_prompt
   build_design_rework_prompt -> capture_pre_turn_workspace

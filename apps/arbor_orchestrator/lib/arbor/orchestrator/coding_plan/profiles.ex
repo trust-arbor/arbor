@@ -39,6 +39,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     capture_pre_turn_recovery
                     capture_pre_turn_workspace
                     capture_validation_workspace
+                    check_design_envelope_retry_budget
                     check_design_rework_total_budget
                     check_design_workspace_unchanged
                     check_pre_turn_recovery_exists
@@ -92,7 +93,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_design_checkpoint_request_id
                     hoist_design_decision_note
                     hoist_design_decision_request_id
-                    hoist_design_response
+                    parse_design_response
                     hoist_review_cycle
                     hoist_review_disposition
                     hoist_review_finding_ledger
@@ -111,6 +112,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_worker_provider_session_id_from_status
                     implement
                     inc_design_attempt
+                    inc_design_envelope_retry_count
                     inc_design_total_rework_count
                     inc_review_cycle
                     init_delta_diff
@@ -121,6 +123,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     init_review_defaults
                     init_design_attempt
                     init_design_defaults
+                    init_design_envelope_retry_count
                     init_worker_phase
                     inspect_workspace
                     load_committed_change
@@ -157,8 +160,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     route_recovery_continuity
                     route_review
                     route_success_workspace_retention
+                    reset_design_envelope_retry_count
                     status_approval_denied
                     await_design_checkpoint
+                    build_design_envelope_repair_prompt
                     build_design_prompt
                     build_design_rework_prompt
                     mark_design_rework_exhausted_error
@@ -209,6 +214,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                              coding_reviewed_commit
                              coding_workspace_acquire
                              coding_workspace_committed_change
+                             coding_design_envelope_parse
                              coding_design_checkpoint_await
                              coding_design_checkpoint_open
                              coding_workspace_inspect
@@ -382,6 +388,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "node_id" => "open_design_checkpoint",
                                   "action" => "coding_design_checkpoint_open",
                                   "required_dominators" => [],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "parse_design_response",
+                                  "action" => "coding_design_envelope_parse",
+                                  "required_dominators" => ["check_design_workspace_unchanged"],
                                   "review_required_dominators" => [],
                                   "required_dominator_sets" => []
                                 },
@@ -819,6 +832,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @rework_budget_node_attrs [
     %{
+      "node_id" => "check_design_envelope_retry_budget",
+      "attrs" => %{
+        "type" => "branch",
+        "shape" => "diamond",
+        "fan_out" => "false"
+      }
+    },
+    %{
       "node_id" => "check_design_rework_total_budget",
       "attrs" => %{
         "type" => "branch",
@@ -856,6 +877,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "type" => "branch",
         "shape" => "diamond",
         "fan_out" => "false"
+      }
+    },
+    %{
+      "node_id" => "inc_design_envelope_retry_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "increment",
+        "source_key" => "design_envelope_retry_count",
+        "output_key" => "design_envelope_retry_count"
       }
     },
     %{
@@ -922,6 +952,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       }
     },
     %{
+      "node_id" => "init_design_envelope_retry_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "json_extract",
+        "source_key" => "design_defaults",
+        "expression" => "design_envelope_retry_count",
+        "output_key" => "design_envelope_retry_count"
+      }
+    },
+    %{
       "node_id" => "init_operator_rework_count",
       "attrs" => %{
         "type" => "transform",
@@ -973,6 +1013,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "transform" => "constant",
         "expression" => "design_checkpoint",
         "output_key" => "rework_kind"
+      }
+    },
+    %{
+      "node_id" => "reset_design_envelope_retry_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "json_extract",
+        "source_key" => "design_defaults",
+        "expression" => "design_envelope_retry_count",
+        "output_key" => "design_envelope_retry_count"
       }
     },
     %{
@@ -1285,11 +1335,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                  |> Enum.sort_by(& &1["node_id"])
 
   @rework_budget_edges [
-    ["inc_design_attempt", "mark_design_rework_kind", nil],
+    ["build_design_envelope_repair_prompt", "capture_pre_turn_workspace", nil],
+    [
+      "check_design_envelope_retry_budget",
+      "error_design_response_invalid",
+      "context.design_envelope_retry_count>=1"
+    ],
+    [
+      "check_design_envelope_retry_budget",
+      "inc_design_envelope_retry_count",
+      "context.design_envelope_retry_count<1"
+    ],
+    ["inc_design_attempt", "reset_design_envelope_retry_count", nil],
+    ["inc_design_envelope_retry_count", "build_design_envelope_repair_prompt", nil],
     ["inc_design_total_rework_count", "inc_design_attempt", nil],
     ["mark_design_rework_exhausted_error", "status_rework_exhausted", nil],
     ["mark_design_rework_iteration", "build_design_rework_prompt", nil],
     ["mark_design_rework_kind", "mark_design_rework_iteration", nil],
+    ["parse_design_response", "check_design_envelope_retry_budget", "outcome=fail"],
+    ["parse_design_response", "extract_design", "outcome=success"],
+    ["reset_design_envelope_retry_count", "mark_design_rework_kind", nil],
     ["build_design_rework_prompt", "capture_pre_turn_workspace", nil],
     [
       "check_operator_rework_category_budget",
@@ -1493,6 +1558,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "delta_diff" => ["init_delta_diff", "prep_review_delta_diff"],
       "delta_files" => ["init_delta_files", "prep_review_delta_files"],
       "delta_ranges" => ["init_delta_ranges", "prep_review_delta_ranges"],
+      "design_envelope_retry_count" => [
+        "inc_design_envelope_retry_count",
+        "init_design_envelope_retry_count",
+        "reset_design_envelope_retry_count"
+      ],
       "finding_ledger" => ["hoist_review_finding_ledger", "init_finding_ledger"],
       "operator_rework_count" => ["inc_operator_rework_count", "init_operator_rework_count"],
       "prior_candidate_commit" => ["snapshot_review_prior_candidate_commit"],
@@ -1584,6 +1654,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "delta_diff" => ["init_delta_diff", "prep_review_delta_diff"],
       "delta_files" => ["init_delta_files", "prep_review_delta_files"],
       "delta_ranges" => ["init_delta_ranges", "prep_review_delta_ranges"],
+      "design_envelope_retry_count" => [
+        "inc_design_envelope_retry_count",
+        "init_design_envelope_retry_count",
+        "reset_design_envelope_retry_count"
+      ],
       "finding_ledger" => ["hoist_review_finding_ledger", "init_finding_ledger"],
       "operator_rework_count" => ["inc_operator_rework_count", "init_operator_rework_count"],
       "prior_candidate_commit" => [

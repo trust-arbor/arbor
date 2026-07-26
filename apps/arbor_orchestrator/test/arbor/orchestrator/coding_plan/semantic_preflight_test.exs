@@ -18,6 +18,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
     Arbor.Actions.Coding.Workspace.RecoverySummary,
+    Arbor.Actions.Coding.DesignCheckpoint.Parse,
     Arbor.Actions.Coding.DesignCheckpoint.Open,
     Arbor.Actions.Coding.DesignCheckpoint.Await,
     Arbor.Actions.Coding.SecurityRegression.Validate,
@@ -141,7 +142,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
             task
           ] do
         update_in(
-          graph.nodes["hoist_design_response"].attrs,
+          graph.nodes["parse_design_response"].attrs,
           &Map.put(&1, "output_key", key)
         )
       end
@@ -175,6 +176,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     prompt_mutations =
       for {node_id, fragment} <- [
+            {"build_design_envelope_repair_prompt", "exactly two string fields"},
             {"build_validation_rework_prompt", "{ctx.coding_plan_work_packet_json}"},
             {"build_review_rework_prompt", "{ctx.accepted_design_request_id}"},
             {"build_operator_rework_prompt", "{ctx.accepted_design_evidence_json}"}
@@ -200,7 +202,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
           "check_design_workspace_unchanged",
           "error_design_modified_workspace",
           nil,
-          "hoist_design_response"
+          "parse_design_response"
         ),
         replace_edge_target(
           graph,
@@ -208,6 +210,20 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
           "hoist_design_checkpoint_request_id",
           "outcome=success",
           "await_design_checkpoint"
+        ),
+        replace_edge_condition(
+          graph,
+          "check_design_envelope_retry_budget",
+          "error_design_response_invalid",
+          "context.design_envelope_retry_count>=1",
+          "context.design_envelope_retry_count>=2"
+        ),
+        replace_edge_target(
+          graph,
+          "inc_design_attempt",
+          "reset_design_envelope_retry_count",
+          nil,
+          "mark_design_rework_kind"
         ),
         update_in(graph.nodes["build_design_prompt"].attrs, fn attrs ->
           Map.update!(attrs, "expression", &String.replace(&1, "MUST NOT edit", "MAY edit"))
@@ -246,7 +262,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     mutated =
       update_in(
-        graph.nodes["hoist_design_response"].attrs,
+        graph.nodes["parse_design_response"].attrs,
         &Map.put(&1, "output_prefix", "design_checkpoint_open")
       )
 
@@ -264,7 +280,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                  "attribute" => "output_prefix",
                  "context_key" => "design_checkpoint_open",
                  "expected_nodes" => ["open_design_checkpoint"],
-                 "actual_nodes" => ["hoist_design_response", "open_design_checkpoint"]
+                 "actual_nodes" => ["open_design_checkpoint", "parse_design_response"]
                }
            end)
   end

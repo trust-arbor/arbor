@@ -790,6 +790,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <-
            rewrite_template_node(graph, "build_design_prompt", design_prompt()),
          {:ok, graph} <-
+           rewrite_template_node(
+             graph,
+             "build_design_envelope_repair_prompt",
+             design_envelope_repair_prompt()
+           ),
+         {:ok, graph} <-
            rewrite_template_node(graph, "build_design_rework_prompt", design_rework_prompt()) do
       rewrite_template_node(graph, "build_implement_prompt", approved_implementation_prompt())
     end
@@ -899,6 +905,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "the worktree; and MUST NOT create commits or otherwise change HEAD. " <>
       "Return ONLY one valid JSON object with exactly two string fields: " <>
       "{\"design\":\"the exact corrected design text\",\"design_digest\":\"sha256:<64 lowercase hex>\"}. " <>
+      "design_digest MUST be the SHA-256 of the exact UTF-8 bytes of the design field."
+  end
+
+  defp design_envelope_repair_prompt do
+    "DESIGN ENVELOPE REPAIR ONLY. Your preceding response could not be admitted as the " <>
+      "required checkpoint envelope. Exact reviewed task: {value}. " <>
+      "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Design attempt: {ctx.design_attempt}. Preserve the preceding design's meaning; repair " <>
+      "only its terminal envelope. You MUST NOT edit, create, delete, or rename files; MUST " <>
+      "NOT run commands that modify the worktree; and MUST NOT create commits or otherwise " <>
+      "change HEAD. Return ONLY one valid JSON object with exactly two string fields: " <>
+      "{\"design\":\"the exact design text\",\"design_digest\":\"sha256:<64 lowercase hex>\"}. " <>
       "design_digest MUST be the SHA-256 of the exact UTF-8 bytes of the design field."
   end
 

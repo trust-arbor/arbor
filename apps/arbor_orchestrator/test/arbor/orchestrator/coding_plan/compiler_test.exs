@@ -29,6 +29,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
     Arbor.Actions.Coding.Workspace.RecoverySummary,
+    Arbor.Actions.Coding.DesignCheckpoint.Parse,
     Arbor.Actions.Coding.DesignCheckpoint.Open,
     Arbor.Actions.Coding.DesignCheckpoint.Await,
     Arbor.Actions.Coding.SecurityRegression.Validate,
@@ -228,9 +229,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 77_093
-    assert map_size(graph.nodes) == 228
-    assert length(graph.edges) == 330
+    assert byte_size(ctx.template_source) == 78_790
+    assert map_size(graph.nodes) == 233
+    assert length(graph.edges) == 337
     assert byte_size(ctx.template_source) <= 262_144
     assert map_size(graph.nodes) <= 256
     assert length(graph.edges) <= 512
@@ -298,6 +299,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       assert node_attrs(graph, "await_design_checkpoint")["action"] ==
                "coding_design_checkpoint_await"
 
+      assert node_attrs(graph, "parse_design_response")["action"] ==
+               "coding_design_envelope_parse"
+
       for node_id <- ~w[
             build_validation_rework_prompt
             build_review_rework_prompt
@@ -321,6 +325,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph = parse!(compilation.dot_source)
 
     assert node_attrs(graph, "init_worker_phase")["expression"] == "design"
+
+    assert node_attrs(graph, "init_design_defaults")["expression"] ==
+             ~s({"design_attempt":1,"design_envelope_retry_count":0})
+
     assert node_attrs(graph, "freeze_coding_plan_work_packet_json")["expression"] == packet_json
     assert edge_target(graph, "hoist_worker_provider_session_id", nil) == "init_design_defaults"
     assert edge_target(graph, "hoist_workspace_fingerprint", nil) == "route_worker_phase"
@@ -333,6 +341,34 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     open = node_attrs(graph, "open_design_checkpoint")
     await = node_attrs(graph, "await_design_checkpoint")
+    parser = node_attrs(graph, "parse_design_response")
+
+    assert parser == %{
+             "type" => "exec",
+             "target" => "action",
+             "action" => "coding_design_envelope_parse",
+             "context_keys" => "worker_msg.text",
+             "output_prefix" => "design_response",
+             "max_retries" => "0"
+           }
+
+    assert edge_target(graph, "parse_design_response", "outcome=fail") ==
+             "check_design_envelope_retry_budget"
+
+    assert edge_target(
+             graph,
+             "check_design_envelope_retry_budget",
+             "context.design_envelope_retry_count<1"
+           ) == "inc_design_envelope_retry_count"
+
+    assert edge_target(
+             graph,
+             "check_design_envelope_retry_budget",
+             "context.design_envelope_retry_count>=1"
+           ) == "error_design_response_invalid"
+
+    assert edge_target(graph, "inc_design_attempt", nil) ==
+             "reset_design_envelope_retry_count"
 
     for attrs <- [open, await] do
       assert attrs["context_keys"] =~ "session.task_id,task"
@@ -379,6 +415,24 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert design_prompt =~ packet_json
     assert design_prompt =~ "MUST NOT edit"
     assert design_prompt =~ "MUST NOT create commits"
+
+    repair_prompt =
+      run_transform(
+        graph,
+        "build_design_envelope_repair_prompt",
+        %{
+          "task" => plan.task,
+          "coding_plan_work_packet_json" => packet_json,
+          "design_attempt" => 1
+        }
+      )
+
+    assert repair_prompt =~ "DESIGN ENVELOPE REPAIR ONLY"
+    assert repair_prompt =~ packet_json
+    assert repair_prompt =~ "Design attempt: 1"
+    assert repair_prompt =~ "exactly two string fields"
+    assert repair_prompt =~ "MUST NOT edit"
+    assert repair_prompt =~ "MUST NOT create commits"
 
     implementation_prompt =
       run_transform(
@@ -458,13 +512,32 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph = parse!(compilation.dot_source)
 
     defaults = run_transform(graph, "init_design_defaults", %{})
-    assert defaults == ~s({"design_attempt":1})
+    assert defaults == ~s({"design_attempt":1,"design_envelope_retry_count":0})
 
     attempt = run_transform(graph, "init_design_attempt", %{"design_defaults" => defaults})
     assert attempt === 1
 
+    retry_count =
+      run_transform(graph, "init_design_envelope_retry_count", %{"design_defaults" => defaults})
+
+    assert retry_count === 0
+
     next_attempt = run_transform(graph, "inc_design_attempt", %{"design_attempt" => attempt})
     assert next_attempt === 2
+
+    retry_count =
+      run_transform(graph, "inc_design_envelope_retry_count", %{
+        "design_envelope_retry_count" => retry_count
+      })
+
+    assert retry_count === 1
+
+    reset_retry_count =
+      run_transform(graph, "reset_design_envelope_retry_count", %{
+        "design_defaults" => defaults
+      })
+
+    assert reset_retry_count === 0
   end
 
   test "design checkpoint outcomes route approve, rework, deny, timeout, and exhaustion", ctx do

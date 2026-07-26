@@ -115,6 +115,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "post_validation_committed_change"
 
       assert "mix_compile" in default["required_actions"]
+      assert "coding_design_envelope_parse" in default["required_actions"]
       assert "coding_design_checkpoint_open" in default["required_actions"]
       assert "coding_design_checkpoint_await" in default["required_actions"]
       assert "coding_workspace_inspect" in default["required_actions"]
@@ -126,9 +127,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
       for node <- ~w[
             await_design_checkpoint
+            build_design_envelope_repair_prompt
+            check_design_envelope_retry_budget
             check_design_workspace_unchanged
+            inc_design_envelope_retry_count
             init_design_attempt
+            init_design_envelope_retry_count
             open_design_checkpoint
+            parse_design_response
+            reset_design_envelope_retry_count
             route_design_checkpoint_outcome
             route_worker_phase
           ] do
@@ -148,6 +155,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                placements,
                &(&1["node_id"] == "await_design_checkpoint" and
                    &1["action"] == "coding_design_checkpoint_await")
+             ) == 1
+
+      assert Enum.count(
+               placements,
+               &(&1["node_id"] == "parse_design_response" and
+                   &1["action"] == "coding_design_envelope_parse")
              ) == 1
 
       assert {:ok, cross_app} = Profiles.fetch_executable("cross_app")

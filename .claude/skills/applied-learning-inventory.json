@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 526,
+  "entry_count": 527,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6382,8 +6382,21 @@
       "source_incident": "found 2026-07-26 when a fresh coding agent survived in trust state but its agent profile disappeared on restart).",
       "content_sha256": "6171a787b2054a2859706abba74bc60ee378ffffd9e36d3eed46367f47b220b6",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 527,
+      "source_kind": "post-migration",
+      "slug": "treat-acp-streamed-text-as-transcript-evidence-not-a-terminal-structured-envelope",
+      "title": "Treat ACP streamed text as transcript evidence, not a terminal structured envelope.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-treat-acp-streamed-text-as-transcript-evidence-not-a-terminal-structured-envelope",
+      "source_date": "2026-07-26",
+      "source_incident": "found 2026-07-26 after Codex Spark returned progress prose plus two adjacent valid design checkpoint envelopes).",
+      "content_sha256": "6986135822c27ab8217dde48f15789fad9bacf485db98bb1cff6dace6ce83d5a",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 65
+  "post_migration_entry_count": 66
 }

@@ -12,6 +12,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     Arbor.Actions.Acp.SendMessage,
     Arbor.Actions.Acp.SessionStatus,
     Arbor.Actions.Acp.CloseSession,
+    Arbor.Actions.Coding.DesignCheckpoint.Parse,
     Arbor.Actions.Coding.DesignCheckpoint.Open,
     Arbor.Actions.Coding.DesignCheckpoint.Await,
     Arbor.Actions.Coding.SecurityRegression.Validate,

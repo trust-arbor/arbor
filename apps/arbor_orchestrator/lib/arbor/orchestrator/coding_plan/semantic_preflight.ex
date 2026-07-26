@@ -2150,7 +2150,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        %{
          "type" => "transform",
          "transform" => "constant",
-         "expression" => ~s({"design_attempt":1}),
+         "expression" => ~s({"design_attempt":1,"design_envelope_retry_count":0}),
          "output_key" => "design_defaults"
        }},
       {"init_design_attempt",
@@ -2161,6 +2161,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "expression" => "design_attempt",
          "output_key" => "design_attempt"
        }},
+      {"init_design_envelope_retry_count",
+       %{
+         "type" => "transform",
+         "transform" => "json_extract",
+         "source_key" => "design_defaults",
+         "expression" => "design_envelope_retry_count",
+         "output_key" => "design_envelope_retry_count"
+       }},
       {"freeze_coding_plan_work_packet_json",
        %{
          "type" => "transform",
@@ -2170,28 +2178,30 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        }},
       {"check_design_workspace_unchanged",
        %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+      {"check_design_envelope_retry_budget",
+       %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
       {"extract_design",
        %{
          "type" => "transform",
-         "transform" => "json_extract",
-         "source_key" => "design_response",
-         "expression" => "design",
+         "transform" => "identity",
+         "source_key" => "design_response.design",
          "output_key" => "design"
        }},
       {"extract_design_digest",
        %{
          "type" => "transform",
-         "transform" => "json_extract",
-         "source_key" => "design_response",
-         "expression" => "design_digest",
+         "transform" => "identity",
+         "source_key" => "design_response.design_digest",
          "output_key" => "design_digest"
        }},
-      {"hoist_design_response",
+      {"parse_design_response",
        %{
-         "type" => "transform",
-         "transform" => "identity",
-         "source_key" => "worker_msg.text",
-         "output_key" => "design_response"
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_design_envelope_parse",
+         "context_keys" => "worker_msg.text",
+         "output_prefix" => "design_response",
+         "max_retries" => "0"
        }},
       {"prep_checkpoint_work_packet",
        %{
@@ -2249,6 +2259,21 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "transform" => "increment",
          "source_key" => "design_attempt",
          "output_key" => "design_attempt"
+       }},
+      {"inc_design_envelope_retry_count",
+       %{
+         "type" => "transform",
+         "transform" => "increment",
+         "source_key" => "design_envelope_retry_count",
+         "output_key" => "design_envelope_retry_count"
+       }},
+      {"reset_design_envelope_retry_count",
+       %{
+         "type" => "transform",
+         "transform" => "json_extract",
+         "source_key" => "design_defaults",
+         "expression" => "design_envelope_retry_count",
+         "output_key" => "design_envelope_retry_count"
        }},
       {"hoist_accepted_design_evidence",
        %{
@@ -2325,6 +2350,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {:ok, node} ->
         exact_action? =
           expected["action"] in [
+            "coding_design_envelope_parse",
             "coding_design_checkpoint_open",
             "coding_design_checkpoint_await"
           ]
@@ -2359,6 +2385,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "design" => ["extract_design"],
       "design_attempt" => ["inc_design_attempt", "init_design_attempt"],
       "design_digest" => ["extract_design_digest"],
+      "design_envelope_retry_count" => [
+        "inc_design_envelope_retry_count",
+        "init_design_envelope_retry_count",
+        "reset_design_envelope_retry_count"
+      ],
       "packet_digest" => ["prep_checkpoint_packet_digest"],
       "plan_fingerprint" => ["prep_checkpoint_plan_fingerprint"],
       "request_id" => ["hoist_design_checkpoint_request_id"],
@@ -2425,6 +2456,17 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "{ctx.coding_plan_work_packet_json}",
            "MUST NOT edit",
            "MUST NOT create commits",
+           "design_digest"
+         ]},
+        {"build_design_envelope_repair_prompt",
+         [
+           "DESIGN ENVELOPE REPAIR ONLY",
+           "{value}",
+           "{ctx.coding_plan_work_packet_json}",
+           "{ctx.design_attempt}",
+           "MUST NOT edit",
+           "MUST NOT create commits",
+           "exactly two string fields",
            "design_digest"
          ]},
         {"build_design_rework_prompt",
@@ -2507,7 +2549,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   defp check_design_checkpoint_topology(errors, graph, policy, rework_max_cycles) do
     common = [
       {"init_design_defaults", [{"init_design_attempt", nil}]},
-      {"init_design_attempt", [{"init_worker_phase", nil}]},
+      {"init_design_attempt", [{"init_design_envelope_retry_count", nil}]},
+      {"init_design_envelope_retry_count", [{"init_worker_phase", nil}]},
       {"init_worker_phase", [{"freeze_coding_plan_work_packet_json", nil}]},
       {"freeze_coding_plan_work_packet_json", [{"build_design_prompt", nil}]},
       {"build_design_prompt", [{"capture_pre_turn_workspace", nil}]},
@@ -2520,9 +2563,20 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"check_design_workspace_unchanged",
        [
          {"error_design_modified_workspace", nil},
-         {"hoist_design_response", "context.turn_progressed=false"}
+         {"parse_design_response", "context.turn_progressed=false"}
        ]},
-      {"hoist_design_response", [{"extract_design", nil}]},
+      {"parse_design_response",
+       [
+         {"check_design_envelope_retry_budget", "outcome=fail"},
+         {"extract_design", "outcome=success"}
+       ]},
+      {"check_design_envelope_retry_budget",
+       [
+         {"error_design_response_invalid", "context.design_envelope_retry_count>=1"},
+         {"inc_design_envelope_retry_count", "context.design_envelope_retry_count<1"}
+       ]},
+      {"inc_design_envelope_retry_count", [{"build_design_envelope_repair_prompt", nil}]},
+      {"build_design_envelope_repair_prompt", [{"capture_pre_turn_workspace", nil}]},
       {"extract_design",
        [
          {"error_design_response_invalid", "outcome=fail"},
@@ -2582,7 +2636,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        ]},
       {"mark_design_rework_exhausted_error", [{"status_rework_exhausted", nil}]},
       {"inc_design_total_rework_count", [{"inc_design_attempt", nil}]},
-      {"inc_design_attempt", [{"mark_design_rework_kind", nil}]},
+      {"inc_design_attempt", [{"reset_design_envelope_retry_count", nil}]},
+      {"reset_design_envelope_retry_count", [{"mark_design_rework_kind", nil}]},
       {"mark_design_rework_kind", [{"mark_design_rework_iteration", nil}]},
       {"mark_design_rework_iteration", [{"build_design_rework_prompt", nil}]},
       {"build_design_rework_prompt", [{"capture_pre_turn_workspace", nil}]}

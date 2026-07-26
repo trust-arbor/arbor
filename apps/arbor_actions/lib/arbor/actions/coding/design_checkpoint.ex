@@ -13,11 +13,14 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   @max_identifier_bytes 256
   @max_task_bytes 16_384
   @max_design_bytes 16_384
+  @max_terminal_response_bytes 65_536
+  @max_json_scan_attempts 128
   @max_description_bytes 16_384
   @max_metadata_bytes 32_768
   @default_timeout 60_000
   @max_timeout 3_600_000
   @request_prefix "irq_design_"
+  @design_envelope_keys ~w(design design_digest)
   @evidence_keys ~w(
     task_id
     task
@@ -35,6 +38,12 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   def max_design_bytes, do: @max_design_bytes
 
   @doc false
+  def max_terminal_response_bytes, do: @max_terminal_response_bytes
+
+  @doc false
+  def max_json_scan_attempts, do: @max_json_scan_attempts
+
+  @doc false
   def build_binding(params, context) when is_map(params) and is_map(context) do
     with {:ok, work_packet_input} <- required(params, context, :work_packet, :work_packet),
          {:ok, packet} <- normalize_work_packet(work_packet_input),
@@ -48,8 +57,11 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
          {:ok, worker_session_id} <- required_worker_session(params, context),
          {:ok, provider_session_id} <- optional_identifier(params, context, :provider_session_id),
          {:ok, design_attempt} <- required_attempt(params, context),
-         {:ok, design} <- required_design(params, context),
-         {:ok, design_digest} <- required_design_digest(params, context, design) do
+         {:ok, %{"design" => design, "design_digest" => design_digest}} <-
+           validate_design_envelope(
+             value(params, context, :design),
+             value(params, context, :design_digest)
+           ) do
       base_evidence = %{
         "task_id" => task_id,
         "task" => task,
@@ -82,6 +94,38 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   end
 
   def build_binding(_params, _context), do: {:error, :invalid_design_checkpoint_input}
+
+  # Validate and normalize the exact design evidence shared by Parse and Open.
+  @doc false
+  def validate_design_envelope(design, supplied_digest) do
+    with {:ok, design} <- validate_design(design),
+         {:ok, design_digest} <- validate_design_digest(supplied_digest, design) do
+      {:ok, %{"design" => design, "design_digest" => design_digest}}
+    end
+  end
+
+  # Progress prose and unrelated top-level JSON values are ignored. Identical
+  # duplicate envelopes are tolerated because some ACP clients concatenate the
+  # terminal payload twice. Raw response text remains the caller's audit
+  # responsibility and is never returned from this parser.
+  @doc false
+  def parse_design_envelope(text)
+      when is_binary(text) and byte_size(text) <= @max_terminal_response_bytes do
+    with {:ok, objects} <- scan_top_level_json_objects(text),
+         {:ok, envelopes} <- validate_candidate_objects(objects) do
+      case Enum.uniq(envelopes) do
+        [envelope] -> {:ok, envelope}
+        [] -> {:error, :design_envelope_not_found}
+        _conflicting -> {:error, :conflicting_design_envelopes}
+      end
+    end
+  end
+
+  def parse_design_envelope(text)
+      when is_binary(text) and byte_size(text) > @max_terminal_response_bytes,
+      do: {:error, :design_envelope_response_too_large}
+
+  def parse_design_envelope(_text), do: {:error, :design_envelope_text_required}
 
   @doc false
   def request_id(evidence) when is_map(evidence) do
@@ -416,34 +460,29 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     end
   end
 
-  defp required_design(params, context) do
-    case value(params, context, :design) do
-      value
-      when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_design_bytes ->
-        cond do
-          not String.valid?(value) ->
-            {:error, :design_checkpoint_design_invalid_utf8}
+  defp validate_design(value)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_design_bytes do
+    cond do
+      not String.valid?(value) ->
+        {:error, :design_checkpoint_design_invalid_utf8}
 
-          String.trim(value) == "" ->
-            {:error, :design_checkpoint_design_blank}
+      String.trim(value) == "" ->
+        {:error, :design_checkpoint_design_blank}
 
-          String.contains?(value, <<0>>) or has_disallowed_design_control?(value) ->
-            {:error, :design_checkpoint_design_control_character}
+      String.contains?(value, <<0>>) or has_disallowed_design_control?(value) ->
+        {:error, :design_checkpoint_design_control_character}
 
-          true ->
-            {:ok, value}
-        end
-
-      value when is_binary(value) and byte_size(value) > @max_design_bytes ->
-        {:error, :design_checkpoint_design_too_large}
-
-      _ ->
-        {:error, :design_checkpoint_design_required}
+      true ->
+        {:ok, value}
     end
   end
 
-  defp required_design_digest(params, context, design) do
-    supplied = value(params, context, :design_digest)
+  defp validate_design(value) when is_binary(value) and byte_size(value) > @max_design_bytes,
+    do: {:error, :design_checkpoint_design_too_large}
+
+  defp validate_design(_value), do: {:error, :design_checkpoint_design_required}
+
+  defp validate_design_digest(supplied, design) do
     expected = "sha256:" <> (:crypto.hash(:sha256, design) |> Base.encode16(case: :lower))
 
     if is_binary(supplied) and supplied === expected,
@@ -557,6 +596,137 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
       Map.get(secondary, Atom.to_string(key))
   end
 
+  defp scan_top_level_json_objects(text),
+    do: scan_top_level_json_objects(text, 0, 0, [])
+
+  defp scan_top_level_json_objects(text, offset, attempts, objects) do
+    case next_composite_start(text, offset) do
+      :none ->
+        {:ok, Enum.reverse(objects)}
+
+      _start when attempts >= @max_json_scan_attempts ->
+        {:error, :design_envelope_scan_limit_exceeded}
+
+      start ->
+        case balanced_composite_end(text, start) do
+          {:ok, finish} ->
+            candidate = binary_part(text, start, finish - start + 1)
+
+            case Jason.decode(candidate, objects: :ordered_objects) do
+              {:ok, %Jason.OrderedObject{} = object} ->
+                scan_top_level_json_objects(text, finish + 1, attempts + 1, [object | objects])
+
+              {:ok, _other_json} ->
+                scan_top_level_json_objects(text, finish + 1, attempts + 1, objects)
+
+              {:error, _reason} ->
+                scan_top_level_json_objects(text, start + 1, attempts + 1, objects)
+            end
+
+          :unbalanced ->
+            scan_top_level_json_objects(text, start + 1, attempts + 1, objects)
+        end
+    end
+  end
+
+  defp next_composite_start(text, offset) when offset >= byte_size(text), do: :none
+
+  defp next_composite_start(text, offset) do
+    remaining = byte_size(text) - offset
+    brace = match_offset(text, "{", offset, remaining)
+    bracket = match_offset(text, "[", offset, remaining)
+
+    case {brace, bracket} do
+      {:none, :none} -> :none
+      {:none, start} -> start
+      {start, :none} -> start
+      {brace_start, bracket_start} -> min(brace_start, bracket_start)
+    end
+  end
+
+  defp match_offset(text, pattern, offset, length) do
+    case :binary.match(text, pattern, scope: {offset, length}) do
+      {start, _length} -> start
+      :nomatch -> :none
+    end
+  end
+
+  defp balanced_composite_end(text, start) do
+    expected_closer =
+      case :binary.at(text, start) do
+        ?{ -> ?}
+        ?[ -> ?]
+      end
+
+    scan_composite(text, start + 1, [expected_closer], false, false)
+  end
+
+  defp scan_composite(text, offset, _closers, _in_string?, _escaped?)
+       when offset >= byte_size(text),
+       do: :unbalanced
+
+  defp scan_composite(text, offset, closers, true, true),
+    do: scan_composite(text, offset + 1, closers, true, false)
+
+  defp scan_composite(text, offset, closers, true, false) do
+    case :binary.at(text, offset) do
+      ?\\ -> scan_composite(text, offset + 1, closers, true, true)
+      ?" -> scan_composite(text, offset + 1, closers, false, false)
+      _byte -> scan_composite(text, offset + 1, closers, true, false)
+    end
+  end
+
+  defp scan_composite(text, offset, closers, false, false) do
+    case {:binary.at(text, offset), closers} do
+      {?", _} ->
+        scan_composite(text, offset + 1, closers, true, false)
+
+      {?{, _} ->
+        scan_composite(text, offset + 1, [?} | closers], false, false)
+
+      {?[, _} ->
+        scan_composite(text, offset + 1, [?] | closers], false, false)
+
+      {closer, [closer]} ->
+        {:ok, offset}
+
+      {closer, [closer | remaining]} ->
+        scan_composite(text, offset + 1, remaining, false, false)
+
+      {closer, _} when closer in [?}, ?]] ->
+        :unbalanced
+
+      {_byte, _} ->
+        scan_composite(text, offset + 1, closers, false, false)
+    end
+  end
+
+  defp validate_candidate_objects(objects) do
+    Enum.reduce_while(objects, {:ok, []}, fn object, {:ok, envelopes} ->
+      case validate_candidate_object(object) do
+        :unrelated -> {:cont, {:ok, envelopes}}
+        {:ok, envelope} -> {:cont, {:ok, [envelope | envelopes]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_candidate_object(%Jason.OrderedObject{values: pairs}) do
+    keys = Enum.map(pairs, &elem(&1, 0))
+
+    if Enum.any?(keys, &(&1 in @design_envelope_keys)) do
+      if length(keys) == length(@design_envelope_keys) and
+           MapSet.new(keys) == MapSet.new(@design_envelope_keys) do
+        envelope = Map.new(pairs)
+        validate_design_envelope(envelope["design"], envelope["design_digest"])
+      else
+        {:error, :invalid_design_envelope_fields}
+      end
+    else
+      :unrelated
+    end
+  end
+
   defp has_ascii_control?(value), do: has_ascii_control?(value, false)
   defp has_ascii_control?(<<>>, seen), do: seen
 
@@ -574,6 +744,38 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
 
   defp has_disallowed_design_control?(<<_byte, rest::binary>>, seen),
     do: has_disallowed_design_control?(rest, seen)
+end
+
+defmodule Arbor.Actions.Coding.DesignCheckpoint.Parse do
+  @moduledoc """
+  Parse the strict CodingPlan v2 terminal design envelope from ACP response text.
+
+  This pipeline-internal action is bounded, pure, and read-only. The caller
+  retains the raw ACP transcript separately for audit.
+  """
+
+  use Jido.Action,
+    name: "coding_design_envelope_parse",
+    description: "Parse and verify the terminal CodingPlan v2 design envelope",
+    category: "coding",
+    tags: ["coding", "design_checkpoint", "parser", "pipeline_internal"],
+    schema: [
+      text: [type: :string, required: true, doc: "Raw bounded ACP response text"]
+    ]
+
+  alias Arbor.Actions.Coding.DesignCheckpoint
+
+  def taint_roles, do: %{text: :data}
+  def effect_class, do: :read
+  def execution_idempotency, do: :read_only
+
+  @impl true
+  def run(params, _context) when is_map(params) do
+    text = Map.get(params, :text) || Map.get(params, "text")
+    DesignCheckpoint.parse_design_envelope(text)
+  end
+
+  def run(_params, _context), do: {:error, :design_envelope_text_required}
 end
 
 defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
