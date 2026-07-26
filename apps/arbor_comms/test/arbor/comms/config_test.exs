@@ -1,7 +1,8 @@
 defmodule Arbor.Comms.ConfigTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Comms.Config
+  alias Arbor.Comms.InteractionRegistry.Dispatcher
 
   describe "channel_enabled?/1" do
     test "returns false when channel not configured" do
@@ -97,6 +98,49 @@ defmodule Arbor.Comms.ConfigTest do
 
       channels = Config.configured_channels()
       assert :signal in channels
+    end
+  end
+
+  describe "durable_interaction_dispatch_config/0" do
+    setup do
+      original = Application.fetch_env(:arbor_comms, :durable_interaction_dispatch)
+
+      on_exit(fn ->
+        restore_env(:durable_interaction_dispatch, original)
+      end)
+
+      :ok
+    end
+
+    test "uses validated defaults only when configuration is absent" do
+      Application.delete_env(:arbor_comms, :durable_interaction_dispatch)
+
+      assert {:ok,
+              %{
+                sweep_interval_ms: 1_000,
+                startup_delay_ms: 0,
+                batch_size: 32,
+                retry_base_ms: 250,
+                retry_max_ms: 30_000,
+                send_timeout_ms: 5_000,
+                max_concurrency: 4
+              }} = Config.durable_interaction_dispatch_config()
+    end
+
+    test "malformed configured values fail closed and reject dispatcher startup" do
+      for malformed <- [
+            %{sweep_interval_ms: 100},
+            [:not_a_keyword],
+            [sweep_interval_ms: 100, sweep_interval_ms: 200],
+            [unknown: 1],
+            [send_timeout_ms: 0],
+            [retry_base_ms: 100, retry_max_ms: 50]
+          ] do
+        Application.put_env(:arbor_comms, :durable_interaction_dispatch, malformed)
+
+        assert {:error, :invalid_config} = Config.durable_interaction_dispatch_config()
+        assert_dispatcher_start_rejected()
+      end
     end
   end
 
@@ -204,5 +248,25 @@ defmodule Arbor.Comms.ConfigTest do
 
       assert Config.contacts() == test_contacts
     end
+  end
+
+  defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_comms, key, value)
+  defp restore_env(key, :error), do: Application.delete_env(:arbor_comms, key)
+
+  defp assert_dispatcher_start_rejected do
+    parent = self()
+
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        Process.flag(:trap_exit, true)
+
+        send(
+          parent,
+          {:dispatcher_start_result, Dispatcher.start_link(name: __MODULE__.MalformedDispatcher)}
+        )
+      end)
+
+    assert_receive {:dispatcher_start_result, {:error, :invalid_dispatch_config}}
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}
   end
 end

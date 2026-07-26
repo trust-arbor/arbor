@@ -5,6 +5,7 @@ defmodule Arbor.Comms.InteractionRegistry.Supervisor do
 
   alias Arbor.Comms.InteractionRegistry
   alias Arbor.Comms.InteractionRegistry.Authority
+  alias Arbor.Comms.InteractionRegistry.Dispatcher
 
   def start_link(opts) do
     Supervisor.start_link(__MODULE__, opts)
@@ -21,6 +22,18 @@ defmodule Arbor.Comms.InteractionRegistry.Supervisor do
       %{
         id: Authority,
         start: {Authority, :start_link, [Keyword.put_new(opts, :tracker, InteractionRegistry)]},
+        type: :worker
+      },
+      %{
+        id: Arbor.Comms.InteractionRegistry.DeliverySupervisor,
+        start:
+          {Task.Supervisor, :start_link,
+           [[name: Arbor.Comms.InteractionRegistry.DeliverySupervisor]]},
+        type: :supervisor
+      },
+      %{
+        id: Dispatcher,
+        start: {Dispatcher, :start_link, [opts]},
         type: :worker
       }
     ]

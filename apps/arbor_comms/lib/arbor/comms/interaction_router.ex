@@ -25,17 +25,23 @@ defmodule Arbor.Comms.InteractionRouter do
     (e.g. coding-benchmark approval accounting) can aggregate history.
     Signal data stays bounded lifecycle observability — never execution control.
 
-  ## Phase 1 scope
+  Durable adapter delivery is at-least-once. The durable interaction record is
+  the outbox and accepted delivery is CAS-fenced, but the current adapter
+  contract has no idempotent acceptance receipt. A dispatcher crash after an
+  external send returns `:ok` but before the accepted CAS may therefore
+  redeliver the same `request_id`. Exactly-once delivery is impossible without
+  changing that adapter contract. Duplicate human responses remain fenced by
+  the interaction's first-terminal lifecycle CAS.
 
-  Only the dashboard adapter is wired. Signal/Telegram/Discord/voice
-  are additive future channels — no router changes needed when they
-  land.
+  Volatile requests retain their original caller-owned, single-attempt
+  delivery behavior.
   """
 
   require Logger
 
+  alias Arbor.Comms.InteractionDelivery
   alias Arbor.Comms.InteractionRegistry
-  alias Arbor.Comms.PresenceTracker
+  alias Arbor.Comms.InteractionRegistry.Dispatcher, as: DurableDispatcher
   alias Arbor.Contracts.Comms.Interaction
 
   @owner_clock_recheck_ms 60_000
@@ -90,11 +96,14 @@ defmodule Arbor.Comms.InteractionRouter do
              interaction,
              request_opts.owner_deadline_unix_ms
            ) do
-        {:ok, :existing, %Interaction{}, receipt} ->
-          {:ok, receipt}
-
-        {:ok, :inserted, %Interaction{} = stored_interaction, receipt} ->
-          dispatch_inserted_durable(stored_interaction, request_opts.adapter_map, receipt)
+        {:ok, disposition, %Interaction{} = stored_interaction, receipt}
+        when disposition in [:inserted, :existing] ->
+          wake_durable_dispatch(
+            stored_interaction,
+            request_opts.adapter_map,
+            receipt,
+            disposition
+          )
 
         {:error, _reason} = error ->
           error
@@ -103,6 +112,12 @@ defmodule Arbor.Comms.InteractionRouter do
   end
 
   def request_durable(_interaction, _opts), do: {:error, :invalid_options}
+
+  @doc false
+  @spec durable_dispatch_accepted(Interaction.t()) :: :ok
+  def durable_dispatch_accepted(%Interaction{} = interaction) do
+    emit_signal(:requested, interaction, %{})
+  end
 
   @doc """
   Submit a response to a previously-requested interaction. Called by
@@ -415,28 +430,47 @@ defmodule Arbor.Comms.InteractionRouter do
   ## Private — request flow
 
   defp do_request(%Interaction{} = interaction, opts) do
-    adapter_map = Keyword.get(opts, :adapter_map, configured_adapters())
+    adapter_map = Keyword.get(opts, :adapter_map, InteractionDelivery.configured_adapters())
     durability = Keyword.get(opts, :durability, :volatile)
 
     case InteractionRegistry.admit(interaction, durability: durability) do
       {:ok, :existing, %Interaction{} = stored_interaction} ->
-        {:ok, stored_interaction.request_id}
+        maybe_wake_existing(stored_interaction, adapter_map, durability)
 
       {:ok, :inserted, %Interaction{} = stored_interaction} ->
-        dispatch_inserted(stored_interaction, adapter_map)
+        dispatch_inserted(stored_interaction, adapter_map, durability)
 
       {:error, _reason} = error ->
         error
     end
   end
 
-  defp dispatch_inserted(interaction, adapter_map) do
-    case dispatch(interaction, adapter_map) do
+  defp maybe_wake_existing(interaction, adapter_map, :node_restart) do
+    _ = DurableDispatcher.wake(interaction.request_id, adapter_map)
+    {:ok, interaction.request_id}
+  end
+
+  defp maybe_wake_existing(interaction, _adapter_map, :volatile),
+    do: {:ok, interaction.request_id}
+
+  defp dispatch_inserted(interaction, adapter_map, :node_restart) do
+    case DurableDispatcher.wake(interaction.request_id, adapter_map) do
+      :accepted ->
+        {:ok, interaction.request_id}
+
+      _queued_or_settled ->
+        emit_signal(:queued, interaction, %{})
+        {:ok, interaction.request_id}
+    end
+  end
+
+  defp dispatch_inserted(interaction, adapter_map, :volatile) do
+    case InteractionDelivery.deliver(interaction, adapter_map) do
       :ok ->
         emit_signal(:requested, interaction, %{})
         {:ok, interaction.request_id}
 
-      :no_channel ->
+      {:retry, _reason} ->
         # Already persisted; queue for later when presence becomes
         # available. Adapters that come online can pick up pending
         # interactions targeted at their channel via list_pending.
@@ -445,14 +479,13 @@ defmodule Arbor.Comms.InteractionRouter do
     end
   end
 
-  defp dispatch_inserted_durable(interaction, adapter_map, receipt) do
-    case dispatch(interaction, adapter_map) do
-      :ok ->
-        emit_signal(:requested, interaction, %{})
+  defp wake_durable_dispatch(interaction, adapter_map, receipt, disposition) do
+    case DurableDispatcher.wake(interaction.request_id, adapter_map) do
+      :queued when disposition == :inserted ->
+        emit_signal(:queued, interaction, %{})
         {:ok, receipt}
 
-      :no_channel ->
-        emit_signal(:queued, interaction, %{})
+      _accepted_queued_or_settled ->
         {:ok, receipt}
     end
   end
@@ -462,7 +495,8 @@ defmodule Arbor.Comms.InteractionRouter do
 
     with :ok <- validate_keyword_options(opts, allowed),
          {:ok, deadline} <- required_non_negative_integer(opts, :owner_deadline_unix_ms),
-         adapter_map = Keyword.get(opts, :adapter_map, configured_adapters()),
+         adapter_map =
+           Keyword.get(opts, :adapter_map, InteractionDelivery.configured_adapters()),
          true <- is_map(adapter_map) do
       {:ok, %{owner_deadline_unix_ms: deadline, adapter_map: adapter_map}}
     else
@@ -658,60 +692,6 @@ defmodule Arbor.Comms.InteractionRouter do
 
   defp requested_durability(_opts), do: {:error, :invalid_options}
 
-  defp dispatch(%Interaction{user_id: user_id} = interaction, adapter_map) do
-    case PresenceTracker.primary_channel(user_id) do
-      {:ok, channel, meta} ->
-        case Map.get(adapter_map, channel) do
-          nil ->
-            Logger.info(
-              "[InteractionRouter] no adapter for channel #{inspect(channel)}; queueing #{interaction.request_id}"
-            )
-
-            :no_channel
-
-          adapter when is_atom(adapter) ->
-            case safe_send(adapter, meta, interaction) do
-              :ok ->
-                :ok
-
-              {:error, reason} ->
-                # Adapter failed but the interaction IS persisted.
-                # Treat as queued — log the failure and return :ok so
-                # the caller (agent) gets a non-blocking result.
-                # Future adapter health / retry can pick this up.
-                Logger.warning(
-                  "[InteractionRouter] adapter failed for #{interaction.request_id}: " <>
-                    "#{inspect(reason)} — interaction queued"
-                )
-
-                :no_channel
-            end
-        end
-
-      :no_presence ->
-        Logger.info(
-          "[InteractionRouter] no active presence for user #{user_id}; queueing #{interaction.request_id}"
-        )
-
-        :no_channel
-    end
-  end
-
-  defp safe_send(adapter, channel_meta, interaction) do
-    adapter.send_interaction(channel_meta, interaction)
-  rescue
-    e ->
-      Logger.warning(
-        "[InteractionRouter] adapter #{inspect(adapter)} crashed: #{Exception.message(e)}"
-      )
-
-      {:error, {:adapter_crash, Exception.message(e)}}
-  catch
-    :exit, reason ->
-      Logger.warning("[InteractionRouter] adapter #{inspect(adapter)} exited: #{inspect(reason)}")
-      {:error, {:adapter_exit, reason}}
-  end
-
   ## Private — response flow
 
   defp broadcast_response(%Interaction{response_topic: topic} = interaction, response, metadata) do
@@ -747,10 +727,6 @@ defmodule Arbor.Comms.InteractionRouter do
   # cond returned nil at supervisor-init time because no other PubSub
   # existed yet).
   defp current_pubsub, do: Arbor.Comms.PubSub
-
-  defp configured_adapters do
-    Application.get_env(:arbor_comms, :interaction_adapters, %{})
-  end
 
   ## Signal emission for audit
 

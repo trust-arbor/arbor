@@ -5,7 +5,10 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   The record is deliberately a closed, string-keyed JSON object.  Interaction
   metadata and choice values are bounded JSON values; responses use an
   explicit tagged representation so approval and text responses survive a
-  JSON round trip without creating atoms from input.
+  JSON round trip without creating atoms from input. The interaction record
+  is also the durable adapter-dispatch outbox: admission creates a pending
+  dispatch, adapter acceptance settles it, and a terminal lifecycle cancels
+  any dispatch that has not already been accepted.
 
   Terminal projection restores the authority's atom-keyed field names and
   known status/decision/reason atoms. `authority_node` deliberately remains
@@ -20,7 +23,8 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
 
   alias Arbor.Contracts.Comms.Interaction
 
-  @schema_version 1
+  @schema_version 2
+  @legacy_schema_version 1
   @max_identifier_bytes 256
   @max_string_bytes 16_384
   @max_reason_bytes 1_024
@@ -28,8 +32,9 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   @max_response_bytes 16_384
   @max_json_depth 8
   @max_container_entries 128
+  @max_dispatch_attempts 1_000_000
 
-  @record_keys [
+  @legacy_record_keys [
     "schema_version",
     "operation_id",
     "request_id",
@@ -41,6 +46,15 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
     "terminal",
     "admitted_at_unix_ms",
     "updated_at_unix_ms"
+  ]
+
+  @record_keys @legacy_record_keys ++ ["dispatch"]
+
+  @dispatch_keys [
+    "status",
+    "attempts",
+    "next_attempt_at_unix_ms",
+    "accepted_at_unix_ms"
   ]
 
   @interaction_keys [
@@ -69,6 +83,7 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
 
   @statuses ["pending", "responded", "abandoned", "expired"]
   @terminal_statuses ["responded", "abandoned", "expired"]
+  @dispatch_statuses ["pending", "accepted", "cancelled"]
 
   @kind_to_string %{
     approval: "approval",
@@ -105,6 +120,12 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
          "authority_node" => authority_node,
          "authority_epoch" => authority_epoch,
          "owner_deadline_unix_ms" => nil,
+         "dispatch" => %{
+           "status" => "pending",
+           "attempts" => 0,
+           "next_attempt_at_unix_ms" => now_ms,
+           "accepted_at_unix_ms" => nil
+         },
          "terminal" => nil,
          "admitted_at_unix_ms" => now_ms,
          "updated_at_unix_ms" => now_ms
@@ -118,8 +139,42 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   @doc "Strictly validate an already decoded JSON record."
   @spec decode(map()) :: {:ok, map()} | {:error, term()}
   def decode(record) when is_map(record) do
+    case record["schema_version"] do
+      @schema_version -> decode_current(record)
+      @legacy_schema_version -> decode_legacy(record)
+      _ -> {:error, :unsupported_schema_version}
+    end
+  end
+
+  def decode(_), do: {:error, :invalid_record}
+
+  defp decode_current(record) do
     with :ok <- exact_keys(record, @record_keys, :record),
          :ok <- validate_schema_version(record["schema_version"]),
+         :ok <- validate_identifier(record["operation_id"], :operation_id),
+         :ok <- validate_identifier(record["request_id"], :request_id),
+         :ok <- validate_enum(record["status"], @statuses, :status),
+         {:ok, interaction} <- decode_interaction(record["interaction"]),
+         :ok <- same_request_id(record["request_id"], interaction.request_id),
+         :ok <- validate_identifier(record["authority_node"], :authority_node),
+         :ok <- validate_identifier(record["authority_epoch"], :authority_epoch),
+         :ok <- validate_nullable_time(record["owner_deadline_unix_ms"]),
+         {:ok, dispatch} <- decode_dispatch(record["dispatch"]),
+         {:ok, terminal} <- decode_terminal(record["terminal"]),
+         :ok <- terminal_status_consistent(record["status"], terminal),
+         :ok <- terminal_authority_consistent(record, terminal),
+         :ok <- dispatch_lifecycle_consistent(record["status"], dispatch),
+         :ok <- validate_time(record["admitted_at_unix_ms"]),
+         :ok <- validate_time(record["updated_at_unix_ms"]),
+         :ok <- timestamp_ordering(record, terminal),
+         :ok <- dispatch_timestamp_ordering(record, dispatch),
+         :ok <- bounded_record?(record) do
+      {:ok, record}
+    end
+  end
+
+  defp decode_legacy(record) do
+    with :ok <- exact_keys(record, @legacy_record_keys, :record),
          :ok <- validate_identifier(record["operation_id"], :operation_id),
          :ok <- validate_identifier(record["request_id"], :request_id),
          :ok <- validate_enum(record["status"], @statuses, :status),
@@ -135,11 +190,14 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
          :ok <- validate_time(record["updated_at_unix_ms"]),
          :ok <- timestamp_ordering(record, terminal),
          :ok <- bounded_record?(record) do
-      {:ok, record}
+      upgraded =
+        record
+        |> Map.put("schema_version", @schema_version)
+        |> Map.put("dispatch", legacy_dispatch(record))
+
+      decode_current(upgraded)
     end
   end
-
-  def decode(_), do: {:error, :invalid_record}
 
   @doc "Alias for strict durable-record decoding."
   def strict_decode(record), do: decode(record)
@@ -281,6 +339,90 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   def claim_authority_epoch(record, authority_node, authority_epoch, now_ms),
     do: claim_epoch(record, authority_node, authority_epoch, now_ms)
 
+  @doc "Return whether a pending adapter dispatch is eligible at the injected time."
+  @spec dispatch_due?(map(), non_neg_integer()) :: boolean()
+  def dispatch_due?(record, now_ms) when is_integer(now_ms) and now_ms >= 0 do
+    case decode(record) do
+      {:ok,
+       %{
+         "status" => "pending",
+         "dispatch" => %{
+           "status" => "pending",
+           "next_attempt_at_unix_ms" => next_attempt_at
+         }
+       }} ->
+        next_attempt_at <= now_ms
+
+      _ ->
+        false
+    end
+  end
+
+  def dispatch_due?(_record, _now_ms), do: false
+
+  @doc "Persist successful adapter acceptance under the current lifecycle epoch."
+  @spec accept_dispatch(map(), String.t(), String.t(), non_neg_integer()) ::
+          {:ok, map()} | {:error, term()}
+  def accept_dispatch(record, authority_node, authority_epoch, now_ms) do
+    with {:ok, record} <- decode(record),
+         :ok <- validate_identifier(authority_node, :authority_node),
+         :ok <- validate_identifier(authority_epoch, :authority_epoch),
+         :ok <- validate_time(now_ms),
+         :ok <- now_not_before_record(record, now_ms),
+         :ok <- same_authority_node(record, authority_node),
+         :ok <- expected_epoch(record, authority_epoch),
+         :ok <- pending_dispatch(record) do
+      dispatch = %{
+        record["dispatch"]
+        | "status" => "accepted",
+          "next_attempt_at_unix_ms" => nil,
+          "accepted_at_unix_ms" => now_ms
+      }
+
+      {:ok, %{record | "dispatch" => dispatch, "updated_at_unix_ms" => now_ms}}
+    end
+  end
+
+  @doc "Release an unsuccessful adapter claim and persist its next bounded retry time."
+  @spec release_dispatch(
+          map(),
+          String.t(),
+          String.t(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: {:ok, map()} | {:error, term()}
+  def release_dispatch(
+        record,
+        authority_node,
+        authority_epoch,
+        next_attempt_at_unix_ms,
+        now_ms
+      ) do
+    with {:ok, record} <- decode(record),
+         :ok <- validate_identifier(authority_node, :authority_node),
+         :ok <- validate_identifier(authority_epoch, :authority_epoch),
+         :ok <- validate_time(next_attempt_at_unix_ms),
+         :ok <- validate_time(now_ms),
+         true <- next_attempt_at_unix_ms >= now_ms,
+         :ok <- now_not_before_record(record, now_ms),
+         :ok <- same_authority_node(record, authority_node),
+         :ok <- expected_epoch(record, authority_epoch),
+         :ok <- pending_dispatch(record) do
+      attempts = min(record["dispatch"]["attempts"] + 1, @max_dispatch_attempts)
+
+      dispatch = %{
+        record["dispatch"]
+        | "attempts" => attempts,
+          "next_attempt_at_unix_ms" => next_attempt_at_unix_ms
+      }
+
+      {:ok, %{record | "dispatch" => dispatch, "updated_at_unix_ms" => now_ms}}
+    else
+      false -> {:error, :retry_before_release}
+      error -> error
+    end
+  end
+
   @doc "Return whether the owner deadline is due at the injected wall-clock time."
   def deadline_due?(record, now_ms) do
     case decode(record) do
@@ -361,6 +503,7 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
            %{
              record
              | "status" => terminal["status"],
+               "dispatch" => cancel_pending_dispatch(record["dispatch"]),
                "terminal" => terminal,
                "updated_at_unix_ms" => now_ms
            }}
@@ -500,6 +643,19 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
       error -> error
     end
   end
+
+  defp decode_dispatch(dispatch) when is_map(dispatch) do
+    with :ok <- exact_keys(dispatch, @dispatch_keys, :dispatch),
+         :ok <- validate_enum(dispatch["status"], @dispatch_statuses, :dispatch_status),
+         :ok <- validate_dispatch_attempts(dispatch["attempts"]),
+         :ok <- validate_nullable_time(dispatch["next_attempt_at_unix_ms"]),
+         :ok <- validate_nullable_time(dispatch["accepted_at_unix_ms"]),
+         :ok <- validate_dispatch_shape(dispatch) do
+      {:ok, dispatch}
+    end
+  end
+
+  defp decode_dispatch(_), do: {:error, :invalid_dispatch}
 
   defp decode_terminal(nil), do: {:ok, nil}
 
@@ -920,6 +1076,80 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   defp expected_epoch(%{"authority_epoch" => epoch}, epoch), do: :ok
   defp expected_epoch(_, _), do: {:error, :stale_authority_epoch}
 
+  defp pending_dispatch(%{
+         "status" => "pending",
+         "dispatch" => %{"status" => "pending"}
+       }),
+       do: :ok
+
+  defp pending_dispatch(%{"status" => status}) when status != "pending",
+    do: {:error, :not_pending}
+
+  defp pending_dispatch(_record), do: {:error, :dispatch_not_pending}
+
+  defp legacy_dispatch(%{
+         "status" => "pending",
+         "updated_at_unix_ms" => updated_at
+       }) do
+    %{
+      "status" => "pending",
+      "attempts" => 0,
+      "next_attempt_at_unix_ms" => updated_at,
+      "accepted_at_unix_ms" => nil
+    }
+  end
+
+  defp legacy_dispatch(_terminal_record) do
+    %{
+      "status" => "cancelled",
+      "attempts" => 0,
+      "next_attempt_at_unix_ms" => nil,
+      "accepted_at_unix_ms" => nil
+    }
+  end
+
+  defp cancel_pending_dispatch(%{"status" => "pending"} = dispatch) do
+    %{
+      dispatch
+      | "status" => "cancelled",
+        "next_attempt_at_unix_ms" => nil,
+        "accepted_at_unix_ms" => nil
+    }
+  end
+
+  defp cancel_pending_dispatch(dispatch), do: dispatch
+
+  defp validate_dispatch_attempts(attempts)
+       when is_integer(attempts) and attempts >= 0 and attempts <= @max_dispatch_attempts,
+       do: :ok
+
+  defp validate_dispatch_attempts(_attempts), do: {:error, :invalid_dispatch_attempts}
+
+  defp validate_dispatch_shape(%{
+         "status" => "pending",
+         "next_attempt_at_unix_ms" => next_attempt_at,
+         "accepted_at_unix_ms" => nil
+       })
+       when is_integer(next_attempt_at),
+       do: :ok
+
+  defp validate_dispatch_shape(%{
+         "status" => "accepted",
+         "next_attempt_at_unix_ms" => nil,
+         "accepted_at_unix_ms" => accepted_at
+       })
+       when is_integer(accepted_at),
+       do: :ok
+
+  defp validate_dispatch_shape(%{
+         "status" => "cancelled",
+         "next_attempt_at_unix_ms" => nil,
+         "accepted_at_unix_ms" => nil
+       }),
+       do: :ok
+
+  defp validate_dispatch_shape(_dispatch), do: {:error, :invalid_dispatch_shape}
+
   defp terminal_status_consistent("pending", nil), do: :ok
 
   defp terminal_status_consistent(status, %{"status" => status})
@@ -939,6 +1169,17 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
   defp terminal_authority_consistent(_record, _terminal),
     do: {:error, :terminal_authority_mismatch}
 
+  defp dispatch_lifecycle_consistent("pending", %{"status" => status})
+       when status in ["pending", "accepted"],
+       do: :ok
+
+  defp dispatch_lifecycle_consistent(status, %{"status" => dispatch_status})
+       when status in @terminal_statuses and dispatch_status in ["accepted", "cancelled"],
+       do: :ok
+
+  defp dispatch_lifecycle_consistent(_status, _dispatch),
+    do: {:error, :invalid_dispatch_lifecycle}
+
   defp timestamp_ordering(
          %{
            "admitted_at_unix_ms" => admitted_at,
@@ -957,6 +1198,51 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCore do
        do: :ok
 
   defp timestamp_ordering(_record, _terminal), do: {:error, :invalid_timestamp_order}
+
+  defp dispatch_timestamp_ordering(
+         %{
+           "admitted_at_unix_ms" => admitted_at,
+           "updated_at_unix_ms" => updated_at
+         },
+         %{
+           "status" => "pending",
+           "next_attempt_at_unix_ms" => next_attempt_at,
+           "accepted_at_unix_ms" => nil
+         }
+       )
+       when next_attempt_at >= admitted_at and updated_at >= admitted_at,
+       do: :ok
+
+  defp dispatch_timestamp_ordering(
+         %{
+           "admitted_at_unix_ms" => admitted_at,
+           "updated_at_unix_ms" => updated_at
+         },
+         %{
+           "status" => "accepted",
+           "next_attempt_at_unix_ms" => nil,
+           "accepted_at_unix_ms" => accepted_at
+         }
+       )
+       when accepted_at >= admitted_at and updated_at >= accepted_at,
+       do: :ok
+
+  defp dispatch_timestamp_ordering(
+         %{
+           "admitted_at_unix_ms" => admitted_at,
+           "updated_at_unix_ms" => updated_at
+         },
+         %{
+           "status" => "cancelled",
+           "next_attempt_at_unix_ms" => nil,
+           "accepted_at_unix_ms" => nil
+         }
+       )
+       when updated_at >= admitted_at,
+       do: :ok
+
+  defp dispatch_timestamp_ordering(_record, _dispatch),
+    do: {:error, :invalid_dispatch_timestamp_order}
 
   defp validate_terminal_shape("responded", decision, response, nil)
        when decision in [nil, "approved", "rejected"] and not is_nil(response),

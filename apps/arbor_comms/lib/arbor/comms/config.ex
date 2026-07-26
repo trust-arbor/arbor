@@ -8,6 +8,27 @@ defmodule Arbor.Comms.Config do
   @default_durable_interaction_store_namespace :durable_interactions
   @default_durable_interaction_store_max_data_bytes 65_536
   @default_durable_interaction_store_max_items 1_000
+  @default_durable_dispatch_sweep_interval_ms 1_000
+  @default_durable_dispatch_startup_delay_ms 0
+  @default_durable_dispatch_batch_size 32
+  @default_durable_dispatch_retry_base_ms 250
+  @default_durable_dispatch_retry_max_ms 30_000
+  @default_durable_dispatch_send_timeout_ms 5_000
+  @default_durable_dispatch_max_concurrency 4
+  @max_durable_dispatch_sweep_interval_ms 300_000
+  @max_durable_dispatch_batch_size 100
+  @max_durable_dispatch_retry_ms 300_000
+  @max_durable_dispatch_send_timeout_ms 30_000
+  @max_durable_dispatch_concurrency 32
+  @durable_dispatch_keys [
+    :sweep_interval_ms,
+    :startup_delay_ms,
+    :batch_size,
+    :retry_base_ms,
+    :retry_max_ms,
+    :send_timeout_ms,
+    :max_concurrency
+  ]
 
   @doc "Returns whether a given channel is enabled."
   @spec channel_enabled?(atom()) :: boolean()
@@ -105,6 +126,61 @@ defmodule Arbor.Comms.Config do
     |> Keyword.get(:max_items, @default_durable_interaction_store_max_items)
   end
 
+  @doc "Returns the configured interaction adapter registry, failing closed to an empty map."
+  @spec interaction_adapters() :: %{optional(atom()) => module()}
+  def interaction_adapters do
+    case Application.get_env(:arbor_comms, :interaction_adapters, %{}) do
+      adapters when is_map(adapters) -> adapters
+      _ -> %{}
+    end
+  end
+
+  @doc "Returns validated timing and capacity controls for durable interaction dispatch."
+  @spec durable_interaction_dispatch_config() ::
+          {:ok,
+           %{
+             sweep_interval_ms: pos_integer(),
+             startup_delay_ms: non_neg_integer(),
+             batch_size: pos_integer(),
+             retry_base_ms: pos_integer(),
+             retry_max_ms: pos_integer(),
+             send_timeout_ms: pos_integer(),
+             max_concurrency: pos_integer()
+           }}
+          | {:error, :invalid_config}
+  def durable_interaction_dispatch_config do
+    with {:ok, config} <- durable_interaction_dispatch_options() do
+      values = %{
+        sweep_interval_ms:
+          Keyword.get(
+            config,
+            :sweep_interval_ms,
+            @default_durable_dispatch_sweep_interval_ms
+          ),
+        startup_delay_ms:
+          Keyword.get(
+            config,
+            :startup_delay_ms,
+            @default_durable_dispatch_startup_delay_ms
+          ),
+        batch_size: Keyword.get(config, :batch_size, @default_durable_dispatch_batch_size),
+        retry_base_ms:
+          Keyword.get(config, :retry_base_ms, @default_durable_dispatch_retry_base_ms),
+        retry_max_ms: Keyword.get(config, :retry_max_ms, @default_durable_dispatch_retry_max_ms),
+        send_timeout_ms:
+          Keyword.get(config, :send_timeout_ms, @default_durable_dispatch_send_timeout_ms),
+        max_concurrency:
+          Keyword.get(
+            config,
+            :max_concurrency,
+            @default_durable_dispatch_max_concurrency
+          )
+      }
+
+      if valid_dispatch_config?(values), do: {:ok, values}, else: {:error, :invalid_config}
+    end
+  end
+
   @doc "Returns whether the message handler is enabled."
   @spec handler_enabled?() :: boolean()
   def handler_enabled? do
@@ -138,6 +214,59 @@ defmodule Arbor.Comms.Config do
         []
     end
   end
+
+  defp durable_interaction_dispatch_options do
+    case Application.fetch_env(:arbor_comms, :durable_interaction_dispatch) do
+      :error ->
+        {:ok, []}
+
+      {:ok, config} when is_list(config) ->
+        if Keyword.keyword?(config) do
+          keys = Keyword.keys(config)
+
+          if length(keys) == length(Enum.uniq(keys)) and
+               Enum.all?(keys, &(&1 in @durable_dispatch_keys)) do
+            {:ok, config}
+          else
+            {:error, :invalid_config}
+          end
+        else
+          {:error, :invalid_config}
+        end
+
+      {:ok, _malformed} ->
+        {:error, :invalid_config}
+    end
+  end
+
+  defp valid_dispatch_config?(config) do
+    positive_bounded?(
+      config.sweep_interval_ms,
+      @max_durable_dispatch_sweep_interval_ms
+    ) and
+      non_negative_bounded?(
+        config.startup_delay_ms,
+        @max_durable_dispatch_sweep_interval_ms
+      ) and
+      positive_bounded?(config.batch_size, @max_durable_dispatch_batch_size) and
+      positive_bounded?(config.retry_base_ms, @max_durable_dispatch_retry_ms) and
+      positive_bounded?(config.retry_max_ms, @max_durable_dispatch_retry_ms) and
+      positive_bounded?(
+        config.send_timeout_ms,
+        @max_durable_dispatch_send_timeout_ms
+      ) and
+      positive_bounded?(
+        config.max_concurrency,
+        @max_durable_dispatch_concurrency
+      ) and
+      config.retry_base_ms <= config.retry_max_ms
+  end
+
+  defp positive_bounded?(value, maximum),
+    do: is_integer(value) and value > 0 and value <= maximum
+
+  defp non_negative_bounded?(value, maximum),
+    do: is_integer(value) and value >= 0 and value <= maximum
 
   @doc "Returns the configured ResponseRouter module."
   @spec response_router() :: module()

@@ -19,6 +19,7 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
                "admitted_at_unix_ms",
                "authority_epoch",
                "authority_node",
+               "dispatch",
                "interaction",
                "operation_id",
                "owner_deadline_unix_ms",
@@ -28,6 +29,15 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
                "terminal",
                "updated_at_unix_ms"
              ]
+
+      assert record["schema_version"] == 2
+
+      assert record["dispatch"] == %{
+               "status" => "pending",
+               "attempts" => 0,
+               "next_attempt_at_unix_ms" => @now,
+               "accepted_at_unix_ms" => nil
+             }
 
       assert {:ok, decoded} = Jason.encode(record)
       assert {:ok, ^record} = Jason.decode(decoded)
@@ -43,6 +53,11 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
 
       malformed = put_in(record["interaction"]["kind"], "made-up")
       assert {:error, {:invalid, :kind}} = DurableLifecycleCore.decode(malformed)
+
+      malformed_dispatch = put_in(record["dispatch"]["unexpected"], true)
+
+      assert {:error, {:unknown_fields, :dispatch}} =
+               DurableLifecycleCore.decode(malformed_dispatch)
 
       atom_key_metadata = put_in(record["interaction"]["metadata"], %{resource: "example"})
       assert {:error, :non_string_json_key} = DurableLifecycleCore.decode(atom_key_metadata)
@@ -88,6 +103,130 @@ defmodule Arbor.Comms.InteractionRegistry.DurableLifecycleCoreTest do
                  "epoch-1",
                  @now + 1
                )
+    end
+  end
+
+  describe "durable dispatch outbox" do
+    setup do
+      {:ok, record} = DurableLifecycleCore.new(interaction(), "op-1", "node-a", "epoch-1", @now)
+      %{record: record}
+    end
+
+    test "accepts or releases only a pending dispatch under the current epoch", %{record: record} do
+      assert DurableLifecycleCore.dispatch_due?(record, @now)
+
+      assert {:error, :stale_authority_epoch} =
+               DurableLifecycleCore.accept_dispatch(
+                 record,
+                 "node-a",
+                 "stale-epoch",
+                 @now + 1
+               )
+
+      assert {:ok, released} =
+               DurableLifecycleCore.release_dispatch(
+                 record,
+                 "node-a",
+                 "epoch-1",
+                 @now + 101,
+                 @now + 1
+               )
+
+      assert released["dispatch"]["attempts"] == 1
+      assert released["dispatch"]["next_attempt_at_unix_ms"] == @now + 101
+      refute DurableLifecycleCore.dispatch_due?(released, @now + 100)
+      assert DurableLifecycleCore.dispatch_due?(released, @now + 101)
+
+      assert {:ok, accepted} =
+               DurableLifecycleCore.accept_dispatch(
+                 released,
+                 "node-a",
+                 "epoch-1",
+                 @now + 102
+               )
+
+      assert accepted["dispatch"] == %{
+               "status" => "accepted",
+               "attempts" => 1,
+               "next_attempt_at_unix_ms" => nil,
+               "accepted_at_unix_ms" => @now + 102
+             }
+
+      refute DurableLifecycleCore.dispatch_due?(accepted, @now + 103)
+
+      assert {:error, :dispatch_not_pending} =
+               DurableLifecycleCore.accept_dispatch(
+                 accepted,
+                 "node-a",
+                 "epoch-1",
+                 @now + 103
+               )
+    end
+
+    test "terminal lifecycle cancels an unsent dispatch and prevents later acceptance", %{
+      record: record
+    } do
+      assert {:ok, terminal} =
+               DurableLifecycleCore.abandon(
+                 record,
+                 :await_timeout,
+                 "node-a",
+                 "epoch-1",
+                 @now + 1
+               )
+
+      assert terminal["dispatch"] == %{
+               "status" => "cancelled",
+               "attempts" => 0,
+               "next_attempt_at_unix_ms" => nil,
+               "accepted_at_unix_ms" => nil
+             }
+
+      refute DurableLifecycleCore.dispatch_due?(terminal, @now + 2)
+
+      assert {:error, :not_pending} =
+               DurableLifecycleCore.accept_dispatch(
+                 terminal,
+                 "node-a",
+                 "epoch-1",
+                 @now + 2
+               )
+    end
+
+    test "v1 pending records conservatively upgrade to dispatchable and terminals never dispatch",
+         %{
+           record: record
+         } do
+      legacy_pending =
+        record
+        |> Map.put("schema_version", 1)
+        |> Map.delete("dispatch")
+
+      assert {:ok, upgraded_pending} = DurableLifecycleCore.decode(legacy_pending)
+      assert upgraded_pending["schema_version"] == 2
+      assert upgraded_pending["dispatch"]["status"] == "pending"
+      assert upgraded_pending["dispatch"]["next_attempt_at_unix_ms"] == @now
+      assert DurableLifecycleCore.dispatch_due?(upgraded_pending, @now)
+
+      assert {:ok, terminal} =
+               DurableLifecycleCore.respond(
+                 record,
+                 :approved,
+                 %{},
+                 "node-a",
+                 "epoch-1",
+                 @now + 1
+               )
+
+      legacy_terminal =
+        terminal
+        |> Map.put("schema_version", 1)
+        |> Map.delete("dispatch")
+
+      assert {:ok, upgraded_terminal} = DurableLifecycleCore.decode(legacy_terminal)
+      assert upgraded_terminal["schema_version"] == 2
+      assert upgraded_terminal["dispatch"]["status"] == "cancelled"
+      refute DurableLifecycleCore.dispatch_due?(upgraded_terminal, @now + 2)
     end
   end
 

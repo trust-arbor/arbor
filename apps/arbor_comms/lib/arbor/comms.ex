@@ -28,6 +28,7 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.Channels.Voice
   alias Arbor.Comms.ChatLogger
   alias Arbor.Comms.InteractionRouter
+  alias Arbor.Comms.PresenceTracker
   require Logger
 
   alias Arbor.Comms.Config
@@ -52,7 +53,14 @@ defmodule Arbor.Comms do
 
   The deadline is persisted in the initial durable record before discovery
   publication or adapter dispatch. Retries return the stored operation identity
-  and deadline without dispatching again.
+  and may wake the supervised outbox dispatcher, but an accepted record is never
+  sent again after Authority or dispatcher restart.
+
+  Adapter delivery is at-least-once: a crash after the external adapter returns
+  `:ok` but before the accepted-state CAS can redeliver the same `request_id`.
+  Exactly-once delivery requires an idempotent adapter receipt that the current
+  contract does not provide. Duplicate responses are still fenced by the
+  durable first-terminal lifecycle transition.
   """
   @spec request_durable_interaction(Arbor.Contracts.Comms.Interaction.t(), keyword()) ::
           {:ok, durable_interaction_receipt()} | {:error, term()}
@@ -73,6 +81,26 @@ defmodule Arbor.Comms do
   @doc "Return whether opt-in node-restart durable interactions are ready."
   @spec durable_ready?() :: boolean()
   def durable_ready?, do: Arbor.Comms.InteractionRegistry.durable_ready?()
+
+  @doc """
+  Register a process as an active interaction-delivery presence.
+
+  Presence is scoped to `user_id` and `channel` and is removed automatically
+  when `pid` exits.
+  """
+  @spec track_presence(pid(), String.t(), atom(), map()) ::
+          {:ok, term()} | {:error, term()}
+  def track_presence(pid, user_id, channel, metadata \\ %{})
+      when is_pid(pid) and is_binary(user_id) and is_atom(channel) and is_map(metadata) do
+    PresenceTracker.track(pid, user_id, channel, metadata)
+  end
+
+  @doc "Remove one interaction-delivery presence registration."
+  @spec untrack_presence(pid(), String.t(), atom()) :: :ok
+  def untrack_presence(pid, user_id, channel)
+      when is_pid(pid) and is_binary(user_id) and is_atom(channel) do
+    PresenceTracker.untrack(pid, user_id, channel)
+  end
 
   @doc """
   Resolve the human operator's `user_id` for routing an interaction

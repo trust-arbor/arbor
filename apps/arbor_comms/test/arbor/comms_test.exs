@@ -1,7 +1,8 @@
 defmodule Arbor.CommsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Comms
+  alias Arbor.Comms.PresenceTracker
 
   describe "channels/0" do
     test "returns list of enabled channels" do
@@ -45,6 +46,47 @@ defmodule Arbor.CommsTest do
   describe "recent_messages/2" do
     test "returns empty list for channel with no history" do
       assert {:ok, []} = Comms.recent_messages(:nonexistent_channel)
+    end
+  end
+
+  describe "interaction presence facade" do
+    test "tracks and untracks a caller without exposing PresenceTracker" do
+      user_id = "user_comms_facade_#{System.unique_integer([:positive])}"
+      metadata = %{session_id: "session-facade"}
+
+      assert {:ok, _ref} = Comms.track_presence(self(), user_id, :dashboard, metadata)
+
+      assert_eventually(fn ->
+        match?(
+          [{:dashboard, %{session_id: "session-facade", joined_at: joined_at}}]
+          when is_integer(joined_at),
+          PresenceTracker.active_channels(user_id)
+        )
+      end)
+
+      assert :ok = Comms.untrack_presence(self(), user_id, :dashboard)
+      assert_eventually(fn -> PresenceTracker.active_channels(user_id) == [] end)
+    end
+  end
+
+  defp assert_eventually(fun, timeout_ms \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_assert_eventually(fun, deadline)
+  end
+
+  defp do_assert_eventually(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        receive do
+        after
+          10 -> do_assert_eventually(fun, deadline)
+        end
     end
   end
 end

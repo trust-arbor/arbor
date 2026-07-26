@@ -5,6 +5,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
   require Logger
 
+  alias Arbor.Comms.Config
   alias Arbor.Comms.InteractionRegistry.DurableLifecycleCore
   alias Arbor.Comms.InteractionRegistry.DurableStore
   alias Arbor.Contracts.Comms.ApprovalAnswer
@@ -20,6 +21,12 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
   @type terminal_status :: :responded | :abandoned | :expired
   @type admission_disposition :: :inserted | :existing
+  @type dispatch_claim :: %{
+          request_id: String.t(),
+          operation_id: String.t(),
+          authority_epoch: String.t(),
+          claim_id: reference()
+        }
 
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -59,6 +66,31 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
   @spec durable_readiness() :: :ready | {:error, atom()}
   def durable_readiness, do: call(:durable_readiness)
+
+  @doc false
+  @spec claim_dispatch(String.t()) ::
+          {:ok, dispatch_claim(), Interaction.t()}
+          | :already_claimed
+          | :not_dispatchable
+          | :not_found
+          | {:error, term()}
+  def claim_dispatch(request_id) when is_binary(request_id),
+    do: call({:claim_dispatch, request_id})
+
+  @doc false
+  @spec claim_next_dispatch() ::
+          {:ok, dispatch_claim(), Interaction.t()} | :empty | {:error, term()}
+  def claim_next_dispatch, do: call(:claim_next_dispatch)
+
+  @doc false
+  @spec accept_dispatch(dispatch_claim()) :: :ok | {:error, term()}
+  def accept_dispatch(claim) when is_map(claim), do: call({:accept_dispatch, claim})
+  def accept_dispatch(_claim), do: {:error, :invalid_dispatch_claim}
+
+  @doc false
+  @spec release_dispatch(dispatch_claim()) :: :ok | {:error, term()}
+  def release_dispatch(claim) when is_map(claim), do: call({:release_dispatch, claim})
+  def release_dispatch(_claim), do: {:error, :invalid_dispatch_claim}
 
   @spec pending(String.t()) :: {:ok, Interaction.t()} | :not_found
   def pending(request_id) when is_binary(request_id), do: call({:pending, request_id})
@@ -130,7 +162,8 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       pubsub: Keyword.get(opts, :pubsub_server, Arbor.Comms.PubSub),
       authority_node: node(),
       authority_epoch: fresh_id("epoch"),
-      durable_status: :unknown
+      durable_status: :unknown,
+      dispatch_claims: %{}
     }
 
     case hydrate(base) do
@@ -171,6 +204,44 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:claim_dispatch, request_id}, _from, state) do
+    state = state |> expire_due_pending() |> prune_terminals()
+
+    case claim_dispatch_entry(state, request_id, now_ms()) do
+      {:ok, claim, interaction, next_state} ->
+        {:reply, {:ok, claim, interaction}, next_state}
+
+      {:reply, reply} ->
+        {:reply, reply, state}
+    end
+  end
+
+  def handle_call(:claim_next_dispatch, _from, state) do
+    state = state |> expire_due_pending() |> prune_terminals()
+
+    case next_dispatch_request_id(state, now_ms()) do
+      nil ->
+        {:reply, :empty, state}
+
+      request_id ->
+        case claim_dispatch_entry(state, request_id, now_ms()) do
+          {:ok, claim, interaction, next_state} ->
+            {:reply, {:ok, claim, interaction}, next_state}
+
+          {:reply, _unexpected_race} ->
+            {:reply, :empty, state}
+        end
+    end
+  end
+
+  def handle_call({:accept_dispatch, claim}, _from, state) do
+    settle_dispatch_claim(state, claim, :accept)
+  end
+
+  def handle_call({:release_dispatch, claim}, _from, state) do
+    settle_dispatch_claim(state, claim, :release)
   end
 
   def handle_call({:pending, request_id}, _from, state) do
@@ -359,7 +430,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   def handle_call(:reset, _from, state) do
     Enum.each(state.entries, fn {_request_id, entry} -> cancel_entry_timer(entry) end)
     _ = safe_untrack_all(state.tracker)
-    {:reply, :ok, %{state | entries: %{}}}
+    {:reply, :ok, %{state | entries: %{}, dispatch_claims: %{}}}
   end
 
   @impl true
@@ -640,15 +711,48 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     end
   end
 
+  defp load_normalized_record(request_id) do
+    with {:ok, %Record{} = record} <- DurableStore.get(request_id),
+         {:ok, %Record{} = record, data} <- normalize_record_schema(record) do
+      {:ok, record, data}
+    end
+  end
+
+  defp normalize_record_schema(%Record{data: raw_data} = record) do
+    case DurableLifecycleCore.decode(raw_data) do
+      {:ok, decoded} when decoded == raw_data ->
+        {:ok, record, decoded}
+
+      {:ok, decoded} ->
+        replacement = Record.update(record, decoded)
+
+        case DurableStore.compare_and_swap(record.key, record, replacement) do
+          {:ok, %Record{} = stored} ->
+            case DurableLifecycleCore.decode(stored.data) do
+              {:ok, stored_data} -> {:ok, stored, stored_data}
+              {:error, _reason} -> {:error, :malformed_record}
+            end
+
+          {:error, :conflict} ->
+            {:error, :stale_authority}
+
+          {:error, _reason} ->
+            {:error, :unavailable}
+        end
+
+      {:error, _reason} ->
+        {:error, :malformed_record}
+    end
+  end
+
   defp durable_duplicate(
          state,
          %Interaction{request_id: request_id} = interaction,
          owner_deadline_unix_ms
        ) do
-    case DurableStore.get(request_id) do
-      {:ok, %Record{} = record} ->
-        with {:ok, data} <- DurableLifecycleCore.decode(record.data),
-             true <- data["authority_node"] == Atom.to_string(state.authority_node) do
+    case load_normalized_record(request_id) do
+      {:ok, %Record{} = record, data} ->
+        with true <- data["authority_node"] == Atom.to_string(state.authority_node) do
           cond do
             data["status"] != "pending" ->
               {:reply, {:error, {:already_terminal, status_atom(data["status"])}}, state}
@@ -671,7 +775,6 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
           end
         else
           false -> {:reply, {:error, :already_tracked}, state}
-          {:error, _reason} -> {:reply, {:error, :durable_unavailable}, state}
         end
 
       {:error, _reason} ->
@@ -794,7 +897,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     case DurableLifecycleCore.decode(data) do
       {:ok, decoded} ->
         with {:ok, projected_interaction} <- DurableLifecycleCore.project_interaction(decoded),
-             {:ok, entry} <- durable_entry(data, projected_interaction) do
+             {:ok, entry} <- durable_entry(decoded, projected_interaction) do
           next_state = install_durable_entry(state, record, entry)
 
           case mirror_durable_entry(next_state.tracker, next_state.entries[record.key]) do
@@ -868,6 +971,9 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
          authority_epoch: data["authority_epoch"],
          interaction: interaction,
          status: status,
+         dispatch_status: dispatch_status_atom(data["dispatch"]["status"]),
+         dispatch_attempts: data["dispatch"]["attempts"],
+         dispatch_not_before: data["dispatch"]["next_attempt_at_unix_ms"],
          terminal: terminal,
          owner_deadline: data["owner_deadline_unix_ms"],
          timer_ref: nil,
@@ -1089,7 +1195,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
              true <- decoded["authority_node"] == Atom.to_string(state.authority_node),
              false <- decoded["status"] == "pending",
              {:ok, interaction} <- DurableLifecycleCore.project_interaction(decoded),
-             {:ok, entry} <- durable_entry(data, interaction),
+             {:ok, entry} <- durable_entry(decoded, interaction),
              {:ok, next_state} <- state_after_durable_entry(state, record, entry) do
           {:ok, next_state, entry.terminal}
         else
@@ -1104,7 +1210,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   defp state_after_durable_record(state, %Record{data: data} = record) do
     with {:ok, decoded} <- DurableLifecycleCore.decode(data),
          {:ok, interaction} <- DurableLifecycleCore.project_interaction(decoded),
-         {:ok, entry} <- durable_entry(data, interaction),
+         {:ok, entry} <- durable_entry(decoded, interaction),
          {:ok, next_state} <- state_after_durable_entry(state, record, entry) do
       {:ok, next_state}
     else
@@ -1137,7 +1243,11 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
         admission_state: preserved_admission_state(previous_entry, entry)
     }
 
-    next_state = put_in(state.entries[request_id], next_entry)
+    next_state =
+      state
+      |> put_in([:entries, request_id], next_entry)
+      |> retain_valid_dispatch_claim(request_id, next_entry)
+
     schedule_durable_deadline(next_state, request_id)
   end
 
@@ -1150,6 +1260,211 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   defp preserved_admission_state(_previous_entry, entry), do: entry.admission_state
 
   defp record_from_entry(%{record: %Record{} = record}), do: record
+
+  defp next_dispatch_request_id(state, now) do
+    state.entries
+    |> Enum.filter(fn {request_id, entry} ->
+      dispatch_entry_due?(state, request_id, entry, now)
+    end)
+    |> Enum.min_by(
+      fn {request_id, entry} -> {entry.dispatch_not_before, request_id} end,
+      fn -> nil end
+    )
+    |> case do
+      {request_id, _entry} -> request_id
+      nil -> nil
+    end
+  end
+
+  defp claim_dispatch_entry(state, request_id, now) do
+    case Map.get(state.entries, request_id) do
+      nil ->
+        {:reply, :not_found}
+
+      entry ->
+        cond do
+          Map.has_key?(state.dispatch_claims, request_id) ->
+            {:reply, :already_claimed}
+
+          not dispatch_entry_due?(state, request_id, entry, now) ->
+            {:reply, :not_dispatchable}
+
+          true ->
+            claim = %{
+              request_id: request_id,
+              operation_id: entry.operation_id,
+              authority_epoch: entry.authority_epoch,
+              claim_id: make_ref()
+            }
+
+            next_state = put_in(state.dispatch_claims[request_id], claim)
+            {:ok, claim, entry.interaction, next_state}
+        end
+    end
+  end
+
+  defp dispatch_entry_due?(
+         state,
+         request_id,
+         %{
+           durability: :node_restart,
+           status: :pending,
+           dispatch_status: :pending,
+           admission_state: :admitted,
+           operation_id: operation_id,
+           authority_epoch: authority_epoch,
+           record: %Record{} = record
+         },
+         now
+       ) do
+    is_binary(operation_id) and
+      authority_epoch == state.authority_epoch and
+      not Map.has_key?(state.dispatch_claims, request_id) and
+      DurableLifecycleCore.dispatch_due?(record.data, now)
+  end
+
+  defp dispatch_entry_due?(_state, _request_id, _entry, _now), do: false
+
+  defp settle_dispatch_claim(state, claim, action) do
+    with {:ok, request_id, entry} <- validate_dispatch_claim(state, claim),
+         {:ok, data} <-
+           dispatch_claim_transition(entry, state, action)
+           |> tag_dispatch_transition(request_id),
+         replacement = Record.update(record_from_entry(entry), data) do
+      case DurableStore.compare_and_swap(
+             request_id,
+             record_from_entry(entry),
+             replacement
+           ) do
+        {:ok, %Record{} = stored} ->
+          case state_after_durable_record(state, stored) do
+            {:ok, next_state} ->
+              {:reply, :ok, drop_dispatch_claim(next_state, request_id)}
+
+            {:error, _reason} ->
+              {:reply, {:error, :durable_unavailable}, drop_dispatch_claim(state, request_id)}
+          end
+
+        {:error, :conflict} ->
+          next_state = refresh_after_dispatch_conflict(state, request_id)
+          {:reply, {:error, :stale_dispatch_claim}, drop_dispatch_claim(next_state, request_id)}
+
+        {:error, _reason} ->
+          {:reply, {:error, :authority_unavailable}, drop_dispatch_claim(state, request_id)}
+      end
+    else
+      {:error, request_id, reason} ->
+        {:reply, {:error, reason}, drop_dispatch_claim(state, request_id)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp tag_dispatch_transition({:ok, data}, _request_id), do: {:ok, data}
+
+  defp tag_dispatch_transition({:error, reason}, request_id),
+    do: {:error, request_id, reason}
+
+  defp validate_dispatch_claim(
+         state,
+         %{
+           request_id: request_id,
+           operation_id: operation_id,
+           authority_epoch: authority_epoch,
+           claim_id: claim_id
+         } = claim
+       )
+       when map_size(claim) == 4 and is_binary(request_id) and is_binary(operation_id) and
+              is_binary(authority_epoch) and is_reference(claim_id) do
+    case {Map.get(state.dispatch_claims, request_id), Map.get(state.entries, request_id)} do
+      {
+        ^claim,
+        %{
+          durability: :node_restart,
+          status: :pending,
+          dispatch_status: :pending,
+          operation_id: ^operation_id,
+          authority_epoch: ^authority_epoch
+        } = entry
+      }
+      when authority_epoch == state.authority_epoch ->
+        {:ok, request_id, entry}
+
+      _ ->
+        {:error, :stale_dispatch_claim}
+    end
+  end
+
+  defp validate_dispatch_claim(_state, _claim), do: {:error, :invalid_dispatch_claim}
+
+  defp dispatch_claim_transition(entry, state, :accept) do
+    DurableLifecycleCore.accept_dispatch(
+      entry.record.data,
+      Atom.to_string(state.authority_node),
+      state.authority_epoch,
+      now_ms()
+    )
+  end
+
+  defp dispatch_claim_transition(entry, state, :release) do
+    with {:ok, config} <- Config.durable_interaction_dispatch_config() do
+      now = now_ms()
+      attempt = min(entry.dispatch_attempts + 1, 1_000_000)
+      retry_at = now + retry_delay(config.retry_base_ms, config.retry_max_ms, attempt)
+
+      DurableLifecycleCore.release_dispatch(
+        entry.record.data,
+        Atom.to_string(state.authority_node),
+        state.authority_epoch,
+        retry_at,
+        now
+      )
+    else
+      {:error, _reason} -> {:error, :invalid_dispatch_config}
+    end
+  end
+
+  defp retry_delay(base, maximum, attempt) do
+    grow_retry_delay(base, maximum, max(attempt - 1, 0))
+  end
+
+  defp grow_retry_delay(delay, maximum, 0), do: min(delay, maximum)
+  defp grow_retry_delay(delay, maximum, _remaining) when delay >= maximum, do: maximum
+
+  defp grow_retry_delay(delay, maximum, remaining),
+    do: grow_retry_delay(min(delay * 2, maximum), maximum, remaining - 1)
+
+  defp refresh_after_dispatch_conflict(state, request_id) do
+    with {:ok, %Record{} = record, data} <- load_normalized_record(request_id),
+         true <- data["authority_node"] == Atom.to_string(state.authority_node),
+         {:ok, interaction} <- DurableLifecycleCore.project_interaction(data),
+         {:ok, entry} <- durable_entry(data, interaction),
+         {:ok, next_state} <- state_after_durable_entry(state, record, entry) do
+      next_state
+    else
+      _ -> state
+    end
+  end
+
+  defp retain_valid_dispatch_claim(state, request_id, entry) do
+    case Map.get(state.dispatch_claims, request_id) do
+      %{
+        operation_id: operation_id,
+        authority_epoch: authority_epoch
+      }
+      when entry.status == :pending and entry.dispatch_status == :pending and
+             entry.operation_id == operation_id and entry.authority_epoch == authority_epoch ->
+        state
+
+      _ ->
+        drop_dispatch_claim(state, request_id)
+    end
+  end
+
+  defp drop_dispatch_claim(state, request_id) do
+    update_in(state.dispatch_claims, &Map.delete(&1, request_id))
+  end
 
   defp durable_receipt(state, request_id) do
     case Map.get(state.entries, request_id) do
@@ -1533,8 +1848,8 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   end
 
   defp hydrate_key(state, request_id) do
-    with {:ok, %Record{} = record} <- DurableStore.get(request_id),
-         {:ok, data} <- DurableLifecycleCore.decode(record.data),
+    with {:ok, %Record{} = stored_record} <- DurableStore.get(request_id),
+         {:ok, %Record{} = record, data} <- normalize_record_schema(stored_record),
          {:ok, interaction} <- DurableLifecycleCore.project_interaction(data) do
       cond do
         data["authority_node"] != Atom.to_string(state.authority_node) ->
@@ -1634,6 +1949,11 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   defp status_atom("abandoned"), do: :abandoned
   defp status_atom("expired"), do: :expired
   defp status_atom(_), do: :invalid
+
+  defp dispatch_status_atom("pending"), do: :pending
+  defp dispatch_status_atom("accepted"), do: :accepted
+  defp dispatch_status_atom("cancelled"), do: :cancelled
+  defp dispatch_status_atom(_), do: :invalid
 
   defp public_terminal(terminal) when is_map(terminal) do
     local_node = Atom.to_string(node())

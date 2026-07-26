@@ -11,7 +11,7 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   use Phoenix.Tracker
 
-  alias Arbor.Comms.InteractionRegistry.{Authority, DurableStore, Routing}
+  alias Arbor.Comms.InteractionRegistry.{Authority, Dispatcher, DurableStore, Routing}
   alias Arbor.Comms.InteractionRegistry.Supervisor, as: RegistrySupervisor
   alias Arbor.Contracts.Comms.Interaction
 
@@ -79,9 +79,9 @@ defmodule Arbor.Comms.InteractionRegistry do
   def put(_interaction, _opts), do: {:error, :invalid_options}
 
   @doc """
-  Admit an interaction and return the stored interaction plus dispatch
-  ownership. `:inserted` grants this caller one adapter dispatch attempt;
-  `:existing` means a prior caller already received that attempt.
+  Admit an interaction and return the stored interaction plus admission
+  disposition. Durable adapter dispatch ownership is claimed separately by
+  the supervised dispatcher, so either disposition may safely wake it.
 
   A newly persisted durable record whose initial Tracker projection failed
   retains `:inserted` for the first retry that repairs the projection.
@@ -131,7 +131,8 @@ defmodule Arbor.Comms.InteractionRegistry do
   @spec durable_readiness() :: DurableStore.availability()
   def durable_readiness do
     with {:ok, details} <- DurableStore.readiness(),
-         :ready <- Authority.durable_readiness() do
+         :ready <- Authority.durable_readiness(),
+         :ready <- Dispatcher.readiness() do
       {:ok, details}
     else
       {:error, _reason} = error -> error

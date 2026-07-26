@@ -3,6 +3,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
   alias Arbor.Comms.InteractionRegistry
   alias Arbor.Comms.InteractionRegistry.Authority
+  alias Arbor.Comms.InteractionRegistry.Dispatcher
   alias Arbor.Comms.InteractionRegistry.DurableLifecycleCore
   alias Arbor.Comms.InteractionRegistry.DurableStore
   alias Arbor.Comms.InteractionRouter
@@ -47,12 +48,52 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     def channel_kind, do: :dashboard
   end
 
+  defmodule BlockingAdapter do
+    @behaviour Arbor.Contracts.Comms.ChannelAdapter
+
+    def send_interaction(channel_meta, %Interaction{} = interaction) do
+      test_pid = Map.fetch!(channel_meta, :test_pid)
+      send(test_pid, {:blocking_adapter_started, self(), interaction})
+
+      receive do
+        {:finish_durable_delivery, request_id} when request_id == interaction.request_id ->
+          :ok
+      after
+        5_000 ->
+          {:error, :test_delivery_timeout}
+      end
+    end
+
+    def parse_response(_raw), do: :not_interaction
+    def channel_kind, do: :dashboard
+  end
+
+  defmodule HangingAdapter do
+    @behaviour Arbor.Contracts.Comms.ChannelAdapter
+
+    def send_interaction(channel_meta, %Interaction{} = interaction) do
+      send(
+        Map.fetch!(channel_meta, :test_pid),
+        {:hanging_adapter_started, interaction.request_id}
+      )
+
+      receive do
+        :never_sent -> :ok
+      end
+    end
+
+    def parse_response(_raw), do: :not_interaction
+    def channel_kind, do: :dashboard
+  end
+
   setup do
     path =
       Path.join(System.tmp_dir!(), "arbor-comms-durable-#{System.unique_integer([:positive])}")
 
     Backend.start_link(path)
-    original = Application.get_env(:arbor_comms, :durable_interaction_store)
+    original_store = Application.fetch_env(:arbor_comms, :durable_interaction_store)
+    original_dispatch = Application.fetch_env(:arbor_comms, :durable_interaction_dispatch)
+    original_adapters = Application.fetch_env(:arbor_comms, :interaction_adapters)
 
     Application.put_env(
       :arbor_comms,
@@ -64,11 +105,21 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
       max_items: 32
     )
 
+    Application.put_env(
+      :arbor_comms,
+      :durable_interaction_dispatch,
+      dispatch_config()
+    )
+
+    Application.put_env(:arbor_comms, :interaction_adapters, %{})
+
     restart_authority()
     InteractionRegistry.reset()
 
     on_exit(fn ->
-      restore_config(original)
+      restore_env(:durable_interaction_store, original_store)
+      restore_env(:durable_interaction_dispatch, original_dispatch)
+      restore_env(:interaction_adapters, original_adapters)
       restart_authority()
       Backend.stop()
       File.rm(path)
@@ -100,6 +151,351 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
                ),
                durability: :process_lifetime
              )
+  end
+
+  test "a supervised sweep dispatches an admission after its caller exits before wakeup" do
+    request_id = "irq_dispatch_admission_before_wakeup"
+    user_id = "user_dispatch_admission_before_wakeup"
+    deadline = now_ms() + 5_000
+    interaction = durable_interaction(request_id, user_id, "caller exits before wakeup")
+    Application.put_env(:arbor_comms, :interaction_adapters, %{dashboard: TestAdapter})
+    track_dashboard(user_id)
+
+    parent = self()
+
+    caller =
+      spawn(fn ->
+        send(
+          parent,
+          {:admission_result, InteractionRegistry.admit_durable(interaction, deadline)}
+        )
+      end)
+
+    monitor = Process.monitor(caller)
+
+    assert_receive {:admission_result,
+                    {:ok, :inserted, %Interaction{request_id: ^request_id}, _receipt}}
+
+    assert_receive {:DOWN, ^monitor, :process, ^caller, :normal}
+    assert :ok = Dispatcher.sweep_now()
+    assert_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}
+    assert_dispatch_status(request_id, "accepted")
+  end
+
+  test "scheduled sweep uses configured adapters after restart hydration" do
+    request_id = "irq_dispatch_restart_hydration"
+    user_id = "user_dispatch_restart_hydration"
+    interaction = durable_interaction(request_id, user_id, "restart hydration")
+
+    assert {:ok, :inserted, %Interaction{}, _receipt} =
+             InteractionRegistry.admit_durable(interaction, now_ms() + 5_000)
+
+    Application.put_env(:arbor_comms, :interaction_adapters, %{dashboard: TestAdapter})
+
+    Application.put_env(
+      :arbor_comms,
+      :durable_interaction_dispatch,
+      dispatch_config(startup_delay_ms: 100)
+    )
+
+    restart_authority()
+    track_dashboard(user_id)
+
+    assert_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}, 2_000
+    assert_dispatch_status(request_id, "accepted")
+  end
+
+  test "accepted dispatch survives authority and dispatcher restart without resend" do
+    request_id = "irq_dispatch_accepted_restart"
+    user_id = "user_dispatch_accepted_restart"
+    interaction = durable_interaction(request_id, user_id, "accepted restart")
+    Application.put_env(:arbor_comms, :interaction_adapters, %{dashboard: TestAdapter})
+    track_dashboard(user_id)
+
+    assert {:ok, _receipt} =
+             Arbor.Comms.request_durable_interaction(interaction,
+               owner_deadline_unix_ms: now_ms() + 5_000,
+               adapter_map: %{dashboard: TestAdapter}
+             )
+
+    assert_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}
+    accepted_record = assert_dispatch_status(request_id, "accepted")
+
+    restart_authority()
+    track_dashboard(user_id)
+
+    assert_dispatch_status(request_id, "accepted")
+    assert :ok = Dispatcher.sweep_now()
+    refute_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}, 100
+
+    assert {:ok, after_restart} = DurableStore.get(request_id)
+    assert after_restart.data["operation_id"] == accepted_record.data["operation_id"]
+
+    assert after_restart.data["dispatch"]["accepted_at_unix_ms"] ==
+             accepted_record.data["dispatch"]["accepted_at_unix_ms"]
+  end
+
+  test "duplicate admission wake cannot create concurrent dispatches" do
+    request_id = "irq_dispatch_duplicate_claim"
+    user_id = "user_dispatch_duplicate_claim"
+    interaction = durable_interaction(request_id, user_id, "duplicate claim")
+    track_dashboard(user_id)
+
+    opts = [
+      owner_deadline_unix_ms: now_ms() + 5_000,
+      adapter_map: %{dashboard: BlockingAdapter}
+    ]
+
+    assert {:ok, first_receipt} = Arbor.Comms.request_durable_interaction(interaction, opts)
+
+    assert_receive {:blocking_adapter_started, adapter_pid, %Interaction{request_id: ^request_id}}
+
+    assert {:ok, ^first_receipt} = Arbor.Comms.request_durable_interaction(interaction, opts)
+    assert {:ok, ^first_receipt} = Arbor.Comms.request_durable_interaction(interaction, opts)
+
+    refute_receive {:blocking_adapter_started, _pid, %Interaction{request_id: ^request_id}}, 100
+
+    send(adapter_pid, {:finish_durable_delivery, request_id})
+    assert_dispatch_status(request_id, "accepted")
+  end
+
+  test "no presence releases the claim with backoff and later sweep retries" do
+    request_id = "irq_dispatch_no_presence_retry"
+    user_id = "user_dispatch_no_presence_retry"
+    interaction = durable_interaction(request_id, user_id, "presence retry")
+
+    Application.put_env(
+      :arbor_comms,
+      :durable_interaction_dispatch,
+      dispatch_config(retry_base_ms: 10, retry_max_ms: 10)
+    )
+
+    Application.put_env(:arbor_comms, :interaction_adapters, %{dashboard: TestAdapter})
+    restart_authority()
+
+    assert {:ok, :inserted, %Interaction{}, _receipt} =
+             InteractionRegistry.admit_durable(interaction, now_ms() + 5_000)
+
+    assert :ok = Dispatcher.sweep_now()
+    assert_dispatch_attempts(request_id, 1)
+
+    track_dashboard(user_id)
+
+    assert_eventually(
+      fn ->
+        :ok = Dispatcher.sweep_now()
+
+        case DurableStore.get(request_id) do
+          {:ok, %Record{data: %{"dispatch" => %{"status" => "accepted"}}}} -> true
+          _ -> false
+        end
+      end,
+      2_000
+    )
+
+    assert_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}
+    assert {:ok, record} = DurableStore.get(request_id)
+    assert record.data["dispatch"]["attempts"] == 1
+  end
+
+  test "terminal lifecycle before dispatch cancels delivery permanently" do
+    request_id = "irq_dispatch_terminal_before_send"
+    user_id = "user_dispatch_terminal_before_send"
+    interaction = durable_interaction(request_id, user_id, "terminal before dispatch")
+    Application.put_env(:arbor_comms, :interaction_adapters, %{dashboard: TestAdapter})
+    track_dashboard(user_id)
+
+    assert {:ok, :inserted, %Interaction{}, _receipt} =
+             InteractionRegistry.admit_durable(interaction, now_ms() + 5_000)
+
+    assert :ok = InteractionRouter.respond(request_id, :approved)
+    terminal_record = assert_dispatch_status(request_id, "cancelled")
+    assert terminal_record.data["status"] == "responded"
+
+    assert :ok = Dispatcher.sweep_now()
+    refute_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}, 100
+  end
+
+  test "stale opaque claim and authority epoch acknowledgements are no-ops" do
+    request_id = "irq_dispatch_stale_claim"
+
+    interaction =
+      durable_interaction(request_id, "user_dispatch_stale_claim", "stale dispatch claim")
+
+    assert {:ok, :inserted, %Interaction{}, _receipt} =
+             InteractionRegistry.admit_durable(interaction, now_ms() + 5_000)
+
+    assert {:ok, claim, %Interaction{request_id: ^request_id}} =
+             Authority.claim_dispatch(request_id)
+
+    forged_claim = %{claim | claim_id: make_ref()}
+    assert {:error, :stale_dispatch_claim} = Authority.accept_dispatch(forged_claim)
+    assert :already_claimed = Authority.claim_dispatch(request_id)
+
+    old_epoch = claim.authority_epoch
+    restart_authority()
+
+    assert {:error, :stale_dispatch_claim} = Authority.accept_dispatch(claim)
+    pending_record = assert_dispatch_status(request_id, "pending")
+    refute pending_record.data["authority_epoch"] == old_epoch
+    assert pending_record.data["dispatch"]["attempts"] == 0
+  end
+
+  test "v1 hydration persists conservative pending and terminal dispatch upgrades", %{path: path} do
+    pending_id = "irq_dispatch_v1_pending"
+    terminal_id = "irq_dispatch_v1_terminal"
+    now = now_ms()
+
+    pending_interaction =
+      durable_interaction(pending_id, "user_dispatch_v1", "legacy pending dispatch")
+
+    terminal_interaction =
+      durable_interaction(terminal_id, "user_dispatch_v1", "legacy terminal dispatch")
+
+    {:ok, pending_v2} =
+      DurableLifecycleCore.new(
+        pending_interaction,
+        "op-v1-pending",
+        Atom.to_string(node()),
+        "epoch-v1",
+        now
+      )
+
+    {:ok, terminal_v2} =
+      DurableLifecycleCore.new(
+        terminal_interaction,
+        "op-v1-terminal",
+        Atom.to_string(node()),
+        "epoch-v1",
+        now
+      )
+
+    {:ok, terminal_v2} =
+      DurableLifecycleCore.respond(
+        terminal_v2,
+        :approved,
+        %{},
+        Atom.to_string(node()),
+        "epoch-v1",
+        now + 1
+      )
+
+    pending_v1 = pending_v2 |> Map.put("schema_version", 1) |> Map.delete("dispatch")
+    terminal_v1 = terminal_v2 |> Map.put("schema_version", 1) |> Map.delete("dispatch")
+
+    :ok = Backend.put_raw(pending_id, Record.new(pending_id, pending_v1), path)
+    :ok = Backend.put_raw(terminal_id, Record.new(terminal_id, terminal_v1), path)
+
+    restart_authority()
+
+    pending_record = assert_dispatch_status(pending_id, "pending")
+    terminal_record = assert_dispatch_status(terminal_id, "cancelled")
+    assert pending_record.data["schema_version"] == 2
+    assert terminal_record.data["schema_version"] == 2
+    assert terminal_record.data["status"] == "responded"
+
+    Application.put_env(:arbor_comms, :interaction_adapters, %{dashboard: TestAdapter})
+    track_dashboard("user_dispatch_v1")
+    assert :ok = Dispatcher.sweep_now()
+
+    assert_receive {:durable_adapter_called, %Interaction{request_id: ^pending_id}}
+    refute_receive {:durable_adapter_called, %Interaction{request_id: ^terminal_id}}, 100
+    assert_dispatch_status(pending_id, "accepted")
+  end
+
+  test "send before failed acceptance CAS may redeliver the same request_id" do
+    request_id = "irq_dispatch_send_before_cas"
+    user_id = "user_dispatch_send_before_cas"
+    interaction = durable_interaction(request_id, user_id, "send before acceptance CAS")
+    Application.put_env(:arbor_comms, :interaction_adapters, %{dashboard: TestAdapter})
+    track_dashboard(user_id)
+
+    assert {:ok, :inserted, %Interaction{}, _receipt} =
+             InteractionRegistry.admit_durable(interaction, now_ms() + 5_000)
+
+    Backend.fail_next_cas(request_id, self())
+    assert :ok = Dispatcher.sweep_now()
+    assert_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}
+    assert_receive {:backend_cas_failed_once, ^request_id}
+
+    assert_eventually(fn ->
+      claims = :sys.get_state(Authority).dispatch_claims
+      not Map.has_key?(claims, request_id)
+    end)
+
+    assert_dispatch_status(request_id, "pending")
+    assert :ok = Dispatcher.sweep_now()
+    assert_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}
+    assert_dispatch_status(request_id, "accepted")
+  end
+
+  test "hung adapter batch cannot block dispatcher readiness or wake and timeout releases claims" do
+    user_id = "user_dispatch_hung_batch"
+    request_ids = ["irq_dispatch_hung_a", "irq_dispatch_hung_b", "irq_dispatch_hung_queued"]
+
+    Application.put_env(
+      :arbor_comms,
+      :durable_interaction_dispatch,
+      dispatch_config(
+        batch_size: 2,
+        max_concurrency: 2,
+        send_timeout_ms: 1_000,
+        retry_base_ms: 60_000,
+        retry_max_ms: 60_000
+      )
+    )
+
+    Application.put_env(:arbor_comms, :interaction_adapters, %{dashboard: HangingAdapter})
+    restart_authority()
+    track_dashboard(user_id)
+
+    for request_id <- request_ids do
+      interaction = durable_interaction(request_id, user_id, "hung batch #{request_id}")
+
+      assert {:ok, :inserted, %Interaction{}, _receipt} =
+               InteractionRegistry.admit_durable(interaction, now_ms() + 5_000)
+    end
+
+    sweep_task = Task.async(fn -> Dispatcher.sweep_now() end)
+    assert {:ok, :ok} = Task.yield(sweep_task, 250)
+
+    assert_receive {:hanging_adapter_started, first_id}
+    assert_receive {:hanging_adapter_started, second_id}
+    assert MapSet.new([first_id, second_id]) == MapSet.new(Enum.take(request_ids, 2))
+
+    responsiveness =
+      Task.async(fn ->
+        {
+          Dispatcher.readiness(),
+          Dispatcher.wake(List.last(request_ids), %{dashboard: HangingAdapter})
+        }
+      end)
+
+    assert {:ok, {:ready, :queued}} = Task.yield(responsiveness, 250)
+    assert :ok = InteractionRouter.respond(List.last(request_ids), :approved)
+
+    assert_dispatch_attempts(first_id, 1, 2_000)
+    assert_dispatch_attempts(second_id, 1, 2_000)
+
+    claims = :sys.get_state(Authority).dispatch_claims
+    refute Map.has_key?(claims, first_id)
+    refute Map.has_key?(claims, second_id)
+    assert_dispatch_status(List.last(request_ids), "cancelled")
+  end
+
+  test "durable readiness reports dispatcher failure and recovery" do
+    assert {:ok, %{durability: :node_restart}} = Arbor.Comms.durable_readiness()
+    registry_supervisor = registry_supervisor_pid()
+
+    assert :ok = Supervisor.terminate_child(registry_supervisor, Dispatcher)
+    assert {:error, :unavailable} = Arbor.Comms.durable_readiness()
+    refute Arbor.Comms.durable_ready?()
+
+    assert_registry_restart(Supervisor.restart_child(registry_supervisor, Dispatcher))
+
+    assert_eventually(fn ->
+      match?({:ok, %{durability: :node_restart}}, Arbor.Comms.durable_readiness())
+    end)
   end
 
   test "durable request atomically persists its deadline and arms authority before dispatch" do
@@ -163,7 +559,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
     assert {:ok, first_receipt} = Arbor.Comms.request_durable_interaction(interaction, opts)
     assert_receive {:durable_adapter_called, %Interaction{request_id: ^request_id}}
-    assert {:ok, first_record} = DurableStore.get(request_id)
+    first_record = assert_dispatch_status(request_id, "accepted")
 
     assert {:ok, second_receipt} =
              Arbor.Comms.request_durable_interaction(interaction,
@@ -281,7 +677,6 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
       match?(
         {:ok,
          %Record{
-           revision: 2,
            data: %{
              "status" => "abandoned",
              "terminal" => %{"reason" => "owner_timeout"}
@@ -325,7 +720,6 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
         match?(
           {:ok,
            %Record{
-             revision: 2,
              data: %{
                "status" => "expired",
                "terminal" => %{"reason" => "expires_at_elapsed"}
@@ -351,6 +745,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
                adapter_map: %{}
              )
 
+    assert_dispatch_attempts(request_id, 1)
     Backend.fail_next_cas(request_id, self())
 
     assert_receive {:backend_cas_failed_once, ^request_id}, 1_000
@@ -365,7 +760,6 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
         match?(
           {:ok,
            %Record{
-             revision: 2,
              data: %{
                "status" => "abandoned",
                "terminal" => %{"reason" => "owner_timeout"}
@@ -453,6 +847,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
                adapter_map: %{}
              )
 
+    assert_dispatch_attempts(request_id, 1)
     first_entry = :sys.get_state(Authority).entries[request_id]
     assert {:ok, first_record} = DurableStore.get(request_id)
 
@@ -486,7 +881,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
     assert_eventually(fn ->
       match?(
-        {:ok, %Record{revision: 2, data: %{"status" => "abandoned"}}},
+        {:ok, %Record{data: %{"status" => "abandoned"}}},
         DurableStore.get(request_id)
       )
     end)
@@ -597,6 +992,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
                adapter_map: %{}
              )
 
+    assert_dispatch_attempts(request_id, 1)
     assert {:ok, before_record} = DurableStore.get(request_id)
 
     assert {:error, :timeout} =
@@ -628,6 +1024,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
                adapter_map: %{}
              )
 
+    assert_dispatch_attempts(request_id, 1)
     assert {:ok, before_record} = DurableStore.get(request_id)
 
     assert {:error, :interaction_identity_mismatch} =
@@ -691,7 +1088,6 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     end)
 
     assert {:ok, terminal_record} = DurableStore.get(request_id)
-    assert terminal_record.revision == 2
     assert terminal_record.data["operation_id"] == receipt.operation_id
     assert terminal_record.data["status"] in ["responded", "abandoned"]
 
@@ -814,6 +1210,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
                adapter_map: %{}
              )
 
+    assert_dispatch_attempts(interaction.request_id, 1)
     {:ok, record_before} = DurableStore.get(interaction.request_id)
 
     assert {:error, :already_tracked} =
@@ -849,6 +1246,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
     assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
     assert_receive {:durable_adapter_called, %Interaction{request_id: "irq_durable_notify_once"}}
+    assert_dispatch_status(interaction.request_id, "accepted")
 
     assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
     refute_receive {:durable_adapter_called, _interaction}, 100
@@ -909,6 +1307,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     assert {:ok, interaction.request_id} == InteractionRouter.request(interaction, opts)
     assert_receive {:durable_adapter_called, %Interaction{request_id: interaction_id}}
     assert interaction_id == interaction.request_id
+    assert_dispatch_status(interaction.request_id, "accepted")
     assert :ok = InteractionRouter.respond(interaction.request_id, :approved)
     assert {:ok, terminal_record} = DurableStore.get(interaction.request_id)
 
@@ -1578,6 +1977,10 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     interaction
   end
 
+  defp durable_interaction(request_id, user_id, description) do
+    build_interaction(interaction_attrs(description, request_id: request_id, user_id: user_id))
+  end
+
   defp durable_receipt(%Record{data: data}) do
     %{
       request_id: data["request_id"],
@@ -1595,12 +1998,44 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
   end
 
   defp track_dashboard(user_id) do
-    assert {:ok, _ref} =
-             PresenceTracker.track(self(), user_id, :dashboard, %{test_pid: self()})
+    case PresenceTracker.track(self(), user_id, :dashboard, %{test_pid: self()}) do
+      {:ok, _ref} ->
+        :ok
+
+      {:error, {:already_tracked, pid, _topic, :dashboard}} when pid == self() ->
+        :ok
+    end
 
     assert_eventually(fn ->
       match?([{:dashboard, _metadata}], PresenceTracker.active_channels(user_id))
     end)
+  end
+
+  defp assert_dispatch_status(request_id, status, timeout_ms \\ 1_000) do
+    assert_eventually(
+      fn ->
+        match?(
+          {:ok, %Record{data: %{"dispatch" => %{"status" => ^status}}}},
+          DurableStore.get(request_id)
+        )
+      end,
+      timeout_ms
+    )
+
+    assert {:ok, %Record{} = record} = DurableStore.get(request_id)
+    record
+  end
+
+  defp assert_dispatch_attempts(request_id, attempts, timeout_ms \\ 1_000) do
+    assert_eventually(
+      fn ->
+        match?(
+          {:ok, %Record{data: %{"dispatch" => %{"attempts" => ^attempts}}}},
+          DurableStore.get(request_id)
+        )
+      end,
+      timeout_ms
+    )
   end
 
   defp assert_eventually(fun, timeout_ms \\ 1_000) do
@@ -1615,8 +2050,10 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
       if System.monotonic_time(:millisecond) > deadline do
         flunk("condition not met within timeout")
       else
-        Process.sleep(10)
-        do_assert_eventually(fun, deadline)
+        receive do
+        after
+          10 -> do_assert_eventually(fun, deadline)
+        end
       end
     end
   end
@@ -1650,6 +2087,8 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     if is_pid(old_pid) and not wait_for_new_authority(old_pid, 100) do
       raise "authority did not restart"
     end
+
+    assert_eventually(fn -> Dispatcher.readiness() == :ready end)
   end
 
   defp assert_registry_restart({:ok, _pid}), do: :ok
@@ -1670,10 +2109,33 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
   defp now_ms, do: System.system_time(:millisecond)
 
-  defp restore_config(nil), do: Application.delete_env(:arbor_comms, :durable_interaction_store)
+  defp dispatch_config(overrides \\ []) do
+    Keyword.merge(
+      [
+        sweep_interval_ms: 60_000,
+        startup_delay_ms: 60_000,
+        batch_size: 32,
+        retry_base_ms: 60_000,
+        retry_max_ms: 60_000,
+        send_timeout_ms: 1_000,
+        max_concurrency: 4
+      ],
+      overrides
+    )
+  end
 
-  defp restore_config(value),
-    do: Application.put_env(:arbor_comms, :durable_interaction_store, value)
+  defp registry_supervisor_pid do
+    case Enum.find(Supervisor.which_children(Arbor.Comms.Supervisor), fn
+           {InteractionRegistry, _pid, _type, _modules} -> true
+           _child -> false
+         end) do
+      {InteractionRegistry, pid, :supervisor, _modules} when is_pid(pid) -> pid
+      _ -> flunk("interaction registry supervisor is not running")
+    end
+  end
+
+  defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_comms, key, value)
+  defp restore_env(key, :error), do: Application.delete_env(:arbor_comms, key)
 
   defmodule Backend do
     alias Arbor.Contracts.Persistence.Record
