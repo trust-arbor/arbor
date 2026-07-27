@@ -277,3 +277,7 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 <!-- applied-learning: git-ref-cas-and-worktree-checkout-protection-are-distinct-invariants -->
 <a id="applied-learning-git-ref-cas-and-worktree-checkout-protection-are-distinct-invariants"></a>
 **Git ref CAS and worktree checkout protection are distinct invariants.** `git update-ref -d <ref> <expected-oid>` atomically rejects an OID replacement, but it will delete a branch currently checked out in another worktree; the porcelain `git branch -D` guard is not part of the plumbing command. Branch retirement therefore needs both exact-OID authority and explicit checked-out-worktree protection, with conservative postcondition/recovery handling for races between observation and deletion (verified 2026-07-20 while reviewing coding-branch discard settlement).
+
+<!-- applied-learning: erlang-receive-tracing-proves-delivery-not-selective-receive-consumption -->
+<a id="applied-learning-erlang-receive-tracing-proves-delivery-not-selective-receive-consumption"></a>
+**Erlang `:receive` tracing proves delivery, not selective-receive consumption.** A `{:trace, pid, :receive, message}` event can be emitted even when the process's active receive expression has no matching clause; do not treat that event alone as an acknowledgement that a state machine handled the message. Pair delivery tracing with an explicit reply, monitor, or bounded mailbox/state postcondition, and always disable tracing in cleanup (found 2026-07-27 while making RegistryBase forged-transfer tests deterministic).

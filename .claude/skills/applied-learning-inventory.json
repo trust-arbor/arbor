@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
-  "source_captured_on": "2026-07-20",
-  "entry_count": 529,
+  "source_captured_on": "2026-07-27",
+  "entry_count": 531,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6421,8 +6421,34 @@
       "source_incident": "found 2026-07-26 when durable interaction hydration committed its claim but discarded the receipt).",
       "content_sha256": "af935888f90b9f25b978b0d91a69e45255b0f2f61b4ac89efa65ec72e83c1481",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 530,
+      "source_kind": "post-migration",
+      "slug": "claude-acp-resume-is-launch-bound-and-model-aliases-need-live-attestation",
+      "title": "Claude ACP resume is launch-bound, and model aliases need live attestation.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-claude-acp-resume-is-launch-bound-and-model-aliases-need-live-attestation",
+      "source_date": "2026-07-27",
+      "source_incident": "found while repairing and proving managed Claude session continuity).",
+      "content_sha256": "269893f46082f9d47a8fe00594564745f369f1d5a75f6a0b5bdc64720c140f4c",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 531,
+      "source_kind": "post-migration",
+      "slug": "erlang-receive-tracing-proves-delivery-not-selective-receive-consumption",
+      "title": "Erlang `:receive` tracing proves delivery, not selective-receive consumption.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-erlang-receive-tracing-proves-delivery-not-selective-receive-consumption",
+      "source_date": "2026-07-27",
+      "source_incident": "found 2026-07-27 while making RegistryBase forged-transfer tests deterministic).",
+      "content_sha256": "a042a24605b53886a1d1e5836124768de1529cb6f9cf1c63dc9ee65860e01900",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 68
+  "post_migration_entry_count": 70
 }
