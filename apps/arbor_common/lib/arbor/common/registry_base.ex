@@ -79,6 +79,16 @@ defmodule Arbor.Common.RegistryBase do
       @pg_scope :arbor_registry
       @pg_group {:registry, unquote(table_name)}
       @remote_cache_ttl_ms 30_000
+      # Fixed, absolute duration the old heir stays in owner state waiting
+      # for a claim once it becomes the orphaned table's owner. This is a
+      # single deadline computed once at the standby->owner transition —
+      # invalid or rejected claims must NOT extend it, and an unclaimed
+      # orphan must not be retained past it (see heir_owner/1).
+      @heir_claim_window_ms 60_000
+      # Total time budget (including retries across an owner-DOWN race) a
+      # replacement registry spends trying to claim an orphaned table before
+      # giving up and failing closed.
+      @claim_retry_deadline_ms 5_000
 
       # --- Client API ---
 
@@ -292,35 +302,184 @@ defmodule Arbor.Common.RegistryBase do
 
       @impl GenServer
       def init(_opts) do
+        case :ets.whereis(@table_name) do
+          :undefined -> init_fresh_table()
+          table_ref -> init_reclaimed_table(table_ref)
+        end
+      end
+
+      # Fresh boot: no table exists yet. Create it (owned by us, with a
+      # standby heir installed at creation) and prove the invariant holds.
+      defp init_fresh_table do
         heir_pid = start_heir()
 
-        table =
-          case :ets.whereis(@table_name) do
-            :undefined ->
-              :ets.new(@table_name, [
-                :set,
-                :named_table,
-                :public,
-                {:read_concurrency, true},
-                {:heir, heir_pid, @table_name}
-              ])
+        with {:ok, table_ref} <- create_table(heir_pid),
+             :ok <- verify_ownership_and_heir(table_ref, heir_pid) do
+          maybe_join_pg()
+          maybe_monitor_pg()
+          {:ok, %{core_locked: false, heir_pid: heir_pid}}
+        else
+          {:error, reason} ->
+            stop_heir(heir_pid)
+            {:stop, {:ets_table_init_failed, reason}}
+        end
+      end
 
-            _ref ->
-              # Table exists (held by heir after crash). Claim ownership.
-              try do
-                :ets.setopts(@table_name, [{:heir, heir_pid, @table_name}])
-              rescue
-                ArgumentError -> :ok
-              end
+      defp create_table(heir_pid) do
+        :ets.new(@table_name, [
+          :set,
+          :named_table,
+          :public,
+          {:read_concurrency, true},
+          {:heir, heir_pid, @table_name}
+        ])
 
-              @table_name
-          end
+        # :ets.new/2 on a :named_table returns the name atom itself, not a
+        # distinguishing reference — re-derive via :ets.whereis/1 so
+        # `table_ref` is always the same kind of exact-generation identity
+        # used everywhere else (including the reclaim path).
+        {:ok, :ets.whereis(@table_name)}
+      rescue
+        error -> {:error, error}
+      end
 
-        # Join pg group for cross-node discovery + monitor membership changes
-        maybe_join_pg()
-        maybe_monitor_pg()
+      # Replacement boot: the table already exists, orphaned by a crashed
+      # predecessor and currently owned by its old heir. `table_ref` is the
+      # EXACT current generation captured via :ets.whereis/1 — for a
+      # :named_table this is a reference distinct from the (reusable) name
+      # atom, and it changes if the table is ever deleted and recreated
+      # under the same name. We thread this exact reference through the
+      # claim request and the transfer's gift data so a stale or
+      # regenerated table can never be silently accepted.
+      #
+      # We never call :ets.setopts/2 until AFTER claim_table/2 has proven
+      # (via :ets.info) that we are the real owner — calling setopts on a
+      # table we don't own is the original bug: it silently no-ops instead
+      # of reclaiming anything.
+      defp init_reclaimed_table(table_ref) do
+        deadline = System.monotonic_time(:millisecond) + @claim_retry_deadline_ms
 
-        {:ok, %{core_locked: false, heir_pid: heir_pid}}
+        case claim_table(table_ref, deadline) do
+          {:ok, ^table_ref} ->
+            heir_pid = start_heir()
+
+            with :ok <- install_heir(table_ref, heir_pid),
+                 :ok <- verify_ownership_and_heir(table_ref, heir_pid) do
+              maybe_join_pg()
+              maybe_monitor_pg()
+              {:ok, %{core_locked: false, heir_pid: heir_pid}}
+            else
+              {:error, reason} ->
+                stop_heir(heir_pid)
+                {:stop, {:ets_table_reclaim_failed, reason}}
+            end
+
+          {:error, reason} ->
+            {:stop, {:ets_table_reclaim_failed, reason}}
+        end
+      end
+
+      defp install_heir(table_ref, heir_pid) do
+        :ets.setopts(table_ref, [{:heir, heir_pid, @table_name}])
+        :ok
+      rescue
+        error -> {:error, error}
+      end
+
+      # Fail closed unless we can literally prove, via :ets.info, that we
+      # are the table's owner and the table's heir is exactly the process we
+      # just spawned. Anything else is an unprovable invariant.
+      defp verify_ownership_and_heir(table_ref, heir_pid) do
+        self_pid = self()
+
+        case {:ets.whereis(@table_name), :ets.info(table_ref, :owner),
+              :ets.info(table_ref, :heir)} do
+          {^table_ref, ^self_pid, ^heir_pid} -> :ok
+          other -> {:error, {:invariant_violation, other}}
+        end
+      end
+
+      defp stop_heir(heir_pid) do
+        if is_pid(heir_pid) and Process.alive?(heir_pid) do
+          Process.exit(heir_pid, :kill)
+        end
+
+        :ok
+      end
+
+      # Bounded claim loop, addressed to the table's CURRENT OWNER (never
+      # the :heir field — after the first ETS-TRANSFER the old heir IS the
+      # owner and the heir field may be stale or :none). Re-reads the exact
+      # table generation and current owner on every attempt, including
+      # after an owner-DOWN race, and keeps retrying the newly-observed
+      # owner until `deadline`. A generic, unauthenticated receive can never
+      # consume the transfer: await_claim/5 matches the exact table name,
+      # exact owner pid, and exact {table_ref, claim_ref} gift data.
+      defp claim_table(table_ref, deadline) do
+        case current_owner(table_ref) do
+          {:ok, owner} when owner == self() -> {:ok, table_ref}
+          {:ok, owner} -> attempt_claim(table_ref, owner, deadline)
+          {:error, reason} -> {:error, reason}
+        end
+      end
+
+      defp attempt_claim(table_ref, owner, deadline) do
+        now = System.monotonic_time(:millisecond)
+
+        if now >= deadline do
+          {:error, :claim_deadline_exceeded}
+        else
+          claim_ref = make_ref()
+          monitor_ref = Process.monitor(owner)
+          send(owner, {:claim_ets_table, @table_name, table_ref, claim_ref, self()})
+
+          result = await_claim(table_ref, owner, claim_ref, monitor_ref, deadline)
+          Process.demonitor(monitor_ref, [:flush])
+          result
+        end
+      end
+
+      defp await_claim(table_ref, owner, claim_ref, monitor_ref, deadline) do
+        remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+        receive do
+          {:"ETS-TRANSFER", @table_name, ^owner, {^table_ref, ^claim_ref}} ->
+            confirm_ownership(table_ref)
+
+          {:DOWN, ^monitor_ref, :process, ^owner, _reason} ->
+            # Owner-DOWN vs. transfer ordering race: re-read the exact table
+            # generation and current owner rather than assuming failure —
+            # this also correctly handles a transfer that already completed
+            # (current_owner/1 would then report us as owner).
+            claim_table(table_ref, deadline)
+        after
+          remaining ->
+            {:error, :claim_timeout}
+        end
+      end
+
+      defp current_owner(table_ref) do
+        case :ets.whereis(@table_name) do
+          :undefined ->
+            {:error, :table_gone}
+
+          ^table_ref ->
+            case :ets.info(table_ref, :owner) do
+              :undefined -> {:error, :table_gone}
+              owner when is_pid(owner) -> {:ok, owner}
+            end
+
+          _other_ref ->
+            {:error, :table_regenerated}
+        end
+      end
+
+      defp confirm_ownership(table_ref) do
+        if :ets.info(table_ref, :owner) == self() do
+          {:ok, table_ref}
+        else
+          {:error, :ownership_not_proven}
+        end
       end
 
       @impl GenServer
@@ -423,21 +582,16 @@ defmodule Arbor.Common.RegistryBase do
         {:reply, :ok, %{state | core_locked: core_locked}}
       end
 
+      # No handle_info clause for :"ETS-TRANSFER" here by design: the
+      # authenticated handoff is performed synchronously inside init/1 (see
+      # claim_table/2 and await_claim/5), which is the only place that knows
+      # the exact table generation and claim reference needed to accept a
+      # transfer safely. A loosely-matched handle_info clause here would be
+      # exactly the kind of generic, unauthenticated consumer this module
+      # must avoid — any unsolicited transfer message falls through to the
+      # catch-all handle_info/2 below.
+
       @impl GenServer
-      def handle_info({:"ETS-TRANSFER", table, _from_pid, _data}, state) do
-        # ETS table transferred from dying heir or previous owner
-        # Re-establish heir
-        heir_pid = start_heir()
-
-        try do
-          :ets.setopts(table, [{:heir, heir_pid, @table_name}])
-        rescue
-          ArgumentError -> :ok
-        end
-
-        {:noreply, %{state | heir_pid: heir_pid}}
-      end
-
       def handle_info({:pg_membership, @pg_scope, @pg_group, _joins, leaves}, state)
           when leaves != [] do
         # Remote registry left — invalidate any cached entries from those nodes
@@ -760,26 +914,134 @@ defmodule Arbor.Common.RegistryBase do
         :exit, _ -> :ok
       end
 
+      # Explicit old-heir state machine.
+      #
+      # :standby — before the registry has ever crashed. A message that is
+      #            merely SHAPED like an ETS-TRANSFER is not proof of
+      #            anything — any process can send one. On receipt, we
+      #            independently PROVE a real transfer occurred by reading
+      #            :ets.info/2 ourselves: only if :ets.whereis/1 resolves to
+      #            a live table AND that table's actual owner is us
+      #            (self()) do we trust it. A forged message fails this
+      #            proof and we loop back to :standby untouched — it cannot
+      #            disarm or expire the heir, because we never start the
+      #            owner-state deadline without independently-verified
+      #            proof. Only a message shaped like an :EXIT is otherwise
+      #            handled (kept for parity with the pre-existing
+      #            trap_exit behavior).
+      #
+      # :owner   — entered only after that independent proof, carrying the
+      #            exact `table_ref` captured at proof time. It computes ONE
+      #            fixed absolute deadline right here and waits for an
+      #            authenticated claim until exactly that deadline — an
+      #            invalid/rejected claim loops but does NOT push the
+      #            deadline out. If nothing valid claims the table within
+      #            @heir_claim_window_ms, this process exits; since it is
+      #            still its own :heir, Erlang deletes the table rather than
+      #            leaving it retained indefinitely.
+      #
+      #            A claim is honored only when its table generation is
+      #            pinned to exactly the stored `table_ref` (not a fresh,
+      #            re-derived value — bound against the generation we
+      #            already proved) and its claimant pid matches exactly,
+      #            and only after re-verifying — immediately before
+      #            :ets.give_away/3 — that the table still exists under
+      #            that exact generation and that this process is still its
+      #            owner. Only the current owner may call give_away; this
+      #            process never calls it except in that verified branch.
+      #            A valid claimant can still die in the narrow window
+      #            between validation and give_away — that call is guarded,
+      #            and a failure there leaves this process safely in
+      #            :owner (deadline unchanged) rather than crashing and
+      #            deleting the orphan early. On success it exits
+      #            immediately afterward.
       defp start_heir do
         {:ok, pid} =
           Task.start(fn ->
             Process.flag(:trap_exit, true)
-
-            receive do
-              {:"ETS-TRANSFER", _table, _from, _data} ->
-                # Hold the table until the registry restarts and reclaims it
-                receive do
-                  {:"ETS-TRANSFER", _table, _from, _data} -> :ok
-                after
-                  60_000 -> :ok
-                end
-
-              {:EXIT, _pid, _reason} ->
-                :ok
-            end
+            heir_standby()
           end)
 
         pid
+      end
+
+      defp heir_standby do
+        receive do
+          {:"ETS-TRANSFER", @table_name, _from_pid, _data} ->
+            case proven_transfer_ownership() do
+              {:ok, table_ref} ->
+                deadline = System.monotonic_time(:millisecond) + @heir_claim_window_ms
+                heir_owner(table_ref, deadline)
+
+              :error ->
+                heir_standby()
+            end
+
+          {:EXIT, _pid, _reason} ->
+            :ok
+        end
+      end
+
+      # Independently prove real ownership rather than trusting that an
+      # ETS-TRANSFER-shaped message actually reflects one.
+      defp proven_transfer_ownership do
+        case :ets.whereis(@table_name) do
+          :undefined ->
+            :error
+
+          table_ref ->
+            if :ets.info(table_ref, :owner) == self() do
+              {:ok, table_ref}
+            else
+              :error
+            end
+        end
+      end
+
+      defp heir_owner(table_ref, deadline) do
+        remaining = deadline - System.monotonic_time(:millisecond)
+
+        if remaining <= 0 do
+          :ok
+        else
+          receive do
+            {:claim_ets_table, @table_name, ^table_ref, claim_ref, claimant_pid}
+            when is_pid(claimant_pid) ->
+              if heir_claim_valid?(table_ref, claimant_pid) do
+                case give_away_safely(table_ref, claimant_pid, claim_ref) do
+                  :ok -> :ok
+                  {:error, _reason} -> heir_owner(table_ref, deadline)
+                end
+              else
+                heir_owner(table_ref, deadline)
+              end
+          after
+            remaining ->
+              heir_owner(table_ref, deadline)
+          end
+        end
+      end
+
+      # Final invariant proof immediately before acting: the table must
+      # still exist under exactly the stored generation, we must still be
+      # its owner, and the claimant must be exactly the registered module's
+      # live pid.
+      defp heir_claim_valid?(table_ref, claimant_pid) do
+        claimant_pid == Process.whereis(__MODULE__) and
+          :ets.whereis(@table_name) == table_ref and
+          :ets.info(table_ref, :owner) == self()
+      end
+
+      # A validated claimant can still die between heir_claim_valid?/2 and
+      # this call — :ets.give_away/3 then raises ArgumentError (recipient
+      # not alive). Catch it so the heir remains safely in :owner (under
+      # the unchanged, original deadline) instead of crashing and losing
+      # its own-heir table to an unhandled exit.
+      defp give_away_safely(table_ref, claimant_pid, claim_ref) do
+        :ets.give_away(table_ref, claimant_pid, {table_ref, claim_ref})
+        :ok
+      rescue
+        ArgumentError -> {:error, :give_away_failed}
       end
 
       # --- persistent_term fast path ---
