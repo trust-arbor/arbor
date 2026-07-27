@@ -668,7 +668,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       include_committable_tree? =
         (Map.get(args, "include_committable_tree") ||
-           Map.get(args, :include_committable_tree)) in [true, "true"]
+           Map.get(args, :include_committable_tree)) == true
 
       response =
         Agent.get_and_update(state, fn current ->
@@ -1473,7 +1473,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
     validation_captures =
       Enum.filter(inspect_calls, fn {_name, args} ->
-        args["include_committable_tree"] in [true, "true"]
+        args["include_committable_tree"] == true
       end)
 
     assert length(inspect_calls) == attempts * 3
@@ -1653,7 +1653,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                "target" => "action",
                "action" => "coding_workspace_inspect",
                "context_keys" => "workspace_id",
-               "param.include_committable_tree" => "true",
+               "param.include_committable_tree" => true,
                "output_prefix" => "validation_workspace",
                "max_retries" => "0"
              }

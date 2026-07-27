@@ -3764,7 +3764,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "target" => "action",
          "action" => "coding_workspace_inspect",
          "context_keys" => "workspace_id",
-         "param.include_committable_tree" => "true",
+         "param.include_committable_tree" => true,
          "output_prefix" => "validation_workspace",
          "max_retries" => "0"
        }},

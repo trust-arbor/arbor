@@ -90,7 +90,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     defp dispatch("coding_workspace_inspect", args, scenario, state) do
       baseline = args["baseline_fingerprint"] || args[:baseline_fingerprint]
       post_turn? = is_binary(baseline) and baseline != ""
-      include_committable_tree? = args["include_committable_tree"] in [true, "true"]
+      include_committable_tree? = args["include_committable_tree"] == true
 
       Agent.get_and_update(state, fn current ->
         inspect_index = Map.get(current.counters, :inspect, 0) + 1

@@ -741,13 +741,13 @@
     {
       "source_ordinal": 62,
       "slug": "static-dot-action-parameters-arrive-as-strings",
-      "title": "Static DOT action parameters arrive as strings.",
+      "title": "Static DOT action parameters preserve parser types; quoted values are strings.",
       "topic": "dot-pipelines",
       "destination": ".claude/skills/dot-pipeline-authoring.md",
       "anchor": "applied-learning-static-dot-action-parameters-arrive-as-strings",
       "source_date": "2026-07-10",
-      "source_incident": "found 2026-07-10 when `git.commit` skipped staging after a successful Grok edit).",
-      "content_sha256": "358f5e4e0bcdf9f43213dee4b59415f0eb402c913cd266ded53b1431b2120a19",
+      "source_incident": "found 2026-07-10 when `git.commit` skipped staging after a successful Grok edit; refined 2026-07-26 when quoted validation-tree capture omitted terminal evidence).",
+      "content_sha256": "843bf36cc082ca99da2ed352a0bc36d6260d45aae7486c5dfa3df6bfcfa0ba38",
       "always_loaded": false
     },
     {

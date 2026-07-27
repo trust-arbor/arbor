@@ -229,7 +229,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 78_790
+    assert byte_size(ctx.template_source) == 78_788
     assert map_size(graph.nodes) == 233
     assert length(graph.edges) == 337
     assert byte_size(ctx.template_source) <= 262_144
@@ -1883,7 +1883,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              "target" => "action",
              "action" => "coding_workspace_inspect",
              "context_keys" => "workspace_id",
-             "param.include_committable_tree" => "true",
+             "param.include_committable_tree" => true,
              "output_prefix" => "validation_workspace",
              "max_retries" => "0"
            }

@@ -362,7 +362,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     mutations = [
       update_in(
         graph.nodes["capture_validation_workspace"].attrs,
-        &Map.put(&1, "param.include_committable_tree", "false")
+        &Map.put(&1, "param.include_committable_tree", false)
       ),
       update_in(
         graph.nodes["hoist_validation_candidate_tree_oid"].attrs,

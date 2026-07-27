@@ -262,7 +262,14 @@ lookup, and regress with the exact DOT-produced parameter map (found
 
 <!-- applied-learning: static-dot-action-parameters-arrive-as-strings -->
 <a id="applied-learning-static-dot-action-parameters-arrive-as-strings"></a>
-**Static DOT action parameters arrive as strings.** Attributes such as `param.all="true"` cross the parser/context boundary as string values even when the action schema declares a boolean. Schema-bounded actions that are valid DOT targets must normalize their accepted serialized boolean forms at the action boundary; testing only direct Elixir calls with `true` can leave the live pipeline taking a different branch (found 2026-07-10 when `git.commit` skipped staging after a successful Grok edit).
+**Static DOT action parameters preserve parser types; quoted values are strings.** An attribute
+such as `param.all="true"` reaches the action as a string even when its schema declares a boolean,
+while `param.all=true` reaches it as canonical boolean `true`. Use an unquoted literal when the
+action intentionally requires an exact JSON scalar type, and assert that exact type in both the
+compiled graph and an execution fixture; accepting `[true, "true"]` in a fake executor can mask a
+dead production branch. Normalize serialized forms only when the action contract explicitly
+accepts them (found 2026-07-10 when `git.commit` skipped staging after a successful Grok edit;
+refined 2026-07-26 when quoted validation-tree capture omitted terminal evidence).
 
 <!-- applied-learning: hot-loading-an-action-does-not-refresh-a-core-locked-actionregistry -->
 <a id="applied-learning-hot-loading-an-action-does-not-refresh-a-core-locked-actionregistry"></a>
