@@ -43,7 +43,8 @@ defmodule Arbor.AI.AcpManaged do
 
     with {:ok, opts, _timeout} <-
            Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms),
-         :ok <- validate_resume_option(opts) do
+         :ok <- validate_resume_option(opts),
+         {:ok, opts} <- bind_claude_managed_resume(provider, opts) do
       use_pool? = Keyword.get(opts, :use_pool) || Keyword.get(opts, :pooled) || false
 
       if use_pool? do
@@ -783,6 +784,86 @@ defmodule Arbor.AI.AcpManaged do
         end
     end
   end
+
+  # Claude Code continuity is launch-bound: post-start session/load can replay
+  # metadata, but it cannot rebind an already-running CLI subprocess. Bind the
+  # exact requested provider session before pool checkout or child startup.
+  # Explicit client_opts bypass Config.resolve/2, so bind their nested
+  # adapter_opts instead of the otherwise effective top-level adapter_opts.
+  defp bind_claude_managed_resume(:claude, opts) do
+    case Keyword.fetch(opts, :session_id) do
+      :error ->
+        {:ok, opts}
+
+      {:ok, session_id} ->
+        with {:ok, session_id} <- AcpSession.validate_provider_session_id(session_id) do
+          case Keyword.get(opts, :client_opts) do
+            nil -> merge_claude_launch_resume(opts, session_id)
+            client_opts -> merge_claude_client_opts_resume(opts, client_opts, session_id)
+          end
+        end
+    end
+  end
+
+  defp bind_claude_managed_resume(_provider, opts), do: {:ok, opts}
+
+  defp merge_claude_launch_resume(opts, session_id) do
+    case normalize_adapter_opts_for_resume(Keyword.get(opts, :adapter_opts)) do
+      {:ok, adapter_opts} ->
+        case Keyword.fetch(adapter_opts, :resume) do
+          :error ->
+            {:ok,
+             Keyword.put(opts, :adapter_opts, Keyword.put(adapter_opts, :resume, session_id))}
+
+          {:ok, ^session_id} ->
+            {:ok, Keyword.put(opts, :adapter_opts, adapter_opts)}
+
+          {:ok, _conflicting} ->
+            {:error, {:invalid, :adapter_opts, :conflicting_resume}}
+        end
+
+      :error ->
+        {:error, {:invalid, :adapter_opts, :bad_type}}
+    end
+  end
+
+  defp merge_claude_client_opts_resume(opts, client_opts, session_id) do
+    if Keyword.keyword?(client_opts) do
+      case normalize_adapter_opts_for_resume(Keyword.get(client_opts, :adapter_opts)) do
+        {:ok, adapter_opts} ->
+          case Keyword.fetch(adapter_opts, :resume) do
+            :error ->
+              new_client_opts =
+                Keyword.put(
+                  client_opts,
+                  :adapter_opts,
+                  Keyword.put(adapter_opts, :resume, session_id)
+                )
+
+              {:ok, Keyword.put(opts, :client_opts, new_client_opts)}
+
+            {:ok, ^session_id} ->
+              {:ok, opts}
+
+            {:ok, _conflicting} ->
+              {:error, {:invalid, :client_opts, :conflicting_resume}}
+          end
+
+        :error ->
+          {:error, {:invalid, :client_opts, :bad_adapter_opts}}
+      end
+    else
+      {:error, {:invalid, :client_opts, :bad_type}}
+    end
+  end
+
+  defp normalize_adapter_opts_for_resume(nil), do: {:ok, []}
+
+  defp normalize_adapter_opts_for_resume(adapter_opts) when is_list(adapter_opts) do
+    if Keyword.keyword?(adapter_opts), do: {:ok, adapter_opts}, else: :error
+  end
+
+  defp normalize_adapter_opts_for_resume(_other), do: :error
 
   defp provider_session_id_for_start(session_info, opts) do
     case Keyword.fetch(opts, :session_id) do

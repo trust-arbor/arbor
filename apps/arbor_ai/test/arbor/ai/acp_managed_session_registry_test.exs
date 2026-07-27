@@ -1678,4 +1678,316 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
       assert json_clean?(meta)
     end
   end
+
+  describe "Claude launch-bound resume (top-level adapter_opts)" do
+    test "non-pooled: exact requested provider session id reaches child launch", ctx do
+      sid = "a226df5e-bc82-412c-9870-1fc52d036763"
+
+      assert {:ok, meta} = start_managed(:claude, [session_id: sid], ctx)
+      assert meta.session_id == sid
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      assert Keyword.get(init_opts, :adapter_opts)[:resume] == sid
+      refute Keyword.has_key?(init_opts, :session_id)
+    end
+
+    test "non-pooled: sibling adapter_opts are preserved", ctx do
+      sid = "sess_sibling_preserved"
+
+      assert {:ok, _meta} =
+               start_managed(
+                 :claude,
+                 [session_id: sid, adapter_opts: [model: "opus", permission_mode: :bypass]],
+                 ctx
+               )
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      adapter_opts = Keyword.get(init_opts, :adapter_opts)
+
+      assert adapter_opts[:resume] == sid
+      assert adapter_opts[:model] == "opus"
+      assert adapter_opts[:permission_mode] == :bypass
+    end
+
+    test "non-pooled: identical caller-supplied resume is accepted", ctx do
+      sid = "sess_identical_resume"
+
+      assert {:ok, _meta} =
+               start_managed(:claude, [session_id: sid, adapter_opts: [resume: sid]], ctx)
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      assert Keyword.get(init_opts, :adapter_opts)[:resume] == sid
+    end
+
+    test "security regression: conflicting resume fails closed before child start", ctx do
+      assert {:error, {:invalid, :adapter_opts, :conflicting_resume}} =
+               start_managed(
+                 :claude,
+                 [session_id: "requested-id", adapter_opts: [resume: "other-id"]],
+                 ctx
+               )
+
+      refute_receive {:fake_init, _pid, _agent_id, _opts}, 100
+      assert_supervisor_empty(ctx.supervisor)
+    end
+
+    test "security regression: malformed adapter_opts fails closed before child start", ctx do
+      assert {:error, {:invalid, :adapter_opts, :bad_type}} =
+               start_managed(
+                 :claude,
+                 [session_id: "requested-id", adapter_opts: %{resume: "bad-shape"}],
+                 ctx
+               )
+
+      refute_receive {:fake_init, _pid, _agent_id, _opts}, 100
+      assert_supervisor_empty(ctx.supervisor)
+    end
+
+    test "non-pooled: no session_id leaves adapter_opts untouched", ctx do
+      assert {:ok, _meta} =
+               start_managed(:claude, [adapter_opts: [model: "sonnet"]], ctx)
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      adapter_opts = Keyword.get(init_opts, :adapter_opts)
+      refute Keyword.has_key?(adapter_opts, :resume)
+      assert adapter_opts[:model] == "sonnet"
+    end
+
+    test "pooled: exact requested provider session id reaches checkout and child launch", ctx do
+      start_fake_pool()
+      sid = "a226df5e-bc82-412c-9870-1fc52d036763"
+
+      assert {:ok, meta} =
+               start_managed(
+                 :claude,
+                 [use_pool: true, pool_module: FakePool, session_id: sid],
+                 ctx
+               )
+
+      assert meta.pooled == true
+      assert meta.session_id == sid
+
+      assert_receive {:pool_checkout_opts, :claude, checkout_opts, _caller}, 1_000
+      refute Keyword.has_key?(checkout_opts, :session_id)
+      assert Keyword.get(checkout_opts, :adapter_opts)[:resume] == sid
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      assert Keyword.get(init_opts, :adapter_opts)[:resume] == sid
+      refute Keyword.has_key?(init_opts, :session_id)
+    end
+
+    test "pooled: sibling adapter_opts survive checkout", ctx do
+      start_fake_pool()
+      sid = "sess_pool_sibling"
+
+      assert {:ok, _meta} =
+               start_managed(
+                 :claude,
+                 [
+                   use_pool: true,
+                   pool_module: FakePool,
+                   session_id: sid,
+                   adapter_opts: [model: "opus"]
+                 ],
+                 ctx
+               )
+
+      assert_receive {:pool_checkout_opts, :claude, checkout_opts, _caller}, 1_000
+      adapter_opts = Keyword.get(checkout_opts, :adapter_opts)
+      assert adapter_opts[:resume] == sid
+      assert adapter_opts[:model] == "opus"
+    end
+
+    test "security regression: pooled conflicting resume fails before pool checkout", ctx do
+      start_fake_pool()
+
+      assert {:error, {:invalid, :adapter_opts, :conflicting_resume}} =
+               start_managed(
+                 :claude,
+                 [
+                   use_pool: true,
+                   pool_module: FakePool,
+                   session_id: "requested-id",
+                   adapter_opts: [resume: "other-id"]
+                 ],
+                 ctx
+               )
+
+      refute_receive {:pool_checkout_opts, _provider, _opts, _caller}, 100
+    end
+  end
+
+  describe "Claude launch-bound resume (explicit nested client_opts)" do
+    test "non-pooled: resume reaches nested client_opts adapter_opts", ctx do
+      sid = "sess_client_opts_nested"
+
+      assert {:ok, meta} =
+               start_managed(
+                 :claude,
+                 [session_id: sid, client_opts: [command: ["claude"], adapter_opts: []]],
+                 ctx
+               )
+
+      assert meta.session_id == sid
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      client_opts = Keyword.get(init_opts, :client_opts)
+      assert Keyword.get(client_opts, :adapter_opts)[:resume] == sid
+      refute Keyword.has_key?(init_opts, :adapter_opts)
+      refute Keyword.has_key?(init_opts, :session_id)
+    end
+
+    test "non-pooled: sibling nested adapter_opts are preserved", ctx do
+      sid = "sess_client_opts_sibling"
+
+      assert {:ok, _meta} =
+               start_managed(
+                 :claude,
+                 [
+                   session_id: sid,
+                   client_opts: [adapter_opts: [model: "opus", permission_mode: :bypass]]
+                 ],
+                 ctx
+               )
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      adapter_opts = Keyword.get(init_opts, :client_opts) |> Keyword.get(:adapter_opts)
+
+      assert adapter_opts[:resume] == sid
+      assert adapter_opts[:model] == "opus"
+      assert adapter_opts[:permission_mode] == :bypass
+    end
+
+    test "non-pooled: identical nested resume is accepted", ctx do
+      sid = "sess_client_opts_identical"
+
+      assert {:ok, _meta} =
+               start_managed(
+                 :claude,
+                 [session_id: sid, client_opts: [adapter_opts: [resume: sid]]],
+                 ctx
+               )
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      adapter_opts = Keyword.get(init_opts, :client_opts) |> Keyword.get(:adapter_opts)
+      assert adapter_opts[:resume] == sid
+    end
+
+    test "security regression: conflicting nested resume fails closed", ctx do
+      assert {:error, {:invalid, :client_opts, :conflicting_resume}} =
+               start_managed(
+                 :claude,
+                 [
+                   session_id: "requested-id",
+                   client_opts: [adapter_opts: [resume: "other-id"]]
+                 ],
+                 ctx
+               )
+
+      refute_receive {:fake_init, _pid, _agent_id, _opts}, 100
+      assert_supervisor_empty(ctx.supervisor)
+    end
+
+    test "security regression: malformed client_opts fails closed before child start", ctx do
+      assert {:error, {:invalid, :client_opts, :bad_type}} =
+               start_managed(
+                 :claude,
+                 [session_id: "requested-id", client_opts: %{adapter_opts: []}],
+                 ctx
+               )
+
+      refute_receive {:fake_init, _pid, _agent_id, _opts}, 100
+      assert_supervisor_empty(ctx.supervisor)
+    end
+
+    test "security regression: malformed nested adapter_opts fails closed", ctx do
+      assert {:error, {:invalid, :client_opts, :bad_adapter_opts}} =
+               start_managed(
+                 :claude,
+                 [session_id: "requested-id", client_opts: [adapter_opts: %{resume: "x"}]],
+                 ctx
+               )
+
+      refute_receive {:fake_init, _pid, _agent_id, _opts}, 100
+      assert_supervisor_empty(ctx.supervisor)
+    end
+
+    test "pooled: nested resume reaches checkout and child", ctx do
+      start_fake_pool()
+      sid = "sess_pool_client_opts"
+
+      assert {:ok, meta} =
+               start_managed(
+                 :claude,
+                 [
+                   use_pool: true,
+                   pool_module: FakePool,
+                   session_id: sid,
+                   client_opts: [adapter_opts: [model: "opus"]]
+                 ],
+                 ctx
+               )
+
+      assert meta.session_id == sid
+
+      assert_receive {:pool_checkout_opts, :claude, checkout_opts, _caller}, 1_000
+
+      checkout_adapter_opts =
+        Keyword.get(checkout_opts, :client_opts) |> Keyword.get(:adapter_opts)
+
+      assert checkout_adapter_opts[:resume] == sid
+      assert checkout_adapter_opts[:model] == "opus"
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      init_adapter_opts = Keyword.get(init_opts, :client_opts) |> Keyword.get(:adapter_opts)
+      assert init_adapter_opts[:resume] == sid
+    end
+  end
+
+  describe "non-Claude providers are unaffected by resume binding" do
+    test "non-pooled: explicit session_id never injects adapter_opts resume", ctx do
+      assert {:ok, meta} =
+               start_managed(:test, [session_id: "resume_abc", adapter_opts: [foo: 1]], ctx)
+
+      assert meta.session_id == "resume_abc"
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      adapter_opts = Keyword.get(init_opts, :adapter_opts)
+      refute Keyword.has_key?(adapter_opts, :resume)
+      assert Keyword.get(adapter_opts, :foo) == 1
+    end
+
+    test "pooled: explicit session_id never injects adapter_opts resume", ctx do
+      start_fake_pool()
+
+      assert {:ok, meta} =
+               start_managed(
+                 :test,
+                 [use_pool: true, pool_module: FakePool, session_id: "resume_pool_abc"],
+                 ctx
+               )
+
+      assert meta.session_id == "resume_pool_abc"
+
+      assert_receive {:pool_checkout_opts, :test, checkout_opts, _caller}, 1_000
+      refute Keyword.has_key?(checkout_opts, :session_id)
+      refute Keyword.has_key?(Keyword.get(checkout_opts, :adapter_opts, []), :resume)
+    end
+
+    test "explicit client_opts is untouched for a non-Claude provider", ctx do
+      assert {:ok, meta} =
+               start_managed(
+                 :test,
+                 [session_id: "resume_client_abc", client_opts: [adapter_opts: [foo: 1]]],
+                 ctx
+               )
+
+      assert meta.session_id == "resume_client_abc"
+
+      assert_receive {:fake_init, _pid, _agent_id, init_opts}, 1_000
+      adapter_opts = Keyword.get(init_opts, :client_opts) |> Keyword.get(:adapter_opts)
+      refute Keyword.has_key?(adapter_opts, :resume)
+      assert Keyword.get(adapter_opts, :foo) == 1
+    end
+  end
 end
