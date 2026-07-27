@@ -620,11 +620,11 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
                 scan_top_level_json_objects(text, finish + 1, attempts + 1, objects)
 
               {:error, _reason} ->
-                scan_top_level_json_objects(text, start + 1, attempts + 1, objects)
+                scan_top_level_json_objects(text, finish + 1, attempts + 1, objects)
             end
 
           :unbalanced ->
-            scan_top_level_json_objects(text, start + 1, attempts + 1, objects)
+            {:error, :design_envelope_unbalanced_json}
         end
     end
   end

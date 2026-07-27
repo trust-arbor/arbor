@@ -673,13 +673,16 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {:ok,
        %{
          "node_attrs" => node_attrs,
+         "node_attr_subsets" => node_attr_subsets,
          "protected_prefix_writers" => protected_prefix_writers,
          "protected_writers" => protected_writers,
          "edges" => edges
        }}
-      when is_list(node_attrs) and is_map(protected_prefix_writers) and
+      when is_list(node_attrs) and is_list(node_attr_subsets) and
+             is_map(protected_prefix_writers) and
              is_map(protected_writers) and is_list(edges) ->
         with :ok <- require_worker_recovery_node_attrs(node_attrs),
+             :ok <- require_review_convergence_node_attr_subsets(node_attr_subsets),
              :ok <- require_worker_recovery_writers(protected_prefix_writers),
              :ok <- require_worker_recovery_writers(protected_writers) do
           require_worker_recovery_edges(edges)
@@ -708,6 +711,16 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       :ok
     else
       {:error, {:invalid_semantic_policy, :invalid_worker_recovery_node_attrs}}
+    end
+  end
+
+  defp require_review_convergence_node_attr_subsets(entries) do
+    with :ok <- require_worker_recovery_node_attrs(entries),
+         true <- entries != [] and Enum.all?(entries, &(map_size(&1["attrs"]) > 0)) do
+      :ok
+    else
+      _other ->
+        {:error, {:invalid_semantic_policy, :invalid_review_convergence_node_attr_subsets}}
     end
   end
 
@@ -2180,6 +2193,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
       {"check_design_envelope_retry_budget",
        %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+      {"build_design_envelope_repair_prompt",
+       %{
+         "type" => "transform",
+         "transform" => "template",
+         "source_key" => "task",
+         "output_key" => "prompt"
+       }},
       {"extract_design",
        %{
          "type" => "transform",
@@ -2577,6 +2597,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        ]},
       {"inc_design_envelope_retry_count", [{"build_design_envelope_repair_prompt", nil}]},
       {"build_design_envelope_repair_prompt", [{"capture_pre_turn_workspace", nil}]},
+      {"error_design_checkpoint_await_failed", [{"status_pipeline_error_then_close", nil}]},
+      {"error_design_checkpoint_open_failed", [{"status_pipeline_error_then_close", nil}]},
+      {"error_design_checkpoint_outcome_invalid", [{"status_pipeline_error_then_close", nil}]},
+      {"error_design_checkpoint_timeout", [{"status_pipeline_error_then_close", nil}]},
+      {"error_design_modified_workspace", [{"status_pipeline_error_then_close", nil}]},
+      {"error_design_response_invalid", [{"status_pipeline_error_then_close", nil}]},
+      {"error_design_worker_phase_invalid", [{"status_pipeline_error_then_close", nil}]},
       {"extract_design",
        [
          {"error_design_response_invalid", "outcome=fail"},
@@ -2939,6 +2966,33 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
               })
               | acc
             ]
+
+          :error ->
+            [error("review_convergence_missing_node", node_id, %{}) | acc]
+        end
+      end)
+
+    errors =
+      Enum.reduce(convergence["node_attr_subsets"], errors, fn %{
+                                                                 "node_id" => node_id,
+                                                                 "attrs" => expected
+                                                               },
+                                                               acc ->
+        case Map.fetch(graph.nodes, node_id) do
+          {:ok, node} ->
+            actual = Map.take(node.attrs, Map.keys(expected))
+
+            if actual == expected do
+              acc
+            else
+              [
+                error("review_convergence_node_attr_subset_mismatch", node_id, %{
+                  "expected" => expected,
+                  "actual" => actual
+                })
+                | acc
+              ]
+            end
 
           :error ->
             [error("review_convergence_missing_node", node_id, %{}) | acc]

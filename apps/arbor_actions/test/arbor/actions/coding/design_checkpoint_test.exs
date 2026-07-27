@@ -180,6 +180,24 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
              Parse.run(%{text: Jason.encode!(first) <> Jason.encode!(second)}, %{})
   end
 
+  test "Parse never extracts an envelope from inside malformed outer JSON", ctx do
+    encoded = Jason.encode!(design_envelope(ctx.params.design))
+
+    for wrapped <- ["{malformed:" <> encoded <> "}", "[malformed," <> encoded <> "]"] do
+      assert {:error, :design_envelope_not_found} = Parse.run(%{text: wrapped}, %{})
+    end
+
+    assert {:error, :design_envelope_unbalanced_json} =
+             Parse.run(%{text: "{malformed:" <> encoded}, %{})
+  end
+
+  test "Parse skips a whole rejected prose composite before a valid envelope", ctx do
+    envelope = design_envelope(ctx.params.design)
+
+    assert {:ok, ^envelope} =
+             Parse.run(%{text: "Example syntax: {not-json}\n" <> Jason.encode!(envelope)}, %{})
+  end
+
   test "Parse rejects candidate-like objects with missing, extra, or duplicate fields", ctx do
     missing = Jason.encode!(%{"design" => ctx.params.design})
     extra = Jason.encode!(Map.put(design_envelope(ctx.params.design), "commentary", "done"))
@@ -225,7 +243,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     assert {:error, :design_envelope_response_too_large} =
              Parse.run(%{text: oversized_response}, %{})
 
-    excessive_candidates = String.duplicate("{", DesignCheckpoint.max_json_scan_attempts() + 1)
+    excessive_candidates = String.duplicate("{}", DesignCheckpoint.max_json_scan_attempts() + 1)
 
     assert {:error, :design_envelope_scan_limit_exceeded} =
              Parse.run(%{text: excessive_candidates}, %{})

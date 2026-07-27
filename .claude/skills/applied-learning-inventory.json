@@ -6393,7 +6393,7 @@
       "anchor": "applied-learning-treat-acp-streamed-text-as-transcript-evidence-not-a-terminal-structured-envelope",
       "source_date": "2026-07-26",
       "source_incident": "found 2026-07-26 after Codex Spark returned progress prose plus two adjacent valid design checkpoint envelopes).",
-      "content_sha256": "6986135822c27ab8217dde48f15789fad9bacf485db98bb1cff6dace6ce83d5a",
+      "content_sha256": "58e2b578617c445ddd75fd8878d38c30e33e65e4087b3759a8b0593952162d8b",
       "always_loaded": false
     }
   ],

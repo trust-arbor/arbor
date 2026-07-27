@@ -123,6 +123,60 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              )
   end
 
+  test "reviewed profile independently rejects repair prompt executable attr drift", ctx do
+    plan = v2_plan!()
+    assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutated =
+      update_in(
+        graph.nodes["build_design_envelope_repair_prompt"].attrs,
+        &Map.put(&1, "transform", "identity")
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(mutated, profile["semantic_policy"],
+               review_profile: "binding",
+               checkpoint_policy: "design_required",
+               checkpoint_work_packet_json: packet_json,
+               design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+             )
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "review_convergence_node_attr_subset_mismatch" and
+               error["node_id"] == "build_design_envelope_repair_prompt" and
+               error["detail"]["actual"]["transform"] == "identity" and
+               error["detail"]["expected"]["transform"] == "template"
+           end)
+  end
+
+  test "security regression: design error terminals cannot redirect during compilation", ctx do
+    for {node_id, redirected_target} <- [
+          {"error_design_modified_workspace", "parse_design_response"},
+          {"error_design_response_invalid", "build_design_envelope_repair_prompt"}
+        ] do
+      original = "#{node_id} -> status_pipeline_error_then_close"
+      redirect = "#{node_id} -> #{redirected_target}"
+      mutated = String.replace(ctx.template_source, original, redirect, global: false)
+      refute mutated == ctx.template_source
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               compile(v2_plan!(), ctx, mutated)
+
+      for code <- [
+            "design_checkpoint_topology_mismatch",
+            "review_convergence_topology_mismatch"
+          ] do
+        assert Enum.any?(errors, fn error ->
+                 error["code"] == code and error["node_id"] == node_id
+               end),
+               "expected #{code} for #{node_id}, got: #{inspect(errors)}"
+      end
+    end
+  end
+
   test "security regression: design checkpoint tampering and implementation bypass fail closed",
        ctx do
     plan = v2_plan!()
@@ -186,6 +240,19 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         end)
       end
 
+    repair_binding_mutations =
+      for {attribute, replacement} <- [
+            {"type", "compute"},
+            {"transform", "identity"},
+            {"source_key", "design_response"},
+            {"output_key", "design_repair_prompt"}
+          ] do
+        update_in(
+          graph.nodes["build_design_envelope_repair_prompt"].attrs,
+          &Map.put(&1, attribute, replacement)
+        )
+      end
+
     mutations =
       [
         update_in(
@@ -228,7 +295,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         update_in(graph.nodes["build_design_prompt"].attrs, fn attrs ->
           Map.update!(attrs, "expression", &String.replace(&1, "MUST NOT edit", "MAY edit"))
         end)
-      ] ++ checkpoint_mutations ++ prompt_mutations ++ immutable_mutations
+      ] ++
+        checkpoint_mutations ++
+        prompt_mutations ++ repair_binding_mutations ++ immutable_mutations
 
     for mutated <- mutations do
       assert {:error, {:semantic_preflight_failed, errors}} =

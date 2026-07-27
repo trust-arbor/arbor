@@ -453,7 +453,9 @@ Providers can emit progress chunks, context-compaction notices, and duplicate th
 final payload into one accumulated text field. A coding control parser must be
 domain-specific and bounded: scan for the exact envelope schema, accept one unique
 valid envelope, tolerate identical duplicates, reject conflicting valid envelopes
-or malformed fields, and preserve the raw transcript separately for audit. Do not
-weaken generic JSON parsing to make one provider transcript pass (found 2026-07-26
-after Codex Spark returned progress prose plus two adjacent valid design checkpoint
-envelopes).
+or malformed fields, and preserve the raw transcript separately for audit. Treat a
+rejected balanced composite as indivisible by resuming after its closing delimiter,
+never from an inner byte; reject an unbalanced remainder instead of resynchronizing
+inside it. Do not weaken generic JSON parsing to make one provider transcript pass
+(found 2026-07-26 after Codex Spark returned progress prose plus two adjacent valid
+design checkpoint envelopes; malformed-wrapper gap closed during review).

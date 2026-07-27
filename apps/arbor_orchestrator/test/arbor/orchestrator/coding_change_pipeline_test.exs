@@ -333,7 +333,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       n = Map.get(counters, :design, 0)
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :design, n + 1)} end)
 
-      if scenario == :design_mutates_workspace do
+      if scenario == :design_mutates_workspace or
+           (scenario == :design_repair_mutates_workspace and n == 1) do
         Agent.update(state, fn s -> %{s | mutations: s.mutations + 1} end)
       end
 
@@ -345,12 +346,20 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           {:malformed_design_then_valid_repair, 0} ->
             "this is not a design checkpoint envelope"
 
+          {:design_repair_mutates_workspace, 0} ->
+            "this is not a design checkpoint envelope"
+
+          {:protocol_repair_then_design_rework, n} when n in [0, 2] ->
+            "this is not a design checkpoint envelope"
+
           _ ->
             attempt =
-              if scenario == :malformed_design_then_valid_repair do
-                1
-              else
-                n + 1
+              case {scenario, n} do
+                {:malformed_design_then_valid_repair, _} -> 1
+                {:design_repair_mutates_workspace, _} -> 1
+                {:protocol_repair_then_design_rework, 1} -> 1
+                {:protocol_repair_then_design_rework, 3} -> 2
+                _ -> n + 1
               end
 
             design =
@@ -397,10 +406,18 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       {outcome, note} =
         case {scenario, attempt} do
-          {:design_rework_then_approved, 1} -> {"rework", "Clarify the focused test coverage."}
-          {:design_denied, _} -> {"deny", "Do not proceed with this design."}
-          {:design_timeout, _} -> {"timeout", ""}
-          _ -> {"approve", ""}
+          {scenario, 1}
+          when scenario in [:design_rework_then_approved, :protocol_repair_then_design_rework] ->
+            {"rework", "Clarify the focused test coverage."}
+
+          {:design_denied, _} ->
+            {"deny", "Do not proceed with this design."}
+
+          {:design_timeout, _} ->
+            {"timeout", ""}
+
+          _ ->
+            {"approve", ""}
         end
 
       {:ok,
@@ -776,11 +793,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                :design_timeout,
                :malformed_design_output,
                :malformed_design_then_valid_repair,
+               :protocol_repair_then_design_rework,
                :design_streamed_duplicate_envelope
              ] ->
           if sends == 0, do: "fp-clean", else: "fp-after-send-#{sends}"
 
-        :design_mutates_workspace ->
+        scenario when scenario in [:design_mutates_workspace, :design_repair_mutates_workspace] ->
           if mutations == 0, do: "fp-clean", else: "fp-design-mutated-#{mutations}"
 
         s when s in [:no_changes, :narrative_no_changes] ->
@@ -1430,6 +1448,25 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     send_calls
   end
 
+  defp assert_close_after_last_send_before_release(calls) do
+    indexed_calls = Enum.with_index(calls)
+
+    send_indices =
+      for {{"acp_send_message", _args}, index} <- indexed_calls, do: index
+
+    close_indices =
+      for {{"acp_close_session", _args}, index} <- indexed_calls, do: index
+
+    release_indices =
+      for {{"coding_workspace_release", _args}, index} <- indexed_calls, do: index
+
+    assert send_indices != []
+    assert [close_index] = close_indices
+    assert [release_index] = release_indices
+    assert close_index > List.last(send_indices)
+    assert release_index > close_index
+  end
+
   defp assert_validation_inspections(calls, attempts) do
     inspect_calls =
       Enum.filter(calls, fn {name, _args} -> name == "coding_workspace_inspect" end)
@@ -1766,7 +1803,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     end
 
     test "malformed design envelope is repaired once in the same worker session" do
-      assert {{:ok, result}, calls, _plan, _compilation} =
+      assert {{:ok, result}, calls, plan, compilation} =
                run_compiled_v2_fixture(:malformed_design_then_valid_repair, "design_required")
 
       assert result.context["status"] == "change_committed"
@@ -1781,10 +1818,34 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert implementation_prompt =~ "IMPLEMENTATION PHASE"
 
       assert length(action_calls(calls, "coding_design_envelope_parse")) == 2
-      assert length(action_calls(calls, "coding_design_checkpoint_open")) == 1
-      assert length(action_calls(calls, "coding_design_checkpoint_await")) == 1
+      [open_args] = action_calls(calls, "coding_design_checkpoint_open")
+      [await_args] = action_calls(calls, "coding_design_checkpoint_await")
+      assert_design_checkpoint_identity(open_args, await_args, plan, compilation, 1)
       assert length(action_calls(calls, "acp_close_session")) == 1
       assert_single_worker_session(calls, 3)
+      assert_close_after_last_send_before_release(calls)
+      assert_closed_and_released(calls)
+    end
+
+    test "a mutating envelope-repair turn fails before its response is parsed" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:design_repair_mutates_workspace, "design_required")
+
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "design_turn_modified_workspace"
+      assert result.context["design_attempt"] == 1
+      assert result.context["design_envelope_retry_count"] == 1
+
+      [initial_prompt, repair_prompt] = action_prompts(calls)
+      assert initial_prompt =~ "DESIGN PHASE ONLY"
+      assert repair_prompt =~ "DESIGN ENVELOPE REPAIR ONLY"
+
+      assert length(action_calls(calls, "coding_design_envelope_parse")) == 1
+      assert action_calls(calls, "coding_design_checkpoint_open") == []
+      assert action_calls(calls, "coding_design_checkpoint_await") == []
+      assert_single_worker_session(calls, 2)
+      assert_close_after_last_send_before_release(calls)
+      refute called?(calls, "mix_compile")
       assert_closed_and_released(calls)
     end
 
@@ -1810,6 +1871,53 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       end
 
       assert_single_worker_session(calls, 3)
+      assert_closed_and_released(calls)
+    end
+
+    test "protocol repair and semantic rework keep independent counters and continuity" do
+      assert {{:ok, result}, calls, plan, compilation} =
+               run_compiled_v2_fixture(
+                 :protocol_repair_then_design_rework,
+                 "design_required"
+               )
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["design_attempt"] == 2
+      assert result.context["design_envelope_retry_count"] == 1
+      assert result.context["total_rework_count"] == 1
+      assert result.context["rework_kind"] == "design_checkpoint"
+      assert result.context["accepted_design"] == fixture_design(2)
+      assert result.context["accepted_design_digest"] == fixture_design_digest(2)
+
+      assert [
+               initial_prompt,
+               first_repair_prompt,
+               semantic_rework_prompt,
+               second_repair_prompt,
+               implementation_prompt
+             ] = action_prompts(calls)
+
+      assert initial_prompt =~ "DESIGN PHASE ONLY"
+      assert first_repair_prompt =~ "DESIGN ENVELOPE REPAIR ONLY"
+      assert semantic_rework_prompt =~ "DESIGN REWORK PHASE ONLY"
+      assert second_repair_prompt =~ "DESIGN ENVELOPE REPAIR ONLY"
+      assert implementation_prompt =~ "IMPLEMENTATION PHASE"
+      assert implementation_prompt =~ fixture_design(2)
+
+      assert length(action_calls(calls, "coding_design_envelope_parse")) == 4
+      assert [first_open, second_open] = action_calls(calls, "coding_design_checkpoint_open")
+      assert [first_await, second_await] = action_calls(calls, "coding_design_checkpoint_await")
+      assert_design_checkpoint_identity(first_open, first_await, plan, compilation, 1)
+      assert_design_checkpoint_identity(second_open, second_await, plan, compilation, 2)
+
+      for args <- [first_open, second_open] do
+        assert args["workspace_id"] == "ws_fixture_1"
+        assert args["worker_session_id"] == "acp_worker_fixture_1"
+        assert args["worker_provider_session_id"] == "sess_1"
+      end
+
+      assert_single_worker_session(calls, 5)
+      assert_close_after_last_send_before_release(calls)
       assert_closed_and_released(calls)
     end
 

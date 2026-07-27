@@ -830,6 +830,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @security_review_context_keys @review_context_keys <>
                                   ",test_paths,validation_profile"
 
+  @review_convergence_node_attr_subsets [
+    %{
+      "node_id" => "build_design_envelope_repair_prompt",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "template",
+        "source_key" => "task",
+        "output_key" => "prompt"
+      }
+    }
+  ]
+
   @rework_budget_node_attrs [
     %{
       "node_id" => "check_design_envelope_retry_budget",
@@ -1336,6 +1348,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @rework_budget_edges [
     ["build_design_envelope_repair_prompt", "capture_pre_turn_workspace", nil],
+    ["error_design_checkpoint_await_failed", "status_pipeline_error_then_close", nil],
+    ["error_design_checkpoint_open_failed", "status_pipeline_error_then_close", nil],
+    ["error_design_checkpoint_outcome_invalid", "status_pipeline_error_then_close", nil],
+    ["error_design_checkpoint_timeout", "status_pipeline_error_then_close", nil],
+    ["error_design_modified_workspace", "status_pipeline_error_then_close", nil],
+    ["error_design_response_invalid", "status_pipeline_error_then_close", nil],
+    ["error_design_worker_phase_invalid", "status_pipeline_error_then_close", nil],
     [
       "check_design_envelope_retry_budget",
       "error_design_response_invalid",
@@ -1546,6 +1565,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @review_convergence_policy %{
     "node_attrs" => @review_convergence_node_attrs,
+    "node_attr_subsets" => @review_convergence_node_attr_subsets,
     "protected_prefix_writers" => %{
       "coding_plan_validation_program" => [],
       "validation" => ["validate"],
@@ -1642,6 +1662,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         }
       ])
       |> Enum.sort_by(& &1["node_id"]),
+    "node_attr_subsets" => @review_convergence_node_attr_subsets,
     "protected_prefix_writers" => %{
       "coding_plan_validation_program" => [],
       "validation" => ["validate"],

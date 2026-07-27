@@ -41,6 +41,32 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert Profiles.known_ids() == Plan.profile_ids()
     end
 
+    test "executable profiles pin repair prompt executable attrs as a subset" do
+      expected_attrs = %{
+        "type" => "transform",
+        "transform" => "template",
+        "source_key" => "task",
+        "output_key" => "prompt"
+      }
+
+      for profile_id <- @executable_ids do
+        assert {:ok, profile} = Profiles.fetch_executable(profile_id)
+        convergence = profile["semantic_policy"]["review_convergence"]
+
+        assert [
+                 %{
+                   "node_id" => "build_design_envelope_repair_prompt",
+                   "attrs" => ^expected_attrs
+                 }
+               ] = convergence["node_attr_subsets"]
+
+        refute Enum.any?(
+                 convergence["node_attrs"],
+                 &(&1["node_id"] == "build_design_envelope_repair_prompt")
+               )
+      end
+    end
+
     test "requires the frozen-ledger reducer and git_commit in compiled execution manifests" do
       assert {:ok, profile} = Profiles.fetch_executable("default")
 
@@ -141,6 +167,23 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
           ] do
         assert node in default["required_nodes"]
         assert node in security["required_nodes"]
+      end
+
+      for profile <- [default, security],
+          node <- ~w[
+            error_design_checkpoint_await_failed
+            error_design_checkpoint_open_failed
+            error_design_checkpoint_outcome_invalid
+            error_design_checkpoint_timeout
+            error_design_modified_workspace
+            error_design_response_invalid
+            error_design_worker_phase_invalid
+          ] do
+        assert node in profile["required_nodes"]
+
+        assert [node, "status_pipeline_error_then_close", nil] in profile["semantic_policy"][
+                 "review_convergence"
+               ]["edges"]
       end
 
       placements = default["semantic_policy"]["action_placements"]
