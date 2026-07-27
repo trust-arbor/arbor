@@ -1818,13 +1818,40 @@ defmodule Arbor.Agent.OrchestrationTest do
                        [verify_identity: false]}
 
       assert_received {:interaction_respond, "irq_1", :approved, metadata}
-      assert metadata.actor == "human_1"
-      assert metadata.decision == :approve
-      assert metadata.note == "looks bounded"
+      assert metadata["actor"] == "human_1"
+      assert metadata["decision"] == "approve"
+      assert metadata["note"] == "looks bounded"
 
       assert_received {:audit_answered, "human_1", "irq_1", :interaction, :approve, opts}
       assert opts[:resource_uri] == "arbor://shell/exec/git"
       assert opts[:agent_id] == "agent_1"
+    end
+
+    test "interaction answer metadata remains JSON-clean for durable approvals" do
+      Process.put(
+        {FakeInteractionRouter, :pending},
+        [interaction_request("irq_1", "agent_1", "human_1", "arbor://shell/exec/git")]
+      )
+
+      assert :ok =
+               Orchestration.answer_approval("irq_1", :rework,
+                 caller_id: "human_1",
+                 note: "use an owner-mediated handoff",
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter,
+                 security_module: FakeSecurity,
+                 audit_module: FakeAudit
+               )
+
+      assert_received {:interaction_respond, "irq_1", :rejected, metadata}
+      assert Enum.all?(Map.keys(metadata), &is_binary/1)
+      assert {:ok, _encoded} = Jason.encode(metadata)
+      assert metadata["decision"] == "rework"
+      assert metadata["rework"] == true
+      assert {:ok, _answered_at, 0} = DateTime.from_iso8601(metadata["answered_at"])
+
+      assert {:ok, :rework, "use an owner-mediated handoff"} =
+               Arbor.Contracts.Comms.ApprovalAnswer.normalize(:rejected, metadata)
     end
 
     test "maps rework to consensus rejection while preserving rework metadata" do

@@ -1411,7 +1411,7 @@ defmodule Arbor.Agent.Orchestration do
         :rework -> :rejected
       end
 
-    metadata = answer_metadata(decision, caller_id, opts)
+    metadata = interaction_answer_metadata(decision, caller_id, opts)
 
     opts
     |> interaction_backend()
@@ -1455,6 +1455,16 @@ defmodule Arbor.Agent.Orchestration do
       answered_at: DateTime.utc_now()
     }
     |> maybe_put(:rework, decision == :rework)
+  end
+
+  defp interaction_answer_metadata(decision, caller_id, opts) do
+    %{
+      "actor" => caller_id,
+      "decision" => Atom.to_string(decision),
+      "note" => opt(opts, :note),
+      "answered_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+    |> maybe_put("rework", decision == :rework)
   end
 
   defp reject_blocked_approval(%PendingApproval{} = approval, :approve) do
