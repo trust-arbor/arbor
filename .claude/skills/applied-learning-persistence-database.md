@@ -161,3 +161,14 @@ verifying the persistence CAS foundation).
 <!-- applied-learning: idempotent-side-effects-must-reconstruct-their-full-durable-receipt -->
 <a id="applied-learning-idempotent-side-effects-must-reconstruct-their-full-durable-receipt"></a>
 **Idempotent side effects must reconstruct their full durable receipt.** An Engine retry can occur after an action's external side effects succeed but before its result is checkpointed. Returning a generic `already_released` response is not enough when downstream logic needs immutable evidence from the original response. Reconstruct the receipt only from durable state and reverify it before reporting success; for workspace publication, the retry carries the repo root and succeeds only when the deterministic task/workspace hidden ref still points to the exact candidate OID. Normalize failed replay proofs so the recovery path does not become a repository-state oracle (found 2026-07-21 while reviewing candidate publication crash replay).
+
+<!-- applied-learning: raw-sql-mutation-receipts-must-match-orm-record-contracts -->
+<a id="applied-learning-raw-sql-mutation-receipts-must-match-orm-record-contracts"></a>
+**Raw SQL mutation receipts must match ORM record contracts.** Postgrex `RETURNING`
+rows can expose timestamp columns as `%NaiveDateTime{}` even when the Ecto schema
+normalizes ordinary reads to UTC `%DateTime{}`. Normalize every raw mutation
+acknowledgement at its adapter boundary and reject invalid timestamp types
+explicitly. Regress exact equality between the insert/update receipt and an
+immediate ORM reread; otherwise a committed CAS can be reported as malformed,
+making first execution fail while idempotent replay succeeds (found 2026-07-26
+when durable interaction hydration committed its claim but discarded the receipt).

@@ -459,3 +459,14 @@ never from an inner byte; reject an unbalanced remainder instead of resynchroniz
 inside it. Do not weaken generic JSON parsing to make one provider transcript pass
 (found 2026-07-26 after Codex Spark returned progress prose plus two adjacent valid
 design checkpoint envelopes; malformed-wrapper gap closed during review).
+
+<!-- applied-learning: durable-interaction-metadata-must-be-json-clean-before-persistence -->
+<a id="applied-learning-durable-interaction-metadata-must-be-json-clean-before-persistence"></a>
+**Durable interaction metadata must be JSON-clean before persistence.** In-memory
+approval and consensus paths may use atom keys, atom decisions, and `%DateTime{}`
+values, but a durable interaction crosses a JSON serialization boundary. Construct
+its metadata explicitly with string keys, closed-enum strings, and ISO 8601
+timestamps; do not reuse a richer in-memory map or rely on recursive cleanup after
+the fact. Regress both JSON encoding and the public answer normalizer so persistence
+success also proves the decision and note survive the round trip (found 2026-07-26
+when a design-checkpoint rework answer failed as `:durable_unavailable`).

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-20",
-  "entry_count": 527,
+  "entry_count": 529,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6395,8 +6395,34 @@
       "source_incident": "found 2026-07-26 after Codex Spark returned progress prose plus two adjacent valid design checkpoint envelopes).",
       "content_sha256": "58e2b578617c445ddd75fd8878d38c30e33e65e4087b3759a8b0593952162d8b",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 528,
+      "source_kind": "post-migration",
+      "slug": "durable-interaction-metadata-must-be-json-clean-before-persistence",
+      "title": "Durable interaction metadata must be JSON-clean before persistence.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-durable-interaction-metadata-must-be-json-clean-before-persistence",
+      "source_date": "2026-07-26",
+      "source_incident": "found 2026-07-26 when a design-checkpoint rework answer failed as `:durable_unavailable`).",
+      "content_sha256": "cc7d5c3555d558e46b27c3dd1278acce556c0a6214a1ba3dbab3e9983f53cc1a",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 529,
+      "source_kind": "post-migration",
+      "slug": "raw-sql-mutation-receipts-must-match-orm-record-contracts",
+      "title": "Raw SQL mutation receipts must match ORM record contracts.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-raw-sql-mutation-receipts-must-match-orm-record-contracts",
+      "source_date": "2026-07-26",
+      "source_incident": "found 2026-07-26 when durable interaction hydration committed its claim but discarded the receipt).",
+      "content_sha256": "af935888f90b9f25b978b0d91a69e45255b0f2f61b4ac89efa65ec72e83c1481",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 66
+  "post_migration_entry_count": 68
 }
