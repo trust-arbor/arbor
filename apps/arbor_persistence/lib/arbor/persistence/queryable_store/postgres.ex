@@ -399,10 +399,19 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
       metadata: map["metadata"] || %{},
       generation: map["generation"] || 0,
       revision: map["revision"] || 0,
-      inserted_at: map["inserted_at"],
-      updated_at: map["updated_at"]
+      inserted_at: utc_datetime!(map["inserted_at"], :inserted_at),
+      updated_at: utc_datetime!(map["updated_at"], :updated_at)
     }
   end
+
+  defp utc_datetime!(%DateTime{} = datetime, _field),
+    do: DateTime.shift_zone!(datetime, "Etc/UTC")
+
+  defp utc_datetime!(%NaiveDateTime{} = datetime, _field),
+    do: DateTime.from_naive!(datetime, "Etc/UTC")
+
+  defp utc_datetime!(value, field),
+    do: raise(ArgumentError, "invalid persisted record #{field}: #{inspect(value)}")
 
   defp base_query(namespace) do
     from(r in RecordSchema, where: r.namespace == ^namespace and is_nil(r.deleted_at))

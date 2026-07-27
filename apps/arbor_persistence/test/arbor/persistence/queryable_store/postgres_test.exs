@@ -550,23 +550,39 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
   end
 
   describe "compare_and_swap recovery fencing" do
-    test "not_found CAS inserts once", %{name: name} do
+    test "not_found CAS acknowledgement matches its DateTime-normalized read", %{name: name} do
       rec = Record.new("cas-nf", %{"x" => 1})
 
-      assert {:ok, %Record{generation: 1, revision: 1, data: %{"x" => 1}}} =
+      assert {:ok,
+              %Record{
+                generation: 1,
+                revision: 1,
+                data: %{"x" => 1},
+                inserted_at: %DateTime{},
+                updated_at: %DateTime{}
+              } = acknowledged} =
                Postgres.compare_and_swap("cas-nf", :not_found, rec, name: name, repo: Repo)
+
+      assert {:ok, ^acknowledged} = Postgres.get("cas-nf", name: name, repo: Repo)
 
       assert {:error, :conflict} =
                Postgres.compare_and_swap("cas-nf", :not_found, rec, name: name, repo: Repo)
     end
 
-    test "expected generation+revision CAS advances and returns stored record", %{name: name} do
+    test "update CAS acknowledgement matches its DateTime-normalized read", %{name: name} do
       assert :ok =
                Postgres.put("cas-rev", Record.new("cas-rev", %{"v" => 1}), name: name, repo: Repo)
 
       assert {:ok, observed} = Postgres.get("cas-rev", name: name, repo: Repo)
 
-      assert {:ok, %Record{generation: 1, revision: 2, data: %{"v" => 2}} = stored} =
+      assert {:ok,
+              %Record{
+                generation: 1,
+                revision: 2,
+                data: %{"v" => 2},
+                inserted_at: %DateTime{},
+                updated_at: %DateTime{}
+              } = acknowledged} =
                Postgres.compare_and_swap(
                  "cas-rev",
                  {:value, observed},
@@ -575,8 +591,7 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
                  repo: Repo
                )
 
-      assert stored.revision == 2
-      assert stored.generation == 1
+      assert {:ok, ^acknowledged} = Postgres.get("cas-rev", name: name, repo: Repo)
 
       assert {:error, :conflict} =
                Postgres.compare_and_swap(
