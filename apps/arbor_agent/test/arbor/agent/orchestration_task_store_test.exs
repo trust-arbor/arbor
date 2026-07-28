@@ -762,7 +762,6 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
         status
       end)
 
-    completed_at = DateTime.to_iso8601(status.completed_at)
     assert status.steering["counts"] == %{"delivery_unconfirmed" => 1}
     assert status.steering["last"]["control_id"] == control["control_id"]
     assert status.steering["last"]["status"] == "delivery_unconfirmed"
