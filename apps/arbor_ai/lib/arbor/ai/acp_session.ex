@@ -87,6 +87,8 @@ defmodule Arbor.AI.AcpSession do
   @max_queued_task_controls 64
   @max_provider_session_id_bytes 512
   @provider_session_id_aliases ["sessionId", :sessionId, "session_id", :session_id]
+  @claude_transient_session_prefix "claude_sdk_"
+  @claude_provider_session_id_pattern ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
   @callback_cleanup_timeout_ms 250
   @task_control_stream_id "agent:task_steering"
   @terminal_task_control_statuses [
@@ -2531,11 +2533,11 @@ defmodule Arbor.AI.AcpSession do
          max(completed_at, System.monotonic_time(:millisecond)),
          prompt.deadline_ms
        ) do
-      case AcpPromptFailure.classify(result) do
-        :none ->
-          complete_durable_prompt_success(prompt, result, state)
+      case reconcile_prompt_provider_session_id(result, state) do
+        {:ok, state} ->
+          complete_prompt_with_identity(prompt, result, state)
 
-        reason ->
+        {:error, reason} ->
           demonitor_owner(prompt.caller_ref)
 
           complete_prompt_error(
@@ -2551,6 +2553,70 @@ defmodule Arbor.AI.AcpSession do
       timeout_prompt(:timeout, prompt, empty_prompt_timers(), state)
     end
   end
+
+  defp complete_prompt_with_identity(prompt, result, state) do
+    case AcpPromptFailure.classify(result) do
+      :none ->
+        complete_durable_prompt_success(prompt, result, state)
+
+      reason ->
+        demonitor_owner(prompt.caller_ref)
+
+        complete_prompt_error(
+          prompt,
+          :provider_error,
+          reason,
+          {:error, reason},
+          result,
+          state
+        )
+    end
+  end
+
+  defp reconcile_prompt_provider_session_id(result, %{provider: :claude} = state) do
+    case claude_prompt_provider_session_id(result) do
+      :absent ->
+        {:ok, state}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, session_id} ->
+        cond do
+          state.session_id == session_id ->
+            {:ok, %{state | last_session_id: session_id}}
+
+          transient_claude_session_id?(state.session_id) ->
+            {:ok, %{state | session_id: session_id, last_session_id: session_id}}
+
+          true ->
+            {:error, {:provider_session_id_mismatch, :claude_prompt_result}}
+        end
+    end
+  end
+
+  defp reconcile_prompt_provider_session_id(_result, state), do: {:ok, state}
+
+  defp claude_prompt_provider_session_id(%{
+         "_meta" => %{
+           "ex_mcp.claude_sdk" => %{"sessionId" => session_id} = claude_meta
+         }
+       })
+       when is_map(claude_meta) and not is_struct(claude_meta) do
+    if is_binary(session_id) and
+         Regex.match?(@claude_provider_session_id_pattern, session_id) do
+      {:ok, session_id}
+    else
+      {:error, {:invalid_provider_session_id, :claude_prompt_result}}
+    end
+  end
+
+  defp claude_prompt_provider_session_id(_result), do: :absent
+
+  defp transient_claude_session_id?(session_id) when is_binary(session_id),
+    do: String.starts_with?(session_id, @claude_transient_session_prefix)
+
+  defp transient_claude_session_id?(_session_id), do: false
 
   defp prompt_timeout_kind(prompt, fallback) do
     if hard_deadline_exhausted?(prompt), do: :timeout, else: fallback

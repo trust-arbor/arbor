@@ -57,7 +57,13 @@ defmodule Arbor.AI.AcpSessionTest do
 
     def start_link(opts), do: Agent.start_link(fn -> opts end)
 
-    def new_session(_client, _cwd, _opts), do: {:ok, %{"sessionId" => "fake-session"}}
+    def new_session(client, _cwd, _opts) do
+      Agent.get(
+        client,
+        &Keyword.get(&1, :new_session_result, {:ok, %{"sessionId" => "fake-session"}})
+      )
+    end
+
     def load_session(_client, session_id, _cwd, _opts), do: {:ok, %{"sessionId" => session_id}}
     def set_config_option(_client, _session_id, _key, _value), do: :ok
     def cancel(_client, _session_id), do: :ok
@@ -67,9 +73,13 @@ defmodule Arbor.AI.AcpSessionTest do
       :ok
     end
 
-    def prompt(client, _session_id, _content, _opts) do
+    def prompt(client, session_id, _content, _opts) do
       result =
         Agent.get_and_update(client, fn state ->
+          if test_pid = Keyword.get(state, :test_pid) do
+            send(test_pid, {:fake_usage_prompt_session_id, session_id})
+          end
+
           case Keyword.get(state, :results, []) do
             [next | rest] -> {next, Keyword.put(state, :results, rest)}
             [] -> {Keyword.get(state, :default_result, %{"text" => "ok"}), state}
@@ -1624,15 +1634,123 @@ defmodule Arbor.AI.AcpSessionTest do
       client_opts
     end
 
-    defp start_usage_session(results) do
-      client_opts = install_fake_usage_client(results: results)
+    defp start_usage_session(results, opts \\ []) do
+      provider = Keyword.get(opts, :provider, :test)
 
-      {:ok, session} =
-        AcpSession.start_link(provider: :test, client_opts: client_opts)
+      client_opts =
+        opts
+        |> Keyword.delete(:provider)
+        |> Keyword.put(:test_pid, self())
+        |> Keyword.put(:results, results)
+        |> install_fake_usage_client()
+
+      {:ok, session} = AcpSession.start_link(provider: provider, client_opts: client_opts)
 
       on_exit(fn -> safely_close_session(session) end)
 
       session
+    end
+
+    test "security regression: Claude adopts the provider UUID before continuity consumers" do
+      provider_session_id = "a226df5e-bc82-412c-9870-1fc52d036763"
+
+      result = %{
+        "text" => "done",
+        "stopReason" => "end_turn",
+        "_meta" => %{
+          "ex_mcp.claude_sdk" => %{"sessionId" => provider_session_id}
+        }
+      }
+
+      session =
+        start_usage_session(
+          [result, %{"text" => "second", "stopReason" => "end_turn"}],
+          provider: :claude,
+          new_session_result: {:ok, %{"sessionId" => "claude_sdk_179"}}
+        )
+
+      assert {:ok, %{"sessionId" => "claude_sdk_179"}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      assert {:ok, ^result} = AcpSession.send_message(session, "first", timeout: 1_000)
+      assert_receive {:fake_usage_prompt_session_id, "claude_sdk_179"}
+
+      assert %{session_id: ^provider_session_id} = AcpSession.status(session)
+      assert :sys.get_state(session).last_session_id == provider_session_id
+
+      assert {:ok, %{"text" => "second"}} =
+               AcpSession.send_message(session, "second", timeout: 1_000)
+
+      assert_receive {:fake_usage_prompt_session_id, ^provider_session_id}
+    end
+
+    test "Claude rejects provider UUID drift after adopting the durable identity" do
+      first_session_id = "a226df5e-bc82-412c-9870-1fc52d036763"
+      second_session_id = "d8abe6ec-27f1-489d-8f42-47a8168d2a6e"
+
+      result = fn session_id ->
+        %{
+          "text" => "done",
+          "stopReason" => "end_turn",
+          "_meta" => %{
+            "ex_mcp.claude_sdk" => %{"sessionId" => session_id}
+          }
+        }
+      end
+
+      session =
+        start_usage_session(
+          [result.(first_session_id), result.(second_session_id)],
+          provider: :claude,
+          new_session_result: {:ok, %{"sessionId" => "claude_sdk_180"}}
+        )
+
+      assert {:ok, _result} = AcpSession.send_message(session, "first", timeout: 1_000)
+
+      assert {:error, {:provider_session_id_mismatch, :claude_prompt_result}} =
+               AcpSession.send_message(session, "second", timeout: 1_000)
+
+      assert %{status: :error, session_id: ^first_session_id} = AcpSession.status(session)
+    end
+
+    test "security regression: Claude rejects a malformed durable provider identity" do
+      session =
+        start_usage_session(
+          [
+            %{
+              "text" => "done",
+              "stopReason" => "end_turn",
+              "_meta" => %{
+                "ex_mcp.claude_sdk" => %{"sessionId" => "../../not-a-session"}
+              }
+            }
+          ],
+          provider: :claude,
+          new_session_result: {:ok, %{"sessionId" => "claude_sdk_181"}}
+        )
+
+      assert {:error, {:invalid_provider_session_id, :claude_prompt_result}} =
+               AcpSession.send_message(session, "first", timeout: 1_000)
+
+      assert %{status: :error, session_id: "claude_sdk_181"} = AcpSession.status(session)
+    end
+
+    test "non-Claude sessions ignore Claude namespaced provider identity metadata" do
+      provider_session_id = "a226df5e-bc82-412c-9870-1fc52d036763"
+
+      session =
+        start_usage_session([
+          %{
+            "text" => "done",
+            "stopReason" => "end_turn",
+            "_meta" => %{
+              "ex_mcp.claude_sdk" => %{"sessionId" => provider_session_id}
+            }
+          }
+        ])
+
+      assert {:ok, _result} = AcpSession.send_message(session, "hello", timeout: 1_000)
+      assert %{session_id: "fake-session"} = AcpSession.status(session)
     end
 
     test "status returns zero usage on fresh session" do
