@@ -494,3 +494,14 @@ moving a CrossApp capacity failure from runtime handoff to structural admission.
 Derive optional deadlines without perturbing legacy samples when the option is
 unset, and regress the nil/default path with the exact existing clock sequence
 (found 2026-07-27 while adding terminal-gate budget projection).
+
+<!-- applied-learning: a-fresh-build-path-and-an-external-deps-path-are-not-always-compatible-for-rebar-dependencies -->
+<a id="applied-learning-a-fresh-build-path-and-an-external-deps-path-are-not-always-compatible-for-rebar-dependencies"></a>
+**A fresh build path and an external deps path are not always compatible for
+Rebar dependencies.** An isolated worktree that points `MIX_DEPS_PATH` at another
+checkout while compiling into an empty `MIX_BUILD_PATH` can fail before project
+code when an Erlang dependency cannot resolve generated or relative include
+paths. Reuse a compatible pinned test build cache, or materialize the complete
+dependency tree inside the worktree; do not diagnose the resulting dependency
+compile failure as an application regression (found 2026-07-27 when fresh
+`yamerl` compilation could not resolve its existing headers).

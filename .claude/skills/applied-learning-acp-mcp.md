@@ -474,3 +474,24 @@ timestamps; do not reuse a richer in-memory map or rely on recursive cleanup aft
 the fact. Regress both JSON encoding and the public answer normalizer so persistence
 success also proves the decision and note survive the round trip (found 2026-07-26
 when a design-checkpoint rework answer failed as `:durable_unavailable`).
+
+<!-- applied-learning: provider-spend-limit-notices-are-not-successful-no-change-turns -->
+<a id="applied-learning-provider-spend-limit-notices-are-not-successful-no-change-turns"></a>
+**Provider spend-limit notices are not successful no-change turns.** Claude ACP can
+emit a human-readable monthly spend-limit notice as its only response and then end
+the turn without touching the workspace. Classifying that sequence as successful
+`no_changes` hides deterministic account exhaustion and can route more work into
+the same unavailable pool. Recognize only bounded, provider-attested exhaustion
+evidence, terminalize it as a typed routing failure, and preserve unknown notices
+as protocol failures rather than inferring success (found 2026-07-27 in
+`task_8195`).
+
+<!-- applied-learning: validate-closed-typed-envelopes-before-generic-json-canonicalization -->
+<a id="applied-learning-validate-closed-typed-envelopes-before-generic-json-canonicalization"></a>
+**Validate closed typed envelopes before generic JSON canonicalization.** A generic
+canonicalizer can convert atom keys into accepted string keys and recursively walk
+an attacker-sized payload before the typed contract applies its field and byte
+bounds. Validate the raw closed shape and bounded component contracts first,
+require equality with the canonical representation, and only then perform a JSON
+round trip on that small canonical object (found 2026-07-27 while reviewing typed
+coding-plan admission failures).

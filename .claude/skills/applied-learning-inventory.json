@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-27",
-  "entry_count": 531,
+  "entry_count": 535,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6447,8 +6447,60 @@
       "source_incident": "found 2026-07-27 while making RegistryBase forged-transfer tests deterministic).",
       "content_sha256": "a042a24605b53886a1d1e5836124768de1529cb6f9cf1c63dc9ee65860e01900",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 532,
+      "source_kind": "post-migration",
+      "slug": "optional-deadline-controls-must-preserve-legacy-clock-sampling-order",
+      "title": "Optional deadline controls must preserve legacy clock sampling order.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-optional-deadline-controls-must-preserve-legacy-clock-sampling-order",
+      "source_date": "2026-07-27",
+      "source_incident": "found 2026-07-27 while adding terminal-gate budget projection).",
+      "content_sha256": "9ddfd63bbc6c3d2a9bf44a53e4251edd7b647663a222b84b9cf2a43849922617",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 533,
+      "source_kind": "post-migration",
+      "slug": "provider-spend-limit-notices-are-not-successful-no-change-turns",
+      "title": "Provider spend-limit notices are not successful no-change turns.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-provider-spend-limit-notices-are-not-successful-no-change-turns",
+      "source_date": "2026-07-27",
+      "source_incident": "found 2026-07-27 in `task_8195`).",
+      "content_sha256": "fc1381eab39af6e871e6371a7237ef27c3f375bd940917c06dab3278d3d0b4fe",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 534,
+      "source_kind": "post-migration",
+      "slug": "a-fresh-build-path-and-an-external-deps-path-are-not-always-compatible-for-rebar-dependencies",
+      "title": "A fresh build path and an external deps path are not always compatible for Rebar dependencies.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-a-fresh-build-path-and-an-external-deps-path-are-not-always-compatible-for-rebar-dependencies",
+      "source_date": "2026-07-27",
+      "source_incident": "found 2026-07-27 when fresh `yamerl` compilation could not resolve its existing headers).",
+      "content_sha256": "584b5af8cc792467fbd48f24874f33387d7405cce7942312448f9baab590deac",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 535,
+      "source_kind": "post-migration",
+      "slug": "validate-closed-typed-envelopes-before-generic-json-canonicalization",
+      "title": "Validate closed typed envelopes before generic JSON canonicalization.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-validate-closed-typed-envelopes-before-generic-json-canonicalization",
+      "source_date": "2026-07-27",
+      "source_incident": "found 2026-07-27 while reviewing typed coding-plan admission failures).",
+      "content_sha256": "a5a4b3d388657bd7c8eeba944139ce5632c045c8e89c1c533837753067da3e97",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 70
+  "post_migration_entry_count": 74
 }
