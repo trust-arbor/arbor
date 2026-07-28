@@ -5,10 +5,12 @@ defmodule Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCore do
   The terminal evidence kind records how TaskStore observed completion; the
   terminal state records TaskStore's outer lifecycle state; and the outcome is
   preserved from the exact registered evidence. Consequently, an
-  `executor_result` has state `done` and a `pipeline_failure` has state `failed`,
-  but either may preserve any non-cancelled registered non-lifecycle outcome.
-  In particular, pipeline failures may legitimately preserve dispositions such
-  as `requires_input` or `rejected` without changing the outer failed state.
+  `executor_result` has state `done`; `coding_admission_failure` and
+  `pipeline_failure` have state `failed`. Admission evidence requires the exact
+  `coding_admission_failed` outcome. Executor and pipeline evidence may preserve
+  any non-cancelled registered non-lifecycle outcome; in particular, pipeline
+  failures may legitimately preserve dispositions such as `requires_input` or
+  `rejected` without changing the outer failed state.
 
   Dedicated lifecycle evidence has an exact state/code pairing. A legacy
   finalizer failure is the sole form with `prior_outcome`: it has failed state,
@@ -156,9 +158,16 @@ defmodule Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCore do
   end
 
   defp preserved_runner_terminal?(state, code, disposition, prior?, kind) do
-    expected_state = %{"executor_result" => "done", "pipeline_failure" => "failed"}
+    expected_state = %{
+      "executor_result" => "done",
+      "coding_admission_failure" => "failed",
+      "pipeline_failure" => "failed"
+    }
 
-    Map.get(expected_state, kind) == state and not prior? and disposition != "cancelled" and
+    exact_kind_code? = kind != "coding_admission_failure" or code == "coding_admission_failed"
+
+    Map.get(expected_state, kind) == state and exact_kind_code? and not prior? and
+      disposition != "cancelled" and
       not MapSet.member?(@reserved_lifecycle_codes, code)
   end
 

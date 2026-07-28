@@ -4,7 +4,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   @moduletag :fast
 
   alias Arbor.Agent.Orchestration.TaskStore
-  alias Arbor.Contracts.Coding.{ReadinessReport, TaskOutcome, TaskTerminalEnvelope}
+  alias Arbor.Contracts.Coding.{Diagnostic, ReadinessReport, TaskOutcome, TaskTerminalEnvelope}
 
   defmodule ControlledRunner do
     def run(agent_id, task, opts) do
@@ -1508,6 +1508,107 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       assert envelope == callback_envelope
       assert envelope["evidence"]["result"] == report
     end)
+  end
+
+  test "configured executor preserves canonical coding admission failures in the public terminal",
+       %{
+         supervisor: supervisor
+       } do
+    store = start_all_terminal_store(supervisor)
+    detail = coding_admission_failure_detail()
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "invalid checkpoint policy"},
+               name: store,
+               task_id: "task_coding_admission_failed"
+             )
+
+    assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+    send(runner_pid, {:finish, {:error, {:coding_admission_failed, detail}}})
+
+    assert_receive {:finalize_terminal_task_called, "agent_1", callback_envelope, [], _, _}
+    assert callback_envelope["terminal_state"] == "failed"
+    assert callback_envelope["outcome"] == detail["outcome"]
+
+    assert callback_envelope["evidence"] == %{
+             "kind" => "coding_admission_failure",
+             "result" => detail
+           }
+
+    assert_eventually(fn ->
+      assert {:ok, ^callback_envelope} = TaskStore.result(task_id, name: store)
+
+      assert {:ok, %{state: :failed, outcome: outcome}} = TaskStore.status(task_id, name: store)
+      assert outcome == detail["outcome"]
+    end)
+  end
+
+  test "coding admission failure regression: malformed typed detail fails closed", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+    secret = "malformed_admission_detail_must_not_publish"
+    canonical = coding_admission_failure_detail()
+
+    malformed_details = [
+      {"extra_field", Map.put(canonical, "extra", secret)},
+      {
+        "atom_keys",
+        %{
+          status: canonical["status"],
+          diagnostic: canonical["diagnostic"],
+          outcome: canonical["outcome"]
+        }
+      },
+      {
+        "forged_outcome",
+        put_in(canonical, ["outcome", "retry"], "new_session")
+      },
+      {
+        "noncanonical_diagnostic",
+        put_in(canonical, ["diagnostic", "message"], nil)
+      },
+      {
+        "passed_diagnostic",
+        put_in(canonical, ["diagnostic", "decision"], "passed")
+      },
+      {
+        "wrong_phase",
+        put_in(canonical, ["diagnostic", "phase"], "worker_turn")
+      }
+    ]
+
+    for {suffix, malformed} <- malformed_details do
+      task_id = "task_malformed_coding_admission_failure_#{suffix}"
+
+      assert {:ok, ^task_id} =
+               TaskStore.dispatch(
+                 "agent_1",
+                 %{"kind" => "coding_change", "input" => "malformed admission detail"},
+                 name: store,
+                 task_id: task_id
+               )
+
+      assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+      send(runner_pid, {:finish, {:error, {:coding_admission_failed, malformed}}})
+
+      assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], _, _}
+      assert envelope["terminal_state"] == "failed"
+      assert envelope["outcome"]["code"] == "invalid_terminal_evidence"
+      assert envelope["evidence"] == %{"kind" => "invalid_terminal_evidence"}
+      refute Jason.encode!(envelope) =~ secret
+      refute Jason.encode!(envelope) =~ "coding_admission_failure"
+
+      assert_eventually(fn ->
+        assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+
+        assert {:ok, %{state: :failed, outcome: outcome}} = TaskStore.status(task_id, name: store)
+        assert outcome == envelope["outcome"]
+        assert outcome["code"] == "invalid_terminal_evidence"
+      end)
+    end
   end
 
   test "state drift regression: malformed and oversized reports fail closed without raw data", %{
@@ -4279,6 +4380,24 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   defp registered_outcome(code) do
     {:ok, outcome} = TaskOutcome.from_code(code)
     TaskOutcome.to_map(outcome)
+  end
+
+  defp coding_admission_failure_detail do
+    {:ok, diagnostic} =
+      Diagnostic.new(%{
+        version: Diagnostic.schema_version(),
+        gate_id: "coding_plan_admission",
+        phase: "preflight",
+        decision: "blocked",
+        code: "invalid_checkpoint_policy",
+        observed_at: "2026-07-27T20:00:00Z"
+      })
+
+    %{
+      "status" => "coding_admission_failed",
+      "diagnostic" => Diagnostic.to_map(diagnostic),
+      "outcome" => registered_outcome("coding_admission_failed")
+    }
   end
 
   defp readiness_report(diagnostic_count \\ 1, diagnostic_code \\ "execution_binding_drift") do

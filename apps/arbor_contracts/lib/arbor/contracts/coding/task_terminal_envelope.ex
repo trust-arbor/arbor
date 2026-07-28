@@ -9,13 +9,14 @@ defmodule Arbor.Contracts.Coding.TaskTerminalEnvelope do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Coding.{ReadinessReport, TaskOutcome}
+  alias Arbor.Contracts.Coding.{AdmissionFailure, ReadinessReport, TaskOutcome}
 
   @schema_version 1
   @terminal_states ~w(done failed cancelled)
   @fields [:version, :terminal_state, :outcome, :prior_outcome, :evidence]
   @evidence_fields ~w(kind result approval_id truncated)
   @evidence_kinds ~w(
+    coding_admission_failure
     coding_execution_state_drift
     executor_result
     pipeline_failure
@@ -228,11 +229,26 @@ defmodule Arbor.Contracts.Coding.TaskTerminalEnvelope do
   end
 
   defp validate_evidence_shape(kind, evidence)
-       when kind in ["coding_execution_state_drift", "executor_result", "pipeline_failure"] do
+       when kind in [
+              "coding_admission_failure",
+              "coding_execution_state_drift",
+              "executor_result",
+              "pipeline_failure"
+            ] do
     if Map.has_key?(evidence, "result"), do: :ok, else: {:error, :missing_result}
   end
 
   defp validate_evidence_shape(_kind, _evidence), do: :ok
+
+  defp normalize_optional_result("coding_admission_failure", %{"result" => result}) do
+    with {:ok, failure} <- AdmissionFailure.normalize(result),
+         {:ok, clean, _nodes_left, false} <- bound_json(failure, 0, @max_nodes),
+         {:ok, ^clean} <- AdmissionFailure.normalize(clean) do
+      {:ok, clean, false}
+    else
+      _ -> {:error, :invalid_admission_failure}
+    end
+  end
 
   defp normalize_optional_result("coding_execution_state_drift", %{"result" => result}) do
     with {:ok, report} <- ReadinessReport.normalize(result),

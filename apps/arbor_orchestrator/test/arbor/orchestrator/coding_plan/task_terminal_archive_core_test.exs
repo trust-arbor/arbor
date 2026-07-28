@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCoreTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Contracts.Coding.TaskTerminalEnvelope
+  alias Arbor.Contracts.Coding.{Diagnostic, TaskOutcome, TaskTerminalEnvelope}
   alias Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCore
 
   @moduletag :fast
@@ -16,6 +16,10 @@ defmodule Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCoreTest do
       terminal!("worker_turn_no_progress", "failed", %{
         "kind" => "pipeline_failure",
         "result" => %{"task_id" => @task_id}
+      }),
+      terminal!("coding_admission_failed", "failed", %{
+        "kind" => "coding_admission_failure",
+        "result" => admission_detail()
       }),
       terminal!("task_cancelled", "cancelled", %{"kind" => "task_cancelled"}),
       terminal!("task_owner_died", "failed", %{"kind" => "task_owner_died"}),
@@ -98,6 +102,25 @@ defmodule Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCoreTest do
     end
   end
 
+  test "rejects incomplete or contradictory admission evidence at the archive boundary" do
+    valid =
+      terminal!("coding_admission_failed", "failed", %{
+        "kind" => "coding_admission_failure",
+        "result" => admission_detail()
+      })
+
+    invalid_envelopes = [
+      update_in(valid, ["evidence", "result"], &Map.delete(&1, "diagnostic")),
+      put_in(valid, ["evidence", "result", "diagnostic", "decision"], "passed"),
+      put_in(valid, ["evidence", "result", "diagnostic", "phase"], "worker_turn")
+    ]
+
+    for envelope <- invalid_envelopes do
+      assert {:error, :invalid_task_terminal_envelope} =
+               TaskTerminalArchiveCore.build(@task_id, envelope, [])
+    end
+  end
+
   test "rejects malformed states, codes, kinds, and reserved lifecycle pairings" do
     successful =
       terminal!("no_changes", "done", %{
@@ -129,6 +152,15 @@ defmodule Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCoreTest do
 
     assert {:error, :invalid_task_terminal_semantics} =
              TaskTerminalArchiveCore.build(@task_id, lifecycle_as_pipeline, [])
+
+    wrong_admission_outcome =
+      terminal!("no_changes", "failed", %{
+        "kind" => "coding_admission_failure",
+        "result" => admission_detail()
+      })
+
+    assert {:error, :invalid_task_terminal_semantics} =
+             TaskTerminalArchiveCore.build(@task_id, wrong_admission_outcome, [])
   end
 
   test "rejects every recursively embedded task identity mismatch" do
@@ -236,6 +268,26 @@ defmodule Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCoreTest do
       "kind" => "executor_result",
       "result" => %{"task_id" => @task_id}
     })
+  end
+
+  defp admission_detail do
+    {:ok, diagnostic} =
+      Diagnostic.new(%{
+        version: Diagnostic.schema_version(),
+        gate_id: "plan_schema",
+        phase: "preflight",
+        decision: "blocked",
+        code: "checkpoint_policy_required",
+        observed_at: "2026-07-27T20:00:00Z"
+      })
+
+    {:ok, outcome} = TaskOutcome.from_code("coding_admission_failed")
+
+    %{
+      "status" => "coding_admission_failed",
+      "diagnostic" => Diagnostic.to_map(diagnostic),
+      "outcome" => TaskOutcome.to_map(outcome)
+    }
   end
 
   defp terminal!(code, state, evidence) do

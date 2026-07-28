@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.Readiness do
   @moduledoc false
 
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Diagnostic, Plan}
 
   alias Arbor.Orchestrator.CodingPlan.{
     Compilation,
@@ -31,6 +31,29 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
   end
 
   def prepare(_plan_or_attrs, _opts), do: {:error, :invalid_options}
+
+  @doc false
+  @spec admission_diagnostic(:plan | :readiness, term(), DateTime.t() | String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def admission_diagnostic(stage, reason, observed_at)
+      when stage in [:plan, :readiness] do
+    with {:ok, observed_at} <- normalize_observation_time(observed_at) do
+      {gate_id, code, message, remediation} =
+        case stage do
+          :plan -> plan_failure_diagnostic(reason)
+          :readiness -> failure_diagnostic(reason)
+        end
+
+      diagnostic =
+        blocked(gate_id, code, observed_at, message, remediation)
+        |> Diagnostic.to_map()
+
+      {:ok, diagnostic}
+    end
+  end
+
+  def admission_diagnostic(_stage, _reason, _observed_at),
+    do: {:error, :invalid_admission_diagnostic}
 
   @doc false
   @spec check(term(), keyword()) :: {:ok, map()}
@@ -708,6 +731,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
      "Correct the reviewed template or plan policy inputs and rerun readiness."}
   end
 
+  defp failure_diagnostic({:coding_execution_preflight_failed, reason}),
+    do: failure_diagnostic(reason)
+
   defp failure_diagnostic({:missing_requirements, _missing}) do
     {"executable_profile", "profile_requirements_missing",
      "The plan does not satisfy profile requirements.",
@@ -748,6 +774,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   defp failure_diagnostic({:forbidden_compilation_key, _scope, _key}),
     do: provenance_failure("provenance_forbidden")
+
+  defp failure_diagnostic(:coding_pipeline_unavailable),
+    do: compiler_failure(:template)
+
+  defp failure_diagnostic({:coding_pipeline_unavailable, _path}),
+    do: compiler_failure(:template)
+
+  defp failure_diagnostic(:invalid_readiness_report) do
+    {"readiness", "report_invalid", "The coding readiness report is invalid.",
+     "Repair the readiness boundary and rerun coding-plan admission."}
+  end
 
   defp failure_diagnostic(_reason), do: compiler_failure(:unknown)
 
@@ -870,6 +907,28 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
   defp fallback_observed_at(_value), do: "1970-01-01T00:00:00.000Z"
 
   defp invalid_plan_digest, do: "sha256:" <> String.duplicate("0", 64)
+
+  defp plan_failure_diagnostic(
+         {:invalid_field, "work_packet.checkpoint_policy",
+          {:required_for_task_class, _task_class, "design_required"}}
+       ) do
+    {"plan_schema", "checkpoint_policy_required",
+     "This task class requires a design checkpoint before implementation.",
+     "Set work_packet.checkpoint_policy to design_required."}
+  end
+
+  defp plan_failure_diagnostic({:invalid_field, "work_packet.checkpoint_policy", _reason}) do
+    {"plan_schema", "checkpoint_policy_invalid", "The work packet checkpoint policy is invalid.",
+     "Use direct or design_required for work_packet.checkpoint_policy."}
+  end
+
+  defp plan_failure_diagnostic(reason) do
+    {"plan_schema", plan_error_code(reason),
+     "The coding plan does not satisfy the versioned plan contract.",
+     "Provide a valid version 2 plan with task, repo_root, worker provider, " <>
+       "work_packet, and work_packet_digest; use explicit version 1 only for " <>
+       "legacy compatibility."}
+  end
 
   defp plan_error_code({:invalid_field, "validation_profile", _}), do: "profile_invalid"
   defp plan_error_code({:invalid_field, "task_class", _}), do: "profile_invalid"

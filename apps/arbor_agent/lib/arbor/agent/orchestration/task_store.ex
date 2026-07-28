@@ -73,7 +73,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskInventoryProjection}
-  alias Arbor.Contracts.Coding.{ReadinessReport, TaskTerminalEnvelope}
+
+  alias Arbor.Contracts.Coding.{
+    AdmissionFailure,
+    ReadinessReport,
+    TaskTerminalEnvelope
+  }
 
   @type task_id :: String.t()
   # :waiting_approval is retained for status projection / facade enrichment
@@ -1865,6 +1870,23 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
+  defp terminal_envelope(
+         record,
+         {:runner_result, {:error, {:coding_admission_failed, detail}}}
+       ) do
+    with {:ok, canonical_detail} <- canonical_coding_admission_failure(detail),
+         {:ok, envelope} <-
+           TaskTerminalEnvelope.preserve(
+             canonical_detail["outcome"],
+             terminal_state(record),
+             %{"kind" => "coding_admission_failure", "result" => canonical_detail}
+           ) do
+      envelope
+    else
+      _failure -> invalid_terminal_envelope(record, nil)
+    end
+  end
+
   defp terminal_envelope(record, {:runner_result, {:ok, :pending_approval, approval_id}}),
     do: approval_owner_terminated_envelope(record, approval_id)
 
@@ -1914,6 +1936,19 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp canonical_readiness_report(_report), do: {:error, :invalid_readiness_report}
+
+  defp canonical_coding_admission_failure(detail) when is_map(detail) and not is_struct(detail) do
+    with {:ok, canonical} <- AdmissionFailure.normalize(detail),
+         true <- detail == canonical,
+         {:ok, ^canonical} <- canonicalize_and_roundtrip(canonical) do
+      {:ok, canonical}
+    else
+      _ -> {:error, :invalid_coding_admission_failure}
+    end
+  end
+
+  defp canonical_coding_admission_failure(_detail),
+    do: {:error, :invalid_coding_admission_failure}
 
   defp readiness_outcome_attrs(%{"diagnostics" => diagnostics}) do
     diagnostic_refs =

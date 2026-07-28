@@ -113,6 +113,58 @@ defmodule Arbor.Contracts.Coding.TaskTerminalEnvelopeTest do
              )
   end
 
+  test "accepts coding admission failure evidence only when it includes a result" do
+    {:ok, outcome} = TaskOutcome.from_code("coding_admission_failed")
+    outcome = TaskOutcome.to_map(outcome)
+
+    detail = %{
+      "status" => "coding_admission_failed",
+      "diagnostic" => %{
+        "version" => 1,
+        "gate_id" => "coding_plan_admission",
+        "phase" => "preflight",
+        "decision" => "blocked",
+        "code" => "invalid_checkpoint_policy",
+        "observed_at" => "2026-07-27T20:00:00Z"
+      },
+      "outcome" => outcome
+    }
+
+    assert {:ok, envelope} =
+             TaskTerminalEnvelope.preserve(
+               outcome,
+               "failed",
+               %{"kind" => "coding_admission_failure", "result" => detail}
+             )
+
+    assert envelope["evidence"] == %{
+             "kind" => "coding_admission_failure",
+             "result" => detail
+           }
+
+    assert {:error, {:invalid_field, "evidence"}} =
+             TaskTerminalEnvelope.preserve(
+               outcome,
+               "failed",
+               %{"kind" => "coding_admission_failure"}
+             )
+
+    invalid_details = [
+      Map.delete(detail, "diagnostic"),
+      put_in(detail, ["diagnostic", "decision"], "passed"),
+      put_in(detail, ["diagnostic", "phase"], "worker_turn")
+    ]
+
+    for invalid <- invalid_details do
+      assert {:error, {:invalid_field, "evidence"}} =
+               TaskTerminalEnvelope.preserve(
+                 outcome,
+                 "failed",
+                 %{"kind" => "coding_admission_failure", "result" => invalid}
+               )
+    end
+  end
+
   test "finalization failure retains prior outcome and bounded evidence" do
     {:ok, outcome} = TaskOutcome.from_code("no_changes")
     outcome = TaskOutcome.to_map(outcome)

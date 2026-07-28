@@ -58,11 +58,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   alias Arbor.Common.SafePath
 
   alias Arbor.Contracts.Coding.{
+    AdmissionFailure,
     BranchLifecycleDescriptor,
     Diagnostic,
     Plan,
     ReadinessReport,
     TaskEvidenceDescriptor,
+    TaskOutcome,
     TranscriptDescriptor,
     ValidationCapacityHandoff,
     VerificationReport,
@@ -281,19 +283,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
     with :ok <- validate_agent_id(agent_id),
          {:ok, exec_ctx} <- validate_context(context),
-         {:ok, plan} <- Normalizer.normalize_task(task),
-         {:ok, template_path} <- resolve_template_path(),
-         {:ok, canonical_plan, compilation} <-
-           Readiness.prepare(plan, template_path: template_path),
-         {:ok, readiness_report} <-
-           Readiness.check_prepared(
-             canonical_plan,
-             compilation,
-             mode: :live,
-             agent_id: agent_id,
-             observed_at: DateTime.utc_now()
-           ),
-         :ok <- admit_readiness(readiness_report),
+         {:ok, canonical_plan, compilation, readiness_report} <-
+           admit_coding_plan(task, agent_id),
          {:ok, security} <- security_facade(),
          {:ok, authority} <- acquire_signing_authority(security, agent_id) do
       try do
@@ -1475,24 +1466,80 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # Identity / graph / engine opts
   # ===========================================================================
 
-  defp admit_readiness(%{"status" => status}) when status in ["ready", "degraded"],
-    do: :ok
-
-  defp admit_readiness(%{"status" => "blocked", "diagnostics" => diagnostics})
-       when is_list(diagnostics) do
-    case Enum.find(diagnostics, &(&1["decision"] == "blocked")) do
-      %{"gate_id" => gate_id, "code" => code}
-      when is_binary(gate_id) and is_binary(code) and byte_size(gate_id) <= 128 and
-             byte_size(code) <= 128 ->
-        {:error, {:coding_readiness_blocked, gate_id, code}}
-
-      _ ->
-        {:error, {:coding_readiness_blocked, "readiness", "report_invalid"}}
+  defp admit_coding_plan(task, agent_id) do
+    with {:ok, plan} <-
+           Normalizer.normalize_task(task)
+           |> map_admission_failure(:plan),
+         {:ok, template_path} <-
+           resolve_template_path()
+           |> map_admission_failure(:readiness),
+         {:ok, canonical_plan, compilation} <-
+           Readiness.prepare(plan, template_path: template_path)
+           |> map_admission_failure(:readiness),
+         readiness_observed_at = DateTime.utc_now(),
+         {:ok, readiness_report} <-
+           Readiness.check_prepared(
+             canonical_plan,
+             compilation,
+             mode: :live,
+             agent_id: agent_id,
+             observed_at: readiness_observed_at
+           )
+           |> map_admission_failure(:readiness, readiness_observed_at),
+         :ok <- admit_readiness(readiness_report, readiness_observed_at) do
+      {:ok, canonical_plan, compilation, readiness_report}
     end
   end
 
-  defp admit_readiness(_report),
-    do: {:error, {:coding_readiness_blocked, "readiness", "report_invalid"}}
+  defp map_admission_failure({:error, reason}, stage),
+    do: coding_admission_error(stage, reason, DateTime.utc_now())
+
+  defp map_admission_failure(result, _stage), do: result
+
+  defp map_admission_failure({:error, reason}, stage, observed_at),
+    do: coding_admission_error(stage, reason, observed_at)
+
+  defp map_admission_failure(result, _stage, _observed_at), do: result
+
+  defp admit_readiness(%{"status" => status}, _observed_at)
+       when status in ["ready", "degraded"],
+       do: :ok
+
+  defp admit_readiness(%{"status" => "blocked", "diagnostics" => diagnostics}, observed_at)
+       when is_list(diagnostics) do
+    case Enum.find(diagnostics, &(&1["decision"] == "blocked")) do
+      diagnostic when is_map(diagnostic) ->
+        coding_admission_error(diagnostic)
+
+      _ ->
+        coding_admission_error(:readiness, :invalid_readiness_report, observed_at)
+    end
+  end
+
+  defp admit_readiness(_report, observed_at),
+    do: coding_admission_error(:readiness, :invalid_readiness_report, observed_at)
+
+  defp coding_admission_error(stage, reason, observed_at) do
+    case Readiness.admission_diagnostic(stage, reason, observed_at) do
+      {:ok, diagnostic} -> coding_admission_error(diagnostic)
+      {:error, _reason} -> {:error, :coding_admission_contract_unavailable}
+    end
+  end
+
+  defp coding_admission_error(diagnostic) do
+    with {:ok, canonical_diagnostic} <- Diagnostic.normalize(diagnostic),
+         {:ok, outcome} <- TaskOutcome.from_code("coding_admission_failed"),
+         {:ok, failure} <-
+           AdmissionFailure.normalize(%{
+             "status" => "coding_admission_failed",
+             "diagnostic" => canonical_diagnostic,
+             "outcome" => TaskOutcome.to_map(outcome)
+           }) do
+      {:error, {:coding_admission_failed, failure}}
+    else
+      {:error, _reason} -> {:error, :coding_admission_contract_unavailable}
+    end
+  end
 
   defp map_post_readiness_immutable_failure({:ok, _value} = result, _report, _stage),
     do: result

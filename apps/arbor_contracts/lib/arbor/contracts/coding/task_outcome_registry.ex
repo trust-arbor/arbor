@@ -301,6 +301,12 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
   }
 
   @outer_specs %{
+    "coding_admission_failed" => %{
+      disposition: "failed",
+      phase: "preflight",
+      origin: "arbor",
+      retry: "none"
+    },
     "coding_execution_state_drift" => %{
       disposition: "failed",
       phase: "preflight",

@@ -983,6 +983,31 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Map.merge(%{"task_id" => "task_coding_1"}, overrides)
   end
 
+  defp assert_coding_admission_failed(result, expected_gate_id, expected_code) do
+    assert {:error, {:coding_admission_failed, detail}} = result
+    assert Map.keys(detail) |> Enum.sort() == ["diagnostic", "outcome", "status"]
+    assert detail["status"] == "coding_admission_failed"
+
+    diagnostic = detail["diagnostic"]
+    assert Diagnostic.valid?(diagnostic)
+    assert diagnostic["gate_id"] == expected_gate_id
+    assert diagnostic["phase"] == "preflight"
+    assert diagnostic["decision"] == "blocked"
+    assert diagnostic["code"] == expected_code
+
+    assert detail["outcome"] == %{
+             "version" => 1,
+             "disposition" => "failed",
+             "code" => "coding_admission_failed",
+             "phase" => "preflight",
+             "origin" => "arbor",
+             "retry" => "none"
+           }
+
+    assert {:ok, _json} = Jason.encode(detail)
+    detail
+  end
+
   defp valid_control(overrides \\ %{}) do
     Map.merge(
       %{
@@ -1491,75 +1516,102 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   describe "task/context validation" do
     test "rejects non-map and wrong-kind tasks" do
-      assert {:error, :invalid_task} =
-               CodingTaskExecutor.run("agent_1", "plain string", valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", "plain string", valid_context()),
+        "plan_schema",
+        "plan_invalid"
+      )
 
-      assert {:error, {:unsupported_task_kind, "other"}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"kind" => "other"}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"kind" => "other"}),
+          valid_context()
+        ),
+        "plan_schema",
+        "plan_invalid"
+      )
 
-      assert {:error, :missing_task_kind} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 Map.delete(valid_task(), "kind"),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          Map.delete(valid_task(), "kind"),
+          valid_context()
+        ),
+        "plan_schema",
+        "plan_invalid"
+      )
     end
 
     test "requires nonblank task, repo_path, acp_agent" do
       for field <- ["task", "repo_path", "acp_agent"] do
-        assert {:error, {:blank_field, ^field}} =
-                 CodingTaskExecutor.run(
-                   "agent_1",
-                   valid_task(%{field => "   "}),
-                   valid_context()
-                 )
+        assert_coding_admission_failed(
+          CodingTaskExecutor.run(
+            "agent_1",
+            valid_task(%{field => "   "}),
+            valid_context()
+          ),
+          "plan_schema",
+          "plan_invalid"
+        )
 
-        assert {:error, {:missing_field, ^field}} =
-                 CodingTaskExecutor.run(
-                   "agent_1",
-                   Map.delete(valid_task(), field),
-                   valid_context()
-                 )
+        assert_coding_admission_failed(
+          CodingTaskExecutor.run(
+            "agent_1",
+            Map.delete(valid_task(), field),
+            valid_context()
+          ),
+          "plan_schema",
+          "plan_invalid"
+        )
       end
     end
 
     test "rejects unknown task keys and control keys" do
-      assert {:error, {:unknown_task_key, "extra"}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"extra" => "nope"}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"extra" => "nope"}),
+          valid_context()
+        ),
+        "plan_schema",
+        "plan_invalid"
+      )
 
       for key <-
             ~w(authorization signer agent_id task_id capabilities graph_path actions_executor identity_private_key) do
-        assert {:error, {:forbidden_task_key, ^key}} =
-                 CodingTaskExecutor.run(
-                   "agent_1",
-                   valid_task(%{key => "evil"}),
-                   valid_context()
-                 )
+        assert_coding_admission_failed(
+          CodingTaskExecutor.run(
+            "agent_1",
+            valid_task(%{key => "evil"}),
+            valid_context()
+          ),
+          "plan_schema",
+          "plan_invalid"
+        )
       end
     end
 
     test "rejects atom-keyed, keyword, and non-JSON task/context values" do
-      assert {:error, {:non_json_task, :non_string_key}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 %{kind: "coding_change", task: "x", repo_path: "/tmp", acp_agent: "c"},
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          %{kind: "coding_change", task: "x", repo_path: "/tmp", acp_agent: "c"},
+          valid_context()
+        ),
+        "plan_schema",
+        "plan_invalid"
+      )
 
-      assert {:error, {:non_json_task, :pid_not_json}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"task" => self()}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"task" => self()}),
+          valid_context()
+        ),
+        "plan_schema",
+        "plan_invalid"
+      )
 
       assert {:error, :invalid_context} =
                CodingTaskExecutor.run("agent_1", valid_task(), task_id: "t1")
@@ -1572,21 +1624,27 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                )
 
       # Conflicting/coercible atom+string keys are rejected (no stringify).
-      assert {:error, {:non_json_task, :non_string_key}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 Map.put(valid_task(), :task, "forged"),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          Map.put(valid_task(), :task, "forged"),
+          valid_context()
+        ),
+        "plan_schema",
+        "plan_invalid"
+      )
     end
 
     test "task and context data cannot set the coding approval timeout" do
-      assert {:error, {:unknown_task_key, "approval_timeout_ms"}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"approval_timeout_ms" => 999_999}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"approval_timeout_ms" => 999_999}),
+          valid_context()
+        ),
+        "plan_schema",
+        "plan_invalid"
+      )
 
       assert {:error, {:forbidden_context_key, "approval_timeout_ms"}} =
                CodingTaskExecutor.run(
@@ -1608,12 +1666,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     test "rejects invalid optional field types and requires task_id in context" do
-      assert {:error, {:invalid_field_type, "open_pr"}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"open_pr" => 123}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"open_pr" => 123}),
+          valid_context()
+        ),
+        "plan_schema",
+        "plan_invalid"
+      )
 
       assert {:error, {:missing_field, "task_id"}} =
                CodingTaskExecutor.run("agent_1", valid_task(), %{})
@@ -1793,6 +1854,29 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       end
     end
 
+    test "invalid high-risk checkpoint policy returns a bounded typed admission failure" do
+      task =
+        valid_v2_direct_task(%{
+          "task_class" => "security_regression",
+          "validation_profile" => "security_regression",
+          "requested_paths" => ["apps/arbor_security/test/security_regression_test.exs"]
+        })
+
+      detail =
+        assert_coding_admission_failed(
+          CodingTaskExecutor.run("agent_direct", task, valid_context()),
+          "plan_schema",
+          "checkpoint_policy_required"
+        )
+
+      assert detail["diagnostic"]["remediation"] ==
+               "Set work_packet.checkpoint_policy to design_required."
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
+      refute File.exists?(Config.coding_pipeline_logs_root())
+    end
+
     test "rejects direct none review before compiler, archive, or runner" do
       Application.put_env(:arbor_orchestrator, :coding_plan_compiler, ObservedCompiler)
 
@@ -1804,8 +1888,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       task = valid_direct_task(%{"review_profile" => "none"})
 
-      assert {:error, {:coding_plan_review_profile_not_allowed, "none"}} =
-               CodingTaskExecutor.run("agent_direct", task, valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_direct", task, valid_context()),
+        "plan_schema",
+        "plan_invalid"
+      )
 
       refute_receive :coding_plan_compiler_called
       refute_receive :coding_plan_artifact_store_called
@@ -1830,8 +1917,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           "requested_paths" => ["apps/arbor_security/test/security_regression_test.exs"]
         })
 
-      assert {:error, {:legacy_coding_plan_not_allowed_for_task_class, "security_regression"}} =
-               CodingTaskExecutor.run("agent_direct", task, valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_direct", task, valid_context()),
+        "plan_schema",
+        "plan_invalid"
+      )
 
       refute_receive :coding_plan_compiler_called
       refute_receive :coding_plan_artifact_store_called
@@ -1853,15 +1943,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "rejects mixed direct/legacy shapes and task-supplied authority" do
       mixed = Map.put(valid_direct_task(), "task", "legacy override")
 
-      assert {:error, :mixed_task_shape} =
-               CodingTaskExecutor.run("agent_1", mixed, valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", mixed, valid_context()),
+        "plan_schema",
+        "plan_invalid"
+      )
 
       authority =
         valid_direct_task()
         |> put_in(["plan", "authorization"], true)
 
-      assert {:error, {:unknown_fields, ["authorization"]}} =
-               CodingTaskExecutor.run("agent_1", authority, valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", authority, valid_context()),
+        "plan_schema",
+        "plan_invalid"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -1879,12 +1975,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         |> create_git_repo!()
         |> real_path!()
 
-      assert {:error, {:coding_path_outside_roots, :repo_path}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"repo_path" => outside_repo}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"repo_path" => outside_repo}),
+          valid_context()
+        ),
+        "trusted_roots",
+        "repo_outside_root"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -1899,12 +1998,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       link = Path.join(Process.get(:coding_executor_repo_scope), "escaped-repo")
       File.ln_s!(outside_repo, link)
 
-      assert {:error, {:coding_path_outside_roots, :repo_path}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"repo_path" => link}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"repo_path" => link}),
+          valid_context()
+        ),
+        "trusted_roots",
+        "repo_outside_root"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -1916,12 +2018,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         |> create_git_repo!()
         |> real_path!()
 
-      assert {:error, {:coding_path_outside_roots, :repo_path}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"repo_path" => sibling_repo}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"repo_path" => sibling_repo}),
+          valid_context()
+        ),
+        "trusted_roots",
+        "repo_outside_root"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -1933,12 +2038,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       link = Path.join(configured_worktree_root(), "escaped-worktrees")
       File.ln_s!(outside_worktrees, link)
 
-      assert {:error, {:coding_path_outside_roots, :worktree_base_dir}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"worktree_base_dir" => link}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"worktree_base_dir" => link}),
+          valid_context()
+        ),
+        "trusted_roots",
+        "worktree_outside_root"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -1947,12 +2055,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       sibling_worktree = Path.join(Process.get(:coding_executor_tmp_dir), "worktrees-evil")
       File.mkdir_p!(sibling_worktree)
 
-      assert {:error, {:coding_path_outside_roots, :worktree_base_dir}} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"worktree_base_dir" => sibling_worktree}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"worktree_base_dir" => sibling_worktree}),
+          valid_context()
+        ),
+        "trusted_roots",
+        "worktree_outside_root"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -1968,12 +2079,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       File.mkdir_p!(nested_path)
       Application.put_env(:arbor_orchestrator, :coding_repo_roots, [real_path!(allowed_subdir)])
 
-      assert {:error, :git_root_outside_coding_roots} =
-               CodingTaskExecutor.run(
-                 "agent_1",
-                 valid_task(%{"repo_path" => real_path!(nested_path)}),
-                 valid_context()
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_task(%{"repo_path" => real_path!(nested_path)}),
+          valid_context()
+        ),
+        "trusted_roots",
+        "git_root_outside_root"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -2009,30 +2123,45 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "security regression: missing, malformed, and nonexistent roots fail closed" do
       Application.delete_env(:arbor_orchestrator, :coding_repo_roots)
 
-      assert {:error, {:coding_roots_not_configured, :repo}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "trusted_roots",
+        "repo_roots_unconfigured"
+      )
 
       Application.put_env(:arbor_orchestrator, :coding_repo_roots, ["relative/repo"])
 
-      assert {:error, {:invalid_coding_roots, :repo}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "trusted_roots",
+        "repo_roots_invalid"
+      )
 
       Application.put_env(:arbor_orchestrator, :coding_repo_roots, [configured_repo_path()])
       Application.delete_env(:arbor_orchestrator, :coding_worktree_roots)
 
-      assert {:error, {:coding_roots_not_configured, :worktree}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "trusted_roots",
+        "worktree_roots_unconfigured"
+      )
 
       Application.put_env(:arbor_orchestrator, :coding_worktree_roots, ["/"])
 
-      assert {:error, {:invalid_coding_roots, :worktree}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "trusted_roots",
+        "worktree_roots_invalid"
+      )
 
       missing = Path.join(Process.get(:coding_executor_tmp_dir), "missing-root")
       Application.put_env(:arbor_orchestrator, :coding_worktree_roots, [missing])
 
-      assert {:error, {:invalid_coding_root, :worktree}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "trusted_roots",
+        "worktree_root_invalid"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -2688,12 +2817,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     test "task cannot override session.agent_id or session.task_id via allowlisted fields" do
-      assert {:error, {:unknown_task_key, "session.agent_id"}} =
-               CodingTaskExecutor.run(
-                 "agent_real",
-                 valid_task(%{"session.agent_id" => "agent_forged"}),
-                 valid_context(%{"task_id" => "task_real"})
-               )
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run(
+          "agent_real",
+          valid_task(%{"session.agent_id" => "agent_forged"}),
+          valid_context(%{"task_id" => "task_real"})
+        ),
+        "plan_schema",
+        "plan_invalid"
+      )
     end
 
     test "authority opts cannot be replaced by legacy auth material" do
@@ -2707,12 +2839,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute Keyword.has_key?(opts, :identity_private_key)
 
       for key <- ~w(authorizer signer authorization identity private_key signing_key) do
-        assert {:error, {:forbidden_task_key, ^key}} =
-                 CodingTaskExecutor.run(
-                   "agent_1",
-                   valid_task(%{key => "evil"}),
-                   valid_context()
-                 )
+        assert_coding_admission_failed(
+          CodingTaskExecutor.run(
+            "agent_1",
+            valid_task(%{key => "evil"}),
+            valid_context()
+          ),
+          "plan_schema",
+          "plan_invalid"
+        )
       end
     end
   end
@@ -2761,9 +2896,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       Application.put_env(:arbor_orchestrator, :security_available_override, false)
       Application.put_env(:arbor_orchestrator, :security_required, false)
 
-      assert {:error,
-              {:coding_readiness_blocked, "security_authority", "security_authority_unavailable"}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "security_authority",
+        "security_authority_unavailable"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -2771,9 +2908,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "missing signing key fails closed" do
       Process.put(:coding_executor_signing_key, :missing)
 
-      assert {:error,
-              {:coding_readiness_blocked, "security_authority", "signing_key_unavailable"}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "security_authority",
+        "signing_key_unavailable"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -2785,8 +2924,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "/nonexistent/coding-change-v1.dot"
       )
 
-      assert {:error, {:coding_pipeline_unavailable, _}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "compiler",
+        "template_unavailable"
+      )
 
       assert Process.get(:coding_executor_last_run) == nil
     end
@@ -2794,13 +2936,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "invalid compiler module and malformed compiler replies fail closed" do
       Application.put_env(:arbor_orchestrator, :coding_plan_compiler, "not-a-module")
 
-      assert {:error, {:coding_plan_compiler_unavailable, "not-a-module"}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "compiler",
+        "compiler_unavailable"
+      )
 
       Application.put_env(:arbor_orchestrator, :coding_plan_compiler, InvalidCompilerReply)
 
-      assert {:error, {:invalid_compilation_field, "compilation"}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "provenance",
+        "compilation_invalid"
+      )
 
       refute_receive {:coding_executor_captured_run, _path, _opts}
     end
@@ -2812,8 +2960,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         MismatchedManifestCompiler
       )
 
-      assert {:error, {:compilation_field_mismatch, "manifest.plan_fingerprint"}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "provenance",
+        "provenance_mismatch"
+      )
 
       Application.put_env(
         :arbor_orchestrator,
@@ -2821,8 +2972,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         RedirectingInitialValuesCompiler
       )
 
-      assert {:error, {:compilation_field_mismatch, "initial_values"}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "provenance",
+        "provenance_mismatch"
+      )
 
       refute_receive {:coding_executor_captured_run, _path, _opts}
     end
@@ -2839,8 +2993,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         {:put, "coding_plan_work_packet_digest", "sha256:" <> String.duplicate("0", 64)}
       )
 
-      assert {:error, {:compilation_field_mismatch, "initial_values"}} =
-               CodingTaskExecutor.run("agent_1", valid_v2_direct_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_v2_direct_task(), valid_context()),
+        "provenance",
+        "provenance_mismatch"
+      )
 
       refute_receive {:coding_executor_captured_run, _path, _opts}
       assert Process.get(:coding_executor_last_run) == nil
@@ -2935,8 +3092,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         OutsideWorktreeCreatingRunner
       )
 
-      assert {:error, {:compilation_field_mismatch, "initial_values"}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert_coding_admission_failed(
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context()),
+        "provenance",
+        "provenance_mismatch"
+      )
 
       refute File.exists?(marker)
       refute_receive {:outside_worktree_runner_invoked, ^marker}
@@ -2970,8 +3130,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       for {task, operation, key, value} <- cases do
         Process.put(:coding_executor_initial_value_mutation, {operation, key, value})
 
-        assert {:error, {:compilation_field_mismatch, "initial_values"}} =
-                 CodingTaskExecutor.run("agent_1", task, valid_context())
+        assert_coding_admission_failed(
+          CodingTaskExecutor.run("agent_1", task, valid_context()),
+          "provenance",
+          "provenance_mismatch"
+        )
       end
 
       refute_receive {:coding_executor_captured_run, _path, _opts}
