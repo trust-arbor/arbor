@@ -511,3 +511,15 @@ archives immutable evidence, and retires only the exact owned resources. It
 deliberately does not move the destination ref, so calling it before integration
 must fail as `:not_adopted` (found 2026-07-28 when the Phase C canary correctly
 returned `:aggregate_patch_not_found` before its reviewed commit reached `main`).
+
+<!-- applied-learning: synchronous-mcp-mutations-must-converge-before-the-transport-deadline -->
+<a id="applied-learning-synchronous-mcp-mutations-must-converge-before-the-transport-deadline"></a>
+**Synchronous MCP mutations must converge before the transport deadline.** If the
+MCP server has a shorter fixed call timeout than an owned operation's worst-case
+duration, start the mutation exactly once, wait only within a smaller product
+budget, then reconcile the authoritative owner state and return a typed
+pending, settled, or failed receipt. Never let an ambiguous transport timeout invite
+the caller to replay the mutation; retries may poll or coalesce against the exact
+destination and result fingerprint but may not create a second owner (found
+2026-07-28 when adoption completed in `TaskStore` after ExMCP had already returned
+an empty HTTP 500).

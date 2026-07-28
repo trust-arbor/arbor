@@ -117,3 +117,14 @@ reviewed subgraph changes its exec action.
 <!-- applied-learning: consensus-proposals-must-reference-authoritative-validation-evidence-not-select-execution -->
 <a id="applied-learning-consensus-proposals-must-reference-authoritative-validation-evidence-not-select-execution"></a>
 **Consensus proposals must reference authoritative validation evidence, not select execution.** Accepting proposal-controlled project paths, environments, commands, test paths, or per-call runners turns deliberation input into execution authority even when the current shell sandbox happens to block it. Derive a closed request from the proposal identity and perspective, resolve it through an operator-configured authorization-bound backend, and reject missing, timed-out, or malformed evidence; keep commands, paths, credentials, and runner selection outside the proposal surface (found 2026-07-23 while repairing the deterministic evaluator after shell hardening).
+
+<!-- applied-learning: forced-tool-choice-is-not-provider-compliance-proof -->
+<a id="applied-learning-forced-tool-choice-is-not-provider-compliance-proof"></a>
+**Forced tool choice is not provider compliance proof.** Even when a request forces
+one reserved terminal tool, a provider may return no call, multiple terminal calls,
+non-terminal calls, or a mixed set. Reject every non-singleton terminal shape before
+executing anything, classify it separately from free-form text, and emit bounded
+diagnostics containing only sanitized tool names, never arguments. Do not retry the
+same reserved terminal request through a generic tool loop or fallback that could
+execute an unexpected call (found 2026-07-28 when an Ollama council reviewer returned
+mixed tool calls despite forced selection).

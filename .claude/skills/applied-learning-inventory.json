@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 540,
+  "entry_count": 543,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6564,8 +6564,47 @@
       "source_incident": "found 2026-07-28 when the Phase C canary correctly returned `:aggregate_patch_not_found` before its reviewed commit reached `main`).",
       "content_sha256": "61be6524cde886add67522ac38808525fc57c9a16246f2da713644f9792373d7",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 541,
+      "source_kind": "post-migration",
+      "slug": "provider-registration-is-independent-of-credential-readiness",
+      "title": "Provider registration is independent of credential readiness.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-provider-registration-is-independent-of-credential-readiness",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when legacy OpenAI and xAI OAuth stores made council reviewers appear unconfigured).",
+      "content_sha256": "debb61f465905a9583de17366aa9f25c3f7544baa4ac7b99b6aba25421605c0b",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 542,
+      "source_kind": "post-migration",
+      "slug": "forced-tool-choice-is-not-provider-compliance-proof",
+      "title": "Forced tool choice is not provider compliance proof.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-forced-tool-choice-is-not-provider-compliance-proof",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when an Ollama council reviewer returned mixed tool calls despite forced selection).",
+      "content_sha256": "8a3e13004fbd495b4a166a49804c150705ecb4f2a259c80c21d1da1e8cd37ad7",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 543,
+      "source_kind": "post-migration",
+      "slug": "synchronous-mcp-mutations-must-converge-before-the-transport-deadline",
+      "title": "Synchronous MCP mutations must converge before the transport deadline.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-synchronous-mcp-mutations-must-converge-before-the-transport-deadline",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when adoption completed in `TaskStore` after ExMCP had already returned an empty HTTP 500).",
+      "content_sha256": "2ec14889bc7088093d8a350cc6931c765de140bdd20cd6553b0c00530bf4f063",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 79
+  "post_migration_entry_count": 82
 }

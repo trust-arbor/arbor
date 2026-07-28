@@ -104,6 +104,17 @@ perspective calls through `Arbor.Consensus.LLMBridge`).
 <a id="applied-learning-provider-security-flags-must-be-proven-on-the-exact-transport"></a>
 **Provider security flags must be proven on the exact transport.** Grok CLI `--tools`, `--disallowed-tools`, and `--deny Bash(*)` are headless-policy claims that did not constrain `grok agent stdio`; an anonymous ACP denial proves only missing handler identity/authority, not provider-level shell containment. Test the actual ACP transport and client-visible contract, not a nearby CLI mode (found 2026-07-19 during Grok ACP containment work).
 
+<!-- applied-learning: provider-registration-is-independent-of-credential-readiness -->
+<a id="applied-learning-provider-registration-is-independent-of-credential-readiness"></a>
+**Provider registration is independent of credential readiness.** A known provider
+route must remain registered even when its credential is expired, unsafe to migrate,
+or requires login. Validate credentials lazily at the adapter boundary and return the
+typed migration, login, or refresh error there; omitting the adapter during client
+construction turns an actionable auth failure into misleading `unknown_provider`
+evidence and prevents health and routing systems from identifying the real fault
+(found 2026-07-28 when legacy OpenAI and xAI OAuth stores made council reviewers
+appear unconfigured).
+
 <!-- applied-learning: streamed-function-call-arguments-are-not-terminal-json-until-the-protocol-says-the-item-is-done -->
 <a id="applied-learning-streamed-function-call-arguments-are-not-terminal-json-until-the-protocol-says-the-item-is-done"></a>
 **Streamed function-call arguments are not terminal JSON until the protocol says the item is done.** xAI Responses emits valid `response.output_item.added` events whose in-progress function call has `arguments: ""`. Apply bounded JSON decoding to the event envelope, but validate and charge embedded tool-argument JSON only on the terminal `response.output_item.done` item. A generic recursive detector for every map containing `name` and `arguments` will reject legitimate intermediate events as malformed (found 2026-07-20 reproducing the xAI council reviewer failure against the raw SSE stream).
