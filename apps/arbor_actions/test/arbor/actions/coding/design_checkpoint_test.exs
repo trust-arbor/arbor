@@ -403,7 +403,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     bounded_design = String.duplicate("x", DesignCheckpoint.max_design_bytes())
     bounded_task = String.duplicate("t", DesignCheckpoint.max_task_bytes())
 
-    assert {:error, {:invalid_durable_interaction, reason}} =
+    assert {:error, {:invalid_durable_interaction, :json_value_too_large}} =
              Open.run(
                %{
                  ctx.params
@@ -414,7 +414,6 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
                ctx.context
              )
 
-    assert reason in [:json_value_too_large, :invalid_json_string]
     refute_received {:request_durable_interaction, _, _}
   end
 
@@ -431,7 +430,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     escaped_task = String.duplicate(<<1>>, DesignCheckpoint.max_task_bytes())
     escaped_design = String.duplicate(<<1>>, DesignCheckpoint.max_design_bytes())
 
-    assert {:error, {:invalid_durable_interaction, reason}} =
+    assert {:error, {:invalid_durable_interaction, :json_value_too_large}} =
              Open.run(
                %{
                  ctx.params
@@ -444,7 +443,6 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
                ctx.context
              )
 
-    assert reason in [:json_value_too_large, :invalid_json_string]
     refute_received {:request_durable_interaction, _, _}
   end
 
