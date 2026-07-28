@@ -172,3 +172,16 @@ explicitly. Regress exact equality between the insert/update receipt and an
 immediate ORM reread; otherwise a committed CAS can be reported as malformed,
 making first execution fail while idempotent replay succeeds (found 2026-07-26
 when durable interaction hydration committed its claim but discarded the receipt).
+
+<!-- applied-learning: process-local-monotonic-ids-cannot-name-durable-resources -->
+<a id="applied-learning-process-local-monotonic-ids-cannot-name-durable-resources"></a>
+**Process-local monotonic IDs cannot name durable resources.** BEAM
+`System.unique_integer/1` is unique only inside one VM lifetime. Reusing its
+short decimal output for task IDs after restart can collide with retained
+artifacts, approvals, capabilities, or other durable provenance from an older
+run. Use the shared cryptographically random identifier primitive for every ID
+that crosses a restart boundary, replace every public fallback that can mint
+that ID, and reject an explicit duplicate before spawning or replacing an
+in-memory owner. Keep immutable stores fail closed on same-name/different-content
+reuse as the final cross-restart backstop (found 2026-07-28 when live
+`task_58178` collided with a retained 2026-07-19 coding artifact).

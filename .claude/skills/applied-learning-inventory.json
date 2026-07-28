@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-27",
-  "entry_count": 536,
+  "entry_count": 537,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6512,8 +6512,21 @@
       "source_incident": "found 2026-07-28 when terminal-gate budgeting exposed 58 stale direct-pipeline fixture failures).",
       "content_sha256": "ddc8ea797c9028696c86b18bfda0b62dc4ee7d753579f0bdf0302b8742898930",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 537,
+      "source_kind": "post-migration",
+      "slug": "process-local-monotonic-ids-cannot-name-durable-resources",
+      "title": "Process-local monotonic IDs cannot name durable resources.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-process-local-monotonic-ids-cannot-name-durable-resources",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when live `task_58178` collided with a retained 2026-07-19 coding artifact).",
+      "content_sha256": "a2a9b2a498b3df7af809dc68eec58fd9853a1e78f549564c4e0ece41ddc0f58c",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 75
+  "post_migration_entry_count": 76
 }
