@@ -104,10 +104,23 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     end
   end
 
+  # Server-owned digest admission: the caller supplies only `design`, and
+  # Arbor computes the sha256 digest itself from the exact admitted bytes.
+  # There is no supplied digest to validate, so no mismatch is possible.
+  defp validate_design_only_envelope(design) do
+    with {:ok, design} <- validate_design(design) do
+      {:ok, %{"design" => design, "design_digest" => computed_design_digest(design)}}
+    end
+  end
+
   # Progress prose and unrelated top-level JSON values are ignored. Identical
   # duplicate envelopes are tolerated because some ACP clients concatenate the
   # terminal payload twice. Raw response text remains the caller's audit
-  # responsibility and is never returned from this parser.
+  # responsibility and is never returned from this parser. A candidate object
+  # is admitted with exactly `design` alone (Arbor computes the digest from
+  # the exact admitted bytes) or with the legacy `design`+`design_digest`
+  # pair (the supplied digest must match exactly). Any other field shape,
+  # including a lone `design_digest`, is rejected.
   @doc false
   def parse_design_envelope(text)
       when is_binary(text) and byte_size(text) <= @max_terminal_response_bytes do
@@ -483,12 +496,15 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   defp validate_design(_value), do: {:error, :design_checkpoint_design_required}
 
   defp validate_design_digest(supplied, design) do
-    expected = "sha256:" <> (:crypto.hash(:sha256, design) |> Base.encode16(case: :lower))
+    expected = computed_design_digest(design)
 
     if is_binary(supplied) and supplied === expected,
       do: {:ok, expected},
       else: {:error, :design_digest_mismatch}
   end
+
+  defp computed_design_digest(design),
+    do: "sha256:" <> (:crypto.hash(:sha256, design) |> Base.encode16(case: :lower))
 
   defp description(packet, task_id, task, plan_fingerprint, design) do
     with {:ok, packet_bytes} <- WorkPacket.canonical_bytes(packet),
@@ -715,12 +731,18 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     keys = Enum.map(pairs, &elem(&1, 0))
 
     if Enum.any?(keys, &(&1 in @design_envelope_keys)) do
-      if length(keys) == length(@design_envelope_keys) and
-           MapSet.new(keys) == MapSet.new(@design_envelope_keys) do
-        envelope = Map.new(pairs)
-        validate_design_envelope(envelope["design"], envelope["design_digest"])
-      else
-        {:error, :invalid_design_envelope_fields}
+      cond do
+        keys == ~w(design) ->
+          envelope = Map.new(pairs)
+          validate_design_only_envelope(envelope["design"])
+
+        length(keys) == length(@design_envelope_keys) and
+            MapSet.new(keys) == MapSet.new(@design_envelope_keys) ->
+          envelope = Map.new(pairs)
+          validate_design_envelope(envelope["design"], envelope["design_digest"])
+
+        true ->
+          {:error, :invalid_design_envelope_fields}
       end
     else
       :unrelated

@@ -172,6 +172,44 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     assert {:ok, ^envelope} = Parse.run(%{text: text}, %{})
   end
 
+  test "Parse admits a server-owned one-field envelope and computes the digest", ctx do
+    encoded = Jason.encode!(%{"design" => ctx.params.design})
+
+    assert {:ok, envelope} = Parse.run(%{text: encoded}, %{})
+    assert envelope["design"] == ctx.params.design
+    assert envelope["design_digest"] == ctx.params.design_digest
+  end
+
+  test "Parse rejects a lone design_digest field and any other envelope shape", ctx do
+    lone_digest = Jason.encode!(%{"design_digest" => ctx.params.design_digest})
+
+    assert {:error, :invalid_design_envelope_fields} = Parse.run(%{text: lone_digest}, %{})
+
+    duplicate_design_only =
+      ~s({"design":#{Jason.encode!(ctx.params.design)},"design":#{Jason.encode!(ctx.params.design)}})
+
+    assert {:error, :invalid_design_envelope_fields} =
+             Parse.run(%{text: duplicate_design_only}, %{})
+  end
+
+  test "Parse rejects invalid or oversized designs in a one-field envelope" do
+    for invalid_design <- [" \n\t ", "invalid\u0000control"] do
+      encoded = Jason.encode!(%{"design" => invalid_design})
+
+      assert {:error, reason} = Parse.run(%{text: encoded}, %{})
+
+      assert reason in [
+               :design_checkpoint_design_blank,
+               :design_checkpoint_design_control_character
+             ]
+    end
+
+    oversized = String.duplicate("x", DesignCheckpoint.max_design_bytes() + 1)
+
+    assert {:error, :design_checkpoint_design_too_large} =
+             Parse.run(%{text: Jason.encode!(%{"design" => oversized})}, %{})
+  end
+
   test "Parse rejects conflicting valid terminal envelopes", ctx do
     first = design_envelope(ctx.params.design)
     second = design_envelope(ctx.params.design <> " Use a different implementation.")
@@ -198,14 +236,13 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
              Parse.run(%{text: "Example syntax: {not-json}\n" <> Jason.encode!(envelope)}, %{})
   end
 
-  test "Parse rejects candidate-like objects with missing, extra, or duplicate fields", ctx do
-    missing = Jason.encode!(%{"design" => ctx.params.design})
+  test "Parse rejects candidate-like objects with extra or duplicate fields", ctx do
     extra = Jason.encode!(Map.put(design_envelope(ctx.params.design), "commentary", "done"))
 
     duplicate =
       ~s({"design":#{Jason.encode!(ctx.params.design)},"design":#{Jason.encode!(ctx.params.design)},"design_digest":#{Jason.encode!(ctx.params.design_digest)}})
 
-    for candidate <- [missing, extra, duplicate] do
+    for candidate <- [extra, duplicate] do
       assert {:error, :invalid_design_envelope_fields} = Parse.run(%{text: candidate}, %{})
     end
   end
