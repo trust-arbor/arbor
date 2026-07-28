@@ -281,3 +281,7 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 <!-- applied-learning: erlang-receive-tracing-proves-delivery-not-selective-receive-consumption -->
 <a id="applied-learning-erlang-receive-tracing-proves-delivery-not-selective-receive-consumption"></a>
 **Erlang `:receive` tracing proves delivery, not selective-receive consumption.** A `{:trace, pid, :receive, message}` event can be emitted even when the process's active receive expression has no matching clause; do not treat that event alone as an acknowledgement that a state machine handled the message. Pair delivery tracing with an explicit reply, monitor, or bounded mailbox/state postcondition, and always disable tracing in cleanup (found 2026-07-27 while making RegistryBase forged-transfer tests deterministic).
+
+<!-- applied-learning: source-owner-cleanup-success-does-not-imply-convergence -->
+<a id="applied-learning-source-owner-cleanup-success-does-not-imply-convergence"></a>
+**Source-owner cleanup success does not imply convergence.** Crash-durable cleanup may remove the physical resource, fail marker deletion, install retained retry residue, and still return `{:ok, state}` because the destructive phase succeeded. Reconciliation may emit a settled receipt only when the helper succeeded and every authoritative source index proves absence; preserve helper errors and the exact returned state instead of converting partial success into settlement (found 2026-07-28 while reviewing the first live-workspace reconciliation CAS).
