@@ -1312,7 +1312,9 @@ defmodule Arbor.Actions.Coding.Workspace do
           {:cont, {:ok, [%{path: path, blob_sha256: sha256(bytes)} | acc]}}
 
         {:error, _reason} ->
-          {:halt, {:error, :selected_test_not_in_candidate}}
+          # Path-aware, bounded reason only. Never attach Git stderr/stdout,
+          # exit codes, or blob bytes (candidate-controlled IO must not leak).
+          {:halt, {:error, {:selected_test_not_in_candidate, path}}}
       end
     end)
     |> case do

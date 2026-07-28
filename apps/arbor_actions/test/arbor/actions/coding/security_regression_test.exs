@@ -2147,6 +2147,219 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     end
   end
 
+  test "security regression: missing selected test never invokes reviewer and returns path-aware error",
+       %{
+         tmp_dir: tmp_dir
+       } do
+    fixture = leased_project(tmp_dir, valid_module())
+    committed_path = "test/committed_name_test.exs"
+    missing_path = "test/plan_selected_missing_test.exs"
+
+    write_candidate_test(fixture, committed_path, """
+    defmodule Tiny.CommittedNameTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        fixture.lease.worktree_path,
+        fixture.lease.workspace_id,
+        fixture.lease.base_commit,
+        [committed_path]
+      )
+
+    # Dogfood case: plan selector does not match the committed test path.
+    # Diff/files describe the actual change; test_paths is the plan selector.
+    params = %{
+      diff: material.diff,
+      files: [committed_path],
+      branch: fixture.lease.branch,
+      base_ref: fixture.lease.base_commit,
+      intent: "fail closed before review when selector is missing",
+      agent_id: fixture.context.agent_id,
+      workspace_id: fixture.lease.workspace_id,
+      commit_hash: material.candidate_commit,
+      test_paths: [missing_path],
+      validation_profile: "security_regression"
+    }
+
+    parent = self()
+
+    context =
+      Map.merge(fixture.context, %{
+        persist_verdict: false,
+        review_runner: fn _request, _params, _context ->
+          send(parent, :review_runner_invoked)
+
+          {:ok,
+           %{
+             decision: "approved",
+             approve_count: 3,
+             reject_count: 0,
+             abstain_count: 0,
+             quorum_met: true
+           }}
+        end
+      })
+
+    assert {:error, {:selected_test_not_in_candidate, ^missing_path}} =
+             Council.ReviewChange.run(params, context)
+
+    refute_received :review_runner_invoked
+  end
+
+  test "security regression: preflight never exposes candidate-controlled Git failure output", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/opaque_preflight_error_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.OpaquePreflightErrorTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        fixture.lease.worktree_path,
+        fixture.lease.workspace_id,
+        fixture.lease.base_commit,
+        [test_path]
+      )
+
+    params = %{
+      diff: material.diff,
+      files: [test_path],
+      branch: fixture.lease.branch,
+      base_ref: fixture.lease.base_commit,
+      intent: "collapse raw Git failures before review",
+      agent_id: fixture.context.agent_id,
+      workspace_id: fixture.lease.workspace_id,
+      commit_hash: material.candidate_commit,
+      test_paths: [test_path],
+      validation_profile: "security_regression"
+    }
+
+    parent = self()
+
+    context =
+      Map.merge(fixture.context, %{
+        persist_verdict: false,
+        review_runner: fn _request, _params, _context ->
+          send(parent, :review_runner_invoked)
+          {:error, :reviewer_must_not_run}
+        end
+      })
+
+    marker = "candidate-controlled-git-error-marker"
+
+    :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
+      lease = Map.fetch!(state.leases, fixture.lease.workspace_id)
+      corrupted = %{lease | base_commit: marker}
+      %{state | leases: Map.put(state.leases, fixture.lease.workspace_id, corrupted)}
+    end)
+
+    try do
+      assert {:error, :security_regression_material_preflight_failed} =
+               Council.ReviewChange.run(params, context)
+
+      refute_received :review_runner_invoked
+    after
+      :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
+        lease = Map.fetch!(state.leases, fixture.lease.workspace_id)
+        restored = %{lease | base_commit: fixture.lease.base_commit}
+        %{state | leases: Map.put(state.leases, fixture.lease.workspace_id, restored)}
+      end)
+    end
+  end
+
+  test "security regression: valid selected test still preflights, reviews, and issues attestation",
+       %{
+         tmp_dir: tmp_dir
+       } do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/preflight_present_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.PreflightPresentTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        fixture.lease.worktree_path,
+        fixture.lease.workspace_id,
+        fixture.lease.base_commit,
+        [test_path]
+      )
+
+    params = %{
+      diff: material.diff,
+      files: [test_path],
+      branch: fixture.lease.branch,
+      base_ref: fixture.lease.base_commit,
+      intent: "preflight then attest on exact selector",
+      agent_id: fixture.context.agent_id,
+      workspace_id: fixture.lease.workspace_id,
+      commit_hash: material.candidate_commit,
+      test_paths: [test_path],
+      validation_profile: "security_regression"
+    }
+
+    parent = self()
+
+    context =
+      Map.merge(fixture.context, %{
+        persist_verdict: false,
+        review_runner: fn _request, _params, _context ->
+          send(parent, :review_runner_invoked)
+
+          {:ok,
+           %{
+             decision: "approved",
+             approve_count: 3,
+             reject_count: 0,
+             abstain_count: 0,
+             quorum_met: true
+           }}
+        end
+      })
+
+    assert {:ok, %{review_attestation_id: id}} = Council.ReviewChange.run(params, context)
+    assert_received :review_runner_invoked
+    refute_received :review_runner_invoked
+    assert {:ok, _} = WorkspaceLeaseRegistry.claim_review_attestation(id, fixture.context)
+  end
+
+  test "security regression: materialize returns path-aware missing-selector error", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+    committed_path = "test/material_present_test.exs"
+    missing_path = "test/material_missing_test.exs"
+
+    write_candidate_test(fixture, committed_path, """
+    defmodule Tiny.MaterialPresentTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    assert {:error, {:selected_test_not_in_candidate, ^missing_path}} =
+             Workspace.materialize_security_regression_material(
+               fixture.lease.worktree_path,
+               fixture.lease.workspace_id,
+               fixture.lease.base_commit,
+               [missing_path]
+             )
+  end
+
   test "security regression: council attestation binds completed ledger findings, not the incoming ledger",
        %{
          tmp_dir: tmp_dir

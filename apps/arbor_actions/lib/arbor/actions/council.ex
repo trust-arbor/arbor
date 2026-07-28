@@ -521,6 +521,7 @@ defmodule Arbor.Actions.Council do
 
       with {:ok, request} <- Council.build_code_review_request(params),
            :ok <- Council.reject_bound_review_overrides(params, bound?),
+           :ok <- preflight_security_regression_selectors(params, context),
            {:ok, request, decision} <- run_review_with_snapshot(request, params, context),
            :ok <- Council.validate_review_decision_cycle(decision, request),
            {:ok, verdict} <- Council.verdict_from_review_decision(decision, request) do
@@ -638,6 +639,42 @@ defmodule Arbor.Actions.Council do
       }
     end
 
+    # Prove exact committed security_regression selectors exist before any
+    # reviewer/provider egress. Material is discarded; post-review still
+    # rematerializes + compares the reviewed full diff + issues attestation.
+    defp preflight_security_regression_selectors(params, context) do
+      if Council.get_param(params, :validation_profile) == "security_regression" do
+        workspace_id = Council.get_param(params, :workspace_id)
+        test_paths = Council.get_param(params, :test_paths)
+
+        with true <- valid_id?(workspace_id),
+             true <- is_list(test_paths) and test_paths != [],
+             {:ok, lease} <-
+               WorkspaceLeaseRegistry.inspect_lease(workspace_id, registry_caller(context)),
+             {:ok, _material} <-
+               Workspace.materialize_security_regression_material(
+                 lease.worktree_path,
+                 workspace_id,
+                 lease.base_commit,
+                 test_paths
+               ) do
+          # Discard material; post-review rematerializes after keep.
+          :ok
+        else
+          false ->
+            {:error, :incomplete_security_regression_review_binding}
+
+          {:error, reason} ->
+            project_security_regression_material_error(
+              reason,
+              :security_regression_material_preflight_failed
+            )
+        end
+      else
+        :ok
+      end
+    end
+
     defp maybe_issue_security_regression_attestation(
            result,
            decision,
@@ -650,7 +687,8 @@ defmodule Arbor.Actions.Council do
            eligible_for_security_regression?(result) do
         with workspace_id when is_binary(workspace_id) and workspace_id != "" <-
                Council.get_param(params, :workspace_id),
-             test_paths when is_list(test_paths) <- Council.get_param(params, :test_paths),
+             test_paths when is_list(test_paths) and test_paths != [] <-
+               Council.get_param(params, :test_paths),
              {:ok, lease} <-
                WorkspaceLeaseRegistry.inspect_lease(workspace_id, registry_caller(context)),
              {:ok, material} <-
@@ -670,13 +708,32 @@ defmodule Arbor.Actions.Council do
                ) do
           {:ok, Map.put(result, :review_attestation_id, issued.review_attestation_id)}
         else
-          false -> {:error, :reviewed_diff_changed}
-          _ -> {:error, :security_regression_attestation_failed}
+          false ->
+            {:error, :reviewed_diff_changed}
+
+          {:error, reason} ->
+            project_security_regression_material_error(
+              reason,
+              :security_regression_attestation_failed
+            )
+
+          _other ->
+            {:error, :security_regression_attestation_failed}
         end
       else
         {:ok, result}
       end
     end
+
+    defp project_security_regression_material_error(
+           {:selected_test_not_in_candidate, path},
+           _fallback
+         )
+         when is_binary(path) and byte_size(path) <= 512,
+         do: {:error, {:selected_test_not_in_candidate, path}}
+
+    defp project_security_regression_material_error(_reason, fallback),
+      do: {:error, fallback}
 
     defp eligible_for_security_regression?(result) do
       result.recommendation == "keep" and result.quorum_met == true and
