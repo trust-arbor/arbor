@@ -349,7 +349,8 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     {target, generation} = retained_target_and_generation(server)
     send(server_pid(server), {:retained_expire, target, generation})
 
-    assert_receive {:owner_death_archive, {:ok, %{hidden_ref: hidden_ref}}}, 2_000
+    assert_receive {:owner_death_archive, {:ok, %{hidden_ref: hidden_ref}}},
+                   @owner_operation_timeout
 
     assert_eventually(
       fn ->
@@ -390,10 +391,10 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     force_retained_expired(server)
     {target, generation} = retained_target_and_generation(server)
     send(server_pid(server), {:retained_expire, target, generation})
-    assert_receive {:cleanup_attempt, 1}, 2_000
+    assert_receive {:cleanup_attempt, 1}, @owner_operation_timeout
     assert retained_count(server) == 1
     assert File.dir?(lease.worktree_path)
-    assert_receive {:cleanup_attempt, 2}, 2_000
+    assert_receive {:cleanup_attempt, 2}, @owner_operation_timeout
     assert retained_count(server) == 1
     assert File.dir?(lease.worktree_path)
 

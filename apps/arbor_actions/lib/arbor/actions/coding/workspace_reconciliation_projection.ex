@@ -72,6 +72,29 @@ defmodule Arbor.Actions.Coding.WorkspaceReconciliationProjection do
     do: {:error, :current_identity_unavailable}
 
   @doc false
+  @spec retained_comparison_identity(map(), String.t()) ::
+          {:ok, map()} | {:error, :current_identity_unavailable} | :absent
+  def retained_comparison_identity(state, workspace_id)
+      when is_map(state) and is_binary(workspace_id) do
+    case Map.get(Map.get(state, :retained_by_id, %{}), workspace_id) do
+      nil ->
+        :absent
+
+      record when is_map(record) ->
+        case project_record(record, :retained) do
+          {:ok, resource} -> {:ok, expected_identity(resource)}
+          :quarantine -> {:error, :current_identity_unavailable}
+        end
+
+      _other ->
+        {:error, :current_identity_unavailable}
+    end
+  end
+
+  def retained_comparison_identity(_state, _workspace_id),
+    do: {:error, :current_identity_unavailable}
+
+  @doc false
   @spec from_registry_state(map(), String.t() | nil, String.t() | nil, pos_integer()) :: map()
   def from_registry_state(state, task_id, principal_id, max_items)
       when is_map(state) and is_integer(max_items) and max_items > 0 do

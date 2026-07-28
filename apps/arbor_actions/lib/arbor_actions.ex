@@ -251,12 +251,14 @@ defmodule Arbor.Actions do
 
   * `arbor://coding/reconciliation/apply/validation_resource/<resource_id>`
   * `arbor://coding/reconciliation/apply/live_workspace_lease/<workspace_id>`
+  * `arbor://coding/reconciliation/apply/retained_workspace_record/<workspace_id>`
 
   Reconciliation decision evidence is never bearer authority. This slice
   supports only:
 
   * `validation_resource` + `settle` + `terminal_active_resource`
   * `live_workspace_lease` + `settle` + `terminal_active_resource`
+  * `retained_workspace_record` + `settle` + `retained_expired`
   """
   @spec apply_coding_reconciliation_decision(AuthContext.t(), map() | keyword() | term()) ::
           {:ok, map()} | {:error, term()}
@@ -286,6 +288,12 @@ defmodule Arbor.Actions do
 
         "live_workspace_lease" ->
           WorkspaceLeaseRegistry.compare_and_settle_live_workspace_lease(
+            settle_fields,
+            server_opts
+          )
+
+        "retained_workspace_record" ->
+          WorkspaceLeaseRegistry.compare_and_settle_retained_workspace_record(
             settle_fields,
             server_opts
           )
@@ -349,6 +357,13 @@ defmodule Arbor.Actions do
        }),
        do: :ok
 
+  defp require_supported_reconciliation_decision(%{
+         "resource_type" => "retained_workspace_record",
+         "decision" => "settle",
+         "reason" => "retained_expired"
+       }),
+       do: :ok
+
   defp require_supported_reconciliation_decision(decision_map) when is_map(decision_map) do
     {:error,
      {:unsupported_reconciliation_apply,
@@ -388,6 +403,12 @@ defmodule Arbor.Actions do
 
   defp require_canonical_reconciliation_resource_id(%{
          "resource_type" => "live_workspace_lease",
+         "resource_id" => resource_id
+       }),
+       do: require_canonical_live_workspace_id(resource_id)
+
+  defp require_canonical_reconciliation_resource_id(%{
+         "resource_type" => "retained_workspace_record",
          "resource_id" => resource_id
        }),
        do: require_canonical_live_workspace_id(resource_id)
@@ -434,6 +455,14 @@ defmodule Arbor.Actions do
        })
        when is_binary(resource_id) do
     {:ok, @reconciliation_apply_uri_base <> "live_workspace_lease/" <> resource_id}
+  end
+
+  defp reconciliation_apply_uri(%{
+         "resource_type" => "retained_workspace_record",
+         "resource_id" => resource_id
+       })
+       when is_binary(resource_id) do
+    {:ok, @reconciliation_apply_uri_base <> "retained_workspace_record/" <> resource_id}
   end
 
   defp reconciliation_apply_uri(_decision), do: {:error, :unsupported_reconciliation_apply}

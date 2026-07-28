@@ -573,6 +573,37 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     do: {:error, :invalid_reconciliation_settle_fields}
 
   @doc false
+  @spec compare_and_settle_retained_workspace_record(map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_retained_workspace_record(decision_fields, opts \\ [])
+
+  def compare_and_settle_retained_workspace_record(decision_fields, opts)
+      when is_map(decision_fields) and is_list(opts) do
+    resource_id =
+      Map.get(decision_fields, "resource_id") || Map.get(decision_fields, :resource_id)
+
+    expected_identity =
+      Map.get(decision_fields, "expected_identity") ||
+        Map.get(decision_fields, :expected_identity)
+
+    if is_binary(resource_id) and is_map(expected_identity) and not is_struct(expected_identity) do
+      call(
+        {:compare_and_settle_retained_workspace_record,
+         %{
+           "resource_id" => resource_id,
+           "expected_identity" => expected_identity
+         }},
+        opts
+      )
+    else
+      {:error, :invalid_reconciliation_settle_fields}
+    end
+  end
+
+  def compare_and_settle_retained_workspace_record(_decision_fields, _opts),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  @doc false
   @spec validation_resources(String.t(), map() | keyword()) ::
           {:ok, [map()]} | {:error, term()}
   def validation_resources(workspace_id, opts \\ %{}) when is_binary(workspace_id) do
@@ -1239,6 +1270,32 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       case ensure_journal_inventory_known(state) do
         :ok ->
           compare_and_settle_live_workspace_lease_after_journal(
+            state,
+            workspace_id,
+            expected_identity
+          )
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :invalid_reconciliation_settle_fields}, state}
+    end
+  end
+
+  def handle_call(
+        {:compare_and_settle_retained_workspace_record, fields},
+        _from,
+        state
+      )
+      when is_map(fields) do
+    workspace_id = Map.get(fields, "resource_id")
+    expected_identity = Map.get(fields, "expected_identity")
+
+    if is_binary(workspace_id) and is_map(expected_identity) and not is_struct(expected_identity) do
+      case ensure_journal_inventory_known(state) do
+        :ok ->
+          compare_and_settle_retained_after_journal(
             state,
             workspace_id,
             expected_identity
@@ -2487,6 +2544,27 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     }
   end
 
+  defp retained_reconciliation_already_absent_receipt(workspace_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "retained_workspace_record",
+      "resource_id" => workspace_id,
+      "outcome" => "already_absent",
+      "active" => false
+    }
+  end
+
+  defp retained_reconciliation_settled_receipt(workspace_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "retained_workspace_record",
+      "resource_id" => workspace_id,
+      "outcome" => "settled",
+      "active" => false,
+      "status" => "removed"
+    }
+  end
+
   defp compare_and_settle_live_workspace_lease_after_journal(
          state,
          workspace_id,
@@ -2522,6 +2600,127 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  defp compare_and_settle_retained_after_journal(state, workspace_id, expected_identity) do
+    case Map.fetch(state.retained_by_id, workspace_id) do
+      :error ->
+        reply_retained_absent(state, workspace_id)
+
+      {:ok, retained} ->
+        case WorkspaceReconciliationProjection.retained_comparison_identity(
+               state,
+               workspace_id
+             ) do
+          {:ok, ^expected_identity} ->
+            settle_retained_after_identity_match(state, retained, workspace_id)
+
+          {:ok, current_identity} ->
+            {:reply,
+             {:error,
+              {:reconciliation_identity_conflict,
+               %{
+                 "resource_id" => workspace_id,
+                 "current_identity" => current_identity
+               }}}, state}
+
+          {:error, :current_identity_unavailable} ->
+            {:reply, {:error, :current_identity_unavailable}, state}
+
+          :absent ->
+            reply_retained_absent(state, workspace_id)
+        end
+    end
+  end
+
+  defp settle_retained_after_identity_match(state, retained, workspace_id) do
+    cond do
+      Map.get(retained, :dormant) == true ->
+        {:reply, {:error, :retained_not_expirable}, state}
+
+      Map.get(retained, :lifecycle) == :active_orphaned ->
+        {:reply, {:error, :retained_not_expirable}, state}
+
+      Map.get(retained, :lifecycle) == :discarding ->
+        case verify_retained_target_index(state, retained) do
+          {:ok, _derived} ->
+            confirm_retained_workspace_settlement(
+              continue_discard_retained(state, retained),
+              workspace_id
+            )
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      Map.get(retained, :lifecycle) == :retained ->
+        with {:ok, derived} <- verify_retained_target_index(state, retained),
+             :ok <- require_retained_expired(retained),
+             :ok <- require_no_active_target(state, derived) do
+          confirm_retained_workspace_settlement(
+            expire_retained_workspace_result(state, retained),
+            workspace_id
+          )
+        else
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      true ->
+        {:reply, {:error, :retained_not_expirable}, state}
+    end
+  end
+
+  defp verify_retained_target_index(state, retained) when is_map(retained) do
+    repo_path = Map.get(retained, :repo_path)
+    branch = Map.get(retained, :branch)
+    worktree_path = Map.get(retained, :worktree_path)
+
+    if valid_retained_target_field?(repo_path) and valid_retained_target_field?(branch) and
+         valid_retained_target_field?(worktree_path) do
+      derived = target_key(repo_path, branch, worktree_path)
+
+      if Map.get(retained, :target) == derived and
+           Map.get(state.retained_by_target, derived) === retained do
+        {:ok, derived}
+      else
+        {:error, :retained_target_index_invalid}
+      end
+    else
+      {:error, :retained_target_index_invalid}
+    end
+  end
+
+  defp verify_retained_target_index(_state, _retained),
+    do: {:error, :retained_target_index_invalid}
+
+  defp valid_retained_target_field?(value)
+       when is_binary(value) and byte_size(value) > 0,
+       do: String.trim(value) != ""
+
+  defp valid_retained_target_field?(_value), do: false
+
+  defp require_retained_expired(retained) when is_map(retained) do
+    case Map.get(retained, :expires_at_ms) do
+      ms when is_integer(ms) ->
+        if System.monotonic_time(:millisecond) < ms do
+          {:error, :retained_not_expired}
+        else
+          :ok
+        end
+
+      _other ->
+        {:error, :retained_not_expirable}
+    end
+  end
+
+  defp require_retained_expired(_retained), do: {:error, :retained_not_expirable}
+
+  defp require_no_active_target(state, derived_target) do
+    if active_target?(state, derived_target) do
+      {:error, :retained_active_target}
+    else
+      :ok
+    end
+  end
+
   defp reply_live_lease_absent(state, workspace_id) do
     if non_live_workspace_residue?(state, workspace_id) do
       {:reply, {:error, :not_live_workspace_lease}, state}
@@ -2530,9 +2729,49 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  defp reply_retained_absent(state, workspace_id) do
+    cond do
+      Map.has_key?(state.leases, workspace_id) or
+          Map.has_key?(state.retention_blockers, workspace_id) ->
+        {:reply, {:error, :not_retained_workspace_record}, state}
+
+      retained_index_residue?(state, workspace_id) ->
+        {:reply, {:error, :settlement_residue}, state}
+
+      true ->
+        {:reply, {:ok, retained_reconciliation_already_absent_receipt(workspace_id)}, state}
+    end
+  end
+
   defp non_live_workspace_residue?(state, workspace_id) do
     Map.has_key?(state.retained_by_id, workspace_id) or
       Map.has_key?(state.retention_blockers, workspace_id)
+  end
+
+  defp retained_index_residue?(state, workspace_id) do
+    target_index_has_workspace?(
+      Map.get(state, :retained_by_target, %{}),
+      workspace_id
+    ) or
+      target_index_has_workspace?(
+        Map.get(state, :retention_blockers_by_target, %{}),
+        workspace_id
+      )
+  end
+
+  defp target_index_has_workspace?(index, workspace_id) when is_map(index) do
+    Enum.any?(index, fn {_key, value} ->
+      is_map(value) and Map.get(value, :workspace_id) == workspace_id
+    end)
+  end
+
+  defp target_index_has_workspace?(_index, _workspace_id), do: false
+
+  defp retained_fully_absent?(state, workspace_id) do
+    not Map.has_key?(state.leases, workspace_id) and
+      not Map.has_key?(state.retained_by_id, workspace_id) and
+      not Map.has_key?(state.retention_blockers, workspace_id) and
+      not retained_index_residue?(state, workspace_id)
   end
 
   defp confirm_live_workspace_settlement({:ok, returned_state}, workspace_id) do
@@ -2544,6 +2783,18 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp confirm_live_workspace_settlement({:error, reason, returned_state}, _workspace_id) do
+    {:reply, {:error, reason}, returned_state}
+  end
+
+  defp confirm_retained_workspace_settlement({:ok, _view, returned_state}, workspace_id) do
+    if retained_fully_absent?(returned_state, workspace_id) do
+      {:reply, {:ok, retained_reconciliation_settled_receipt(workspace_id)}, returned_state}
+    else
+      {:reply, {:error, :settlement_residue}, returned_state}
+    end
+  end
+
+  defp confirm_retained_workspace_settlement({:error, reason, returned_state}, _workspace_id) do
     {:reply, {:error, reason}, returned_state}
   end
 
@@ -6215,31 +6466,50 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   # The only non-archiving terminal path is positive absence of both recorded
   # parents, where no repository remains from which archive authority could be
   # derived. Explicit remove continues to use the backward-compatible path.
+  # Timer path keeps state-only semantics; reconciliation apply uses the
+  # result-aware variant for receipt convergence.
   defp expire_retained_workspace(state, retained) do
-    if both_paths_positively_absent?(retained.repo_path, retained.worktree_path) do
-      settle_expired_both_absent(state, retained)
-    else
-      begin_retained_expiry_archive(state, retained)
+    case expire_retained_workspace_result(state, retained) do
+      {:ok, _result, state2} -> state2
+      {:error, _reason, state2} -> state2
     end
   end
 
-  defp settle_expired_both_absent(state, retained) do
+  defp expire_retained_workspace_result(state, retained) do
+    if both_paths_positively_absent?(retained.repo_path, retained.worktree_path) do
+      settle_expired_both_absent_result(state, retained)
+    else
+      begin_retained_expiry_archive_result(state, retained)
+    end
+  end
+
+  defp settle_expired_both_absent_result(state, retained) do
     case reserve_cleanup_attempt(state, retained) do
       {:ok, reserved, state2} ->
         case delete_retained_marker(state2, reserved) do
           :ok ->
-            drop_retained(state2, reserved)
+            result =
+              reserved
+              |> Map.put(:active, false)
+              |> public_view()
+              |> Map.put(:active, false)
+              |> Map.put(:status, "removed")
+
+            {:ok, result, drop_retained(state2, reserved)}
 
           {:error, reason} ->
-            schedule_retry_after_failed_attempt(
-              state2,
-              reserved,
-              {:marker_delete_failed, reason}
-            )
+            state3 =
+              schedule_retry_after_failed_attempt(
+                state2,
+                reserved,
+                {:marker_delete_failed, reason}
+              )
+
+            {:error, {:marker_delete_failed, reason}, state3}
         end
 
-      {:error, _reason, state2} ->
-        state2
+      {:error, reason, state2} ->
+        {:error, reason, state2}
     end
   end
 
@@ -6247,7 +6517,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   # worktree identity is still valid, then persist archive intent before the
   # hidden ref or either destructive phase can run. Once persisted, retries
   # never rebind to a replacement tip.
-  defp begin_retained_expiry_archive(state, retained) do
+  defp begin_retained_expiry_archive_result(state, retained) do
     with :ok <- validate_retained_stored_identity(retained),
          {:ok, {:present, expected_tip}} <-
            Git.observe_branch_ref(retained.repo_path, retained.branch) do
@@ -6268,25 +6538,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             |> Map.put(:expiry_ref, nil)
 
           state = put_retained(state, hot_marker)
-
-          case continue_discard_retained(state, hot_marker) do
-            {:ok, _result, state2} -> state2
-            {:error, _reason, state2} -> state2
-          end
+          continue_discard_retained(state, hot_marker)
 
         {:error, reason} ->
-          schedule_expiry_transition_retry(
-            state,
-            retained,
-            {:archive_intent_persist_failed, reason}
-          )
+          failure = {:archive_intent_persist_failed, reason}
+          state2 = schedule_expiry_transition_retry(state, retained, failure)
+          {:error, failure, state2}
       end
     else
       {:ok, :absent} ->
-        schedule_expiry_transition_retry(state, retained, :archive_branch_absent)
+        state2 = schedule_expiry_transition_retry(state, retained, :archive_branch_absent)
+        {:error, :archive_branch_absent, state2}
 
       {:error, reason} ->
-        schedule_expiry_transition_retry(state, retained, {:archive_capture_failed, reason})
+        failure = {:archive_capture_failed, reason}
+        state2 = schedule_expiry_transition_retry(state, retained, failure)
+        {:error, failure, state2}
     end
   end
 
