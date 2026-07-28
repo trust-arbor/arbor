@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 559,
+  "entry_count": 560,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6811,8 +6811,21 @@
       "source_incident": "found 2026-07-28 while reviewing the first live-workspace reconciliation CAS).",
       "content_sha256": "15cafb81de33e566dc3aafdbd0cd5ccedc7e1c132b41956e4fb9e2986767b72e",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 560,
+      "source_kind": "post-migration",
+      "slug": "acp-recovery-needs-reserved-budget-not-a-provider-switch",
+      "title": "ACP recovery needs reserved budget, not a provider switch.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-acp-recovery-needs-reserved-budget-not-a-provider-switch",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while completing the managed ACP reconciliation read model).",
+      "content_sha256": "c24e43cdef62912d1fcdd2534aea357c65851a1cd55e4d91f04c50d5d486d9e3",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 98
+  "post_migration_entry_count": 99
 }

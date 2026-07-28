@@ -628,3 +628,14 @@ attestation still binds the reviewed diff. A missing selector is an Arbor
 readiness defect, not something reviewers should spend tokens discovering
 (found 2026-07-28 after a delegated security-regression candidate selected a
 test absent from its commit).
+
+<!-- applied-learning: acp-recovery-needs-reserved-budget-not-a-provider-switch -->
+<a id="applied-learning-acp-recovery-needs-reserved-budget-not-a-provider-switch"></a>
+**ACP recovery needs reserved budget, not a provider switch.** A worker can
+consume the coding stage's remaining wall-clock budget before reopen or
+follow-up delivery, producing `worker_recovery_reopen_failed` or
+`worker_recovery_send_failed` with `:budget_exhausted`. The same failure on Grok
+and Claude proves this is orchestration accounting, not provider behavior.
+Preserve the exact candidate tree, avoid blind cross-provider retries, and
+reserve enough stage budget for one complete recovery turn plus settlement
+(found 2026-07-28 while completing the managed ACP reconciliation read model).
