@@ -61,7 +61,9 @@ defmodule Arbor.AI do
     UsageStats
   }
 
-  # Note: Arbor.Memory.* and Arbor.Actions are higher in the hierarchy than arbor_ai (Standalone).
+  alias Arbor.AI.Runtime.RouteInputAssembler
+
+  # Note: Arbor.Memory.* and Arbor.Actions are higher in the hierarchy than arbor_ai (L4).
   # All calls use Code.ensure_loaded?/apply to avoid compile-time dependency.
 
   require Logger
@@ -919,6 +921,36 @@ defmodule Arbor.AI do
           | {:error, :unavailable | :malformed}
   def provider_budget_snapshots(opts \\ []) do
     ProviderControlPlane.snapshots(opts)
+  end
+
+  @doc """
+  Assemble a strict ProviderRouter input from the reviewed application profile.
+
+  Loads `config :arbor_ai, :provider_route_profile` only — no per-run profile
+  injection. Returns `{:error, :disabled}` when the profile is absent or not
+  explicitly enabled so callers preserve legacy dispatch. When enabled,
+  assembly failures are terminal (`{:error, {:route_assembly_failed, reason}}`).
+
+  `task_class` may be a bounded string or `nil` (profile default). Every other
+  non-nil value is rejected — maps, integers, atoms, and lists must not silently
+  become the profile default.
+  """
+  @spec assemble_provider_route_input(String.t() | nil) ::
+          {:ok, map()}
+          | {:error, :disabled}
+          | {:error, {:route_assembly_failed, term()}}
+  def assemble_provider_route_input(task_class \\ nil)
+
+  def assemble_provider_route_input(nil) do
+    RouteInputAssembler.assemble([])
+  end
+
+  def assemble_provider_route_input(task_class) when is_binary(task_class) do
+    RouteInputAssembler.assemble(task_class: task_class)
+  end
+
+  def assemble_provider_route_input(_task_class) do
+    {:error, {:route_assembly_failed, :invalid_task_class}}
   end
 
   @doc "Whether `provider` is a known ACP provider in the catalog."

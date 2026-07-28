@@ -46,6 +46,16 @@ defmodule Arbor.AI.Runtime.Dispatch do
   alias Arbor.LLM.Request
   alias Arbor.LLM.Response
 
+  # Arbor-owned executed-route evidence lives on Response.usage only.
+  # Response.raw is untrusted provider payload and must never carry this key.
+  @executed_route_key "arbor.executed_route"
+  @executed_route_aliases [
+    "arbor.executed_route",
+    "arbor_executed_route",
+    :arbor_executed_route,
+    :"arbor.executed_route"
+  ]
+
   @type dispatch_opts :: [
           client: Client.t() | nil,
           policy: Selector.policy(),
@@ -211,9 +221,27 @@ defmodule Arbor.AI.Runtime.Dispatch do
              :route_authorizer
            ]),
          {:ok, prepared} <- runtime_module.prepare(rewritten, runtime_opts),
-         {:ok, response} <- runtime_module.execute(prepared, callbacks, runtime_opts) do
+         {:ok, %Response{} = response} <-
+           execute_routed_runtime(runtime_module, prepared, callbacks, runtime_opts) do
       :ok = emit_executed(route, request, attempt.attempt)
-      {:ok, response}
+      {:ok, put_executed_route(response, route, attempt.attempt)}
+    end
+  end
+
+  # Behaviour violations must fail closed — never return an unstamped success.
+  defp execute_routed_runtime(runtime_module, prepared, callbacks, runtime_opts) do
+    case runtime_module.execute(prepared, callbacks, runtime_opts) do
+      {:ok, %Response{} = response} ->
+        {:ok, response}
+
+      {:ok, _not_response} ->
+        {:error, {:selection_failed, {:provider_route, :invalid_runtime_response}}}
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, {:selection_failed, {:provider_route, :invalid_runtime_response}}}
     end
   end
 
@@ -559,6 +587,43 @@ defmodule Arbor.AI.Runtime.Dispatch do
     safe_telemetry([:arbor, :runtime, :executed], %{count: 1}, metadata)
     :ok
   end
+
+  defp put_executed_route(%Response{} = response, route, attempt) do
+    usage =
+      response.usage
+      |> normalize_usage_map()
+      |> strip_executed_route_aliases()
+      |> Map.put(@executed_route_key, executed_route_evidence(route, attempt))
+
+    %{response | usage: usage}
+  end
+
+  defp normalize_usage_map(usage) when is_map(usage) and not is_struct(usage), do: usage
+  defp normalize_usage_map(_), do: %{}
+
+  defp strip_executed_route_aliases(usage) when is_map(usage) and not is_struct(usage) do
+    Map.drop(usage, @executed_route_aliases)
+  end
+
+  defp strip_executed_route_aliases(_usage), do: %{}
+
+  # Closed seven-field canonical route owned by Dispatch (not the provider).
+  defp executed_route_evidence(route, attempt) do
+    %{
+      "provider" => Atom.to_string(route.provider.id),
+      "provider_ref" => route.provider.ref,
+      "model" => route.model_entry.canonical_id,
+      "runtime" => Atom.to_string(route.runtime),
+      "attempt" => attempt_string(attempt),
+      "route_identity" => "router_selected",
+      "provider_confirmed" => false
+    }
+  end
+
+  defp attempt_string(:primary), do: "primary"
+  defp attempt_string(:fallback), do: "fallback"
+  defp attempt_string(other) when is_atom(other), do: Atom.to_string(other)
+  defp attempt_string(_), do: "unknown"
 
   defp bounded_request_id(%Request{} = request) do
     case Map.get(request, :request_id) do

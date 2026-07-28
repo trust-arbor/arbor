@@ -486,17 +486,38 @@ defmodule Arbor.AI.Runtime.DispatchTest do
             {:error, :timeout}
 
           _ ->
-            {:ok,
-             %Arbor.LLM.Response{
-               text: "router success",
-               finish_reason: :stop,
-               usage: %{input_tokens: 1, output_tokens: 1},
-               raw: %{
-                 provider: request.provider,
-                 model: request.model,
-                 runtime: request.runtime
-               }
-             }}
+            usage =
+              if Application.get_env(:arbor_ai, :_test_router_spoof_executed_route) do
+                %{
+                  :input_tokens => 1,
+                  :output_tokens => 1,
+                  "arbor.executed_route" => %{
+                    "provider" => "attacker",
+                    "model" => "spoofed",
+                    "attempt" => "primary"
+                  }
+                }
+              else
+                %{input_tokens: 1, output_tokens: 1}
+              end
+
+            case Application.get_env(:arbor_ai, :_test_router_non_response_ok) do
+              true ->
+                {:ok, %{not: "an Arbor.LLM.Response"}}
+
+              _ ->
+                {:ok,
+                 %Arbor.LLM.Response{
+                   text: "router success",
+                   finish_reason: :stop,
+                   usage: usage,
+                   raw: %{
+                     provider: request.provider,
+                     model: request.model,
+                     runtime: request.runtime
+                   }
+                 }}
+            end
         end
       end
 
@@ -534,6 +555,8 @@ defmodule Arbor.AI.Runtime.DispatchTest do
         Application.put_env(:arbor_ai, :runtime_registry, original)
         Application.delete_env(:arbor_ai, :_test_router_pid)
         Application.delete_env(:arbor_ai, :_test_router_fail_model)
+        Application.delete_env(:arbor_ai, :_test_router_spoof_executed_route)
+        Application.delete_env(:arbor_ai, :_test_router_non_response_ok)
       end)
 
       :ok
@@ -775,7 +798,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
 
       route = route_model("primary", :provider_a, "wire-primary", :arbor)
 
-      assert {:ok, _response} =
+      assert {:ok, response} =
                Dispatch.dispatch(build_request("ignored"),
                  provider_route_input: provider_route_input([route]),
                  route_authorizer: fn _ -> :allow end
@@ -788,6 +811,79 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       assert metadata.attempt == :primary
       assert metadata.route_identity == :router_selected
       assert metadata.provider_confirmed == false
+
+      executed = response.usage["arbor.executed_route"]
+      assert executed["provider"] == "provider_a"
+      assert executed["provider_ref"] == "wire-primary"
+      assert executed["model"] == "primary"
+      assert executed["runtime"] == "arbor"
+      assert executed["attempt"] == "primary"
+      assert executed["route_identity"] == "router_selected"
+      assert executed["provider_confirmed"] == false
+      refute match?(%{raw: %{executed_route: _}}, response)
+      refute is_map(response.raw) and Map.has_key?(response.raw, "arbor.executed_route")
+    end
+
+    test "overwrites provider-supplied arbor.executed_route on usage after exact success" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      Application.put_env(:arbor_ai, :_test_router_spoof_executed_route, true)
+
+      on_exit(fn -> Application.delete_env(:arbor_ai, :_test_router_spoof_executed_route) end)
+
+      assert {:ok, response} =
+               Dispatch.dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([primary]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      executed = response.usage["arbor.executed_route"]
+      assert executed["provider"] == "provider_a"
+      assert executed["model"] == "primary"
+      refute executed["provider"] == "attacker"
+    end
+
+    test "fallback success writes executed_route for the fallback attempt" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+
+      Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
+
+      assert {:ok, response} =
+               Dispatch.dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([fallback, primary]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      executed = response.usage["arbor.executed_route"]
+      assert executed["provider"] == "provider_b"
+      assert executed["provider_ref"] == "wire-fallback"
+      assert executed["model"] == "fallback"
+      assert executed["runtime"] == "acp"
+      assert executed["attempt"] == "fallback"
+    end
+
+    test "runtime {:ok, non-Response} fails closed without unstamped success" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      Application.put_env(:arbor_ai, :_test_router_non_response_ok, true)
+      handler_id = "router-non-response-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:arbor, :runtime, :executed],
+        fn _event, _measurements, _metadata, _config -> send(test_pid, :executed) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:error, {:selection_failed, {:provider_route, :invalid_runtime_response}}} =
+               Dispatch.dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([primary]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      refute_received :executed
     end
 
     defp provider_route_input(catalog) do

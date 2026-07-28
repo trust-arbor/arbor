@@ -167,51 +167,108 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   def idempotency, do: :idempotent_with_key
 
   defp call_llm_and_respond(prompt, node, context, graph, base_updates, opts) do
-    router_mode? = Keyword.has_key?(opts, :provider_route_input)
     tool_loop? = Map.get(node.attrs, "use_tools") in ["true", true]
 
-    cond do
-      router_mode? and tool_loop? ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "ProviderRouter dispatch is not supported for tool-loop calls",
-          context_updates: Map.put(base_updates, "last_response", nil)
+    case maybe_assemble_provider_route(opts, node, tool_loop?) do
+      {:error, %Outcome{} = outcome} ->
+        %{
+          outcome
+          | context_updates: Map.merge(base_updates, outcome.context_updates || %{})
         }
 
-      router_mode? ->
-        # The session provider may be stale once ProviderRouter selects an exact
-        # destination. Router mode authorizes every mapped attempt inside Dispatch.
-        call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+      {:ok, opts} ->
+        router_mode? = Keyword.has_key?(opts, :provider_route_input)
 
-      true ->
-        # Legacy defense-in-depth gate (2026-06-14 URI-addressing-vs-classification
-        # decision). Keep its historical behavior unchanged when router mode is absent.
-        case egress_halt_outcome(context, base_updates) do
-          %Outcome{} = halt -> halt
-          _ -> call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+        cond do
+          router_mode? and tool_loop? ->
+            %Outcome{
+              status: :fail,
+              failure_reason: "ProviderRouter dispatch is not supported for tool-loop calls",
+              context_updates: Map.put(base_updates, "last_response", nil)
+            }
+
+          router_mode? ->
+            # The session provider may be stale once ProviderRouter selects an exact
+            # destination. Router mode authorizes every mapped attempt inside Dispatch.
+            call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+
+          true ->
+            # Legacy defense-in-depth gate (2026-06-14 URI-addressing-vs-classification
+            # decision). Keep its historical behavior unchanged when router mode is absent.
+            case egress_halt_outcome(context, base_updates) do
+              %Outcome{} = halt -> halt
+              _ -> call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+            end
         end
     end
+  end
+
+  # Production assembly uses Arbor.AI facade only (Application profile).
+  # Explicit :provider_route_input remains a test/upstream opt and is not overwritten.
+  defp maybe_assemble_provider_route(opts, node, tool_loop?) do
+    cond do
+      Keyword.has_key?(opts, :provider_route_input) ->
+        {:ok, opts}
+
+      tool_loop? ->
+        {:ok, opts}
+
+      true ->
+        task_class = Map.get(node.attrs, "task_class")
+
+        case Arbor.AI.assemble_provider_route_input(task_class) do
+          {:error, :disabled} ->
+            {:ok, opts}
+
+          {:ok, input} ->
+            {:ok, Keyword.put(opts, :provider_route_input, input)}
+
+          {:error, reason} ->
+            {:error,
+             %Outcome{
+               status: :fail,
+               failure_reason: "Provider route assembly failed: #{inspect(reason)}",
+               context_updates: %{"last_response" => nil}
+             }}
+        end
+    end
+  rescue
+    _ ->
+      {:error,
+       %Outcome{
+         status: :fail,
+         failure_reason: "Provider route assembly failed: :malformed",
+         context_updates: %{"last_response" => nil}
+       }}
+  catch
+    _, _ ->
+      {:error,
+       %Outcome{
+         status: :fail,
+         failure_reason: "Provider route assembly failed: :malformed",
+         context_updates: %{"last_response" => nil}
+       }}
   end
 
   defp call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts) do
     agent_id = Context.get(context, "session.agent_id", "?")
     prompt_len = if is_binary(prompt), do: String.length(prompt), else: 0
     msgs_count = context |> Context.get("session.messages", []) |> length()
-    provider = Context.get(context, "session.llm_provider")
-    model = Context.get(context, "session.llm_model")
+    session_provider = Context.get(context, "session.llm_provider")
+    session_model = Context.get(context, "session.llm_model")
     use_tools = Map.get(node.attrs, "use_tools") in ["true", true]
 
     Logger.info(
       "[LlmHandler] #{node.id} for #{agent_id}: " <>
         "prompt=#{prompt_len} chars, messages=#{msgs_count}, " <>
-        "provider=#{provider}, model=#{model}"
+        "provider=#{session_provider}, model=#{session_model}"
     )
 
     emit_llm_signal(:llm_call_started, %{
       agent_id: agent_id,
       node_id: node.id,
-      provider: provider,
-      model: model,
+      provider: session_provider,
+      model: session_model,
       prompt_length: prompt_len,
       message_count: msgs_count,
       use_tools: use_tools
@@ -228,8 +285,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     span_meta = %{
       agent_id: agent_id,
       node_id: node.id,
-      provider: provider,
-      model: model,
+      provider: session_provider,
+      model: session_model,
       use_tools: use_tools
     }
 
@@ -247,10 +304,23 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     # if the retry also cuts off, both warnings are appended and we give up.
     llm_result = maybe_retry_on_reasoning_cutoff(llm_result, prompt, node, context, graph, opts)
 
+    # Only Dispatch router mode may author/consume usage["arbor.executed_route"].
+    # A legacy provider response must not spoof that reserved key.
+    router_mode? = Keyword.has_key?(opts, :provider_route_input)
+
     case llm_result do
       {:ok, raw_response} ->
         response = PipelineResponse.normalize(raw_response)
         response_text = response.content
+
+        executed_route =
+          if router_mode? do
+            extract_executed_route(raw_response, response)
+          else
+            nil
+          end
+
+        {provider, model} = attribution_route(executed_route, session_provider, session_model)
 
         if response_text == "" do
           # Surface reasoning_content too: for reasoning-tuned models (gemma
@@ -306,18 +376,24 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
         _ = write_stage_artifacts(opts, node.id, prompt, response_text)
 
-        # Merge duration and provider/model into usage for telemetry
+        # Merge duration and provider/model into usage for telemetry.
+        # Strip every reserved executed-route alias first so legacy spoof /
+        # incomplete evidence cannot leak into session usage; only a complete
+        # Dispatch-owned canonical route is re-added in router mode.
         usage_with_meta =
           (response.usage || %{})
+          |> strip_executed_route_aliases()
           |> Map.put("duration_ms", elapsed)
           |> Map.put("provider", provider)
           |> Map.put("model", model)
+          |> maybe_put_executed_route_usage(executed_route)
 
         updates =
           base_updates
           |> Map.put("last_response", response_text)
           |> Map.put("session.usage", usage_with_meta)
           |> Map.put("session.tool_round_count", response.tool_rounds)
+          |> maybe_put_executed_route_context(executed_route)
           |> maybe_put_perspective_key(node.attrs, response_text)
           |> maybe_put_routing_decision()
           |> maybe_put_discovered_tools()
@@ -340,8 +416,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         emit_llm_signal(:llm_call_failed, %{
           agent_id: agent_id,
           node_id: node.id,
-          provider: provider,
-          model: model,
+          provider: session_provider,
+          model: session_model,
           duration_ms: elapsed,
           error_type: error_info.type,
           error_message: error_info.message,
@@ -360,6 +436,148 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           context_updates: Map.put(base_updates, "last_response", nil)
         }
     end
+  end
+
+  @executed_route_key "arbor.executed_route"
+  # Reserved aliases that must never survive into session usage unless a
+  # complete Dispatch-owned canonical route is re-added in router mode.
+  @executed_route_aliases [
+    "arbor.executed_route",
+    "arbor_executed_route",
+    :arbor_executed_route,
+    :"arbor.executed_route"
+  ]
+  @executed_route_attempts ~w(primary fallback)
+  @executed_route_identity "router_selected"
+
+  # Trust only complete Dispatch-written usage["arbor.executed_route"] evidence.
+  # Never read Response.raw. Incomplete or enum-invalid evidence is dropped.
+  defp extract_executed_route(raw_response, normalized) do
+    usage =
+      cond do
+        is_map(normalized.usage) and not is_struct(normalized.usage) ->
+          normalized.usage
+
+        match?(%{usage: usage} when is_map(usage), raw_response) ->
+          raw_response.usage
+
+        true ->
+          %{}
+      end
+
+    case fetch_mixed_key(usage, @executed_route_key, :arbor_executed_route) do
+      {:ok, route} when is_map(route) and not is_struct(route) -> sanitize_executed_route(route)
+      _ -> nil
+    end
+  end
+
+  # Closed seven-field canonical route. Reject incomplete / enum-invalid evidence.
+  defp sanitize_executed_route(route) do
+    provider = route_string(route, "provider", :provider)
+    provider_ref = route_string(route, "provider_ref", :provider_ref)
+    model = route_string(route, "model", :model)
+    runtime = route_string(route, "runtime", :runtime)
+    attempt = route_attempt(route)
+    identity = route_identity(route)
+    confirmed = route_provider_confirmed(route)
+
+    if is_binary(provider) and is_binary(provider_ref) and is_binary(model) and
+         is_binary(runtime) and is_binary(attempt) and identity == @executed_route_identity and
+         confirmed == false do
+      %{
+        "provider" => provider,
+        "provider_ref" => provider_ref,
+        "model" => model,
+        "runtime" => runtime,
+        "attempt" => attempt,
+        "route_identity" => @executed_route_identity,
+        "provider_confirmed" => false
+      }
+    else
+      nil
+    end
+  end
+
+  # Map.fetch-style mixed-key reader: preserves false, rejects conflicting aliases.
+  defp fetch_mixed_key(map, string_key, atom_key) when is_map(map) do
+    case {Map.fetch(map, string_key), Map.fetch(map, atom_key)} do
+      {{:ok, value}, :error} -> {:ok, value}
+      {:error, {:ok, value}} -> {:ok, value}
+      {{:ok, value}, {:ok, value}} -> {:ok, value}
+      {{:ok, _}, {:ok, _}} -> :conflict
+      {:error, :error} -> :missing
+    end
+  end
+
+  defp fetch_mixed_key(_map, _string_key, _atom_key), do: :missing
+
+  defp route_string(route, string_key, atom_key) do
+    case fetch_mixed_key(route, string_key, atom_key) do
+      {:ok, value} when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 512 ->
+        if String.valid?(value) and String.trim(value) == value and
+             not String.match?(value, ~r/[\x00-\x1F\x7F]/),
+           do: value,
+           else: nil
+
+      {:ok, value} when is_atom(value) and value not in [nil, true, false] ->
+        Atom.to_string(value)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp route_attempt(route) do
+    case fetch_mixed_key(route, "attempt", :attempt) do
+      {:ok, value} when is_binary(value) and value in @executed_route_attempts -> value
+      {:ok, :primary} -> "primary"
+      {:ok, :fallback} -> "fallback"
+      _ -> nil
+    end
+  end
+
+  defp route_identity(route) do
+    case fetch_mixed_key(route, "route_identity", :route_identity) do
+      {:ok, @executed_route_identity} -> @executed_route_identity
+      {:ok, :router_selected} -> @executed_route_identity
+      _ -> nil
+    end
+  end
+
+  defp route_provider_confirmed(route) do
+    # Must not use `||` — false is valid Dispatch evidence and is falsy in Elixir.
+    case fetch_mixed_key(route, "provider_confirmed", :provider_confirmed) do
+      {:ok, false} -> false
+      _ -> nil
+    end
+  end
+
+  defp strip_executed_route_aliases(usage) when is_map(usage) and not is_struct(usage) do
+    Map.drop(usage, @executed_route_aliases)
+  end
+
+  defp strip_executed_route_aliases(_usage), do: %{}
+
+  defp attribution_route(%{"provider" => provider, "model" => model}, _session_p, _session_m)
+       when is_binary(provider) and is_binary(model) do
+    {provider, model}
+  end
+
+  defp attribution_route(_executed, session_provider, session_model),
+    do: {session_provider, session_model}
+
+  defp maybe_put_executed_route_usage(usage, nil), do: usage
+
+  defp maybe_put_executed_route_usage(usage, executed_route) when is_map(executed_route) do
+    usage
+    |> Map.put(@executed_route_key, executed_route)
+    |> Map.put("runtime", Map.get(executed_route, "runtime"))
+  end
+
+  defp maybe_put_executed_route_context(updates, nil), do: updates
+
+  defp maybe_put_executed_route_context(updates, executed_route) when is_map(executed_route) do
+    Map.put(updates, "turn.executed_route", executed_route)
   end
 
   # ── Egress gate (2026-06-14) — compute-node LLM path ──────────────────────

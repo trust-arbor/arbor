@@ -73,11 +73,11 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
   def decide_route(input) do
     with {:ok, input} <- normalize_input(input),
          {:ok, now} <- normalize_now(input.now),
-         {:ok, registry} <- normalize_registry(input[:task_registry], input[:requirements]),
+         {:ok, registry} <- admit_task_registry(input[:task_registry], input[:requirements]),
          {:ok, class} <- resolve_task_class(input.task_class, registry),
          {:ok, requirements} <- normalize_requirements(class.requirements),
          {:ok, catalog} <- validate_catalog(input.catalog),
-         {:ok, scoreboard} <- validate_scoreboard(input.scoreboard),
+         {:ok, scoreboard} <- admit_scoreboard(input.scoreboard),
          {:ok, observations} <- validate_observations(input.observations),
          {:ok, budgets} <- validate_budgets(input.budgets),
          {:ok, policy} <- normalize_policy(input[:policy] || %{}),
@@ -104,6 +104,46 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
   @doc "Alias for callers that prefer the shorter pure-router name."
   @spec route(input() | keyword()) :: {:ok, map()} | {:error, term()}
   def route(input), do: decide_route(input)
+
+  @doc """
+  Structurally admit a task registry (must include `"default"`).
+
+  Shared by `decide_route/1` and `RouteInputAssembler` so registry shape has one
+  pure source of truth. Returns normalized class → requirements maps.
+  """
+  @spec admit_task_registry(term(), term()) :: {:ok, map()} | {:error, term()}
+  def admit_task_registry(registry, direct_requirements \\ nil) do
+    normalize_registry(registry, direct_requirements)
+  end
+
+  @doc """
+  Structurally admit scoreboard rows (bounds, known fields, metrics, uniqueness).
+
+  Shared by `decide_route/1` and `RouteInputAssembler`.
+  """
+  @spec admit_scoreboard(term()) :: {:ok, [map()]} | {:error, term()}
+  def admit_scoreboard(rows), do: validate_scoreboard(rows)
+
+  @doc """
+  Structurally admit catalog `%ModelEntry{}` contracts (bounds + field contracts).
+
+  Shared by `decide_route/1` and `RouteInputAssembler` so injected direct catalogs
+  and reader-returned catalogs validate every ModelEntry contract before Dispatch.
+  """
+  @spec admit_catalog(term()) :: {:ok, [ModelEntry.t()]} | {:error, term()}
+  def admit_catalog(catalog), do: validate_catalog(catalog)
+
+  @doc """
+  Admit a bounded task-class identifier (segments, length, charset).
+  """
+  @spec admit_task_class(term()) :: {:ok, String.t()} | {:error, term()}
+  def admit_task_class(value), do: normalize_task_class(value)
+
+  @doc """
+  Admit an optional bounded identifier (provider/runtime/model-id strings).
+  """
+  @spec admit_identifier(term(), atom()) :: {:ok, String.t() | nil} | {:error, term()}
+  def admit_identifier(value, field), do: optional_identifier(value, field)
 
   defp normalize_input(input) when is_list(input) do
     with {:ok, input} <- canonical_keyword_fields(input, @input_keys, :invalid_route_input),

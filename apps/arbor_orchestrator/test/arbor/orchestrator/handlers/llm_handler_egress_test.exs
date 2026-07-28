@@ -22,8 +22,37 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
     @moduledoc false
     @behaviour Arbor.LLM.Dispatcher
 
-    def start_link, do: Agent.start_link(fn -> [] end, name: __MODULE__)
+    # Unlinked named Agent owned by this test module. setup starts it; on_exit
+    # stops it explicitly. Avoid Agent.start_link (test-process link) and avoid
+    # broad rescue/catch that would hide owner death.
+    def start do
+      case Agent.start(fn -> [] end, name: __MODULE__) do
+        {:ok, pid} ->
+          {:ok, pid}
+
+        {:error, {:already_started, pid}} ->
+          :ok = stop_pid(pid)
+          Agent.start(fn -> [] end, name: __MODULE__)
+      end
+    end
+
+    def stop do
+      case Process.whereis(__MODULE__) do
+        nil -> :ok
+        pid -> stop_pid(pid)
+      end
+    end
+
     def calls, do: Agent.get(__MODULE__, & &1) |> Enum.reverse()
+    def reset, do: Agent.update(__MODULE__, fn _ -> [] end)
+
+    defp stop_pid(pid) do
+      if Process.alive?(pid) do
+        Agent.stop(pid)
+      else
+        :ok
+      end
+    end
 
     @impl true
     def dispatch(request, opts) do
@@ -71,7 +100,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
   end
 
   setup do
-    {:ok, _} = RecordingDispatcher.start_link()
+    {:ok, _} = RecordingDispatcher.start()
     Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
 
     prev_enforce = Application.get_env(:arbor_security, :egress_gate_enforcing)
@@ -82,6 +111,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
       Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
       Application.delete_env(:arbor_orchestrator, :_test_exact_route)
       Application.delete_env(:arbor_orchestrator, :_test_egress_pid)
+      _ = RecordingDispatcher.stop()
 
       case prev_enforce do
         nil -> Application.delete_env(:arbor_security, :egress_gate_enforcing)
@@ -146,7 +176,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
       })
 
     outcome =
-      LlmHandler.execute(build_node(), context, build_graph(),
+      LlmHandler.execute(
+        build_node(),
+        context,
+        build_graph(),
         provider_route_input: %{assembled: "by-an-upstream-caller"}
       )
 
@@ -203,7 +236,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
       })
 
     outcome =
-      LlmHandler.execute(build_node(), context, build_graph(),
+      LlmHandler.execute(
+        build_node(),
+        context,
+        build_graph(),
         provider_route_input: %{assembled: "by-an-upstream-caller"}
       )
 
@@ -238,7 +274,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
         })
 
       outcome =
-        LlmHandler.execute(build_node(), context, build_graph(),
+        LlmHandler.execute(
+          build_node(),
+          context,
+          build_graph(),
           provider_route_input: %{assembled: "by-an-upstream-caller"}
         )
 
@@ -253,7 +292,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
     node = put_in(build_node(), [:attrs, "use_tools"], "true")
 
     outcome =
-      LlmHandler.execute(node, build_context(), build_graph(),
+      LlmHandler.execute(
+        node,
+        build_context(),
+        build_graph(),
         provider_route_input: %{assembled: "by-an-upstream-caller"}
       )
 
