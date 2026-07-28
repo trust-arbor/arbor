@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-27",
-  "entry_count": 535,
+  "entry_count": 536,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6470,8 +6470,8 @@
       "destination": ".claude/skills/applied-learning-acp-mcp.md",
       "anchor": "applied-learning-provider-spend-limit-notices-are-not-successful-no-change-turns",
       "source_date": "2026-07-27",
-      "source_incident": "found 2026-07-27 in `task_8195`).",
-      "content_sha256": "fc1381eab39af6e871e6371a7237ef27c3f375bd940917c06dab3278d3d0b4fe",
+      "source_incident": "found 2026-07-27 in `task_8195`, then proven end to end 2026-07-28 in `task_70274`).",
+      "content_sha256": "8b3fb229a9ca3b0c373c488f8d99b29d70d351e5c5046c61406be5d5ee5ccfe2",
       "always_loaded": false
     },
     {
@@ -6499,8 +6499,21 @@
       "source_incident": "found 2026-07-27 while reviewing typed coding-plan admission failures).",
       "content_sha256": "a5a4b3d388657bd7c8eeba944139ce5632c045c8e89c1c533837753067da3e97",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 536,
+      "source_kind": "post-migration",
+      "slug": "direct-engine-fixtures-must-seed-owner-computed-budget-context",
+      "title": "Direct Engine fixtures must seed owner-computed budget context.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-direct-engine-fixtures-must-seed-owner-computed-budget-context",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when terminal-gate budgeting exposed 58 stale direct-pipeline fixture failures).",
+      "content_sha256": "ddc8ea797c9028696c86b18bfda0b62dc4ee7d753579f0bdf0302b8742898930",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 74
+  "post_migration_entry_count": 75
 }

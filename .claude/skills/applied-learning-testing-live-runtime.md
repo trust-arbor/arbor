@@ -505,3 +505,15 @@ paths. Reuse a compatible pinned test build cache, or materialize the complete
 dependency tree inside the worktree; do not diagnose the resulting dependency
 compile failure as an application regression (found 2026-07-27 when fresh
 `yamerl` compilation could not resolve its existing headers).
+
+<!-- applied-learning: direct-engine-fixtures-must-seed-owner-computed-budget-context -->
+<a id="applied-learning-direct-engine-fixtures-must-seed-owner-computed-budget-context"></a>
+**Direct Engine fixtures must seed owner-computed budget context.** Production
+owners can validate a plan, allocate stage budgets, and project dotted context
+keys before invoking a packaged graph. A test that calls `Engine.run/2` directly
+bypasses that boundary and can make a sound graph fail broadly because required
+budget keys are absent. Build the fixture through the same pure budget policy and
+seed every owner-projected key; assertions about a stage timeout must target the
+effective allocated cap, not the uncapped request supplied before allocation
+(found 2026-07-28 when terminal-gate budgeting exposed 58 stale direct-pipeline
+fixture failures).

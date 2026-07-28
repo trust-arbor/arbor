@@ -479,12 +479,17 @@ when a design-checkpoint rework answer failed as `:durable_unavailable`).
 <a id="applied-learning-provider-spend-limit-notices-are-not-successful-no-change-turns"></a>
 **Provider spend-limit notices are not successful no-change turns.** Claude ACP can
 emit a human-readable monthly spend-limit notice as its only response and then end
-the turn without touching the workspace. Classifying that sequence as successful
+the turn without touching the workspace; the Claude CLI can simultaneously report
+raw `is_error: true`, HTTP 429, and a misleading success subtype that ExMCP
+normalizes into an ACP `end_turn`. Classifying that sequence as successful
 `no_changes` hides deterministic account exhaustion and can route more work into
-the same unavailable pool. Recognize only bounded, provider-attested exhaustion
-evidence, terminalize it as a typed routing failure, and preserve unknown notices
-as protocol failures rather than inferring success (found 2026-07-27 in
-`task_8195`).
+the same unavailable pool. Recognize only the exact bounded notice accompanied by
+the adapter's namespaced metadata, zero usage/cost, and a valid provider session
+ID. Classify it before recording transcript success, terminalize it as a typed
+routing failure, and preserve that session ID through delivery and terminal
+evidence. Unknown or weakly attested notices remain protocol failures rather than
+inferred success (found 2026-07-27 in `task_8195`, then proven end to end
+2026-07-28 in `task_70274`).
 
 <!-- applied-learning: validate-closed-typed-envelopes-before-generic-json-canonicalization -->
 <a id="applied-learning-validate-closed-typed-envelopes-before-generic-json-canonicalization"></a>
