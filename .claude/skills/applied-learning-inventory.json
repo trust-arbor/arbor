@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 552,
+  "entry_count": 553,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6699,13 +6699,13 @@
       "source_ordinal": 551,
       "source_kind": "post-migration",
       "slug": "aggregate-payload-bounds-must-compose-from-admitted-component-bounds",
-      "title": "Aggregate payload bounds must compose from admitted component bounds.",
+      "title": "Aggregate payload contracts must reconcile component and envelope bounds.",
       "topic": "acp-mcp",
       "destination": ".claude/skills/applied-learning-acp-mcp.md",
       "anchor": "applied-learning-aggregate-payload-bounds-must-compose-from-admitted-component-bounds",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 when a valid 14,324-byte Grok design parsed successfully but design-checkpoint Open rejected its packet-composed description as too large).",
-      "content_sha256": "a1544afaf741070b863b52a2c603cc3b7b30f36d8421c993b2cc96037f7234f9",
+      "content_sha256": "8469812d057908b5ba4f80e1ae06bf8f5440ed79cf83a50e4a2a12bbbaa281ac",
       "always_loaded": false
     },
     {
@@ -6720,8 +6720,21 @@
       "source_incident": "found 2026-07-28 while replaying the first Phase F reconciliation dispatch).",
       "content_sha256": "6bad734e5b1f5f1011049fb13d8377db780c0c783832d1bcda3a78ca4e8bfa0c",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 553,
+      "source_kind": "post-migration",
+      "slug": "approval-and-rework-notes-are-bounded-control-plane-messages",
+      "title": "Approval and rework notes are bounded control-plane messages.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-approval-and-rework-notes-are-bounded-control-plane-messages",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when the first detailed Grok rework note was rejected because the approval note exceeded its maximum size).",
+      "content_sha256": "e19f0e1a7dd4b5a5dcce7b3f1905201eae68daad8c9708c391760cc871fe09fd",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 91
+  "post_migration_entry_count": 92
 }

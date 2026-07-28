@@ -582,12 +582,26 @@ the repair prompt never disclosed Arbor's 16,384-byte limit).
 
 <!-- applied-learning: aggregate-payload-bounds-must-compose-from-admitted-component-bounds -->
 <a id="applied-learning-aggregate-payload-bounds-must-compose-from-admitted-component-bounds"></a>
-**Aggregate payload bounds must compose from admitted component bounds.** If a
-contract accepts a 16 KB design and 256 KB work packet, a later interaction
-cannot concatenate packet, task, and design into an independently chosen 16 KB
-description or 32 KB metadata cap. Derive aggregate ceilings from the public
-component maxima plus explicit serialization overhead, then pass maximum
-admitted component values through the real public operation. Per-field tests
-alone miss the downstream contradiction (found 2026-07-28 when a valid
-14,324-byte Grok design parsed successfully but design-checkpoint Open rejected
-its packet-composed description as too large).
+**Aggregate payload contracts must reconcile component and envelope bounds.**
+If a component accepts a 16 KB design and 256 KB work packet, a later
+interaction must not silently assume that every combination fits an unrelated
+16 KB description or 32 KB metadata cap. Either derive an envelope that admits
+the component maxima, reject incompatible combinations explicitly at the
+earliest real public boundary, or store full evidence separately and carry a
+bounded digest/reference. Keep operator prose short, retain exact evidence in
+the authoritative channel, and pass representative plus maximum admitted
+values through the real public operation. Never report caller-invalid payloads
+as backend unavailability. Per-field tests alone miss the downstream
+contradiction (found 2026-07-28 when a valid 14,324-byte Grok design parsed
+successfully but design-checkpoint Open rejected its packet-composed
+description as too large).
+
+<!-- applied-learning: approval-and-rework-notes-are-bounded-control-plane-messages -->
+<a id="applied-learning-approval-and-rework-notes-are-bounded-control-plane-messages"></a>
+**Approval and rework notes are bounded control-plane messages.** Put only the
+decision and a compact, actionable correction ledger in an approval answer;
+reference task, request, or artifact identities for longer evidence instead of
+embedding the full review. Regress both an over-limit rejection and an accepted
+bounded note so feedback cannot disappear before the delegated worker sees it
+(found 2026-07-28 when the first detailed Grok rework note was rejected because
+the approval note exceeded its maximum size).
