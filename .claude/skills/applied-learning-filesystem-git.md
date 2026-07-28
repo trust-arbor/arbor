@@ -326,3 +326,13 @@ Stdlib extensions are not loaded implicitly either: require the owning library
 explicitly (for example, `require "tmpdir"` before `Dir.tmpdir`) instead of
 assuming another tool already loaded it (found 2026-07-23 during worktree
 settlement).
+
+<!-- applied-learning: verify-source-escapes-remain-text-after-agent-edits -->
+<a id="applied-learning-verify-source-escapes-remain-text-after-agent-edits"></a>
+**Verify source escapes remain text after agent edits.** An editor or tool-call
+transport can decode a source literal such as `\u0000` into a real NUL byte while
+rewriting a test, causing Git to classify the whole file as binary and hiding the
+ordinary line diff. When an edited source file unexpectedly becomes binary, inspect
+its NUL count and force the intended language escape to remain textual; review the
+result with `git diff --text` before accepting it (found 2026-07-28 when a Claude ACP
+edit converted an Elixir invalid-input fixture into a literal NUL).

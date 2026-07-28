@@ -523,3 +523,47 @@ the caller to replay the mutation; retries may poll or coalesce against the exac
 destination and result fingerprint but may not create a second owner (found
 2026-07-28 when adoption completed in `TaskStore` after ExMCP had already returned
 an empty HTTP 500).
+
+<!-- applied-learning: coding-plan-contract-admission-does-not-prove-template-support -->
+<a id="applied-learning-coding-plan-contract-admission-does-not-prove-template-support"></a>
+**Coding-plan contract admission does not prove template support.** Before
+dispatching a reviewed plan with an optional feature, compile that exact normalized
+plan or verify the active template advertises the feature. Plan v2 currently accepts
+nonempty `rework.stop_conditions`, while `coding-change-v1` rejects it as
+`{:unsupported_v1_feature, "rework.stop_conditions"}`. Contract success alone would
+spend a failed preflight attempt; omit unsupported optional fields without changing
+the bound work packet (found 2026-07-28 dispatching the Phase E route-input slice).
+
+<!-- applied-learning: compute-generated-artifact-digests-at-the-owned-admission-boundary -->
+<a id="applied-learning-compute-generated-artifact-digests-at-the-owned-admission-boundary"></a>
+**Compute generated-artifact digests at the owned admission boundary.** A worker
+that authors a design controls both its text and any self-reported digest, so asking
+the model to calculate SHA-256 adds no authority or tamper resistance. Parse the
+closed bounded text envelope, compute its digest inside Arbor, and bind approval and
+execution to that server-owned result. Requiring model-computed integrity fields
+only creates an expensive protocol-repair failure mode (found 2026-07-28 when Grok
+returned the empty-string digest for an 8,378-byte Phase E design).
+
+<!-- applied-learning: acp-steering-contracts-must-match-the-semantic-worker-phase -->
+<a id="applied-learning-acp-steering-contracts-must-match-the-semantic-worker-phase"></a>
+**ACP steering contracts must match the semantic worker phase.** Arbor's current
+managed coding-task control is an implementation follow-up: it tells the worker to
+apply a correction in the worktree and return the advisory implementation envelope.
+Do not use that control to repair a design-checkpoint envelope, even when TaskStore's
+generic current step is named `implement`; queued controls run before the active
+`acp_send_message` call returns and can replace the response the design parser sees.
+Make controls phase-aware before steering design or review turns (found 2026-07-28
+while attempting to accelerate the Phase E design-digest repair).
+
+<!-- applied-learning: adopt-provider-refined-session-identities-before-continuity -->
+<a id="applied-learning-adopt-provider-refined-session-identities-before-continuity"></a>
+**Adopt provider-refined session identities before continuity consumers.** Some
+ACP adapters return a transient local handle from `session/new` and reveal the
+durable provider identity only in the first prompt result; Claude uses
+`claude_sdk_*` before emitting its resumable UUID in namespaced metadata.
+Validate that provider-specific transition and atomically replace both
+`session_id` and `last_session_id` before status, recovery, or the next prompt.
+Reject malformed identities and later drift, leave other providers untouched,
+and make fake clients model the transient-to-durable transition rather than a
+single static ID (found 2026-07-28 after recovery tried to resume
+`claude_sdk_179` instead of Claude's persisted UUID).

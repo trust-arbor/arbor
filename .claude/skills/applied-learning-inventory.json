@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 544,
+  "entry_count": 549,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6616,8 +6616,73 @@
       "source_incident": "found 2026-07-28 while adding the executable coding-profile declaration guard).",
       "content_sha256": "9eab8a02d066871724abc12ee3ccae56f1bc6af0d5856556505a5708cea94be7",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 545,
+      "source_kind": "post-migration",
+      "slug": "coding-plan-contract-admission-does-not-prove-template-support",
+      "title": "Coding-plan contract admission does not prove template support.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-coding-plan-contract-admission-does-not-prove-template-support",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 dispatching the Phase E route-input slice).",
+      "content_sha256": "5c45089f5adbed50ee9955bef176a73f0088e1bdd83c8bf97132fc546b912735",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 546,
+      "source_kind": "post-migration",
+      "slug": "compute-generated-artifact-digests-at-the-owned-admission-boundary",
+      "title": "Compute generated-artifact digests at the owned admission boundary.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-compute-generated-artifact-digests-at-the-owned-admission-boundary",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when Grok returned the empty-string digest for an 8,378-byte Phase E design).",
+      "content_sha256": "3a807eed1d2035b5b96cdc974f2a93ee201daca9f80db64391c805cfb710b208",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 547,
+      "source_kind": "post-migration",
+      "slug": "acp-steering-contracts-must-match-the-semantic-worker-phase",
+      "title": "ACP steering contracts must match the semantic worker phase.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-acp-steering-contracts-must-match-the-semantic-worker-phase",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while attempting to accelerate the Phase E design-digest repair).",
+      "content_sha256": "81c01e0c3e6f073f4ee9b75582cb73c67fd97dc217fdbd500b48a683e02633a0",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 548,
+      "source_kind": "post-migration",
+      "slug": "verify-source-escapes-remain-text-after-agent-edits",
+      "title": "Verify source escapes remain text after agent edits.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-verify-source-escapes-remain-text-after-agent-edits",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when a Claude ACP edit converted an Elixir invalid-input fixture into a literal NUL).",
+      "content_sha256": "bd3dda4a2f444bfb60cfc63c2204ee6f9cf0d571b8d87f6db9ff3b31724da162",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 549,
+      "source_kind": "post-migration",
+      "slug": "adopt-provider-refined-session-identities-before-continuity",
+      "title": "Adopt provider-refined session identities before continuity consumers.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-adopt-provider-refined-session-identities-before-continuity",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 after recovery tried to resume `claude_sdk_179` instead of Claude's persisted UUID).",
+      "content_sha256": "b444776684009129e2b273dbf234e3ad4b00d1ce7012f0212f52127a5a2cb3f3",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 83
+  "post_migration_entry_count": 88
 }
