@@ -2,7 +2,7 @@ defmodule Arbor.LLM.OAuthTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
-  alias Arbor.LLM.OAuth
+  alias Arbor.LLM.{Client, Message, OAuth, Request}
 
   @env_keys [
     :oauth_store_dir,
@@ -225,11 +225,16 @@ defmodule Arbor.LLM.OAuthTest do
       assert {:error, :oauth_source_credential_invalid} = OAuth.credential_receipt(:openai)
     end
 
-    test "security regression: adapter discovery refuses raw stores and CLI-file presence",
+    test "security regression: OAuth routes preserve credential errors without accepting raw stores",
          %{store_dir: store_dir} do
       File.write!(
         Path.join(store_dir, "openai.json"),
         Jason.encode!(%{"access_token" => "legacy", "refresh_token" => "legacy-secret"})
+      )
+
+      File.write!(
+        Path.join(store_dir, "xai.json"),
+        Jason.encode!(%{"access_token" => "legacy-xai", "refresh_token" => "legacy-xai-secret"})
       )
 
       cli_path = Path.join(store_dir, "cli-openai.json")
@@ -248,8 +253,25 @@ defmodule Arbor.LLM.OAuthTest do
           discover_oauth: true
         )
 
-      refute Map.has_key?(client.adapters, "openai_oauth")
-      refute Map.has_key?(client.adapters, "xai_oauth")
+      assert client.adapters["openai_oauth"] == Arbor.LLM.Adapter.OAuthResponses
+      assert client.adapters["xai_oauth"] == Arbor.LLM.Adapter.OAuthResponses
+
+      for {provider, model} <- [
+            {"openai_oauth", "gpt-5.6-sol"},
+            {"xai_oauth", "grok-4.5"}
+          ] do
+        request = %Request{
+          provider: provider,
+          model: model,
+          messages: [Message.new(:user, "credential routing regression")]
+        }
+
+        assert {:error, :oauth_credential_migration_required} =
+                 Client.complete(client, request)
+      end
+
+      refute OAuth.configured?(:openai)
+      refute OAuth.configured?(:xai)
       assert File.read!(source_path) == source_bytes
     end
 

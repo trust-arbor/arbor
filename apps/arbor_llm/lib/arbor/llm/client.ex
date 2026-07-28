@@ -1343,14 +1343,6 @@ defmodule Arbor.LLM.Client do
         do: {provider, :present}
   end
 
-  defp maybe_put_oauth(adapters, provider_key, oauth_provider) do
-    if Arbor.LLM.OAuth.configured?(oauth_provider) do
-      Map.put(adapters, provider_key, Arbor.LLM.Adapter.OAuthResponses)
-    else
-      adapters
-    end
-  end
-
   defp discover_env_adapters(opts) do
     api_adapters =
       env_provider_keys()
@@ -1360,14 +1352,15 @@ defmodule Arbor.LLM.Client do
 
     adapters = api_adapters
 
-    # Subscription-OAuth adapters (raw model on a flat subscription instead of an API key).
-    # Registered only for a validated Arbor-owned credential envelope. Discovery never refreshes,
-    # reads CLI credentials, or treats a legacy/raw store as ready.
+    # Subscription-OAuth providers are known transports even when their credentials are not
+    # currently usable. Registering the adapters independently lets the adapter preserve a typed
+    # login/migration error and lets a cached client observe credentials installed after startup.
+    # Credential validation remains lazy and fail-closed in OAuth.Responses.
     adapters =
       if Keyword.get(opts, :discover_oauth, true) do
         adapters
-        |> maybe_put_oauth("openai_oauth", :openai)
-        |> maybe_put_oauth("xai_oauth", :xai)
+        |> Map.put("openai_oauth", Arbor.LLM.Adapter.OAuthResponses)
+        |> Map.put("xai_oauth", Arbor.LLM.Adapter.OAuthResponses)
       else
         adapters
       end
