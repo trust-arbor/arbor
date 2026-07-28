@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 565,
+  "entry_count": 571,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6889,8 +6889,86 @@
       "source_incident": "found 2026-07-28 while checking whether delegated validation was still active).",
       "content_sha256": "d2115efb61a3dc08387b70aef07ecea3ed1dd80dbaa5bc7dd87b151de66a72b3",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 566,
+      "source_kind": "post-migration",
+      "slug": "coding-plan-numeric-bounds-are-runtime-contracts-not-advisory-tuning",
+      "title": "Coding-plan numeric bounds are runtime contracts, not advisory tuning.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-coding-plan-numeric-bounds-are-runtime-contracts-not-advisory-tuning",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when the first Phase F pending-approval settlement dispatch used `max_cycles: 3`).",
+      "content_sha256": "d092163092d00ca9d7daad44893fb96d172e4e8829f07230b35f942f746a6df2",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 567,
+      "source_kind": "post-migration",
+      "slug": "design-required-checkpoint-turns-must-be-observational",
+      "title": "Design-required checkpoint turns must be observational.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-design-required-checkpoint-turns-must-be-observational",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 during the Phase F pending-approval settlement delegation).",
+      "content_sha256": "fe0fa981d7af88ef58158b9f7756c6e8b99527fa983ec9c52351b92822625db5",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 568,
+      "source_kind": "post-migration",
+      "slug": "preserve-retained-worker-trees-without-mutating-the-source-owned-workspace",
+      "title": "Preserve retained worker trees without mutating the source-owned workspace.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-preserve-retained-worker-trees-without-mutating-the-source-owned-workspace",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 salvaging the rejected Phase F design-turn implementation).",
+      "content_sha256": "4d53a0207a3b624eefaa98a071ca4e3c51e2d15eb2ba10f67114c986ce74f477",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 569,
+      "source_kind": "post-migration",
+      "slug": "conditional-readiness-fixtures-must-assert-their-precondition",
+      "title": "Conditional readiness fixtures must assert their precondition.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-conditional-readiness-fixtures-must-assert-their-precondition",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while reviewing pending-approval settlement tests).",
+      "content_sha256": "606eb33b23899805f75908d1992441d0d84dd1804b0ba3794582bdcffbe2a99c",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 570,
+      "source_kind": "post-migration",
+      "slug": "zsh-command-substitution-does-not-split-newline-path-lists",
+      "title": "Zsh command substitution does not split newline path lists by default.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-zsh-command-substitution-does-not-split-newline-path-lists",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 during the Phase F scoped formatting check).",
+      "content_sha256": "189ab184fd56770a458a461b7b4a125efa84efb0707fc44d132a5fbf7ca9bda5",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 571,
+      "source_kind": "post-migration",
+      "slug": "negative-reconciliation-needs-complete-inventory-and-durable-terminal-evidence",
+      "title": "Negative reconciliation needs complete inventory and durable terminal evidence.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-negative-reconciliation-needs-complete-inventory-and-durable-terminal-evidence",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while hardening exact pending-approval settlement across Consensus and Comms).",
+      "content_sha256": "73346a9b3f0de689ccf0a542bf9eb4f3fc8fd0ac06b4a30f7aded034719be7af",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 104
+  "post_migration_entry_count": 110
 }

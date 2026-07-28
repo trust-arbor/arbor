@@ -600,3 +600,23 @@ batches until that deadline, and return exact completed and unstarted evidence
 on capacity exhaustion without silently reducing required coverage (found
 2026-07-28 when 38 cross-app batches were assigned a synthetic 45.6-million-ms
 requirement against 272 seconds and all 667 test files remained unstarted).
+
+<!-- applied-learning: conditional-readiness-fixtures-must-assert-their-precondition -->
+<a id="applied-learning-conditional-readiness-fixtures-must-assert-their-precondition"></a>
+**Conditional readiness fixtures must assert their precondition.** A regression
+wrapped in `if Process.whereis(owner)` or another optional-readiness branch can
+silently execute no assertion and still report green when the required service
+never started. Start or inject the dependency explicitly, assert the fixture is
+ready, and then prove the public behavior; a skipped negative-security path is
+not evidence (found 2026-07-28 while reviewing pending-approval settlement
+tests).
+
+<!-- applied-learning: zsh-command-substitution-does-not-split-newline-path-lists -->
+<a id="applied-learning-zsh-command-substitution-does-not-split-newline-path-lists"></a>
+**Zsh command substitution does not split newline path lists by default.**
+Passing `$(git diff --name-only ...)` to a formatter can produce one
+newline-containing argument instead of one argument per path. Use a native Zsh
+array expansion such as `${(@f)...}` for trusted line-delimited paths, or a
+NUL-delimited producer and consumer for arbitrary filenames, then verify the
+tool actually inspected the intended file count (found 2026-07-28 during the
+Phase F scoped formatting check).

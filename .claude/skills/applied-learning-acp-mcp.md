@@ -653,3 +653,33 @@ implementation prompt. Keep the approval note as the authoritative review
 record, but treat implementation conformance as a separate gate (found
 2026-07-28 when an approved ACP settlement naming and arity correction was
 absent from Grok's candidate).
+
+<!-- applied-learning: coding-plan-numeric-bounds-are-runtime-contracts-not-advisory-tuning -->
+<a id="applied-learning-coding-plan-numeric-bounds-are-runtime-contracts-not-advisory-tuning"></a>
+**Coding-plan numeric bounds are runtime contracts, not advisory tuning.**
+Read the active plan contract before dispatching optional retry or rework
+settings; plan v2 currently admits `rework.max_cycles` only from zero through
+two. An out-of-range value fails admission before a worker starts, so copying a
+plausible higher retry count into a task wastes an orchestration attempt rather
+than granting more recovery capacity (found 2026-07-28 when the first Phase F
+pending-approval settlement dispatch used `max_cycles: 3`).
+
+<!-- applied-learning: design-required-checkpoint-turns-must-be-observational -->
+<a id="applied-learning-design-required-checkpoint-turns-must-be-observational"></a>
+**Design-required checkpoint turns must be observational.** Tell the delegated
+worker explicitly to inspect and design without editing the worktree until the
+checkpoint is approved. Arbor correctly rejects a design turn that changes the
+workspace as `design_turn_modified_workspace`, even when the resulting patch is
+useful; implementation authority begins only after approval, not when the model
+believes its design is obvious (found 2026-07-28 during the Phase F
+pending-approval settlement delegation).
+
+<!-- applied-learning: preserve-retained-worker-trees-without-mutating-the-source-owned-workspace -->
+<a id="applied-learning-preserve-retained-worker-trees-without-mutating-the-source-owned-workspace"></a>
+**Preserve retained worker trees without mutating the source-owned workspace.**
+When a failed coding task retains a useful dirty tree, materialize its exact
+state through an alternate Git index, `write-tree`, and `commit-tree`, then pin
+that synthetic commit under a preservation ref and review it from a separate
+worktree. Do not stage, reset, commit, or otherwise alter the retained source
+workspace after Arbor has published its ownership and fingerprint evidence
+(found 2026-07-28 salvaging the rejected Phase F design-turn implementation).

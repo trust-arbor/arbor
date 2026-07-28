@@ -185,3 +185,14 @@ that ID, and reject an explicit duplicate before spawning or replacing an
 in-memory owner. Keep immutable stores fail closed on same-name/different-content
 reuse as the final cross-restart backstop (found 2026-07-28 when live
 `task_58178` collided with a retained 2026-07-19 coding artifact).
+
+<!-- applied-learning: negative-reconciliation-needs-complete-inventory-and-durable-terminal-evidence -->
+<a id="applied-learning-negative-reconciliation-needs-complete-inventory-and-durable-terminal-evidence"></a>
+**Negative reconciliation needs complete inventory and durable terminal
+evidence.** A source owner may return `already_absent` only after complete
+hydration proves the resource is absent; partial recovery must remain degraded
+and fail closed. For an existing resource, persist the terminal cancellation or
+abandonment event before changing hot state or publishing success, and regress
+both restart replay and append failure so a transient reply cannot resurrect
+the resource later (found 2026-07-28 while hardening exact pending-approval
+settlement across Consensus and Comms).
