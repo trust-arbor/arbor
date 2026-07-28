@@ -391,7 +391,15 @@ routing; mutation tests must remove or bypass each increment and fail before exe
 
 <!-- applied-learning: tests-that-mutate-global-application-config-must-not-run-async -->
 <a id="applied-learning-tests-that-mutate-global-application-config-must-not-run-async"></a>
-**Tests that mutate global Application config must not run async.** Restoring values in `on_exit` does not prevent another async module from observing the temporary value. Mark the whole module `async: false` whenever it changes shared Application env, globally named processes, or shared ETS state (found 2026-07-19 when the Comms suite intermittently hid the Signal response channel).
+**Tests that mutate shared runtime state must not run async and must restore every
+injected seam.** Capture each prior Application value or GenServer callback before
+replacement and restore it in `on_exit`; otherwise randomized later tests inherit
+the fault. Restoration still does not prevent another async module from observing
+the temporary value, so mark the whole module `async: false` whenever it changes
+shared Application env, globally named processes, GenServer state, or shared ETS
+state (found 2026-07-19 when the Comms suite intermittently hid the Signal response
+channel; reinforced 2026-07-28 when retained-workspace reconciliation tests leaked
+archive and cleanup callbacks into later tests).
 
 <!-- applied-learning: elixir-is-list-1-recognizes-cons-cells-including-improper-lists -->
 <a id="applied-learning-elixir-is-list-1-recognizes-cons-cells-including-improper-lists"></a>

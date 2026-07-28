@@ -5433,13 +5433,13 @@
     {
       "source_ordinal": 453,
       "slug": "tests-that-mutate-global-application-config-must-not-run-async",
-      "title": "Tests that mutate global Application config must not run async.",
+      "title": "Tests that mutate shared runtime state must not run async and must restore every injected seam.",
       "topic": "testing-live-runtime",
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-tests-that-mutate-global-application-config-must-not-run-async",
       "source_date": "2026-07-19",
-      "source_incident": "found 2026-07-19 when the Comms suite intermittently hid the Signal response channel).",
-      "content_sha256": "2be1908cc2f648ef417141f729b6a3774905c5997748af562c03871f2adac534",
+      "source_incident": "found 2026-07-19 when the Comms suite intermittently hid the Signal response channel; reinforced 2026-07-28 when retained-workspace reconciliation tests leaked archive and cleanup callbacks into later tests).",
+      "content_sha256": "797e0e03e145f252e9f1a1668786271dc70eb8b01eb3f2042fd60d9023b6a3ec",
       "always_loaded": false
     },
     {
