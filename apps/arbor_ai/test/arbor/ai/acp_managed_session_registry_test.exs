@@ -221,6 +221,14 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
           if state.test_pid, do: send(state.test_pid, {:fake_close_stalled, self()})
           Process.sleep(:infinity)
 
+        :slow ->
+          if state.test_pid, do: send(state.test_pid, {:fake_close_slow, self()})
+          Process.sleep(300)
+          {:stop, :normal, :ok, %{state | status: :closed, closed: true}}
+
+        :error ->
+          {:reply, {:error, :close_failed}, state}
+
         _other ->
           {:stop, :normal, :ok, %{state | status: :closed, closed: true}}
       end
@@ -1989,5 +1997,397 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
       refute Keyword.has_key?(adapter_opts, :resume)
       assert Keyword.get(adapter_opts, :foo) == 1
     end
+  end
+
+  describe "compare-and-settle source ownership" do
+    test "exact open match settles only after cleanup and dual-index absence", ctx do
+      assert {:ok, meta} =
+               start_managed(
+                 [model: "settle-model", task_id: "task_settle", principal_id: "agent_settle"],
+                 ctx
+               )
+
+      id = meta.worker_session_id
+      expected = projected_settle_identity(id, ctx.registry)
+      fields = settle_fields(id, expected)
+
+      assert {:ok, receipt} =
+               AI.acp_managed_compare_and_settle_session(fields, server: ctx.registry)
+
+      assert receipt["outcome"] == "settled"
+      assert receipt["resource_type"] == "acp_managed_session"
+      assert receipt["resource_id"] == id
+      assert receipt["active"] == false
+      assert receipt["status"] == "removed"
+      assert json_clean?(receipt)
+      refute_pid_like(receipt)
+
+      state = :sys.get_state(ctx.registry)
+      refute Map.has_key?(state.sessions, id)
+      refute Map.has_key?(state.closures, id)
+
+      assert {:ok, replay} =
+               AI.acp_managed_compare_and_settle_session(fields, server: ctx.registry)
+
+      assert replay["outcome"] == "already_absent"
+      assert replay["resource_id"] == id
+      assert replay["active"] == false
+      assert json_clean?(replay)
+    end
+
+    test "identity drift conflicts without mutation", ctx do
+      assert {:ok, meta} = start_managed([model: "drift-model"], ctx)
+      id = meta.worker_session_id
+      expected = projected_settle_identity(id, ctx.registry)
+
+      :sys.replace_state(ctx.registry, fn state ->
+        entry = Map.fetch!(state.sessions, id)
+        updated = %{entry | status: "busy"}
+        %{state | sessions: Map.put(state.sessions, id, updated)}
+      end)
+
+      assert {:error, {:reconciliation_identity_conflict, conflict}} =
+               AI.acp_managed_compare_and_settle_session(settle_fields(id, expected),
+                 server: ctx.registry
+               )
+
+      assert conflict["resource_id"] == id
+      assert conflict["current_identity"]["status"] == "busy"
+      assert Map.has_key?(:sys.get_state(ctx.registry).sessions, id)
+    end
+
+    test "duplicate provider-session identity fails closed without mutation", ctx do
+      shared_provider_session = "prov_duplicate_shared"
+
+      assert {:ok, first} =
+               start_managed([session_id: shared_provider_session, model: "dup-a"], ctx)
+
+      id = first.worker_session_id
+      # Capture identity before the twin is registered (inventory quarantines dups).
+      expected = projected_settle_identity(id, ctx.registry)
+
+      assert {:ok, second} =
+               start_managed([session_id: shared_provider_session, model: "dup-b"], ctx)
+
+      assert {:error, :duplicate_identity} =
+               AI.acp_managed_compare_and_settle_session(settle_fields(id, expected),
+                 server: ctx.registry
+               )
+
+      state = :sys.get_state(ctx.registry)
+      assert Map.has_key?(state.sessions, first.worker_session_id)
+      assert Map.has_key?(state.sessions, second.worker_session_id)
+    end
+
+    test "malformed sibling source state fails closed without mutation", ctx do
+      assert {:ok, meta} = start_managed([model: "malformed-sibling"], ctx)
+      id = meta.worker_session_id
+      expected = projected_settle_identity(id, ctx.registry)
+      sibling_id = "acp_worker_" <> String.duplicate("c", 32)
+
+      :sys.replace_state(ctx.registry, fn state ->
+        malformed = %{worker_session_id: sibling_id}
+        %{state | sessions: Map.put(state.sessions, sibling_id, malformed)}
+      end)
+
+      assert {:error, :current_identity_unavailable} =
+               AI.acp_managed_compare_and_settle_session(settle_fields(id, expected),
+                 server: ctx.registry
+               )
+
+      state = :sys.get_state(ctx.registry)
+      assert Map.has_key?(state.sessions, id)
+      assert Map.has_key?(state.sessions, sibling_id)
+    end
+
+    test "hard-truncated source state fails closed without mutation", ctx do
+      assert {:ok, meta} = start_managed([model: "hard-truncated"], ctx)
+      id = meta.worker_session_id
+      expected = projected_settle_identity(id, ctx.registry)
+
+      :sys.replace_state(ctx.registry, fn state ->
+        entry = Map.fetch!(state.sessions, id)
+
+        injected =
+          0..10_000
+          |> Map.new(fn index ->
+            sibling_id =
+              "acp_worker_" <>
+                (index |> Integer.to_string(16) |> String.pad_leading(32, "0"))
+
+            {sibling_id,
+             %{
+               entry
+               | worker_session_id: sibling_id,
+                 session_id: "prov_injected_#{index}"
+             }}
+          end)
+          |> Map.delete(id)
+
+        %{state | sessions: Map.merge(state.sessions, injected)}
+      end)
+
+      assert {:error, :current_identity_unavailable} =
+               AI.acp_managed_compare_and_settle_session(settle_fields(id, expected),
+                 server: ctx.registry
+               )
+
+      assert Map.has_key?(:sys.get_state(ctx.registry).sessions, id)
+    end
+
+    test "closing-in-progress is never reported settled", ctx do
+      task_id = "task_settle_closing"
+      principal_id = "agent_settle_closing"
+
+      assert {:ok, meta} =
+               start_managed(
+                 [
+                   close_mode: :stall,
+                   model: "closing",
+                   task_id: task_id,
+                   principal_id: principal_id
+                 ],
+                 ctx
+               )
+
+      id = meta.worker_session_id
+      expected = projected_settle_identity(id, ctx.registry)
+
+      closer =
+        Task.async(fn ->
+          AI.acp_managed_close_session(id,
+            server: ctx.registry,
+            timeout: 1_000,
+            task_id: task_id,
+            principal_id: principal_id
+          )
+        end)
+
+      assert_receive {:fake_close_stalled, _pid}, 1_000
+
+      assert_eventually(fn ->
+        state = :sys.get_state(ctx.registry)
+        assert Map.has_key?(state.closures, id)
+        refute Map.has_key?(state.sessions, id)
+      end)
+
+      assert {:error, :close_cleanup_in_progress} =
+               AI.acp_managed_compare_and_settle_session(settle_fields(id, expected),
+                 server: ctx.registry
+               )
+
+      assert Map.has_key?(:sys.get_state(ctx.registry).closures, id)
+      _ = Task.await(closer, 2_000)
+    end
+
+    test "cleanup ok with residual open index fails as settlement_residue", ctx do
+      assert {:ok, meta} = start_managed([model: "residue", close_mode: :slow], ctx)
+      id = meta.worker_session_id
+      expected = projected_settle_identity(id, ctx.registry)
+
+      reinject =
+        Task.async(fn ->
+          assert_eventually(fn ->
+            state = :sys.get_state(ctx.registry)
+            assert Map.has_key?(state.closures, id)
+          end)
+
+          :sys.replace_state(ctx.registry, fn state ->
+            entry = get_in(state, [:closures, id, :entry])
+
+            if is_map(entry) do
+              %{state | sessions: Map.put(state.sessions, id, entry)}
+            else
+              state
+            end
+          end)
+        end)
+
+      assert {:error, :settlement_residue} =
+               AI.acp_managed_compare_and_settle_session(settle_fields(id, expected),
+                 server: ctx.registry
+               )
+
+      _ = Task.await(reinject, 2_000)
+    end
+
+    test "cleanup helper errors never report settled", ctx do
+      assert {:ok, meta} =
+               start_managed([model: "cleanup-error", close_mode: :error], ctx)
+
+      assert_receive {:fake_init, session_pid, _agent_id, _opts}, 1_000
+
+      id = meta.worker_session_id
+      expected = projected_settle_identity(id, ctx.registry)
+
+      assert {:error, :close_failed} =
+               AI.acp_managed_compare_and_settle_session(settle_fields(id, expected),
+                 server: ctx.registry
+               )
+
+      assert_receive {:fake_close, ^session_pid}, 1_000
+
+      assert_eventually(fn ->
+        state = :sys.get_state(ctx.registry)
+        refute Map.has_key?(state.sessions, id)
+        refute Map.has_key?(state.closures, id)
+        refute Process.alive?(session_pid)
+      end)
+    end
+
+    test "malformed settle fields and facade shape fail closed", ctx do
+      good_id = "acp_worker_" <> String.duplicate("a", 32)
+
+      assert {:error, :invalid_reconciliation_settle_fields} =
+               AI.acp_managed_compare_and_settle_session(%{
+                 "resource_id" => good_id,
+                 "expected_identity" => %{},
+                 "server" => self()
+               })
+
+      assert {:error, :invalid_reconciliation_settle_fields} =
+               AI.acp_managed_compare_and_settle_session(
+                 %{
+                   "resource_id" => "acp_worker_NOT_HEX",
+                   "expected_identity" => %{"resource_type" => "acp_managed_session"}
+                 },
+                 server: ctx.registry
+               )
+
+      assert {:error, :invalid_reconciliation_settle_fields} =
+               SessionRegistry.compare_and_settle(%{"resource_id" => good_id},
+                 server: ctx.registry
+               )
+    end
+
+    test "expected identity values are validated before already-absent success", ctx do
+      id = "acp_worker_" <> String.duplicate("d", 32)
+      expected = absent_settle_identity(id)
+
+      invalid_expected_identities =
+        [
+          Map.put(expected, "provider_session_id", :not_json),
+          Map.put(expected, "provider_session_id", "provider" <> <<0>>),
+          Map.put(expected, "provider", nil),
+          Map.put(expected, "model", String.duplicate("m", 257)),
+          Map.put(expected, "status", <<255>>),
+          Map.put(expected, "task_id", " task_bad"),
+          Map.put(expected, "principal_id", "agent" <> <<10>>),
+          expected
+          |> Map.put("owner_present", false)
+          |> Map.put("owner_alive", true),
+          expected
+          |> Map.put("status", "ready")
+          |> Map.put("close_cleanup_in_progress", true)
+        ] ++
+          Enum.map(
+            [
+              "pooled",
+              "return_to_pool",
+              "owner_present",
+              "owner_alive",
+              "session_alive",
+              "close_cleanup_in_progress"
+            ],
+            &Map.put(expected, &1, "false")
+          )
+
+      for invalid_expected <- invalid_expected_identities do
+        assert {:error, :invalid_reconciliation_settle_fields} =
+                 AI.acp_managed_compare_and_settle_session(
+                   settle_fields(id, invalid_expected),
+                   server: ctx.registry
+                 )
+      end
+    end
+
+    test "unavailable source registry returns a typed error" do
+      id = "acp_worker_" <> String.duplicate("e", 32)
+      missing_registry = :"missing_acp_registry_#{System.unique_integer([:positive])}"
+
+      assert {:error, :session_registry_unavailable} =
+               AI.acp_managed_compare_and_settle_session(
+                 settle_fields(id, absent_settle_identity(id)),
+                 server: missing_registry
+               )
+    end
+
+    test "already-absent handle is idempotent without mutation", ctx do
+      id = "acp_worker_" <> String.duplicate("b", 32)
+      expected = absent_settle_identity(id)
+
+      assert {:ok, first} =
+               AI.acp_managed_compare_and_settle_session(settle_fields(id, expected),
+                 server: ctx.registry
+               )
+
+      assert first["outcome"] == "already_absent"
+
+      assert {:ok, second} =
+               AI.acp_managed_compare_and_settle_session(settle_fields(id, expected),
+                 server: ctx.registry
+               )
+
+      assert second == first
+    end
+  end
+
+  defp settle_fields(resource_id, expected_identity) do
+    %{
+      "resource_id" => resource_id,
+      "expected_identity" => expected_identity
+    }
+  end
+
+  defp absent_settle_identity(resource_id) do
+    %{
+      "resource_type" => "acp_managed_session",
+      "resource_id" => resource_id,
+      "worker_session_id" => resource_id,
+      "provider_session_id" => nil,
+      "provider" => "test",
+      "model" => nil,
+      "status" => "ready",
+      "pooled" => false,
+      "return_to_pool" => false,
+      "task_id" => nil,
+      "principal_id" => nil,
+      "owner_present" => false,
+      "owner_alive" => false,
+      "session_alive" => false,
+      "close_cleanup_in_progress" => false
+    }
+  end
+
+  defp projected_settle_identity(worker_session_id, registry) do
+    assert {:ok, inventory} =
+             SessionRegistry.inventory(%{task_id: nil, principal_id: nil}, 1_000,
+               server: registry
+             )
+
+    session =
+      Enum.find(inventory["sessions"], fn item ->
+        item["worker_session_id"] == worker_session_id
+      end)
+
+    assert is_map(session)
+
+    %{
+      "resource_type" => "acp_managed_session",
+      "resource_id" => session["worker_session_id"],
+      "worker_session_id" => session["worker_session_id"],
+      "provider_session_id" => session["provider_session_id"],
+      "provider" => session["provider"],
+      "model" => session["model"],
+      "status" => session["status"],
+      "pooled" => session["pooled"],
+      "return_to_pool" => session["return_to_pool"],
+      "task_id" => session["task_id"],
+      "principal_id" => session["principal_id"],
+      "owner_present" => session["owner_present"],
+      "owner_alive" => session["owner_alive"],
+      "session_alive" => session["session_alive"],
+      "close_cleanup_in_progress" => session["close_cleanup_in_progress"]
+    }
   end
 end

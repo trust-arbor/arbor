@@ -1238,6 +1238,40 @@ defmodule Arbor.AI do
   def acp_managed_session_inventory(_opts),
     do: {:error, :invalid_session_inventory_options}
 
+  @doc """
+  Source-owned compare-and-settle for one managed ACP session.
+
+  Accepts only `%{"resource_id" => handle, "expected_identity" => identity}`
+  where `resource_id` is a canonical `acp_worker_<32 lowercase hex>` handle and
+  `expected_identity` is the exact closed inventory identity emitted by
+  reconciliation. Authority is enforced by the Actions apply path; this facade
+  performs source-owned mutation only.
+
+  Receipts and errors are JSON-clean (no PID, monitor ref, cleanup token, or
+  internal module).
+  """
+  @spec acp_managed_compare_and_settle_session(map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def acp_managed_compare_and_settle_session(fields, opts \\ [])
+
+  def acp_managed_compare_and_settle_session(fields, opts)
+      when is_map(fields) and not is_struct(fields) and is_list(opts) do
+    if settle_fields_shape?(fields) do
+      Arbor.AI.AcpManaged.compare_and_settle_session(fields, opts)
+    else
+      {:error, :invalid_reconciliation_settle_fields}
+    end
+  end
+
+  def acp_managed_compare_and_settle_session(_fields, _opts),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  defp settle_fields_shape?(fields) when is_map(fields) do
+    Map.keys(fields) |> Enum.sort() == ["expected_identity", "resource_id"]
+  end
+
+  defp settle_fields_shape?(_fields), do: false
+
   # ===========================================================================
   # Private Helpers
   # ===========================================================================

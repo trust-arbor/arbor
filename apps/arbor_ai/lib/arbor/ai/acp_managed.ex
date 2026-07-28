@@ -157,6 +157,39 @@ defmodule Arbor.AI.AcpManaged do
   end
 
   @doc false
+  @spec compare_and_settle_session(map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_session(fields, opts \\ [])
+
+  def compare_and_settle_session(fields, opts)
+      when is_map(fields) and not is_struct(fields) and is_list(opts) do
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 5_000),
+         {:ok, opts, _remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      opts = settle_registry_opts(opts)
+
+      case SessionRegistry.compare_and_settle(fields, opts) do
+        {:error, :registry_unavailable} -> {:error, :session_registry_unavailable}
+        other -> other
+      end
+    end
+  end
+
+  def compare_and_settle_session(_fields, _opts),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  defp settle_registry_opts(opts) when is_list(opts) do
+    timeout_keys = Arbor.LLM.timeout_option_keys()
+
+    Enum.filter(opts, fn
+      {key, _value} when is_atom(key) ->
+        key == :server or key == :deadline_ms or key in timeout_keys
+
+      _invalid ->
+        false
+    end)
+  end
+
+  @doc false
   @spec public_session_inventory(keyword() | map()) :: {:ok, map()} | {:error, term()}
   def public_session_inventory(opts) do
     with {:ok, normalized} <- normalize_inventory_options(opts, false),

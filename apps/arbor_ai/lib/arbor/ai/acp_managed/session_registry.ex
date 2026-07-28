@@ -55,9 +55,28 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
   @registry_name __MODULE__
   @handle_prefix "acp_worker_"
+  @acp_worker_id_re ~r/\Aacp_worker_[0-9a-f]{32}\z/
   @cleanup_timeout_ms 5_000
   @max_inventory_records 10_000
   @max_inventory_id_bytes 256
+  @acp_settle_field_keys ["expected_identity", "resource_id"]
+  @acp_settle_identity_keys [
+    "resource_type",
+    "resource_id",
+    "worker_session_id",
+    "provider_session_id",
+    "provider",
+    "model",
+    "status",
+    "pooled",
+    "return_to_pool",
+    "task_id",
+    "principal_id",
+    "owner_present",
+    "owner_alive",
+    "session_alive",
+    "close_cleanup_in_progress"
+  ]
 
   # -- Public API -----------------------------------------------------
 
@@ -251,6 +270,28 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     end
   end
 
+  @doc """
+  Source-owned compare-and-settle for one managed ACP session.
+
+  Accepts only a canonical worker handle plus the exact closed
+  `expected_identity` emitted by reconciliation inventory projection.
+  Mutation is admitted only after atomic reproject, full identity equality,
+  and provider-session uniqueness checks. Success requires cleanup helper
+  success and absence from both open and closing indexes.
+  """
+  @spec compare_and_settle(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def compare_and_settle(fields, opts \\ [])
+
+  def compare_and_settle(fields, opts) when is_map(fields) and is_list(opts) do
+    with {:ok, resource_id, expected_identity} <- normalize_settle_fields(fields),
+         {:ok, opts, _remaining} <- normalized_call_opts(opts),
+         {:ok, deadline} <- Arbor.AI.Timeout.deadline(opts) do
+      settle_until(resource_id, expected_identity, opts, deadline)
+    end
+  end
+
+  def compare_and_settle(_fields, _opts), do: {:error, :invalid_reconciliation_settle_fields}
+
   @doc false
   @spec public_view(map()) :: public_view()
   def public_view(entry) when is_map(entry) do
@@ -368,6 +409,38 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
       {:reply, {:error, :timeout}, state}
     end
   end
+
+  def handle_call(
+        {:compare_and_settle, resource_id, expected_identity, request},
+        _from,
+        state
+      )
+      when is_binary(resource_id) and is_map(expected_identity) and is_map(request) do
+    if deadline_active?(request.deadline_ms) do
+      handle_compare_and_settle(state, resource_id, expected_identity, request)
+    else
+      {:reply, {:error, :timeout}, state}
+    end
+  rescue
+    _ -> {:reply, {:error, :current_identity_unavailable}, state}
+  catch
+    _, _ -> {:reply, {:error, :current_identity_unavailable}, state}
+  end
+
+  def handle_call({:compare_and_settle, _resource_id, _expected, _request}, _from, state),
+    do: {:reply, {:error, :invalid_reconciliation_settle_fields}, state}
+
+  def handle_call({:settlement_absent, worker_session_id}, _from, state)
+      when is_binary(worker_session_id) do
+    absent? =
+      not Map.has_key?(state.sessions, worker_session_id) and
+        not Map.has_key?(state.closures, worker_session_id)
+
+    {:reply, {:ok, absent?}, state}
+  end
+
+  def handle_call({:settlement_absent, _worker_session_id}, _from, state),
+    do: {:reply, {:error, :invalid_reconciliation_settle_fields}, state}
 
   def handle_info(
         {:close_cleanup_complete, worker_session_id, operation_ref, result},
@@ -556,7 +629,11 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     state
     |> bounded_inventory_records()
     |> elem(0)
-    |> Enum.reduce(%{}, fn {kind, _key, raw_record}, acc ->
+    |> inventory_liveness_from_records()
+  end
+
+  defp inventory_liveness_from_records(records) do
+    Enum.reduce(records, %{}, fn {kind, _key, raw_record}, acc ->
       entry = if kind == :closing, do: inventory_value(raw_record, :entry), else: raw_record
       worker_session_id = inventory_value(entry, :worker_session_id)
 
@@ -710,6 +787,37 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     end
   end
 
+  defp settle_until(resource_id, expected_identity, opts, deadline) do
+    reply_alias = :erlang.alias()
+    operation_ref = make_ref()
+
+    request = %{
+      return_to_pool_override: :default,
+      deadline_ms: deadline,
+      cleanup_opts: Keyword.delete(opts, :server),
+      operation_ref: operation_ref,
+      reply_alias: reply_alias
+    }
+
+    try do
+      case call_normalized(
+             {:compare_and_settle, resource_id, expected_identity, request},
+             opts
+           ) do
+        {:ok, receipt, :reconciled} ->
+          {:ok, receipt}
+
+        {:ok, _preview, :committed} ->
+          await_settle_cleanup(operation_ref, resource_id, opts)
+
+        {:error, _reason} = error ->
+          error
+      end
+    after
+      :erlang.unalias(reply_alias)
+    end
+  end
+
   defp await_close_cleanup(operation_ref, result, opts) do
     with {:ok, _opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
       receive do
@@ -723,11 +831,254 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     end
   end
 
+  defp await_settle_cleanup(operation_ref, resource_id, opts) do
+    with {:ok, _opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      receive do
+        {^operation_ref, :close_cleanup, cleanup_result} ->
+          with :ok <- Arbor.AI.Timeout.ensure_active(opts),
+               :ok <- normalize_settle_cleanup_result(cleanup_result),
+               {:ok, true} <- prove_settlement_absent(resource_id, opts) do
+            {:ok, acp_settled_receipt(resource_id)}
+          else
+            {:ok, false} -> {:error, :settlement_residue}
+            {:error, _reason} = error -> error
+          end
+      after
+        remaining -> {:error, :timeout}
+      end
+    end
+  end
+
+  defp prove_settlement_absent(resource_id, opts) do
+    call_normalized({:settlement_absent, resource_id}, opts)
+  end
+
   defp normalize_close_cleanup_result(:ok, result), do: {:ok, result}
   defp normalize_close_cleanup_result({:error, reason}, _result), do: {:error, reason}
 
   defp normalize_close_cleanup_result(other, _result),
     do: {:error, {:invalid_close_cleanup_result, Arbor.LLM.sanitize_external_reason(other)}}
+
+  defp normalize_settle_cleanup_result(:ok), do: :ok
+  defp normalize_settle_cleanup_result({:error, reason}), do: {:error, reason}
+
+  defp normalize_settle_cleanup_result(other),
+    do: {:error, {:invalid_close_cleanup_result, Arbor.LLM.sanitize_external_reason(other)}}
+
+  defp normalize_settle_fields(fields) when is_map(fields) and not is_struct(fields) do
+    resource_id = Map.get(fields, "resource_id")
+    expected = Map.get(fields, "expected_identity")
+
+    with :ok <- exact_settle_field_keys(fields),
+         true <- canonical_acp_worker_id?(resource_id),
+         true <- is_map(expected) and not is_struct(expected),
+         :ok <- validate_settle_identity(expected, resource_id) do
+      {:ok, resource_id, expected}
+    else
+      _ -> {:error, :invalid_reconciliation_settle_fields}
+    end
+  end
+
+  defp normalize_settle_fields(_fields), do: {:error, :invalid_reconciliation_settle_fields}
+
+  defp canonical_acp_worker_id?(resource_id)
+       when is_binary(resource_id) and byte_size(resource_id) > 0 do
+    Regex.match?(@acp_worker_id_re, resource_id) and not String.contains?(resource_id, "/")
+  end
+
+  defp canonical_acp_worker_id?(_resource_id), do: false
+
+  defp exact_settle_field_keys(map) when is_map(map) do
+    if Enum.sort(Map.keys(map)) == @acp_settle_field_keys, do: :ok, else: :error
+  end
+
+  defp exact_settle_field_keys(_map), do: :error
+
+  defp exact_settle_identity_keys(map) when is_map(map) do
+    keys = map |> Map.keys() |> Enum.sort()
+
+    if keys == Enum.sort(@acp_settle_identity_keys) do
+      :ok
+    else
+      :error
+    end
+  end
+
+  defp exact_settle_identity_keys(_map), do: :error
+
+  defp validate_settle_identity(expected, resource_id) do
+    with :ok <- exact_settle_identity_keys(expected),
+         true <- expected["resource_type"] == "acp_managed_session",
+         true <- expected["resource_id"] == resource_id,
+         true <- expected["worker_session_id"] == resource_id,
+         {:ok, _provider_session_id} <-
+           settle_optional_text(expected["provider_session_id"]),
+         {:ok, _provider} <- settle_text(expected["provider"]),
+         {:ok, _model} <- settle_optional_text(expected["model"]),
+         {:ok, _status} <- settle_text(expected["status"]),
+         true <- settle_boolean_fields?(expected),
+         {:ok, _task_id} <- inventory_optional_id(expected["task_id"]),
+         {:ok, _principal_id} <- inventory_optional_id(expected["principal_id"]),
+         true <- settle_liveness_consistent?(expected) do
+      :ok
+    else
+      _ -> :error
+    end
+  end
+
+  defp settle_optional_text(nil), do: {:ok, nil}
+  defp settle_optional_text(value) when is_binary(value), do: settle_text(value)
+  defp settle_optional_text(_value), do: :error
+
+  defp settle_text(value) when is_binary(value), do: inventory_text(value)
+  defp settle_text(_value), do: :error
+
+  defp settle_boolean_fields?(expected) do
+    Enum.all?(
+      [
+        "pooled",
+        "return_to_pool",
+        "owner_present",
+        "owner_alive",
+        "session_alive",
+        "close_cleanup_in_progress"
+      ],
+      &is_boolean(Map.get(expected, &1))
+    )
+  end
+
+  defp settle_liveness_consistent?(expected) do
+    owner_consistent? =
+      expected["owner_alive"] == false or expected["owner_present"] == true
+
+    close_consistent? =
+      expected["close_cleanup_in_progress"] == false or expected["status"] == "closing"
+
+    owner_consistent? and close_consistent?
+  end
+
+  defp handle_compare_and_settle(state, resource_id, expected_identity, request) do
+    cond do
+      Map.has_key?(state.closures, resource_id) ->
+        {:reply, {:error, :close_cleanup_in_progress}, state}
+
+      Map.has_key?(state.sessions, resource_id) ->
+        handle_open_settle(state, resource_id, expected_identity, request)
+
+      true ->
+        {:reply, {:ok, acp_already_absent_receipt(resource_id), :reconciled}, state}
+    end
+  end
+
+  defp handle_open_settle(state, resource_id, expected_identity, request) do
+    case project_settle_identity(state, resource_id) do
+      {:ok, current_identity, record_identities, identity_counts} ->
+        cond do
+          current_identity != expected_identity ->
+            {:reply,
+             {:error,
+              {:reconciliation_identity_conflict,
+               %{
+                 "resource_id" => resource_id,
+                 "current_identity" => current_identity
+               }}}, state}
+
+          settle_identity_duplicate?(identity_counts, record_identities) ->
+            {:reply, {:error, :duplicate_identity}, state}
+
+          true ->
+            entry = Map.fetch!(state.sessions, resource_id)
+            entry = apply_return_to_pool_override(entry, request.return_to_pool_override)
+            {_preview, next_state} = commit_close(state, entry, request)
+            {:reply, {:ok, acp_settled_receipt(resource_id), :committed}, next_state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp project_settle_identity(state, resource_id) do
+    {records, _observed_count, hard_truncated} = bounded_inventory_records(state)
+
+    if hard_truncated do
+      {:error, :current_identity_unavailable}
+    else
+      liveness = inventory_liveness_from_records(records)
+
+      with {:ok, entry} <- Map.fetch(state.sessions, resource_id),
+           {:ok, session, identities} <-
+             project_inventory_record({:registered, resource_id, entry}, liveness),
+           {:ok, identity_counts} <- settle_identity_counts(records, liveness) do
+        {:ok, settle_identity_from_session(session), identities, identity_counts}
+      else
+        _ -> {:error, :current_identity_unavailable}
+      end
+    end
+  end
+
+  defp settle_identity_from_session(session) when is_map(session) do
+    %{
+      "resource_type" => "acp_managed_session",
+      "resource_id" => session["worker_session_id"],
+      "worker_session_id" => session["worker_session_id"],
+      "provider_session_id" => session["provider_session_id"],
+      "provider" => session["provider"],
+      "model" => session["model"],
+      "status" => session["status"],
+      "pooled" => session["pooled"],
+      "return_to_pool" => session["return_to_pool"],
+      "task_id" => session["task_id"],
+      "principal_id" => session["principal_id"],
+      "owner_present" => session["owner_present"],
+      "owner_alive" => session["owner_alive"],
+      "session_alive" => session["session_alive"],
+      "close_cleanup_in_progress" => session["close_cleanup_in_progress"]
+    }
+  end
+
+  defp settle_identity_counts(records, liveness) do
+    Enum.reduce_while(records, {:ok, %{}}, fn record, {:ok, counts} ->
+      case project_inventory_record(record, liveness) do
+        {:ok, _session, identities} ->
+          next_counts =
+            Enum.reduce(identities, counts, fn identity, acc ->
+              Map.update(acc, identity, 1, &(&1 + 1))
+            end)
+
+          {:cont, {:ok, next_counts}}
+
+        :malformed ->
+          {:halt, {:error, :current_identity_unavailable}}
+      end
+    end)
+  end
+
+  defp settle_identity_duplicate?(identity_counts, target_identities)
+       when is_map(identity_counts) and is_list(target_identities) do
+    Enum.any?(target_identities, fn identity -> Map.get(identity_counts, identity, 0) > 1 end)
+  end
+
+  defp acp_settled_receipt(resource_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "acp_managed_session",
+      "resource_id" => resource_id,
+      "outcome" => "settled",
+      "active" => false,
+      "status" => "removed"
+    }
+  end
+
+  defp acp_already_absent_receipt(resource_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "acp_managed_session",
+      "resource_id" => resource_id,
+      "outcome" => "already_absent",
+      "active" => false
+    }
+  end
 
   defp normalized_call_opts(opts) do
     with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 5_000),
@@ -1170,8 +1521,18 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
         error
 
-      _other ->
-        :ok
+      other ->
+        force_terminate(entry.session_pid)
+
+        error =
+          {:error, {:invalid_release_result, Arbor.LLM.sanitize_external_reason(other)}}
+
+        Logger.debug(
+          "AcpManaged: invalid bounded release result after #{release_reason}: " <>
+            Arbor.LLM.inspect_external_reason(error)
+        )
+
+        error
     end
   end
 
@@ -1218,9 +1579,9 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
         function_exported?(session_mod, :close, 1) -> session_mod.close(pid)
         true -> force_terminate(pid)
       end
+    else
+      :ok
     end
-
-    :ok
   end
 
   defp force_terminate(pid) when is_pid(pid) do

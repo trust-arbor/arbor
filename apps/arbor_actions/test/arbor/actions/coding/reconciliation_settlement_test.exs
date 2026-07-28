@@ -36,6 +36,71 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     end
   end
 
+  defmodule RecordingAI do
+    def acp_managed_compare_and_settle_session(fields) do
+      send(self(), {:ai_settle_called, fields})
+
+      {:ok,
+       %{
+         "schema_version" => 1,
+         "resource_type" => "acp_managed_session",
+         "resource_id" => fields["resource_id"],
+         "outcome" => "settled",
+         "active" => false,
+         "status" => "removed"
+       }}
+    end
+  end
+
+  defmodule DriftAI do
+    def acp_managed_compare_and_settle_session(fields) do
+      send(self(), {:ai_settle_called, fields})
+
+      {:error,
+       {:reconciliation_identity_conflict,
+        %{
+          "resource_id" => fields["resource_id"],
+          "current_identity" => fields["expected_identity"]
+        }}}
+    end
+  end
+
+  defmodule ClosingAI do
+    def acp_managed_compare_and_settle_session(fields) do
+      send(self(), {:ai_settle_called, fields})
+      {:error, :close_cleanup_in_progress}
+    end
+  end
+
+  defmodule ResidueAI do
+    def acp_managed_compare_and_settle_session(fields) do
+      send(self(), {:ai_settle_called, fields})
+      {:error, :settlement_residue}
+    end
+  end
+
+  defmodule AbsentAI do
+    def acp_managed_compare_and_settle_session(fields) do
+      send(self(), {:ai_settle_called, fields})
+
+      {:ok,
+       %{
+         "schema_version" => 1,
+         "resource_type" => "acp_managed_session",
+         "resource_id" => fields["resource_id"],
+         "outcome" => "already_absent",
+         "active" => false
+       }}
+    end
+  end
+
+  defmodule ArityTwoOnlyAI do
+    def acp_managed_compare_and_settle_session(fields, opts) do
+      send(self(), {:ai_arity_two_settle_called, fields, opts})
+      {:ok, %{"outcome" => "settled"}}
+    end
+  end
+
   setup_all do
     previous_shell = Application.get_env(:arbor_actions, :mix_shell_module)
     Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Actions.TestMixShell)
@@ -50,14 +115,17 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
   setup do
     previous_security = Application.get_env(:arbor_actions, :security_module)
     previous_server = Application.get_env(:arbor_actions, :workspace_lease_registry_server)
+    previous_ai = Application.get_env(:arbor_actions, :ai_module)
 
     Application.delete_env(:arbor_actions, :workspace_lease_registry_server)
     Application.put_env(:arbor_actions, :security_module, AllowSecurity)
+    Application.delete_env(:arbor_actions, :ai_module)
     Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
 
     on_exit(fn ->
       restore_env(:security_module, previous_security)
       restore_env(:workspace_lease_registry_server, previous_server)
+      restore_env(:ai_module, previous_ai)
     end)
 
     :ok
@@ -1620,6 +1688,197 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
       _key, left, right when is_map(left) and is_map(right) -> Map.merge(left, right)
       _key, _left, right -> right
     end)
+  end
+
+  test "acp managed session exact authorize URI and settled apply via Config.ai_module" do
+    worker_id = acp_worker_id()
+    expected = acp_expected_identity(worker_id)
+    decision = acp_settle_decision(worker_id, expected)
+    principal = "agent_acp_apply_ok"
+    auth = verified_auth(principal)
+
+    Application.put_env(:arbor_actions, :security_module, RecordingSecurity)
+    Application.put_env(:arbor_actions, :ai_module, RecordingAI)
+
+    assert {:ok, receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert receipt["outcome"] == "settled"
+    assert receipt["resource_id"] == worker_id
+    assert receipt["resource_type"] == "acp_managed_session"
+    assert receipt["active"] == false
+    assert receipt["status"] == "removed"
+
+    assert_received {:authorize_called, ^principal, uri, opts}
+
+    assert uri ==
+             "arbor://coding/reconciliation/apply/acp_managed_session/" <> worker_id
+
+    assert Keyword.get(opts, :verify_identity) == false
+    assert match?(%SignedRequest{agent_id: ^principal}, Keyword.get(opts, :signed_request))
+
+    assert_received {:ai_settle_called, fields}
+    assert fields == %{"resource_id" => worker_id, "expected_identity" => expected}
+  end
+
+  test "acp managed session requires the exact one-arity AI facade contract" do
+    worker_id = acp_worker_id()
+    expected = acp_expected_identity(worker_id)
+    decision = acp_settle_decision(worker_id, expected)
+    auth = verified_auth("agent_acp_arity_contract")
+
+    Application.put_env(:arbor_actions, :ai_module, ArityTwoOnlyAI)
+
+    assert {:error, :reconciliation_ai_unavailable} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    refute_received {:ai_arity_two_settle_called, _, _}
+  end
+
+  test "acp managed session unauthorized and pending-approval fail closed without AI call" do
+    worker_id = acp_worker_id()
+    decision = acp_settle_decision(worker_id, acp_expected_identity(worker_id))
+    auth = verified_auth("agent_acp_denied")
+    Application.put_env(:arbor_actions, :ai_module, RecordingAI)
+
+    Application.put_env(:arbor_actions, :security_module, DenySecurity)
+
+    assert {:error, {:unauthorized, :denied}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    refute_received {:ai_settle_called, _}
+
+    Application.put_env(:arbor_actions, :security_module, PendingSecurity)
+
+    assert {:error, {:unauthorized, {:pending_approval, "proposal_test_1"}}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    refute_received {:ai_settle_called, _}
+  end
+
+  test "acp managed session unsupported decision and bad handle fail closed without AI call" do
+    worker_id = acp_worker_id()
+    base = acp_settle_decision(worker_id, acp_expected_identity(worker_id))
+    auth = verified_auth("agent_acp_reject")
+    Application.put_env(:arbor_actions, :ai_module, RecordingAI)
+
+    keep = Map.put(base, "decision", "keep")
+
+    assert {:error, {:unsupported_reconciliation_apply, detail}} =
+             Actions.apply_coding_reconciliation_decision(auth, keep)
+
+    assert detail == %{
+             "resource_type" => "acp_managed_session",
+             "decision" => "keep",
+             "reason" => "terminal_active_resource"
+           }
+
+    refute_received {:ai_settle_called, _}
+
+    bad_id = "acp_worker_" <> String.duplicate("g", 32)
+
+    bad =
+      base
+      |> Map.put("resource_id", bad_id)
+      |> put_in(["expected_identity", "resource_id"], bad_id)
+      |> put_in(["expected_identity", "worker_session_id"], bad_id)
+
+    assert {:error, :invalid_acp_managed_session_id} =
+             Actions.apply_coding_reconciliation_decision(auth, bad)
+
+    refute_received {:ai_settle_called, _}
+
+    uppercase = "acp_worker_" <> String.duplicate("A", 32)
+
+    upper =
+      base
+      |> Map.put("resource_id", uppercase)
+      |> put_in(["expected_identity", "resource_id"], uppercase)
+      |> put_in(["expected_identity", "worker_session_id"], uppercase)
+
+    assert {:error, :invalid_acp_managed_session_id} =
+             Actions.apply_coding_reconciliation_decision(auth, upper)
+
+    refute_received {:ai_settle_called, _}
+  end
+
+  test "acp managed session source failures pass through and never report settled" do
+    worker_id = acp_worker_id()
+    decision = acp_settle_decision(worker_id, acp_expected_identity(worker_id))
+    auth = verified_auth("agent_acp_source_fail")
+
+    Application.put_env(:arbor_actions, :ai_module, DriftAI)
+
+    assert {:error, {:reconciliation_identity_conflict, conflict}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert conflict["resource_id"] == worker_id
+    assert_received {:ai_settle_called, _}
+
+    Application.put_env(:arbor_actions, :ai_module, ClosingAI)
+
+    assert {:error, :close_cleanup_in_progress} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert_received {:ai_settle_called, _}
+
+    Application.put_env(:arbor_actions, :ai_module, ResidueAI)
+
+    assert {:error, :settlement_residue} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert_received {:ai_settle_called, _}
+
+    Application.put_env(:arbor_actions, :ai_module, AbsentAI)
+
+    assert {:ok, receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert receipt["outcome"] == "already_absent"
+    assert receipt["resource_id"] == worker_id
+    refute receipt["outcome"] == "settled"
+  end
+
+  defp acp_worker_id do
+    "acp_worker_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+  end
+
+  defp acp_expected_identity(worker_id) do
+    %{
+      "resource_type" => "acp_managed_session",
+      "resource_id" => worker_id,
+      "worker_session_id" => worker_id,
+      "provider_session_id" => "prov_test",
+      "provider" => "test",
+      "model" => "model-a",
+      "status" => "ready",
+      "pooled" => false,
+      "return_to_pool" => false,
+      "task_id" => "task_acp_settle",
+      "principal_id" => "agent_acp_settle",
+      "owner_present" => true,
+      "owner_alive" => false,
+      "session_alive" => true,
+      "close_cleanup_in_progress" => false
+    }
+  end
+
+  defp acp_settle_decision(worker_id, expected_identity) do
+    {:ok, decision} =
+      ReconciliationDecision.new(%{
+        "schema_version" => 1,
+        "resource_type" => "acp_managed_session",
+        "resource_id" => worker_id,
+        "task_id" => expected_identity["task_id"],
+        "principal_id" => expected_identity["principal_id"],
+        "decision" => "settle",
+        "reason" => "terminal_active_resource",
+        "expected_identity" => expected_identity,
+        "evidence" => %{
+          "task_presence" => "observed",
+          "task_state" => "done",
+          "owner_status" => "dead",
+          "journal_status" => "complete"
+        }
+      })
+
+    ReconciliationDecision.to_map(decision)
   end
 
   defp verified_auth(principal_id) when is_binary(principal_id) do

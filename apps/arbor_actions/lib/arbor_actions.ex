@@ -90,6 +90,7 @@ defmodule Arbor.Actions do
   @max_reconciliation_principal_bytes 256
   @validation_resource_id_re ~r/\Avalidation_[0-9a-f]{32}\z/
   @live_workspace_id_re ~r/\Aws_[0-9a-f]{32}\z/
+  @acp_worker_id_re ~r/\Aacp_worker_[0-9a-f]{32}\z/
   @reconciliation_apply_uri_base "arbor://coding/reconciliation/apply/"
 
   @approval_preview_limit 500
@@ -252,6 +253,7 @@ defmodule Arbor.Actions do
   * `arbor://coding/reconciliation/apply/validation_resource/<resource_id>`
   * `arbor://coding/reconciliation/apply/live_workspace_lease/<workspace_id>`
   * `arbor://coding/reconciliation/apply/retained_workspace_record/<workspace_id>`
+  * `arbor://coding/reconciliation/apply/acp_managed_session/<worker_session_id>`
 
   Reconciliation decision evidence is never bearer authority. This slice
   supports only:
@@ -259,6 +261,7 @@ defmodule Arbor.Actions do
   * `validation_resource` + `settle` + `terminal_active_resource`
   * `live_workspace_lease` + `settle` + `terminal_active_resource`
   * `retained_workspace_record` + `settle` + `retained_expired`
+  * `acp_managed_session` + `settle` + `terminal_active_resource`
   """
   @spec apply_coding_reconciliation_decision(AuthContext.t(), map() | keyword() | term()) ::
           {:ok, map()} | {:error, term()}
@@ -297,12 +300,26 @@ defmodule Arbor.Actions do
             settle_fields,
             server_opts
           )
+
+        "acp_managed_session" ->
+          apply_acp_managed_session_settlement(settle_fields)
       end
     end
   rescue
     _ -> {:error, :reconciliation_apply_failed}
   catch
     _, _ -> {:error, :reconciliation_apply_failed}
+  end
+
+  defp apply_acp_managed_session_settlement(settle_fields) when is_map(settle_fields) do
+    ai = Config.ai_module()
+
+    if is_atom(ai) and Code.ensure_loaded?(ai) and
+         function_exported?(ai, :acp_managed_compare_and_settle_session, 1) do
+      ai.acp_managed_compare_and_settle_session(settle_fields)
+    else
+      {:error, :reconciliation_ai_unavailable}
+    end
   end
 
   defp admit_reconciliation_caller_auth(%AuthContext{
@@ -364,6 +381,13 @@ defmodule Arbor.Actions do
        }),
        do: :ok
 
+  defp require_supported_reconciliation_decision(%{
+         "resource_type" => "acp_managed_session",
+         "decision" => "settle",
+         "reason" => "terminal_active_resource"
+       }),
+       do: :ok
+
   defp require_supported_reconciliation_decision(decision_map) when is_map(decision_map) do
     {:error,
      {:unsupported_reconciliation_apply,
@@ -413,6 +437,12 @@ defmodule Arbor.Actions do
        }),
        do: require_canonical_live_workspace_id(resource_id)
 
+  defp require_canonical_reconciliation_resource_id(%{
+         "resource_type" => "acp_managed_session",
+         "resource_id" => resource_id
+       }),
+       do: require_canonical_acp_worker_id(resource_id)
+
   defp require_canonical_reconciliation_resource_id(_decision),
     do: {:error, :invalid_reconciliation_resource_id}
 
@@ -441,6 +471,18 @@ defmodule Arbor.Actions do
   defp require_canonical_live_workspace_id(_workspace_id),
     do: {:error, :invalid_live_workspace_id}
 
+  defp require_canonical_acp_worker_id(resource_id) when is_binary(resource_id) do
+    if Regex.match?(@acp_worker_id_re, resource_id) and
+         not String.contains?(resource_id, "/") do
+      :ok
+    else
+      {:error, :invalid_acp_managed_session_id}
+    end
+  end
+
+  defp require_canonical_acp_worker_id(_resource_id),
+    do: {:error, :invalid_acp_managed_session_id}
+
   defp reconciliation_apply_uri(%{
          "resource_type" => "validation_resource",
          "resource_id" => resource_id
@@ -463,6 +505,14 @@ defmodule Arbor.Actions do
        })
        when is_binary(resource_id) do
     {:ok, @reconciliation_apply_uri_base <> "retained_workspace_record/" <> resource_id}
+  end
+
+  defp reconciliation_apply_uri(%{
+         "resource_type" => "acp_managed_session",
+         "resource_id" => resource_id
+       })
+       when is_binary(resource_id) do
+    {:ok, @reconciliation_apply_uri_base <> "acp_managed_session/" <> resource_id}
   end
 
   defp reconciliation_apply_uri(_decision), do: {:error, :unsupported_reconciliation_apply}
