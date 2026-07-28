@@ -500,3 +500,14 @@ bounds. Validate the raw closed shape and bounded component contracts first,
 require equality with the canonical representation, and only then perform a JSON
 round trip on that small canonical object (found 2026-07-27 while reviewing typed
 coding-plan admission failures).
+
+<!-- applied-learning: coding-task-adoption-is-post-integration-settlement-not-git-integration -->
+<a id="applied-learning-coding-task-adoption-is-post-integration-settlement-not-git-integration"></a>
+**Coding-task adoption is post-integration settlement, not Git integration.**
+First integrate the reviewed candidate through the operator or merge system by
+fast-forward, cherry-pick, or squash; only then call `adopt_task_change/3` or
+`arbor_adopt_task_change`. The API proves ancestry or bounded patch equivalence,
+archives immutable evidence, and retires only the exact owned resources. It
+deliberately does not move the destination ref, so calling it before integration
+must fail as `:not_adopted` (found 2026-07-28 when the Phase C canary correctly
+returned `:aggregate_patch_not_found` before its reviewed commit reached `main`).

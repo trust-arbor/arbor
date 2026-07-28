@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 539,
+  "entry_count": 540,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6551,8 +6551,21 @@
       "source_incident": "found 2026-07-28 during the Phase C delegated-work canary).",
       "content_sha256": "1130c4a38fa19fb6857022225a3dc26e31c6ed66d6bff6992afd705661987302",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 540,
+      "source_kind": "post-migration",
+      "slug": "coding-task-adoption-is-post-integration-settlement-not-git-integration",
+      "title": "Coding-task adoption is post-integration settlement, not Git integration.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-coding-task-adoption-is-post-integration-settlement-not-git-integration",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when the Phase C canary correctly returned `:aggregate_patch_not_found` before its reviewed commit reached `main`).",
+      "content_sha256": "61be6524cde886add67522ac38808525fc57c9a16246f2da713644f9792373d7",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 78
+  "post_migration_entry_count": 79
 }
