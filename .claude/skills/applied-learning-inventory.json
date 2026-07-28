@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 563,
+  "entry_count": 565,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -183,7 +183,7 @@
       "anchor": "applied-learning-a-coding-task-s-public-result-may-omit-the-actionable-validation-failure",
       "source_date": "2026-07-13",
       "source_incident": "found 2026-07-13 reviewing retained Grok candidates).",
-      "content_sha256": "8c34cf917bd9791b4e5e054063b1140bd3f89876c56c31ba0d9245ce387b4151",
+      "content_sha256": "abac843746744c33b4161637c364496ec79ec977e4141d27640c0dccb7072717",
       "always_loaded": false
     },
     {
@@ -255,7 +255,7 @@
       "anchor": "applied-learning-anchor-manual-patches-with-unique-surrounding-context",
       "source_date": "2026-07-15",
       "source_incident": "found 2026-07-15 while isolating a coordinator timer test).",
-      "content_sha256": "12de62c3ccff5ec86cd50bf5eb3a6c432ccad478585096bb83a56e8c5735803d",
+      "content_sha256": "0ca5705c3d4e85f0743a8dd8a1a7e1f83e29f47f42beb7c92455d15637b56892",
       "always_loaded": true
     },
     {
@@ -6863,8 +6863,34 @@
       "source_incident": "found 2026-07-28 when 38 cross-app batches were assigned a synthetic 45.6-million-ms requirement against 272 seconds and all 667 test files remained unstarted).",
       "content_sha256": "5ce7c95f9283b1f4a2e9cd60ced6d9607150bb2c89d4e83a49c2b5e45b18c459",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 564,
+      "source_kind": "post-migration",
+      "slug": "claimed-formatting-is-not-review-evidence",
+      "title": "Claimed formatting is not review evidence.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-claimed-formatting-is-not-review-evidence",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while reviewing the pending-approval reconciliation candidate).",
+      "content_sha256": "7f3355a072e09b6d99c856e7eb066da266ec9f36322e183920afd5f9dc7d37c7",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 565,
+      "source_kind": "post-migration",
+      "slug": "do-not-print-full-process-command-lines-during-diagnostics",
+      "title": "Do not print full process command lines during diagnostics.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-do-not-print-full-process-command-lines-during-diagnostics",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while checking whether delegated validation was still active).",
+      "content_sha256": "d2115efb61a3dc08387b70aef07ecea3ed1dd80dbaa5bc7dd87b151de66a72b3",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 102
+  "post_migration_entry_count": 104
 }

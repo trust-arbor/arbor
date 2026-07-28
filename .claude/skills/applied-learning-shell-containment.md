@@ -214,3 +214,13 @@ closed JSON-clean termination envelope, and otherwise preserve the ordinary
 compile failure. Route trusted capacity terminals directly to owner recovery
 without consuming worker rework (found 2026-07-28 after a default compile hit
 its exact stage deadline and was incorrectly treated as a code defect).
+
+<!-- applied-learning: do-not-print-full-process-command-lines-during-diagnostics -->
+<a id="applied-learning-do-not-print-full-process-command-lines-during-diagnostics"></a>
+**Do not print full process command lines during diagnostics.** Provider CLIs,
+BEAM launchers, and wrapper processes can carry credentials or signed material
+in argv. Inspect bounded fields such as PID, elapsed time, executable name
+(`comm`), working directory, and task telemetry instead of `ps ... command`;
+redact any unavoidable argv evidence before it reaches logs or conversation
+output (found 2026-07-28 while checking whether delegated validation was still
+active).

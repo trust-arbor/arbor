@@ -26,11 +26,14 @@ structured `kind=execute` callback was misidentified by its descriptive title).
 <a id="applied-learning-a-coding-task-s-public-result-may-omit-the-actionable-validation-failure"></a>
 **A coding task's public result may omit the actionable validation failure.**
 The canonical task result can report only `validation_failed` and even an empty
-`files` list after retaining a real candidate. Read the task artifact's
+`files` list after retaining a real candidate. The preserved candidate tree OID
+and immutable tree contents are authoritative for what changed; the public file
+summary is not proof that the tree is empty. Read the task artifact's
 `validate/status.json` for the exact action failure before diagnosing or
 redispatching; for example, Phase 6 cross-app validation correctly recorded
 `{:spawn_backend_unavailable, :production_backend_missing}` only there (found
-2026-07-13 reviewing retained Grok candidates).
+2026-07-13 reviewing retained Grok candidates; tree-authority lesson reinforced
+2026-07-28 when validation terminalized before commit).
 
 <!-- applied-learning: do-not-reuse-a-delegated-worktree-build-across-compile-time-adapter-modes -->
 <a id="applied-learning-do-not-reuse-a-delegated-worktree-build-across-compile-time-adapter-modes"></a>

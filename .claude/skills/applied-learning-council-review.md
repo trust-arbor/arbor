@@ -128,3 +128,12 @@ diagnostics containing only sanitized tool names, never arguments. Do not retry 
 same reserved terminal request through a generic tool loop or fallback that could
 execute an unexpected call (found 2026-07-28 when an Ollama council reviewer returned
 mixed tool calls despite forced selection).
+
+<!-- applied-learning: claimed-formatting-is-not-review-evidence -->
+<a id="applied-learning-claimed-formatting-is-not-review-evidence"></a>
+**Claimed formatting is not review evidence.** A worker can report that its
+candidate is formatted while the exact preserved tree still fails the formatter.
+Run the repository formatter in check mode against the immutable candidate under
+the same dependency environment used for validation, and bind that result to the
+candidate tree OID before accepting it (found 2026-07-28 while reviewing the
+pending-approval reconciliation candidate).

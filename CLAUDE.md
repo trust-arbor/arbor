@@ -264,7 +264,11 @@ This section is the always-loaded working set: 12 broad cross-task rules measuri
 
 <!-- applied-learning: anchor-manual-patches-with-unique-surrounding-context -->
 <a id="applied-learning-anchor-manual-patches-with-unique-surrounding-context"></a>
-**Anchor manual patches with unique surrounding context.** A one-line `apply_patch` hunk can silently match an earlier identical line in the same file; include the enclosing test/function or nearby setup statements, then inspect the resulting location before proceeding (found 2026-07-15 while isolating a coordinator timer test).
+**Anchor manual patches with unique surrounding context.** A one-line
+`apply_patch` hunk can match an earlier identical line; include the enclosing
+function or setup, then inspect the result. This recurred on 2026-07-28 when a
+`missing_task` clause meant for pending approvals landed in the workspace
+reducer; compile caught it (first found 2026-07-15).
 
 
 <!-- applied-learning: verify-x-doesn-t-exist-claims-in-roadmap-docs-against-source-before-designing -->
