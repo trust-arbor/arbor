@@ -517,3 +517,21 @@ seed every owner-projected key; assertions about a stage timeout must target the
 effective allocated cap, not the uncapped request supplied before allocation
 (found 2026-07-28 when terminal-gate budgeting exposed 58 stale direct-pipeline
 fixture failures).
+
+<!-- applied-learning: required-evidence-is-intent-not-an-executable-validation-program -->
+<a id="applied-learning-required-evidence-is-intent-not-an-executable-validation-program"></a>
+**Coding work-packet `required_evidence` is intent, not an executable validation
+program.** The default validation profile may run only warnings-as-errors
+compilation even when the packet asks for a focused test command. Treat the
+compiler-selected validation action as authority, then have the operator execute
+and inspect any additional exact evidence command before approval; do not infer
+that a green compile satisfied the packet's test requirement (found 2026-07-28
+when a runtime `Enum.find!/2` error survived compile-only candidate validation).
+
+<!-- applied-learning: a-green-exunit-exit-must-include-a-nonzero-intended-test-count -->
+<a id="applied-learning-a-green-exunit-exit-must-include-a-nonzero-intended-test-count"></a>
+**A green ExUnit exit must include a nonzero intended test count.** An exact
+`mix test file.exs --only fast` command can exit zero with `0 tests, 0 failures`
+when the module omitted the requested tag. Evidence admission must verify that
+the expected module/tests were selected, not merely the process exit code or
+zero-failure count (found 2026-07-28 during the Phase C delegated-work canary).

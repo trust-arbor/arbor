@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
-  "source_captured_on": "2026-07-27",
-  "entry_count": 537,
+  "source_captured_on": "2026-07-28",
+  "entry_count": 539,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6525,8 +6525,34 @@
       "source_incident": "found 2026-07-28 when live `task_58178` collided with a retained 2026-07-19 coding artifact).",
       "content_sha256": "a2a9b2a498b3df7af809dc68eec58fd9853a1e78f549564c4e0ece41ddc0f58c",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 538,
+      "source_kind": "post-migration",
+      "slug": "required-evidence-is-intent-not-an-executable-validation-program",
+      "title": "Coding work-packet `required_evidence` is intent, not an executable validation program.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-required-evidence-is-intent-not-an-executable-validation-program",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when a runtime `Enum.find!/2` error survived compile-only candidate validation).",
+      "content_sha256": "a0619d16a3c90b12342fe0916196496ae99628d0d593bcce28d317e5eb7d35bf",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 539,
+      "source_kind": "post-migration",
+      "slug": "a-green-exunit-exit-must-include-a-nonzero-intended-test-count",
+      "title": "A green ExUnit exit must include a nonzero intended test count.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-a-green-exunit-exit-must-include-a-nonzero-intended-test-count",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 during the Phase C delegated-work canary).",
+      "content_sha256": "1130c4a38fa19fb6857022225a3dc26e31c6ed66d6bff6992afd705661987302",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 76
+  "post_migration_entry_count": 78
 }
