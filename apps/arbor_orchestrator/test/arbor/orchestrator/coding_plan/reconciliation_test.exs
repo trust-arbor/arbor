@@ -137,6 +137,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       |> put_in(["task_inventory", "filters", "task_id"], "task-1")
       |> put_in(["resource_inventory", "filters", "task_id"], "task-1")
       |> put_in(["acp_sessions", "filters", "task_id"], "task-1")
+      |> put_in(["pending_approvals", "filters", "task_id"], "task-1")
     )
 
     Process.put({Clock, :values}, [@observed_at, @persisted_at])
@@ -197,6 +198,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       |> put_in(["resource_inventory", "filters", "principal_id"], "principal-1")
       |> put_in(["acp_sessions", "filters", "task_id"], "task-1")
       |> put_in(["acp_sessions", "filters", "principal_id"], "principal-1")
+      |> put_in(["pending_approvals", "filters", "task_id"], "task-1")
+      |> put_in(["pending_approvals", "filters", "principal_id"], "principal-1")
 
     Application.put_env(:arbor_orchestrator, :coding_reconciliation_observer_module, nil)
 
@@ -252,7 +255,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
                       caller_id: "operator-1",
                       task_id: "task-1",
                       principal_id: "principal-1",
-                      max_items: 64
+                      max_items: 64,
+                      principal_scope: :subject
                     ]}
   end
 
@@ -360,11 +364,65 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       observations()
       |> put_in(["task_inventory", "filters", "task_id"], "task-1")
       |> put_in(["resource_inventory", "filters", "task_id"], "task-2")
+      |> put_in(["acp_sessions", "filters", "task_id"], "task-2")
+      |> put_in(["pending_approvals", "filters", "task_id"], "task-2")
     )
 
     Process.put({Clock, :values}, [@observed_at, @persisted_at])
 
     assert {:error, :inconsistent_scope} =
+             Reconciliation.dry_run(caller_id: "operator-1")
+  end
+
+  test "pending approvals produce decisions and reject narrowed observer filters" do
+    {:ok, resource_id} =
+      Arbor.Contracts.Coding.PendingApprovalResourceId.resource_id("consensus", "irq-keep")
+
+    approval = %{
+      "resource_id" => resource_id,
+      "approval_id" => "irq-keep",
+      "source" => "consensus",
+      "task_id" => "task-1",
+      "agent_id" => "agent-1",
+      "principal_id" => "principal-1",
+      "approver_id" => nil,
+      "resource_uri" => "arbor://fs/read/repo/file.ex",
+      "action" => "read",
+      "status" => "pending",
+      "created_at" => "2026-07-22T12:00:00Z"
+    }
+
+    Process.put(
+      {Observer, :observations},
+      observations()
+      |> Map.put(
+        "task_inventory",
+        task_inventory([task("task-1", "running", true)])
+      )
+      |> Map.put(
+        "pending_approvals",
+        pending_approval_inventory([approval])
+      )
+    )
+
+    Process.put({Clock, :values}, [@observed_at, @persisted_at])
+    assert {:ok, result} = Reconciliation.dry_run(caller_id: "operator-1")
+
+    by_id = Map.new(result["manifest"]["decisions"], &{&1["resource_id"], &1})
+    assert by_id[resource_id]["resource_type"] == "pending_approval"
+    assert by_id[resource_id]["decision"] == "keep"
+    assert by_id[resource_id]["expected_identity"]["approval_id"] == "irq-keep"
+    assert result["supplementary_evidence"]["pending_approvals"]["counts"]["returned"] == 1
+    refute Map.has_key?(result["supplementary_evidence"]["pending_approvals"], "approvals")
+
+    narrowed =
+      observations()
+      |> put_in(["pending_approvals", "filters", "agent_id"], "agent-1")
+
+    Process.put({Observer, :observations}, narrowed)
+    Process.put({Clock, :values}, [@observed_at, @persisted_at])
+
+    assert {:error, :invalid_or_incomplete_pending_approval_inventory} =
              Reconciliation.dry_run(caller_id: "operator-1")
   end
 
@@ -502,23 +560,40 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
     }
   end
 
-  defp pending_approval_inventory do
+  defp pending_approval_inventory(approvals \\ []) do
     %{
       "schema_version" => 1,
-      "storage" => %{"durability" => "volatile"},
-      "filters" => %{"task_id" => nil, "principal_id" => nil},
+      "storage" => %{
+        "durability" => "volatile",
+        "authority" => "approval_backends",
+        "read_only" => true
+      },
+      "bounds" => %{"max_items" => 64, "max_backend_entries" => 1_000},
+      "filters" => %{
+        "task_id" => nil,
+        "agent_id" => nil,
+        "principal_id" => nil,
+        "principal_scope" => "subject",
+        "resource_uri" => nil
+      },
       "truncated" => false,
       "counts" => %{
-        "observed" => 0,
-        "matching" => 0,
-        "returned" => 0,
-        "quarantined" => 0,
-        "duplicates" => 0,
+        "observed" => length(approvals),
+        "matching" => length(approvals),
+        "returned" => length(approvals),
+        "filtered_out" => 0,
+        "ignored" => 0,
         "malformed" => 0,
-        "backend_omitted" => 0,
-        "quarantine_truncated" => 0
+        "duplicates" => 0,
+        "quarantined" => 0,
+        "truncated" => 0,
+        "backend_omitted" => 0
       },
-      "approvals" => []
+      "backend_counts" => %{
+        "consensus" => %{"observed" => length(approvals), "omitted" => 0, "truncated" => false},
+        "interaction" => %{"observed" => 0, "omitted" => 0, "truncated" => false}
+      },
+      "approvals" => approvals
     }
   end
 

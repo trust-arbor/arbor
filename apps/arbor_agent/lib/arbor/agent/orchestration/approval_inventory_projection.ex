@@ -8,6 +8,7 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
   """
 
   alias Arbor.Agent.Orchestration.PendingApproval
+  alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Security.CapabilityUri
 
   @schema_version 1
@@ -146,9 +147,11 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
          {:ok, action} <- optional_value_string(approval.action, @max_id_bytes),
          {:ok, status} <- status_string(approval.status),
          {:ok, created_at} <- optional_timestamp(approval.created_at),
-         {:ok, source_name} <- source_string(source) do
+         {:ok, source_name} <- source_string(source),
+         {:ok, resource_id} <- PendingApprovalResourceId.resource_id(source_name, approval_id) do
       {:ok,
        %{
+         "resource_id" => resource_id,
          "approval_id" => approval_id,
          "source" => source_name,
          "task_id" => task_id,

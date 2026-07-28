@@ -1,6 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Orchestrator.CodingPlan.ReconciliationCore
 
   @moduletag :fast
@@ -709,6 +710,292 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
     assert length(with_empty["decisions"]) == 1
     assert hd(with_empty["decisions"])["resource_type"] == "live_workspace_lease"
     assert String.match?(with_empty["observation_digest"]["source_sha256"], ~r/\A[0-9a-f]{64}\z/)
+  end
+
+  test "classifies pending approvals fail-closed with exact identity binding" do
+    tasks = [
+      task("task-live", "running", true),
+      task("task-dead", "running", false),
+      task("task-terminal", "done", false)
+    ]
+
+    approvals = [
+      pending_approval("keep-a", "consensus", "task-live", "principal-1"),
+      pending_approval("retry-b", "interaction", "task-dead", "principal-1"),
+      pending_approval("settle-c", "consensus", "task-terminal", "principal-1"),
+      pending_approval("missing-task", "consensus", "task-missing", "principal-1"),
+      pending_approval("missing-principal", "consensus", "task-live", nil),
+      pending_approval("missing-task-id", "consensus", nil, "principal-1")
+    ]
+
+    assert {:ok, manifest, digest} =
+             ReconciliationCore.reconcile(
+               task_inventory(tasks),
+               resource_inventory([]),
+               @observed_at,
+               %{},
+               ReconciliationCore.empty_acp_inventory(),
+               pending_approval_inventory(approvals)
+             )
+
+    decisions = Map.new(manifest["decisions"], &{&1["expected_identity"]["approval_id"], &1})
+
+    assert decisions["keep-a"]["decision"] == "keep"
+    assert decisions["keep-a"]["reason"] == "live_task_owner_alive"
+    assert decisions["retry-b"]["decision"] == "retry"
+    assert decisions["retry-b"]["reason"] == "live_task_owner_dead"
+    assert decisions["settle-c"]["decision"] == "settle"
+    assert decisions["settle-c"]["reason"] == "terminal_active_resource"
+    assert decisions["missing-task"]["reason"] == "missing_task"
+
+    assert decisions["missing-principal"]["reason"] ==
+             "missing_task_or_principal_provenance"
+
+    assert decisions["missing-task-id"]["reason"] == "missing_task_or_principal_provenance"
+
+    identity = decisions["keep-a"]["expected_identity"]
+    {:ok, resource_id} = PendingApprovalResourceId.resource_id("consensus", "keep-a")
+
+    assert identity == %{
+             "resource_type" => "pending_approval",
+             "resource_id" => resource_id,
+             "approval_id" => "keep-a",
+             "source" => "consensus",
+             "task_id" => "task-live",
+             "agent_id" => "agent-1",
+             "principal_id" => "principal-1",
+             "approver_id" => nil,
+             "resource_uri" => "arbor://fs/read/repo/file.ex",
+             "action" => "read",
+             "status" => "pending",
+             "created_at" => "2026-07-22T12:00:00Z"
+           }
+
+    assert String.match?(digest, ~r/\A[0-9a-f]{64}\z/)
+    assert Enum.all?(manifest["decisions"], &(&1["resource_type"] == "pending_approval"))
+  end
+
+  test "pending approval decisions are deterministic across input order" do
+    tasks = [task("task-live", "running", true), task("task-dead", "running", false)]
+
+    approvals = [
+      pending_approval("z-approval", "consensus", "task-dead", "principal-1"),
+      pending_approval("a-approval", "interaction", "task-live", "principal-1")
+    ]
+
+    first =
+      ReconciliationCore.reconcile(
+        task_inventory(tasks),
+        resource_inventory([]),
+        @observed_at,
+        %{},
+        nil,
+        pending_approval_inventory(approvals)
+      )
+
+    second =
+      ReconciliationCore.reconcile(
+        task_inventory(tasks),
+        resource_inventory([]),
+        @observed_at,
+        %{},
+        nil,
+        pending_approval_inventory(Enum.reverse(approvals))
+      )
+
+    assert first == second
+    {:ok, manifest, _} = first
+
+    assert Enum.map(manifest["decisions"], & &1["expected_identity"]["approval_id"]) == [
+             "a-approval",
+             "z-approval"
+           ]
+  end
+
+  test "rejects incomplete or narrowed pending approval inventories" do
+    tasks = task_inventory([task("task-1", "running", true)])
+    resources = resource_inventory([])
+    valid = pending_approval_inventory([pending_approval("a1", "consensus", "task-1", "p1")])
+
+    assert {:error, :malformed_pending_approval_inventory} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               nil,
+               Map.put(valid, "truncated", true)
+             )
+
+    assert {:error, :inconsistent_approval_filters} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               nil,
+               put_in(valid, ["filters", "principal_scope"], "participant")
+             )
+
+    assert {:error, :inconsistent_approval_filters} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               nil,
+               put_in(valid, ["filters", "agent_id"], "agent-1")
+             )
+
+    assert {:error, :inconsistent_backend_counts} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               nil,
+               put_in(valid, ["backend_counts", "consensus", "omitted"], 1)
+               |> put_in(["counts", "backend_omitted"], 1)
+             )
+
+    assert {:error, :inconsistent_backend_counts} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               nil,
+               put_in(valid, ["backend_counts", "consensus", "observed"], 0)
+             )
+
+    assert {:error, :inconsistent_approval_counts} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               nil,
+               valid
+               |> put_in(["counts", "malformed"], 1)
+               |> put_in(["counts", "observed"], 2)
+               |> put_in(["counts", "quarantined"], 1)
+               |> put_in(["backend_counts", "consensus", "observed"], 2)
+             )
+  end
+
+  test "empty pending approval inventory is synthesized for compatibility callers" do
+    tasks = task_inventory([task("task-1", "running", true)])
+
+    resources =
+      resource_inventory([resource("live_workspace_lease", "resource-1", "task-1", "principal")])
+
+    assert {:ok, with_default, default_digest} =
+             ReconciliationCore.reconcile(tasks, resources, @observed_at)
+
+    assert {:ok, with_empty, empty_digest} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               nil,
+               ReconciliationCore.empty_pending_approval_inventory()
+             )
+
+    assert with_default == with_empty
+    assert default_digest == empty_digest
+    assert length(with_empty["decisions"]) == 1
+    assert hd(with_empty["decisions"])["resource_type"] == "live_workspace_lease"
+  end
+
+  test "approval identity drift changes source and manifest digests" do
+    tasks = [task("task-live", "running", true)]
+    resources = resource_inventory([])
+    base = pending_approval("a1", "consensus", "task-live", "principal-1")
+    drifted = Map.put(base, "status", "evaluating")
+
+    assert {:ok, base_manifest, base_digest} =
+             ReconciliationCore.reconcile(
+               task_inventory(tasks),
+               resources,
+               @observed_at,
+               %{},
+               nil,
+               pending_approval_inventory([base])
+             )
+
+    assert {:ok, drifted_manifest, drifted_digest} =
+             ReconciliationCore.reconcile(
+               task_inventory(tasks),
+               resources,
+               @observed_at,
+               %{},
+               nil,
+               pending_approval_inventory([drifted])
+             )
+
+    assert base_manifest["observation_digest"]["source_sha256"] !=
+             drifted_manifest["observation_digest"]["source_sha256"]
+
+    assert base_digest != drifted_digest
+    assert hd(base_manifest["decisions"])["expected_identity"]["status"] == "pending"
+    assert hd(drifted_manifest["decisions"])["expected_identity"]["status"] == "evaluating"
+  end
+
+  defp pending_approval(approval_id, source, task_id, principal_id, overrides \\ []) do
+    {:ok, resource_id} = PendingApprovalResourceId.resource_id(source, approval_id)
+
+    %{
+      "resource_id" => resource_id,
+      "approval_id" => approval_id,
+      "source" => source,
+      "task_id" => task_id,
+      "agent_id" => "agent-1",
+      "principal_id" => principal_id,
+      "approver_id" => nil,
+      "resource_uri" => "arbor://fs/read/repo/file.ex",
+      "action" => "read",
+      "status" => "pending",
+      "created_at" => "2026-07-22T12:00:00Z"
+    }
+    |> Map.merge(Map.new(overrides, fn {key, value} -> {to_string(key), value} end))
+  end
+
+  defp pending_approval_inventory(approvals) do
+    %{
+      "schema_version" => 1,
+      "storage" => %{
+        "durability" => "volatile",
+        "authority" => "approval_backends",
+        "read_only" => true
+      },
+      "bounds" => %{"max_items" => 1_000, "max_backend_entries" => 1_000},
+      "filters" => %{
+        "task_id" => nil,
+        "agent_id" => nil,
+        "principal_id" => nil,
+        "principal_scope" => "subject",
+        "resource_uri" => nil
+      },
+      "counts" => %{
+        "observed" => length(approvals),
+        "matching" => length(approvals),
+        "returned" => length(approvals),
+        "filtered_out" => 0,
+        "ignored" => 0,
+        "malformed" => 0,
+        "duplicates" => 0,
+        "quarantined" => 0,
+        "truncated" => 0,
+        "backend_omitted" => 0
+      },
+      "backend_counts" => %{
+        "consensus" => %{"observed" => length(approvals), "omitted" => 0, "truncated" => false},
+        "interaction" => %{"observed" => 0, "omitted" => 0, "truncated" => false}
+      },
+      "truncated" => false,
+      "approvals" => approvals
+    }
   end
 
   defp acp_session(worker_session_id, task_id, principal_id, overrides \\ []) do

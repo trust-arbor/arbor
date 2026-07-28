@@ -2,6 +2,7 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjectionTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Agent.Orchestration
+  alias Arbor.Contracts.Coding.PendingApprovalResourceId
 
   @moduletag :fast
   @timestamp ~U[2026-07-22 12:00:00Z]
@@ -92,6 +93,13 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjectionTest do
     assert first["counts"]["ignored"] == 1
     assert first["counts"]["quarantined"] == 3
     refute first["truncated"]
+
+    for approval <- first["approvals"] do
+      assert {:ok, expected_id} =
+               PendingApprovalResourceId.resource_id(approval["source"], approval["approval_id"])
+
+      assert approval["resource_id"] == expected_id
+    end
 
     assert first["storage"] == %{
              "durability" => "volatile",

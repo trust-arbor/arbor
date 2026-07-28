@@ -8,12 +8,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   decide whether a validated manifest is still current before applying it.
   """
 
+  alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Coding.ReconciliationManifest
+  alias Arbor.Contracts.Security.CapabilityUri
 
   @schema_version 1
   @max_tasks 1_000
   @max_resources 1_000
   @max_acp_sessions 1_000
+  @max_approvals 1_000
   @max_json_bytes 1_000_000
   # Match the producer collection bounds; the document byte limit remains
   # the independent protection against large records.
@@ -24,7 +27,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     "retained_workspace_record" => 1,
     "validation_resource" => 2,
     "quarantine" => 3,
-    "acp_managed_session" => 4
+    "acp_managed_session" => 4,
+    "pending_approval" => 5
   }
   @task_states ~w(running waiting_approval done failed cancelled)
   @terminal_states ~w(done failed cancelled)
@@ -43,11 +47,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     worker_session_id provider_session_id provider model status pooled return_to_pool
     task_id principal_id owner_present owner_alive session_alive close_cleanup_in_progress
   )
+  @source_approval_fields ~w(
+    resource_id approval_id source task_id agent_id principal_id approver_id
+    resource_uri action status created_at
+  )
+  @approval_count_fields ~w(
+    observed matching returned filtered_out ignored malformed duplicates quarantined
+    truncated backend_omitted
+  )
   @acp_count_fields ~w(
     observed matching returned filtered_out truncated malformed duplicates quarantined
     quarantine_returned quarantine_truncated
   )
   @scope_fields ~w(task_id principal_id agent_id state)
+  @pending_approval_statuses ~w(pending evaluating)
 
   @type state :: %{
           required(:observed_at) => String.t(),
@@ -55,6 +68,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
           required(:task_inventory) => map(),
           required(:resource_inventory) => map(),
           required(:acp_session_inventory) => map(),
+          required(:pending_approval_inventory) => map(),
           required(:observation_digest) => map()
         }
 
@@ -64,7 +78,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     with {:ok, attrs} <-
            normalize_object(
              attrs,
-             ~w(task_inventory resource_inventory acp_session_inventory observed_at scope)
+             ~w(
+               task_inventory resource_inventory acp_session_inventory
+               pending_approval_inventory observed_at scope
+             )
            ),
          {:ok, task_inventory} <- normalize_task_inventory(fetch(attrs, "task_inventory")),
          {:ok, resource_inventory} <-
@@ -74,28 +91,47 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
              fetch(attrs, "acp_session_inventory"),
              resource_inventory["filters"]
            ),
+         {:ok, pending_approval_inventory} <-
+           normalize_pending_approval_inventory(
+             fetch(attrs, "pending_approval_inventory"),
+             resource_inventory["filters"]
+           ),
          :ok <-
            validate_scope_consistency(
              task_inventory["filters"],
              resource_inventory["filters"],
-             acp_session_inventory["filters"]
+             acp_session_inventory["filters"],
+             pending_approval_inventory["filters"]
            ),
-         :ok <- no_truncation(task_inventory, resource_inventory, acp_session_inventory),
+         :ok <-
+           no_truncation(
+             task_inventory,
+             resource_inventory,
+             acp_session_inventory,
+             pending_approval_inventory
+           ),
          {:ok, observed_at} <- normalize_observed_at(fetch(attrs, "observed_at")),
          {:ok, scope} <-
            normalize_scope(
              fetch(attrs, "scope"),
              task_inventory,
              resource_inventory,
-             acp_session_inventory
+             acp_session_inventory,
+             pending_approval_inventory
            ),
          {:ok, observation_digest} <-
-           observation_digest(task_inventory, resource_inventory, acp_session_inventory),
+           observation_digest(
+             task_inventory,
+             resource_inventory,
+             acp_session_inventory,
+             pending_approval_inventory
+           ),
          :ok <-
            bounded_document?(%{
              "task_inventory" => task_inventory,
              "resource_inventory" => resource_inventory,
-             "acp_session_inventory" => acp_session_inventory
+             "acp_session_inventory" => acp_session_inventory,
+             "pending_approval_inventory" => pending_approval_inventory
            }) do
       {:ok,
        %{
@@ -104,6 +140,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          task_inventory: task_inventory,
          resource_inventory: resource_inventory,
          acp_session_inventory: acp_session_inventory,
+         pending_approval_inventory: pending_approval_inventory,
          observation_digest: observation_digest
        }}
     end
@@ -123,6 +160,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         task_inventory: task_inventory,
         resource_inventory: resource_inventory,
         acp_session_inventory: acp_session_inventory,
+        pending_approval_inventory: pending_approval_inventory,
         observation_digest: observation_digest
       }) do
     task_index = Map.new(task_inventory["tasks"], &{&1["task_id"], &1})
@@ -140,8 +178,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         &decide_acp_session(&1, task_index, journal_status)
       )
 
+    approval_decisions =
+      Enum.map(
+        pending_approval_inventory["approvals"],
+        &decide_pending_approval(&1, task_index, journal_status)
+      )
+
     decisions =
-      (workspace_decisions ++ acp_decisions)
+      (workspace_decisions ++ acp_decisions ++ approval_decisions)
       |> Enum.sort_by(&decision_sort_key/1)
 
     {:ok,
@@ -181,6 +225,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
           map() | keyword(),
           term(),
           map() | keyword(),
+          map() | keyword() | nil,
           map() | keyword() | nil
         ) ::
           {:ok, map(), String.t()} | {:error, term()}
@@ -189,12 +234,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         resource_inventory,
         observed_at,
         scope \\ %{},
-        acp_session_inventory \\ nil
+        acp_session_inventory \\ nil,
+        pending_approval_inventory \\ nil
       ) do
     attrs = %{
       "task_inventory" => task_inventory,
       "resource_inventory" => resource_inventory,
       "acp_session_inventory" => acp_session_inventory,
+      "pending_approval_inventory" => pending_approval_inventory,
       "observed_at" => observed_at,
       "scope" => scope
     }
@@ -214,6 +261,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   @doc false
   @spec empty_acp_inventory() :: map()
   def empty_acp_inventory, do: empty_acp_inventory_for(%{"task_id" => nil, "principal_id" => nil})
+
+  @doc false
+  @spec empty_pending_approval_inventory() :: map()
+  def empty_pending_approval_inventory,
+    do: empty_pending_approval_inventory_for(%{"task_id" => nil, "principal_id" => nil})
 
   defp empty_acp_inventory_for(filters) do
     %{
@@ -239,6 +291,46 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       },
       "sessions" => [],
       "quarantine" => []
+    }
+  end
+
+  defp empty_pending_approval_inventory_for(filters) do
+    %{
+      "schema_version" => @schema_version,
+      "storage" => %{
+        "durability" => "volatile",
+        "authority" => "approval_backends",
+        "read_only" => true
+      },
+      "bounds" => %{
+        "max_items" => @max_approvals,
+        "max_backend_entries" => @max_approvals
+      },
+      "filters" => %{
+        "task_id" => filters["task_id"],
+        "agent_id" => nil,
+        "principal_id" => filters["principal_id"],
+        "principal_scope" => "subject",
+        "resource_uri" => nil
+      },
+      "counts" => %{
+        "observed" => 0,
+        "matching" => 0,
+        "returned" => 0,
+        "filtered_out" => 0,
+        "ignored" => 0,
+        "malformed" => 0,
+        "duplicates" => 0,
+        "quarantined" => 0,
+        "truncated" => 0,
+        "backend_omitted" => 0
+      },
+      "backend_counts" => %{
+        "consensus" => %{"observed" => 0, "omitted" => 0, "truncated" => false},
+        "interaction" => %{"observed" => 0, "omitted" => 0, "truncated" => false}
+      },
+      "truncated" => false,
+      "approvals" => []
     }
   end
 
@@ -334,6 +426,271 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   defp normalize_acp_session_inventory(_inventory, _resource_filters),
     do: {:error, :malformed_acp_session_inventory}
+
+  defp normalize_pending_approval_inventory(nil, resource_filters),
+    do:
+      normalize_pending_approval_inventory(
+        empty_pending_approval_inventory_for(resource_filters),
+        resource_filters
+      )
+
+  defp normalize_pending_approval_inventory(inventory, resource_filters)
+       when is_map(inventory) and not is_struct(inventory) do
+    with {:ok, inventory} <-
+           object(
+             inventory,
+             ~w(schema_version storage bounds filters counts backend_counts truncated approvals)
+           ),
+         :ok <-
+           exact(
+             inventory,
+             ~w(schema_version storage bounds filters counts backend_counts truncated approvals)
+           ),
+         :ok <- version(inventory["schema_version"]),
+         :ok <- exact(inventory["storage"], ~w(durability authority read_only)),
+         :ok <- value(inventory["storage"]["durability"], "volatile"),
+         :ok <- value(inventory["storage"]["authority"], "approval_backends"),
+         :ok <- value(inventory["storage"]["read_only"], true),
+         {:ok, bounds} <- normalize_approval_bounds(inventory["bounds"]),
+         {:ok, filters} <- normalize_approval_filters(inventory["filters"], resource_filters),
+         :ok <- boolean_value(inventory["truncated"]),
+         true <- inventory["truncated"] == false,
+         {:ok, counts} <- normalize_approval_counts(inventory["counts"], bounds),
+         {:ok, backend_counts} <-
+           normalize_approval_backend_counts(inventory["backend_counts"], bounds, counts),
+         {:ok, approvals} <-
+           normalize_approvals(inventory["approvals"], counts["returned"], bounds),
+         :ok <- validate_approval_filter_membership(approvals, filters),
+         :ok <- validate_approval_count_invariants(counts, length(approvals)) do
+      {:ok,
+       %{
+         inventory
+         | "bounds" => bounds,
+           "filters" => filters,
+           "counts" => counts,
+           "backend_counts" => backend_counts,
+           "approvals" => approvals
+       }}
+    else
+      false -> {:error, :malformed_pending_approval_inventory}
+      error -> error
+    end
+  end
+
+  defp normalize_pending_approval_inventory(_inventory, _resource_filters),
+    do: {:error, :malformed_pending_approval_inventory}
+
+  defp normalize_approval_bounds(bounds) when is_map(bounds) do
+    with {:ok, bounds} <- object(bounds, ~w(max_items max_backend_entries)),
+         :ok <- exact(bounds, ~w(max_items max_backend_entries)),
+         :ok <- positive_count(bounds["max_items"], @max_approvals),
+         :ok <- positive_count(bounds["max_backend_entries"], @max_approvals) do
+      {:ok, bounds}
+    end
+  end
+
+  defp normalize_approval_bounds(_bounds), do: {:error, :malformed_pending_approval_inventory}
+
+  defp normalize_approval_filters(filters, resource_filters) when is_map(filters) do
+    with {:ok, filters} <-
+           object(filters, ~w(task_id agent_id principal_id principal_scope resource_uri)),
+         :ok <- exact(filters, ~w(task_id agent_id principal_id principal_scope resource_uri)),
+         :ok <- optional_id(filters["task_id"]),
+         :ok <- optional_id(filters["agent_id"]),
+         :ok <- optional_id(filters["principal_id"]),
+         true <- filters["principal_scope"] == "subject",
+         true <- is_nil(filters["agent_id"]),
+         true <- is_nil(filters["resource_uri"]),
+         :ok <- optional_resource_uri_value(filters["resource_uri"]),
+         true <- filters["task_id"] == resource_filters["task_id"],
+         true <- filters["principal_id"] == resource_filters["principal_id"] do
+      {:ok, filters}
+    else
+      false -> {:error, :inconsistent_approval_filters}
+      error -> error
+    end
+  end
+
+  defp normalize_approval_filters(_filters, _resource_filters),
+    do: {:error, :malformed_pending_approval_inventory}
+
+  defp normalize_approval_counts(counts, bounds) when is_map(counts) do
+    aggregate_cap = 2 * bounds["max_backend_entries"]
+
+    with {:ok, counts} <- object(counts, @approval_count_fields),
+         :ok <- exact(counts, @approval_count_fields),
+         :ok <- count_at_most(counts["observed"], aggregate_cap),
+         :ok <- count_at_most(counts["matching"], aggregate_cap),
+         :ok <- count_at_most(counts["returned"], bounds["max_items"]),
+         :ok <- count_at_most(counts["filtered_out"], aggregate_cap),
+         :ok <- count_at_most(counts["ignored"], aggregate_cap),
+         :ok <- count_at_most(counts["malformed"], aggregate_cap),
+         :ok <- count_at_most(counts["duplicates"], aggregate_cap),
+         :ok <- count_at_most(counts["quarantined"], aggregate_cap),
+         :ok <- count_at_most(counts["truncated"], aggregate_cap),
+         :ok <- count_at_most(counts["backend_omitted"], aggregate_cap) do
+      {:ok, counts}
+    end
+  end
+
+  defp normalize_approval_counts(_counts, _bounds),
+    do: {:error, :malformed_pending_approval_inventory}
+
+  defp normalize_approval_backend_counts(backend_counts, bounds, counts)
+       when is_map(backend_counts) do
+    with {:ok, backend_counts} <- object(backend_counts, ~w(consensus interaction)),
+         :ok <- exact(backend_counts, ~w(consensus interaction)),
+         {:ok, consensus} <- normalize_backend_source_counts(backend_counts["consensus"], bounds),
+         {:ok, interaction} <-
+           normalize_backend_source_counts(backend_counts["interaction"], bounds),
+         true <- consensus["omitted"] == 0 and interaction["omitted"] == 0,
+         true <- consensus["truncated"] == false and interaction["truncated"] == false,
+         true <- consensus["observed"] + interaction["observed"] == counts["observed"],
+         true <- counts["backend_omitted"] == consensus["omitted"] + interaction["omitted"] do
+      {:ok, %{"consensus" => consensus, "interaction" => interaction}}
+    else
+      false -> {:error, :inconsistent_backend_counts}
+      error -> error
+    end
+  end
+
+  defp normalize_approval_backend_counts(_backend_counts, _bounds, _counts),
+    do: {:error, :inconsistent_backend_counts}
+
+  defp normalize_backend_source_counts(source, bounds) when is_map(source) do
+    with {:ok, source} <- object(source, ~w(observed omitted truncated)),
+         :ok <- exact(source, ~w(observed omitted truncated)),
+         :ok <- count_at_most(source["observed"], bounds["max_backend_entries"]),
+         :ok <- count_at_most(source["omitted"], bounds["max_backend_entries"]),
+         :ok <- boolean_value(source["truncated"]) do
+      {:ok, source}
+    end
+  end
+
+  defp normalize_backend_source_counts(_source, _bounds),
+    do: {:error, :inconsistent_backend_counts}
+
+  defp validate_approval_count_invariants(counts, returned) do
+    if counts["returned"] == returned and
+         counts["truncated"] == 0 and
+         counts["backend_omitted"] == 0 and
+         counts["malformed"] == 0 and
+         counts["duplicates"] == 0 and
+         counts["quarantined"] == 0 and
+         counts["matching"] == counts["returned"] + counts["truncated"] and
+         counts["quarantined"] == counts["malformed"] + counts["duplicates"] and
+         counts["observed"] ==
+           counts["matching"] + counts["filtered_out"] + counts["malformed"] +
+             counts["ignored"] + counts["duplicates"],
+       do: :ok,
+       else: {:error, :inconsistent_approval_counts}
+  end
+
+  defp normalize_approvals(approvals, returned, bounds) when is_list(approvals) do
+    if length(approvals) <= bounds["max_items"] and length(approvals) == returned do
+      with {:ok, normalized} <- normalize_approval_entries(approvals),
+           :ok <- reject_duplicate_approval_identities(normalized),
+           :ok <- reject_duplicate_ids(normalized, "resource_id") do
+        {:ok, Enum.sort_by(normalized, &approval_sort_key/1)}
+      end
+    else
+      {:error, :malformed_pending_approval_inventory}
+    end
+  end
+
+  defp normalize_approvals(_approvals, _returned, _bounds),
+    do: {:error, :malformed_pending_approval_inventory}
+
+  defp normalize_approval_entries(approvals) do
+    Enum.reduce_while(approvals, {:ok, []}, fn approval, {:ok, acc} ->
+      case normalize_approval(approval) do
+        {:ok, approval} -> {:cont, {:ok, [approval | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> reverse_ok()
+  end
+
+  defp normalize_approval(approval) when is_map(approval) and not is_struct(approval) do
+    with {:ok, approval} <- object(approval, @source_approval_fields),
+         :ok <- exact(approval, @source_approval_fields),
+         {:ok, approval_id} <- required_approval_text(approval["approval_id"]),
+         {:ok, source} <- enum_value_result(approval["source"], PendingApprovalResourceId.sources()),
+         {:ok, resource_id} <- PendingApprovalResourceId.resource_id(source, approval_id),
+         true <- approval["resource_id"] == resource_id,
+         :ok <- optional_id(approval["task_id"]),
+         :ok <- optional_id(approval["agent_id"]),
+         :ok <- optional_id(approval["principal_id"]),
+         :ok <- optional_id(approval["approver_id"]),
+         :ok <- optional_resource_uri_value(approval["resource_uri"]),
+         :ok <- optional_approval_text(approval["action"]),
+         :ok <- enum_value(approval["status"], @pending_approval_statuses),
+         :ok <- optional_timestamp_value(approval["created_at"]) do
+      {:ok, Map.put(approval, "resource_id", resource_id)}
+    else
+      false -> {:error, :malformed_pending_approval_inventory}
+      {:error, :invalid_pending_approval_resource_id} ->
+        {:error, :malformed_pending_approval_inventory}
+
+      error ->
+        error
+    end
+  end
+
+  defp normalize_approval(_approval), do: {:error, :malformed_pending_approval_inventory}
+
+  defp validate_approval_filter_membership(approvals, filters) do
+    if Enum.all?(approvals, fn approval ->
+         (is_nil(filters["task_id"]) or approval["task_id"] == filters["task_id"]) and
+           (is_nil(filters["principal_id"]) or
+              approval["principal_id"] == filters["principal_id"])
+       end),
+       do: :ok,
+       else: {:error, :inconsistent_approval_filters}
+  end
+
+  defp reject_duplicate_approval_identities(approvals) do
+    identities =
+      Enum.map(approvals, fn approval -> {approval["source"], approval["approval_id"]} end)
+
+    if length(identities) == length(Enum.uniq(identities)),
+      do: :ok,
+      else: {:error, {:duplicate, "approval_identity"}}
+  end
+
+  defp approval_sort_key(approval), do: {approval["approval_id"], approval["source"]}
+
+  defp required_approval_text(value)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 256 do
+    if String.valid?(value) and not String.contains?(value, <<0>>),
+      do: {:ok, value},
+      else: {:error, :invalid_approval_text}
+  end
+
+  defp required_approval_text(_value), do: {:error, :invalid_approval_text}
+
+  defp optional_approval_text(nil), do: :ok
+
+  defp optional_approval_text(value) when is_binary(value) and byte_size(value) <= 256 do
+    if String.valid?(value) and not String.contains?(value, <<0>>),
+      do: :ok,
+      else: {:error, :invalid_approval_text}
+  end
+
+  defp optional_approval_text(_value), do: {:error, :invalid_approval_text}
+
+  defp optional_resource_uri_value(nil), do: :ok
+
+  defp optional_resource_uri_value(resource_uri)
+       when is_binary(resource_uri) and byte_size(resource_uri) <= 256 do
+    if CapabilityUri.valid?(resource_uri), do: :ok, else: {:error, :invalid_resource_uri}
+  rescue
+    _ -> {:error, :invalid_resource_uri}
+  catch
+    _, _ -> {:error, :invalid_resource_uri}
+  end
+
+  defp optional_resource_uri_value(_resource_uri), do: {:error, :invalid_resource_uri}
 
   defp normalize_acp_filters(filters) when is_map(filters) do
     with {:ok, filters} <- object(filters, ~w(task_id principal_id)),
@@ -899,6 +1256,69 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     }
   end
 
+  defp decide_pending_approval(approval, task_index, journal_status) do
+    task_id = approval["task_id"]
+    principal_id = approval["principal_id"]
+    task = Map.get(task_index, task_id)
+    owner_status = owner_status(task)
+    task_state = if is_map(task), do: task["state"], else: nil
+
+    {decision, reason} =
+      cond do
+        is_nil(task_id) or is_nil(principal_id) ->
+          {"quarantine", "missing_task_or_principal_provenance"}
+
+        is_nil(task) ->
+          {"quarantine", "missing_task"}
+
+        task_state in @live_states and owner_status == "live" ->
+          {"keep", "live_task_owner_alive"}
+
+        task_state in @live_states ->
+          {"retry", "live_task_owner_dead"}
+
+        task_state in @terminal_states ->
+          {"settle", "terminal_active_resource"}
+
+        true ->
+          {"quarantine", "ambiguous_provenance"}
+      end
+
+    %{
+      "schema_version" => @schema_version,
+      "resource_type" => "pending_approval",
+      "resource_id" => approval["resource_id"],
+      "task_id" => task_id,
+      "principal_id" => principal_id,
+      "decision" => decision,
+      "reason" => reason,
+      "expected_identity" => pending_approval_expected_identity(approval),
+      "evidence" => %{
+        "task_presence" => if(is_map(task), do: "observed", else: "absent"),
+        "task_state" => task_state,
+        "owner_status" => owner_status,
+        "journal_status" => journal_status
+      }
+    }
+  end
+
+  defp pending_approval_expected_identity(approval) do
+    %{
+      "resource_type" => "pending_approval",
+      "resource_id" => approval["resource_id"],
+      "approval_id" => approval["approval_id"],
+      "source" => approval["source"],
+      "task_id" => approval["task_id"],
+      "agent_id" => approval["agent_id"],
+      "principal_id" => approval["principal_id"],
+      "approver_id" => approval["approver_id"],
+      "resource_uri" => approval["resource_uri"],
+      "action" => approval["action"],
+      "status" => approval["status"],
+      "created_at" => approval["created_at"]
+    }
+  end
+
   defp acp_owner_status(session, task) do
     session_owner_status =
       cond do
@@ -958,14 +1378,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
      resource["resource_id"]}
   end
 
-  defp observation_digest(tasks, resources, acp_sessions) do
+  defp observation_digest(tasks, resources, acp_sessions, approvals) do
     task_digest = sha256(canonical_json(tasks))
     resource_digest = sha256(canonical_json(resources))
 
     source = %{
       "task_inventory" => tasks,
       "resource_inventory" => resources,
-      "acp_session_inventory" => acp_sessions
+      "acp_session_inventory" => acp_sessions,
+      "pending_approval_inventory" => approvals
     }
 
     {:ok,
@@ -976,20 +1397,51 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
      }}
   end
 
-  defp normalize_scope(nil, task_inventory, resource_inventory, acp_session_inventory),
-    do:
-      normalize_scope(
-        effective_scope(task_inventory, resource_inventory, acp_session_inventory),
-        task_inventory,
-        resource_inventory,
-        acp_session_inventory
-      )
+  defp normalize_scope(
+         nil,
+         task_inventory,
+         resource_inventory,
+         acp_session_inventory,
+         pending_approval_inventory
+       ),
+       do:
+         normalize_scope(
+           effective_scope(
+             task_inventory,
+             resource_inventory,
+             acp_session_inventory,
+             pending_approval_inventory
+           ),
+           task_inventory,
+           resource_inventory,
+           acp_session_inventory,
+           pending_approval_inventory
+         )
 
-  defp normalize_scope(scope, task_inventory, resource_inventory, acp_session_inventory)
+  defp normalize_scope(
+         scope,
+         task_inventory,
+         resource_inventory,
+         acp_session_inventory,
+         pending_approval_inventory
+       )
        when is_map(scope) and map_size(scope) == 0,
-       do: normalize_scope(nil, task_inventory, resource_inventory, acp_session_inventory)
+       do:
+         normalize_scope(
+           nil,
+           task_inventory,
+           resource_inventory,
+           acp_session_inventory,
+           pending_approval_inventory
+         )
 
-  defp normalize_scope(scope, task_inventory, resource_inventory, acp_session_inventory)
+  defp normalize_scope(
+         scope,
+         task_inventory,
+         resource_inventory,
+         acp_session_inventory,
+         pending_approval_inventory
+       )
        when is_list(scope) or is_map(scope) do
     with {:ok, scope} <- normalize_object(scope, @scope_fields),
          {:ok, task_id} <- optional_id_result(scope["task_id"]),
@@ -1005,7 +1457,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          :ok <-
            if(
              normalized ==
-               effective_scope(task_inventory, resource_inventory, acp_session_inventory),
+               effective_scope(
+                 task_inventory,
+                 resource_inventory,
+                 acp_session_inventory,
+                 pending_approval_inventory
+               ),
              do: :ok,
              else: {:error, :inconsistent_scope}
            ) do
@@ -1013,24 +1470,44 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     end
   end
 
-  defp normalize_scope(_scope, _task_inventory, _resource_inventory, _acp_session_inventory),
-    do: {:error, :malformed_scope}
+  defp normalize_scope(
+         _scope,
+         _task_inventory,
+         _resource_inventory,
+         _acp_session_inventory,
+         _pending_approval_inventory
+       ),
+       do: {:error, :malformed_scope}
 
-  defp effective_scope(task_inventory, resource_inventory, acp_session_inventory) do
+  defp effective_scope(
+         task_inventory,
+         resource_inventory,
+         acp_session_inventory,
+         pending_approval_inventory
+       ) do
     task_filters = task_inventory["filters"]
     resource_filters = resource_inventory["filters"]
     acp_filters = acp_session_inventory["filters"]
+    approval_filters = pending_approval_inventory["filters"]
 
     %{
       "task_id" =>
-        resource_filters["task_id"] || acp_filters["task_id"] || task_filters["task_id"],
-      "principal_id" => resource_filters["principal_id"] || acp_filters["principal_id"],
+        resource_filters["task_id"] || acp_filters["task_id"] || approval_filters["task_id"] ||
+          task_filters["task_id"],
+      "principal_id" =>
+        resource_filters["principal_id"] || acp_filters["principal_id"] ||
+          approval_filters["principal_id"],
       "agent_id" => nil,
       "state" => nil
     }
   end
 
-  defp validate_scope_consistency(task_filters, resource_filters, acp_filters) do
+  defp validate_scope_consistency(
+         task_filters,
+         resource_filters,
+         acp_filters,
+         approval_filters
+       ) do
     cond do
       not is_nil(task_filters["agent_id"]) ->
         {:error, :unsupported_task_scope}
@@ -1046,6 +1523,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         {:error, :inconsistent_scope}
 
       acp_filters["principal_id"] != resource_filters["principal_id"] ->
+        {:error, :inconsistent_scope}
+
+      approval_filters["task_id"] != resource_filters["task_id"] ->
+        {:error, :inconsistent_scope}
+
+      approval_filters["principal_id"] != resource_filters["principal_id"] ->
         {:error, :inconsistent_scope}
 
       true ->
@@ -1068,14 +1551,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   defp normalize_observed_at(_value), do: {:error, :invalid_observed_at}
 
-  defp no_truncation(task_inventory, resource_inventory, acp_session_inventory) do
+  defp no_truncation(
+         task_inventory,
+         resource_inventory,
+         acp_session_inventory,
+         pending_approval_inventory
+       ) do
     cond do
       task_inventory["truncated"] or resource_inventory["truncated"] or
-          acp_session_inventory["truncated"] ->
+        acp_session_inventory["truncated"] or pending_approval_inventory["truncated"] ->
         {:error, :truncated_observation}
 
       task_inventory["counts"]["truncated"] > 0 or resource_inventory["counts"]["truncated"] > 0 or
-          acp_session_inventory["counts"]["truncated"] > 0 ->
+        acp_session_inventory["counts"]["truncated"] > 0 or
+          pending_approval_inventory["counts"]["truncated"] > 0 ->
         {:error, :truncated_observation}
 
       task_inventory["counts"]["malformed"] > 0 ->
@@ -1085,6 +1574,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         acp_session_inventory["counts"]["duplicates"] > 0 or
           acp_session_inventory["counts"]["quarantined"] > 0 ->
         {:error, :malformed_acp_session_inventory}
+
+      pending_approval_inventory["counts"]["malformed"] > 0 or
+        pending_approval_inventory["counts"]["duplicates"] > 0 or
+        pending_approval_inventory["counts"]["quarantined"] > 0 or
+          pending_approval_inventory["counts"]["backend_omitted"] > 0 ->
+        {:error, :malformed_pending_approval_inventory}
 
       true ->
         :ok

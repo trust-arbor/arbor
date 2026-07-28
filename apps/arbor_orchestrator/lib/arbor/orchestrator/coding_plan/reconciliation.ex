@@ -30,14 +30,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
          {:ok, observations} <- collect_observations(opts),
          {:ok, task_inventory} <- required_inventory(observations, :task_inventory),
          {:ok, resource_inventory} <- required_inventory(observations, :resource_inventory),
-         {:ok, acp_inventory, supplementary} <- supplementary_evidence(observations),
+         {:ok, acp_inventory, approval_inventory, supplementary} <-
+           collect_required_evidence(observations, opts),
          {:ok, manifest, manifest_sha256} <-
            ReconciliationCore.reconcile(
              task_inventory,
              resource_inventory,
              opts.observed_at,
              scope(opts),
-             acp_inventory
+             acp_inventory,
+             approval_inventory
            ),
          {:ok, exact_manifest_sha256} <- ReconciliationManifest.digest(manifest),
          true <- exact_manifest_sha256 == manifest_sha256,
@@ -213,11 +215,19 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
   defp collect_from_public_facades(opts) do
     task_opts = [caller_id: opts.caller_id, task_id: opts.task_id, max_items: opts.max_items]
 
-    supplementary_opts = [
+    acp_opts = [
       caller_id: opts.caller_id,
       task_id: opts.task_id,
       principal_id: opts.principal_id,
       max_items: opts.max_items
+    ]
+
+    approval_opts = [
+      caller_id: opts.caller_id,
+      task_id: opts.task_id,
+      principal_id: opts.principal_id,
+      max_items: opts.max_items,
+      principal_scope: :subject
     ]
 
     resource_opts = [
@@ -238,13 +248,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
            call_facade(
              Config.coding_reconciliation_acp_facade(),
              :acp_managed_session_inventory,
-             supplementary_opts
+             acp_opts
            ),
          {:ok, pending_approvals} <-
            call_facade(
              Config.coding_reconciliation_approval_facade(),
              :pending_approval_inventory,
-             supplementary_opts
+             approval_opts
            ) do
       {:ok,
        %{
@@ -310,10 +320,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
     end
   end
 
-  defp supplementary_evidence(observations) do
+  defp collect_required_evidence(observations, opts) do
     with {:ok, acp} <- acp_session_inventory(observations),
-         {:ok, approvals} <- supplementary_inventory(observations, "pending_approvals") do
-      {:ok, acp,
+         {:ok, approvals} <- pending_approval_inventory(observations, opts) do
+      {:ok, acp, approvals,
        %{
          "acp_sessions" => summarize_inventory("acp_sessions", acp),
          "pending_approvals" => summarize_inventory("pending_approvals", approvals)
@@ -334,13 +344,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
     end
   end
 
-  defp supplementary_inventory(observations, key) do
-    case Map.get(observations, key) do
+  defp pending_approval_inventory(observations, opts) do
+    case Map.get(observations, "pending_approvals") do
       inventory when is_map(inventory) ->
-        with :ok <- validate_supplementary_inventory(inventory), do: {:ok, inventory}
+        with :ok <- validate_supplementary_inventory(inventory),
+             :ok <- validate_pending_approval_inventory(inventory, opts) do
+          {:ok, inventory}
+        end
 
       _ ->
-        {:error, {:reconciliation_inventory_unavailable, key}}
+        {:error, {:reconciliation_inventory_unavailable, :pending_approvals}}
     end
   end
 
@@ -377,9 +390,32 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
     end
   end
 
+  defp validate_pending_approval_inventory(inventory, opts) do
+    counts = Map.get(inventory, "counts", %{})
+    filters = Map.get(inventory, "filters", %{})
+    approvals = Map.get(inventory, "approvals")
+
+    with true <- is_list(approvals),
+         true <- Map.get(counts, "returned") == length(approvals),
+         true <- Map.get(counts, "truncated", 0) == 0,
+         true <- Map.get(counts, "backend_omitted", 0) == 0,
+         true <- Map.get(filters, "principal_scope") == "subject",
+         true <- Map.get(filters, "task_id") == opts.task_id,
+         true <- Map.get(filters, "principal_id") == opts.principal_id,
+         true <- is_nil(Map.get(filters, "agent_id")),
+         true <- is_nil(Map.get(filters, "resource_uri")) do
+      :ok
+    else
+      _ -> {:error, :invalid_or_incomplete_pending_approval_inventory}
+    end
+  end
+
   defp counts_are_bounded?(counts) do
+    # Producer-aware aggregate counts may sum both backends (2 * max_backend_entries).
+    max_aggregate = @max_items * 2
+
     Enum.all?(counts, fn {_key, value} ->
-      is_integer(value) and value >= 0 and value <= @max_items
+      is_integer(value) and value >= 0 and value <= max_aggregate
     end)
   end
 

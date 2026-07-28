@@ -3,12 +3,17 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
 
   use TypedStruct
 
+  alias Arbor.Contracts.Coding.PendingApprovalResourceId
+  alias Arbor.Contracts.Security.CapabilityUri
+
   @schema_version 1
   @workspace_resource_types ~w(
     live_workspace_lease retained_workspace_record validation_resource quarantine
   )
   @acp_resource_type "acp_managed_session"
-  @resource_types @workspace_resource_types ++ [@acp_resource_type]
+  @pending_approval_resource_type "pending_approval"
+  @resource_types @workspace_resource_types ++
+                    [@acp_resource_type, @pending_approval_resource_type]
   @decisions ~w(keep retry settle quarantine remove)
   @reasons ~w(
     existing_quarantine
@@ -56,6 +61,21 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     :session_alive,
     :close_cleanup_in_progress
   ]
+  @pending_approval_expected_identity_fields [
+    :resource_type,
+    :resource_id,
+    :approval_id,
+    :source,
+    :task_id,
+    :agent_id,
+    :principal_id,
+    :approver_id,
+    :resource_uri,
+    :action,
+    :status,
+    :created_at
+  ]
+  @pending_approval_statuses ~w(pending evaluating)
   @evidence_fields [:task_presence, :task_state, :owner_status, :journal_status]
   @max_id_bytes 256
   @max_timestamp_bytes 64
@@ -208,6 +228,57 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
          "owner_alive" => owner_alive,
          "session_alive" => session_alive,
          "close_cleanup_in_progress" => close_cleanup_in_progress
+       }}
+    else
+      false -> {:error, {:invalid_field, "expected_identity"}}
+      error -> error
+    end
+  end
+
+  defp normalize_identity(value, resource_type, resource_id, outer_task_id, outer_principal_id)
+       when is_map(value) and not is_struct(value) and
+              resource_type == @pending_approval_resource_type do
+    with {:ok, attrs} <-
+           normalize_object(
+             value,
+             @pending_approval_expected_identity_fields,
+             :invalid_identity
+           ),
+         :ok <- exact_identity_fields(attrs, @pending_approval_expected_identity_fields),
+         {:ok, identity_type} <-
+           enum(attrs.resource_type, [@pending_approval_resource_type], :resource_type),
+         true <- identity_type == resource_type,
+         {:ok, identity_resource_id} <- bounded_id(attrs.resource_id, :resource_id),
+         true <- identity_resource_id == resource_id,
+         true <- PendingApprovalResourceId.valid?(identity_resource_id),
+         {:ok, approval_id} <- required_source_text(attrs.approval_id, :approval_id),
+         {:ok, source} <- enum(attrs.source, PendingApprovalResourceId.sources(), :source),
+         {:ok, expected_resource_id} <- PendingApprovalResourceId.resource_id(source, approval_id),
+         true <- expected_resource_id == identity_resource_id,
+         {:ok, task_id} <- optional_source_id(attrs.task_id, :task_id),
+         true <- task_id == outer_task_id,
+         {:ok, agent_id} <- optional_source_id(attrs.agent_id, :agent_id),
+         {:ok, principal_id} <- optional_source_id(attrs.principal_id, :principal_id),
+         true <- principal_id == outer_principal_id,
+         {:ok, approver_id} <- optional_source_id(attrs.approver_id, :approver_id),
+         {:ok, resource_uri} <- optional_resource_uri(attrs.resource_uri),
+         {:ok, action} <- optional_source_text(attrs.action, :action),
+         {:ok, status} <- enum(attrs.status, @pending_approval_statuses, :status),
+         {:ok, created_at} <- optional_timestamp(attrs.created_at, :created_at) do
+      {:ok,
+       %{
+         "resource_type" => identity_type,
+         "resource_id" => identity_resource_id,
+         "approval_id" => approval_id,
+         "source" => source,
+         "task_id" => task_id,
+         "agent_id" => agent_id,
+         "principal_id" => principal_id,
+         "approver_id" => approver_id,
+         "resource_uri" => resource_uri,
+         "action" => action,
+         "status" => status,
+         "created_at" => created_at
        }}
     else
       false -> {:error, {:invalid_field, "expected_identity"}}
@@ -398,6 +469,25 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
 
   defp optional_source_text(nil, _field), do: {:ok, nil}
   defp optional_source_text(value, field), do: source_text(value, field)
+
+  defp required_source_text(value, field) do
+    case source_text(value, field) do
+      {:ok, text} when is_binary(text) and text != "" -> {:ok, text}
+      {:ok, _} -> {:error, {:invalid_field, Atom.to_string(field)}}
+      error -> error
+    end
+  end
+
+  defp optional_resource_uri(nil), do: {:ok, nil}
+
+  defp optional_resource_uri(resource_uri)
+       when is_binary(resource_uri) and byte_size(resource_uri) <= @max_id_bytes do
+    if CapabilityUri.valid?(resource_uri),
+      do: {:ok, resource_uri},
+      else: {:error, {:invalid_field, "resource_uri"}}
+  end
+
+  defp optional_resource_uri(_resource_uri), do: {:error, {:invalid_field, "resource_uri"}}
 
   defp valid_acp_session_state(false, true, _status, _close_cleanup_in_progress),
     do: {:error, {:invalid_field, "owner_alive"}}

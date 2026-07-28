@@ -1,7 +1,11 @@
 defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Contracts.Coding.{ReconciliationDecision, ReconciliationManifest}
+  alias Arbor.Contracts.Coding.{
+    PendingApprovalResourceId,
+    ReconciliationDecision,
+    ReconciliationManifest
+  }
 
   @moduletag :fast
 
@@ -200,6 +204,58 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
     assert {:error, _} = ReconciliationDecision.new(cross_acp_on_workspace)
   end
 
+  test "accepts closed pending_approval identity and mixed manifests" do
+    assert {:ok, approval_decision} = ReconciliationDecision.new(valid_pending_approval_decision())
+    approval_map = ReconciliationDecision.to_map(approval_decision)
+
+    assert approval_map["resource_type"] == "pending_approval"
+    assert PendingApprovalResourceId.valid?(approval_map["resource_id"])
+    assert approval_map["expected_identity"]["approval_id"] == "irq_one"
+    assert approval_map["expected_identity"]["source"] == "consensus"
+
+    decisions = [valid_decision(), valid_acp_decision(), approval_map]
+    attrs = valid_manifest(decisions, 3, 3, 0, 0, 0)
+    assert {:ok, manifest} = ReconciliationManifest.new(attrs)
+    assert length(ReconciliationManifest.to_map(manifest)["decisions"]) == 3
+  end
+
+  test "rejects pending_approval identity drift and impossible fields" do
+    base = valid_pending_approval_decision()
+
+    assert {:error, _} =
+             ReconciliationDecision.new(
+               put_in(base, ["expected_identity", "resource_id"], String.duplicate("a", 73))
+             )
+
+    assert {:error, _} =
+             ReconciliationDecision.new(
+               put_in(base, ["expected_identity", "source"], "interaction")
+             )
+
+    assert {:error, _} =
+             ReconciliationDecision.new(put_in(base, ["expected_identity", "status"], "approved"))
+
+    assert {:error, _} =
+             ReconciliationDecision.new(
+               put_in(base, ["expected_identity", "created_at"], "not-a-timestamp")
+             )
+
+    assert {:error, _} =
+             ReconciliationDecision.new(
+               put_in(base, ["expected_identity", "task_id"], "other-task")
+             )
+
+    assert {:error, _} =
+             ReconciliationDecision.new(
+               put_in(base, ["expected_identity", "lifecycle"], "active")
+             )
+
+    assert {:error, _} =
+             ReconciliationDecision.new(
+               update_in(base, ["expected_identity"], &Map.delete(&1, "approval_id"))
+             )
+  end
+
   test "rejects unknown fields, malformed evidence, paths, and oversized decisions" do
     assert {:error, _} = ReconciliationDecision.new(Map.put(valid_decision(), "path", "/secret"))
 
@@ -248,6 +304,40 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
         "owner_alive" => true,
         "session_alive" => true,
         "close_cleanup_in_progress" => false
+      },
+      "evidence" => %{
+        "task_presence" => "observed",
+        "task_state" => "running",
+        "owner_status" => "live",
+        "journal_status" => "complete"
+      }
+    }
+  end
+
+  defp valid_pending_approval_decision do
+    {:ok, resource_id} = PendingApprovalResourceId.resource_id("consensus", "irq_one")
+
+    %{
+      "schema_version" => 1,
+      "resource_type" => "pending_approval",
+      "resource_id" => resource_id,
+      "task_id" => "task-1",
+      "principal_id" => "principal-1",
+      "decision" => "keep",
+      "reason" => "live_task_owner_alive",
+      "expected_identity" => %{
+        "resource_type" => "pending_approval",
+        "resource_id" => resource_id,
+        "approval_id" => "irq_one",
+        "source" => "consensus",
+        "task_id" => "task-1",
+        "agent_id" => "agent-1",
+        "principal_id" => "principal-1",
+        "approver_id" => nil,
+        "resource_uri" => "arbor://fs/read/repo/file.ex",
+        "action" => "read",
+        "status" => "pending",
+        "created_at" => "2026-07-22T12:00:00Z"
       },
       "evidence" => %{
         "task_presence" => "observed",
