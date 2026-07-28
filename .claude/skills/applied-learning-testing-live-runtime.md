@@ -574,3 +574,25 @@ from a startup timeout, and only then kill the owner and assert linked-child
 termination. A short fixed delay tests code-server scheduling rather than
 cancellation semantics (found 2026-07-28 when an independently reviewed
 candidate crossed a brittle two-second startup assertion).
+
+<!-- applied-learning: detached-worktree-hooks-need-the-same-explicit-dependency-cache-environment-as-validation -->
+<a id="applied-learning-detached-worktree-hooks-need-the-same-explicit-dependency-cache-environment-as-validation"></a>
+**Detached-worktree hooks need the same explicit dependency-cache environment
+as validation.** A temporary worktree without `deps/` cannot load formatter
+`import_deps`; even after an explicit format succeeds, a commit hook will repeat
+the failure unless `MIX_DEPS_PATH` and the isolated `MIX_BUILD_PATH` are also
+present on `git commit`. Use a compatible pinned dependency cache, never the
+live checkout's build path, and run format, compile, tests, and hooks under the
+same environment (found 2026-07-28 while finalizing the managed ACP settlement
+candidate).
+
+<!-- applied-learning: aggregate-validation-admission-must-not-sum-per-batch-maximums-before-running-any-test -->
+<a id="applied-learning-aggregate-validation-admission-must-not-sum-per-batch-maximums-before-running-any-test"></a>
+**Aggregate validation admission must not sum per-batch maximums before running
+any test.** Per-batch caps are safety ceilings, not predicted durations; summing
+all of them can reject a large affected set before the first batch even when
+many batches finish quickly. Admit against one aggregate deadline, execute
+batches until that deadline, and return exact completed and unstarted evidence
+on capacity exhaustion without silently reducing required coverage (found
+2026-07-28 when 38 cross-app batches were assigned a synthetic 45.6-million-ms
+requirement against 272 seconds and all 667 test files remained unstarted).

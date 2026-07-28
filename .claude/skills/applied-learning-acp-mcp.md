@@ -639,3 +639,14 @@ and Claude proves this is orchestration accounting, not provider behavior.
 Preserve the exact candidate tree, avoid blind cross-provider retries, and
 reserve enough stage budget for one complete recovery turn plus settlement
 (found 2026-07-28 while completing the managed ACP reconciliation read model).
+
+<!-- applied-learning: a-design-checkpoint-approval-note-is-audit-evidence-not-guaranteed-worker-steering -->
+<a id="applied-learning-a-design-checkpoint-approval-note-is-audit-evidence-not-guaranteed-worker-steering"></a>
+**A design checkpoint approval note is audit evidence, not guaranteed worker
+steering.** When approval depends on required corrections, deliver them through
+a phase-aware steering or rework control and verify the next artifact against
+each correction; do not approve and assume the note became part of the worker's
+implementation prompt. Keep the approval note as the authoritative review
+record, but treat implementation conformance as a separate gate (found
+2026-07-28 when an approved ACP settlement naming and arity correction was
+absent from Grok's candidate).

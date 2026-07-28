@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 560,
+  "entry_count": 563,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6824,8 +6824,47 @@
       "source_incident": "found 2026-07-28 while completing the managed ACP reconciliation read model).",
       "content_sha256": "c24e43cdef62912d1fcdd2534aea357c65851a1cd55e4d91f04c50d5d486d9e3",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 561,
+      "source_kind": "post-migration",
+      "slug": "a-design-checkpoint-approval-note-is-audit-evidence-not-guaranteed-worker-steering",
+      "title": "A design checkpoint approval note is audit evidence, not guaranteed worker steering.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-a-design-checkpoint-approval-note-is-audit-evidence-not-guaranteed-worker-steering",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when an approved ACP settlement naming and arity correction was absent from Grok's candidate).",
+      "content_sha256": "9c6c1e2db949fa66201dd5d70046a1d1e3e862205fc5fdc138be90ee75eb7e4e",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 562,
+      "source_kind": "post-migration",
+      "slug": "detached-worktree-hooks-need-the-same-explicit-dependency-cache-environment-as-validation",
+      "title": "Detached-worktree hooks need the same explicit dependency-cache environment as validation.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-detached-worktree-hooks-need-the-same-explicit-dependency-cache-environment-as-validation",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while finalizing the managed ACP settlement candidate).",
+      "content_sha256": "78a9704db96e4f8d8bd2c4124d3abae44071188c08f8e7a7705df7cccf02a4ae",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 563,
+      "source_kind": "post-migration",
+      "slug": "aggregate-validation-admission-must-not-sum-per-batch-maximums-before-running-any-test",
+      "title": "Aggregate validation admission must not sum per-batch maximums before running any test.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-aggregate-validation-admission-must-not-sum-per-batch-maximums-before-running-any-test",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when 38 cross-app batches were assigned a synthetic 45.6-million-ms requirement against 272 seconds and all 667 test files remained unstarted).",
+      "content_sha256": "5ce7c95f9283b1f4a2e9cd60ced6d9607150bb2c89d4e83a49c2b5e45b18c459",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 99
+  "post_migration_entry_count": 102
 }
