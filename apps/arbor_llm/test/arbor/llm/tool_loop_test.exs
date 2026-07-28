@@ -1215,10 +1215,21 @@ defmodule Arbor.LLM.ToolLoopTest do
         | provider_options: %{test_pid: self(), reserved_response: :fabricated_read}
       }
 
-      assert {:error, :terminal_tool_submission_required} =
+      assert {:error,
+              {:invalid_reserved_terminal_tool_submission,
+               %{
+                 call_shape: :single_non_terminal,
+                 tool_call_count: 1,
+                 terminal_tool_call_count: 0,
+                 non_terminal_tool_call_count: 1,
+                 tool_names: ["read_file"],
+                 tool_names_truncated: false,
+                 tool_names_omitted_count: 0,
+                 tool_names_redacted_count: 0
+               }}} =
                ToolLoop.run(client, req,
                  tools: terminal_tool_defs() ++ mock_read_tool_def(),
-                 tool_executor: __MODULE__.NeverExecuteReservedReadTools,
+                 tool_executor: __MODULE__.NeverExecuteReservedTools,
                  terminal_tools: ["submit_report"],
                  max_turns: 3,
                  workdir: tmp_dir
@@ -1232,7 +1243,118 @@ defmodule Arbor.LLM.ToolLoopTest do
                "function" => %{"name" => "submit_report"}
              }
 
-      refute_receive :reserved_nonterminal_executed
+      refute_receive {:reserved_tool_executed, _name}
+    end
+
+    @tag :tmp_dir
+    test "reserved terminal-only request reports mixed and multiple terminal call shapes",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
+      client = build_client(__MODULE__.TerminalReservationAdapter)
+
+      cases = [
+        {:mixed, :mixed_terminal_and_non_terminal, ["submit_report", "read_file"], 1, 1},
+        {:multiple_terminal, :multiple_terminal, ["submit_report", "submit_report"], 2, 0}
+      ]
+
+      Enum.each(cases, fn {response, shape, names, terminal_count, non_terminal_count} ->
+        req = %{
+          request("terminal_reservation_test")
+          | provider_options: %{test_pid: self(), reserved_response: response}
+        }
+
+        assert {:error, {:invalid_reserved_terminal_tool_submission, diagnostic}} =
+                 ToolLoop.run(client, req,
+                   tools: terminal_tool_defs() ++ mock_read_tool_def(),
+                   tool_executor: __MODULE__.NeverExecuteReservedTools,
+                   terminal_tools: ["submit_report"],
+                   max_turns: 3,
+                   workdir: tmp_dir
+                 )
+
+        assert diagnostic.call_shape == shape
+        assert diagnostic.tool_names == names
+        assert diagnostic.tool_call_count == 2
+        assert diagnostic.terminal_tool_call_count == terminal_count
+        assert diagnostic.non_terminal_tool_call_count == non_terminal_count
+        assert diagnostic.tool_names_truncated == false
+        assert diagnostic.tool_names_omitted_count == 0
+        assert diagnostic.tool_names_redacted_count == 0
+
+        assert_receive {:terminal_reservation_request, _tools, _tool_choice, _messages}
+        refute_receive {:reserved_tool_executed, _name}
+      end)
+    end
+
+    @tag :tmp_dir
+    test "reserved rejection telemetry bounds tool names and excludes arguments", %{
+      tmp_dir: tmp_dir
+    } do
+      File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
+      client = build_client(__MODULE__.TerminalReservationAdapter)
+      parent = self()
+      agent_id = "agent_terminal_diagnostic_#{System.unique_integer([:positive])}"
+      handler_id = "terminal-diagnostic-#{System.unique_integer([:positive])}"
+      event = [:arbor, :llm, :tool_loop, :terminal_tool_submission_rejected]
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          event,
+          fn event_name, measurements, metadata, reply_to ->
+            send(reply_to, {:reserved_rejection_telemetry, event_name, measurements, metadata})
+          end,
+          parent
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      req = %{
+        request("terminal_reservation_test")
+        | provider_options: %{test_pid: self(), reserved_response: :many_non_terminal}
+      }
+
+      assert {:error, {:invalid_reserved_terminal_tool_submission, diagnostic}} =
+               ToolLoop.run(client, req,
+                 agent_id: agent_id,
+                 tools: terminal_tool_defs() ++ mock_read_tool_def(),
+                 tool_executor: __MODULE__.NeverExecuteReservedTools,
+                 terminal_tools: ["submit_report"],
+                 max_turns: 3,
+                 workdir: tmp_dir
+               )
+
+      assert diagnostic.call_shape == :multiple_non_terminal
+      assert diagnostic.tool_call_count == 12
+      assert length(diagnostic.tool_names) == 8
+      assert diagnostic.tool_names_truncated == true
+      assert diagnostic.tool_names_omitted_count == 4
+
+      assert_receive {:reserved_rejection_telemetry, ^event, measurements,
+                      %{
+                        agent_id: ^agent_id,
+                        provider: "terminal_reservation_test",
+                        model: "test",
+                        turn: 3,
+                        call_shape: :multiple_non_terminal,
+                        tool_names: tool_names,
+                        tool_names_truncated: true,
+                        tool_names_omitted_count: 4,
+                        tool_names_redacted_count: 0
+                      } = metadata}
+
+      assert measurements == %{
+               count: 1,
+               tool_call_count: 12,
+               terminal_tool_call_count: 0,
+               non_terminal_tool_call_count: 12
+             }
+
+      assert length(tool_names) == 8
+      refute Map.has_key?(metadata, :arguments)
+      refute inspect({measurements, metadata}) =~ "secret-argument"
+      refute inspect(diagnostic) =~ "secret-argument"
+      refute_receive {:reserved_tool_executed, _name}
     end
 
     @tag :tmp_dir
@@ -1593,6 +1715,53 @@ defmodule Arbor.LLM.ToolLoopTest do
              usage: %{},
              raw: %{}
            }}
+
+        {true, :mixed} ->
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :tool_calls,
+             content_parts: [
+               ContentPart.tool_call("mixed_terminal", "submit_report", %{
+                 "vote" => "approve"
+               }),
+               ContentPart.tool_call("mixed_read", "read_file", %{
+                 "path" => "must-not-execute"
+               })
+             ],
+             usage: %{},
+             raw: %{}
+           }}
+
+        {true, :multiple_terminal} ->
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :tool_calls,
+             content_parts: [
+               ContentPart.tool_call("terminal_1", "submit_report", %{"vote" => "approve"}),
+               ContentPart.tool_call("terminal_2", "submit_report", %{"vote" => "reject"})
+             ],
+             usage: %{},
+             raw: %{}
+           }}
+
+        {true, :many_non_terminal} ->
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :tool_calls,
+             content_parts:
+               Enum.map(1..12, fn index ->
+                 ContentPart.tool_call(
+                   "fabricated_#{index}",
+                   "read_file_#{index}",
+                   %{"private" => "secret-argument-#{index}"}
+                 )
+               end),
+             usage: %{},
+             raw: %{}
+           }}
       end
     end
 
@@ -1610,13 +1779,13 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
-  defmodule NeverExecuteReservedReadTools do
+  defmodule NeverExecuteReservedTools do
     def execute("read_file", %{"path" => "snapshot.txt"}, workdir, _opts),
       do: File.read(Path.join(workdir, "snapshot.txt"))
 
-    def execute("read_file", %{"path" => "must-not-execute"}, _workdir, _opts) do
-      send(self(), :reserved_nonterminal_executed)
-      raise "reserved non-terminal call reached the executor"
+    def execute(name, _arguments, _workdir, _opts) do
+      send(self(), {:reserved_tool_executed, name})
+      raise "reserved invalid call reached the executor"
     end
   end
 

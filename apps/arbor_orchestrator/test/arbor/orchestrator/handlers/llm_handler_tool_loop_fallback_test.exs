@@ -244,4 +244,29 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopFallbackTest do
       assert :ets.info(attempts, :size) == 2
     end
   end
+
+  describe "project_tool_loop_error/1" do
+    test "projects invalid reserved calls without classifying them as free-form text" do
+      reason =
+        {:invalid_reserved_terminal_tool_submission,
+         %{
+           call_shape: :mixed_terminal_and_non_terminal,
+           tool_names: ["coding_submit_review_report", "coding_review_tree_read"]
+         }}
+
+      message = LlmHandler.project_tool_loop_error(reason)
+
+      assert message ==
+               "Invalid reserved terminal tool submission: " <>
+                 "call_shape=mixed_terminal_and_non_terminal " <>
+                 ~s(tool_names=["coding_submit_review_report", "coding_review_tree_read"])
+
+      refute message =~ "free-form"
+    end
+
+    test "keeps genuine post-correction prose distinct" do
+      assert LlmHandler.project_tool_loop_error(:terminal_tool_submission_required) ==
+               "Terminal tool submission required; model returned free-form text"
+    end
+  end
 end

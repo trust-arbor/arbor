@@ -29,9 +29,11 @@ defmodule Arbor.LLM.ToolLoop do
       call may be returned to the model for correction. Free-form final text
       and normal `max_turns` exhaustion each allow exactly one reserved
       terminal-only LLM request (forced `tool_choice`, terminal definitions
-      only, prior conversation preserved); a second miss fails closed. Mixed
-      or multiple terminal submissions fail closed as ambiguous. Absent/`[]`
-      preserves existing free-form final-text / max_turns wrap-up behavior.
+      only, prior conversation preserved); a second miss fails closed. Invalid,
+      mixed, or multiple calls during that reserved request fail closed with a
+      typed diagnostic. Mixed or multiple terminal submissions during ordinary
+      rounds fail closed as ambiguous. Absent/`[]` preserves existing free-form
+      final-text / max_turns wrap-up behavior.
 
   ## Example
 
@@ -69,6 +71,9 @@ defmodule Arbor.LLM.ToolLoop do
   @prompt_sanitizer Arbor.Common.PromptSanitizer
 
   @default_max_turns 50
+  @terminal_diagnostic_max_tool_names 8
+  @terminal_diagnostic_max_tool_name_bytes 128
+  @terminal_diagnostic_tool_name_re ~r/^[A-Za-z][A-Za-z0-9_.\/-]*$/
   @decoded_json_limits [
     max_bytes: 1_048_576,
     max_nodes: 10_000,
@@ -379,15 +384,80 @@ defmodule Arbor.LLM.ToolLoop do
 
   defp ambiguous_terminal_call_shape?(_tool_calls, _terminals), do: false
 
-  defp invalid_reserved_terminal_call_shape?(
+  defp reserved_terminal_call_diagnostic(
          tool_calls,
          %{terminal_correction_attempted: true, terminal_tools: terminals}
        )
        when is_list(tool_calls) and is_struct(terminals, MapSet) do
-    Enum.any?(tool_calls, fn tc -> not MapSet.member?(terminals, tc.name) end)
+    call_count = length(tool_calls)
+
+    terminal_call_count =
+      Enum.count(tool_calls, fn call ->
+        MapSet.member?(terminals, Map.get(call, :name))
+      end)
+
+    case reserved_terminal_call_shape(call_count, terminal_call_count) do
+      :valid ->
+        nil
+
+      call_shape ->
+        tool_calls
+        |> bounded_tool_call_names()
+        |> Map.merge(%{
+          call_shape: call_shape,
+          tool_call_count: call_count,
+          terminal_tool_call_count: terminal_call_count,
+          non_terminal_tool_call_count: call_count - terminal_call_count
+        })
+    end
   end
 
-  defp invalid_reserved_terminal_call_shape?(_tool_calls, _state), do: false
+  defp reserved_terminal_call_diagnostic(_tool_calls, _state), do: nil
+
+  defp reserved_terminal_call_shape(1, 1), do: :valid
+  defp reserved_terminal_call_shape(0, 0), do: :missing_tool_calls
+  defp reserved_terminal_call_shape(1, 0), do: :single_non_terminal
+
+  defp reserved_terminal_call_shape(call_count, 0) when call_count > 1,
+    do: :multiple_non_terminal
+
+  defp reserved_terminal_call_shape(call_count, call_count) when call_count > 1,
+    do: :multiple_terminal
+
+  defp reserved_terminal_call_shape(_call_count, _terminal_call_count),
+    do: :mixed_terminal_and_non_terminal
+
+  defp bounded_tool_call_names(tool_calls) do
+    {tool_names, redacted_count} =
+      tool_calls
+      |> Enum.take(@terminal_diagnostic_max_tool_names)
+      |> Enum.map_reduce(0, fn call, redacted_count ->
+        case safe_diagnostic_tool_name(Map.get(call, :name)) do
+          {:ok, name} -> {name, redacted_count}
+          :error -> {"<invalid-tool-name>", redacted_count + 1}
+        end
+      end)
+
+    omitted_count = max(length(tool_calls) - @terminal_diagnostic_max_tool_names, 0)
+
+    %{
+      tool_names: tool_names,
+      tool_names_truncated: omitted_count > 0,
+      tool_names_omitted_count: omitted_count,
+      tool_names_redacted_count: redacted_count
+    }
+  end
+
+  defp safe_diagnostic_tool_name(name) when is_binary(name) do
+    if String.valid?(name) and byte_size(name) <= @terminal_diagnostic_max_tool_name_bytes and
+         Regex.match?(@terminal_diagnostic_tool_name_re, name) do
+      {:ok, name}
+    else
+      :error
+    end
+  end
+
+  defp safe_diagnostic_tool_name(_name), do: :error
 
   defp execution_identity(opts) do
     if Keyword.get(opts, :authorization, false) == true do
@@ -600,6 +670,13 @@ defmodule Arbor.LLM.ToolLoop do
         tool_calls =
           Enum.filter(response.content_parts, &(&1.kind == :tool_call))
 
+        tool_name_diagnostic = bounded_tool_call_names(tool_calls)
+
+        reserved_terminal_diagnostic =
+          if response.finish_reason == :tool_calls do
+            reserved_terminal_call_diagnostic(tool_calls, state)
+          end
+
         emit_tool_loop_signal(:tool_loop_response, %{
           agent_id: state.agent_id,
           # Wall time of this round's LLM call — the first round is time-to-first-
@@ -611,6 +688,14 @@ defmodule Arbor.LLM.ToolLoop do
           # summing these across rounds reconstructs the turn's total token+cost.
           usage: response.usage,
           tool_call_count: length(tool_calls),
+          tool_call_names: tool_name_diagnostic.tool_names,
+          tool_call_names_truncated: tool_name_diagnostic.tool_names_truncated,
+          terminal_correction_attempted: state.terminal_correction_attempted,
+          reserved_terminal_call_shape:
+            if(reserved_terminal_diagnostic,
+              do: reserved_terminal_diagnostic.call_shape,
+              else: nil
+            ),
           text_length: if(response.text, do: String.length(response.text), else: 0),
           text_preview: if(response.text, do: String.slice(response.text, 0..200), else: nil),
           content_parts_count: length(response.content_parts || []),
@@ -648,11 +733,14 @@ defmodule Arbor.LLM.ToolLoop do
         end
 
         cond do
-          response.finish_reason == :tool_calls and tool_calls != [] and
-              invalid_reserved_terminal_call_shape?(tool_calls, state) ->
-            # A provider may fabricate a call to a tool omitted from the reserved
-            # request. Reject before execution so terminal-only means terminal-only.
-            {:error, :terminal_tool_submission_required}
+          reserved_terminal_diagnostic != nil ->
+            # Providers may fabricate omitted tools, mix terminal and inspection
+            # calls, or submit multiple terminal calls despite a forced choice.
+            # Reject the entire response before execution and retain only bounded,
+            # argument-free diagnostics.
+            emit_reserved_terminal_rejection(request, state, reserved_terminal_diagnostic)
+
+            {:error, {:invalid_reserved_terminal_tool_submission, reserved_terminal_diagnostic}}
 
           response.finish_reason == :tool_calls and tool_calls != [] and
               ambiguous_terminal_call_shape?(tool_calls, state.terminal_tools) ->
@@ -1341,6 +1429,42 @@ defmodule Arbor.LLM.ToolLoop do
   end
 
   # ── Signal Emission ──────────────────────────────────────────────
+
+  defp emit_reserved_terminal_rejection(request, state, diagnostic) do
+    measurements = %{
+      count: 1,
+      tool_call_count: diagnostic.tool_call_count,
+      terminal_tool_call_count: diagnostic.terminal_tool_call_count,
+      non_terminal_tool_call_count: diagnostic.non_terminal_tool_call_count
+    }
+
+    metadata = %{
+      agent_id: state.agent_id,
+      provider: request.provider,
+      model: request.model,
+      turn: state.turn,
+      call_shape: diagnostic.call_shape,
+      tool_names: diagnostic.tool_names,
+      tool_names_truncated: diagnostic.tool_names_truncated,
+      tool_names_omitted_count: diagnostic.tool_names_omitted_count,
+      tool_names_redacted_count: diagnostic.tool_names_redacted_count
+    }
+
+    emit_tool_loop_signal(
+      :terminal_tool_submission_rejected,
+      Map.merge(metadata, measurements)
+    )
+
+    :telemetry.execute(
+      [:arbor, :llm, :tool_loop, :terminal_tool_submission_rejected],
+      measurements,
+      metadata
+    )
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
 
   # Classify errors using Arbor.AI.LLMError when available, fallback to basic map.
   defp classify_error(reason) do

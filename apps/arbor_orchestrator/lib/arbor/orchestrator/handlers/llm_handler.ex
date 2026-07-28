@@ -1059,23 +1059,40 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
         {:ok, result}
 
-      {:error, {:max_turns_reached, turns, _}} ->
-        {:error, "Tool loop hit #{turns} turn limit without completing"}
-
-      {:error, :terminal_tool_submission_required} ->
-        {:error, "Terminal tool submission required; model returned free-form text"}
-
-      {:error, {:terminal_tool_submission_required, turns, _}} ->
-        {:error,
-         "Terminal tool submission required after #{turns} tool rounds without a valid submission"}
-
-      {:error, :ambiguous_terminal_tool_submission} ->
-        {:error, "Ambiguous terminal tool submission (mixed or multiple terminal calls)"}
-
-      {:error, _} = error ->
-        error
+      {:error, reason} ->
+        {:error, project_tool_loop_error(reason)}
     end
   end
+
+  @doc false
+  # Public only so focused tests can pin stable operator-facing projections of
+  # ToolLoop's typed errors without requiring a live provider.
+  @spec project_tool_loop_error(term()) :: term()
+  def project_tool_loop_error({:max_turns_reached, turns, _}),
+    do: "Tool loop hit #{turns} turn limit without completing"
+
+  def project_tool_loop_error(:terminal_tool_submission_required),
+    do: "Terminal tool submission required; model returned free-form text"
+
+  def project_tool_loop_error({:terminal_tool_submission_required, turns, _}),
+    do: "Terminal tool submission required after #{turns} tool rounds without a valid submission"
+
+  def project_tool_loop_error(
+        {:invalid_reserved_terminal_tool_submission, %{call_shape: call_shape} = diagnostic}
+      ) do
+    tool_names =
+      diagnostic
+      |> Map.get(:tool_names, [])
+      |> Arbor.LLM.ExternalTerm.inspect()
+
+    "Invalid reserved terminal tool submission: " <>
+      "call_shape=#{call_shape} tool_names=#{tool_names}"
+  end
+
+  def project_tool_loop_error(:ambiguous_terminal_tool_submission),
+    do: "Ambiguous terminal tool submission (mixed or multiple terminal calls)"
+
+  def project_tool_loop_error(reason), do: reason
 
   @doc false
   # Exposed (@doc false) so tests can pin the tool-loop fallback shape
