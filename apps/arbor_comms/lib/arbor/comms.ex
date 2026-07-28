@@ -27,8 +27,10 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.Channels.Limitless
   alias Arbor.Comms.Channels.Voice
   alias Arbor.Comms.ChatLogger
+  alias Arbor.Comms.InteractionRegistry.DurableLifecycleCore
   alias Arbor.Comms.InteractionRouter
   alias Arbor.Comms.PresenceTracker
+  alias Arbor.Contracts.Comms.Interaction
   require Logger
 
   alias Arbor.Comms.Config
@@ -49,6 +51,26 @@ defmodule Arbor.Comms do
         }
 
   @doc """
+  Pure validation of a durable interaction payload against the closed durable
+  serialization contract.
+
+  Callers must keep `description` as short operator prose and place exact
+  evidence in `metadata`. This check is side-effect free and does not consult
+  Authority readiness or the durable store.
+  """
+  @spec validate_durable_interaction_payload(Interaction.t()) ::
+          :ok | {:error, {:invalid_durable_interaction, term()}}
+  def validate_durable_interaction_payload(%Interaction{} = interaction) do
+    case DurableLifecycleCore.serialize_interaction(interaction) do
+      {:ok, _serialized} -> :ok
+      {:error, reason} -> {:error, {:invalid_durable_interaction, reason}}
+    end
+  end
+
+  def validate_durable_interaction_payload(_interaction),
+    do: {:error, {:invalid_durable_interaction, :invalid_interaction}}
+
+  @doc """
   Request a durable interaction with an absolute owner deadline.
 
   The deadline is persisted in the initial durable record before discovery
@@ -61,12 +83,18 @@ defmodule Arbor.Comms do
   Exactly-once delivery requires an idempotent adapter receipt that the current
   contract does not provide. Duplicate responses are still fenced by the
   durable first-terminal lifecycle transition.
+
+  Caller-invalid payloads are rejected with
+  `{:error, {:invalid_durable_interaction, reason}}` before Authority is
+  consulted. Backend/readiness failures remain `{:error, :durable_unavailable}`.
   """
   @spec request_durable_interaction(Arbor.Contracts.Comms.Interaction.t(), keyword()) ::
           {:ok, durable_interaction_receipt()} | {:error, term()}
-  def request_durable_interaction(%Arbor.Contracts.Comms.Interaction{} = interaction, opts)
+  def request_durable_interaction(%Interaction{} = interaction, opts)
       when is_list(opts) do
-    InteractionRouter.request_durable(interaction, opts)
+    with :ok <- validate_durable_interaction_payload(interaction) do
+      InteractionRouter.request_durable(interaction, opts)
+    end
   end
 
   def request_durable_interaction(_interaction, _opts), do: {:error, :invalid_options}

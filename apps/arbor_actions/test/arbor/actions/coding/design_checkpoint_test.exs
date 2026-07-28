@@ -136,12 +136,20 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     assert interaction.metadata["task"] == ctx.params.task
     assert interaction.metadata["plan_fingerprint"] == ctx.params.plan_fingerprint
     assert interaction.metadata["design"] == ctx.params.design
+    assert interaction.metadata["packet_digest"] == ctx.params.packet_digest
+    assert interaction.metadata["design_digest"] == ctx.params.design_digest
 
+    # Description is short operator prose; exact evidence stays in metadata.
+    assert interaction.description =~ "Design checkpoint for task task-123"
+    assert interaction.description =~ ctx.params.packet_digest
+    assert interaction.description =~ ctx.params.design_digest
+    refute interaction.description =~ ctx.params.task
+    refute interaction.description =~ ctx.params.design
     {:ok, canonical_packet} = WorkPacket.canonical_bytes(ctx.params.work_packet)
-    assert interaction.description =~ canonical_packet
-    assert interaction.description =~ ctx.params.task
-    assert interaction.description =~ ctx.params.plan_fingerprint
-    assert interaction.description =~ ctx.params.design
+    refute interaction.description =~ canonical_packet
+    assert byte_size(interaction.description) < 1_024
+    assert :ok = Arbor.Comms.validate_durable_interaction_payload(interaction)
+
     assert opened["evidence"]["request_id"] == opened["request_id"]
     assert opened["evidence"]["task"] == ctx.params.task
     assert opened["evidence"]["plan_fingerprint"] == ctx.params.plan_fingerprint
@@ -329,11 +337,73 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     refute_received {:request_durable_interaction, _, _}
   end
 
-  test "Open composes task and design values at their admitted field bounds", ctx do
-    bounded_design = String.duplicate("x", DesignCheckpoint.max_design_bytes())
-    bounded_task = String.duplicate("t", 16_384)
+  test "Open admits the measured Phase F work-packet and design shape under durable ceilings",
+       ctx do
+    # Measured failed Phase F shape: ~4.8 KiB work packet + ~12.7 KiB design.
+    # Description must stay short operator prose; exact evidence is metadata-only.
+    text_chunk = String.duplicate("phase-f-work-packet-intent-", 36)
+    path_chunk = "docs/" <> String.duplicate("phase-f-arch-ref-", 55) <> "guide.md"
+    assert byte_size(text_chunk) <= WorkPacket.max_text_bytes()
+    assert byte_size(path_chunk) <= WorkPacket.max_architecture_ref_bytes()
+
+    phase_f_packet = %{
+      ctx.params.work_packet
+      | "success_criteria" => [text_chunk],
+        "non_goals" => [text_chunk],
+        "constraints" => [text_chunk],
+        "architecture_refs" => [path_chunk],
+        "required_evidence" => [text_chunk]
+    }
+
+    {:ok, packet_bytes} = WorkPacket.canonical_bytes(phase_f_packet)
+    # Keep the packet near the measured 4.8 KiB without exceeding WorkPacket bounds.
+    assert_in_delta byte_size(packet_bytes), 4_900, 400
+
+    {:ok, packet_digest} = WorkPacket.digest(phase_f_packet)
+    phase_f_design = String.duplicate("d", 12_700)
+    assert byte_size(phase_f_design) == 12_700
 
     assert {:ok, opened} =
+             Open.run(
+               %{
+                 ctx.params
+                 | work_packet: phase_f_packet,
+                   packet_digest: packet_digest,
+                   design: phase_f_design,
+                   design_digest: digest(phase_f_design)
+               },
+               ctx.context
+             )
+
+    assert opened["checkpoint_outcome"] == "pending"
+    assert_received {:request_durable_interaction, interaction, _opts}
+
+    assert interaction.description =~ "Design checkpoint for task task-123"
+    assert interaction.description =~ packet_digest
+    assert interaction.description =~ digest(phase_f_design)
+    refute interaction.description =~ phase_f_design
+    refute interaction.description =~ text_chunk
+    assert byte_size(interaction.description) < 1_024
+
+    assert interaction.metadata["work_packet"] == phase_f_packet
+    assert interaction.metadata["design"] == phase_f_design
+    assert interaction.metadata["task"] == ctx.params.task
+    assert interaction.metadata["packet_digest"] == packet_digest
+    assert interaction.metadata["design_digest"] == digest(phase_f_design)
+
+    assert {:ok, _encoded_metadata} = Jason.encode(interaction.metadata)
+    assert :ok = Arbor.Comms.validate_durable_interaction_payload(interaction)
+  end
+
+  test "Open rejects aggregate metadata over durable ceilings via the public Comms validator",
+       ctx do
+    # Individually admitted task/design field bounds still exceed the durable
+    # metadata aggregate ceiling when combined. Aggregate authority is only the
+    # public Comms validator — not an action-local size copy.
+    bounded_design = String.duplicate("x", DesignCheckpoint.max_design_bytes())
+    bounded_task = String.duplicate("t", DesignCheckpoint.max_task_bytes())
+
+    assert {:error, {:invalid_durable_interaction, reason}} =
              Open.run(
                %{
                  ctx.params
@@ -344,18 +414,11 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
                ctx.context
              )
 
-    assert opened["checkpoint_outcome"] == "pending"
-
-    assert_received {:request_durable_interaction, interaction, _opts}
-    assert interaction.description =~ bounded_task
-    assert interaction.description =~ bounded_design
-    assert byte_size(interaction.description) > 32_768
-
-    assert {:ok, encoded_metadata} = Jason.encode(interaction.metadata)
-    assert byte_size(encoded_metadata) > 32_768
+    assert reason in [:json_value_too_large, :invalid_json_string]
+    refute_received {:request_durable_interaction, _, _}
   end
 
-  test "Open composes admitted fields through worst-case metadata JSON expansion", ctx do
+  test "Open rejects worst-case metadata JSON expansion via the public Comms validator", ctx do
     max_text = String.duplicate("p", WorkPacket.max_text_bytes())
 
     large_packet = %{
@@ -365,10 +428,10 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     }
 
     {:ok, large_packet_digest} = WorkPacket.digest(large_packet)
-    escaped_task = String.duplicate(<<1>>, 16_384)
+    escaped_task = String.duplicate(<<1>>, DesignCheckpoint.max_task_bytes())
     escaped_design = String.duplicate(<<1>>, DesignCheckpoint.max_design_bytes())
 
-    assert {:ok, opened} =
+    assert {:error, {:invalid_durable_interaction, reason}} =
              Open.run(
                %{
                  ctx.params
@@ -381,16 +444,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
                ctx.context
              )
 
-    assert opened["checkpoint_outcome"] == "pending"
-
-    assert_received {:request_durable_interaction, interaction, _opts}
-    assert {:ok, encoded_metadata} = Jason.encode(interaction.metadata)
-
-    insufficient_two_x_bound =
-      WorkPacket.max_packet_bytes() +
-        2 * (16_384 + DesignCheckpoint.max_design_bytes()) + 16_384
-
-    assert byte_size(encoded_metadata) > insufficient_two_x_bound
+    assert reason in [:json_value_too_large, :invalid_json_string]
+    refute_received {:request_durable_interaction, _, _}
   end
 
   test "Open requires a bounded task and a strict compiled plan fingerprint", ctx do

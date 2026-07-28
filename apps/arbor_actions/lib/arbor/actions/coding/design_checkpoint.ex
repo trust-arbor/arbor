@@ -15,14 +15,11 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   @max_design_bytes 16_384
   @max_terminal_response_bytes 65_536
   @max_json_scan_attempts 128
-  # Aggregate bounds must admit every value already accepted by the component
-  # contracts. Description uses raw packet/task/design bytes; metadata may
-  # JSON-escape each accepted task/design byte as a six-byte `\u00xx` sequence
-  # and carries bounded identity fields.
-  @max_description_bytes WorkPacket.max_packet_bytes() + @max_task_bytes + @max_design_bytes +
-                           4_096
-  @max_metadata_bytes WorkPacket.max_packet_bytes() +
-                        6 * (@max_task_bytes + @max_design_bytes) + 16_384
+  # Operator-facing description is short prose only. Exact work packet, task,
+  # and design evidence live in metadata. Aggregate durable size authority is
+  # solely `Arbor.Comms.validate_durable_interaction_payload/1` — do not copy
+  # Comms description/metadata ceilings here.
+  @max_operator_prose_bytes 1_024
   @default_timeout 60_000
   @max_timeout 3_600_000
   @request_prefix "irq_design_"
@@ -42,6 +39,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
 
   @doc false
   def max_design_bytes, do: @max_design_bytes
+
+  @doc false
+  def max_task_bytes, do: @max_task_bytes
 
   @doc false
   def max_terminal_response_bytes, do: @max_terminal_response_bytes
@@ -83,7 +83,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
 
       with {:ok, request_id} <- request_id(base_evidence),
            {:ok, description} <-
-             description(packet, task_id, task, plan_fingerprint, design),
+             description(task_id, design_attempt, packet_digest, design_digest),
            {:ok, metadata} <- metadata(base_evidence, packet) do
         {:ok,
          %{
@@ -512,29 +512,33 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   defp computed_design_digest(design),
     do: "sha256:" <> (:crypto.hash(:sha256, design) |> Base.encode16(case: :lower))
 
-  defp description(packet, task_id, task, plan_fingerprint, design) do
-    with {:ok, packet_bytes} <- WorkPacket.canonical_bytes(packet),
-         description =
-           "Design checkpoint for task #{task_id}.\n\nCanonical work-packet intent:\n" <>
-             packet_bytes <>
-             "\n\nExact coding task:\n" <>
-             task <>
-             "\n\nReviewed plan fingerprint:\n" <>
-             plan_fingerprint <> "\n\nWorker design:\n" <> design,
-         true <- String.valid?(description) and byte_size(description) <= @max_description_bytes do
+  # Short operator prose only. Exact work packet, task, plan fingerprint, and
+  # design remain in metadata and bind the deterministic request id.
+  defp description(task_id, design_attempt, packet_digest, design_digest)
+       when is_binary(task_id) and is_integer(design_attempt) and is_binary(packet_digest) and
+              is_binary(design_digest) do
+    description =
+      "Design checkpoint for task #{task_id} (attempt #{design_attempt}). " <>
+        "Review metadata for the exact work packet (#{packet_digest}), task, " <>
+        "plan fingerprint, and design (#{design_digest})."
+
+    if String.valid?(description) and byte_size(description) <= @max_operator_prose_bytes do
       {:ok, description}
     else
-      false -> {:error, :design_checkpoint_description_too_large}
-      {:error, _reason} -> {:error, :design_checkpoint_description_unavailable}
+      {:error, :design_checkpoint_description_too_large}
     end
   end
 
+  defp description(_task_id, _design_attempt, _packet_digest, _design_digest),
+    do: {:error, :design_checkpoint_description_unavailable}
+
+  # Metadata carries exact evidence without an action-local aggregate size
+  # ceiling. `Open` admits the payload through the public Comms validator.
   defp metadata(base_evidence, packet) do
     metadata = Map.put(base_evidence, "work_packet", packet)
 
     case Jason.encode(metadata) do
-      {:ok, encoded} when byte_size(encoded) <= @max_metadata_bytes -> {:ok, metadata}
-      {:ok, _encoded} -> {:error, :design_checkpoint_metadata_too_large}
+      {:ok, _encoded} -> {:ok, metadata}
       {:error, _reason} -> {:error, :design_checkpoint_metadata_not_json}
     end
   end
@@ -890,6 +894,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
          :ok <- DesignCheckpoint.durable_ready?(comms),
          {:ok, operator_id} <- operator_id(comms, agent_id),
          {:ok, interaction} <- interaction(binding, agent_id, operator_id),
+         # Pure public contract check: rejects oversized description/metadata
+         # before the injected Comms boundary or Authority is consulted.
+         :ok <- Arbor.Comms.validate_durable_interaction_payload(interaction),
          {:ok, receipt} <-
            DesignCheckpoint.call(comms, :request_durable_interaction, [
              interaction,
