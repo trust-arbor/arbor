@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 553,
+  "entry_count": 554,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6733,8 +6733,21 @@
       "source_incident": "found 2026-07-28 when the first detailed Grok rework note was rejected because the approval note exceeded its maximum size).",
       "content_sha256": "e19f0e1a7dd4b5a5dcce7b3f1905201eae68daad8c9708c391760cc871fe09fd",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 554,
+      "source_kind": "post-migration",
+      "slug": "compute-work-packet-digests-through-the-contract",
+      "title": "Compute work-packet digests through the contract, not a generic JSON encoder.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-compute-work-packet-digests-through-the-contract",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while dispatching the security-regression attestation preflight correction).",
+      "content_sha256": "1d9f48f7318c4d38fd86675120a484c68a37e63c9af0a97a3819186b75d903ec",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 92
+  "post_migration_entry_count": 93
 }

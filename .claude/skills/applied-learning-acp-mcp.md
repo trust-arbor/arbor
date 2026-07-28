@@ -605,3 +605,14 @@ embedding the full review. Regress both an over-limit rejection and an accepted
 bounded note so feedback cannot disappear before the delegated worker sees it
 (found 2026-07-28 when the first detailed Grok rework note was rejected because
 the approval note exceeded its maximum size).
+
+<!-- applied-learning: compute-work-packet-digests-through-the-contract -->
+<a id="applied-learning-compute-work-packet-digests-through-the-contract"></a>
+**Compute work-packet digests through the contract, not a generic JSON encoder.**
+`Arbor.Contracts.Coding.WorkPacket` uses a fixed schema field order for canonical
+bytes; lexicographically sorting object keys produces a different SHA-256 even
+when the packet values are identical. Construct the exact packet and call
+`WorkPacket.digest/1`, then submit that returned `sha256:` value unchanged. A
+digest mismatch is a typed plan-admission failure and should consume no worker
+resources (found 2026-07-28 while dispatching the security-regression
+attestation preflight correction).
