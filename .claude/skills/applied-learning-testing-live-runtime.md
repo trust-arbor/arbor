@@ -524,7 +524,11 @@ budget keys are absent. Build the fixture through the same pure budget policy an
 seed every owner-projected key; assertions about a stage timeout must target the
 effective allocated cap, not the uncapped request supplied before allocation
 (found 2026-07-28 when terminal-gate budgeting exposed 58 stale direct-pipeline
-fixture failures).
+fixture failures). The same rule applies to semantic-preflight helpers:
+derive profile-specific validation timeouts through `Profiles` and
+`ValidationProgram`, because default/cross-app and security-regression have
+different ceilings under the same plan budget (reinforced 2026-07-28 after a
+generic 600-second fixture default caused nine base-identical failures).
 
 <!-- applied-learning: required-evidence-is-intent-not-an-executable-validation-program -->
 <a id="applied-learning-required-evidence-is-intent-not-an-executable-validation-program"></a>

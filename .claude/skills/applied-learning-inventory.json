@@ -6510,7 +6510,7 @@
       "anchor": "applied-learning-direct-engine-fixtures-must-seed-owner-computed-budget-context",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 when terminal-gate budgeting exposed 58 stale direct-pipeline fixture failures).",
-      "content_sha256": "ddc8ea797c9028696c86b18bfda0b62dc4ee7d753579f0bdf0302b8742898930",
+      "content_sha256": "9f26f51122be14ce6452fae56693da3fe211a521296781d0a0dbdb66e163c9ed",
       "always_loaded": false
     },
     {
