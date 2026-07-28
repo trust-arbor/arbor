@@ -85,10 +85,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
 
   @doc "Normalize a closed default-profile Shell termination envelope."
   @spec normalize_termination(term()) :: {:ok, map()} | :error
-  def normalize_termination(termination) when is_map(termination) and not is_struct(termination) do
+  def normalize_termination(termination)
+      when is_map(termination) and not is_struct(termination) do
     with true <- map_size(termination) == length(@termination_fields),
          true <- MapSet.new(Map.keys(termination)) == MapSet.new(@termination_fields),
-         true <- Enum.all?(@termination_fields, &(is_boolean(termination[&1]))),
+         true <- Enum.all?(@termination_fields, &is_boolean(termination[&1])),
          true <- Enum.any?(@termination_fields, &(termination[&1] == true)) do
       {:ok, Map.new(@termination_fields, fn field -> {field, termination[field]} end)}
     else
@@ -113,7 +114,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
 
   defp normalize_capacity_report(report) do
     cond do
-      default_capacity_report?(report) ->
+      default_profile_capacity_report?(report) ->
         with {:ok, termination} <- normalize_termination(Map.get(report, "termination")) do
           {:ok, Map.put(report, "termination", termination)}
         end
@@ -138,14 +139,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
       match?([_], validation) and length(validation) <= @max_validation_entries
   end
 
-  defp default_capacity_report?(report) when is_map(report) and not is_struct(report) do
+  defp default_profile_capacity_report?(report) when is_map(report) and not is_struct(report) do
     Map.get(report, "reason") == "validation_capacity_exceeded" and
       Map.has_key?(report, "termination") and
       not Map.has_key?(report, "test") and
       not Map.has_key?(report, "capacity_handoff")
   end
 
-  defp default_capacity_report?(_report), do: false
+  defp default_profile_capacity_report?(_report), do: false
 
   defp cross_app_capacity_report?(report) when is_map(report) and not is_struct(report) do
     test = Map.get(report, "test")

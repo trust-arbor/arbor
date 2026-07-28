@@ -2782,17 +2782,31 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       end)
 
       task = valid_task()
+      test_pid = self()
 
       owner =
         spawn(fn ->
-          CodingTaskExecutor.run(
-            "agent_1",
-            task,
-            valid_context(%{"timeout" => 10_000})
-          )
+          result =
+            CodingTaskExecutor.run(
+              "agent_1",
+              task,
+              valid_context(%{"timeout" => 10_000})
+            )
+
+          send(test_pid, {:executor_owner_result, result})
         end)
 
-      assert_receive {:slow_runner_started, runner_pid, _opts, links}, 2_000
+      {runner_pid, links} =
+        receive do
+          {:slow_runner_started, runner_pid, _opts, links} ->
+            {runner_pid, links}
+
+          {:executor_owner_result, result} ->
+            flunk("executor exited before starting the cancellation runner: #{inspect(result)}")
+        after
+          10_000 -> flunk("executor did not start the cancellation runner within 10 seconds")
+        end
+
       assert owner in links
 
       runner_ref = Process.monitor(runner_pid)

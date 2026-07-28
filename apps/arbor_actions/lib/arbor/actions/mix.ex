@@ -146,7 +146,7 @@ defmodule Arbor.Actions.Mix do
     }
   end
 
-  @doc false
+  @doc "Projects bounded compile feedback; `passed` also requires no capacity termination."
   def compile_feedback(%{exit_code: exit_code, stdout: stdout, stderr: stderr} = result) do
     stdout = stdout || ""
     stderr = stderr || ""
@@ -2734,7 +2734,7 @@ defmodule Arbor.Actions.Mix do
       args = build_args(params)
 
       # System-owned intensive containment for default-profile compile validation.
-      # Not caller-controlled; Shell validates the closed profile atom.
+      # Not caller-controlled; Shell validates the closed `:intensive` profile.
       opts =
         MixAction.timeout_opts(params) ++
           [bind_committable_tree: true, resource_profile: :intensive]

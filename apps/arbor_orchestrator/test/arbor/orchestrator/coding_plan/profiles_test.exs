@@ -321,8 +321,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
       assert cross_app["validation_strategy"]["timeout_max_ms"] > standard_ceiling
 
-      # Other executable profiles retain the standard Shell ceiling.
-      assert default["validation_strategy"]["timeout_max_ms"] == standard_ceiling
+      # Default compile and CrossApp use intensive containment; security keeps standard.
+      assert default["validation_strategy"]["timeout_max_ms"] == intensive_ceiling
       assert security["validation_strategy"]["timeout_max_ms"] == standard_ceiling
 
       drifted_source =

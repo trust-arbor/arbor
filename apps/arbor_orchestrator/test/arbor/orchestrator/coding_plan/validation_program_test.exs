@@ -256,7 +256,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         Map.put(program, "action", "coding_security_regression_validate"),
         Map.put(program, "result_adapter", "cross_app_v1"),
         Map.put(program, "context_keys", ["workspace_id"]),
-        put_in(program, ["static_parameters", "timeout"], 600_001),
+        put_in(program, ["static_parameters", "timeout"], 1_200_001),
         Map.put(program, "extra", true)
       ]
 
