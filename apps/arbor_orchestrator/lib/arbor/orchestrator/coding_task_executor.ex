@@ -76,6 +76,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   alias Arbor.Orchestrator.CodingPlan.{
     ActionCatalog,
     ArtifactStore,
+    BudgetPolicy,
     CandidateVerificationCore,
     Compilation,
     ExecutionManifest,
@@ -1996,54 +1997,78 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     timeout = effective_timeout(plan, Map.get(exec_ctx, :timeout))
     approval_timeout_ms = Config.coding_approval_timeout_ms(timeout)
 
-    initial_values =
-      compilation.initial_values
-      |> Map.put("session.agent_id", agent_id)
-      |> Map.put("session.task_id", task_id)
-      |> maybe_put_session_caller_id(caller_id)
-      |> maybe_put_session_metadata(Map.get(exec_ctx, :metadata))
+    with {:ok, validation_timeout_ms} <- validation_timeout_ms(compilation),
+         {:ok, budget_allocation} <- BudgetPolicy.allocate(timeout, validation_timeout_ms) do
+      dotted_budget_allocation =
+        Map.new(budget_allocation, fn {key, value} ->
+          {"coding_budget.#{key}", value}
+        end)
 
-    opts =
-      [
-        authorization: true,
-        agent_id: agent_id,
-        task_id: task_id,
-        run_id: task_id,
-        pipeline_id: task_id,
-        signing_authority: authority,
-        initial_values: initial_values,
-        logs_root: logs_root,
-        transcript_sink: {
-          ArtifactStore,
-          :append_transcript_turn,
-          [logs_root, task_id]
-        },
-        graph_hash: compilation.graph_hash,
-        execution_manifest: compilation.execution_manifest,
-        execution_manifest_digest: compilation.execution_manifest_digest,
-        pinned_action_bindings: pinned_action_bindings,
-        pinned_handler_bindings: pinned_handler_bindings,
-        workdir: plan.repo_root,
-        timeout: timeout,
-        approval_timeout_ms: approval_timeout_ms,
-        spawning_pid: self(),
-        resumable: true,
-        cache: false
-      ]
+      initial_values =
+        compilation.initial_values
+        |> Map.put("session.run_deadline_unix_ms", System.system_time(:millisecond) + timeout)
+        |> Map.put("session.agent_id", agent_id)
+        |> Map.put("session.task_id", task_id)
+        |> maybe_put_session_caller_id(caller_id)
+        |> maybe_put_session_metadata(Map.get(exec_ctx, :metadata))
+        |> Map.merge(dotted_budget_allocation)
 
-    # The authenticated caller remains distinct from the execution principal.
-    # Engine middleware intersects both principals' scoped capabilities at
-    # every node and action invocation.
-    final_opts =
-      case caller_id do
-        cid when is_binary(cid) and cid != "" ->
-          Keyword.put(opts, :caller_id, cid)
+      opts =
+        [
+          authorization: true,
+          agent_id: agent_id,
+          task_id: task_id,
+          run_id: task_id,
+          pipeline_id: task_id,
+          signing_authority: authority,
+          initial_values: initial_values,
+          logs_root: logs_root,
+          transcript_sink: {
+            ArtifactStore,
+            :append_transcript_turn,
+            [logs_root, task_id]
+          },
+          graph_hash: compilation.graph_hash,
+          execution_manifest: compilation.execution_manifest,
+          execution_manifest_digest: compilation.execution_manifest_digest,
+          pinned_action_bindings: pinned_action_bindings,
+          pinned_handler_bindings: pinned_handler_bindings,
+          workdir: plan.repo_root,
+          timeout: timeout,
+          approval_timeout_ms: approval_timeout_ms,
+          spawning_pid: self(),
+          resumable: true,
+          cache: false
+        ]
 
-        _ ->
-          opts
-      end
+      # The authenticated caller remains distinct from the execution principal.
+      # Engine middleware intersects both principals' scoped capabilities at
+      # every node and action invocation.
+      final_opts =
+        case caller_id do
+          cid when is_binary(cid) and cid != "" ->
+            Keyword.put(opts, :caller_id, cid)
 
-    {:ok, final_opts}
+          _ ->
+            opts
+        end
+
+      {:ok, final_opts}
+    else
+      _ -> {:error, :invalid_budget_policy_inputs}
+    end
+  end
+
+  defp validation_timeout_ms(%Compilation{} = compilation) do
+    validation_program = Map.get(compilation.initial_values, "coding_plan_validation_program")
+
+    case get_in(validation_program, ["static_parameters", "timeout"]) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
+        {:ok, timeout_ms}
+
+      _ ->
+        {:error, :invalid_validation_timeout}
+    end
   end
 
   defp effective_timeout(%Plan{} = plan, context_timeout) do
@@ -2214,16 +2239,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         fun.(opts)
 
       {:ok, timeout} ->
-        deadline_unix_ms = System.system_time(:millisecond) + timeout
-
-        bounded_opts =
-          Keyword.update!(opts, :initial_values, fn initial_values ->
-            Map.put(initial_values, "session.run_deadline_unix_ms", deadline_unix_ms)
-          end)
-
         # The link is intentional: TaskStore cancellation kills this owner,
         # which must also terminate the Engine process and its owned resources.
-        task = Task.async(fn -> capture_runner_result(fn -> fun.(bounded_opts) end) end)
+        task = Task.async(fn -> capture_runner_result(fn -> fun.(opts) end) end)
 
         case Task.yield(task, timeout) do
           {:ok, {:ok, result}} ->

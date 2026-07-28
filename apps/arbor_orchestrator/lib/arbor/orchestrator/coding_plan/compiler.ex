@@ -545,7 +545,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          Map.put(
            attrs,
            "context_keys",
-           "worker_session_id,prompt,timeout,inactivity_timeout_ms"
+           "worker_session_id,prompt,timeout,inactivity_timeout_ms," <>
+             "session.run_deadline_unix_ms,coding_budget.worker_completion_reserve_ms"
          )
          |> Map.put("param.failure_mode", "delivery_receipt")
          |> Map.put("max_retries", "0")}

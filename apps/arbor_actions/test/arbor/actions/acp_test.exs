@@ -964,6 +964,8 @@ defmodule Arbor.Actions.AcpTest do
       assert roles[:session_pid] == :control
       assert roles[:timeout] == :data
       assert roles[:inactivity_timeout_ms] == :data
+      assert roles[:run_deadline_unix_ms] == :data
+      assert roles[:worker_completion_reserve_ms] == :data
     end
 
     test "returns error for dead PID" do
@@ -1323,6 +1325,238 @@ defmodule Arbor.Actions.AcpTest do
                )
 
       refute_receive {:managed_send, "acp_worker_invalid_sink", _, _}
+    end
+
+    test "legacy metadata absent preserves normal timeout path without budget enforcement" do
+      install_fake_ai()
+      session = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(session, :kill) end)
+
+      assert {:ok, result} =
+               Acp.SendMessage.run(
+                 %{
+                   session_pid: session,
+                   prompt: "continue",
+                   timeout: 30_000
+                 },
+                 %{}
+               )
+
+      assert result.text == "legacy"
+
+      assert_receive {:legacy_send, ^session, "continue", opts}
+      assert Keyword.get(opts, :timeout) == 30_000
+    end
+
+    test "enforce_send_deadline_limit distinguishes absence from malformed metadata" do
+      now_ms = 1_700_000_000_000
+
+      assert {:ok, :legacy} =
+               Acp.SendMessage.enforce_send_deadline_limit(10_000, nil, nil, now_ms)
+
+      for {deadline, reserve} <- [
+            {now_ms + 10_000, nil},
+            {nil, 1_000},
+            {"bad-deadline", "bad-reserve"},
+            {"bad-deadline", 1_000},
+            {now_ms + 10_000, "bad-reserve"},
+            {0, 1_000},
+            {now_ms + 10_000, 0},
+            {-1, 1_000},
+            {now_ms + 10_000, -1}
+          ] do
+        assert {:error, :invalid_budget_metadata} =
+                 Acp.SendMessage.enforce_send_deadline_limit(
+                   10_000,
+                   deadline,
+                   reserve,
+                   now_ms
+                 )
+      end
+
+      assert {:ok, :unchanged} =
+               Acp.SendMessage.enforce_send_deadline_limit(
+                 nil,
+                 now_ms + 10_000,
+                 1_000,
+                 now_ms
+               )
+
+      assert {:ok, 4_500} =
+               Acp.SendMessage.enforce_send_deadline_limit(
+                 5_000,
+                 now_ms + 5_000,
+                 500,
+                 now_ms
+               )
+
+      assert {:ok, 1_000} =
+               Acp.SendMessage.enforce_send_deadline_limit(
+                 1_000,
+                 now_ms + 5_000,
+                 500,
+                 now_ms
+               )
+
+      for requested_timeout <- ["bad-timeout", 0, -1] do
+        assert {:error, :invalid_budget_metadata} =
+                 Acp.SendMessage.enforce_send_deadline_limit(
+                   requested_timeout,
+                   now_ms + 10_000,
+                   1_000,
+                   now_ms
+                 )
+      end
+
+      assert {:error, :budget_exhausted} =
+               Acp.SendMessage.enforce_send_deadline_limit(
+                 500,
+                 now_ms + 100,
+                 200,
+                 now_ms
+               )
+
+      for requested_timeout <- [500, nil] do
+        assert {:error, :budget_exhausted} =
+                 Acp.SendMessage.enforce_send_deadline_limit(
+                   requested_timeout,
+                   now_ms - 10_000,
+                   1_000,
+                   now_ms
+                 )
+      end
+    end
+
+    test "send path enforces budget before managed side effects and caps timeout" do
+      install_fake_ai()
+
+      assert {:error, _} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_budgeted",
+                   prompt: "continue",
+                   timeout: 10_000,
+                   run_deadline_unix_ms: 1,
+                   worker_completion_reserve_ms: 10
+                 },
+                 %{}
+               )
+
+      refute_receive {:managed_send, "acp_worker_budgeted", _, _}
+
+      assert {:error, _} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_budgeted",
+                   prompt: "continue",
+                   timeout: 10_000,
+                   run_deadline_unix_ms: System.system_time(:millisecond) + 10_000
+                 },
+                 %{}
+               )
+
+      refute_receive {:managed_send, "acp_worker_budgeted", _, _}
+
+      assert {:error, _} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_budgeted",
+                   prompt: "continue",
+                   timeout: 10_000,
+                   run_deadline_unix_ms: "bad-deadline",
+                   worker_completion_reserve_ms: "bad-reserve"
+                 },
+                 %{}
+               )
+
+      refute_receive {:managed_send, "acp_worker_budgeted", _, _}
+
+      run_deadline_ms = System.system_time(:millisecond) + 8_000
+      reserve_ms = 1_000
+
+      assert {:ok, managed} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_budgeted",
+                   prompt: "continue",
+                   timeout: 10_000,
+                   run_deadline_unix_ms: run_deadline_ms,
+                   worker_completion_reserve_ms: reserve_ms
+                 },
+                 %{agent_id: "agent_budget", task_id: "task_budget"}
+               )
+
+      assert managed.text == "echo:continue"
+
+      assert_receive {:managed_send, "acp_worker_budgeted", "continue", managed_opts}
+      assert Keyword.fetch!(managed_opts, :timeout) in 1..7_000
+    end
+
+    test "legacy send path enforces budget before side effects and caps timeout" do
+      install_fake_ai()
+      session = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(session, :kill) end)
+
+      assert {:error, _} =
+               Acp.SendMessage.run(
+                 %{
+                   session_pid: session,
+                   prompt: "continue",
+                   timeout: 10_000,
+                   run_deadline_unix_ms: 1,
+                   worker_completion_reserve_ms: 10
+                 },
+                 %{}
+               )
+
+      refute_receive {:legacy_send, ^session, _, _}
+
+      assert {:error, _} =
+               Acp.SendMessage.run(
+                 %{
+                   session_pid: session,
+                   prompt: "continue",
+                   timeout: 10_000,
+                   worker_completion_reserve_ms: 1_000
+                 },
+                 %{}
+               )
+
+      refute_receive {:legacy_send, ^session, _, _}
+
+      assert {:error, _} =
+               Acp.SendMessage.run(
+                 %{
+                   session_pid: session,
+                   prompt: "continue",
+                   timeout: 10_000,
+                   run_deadline_unix_ms: "bad-deadline",
+                   worker_completion_reserve_ms: "bad-reserve"
+                 },
+                 %{}
+               )
+
+      refute_receive {:legacy_send, ^session, _, _}
+
+      run_deadline_ms = System.system_time(:millisecond) + 8_000
+      reserve_ms = 1_000
+
+      assert {:ok, legacy} =
+               Acp.SendMessage.run(
+                 %{
+                   session_pid: session,
+                   prompt: "continue",
+                   timeout: 10_000,
+                   run_deadline_unix_ms: run_deadline_ms,
+                   worker_completion_reserve_ms: reserve_ms
+                 },
+                 %{}
+               )
+
+      assert legacy.text == "legacy"
+
+      assert_receive {:legacy_send, ^session, "continue", legacy_opts}
+      assert Keyword.fetch!(legacy_opts, :timeout) in 1..7_000
     end
 
     test "standalone response never exposes internal stream capture" do

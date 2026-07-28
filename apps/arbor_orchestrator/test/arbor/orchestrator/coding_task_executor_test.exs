@@ -22,6 +22,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   alias Arbor.Orchestrator.CodingPlan.{
     ArtifactStore,
     Compiler,
+    BudgetPolicy,
     Profiles,
     ReadinessCore,
     ValidationProgram
@@ -2336,6 +2337,45 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       remaining_at_runner_ms = deadline_unix_ms - observed_at_unix_ms
 
       assert remaining_at_runner_ms in 4_000..timeout
+    end
+
+    test "seeds coding budget values as exact flat coding_budget leaves" do
+      timeout = 12_000
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_owner_budget_values", "timeout" => timeout})
+               )
+
+      iv = last_opts()[:initial_values]
+
+      validation_timeout_ms =
+        iv
+        |> Map.fetch!("coding_plan_validation_program")
+        |> get_in(["static_parameters", "timeout"])
+
+      assert {:ok, expected_budget} = BudgetPolicy.allocate(timeout, validation_timeout_ms)
+
+      expected_dotted_budget =
+        Map.new(expected_budget, fn {key, value} ->
+          {"coding_budget.#{key}", value}
+        end)
+
+      actual_budget_keys =
+        iv
+        |> Map.keys()
+        |> Enum.filter(&String.starts_with?(&1, "coding_budget."))
+        |> Enum.sort()
+
+      assert actual_budget_keys == expected_dotted_budget |> Map.keys() |> Enum.sort()
+      assert Map.take(iv, actual_budget_keys) == expected_dotted_budget
+      assert Enum.all?(expected_dotted_budget, fn {_key, value} -> is_integer(value) end)
+
+      assert Map.fetch!(iv, "session.run_deadline_unix_ms") > 0
+      refute Map.has_key?(iv, "coding_budget")
+      assert {:ok, _json} = Jason.encode(iv)
     end
 
     test "security regression: authority closes after success, runner error, and timeout" do

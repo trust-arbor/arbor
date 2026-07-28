@@ -820,6 +820,16 @@ defmodule Arbor.Actions.Acp do
           type: :non_neg_integer,
           doc: "Silence window before aborting the in-flight prompt"
         ],
+        run_deadline_unix_ms: [
+          type: :non_neg_integer,
+          doc:
+            "Absolute wall-clock deadline shared with the run context " <>
+              "(omitted for legacy, non-budgeted callers)"
+        ],
+        worker_completion_reserve_ms: [
+          type: :non_neg_integer,
+          doc: "Reserved completion budget expected after this send action"
+        ],
         failure_mode: [
           type: :string,
           doc: "Failure behavior: error (default) or delivery_receipt"
@@ -835,7 +845,9 @@ defmodule Arbor.Actions.Acp do
         prompt: {:control, requires: [:prompt_injection]},
         failure_mode: :control,
         timeout: :data,
-        inactivity_timeout_ms: :data
+        inactivity_timeout_ms: :data,
+        run_deadline_unix_ms: :data,
+        worker_completion_reserve_ms: :data
       }
     end
 
@@ -855,16 +867,49 @@ defmodule Arbor.Actions.Acp do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, context) do
+      requested_timeout_ms = get_param(params, :timeout)
+      run_deadline_unix_ms = get_param(params, :run_deadline_unix_ms)
+      worker_completion_reserve_ms = get_param(params, :worker_completion_reserve_ms)
+      now_ms = System.system_time(:millisecond)
+
       with {:ok, failure_mode} <- normalize_failure_mode(params),
            :ok <- Acp.require_acp!(),
+           {:ok, budget_timeout} <-
+             enforce_send_deadline_limit(
+               requested_timeout_ms,
+               run_deadline_unix_ms,
+               worker_completion_reserve_ms,
+               now_ms
+             ),
            {:ok, target} <- Acp.resolve_session_target(params),
            {:ok, transcript_opts} <- Acp.transcript_capture_opts(context) do
+        request_timeout =
+          case budget_timeout do
+            :legacy -> requested_timeout_ms
+            :unchanged -> requested_timeout_ms
+            capped_ms when is_integer(capped_ms) -> capped_ms
+          end
+
         case target do
           {:worker, worker_session_id} ->
-            do_managed_send(worker_session_id, params, context, transcript_opts, failure_mode)
+            do_managed_send(
+              worker_session_id,
+              params,
+              request_timeout,
+              context,
+              transcript_opts,
+              failure_mode
+            )
 
           {:pid, pid} ->
-            do_legacy_send(pid, params, transcript_opts, failure_mode)
+            do_legacy_send(
+              pid,
+              params,
+              request_timeout,
+              get_param(params, :inactivity_timeout_ms),
+              transcript_opts,
+              failure_mode
+            )
         end
       else
         {:error, reason} -> {:error, Acp.format_error(reason)}
@@ -875,12 +920,52 @@ defmodule Arbor.Actions.Acp do
       :exit, reason -> {:error, Acp.format_error(reason)}
     end
 
-    defp do_managed_send(worker_session_id, params, context, transcript_opts, failure_mode) do
+    @doc false
+    def enforce_send_deadline_limit(
+          requested_timeout_ms,
+          run_deadline_unix_ms,
+          worker_completion_reserve_ms,
+          now_ms
+        )
+        when is_integer(run_deadline_unix_ms) and run_deadline_unix_ms > 0 and
+               is_integer(worker_completion_reserve_ms) and
+               worker_completion_reserve_ms > 0 and is_integer(now_ms) do
+      remaining_ms = run_deadline_unix_ms - now_ms - worker_completion_reserve_ms
+
+      cond do
+        remaining_ms <= 0 ->
+          {:error, :budget_exhausted}
+
+        is_nil(requested_timeout_ms) ->
+          {:ok, :unchanged}
+
+        is_integer(requested_timeout_ms) and requested_timeout_ms > 0 ->
+          {:ok, min(requested_timeout_ms, remaining_ms)}
+
+        true ->
+          {:error, :invalid_budget_metadata}
+      end
+    end
+
+    def enforce_send_deadline_limit(_requested_timeout_ms, nil, nil, now_ms)
+        when is_integer(now_ms),
+        do: {:ok, :legacy}
+
+    def enforce_send_deadline_limit(_, _, _, _), do: {:error, :invalid_budget_metadata}
+
+    defp do_managed_send(
+           worker_session_id,
+           params,
+           request_timeout_ms,
+           context,
+           transcript_opts,
+           failure_mode
+         ) do
       prompt = get_param(params, :prompt)
 
       opts =
         []
-        |> maybe_add(:timeout, get_param(params, :timeout))
+        |> maybe_add(:timeout, request_timeout_ms)
         |> maybe_add(:inactivity_timeout_ms, get_param(params, :inactivity_timeout_ms))
         |> Keyword.merge(Acp.authority_opts(context))
         |> Keyword.merge(transcript_opts)
@@ -917,11 +1002,18 @@ defmodule Arbor.Actions.Acp do
       end
     end
 
-    defp do_legacy_send(pid, params, transcript_opts, failure_mode) do
+    defp do_legacy_send(
+           pid,
+           params,
+           request_timeout_ms,
+           inactivity_timeout_ms,
+           transcript_opts,
+           failure_mode
+         ) do
       opts =
         []
-        |> maybe_add(:timeout, get_param(params, :timeout))
-        |> maybe_add(:inactivity_timeout_ms, get_param(params, :inactivity_timeout_ms))
+        |> maybe_add(:timeout, request_timeout_ms)
+        |> maybe_add(:inactivity_timeout_ms, inactivity_timeout_ms)
         |> Keyword.merge(transcript_opts)
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply

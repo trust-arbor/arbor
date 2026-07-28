@@ -917,7 +917,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     for node_id <- ~w[implement retry_recovered_send] do
       assert node_attrs(graph, node_id)["context_keys"] ==
-               "worker_session_id,prompt,timeout,inactivity_timeout_ms"
+               "worker_session_id,prompt,timeout,inactivity_timeout_ms,session.run_deadline_unix_ms,coding_budget.worker_completion_reserve_ms"
 
       assert node_attrs(graph, node_id)["param.failure_mode"] == "delivery_receipt"
     end

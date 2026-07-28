@@ -2114,6 +2114,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         coding_plan_work_packet_digest
         session.run_deadline_unix_ms
         session.task_id
+        coding_budget
+        coding_budget.validation_ms
+        coding_budget.approval_ms
+        coding_budget.review_ms
+        coding_budget.cleanup_ms
+        coding_budget.worker_completion_reserve_ms
+        coding_budget.validation_completion_reserve_ms
+        coding_budget.review_completion_reserve_ms
+        coding_budget.approval_completion_reserve_ms
         task
         task_id
       )

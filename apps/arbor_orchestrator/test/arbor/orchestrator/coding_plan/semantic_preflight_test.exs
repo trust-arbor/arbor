@@ -1967,6 +1967,75 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     end
   end
 
+  test "recovery sender bindings require complete budget wiring", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      update_in(
+        graph.nodes["implement"].attrs,
+        &Map.put(
+          &1,
+          "context_keys",
+          "worker_session_id,prompt,timeout,inactivity_timeout_ms,session.run_deadline_unix_ms"
+        )
+      ),
+      update_in(
+        graph.nodes["implement"].attrs,
+        &Map.put(&1, "context_keys", "worker_session_id,prompt,timeout")
+      ),
+      update_in(
+        graph.nodes["retry_recovered_send"].attrs,
+        &Map.put(
+          &1,
+          "context_keys",
+          "worker_session_id,prompt,timeout,inactivity_timeout_ms,coding_budget.worker_completion_reserve_ms"
+        )
+      )
+    ]
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"],
+                 review_profile: "binding",
+                 worker_use_pool: true,
+                 worker_resume_session_id: nil
+               )
+
+      assert Enum.any?(errors, &(&1["code"] == "worker_recovery_node_mismatch"))
+    end
+  end
+
+  test "immutable context writer rules protect coding_budget keys and writers", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      update_in(graph.nodes["implement"].attrs, &Map.put(&1, "output_key", "coding_budget")),
+      update_in(
+        graph.nodes["implement"].attrs,
+        &Map.put(&1, "output_key", "coding_budget.validation_ms")
+      ),
+      update_in(graph.nodes["implement"].attrs, &Map.put(&1, "output_prefix", "coding_budget"))
+    ]
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"],
+                 review_profile: "binding",
+                 worker_use_pool: true,
+                 worker_resume_session_id: nil
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == "immutable_context_writer_violation" and
+                 Map.has_key?(error["detail"], "context_key")
+             end)
+    end
+  end
+
   test "explicit resume binds open_worker fallback flag; forged enable/disable fails", ctx do
     resume_id = "provider-session-continue-preflight"
 

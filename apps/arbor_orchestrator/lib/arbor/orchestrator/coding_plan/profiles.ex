@@ -670,7 +670,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
           "type" => "exec",
           "target" => "action",
           "action" => "acp_send_message",
-          "context_keys" => "worker_session_id,prompt,timeout,inactivity_timeout_ms",
+          "context_keys" =>
+            "worker_session_id,prompt,timeout,inactivity_timeout_ms,session.run_deadline_unix_ms,coding_budget.worker_completion_reserve_ms",
           "param.failure_mode" => "delivery_receipt",
           "output_prefix" => "worker_msg",
           "max_retries" => "0"
@@ -700,7 +701,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
           "type" => "exec",
           "target" => "action",
           "action" => "acp_send_message",
-          "context_keys" => "worker_session_id,prompt,timeout,inactivity_timeout_ms",
+          "context_keys" =>
+            "worker_session_id,prompt,timeout,inactivity_timeout_ms,session.run_deadline_unix_ms,coding_budget.worker_completion_reserve_ms",
           "param.failure_mode" => "delivery_receipt",
           "output_prefix" => "worker_msg",
           "max_retries" => "0"
