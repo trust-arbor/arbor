@@ -5,6 +5,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Coding.WorkspaceReconciliationProjection
+  alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Coding.ReconciliationDecision
   alias Arbor.Contracts.Security.AuthContext
   alias Arbor.Contracts.Security.SignedRequest
@@ -101,6 +102,60 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     end
   end
 
+  defmodule RecordingConsensus do
+    def compare_and_settle_pending_approval(fields) do
+      send(self(), {:consensus_settle_called, fields})
+
+      {:ok,
+       %{
+         "schema_version" => 1,
+         "resource_type" => "pending_approval",
+         "resource_id" => fields["resource_id"],
+         "outcome" => "settled",
+         "active" => false,
+         "status" => "removed"
+       }}
+    end
+  end
+
+  defmodule RecordingComms do
+    def compare_and_settle_pending_approval(fields) do
+      send(self(), {:comms_settle_called, fields})
+
+      {:ok,
+       %{
+         "schema_version" => 1,
+         "resource_type" => "pending_approval",
+         "resource_id" => fields["resource_id"],
+         "outcome" => "settled",
+         "active" => false,
+         "status" => "removed"
+       }}
+    end
+  end
+
+  defmodule AbsentComms do
+    def compare_and_settle_pending_approval(fields) do
+      send(self(), {:comms_settle_called, fields})
+
+      {:ok,
+       %{
+         "schema_version" => 1,
+         "resource_type" => "pending_approval",
+         "resource_id" => fields["resource_id"],
+         "outcome" => "already_absent",
+         "active" => false
+       }}
+    end
+  end
+
+  defmodule UnavailableComms do
+    def compare_and_settle_pending_approval(fields) do
+      send(self(), {:comms_settle_called, fields})
+      {:error, :current_identity_unavailable}
+    end
+  end
+
   setup_all do
     previous_shell = Application.get_env(:arbor_actions, :mix_shell_module)
     Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Actions.TestMixShell)
@@ -116,16 +171,22 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     previous_security = Application.get_env(:arbor_actions, :security_module)
     previous_server = Application.get_env(:arbor_actions, :workspace_lease_registry_server)
     previous_ai = Application.get_env(:arbor_actions, :ai_module)
+    previous_consensus = Application.get_env(:arbor_actions, :consensus_module)
+    previous_comms = Application.get_env(:arbor_actions, :comms_module)
 
     Application.delete_env(:arbor_actions, :workspace_lease_registry_server)
     Application.put_env(:arbor_actions, :security_module, AllowSecurity)
     Application.delete_env(:arbor_actions, :ai_module)
+    Application.delete_env(:arbor_actions, :consensus_module)
+    Application.delete_env(:arbor_actions, :comms_module)
     Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
 
     on_exit(fn ->
       restore_env(:security_module, previous_security)
       restore_env(:workspace_lease_registry_server, previous_server)
       restore_env(:ai_module, previous_ai)
+      restore_env(:consensus_module, previous_consensus)
+      restore_env(:comms_module, previous_comms)
     end)
 
     :ok
@@ -1879,6 +1940,185 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
       })
 
     ReconciliationDecision.to_map(decision)
+  end
+
+  test "pending_approval consensus exact URI and source dispatch via Config.consensus_module" do
+    {resource_id, expected, decision} = pending_approval_decision("consensus", "prop_actions_1")
+    principal = "agent_pa_consensus"
+    auth = verified_auth(principal)
+
+    Application.put_env(:arbor_actions, :security_module, RecordingSecurity)
+    Application.put_env(:arbor_actions, :consensus_module, RecordingConsensus)
+    Application.put_env(:arbor_actions, :comms_module, RecordingComms)
+
+    assert {:ok, receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert receipt["outcome"] == "settled"
+    assert receipt["resource_id"] == resource_id
+    assert receipt["resource_type"] == "pending_approval"
+
+    assert_received {:authorize_called, ^principal, uri, opts}
+
+    assert uri ==
+             "arbor://coding/reconciliation/apply/pending_approval/" <> resource_id
+
+    assert Keyword.get(opts, :verify_identity) == false
+    assert match?(%SignedRequest{agent_id: ^principal}, Keyword.get(opts, :signed_request))
+
+    assert_received {:consensus_settle_called, fields}
+    assert fields == %{"resource_id" => resource_id, "expected_identity" => expected}
+    refute_received {:comms_settle_called, _}
+  end
+
+  test "pending_approval interaction source dispatches to Config.comms_module" do
+    {resource_id, expected, decision} = pending_approval_decision("interaction", "irq_actions_1")
+    auth = verified_auth("agent_pa_comms")
+
+    Application.put_env(:arbor_actions, :consensus_module, RecordingConsensus)
+    Application.put_env(:arbor_actions, :comms_module, RecordingComms)
+
+    assert {:ok, receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert receipt["outcome"] == "settled"
+    assert receipt["resource_id"] == resource_id
+
+    assert_received {:comms_settle_called, fields}
+    assert fields["expected_identity"] == expected
+    refute_received {:consensus_settle_called, _}
+  end
+
+  test "security regression: unauthorized pending_approval never calls backends" do
+    {_id, _expected, decision} = pending_approval_decision("consensus", "prop_denied")
+    auth = verified_auth("agent_pa_denied")
+
+    Application.put_env(:arbor_actions, :security_module, DenySecurity)
+    Application.put_env(:arbor_actions, :consensus_module, RecordingConsensus)
+    Application.put_env(:arbor_actions, :comms_module, RecordingComms)
+
+    assert {:error, {:unauthorized, :denied}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    refute_received {:consensus_settle_called, _}
+    refute_received {:comms_settle_called, _}
+
+    Application.put_env(:arbor_actions, :security_module, PendingSecurity)
+
+    assert {:error, {:unauthorized, {:pending_approval, "proposal_test_1"}}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    refute_received {:consensus_settle_called, _}
+    refute_received {:comms_settle_called, _}
+  end
+
+  test "security regression: non-terminal pending_approval decision is unsupported without backend call" do
+    {resource_id, expected, base} = pending_approval_decision("interaction", "irq_keep")
+    auth = verified_auth("agent_pa_keep")
+    Application.put_env(:arbor_actions, :comms_module, RecordingComms)
+
+    keep = Map.put(base, "decision", "keep")
+
+    assert {:error, {:unsupported_reconciliation_apply, detail}} =
+             Actions.apply_coding_reconciliation_decision(auth, keep)
+
+    assert detail == %{
+             "resource_type" => "pending_approval",
+             "decision" => "keep",
+             "reason" => "terminal_active_resource"
+           }
+
+    refute_received {:comms_settle_called, _}
+    _ = {resource_id, expected}
+  end
+
+  test "pending_approval propagates source unavailable and already_absent receipts" do
+    {_id, _expected, decision} = pending_approval_decision("interaction", "irq_unavail")
+    auth = verified_auth("agent_pa_unavail")
+
+    Application.put_env(:arbor_actions, :comms_module, UnavailableComms)
+
+    assert {:error, :current_identity_unavailable} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    Application.put_env(:arbor_actions, :comms_module, AbsentComms)
+    assert {:ok, receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert receipt["outcome"] == "already_absent"
+  end
+
+  test "pending_approval rejects invalid resource id before authorize" do
+    auth = verified_auth("agent_pa_bad_id")
+    Application.put_env(:arbor_actions, :security_module, RecordingSecurity)
+    Application.put_env(:arbor_actions, :comms_module, RecordingComms)
+
+    bad = %{
+      "schema_version" => 1,
+      "resource_type" => "pending_approval",
+      "resource_id" => "not_an_approval_id",
+      "task_id" => nil,
+      "principal_id" => "agent_1",
+      "decision" => "settle",
+      "reason" => "terminal_active_resource",
+      "expected_identity" => %{
+        "resource_type" => "pending_approval",
+        "resource_id" => "not_an_approval_id",
+        "approval_id" => "x",
+        "source" => "interaction",
+        "task_id" => nil,
+        "agent_id" => "agent_1",
+        "principal_id" => "agent_1",
+        "approver_id" => nil,
+        "resource_uri" => nil,
+        "action" => nil,
+        "status" => "pending",
+        "created_at" => nil
+      },
+      "evidence" => %{
+        "task_presence" => "absent",
+        "task_state" => nil,
+        "owner_status" => "dead",
+        "journal_status" => "complete"
+      }
+    }
+
+    assert {:error, _} = Actions.apply_coding_reconciliation_decision(auth, bad)
+    refute_received {:authorize_called, _, _, _}
+    refute_received {:comms_settle_called, _}
+  end
+
+  defp pending_approval_decision(source, approval_id) do
+    {:ok, resource_id} = PendingApprovalResourceId.resource_id(source, approval_id)
+
+    expected = %{
+      "resource_type" => "pending_approval",
+      "resource_id" => resource_id,
+      "approval_id" => approval_id,
+      "source" => source,
+      "task_id" => "task_pa_1",
+      "agent_id" => "agent_pa_1",
+      "principal_id" => "agent_pa_1",
+      "approver_id" => nil,
+      "resource_uri" => "arbor://shell/exec",
+      "action" => "execute",
+      "status" => "pending",
+      "created_at" => "2026-07-28T00:00:00Z"
+    }
+
+    {:ok, decision} =
+      ReconciliationDecision.new(%{
+        "schema_version" => 1,
+        "resource_type" => "pending_approval",
+        "resource_id" => resource_id,
+        "task_id" => "task_pa_1",
+        "principal_id" => "agent_pa_1",
+        "decision" => "settle",
+        "reason" => "terminal_active_resource",
+        "expected_identity" => expected,
+        "evidence" => %{
+          "task_presence" => "observed",
+          "task_state" => "done",
+          "owner_status" => "dead",
+          "journal_status" => "complete"
+        }
+      })
+
+    {resource_id, expected, ReconciliationDecision.to_map(decision)}
   end
 
   defp verified_auth(principal_id) when is_binary(principal_id) do

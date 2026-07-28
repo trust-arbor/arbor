@@ -191,6 +191,33 @@ defmodule Arbor.Comms.InteractionRouter do
   end
 
   @doc """
+  Source-owned pending-approval compare-and-settle.
+
+  Emits the ordinary abandon signal only on a first-time settled transition.
+  Discovery miss / ambiguous authority surfaces as `:current_identity_unavailable`.
+  """
+  @spec compare_and_settle_pending_approval(map()) :: {:ok, map()} | {:error, term()}
+  def compare_and_settle_pending_approval(fields) when is_map(fields) do
+    case InteractionRegistry.compare_and_settle_pending_approval(fields) do
+      {:ok, receipt, :settled, %Interaction{} = interaction} ->
+        emit_signal(:abandoned, interaction, %{reason: :reconciliation_settled})
+        {:ok, receipt}
+
+      {:ok, receipt, :already_absent, _interaction} ->
+        {:ok, receipt}
+
+      {:ok, receipt, :settled, _interaction} ->
+        {:ok, receipt}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  def compare_and_settle_pending_approval(_fields),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  @doc """
   In-memory public lookup for a responded interaction.
 
   Returns `{:ok, %{response: term(), metadata: map()}}` when the answer is

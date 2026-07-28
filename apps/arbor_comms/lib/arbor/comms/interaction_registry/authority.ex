@@ -8,6 +8,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   alias Arbor.Comms.Config
   alias Arbor.Comms.InteractionRegistry.DurableLifecycleCore
   alias Arbor.Comms.InteractionRegistry.DurableStore
+  alias Arbor.Contracts.Coding.PendingApprovalIdentity
   alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Contracts.Comms.Interaction
   alias Arbor.Contracts.Persistence.Record
@@ -133,6 +134,21 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       when is_binary(request_id) and (is_atom(reason) or is_binary(reason)),
       do: call({:abandon, request_id, reason})
 
+  @doc """
+  Atomically reproject a pending approval interaction and abandon on exact match.
+
+  Settlement is abandonment only. Terminal/absent entries observed on this
+  authority return `already_absent` without mutation.
+  """
+  @spec compare_and_settle_pending_approval(map()) ::
+          {:ok, map(), :settled | :already_absent, Interaction.t() | nil}
+          | {:error, term()}
+  def compare_and_settle_pending_approval(fields) when is_map(fields),
+    do: call({:compare_and_settle_pending_approval, fields})
+
+  def compare_and_settle_pending_approval(_fields),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
   @spec arm_timeout(String.t(), non_neg_integer()) ::
           {:ok, map()} | {:error, term()} | :not_found
   def arm_timeout(request_id, timeout_ms)
@@ -163,6 +179,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       authority_node: node(),
       authority_epoch: fresh_id("epoch"),
       durable_status: :unknown,
+      durable_inventory_complete?: false,
       dispatch_claims: %{}
     }
 
@@ -401,6 +418,18 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
 
       nil ->
         {:reply, :not_found, state}
+    end
+  end
+
+  def handle_call({:compare_and_settle_pending_approval, fields}, _from, state) do
+    state = state |> expire_due_pending() |> prune_terminals()
+
+    case do_compare_and_settle_pending_approval(state, fields) do
+      {:ok, receipt, disposition, interaction, next_state} ->
+        {:reply, {:ok, receipt, disposition, interaction}, next_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -1009,6 +1038,203 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       {:error, reason, next_state} ->
         {:reply, {:error, reason}, next_state}
     end
+  end
+
+  defp do_compare_and_settle_pending_approval(state, fields) when is_map(fields) do
+    with {:ok, resource_id, expected} <-
+           PendingApprovalIdentity.normalize_settle_fields(fields),
+         true <- expected["source"] == "interaction",
+         :ok <- ensure_reconciliation_inventory_complete(state),
+         approval_id <- expected["approval_id"] do
+      case Map.get(state.entries, approval_id) do
+        nil ->
+          {:ok, pending_approval_already_absent_receipt(resource_id), :already_absent, nil, state}
+
+        %{status: status} when status != :pending ->
+          # Terminal evidence retained on this authority — idempotent already_absent.
+          {:ok, pending_approval_already_absent_receipt(resource_id), :already_absent, nil, state}
+
+        %{status: :pending, durability: :volatile} = entry ->
+          with {:ok, interaction} <- authoritative_pending_interaction(entry) do
+            settle_pending_interaction(
+              state,
+              approval_id,
+              interaction,
+              resource_id,
+              expected,
+              :volatile
+            )
+          end
+
+        %{status: :pending, durability: :node_restart} = entry ->
+          with {:ok, interaction} <- authoritative_pending_interaction(entry) do
+            settle_pending_interaction(
+              state,
+              approval_id,
+              interaction,
+              resource_id,
+              expected,
+              {:durable, entry}
+            )
+          end
+      end
+    else
+      false -> {:error, :invalid_reconciliation_settle_fields}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp do_compare_and_settle_pending_approval(_state, _fields),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  defp ensure_reconciliation_inventory_complete(%{durable_inventory_complete?: true}), do: :ok
+
+  defp ensure_reconciliation_inventory_complete(_state),
+    do: {:error, :current_identity_unavailable}
+
+  defp settle_pending_interaction(state, approval_id, interaction, resource_id, expected, mode) do
+    kind = interaction_kind(interaction)
+
+    cond do
+      kind not in [:approval, "approval"] ->
+        {:error, :not_approval_interaction}
+
+      true ->
+        case PendingApprovalIdentity.from_interaction(interaction) do
+          {:ok, current} when current == expected ->
+            commit_settlement_abandon(state, approval_id, interaction, resource_id, mode)
+
+          {:ok, current} ->
+            {:error,
+             {:reconciliation_identity_conflict,
+              %{"resource_id" => resource_id, "current_identity" => current}}}
+
+          {:error, _} ->
+            {:error, :current_identity_unavailable}
+        end
+    end
+  end
+
+  # Reuse the same volatile terminal transition as ordinary abandon/2.
+  defp commit_settlement_abandon(state, approval_id, _interaction, resource_id, :volatile) do
+    case transition_volatile(
+           state,
+           approval_id,
+           fn _interaction, now ->
+             %{
+               status: :abandoned,
+               decision: nil,
+               response: nil,
+               metadata: %{},
+               reason: bound_reason(:reconciliation_settled),
+               resolved_at: now,
+               authority_node: node()
+             }
+           end,
+           :abandoned
+         ) do
+      {:reply, {:ok, %Interaction{} = settled}, next_state} ->
+        {:ok, pending_approval_settled_receipt(resource_id), :settled, settled, next_state}
+
+      {:reply, {:ok, :already_abandoned}, next_state} ->
+        {:ok, pending_approval_already_absent_receipt(resource_id), :already_absent, nil,
+         next_state}
+
+      {:reply, {:error, {:already_terminal, _status}}, next_state} ->
+        # Authority proved a different terminal won — not pending anymore.
+        {:ok, pending_approval_already_absent_receipt(resource_id), :already_absent, nil,
+         next_state}
+
+      {:reply, :not_found, next_state} ->
+        {:ok, pending_approval_already_absent_receipt(resource_id), :already_absent, nil,
+         next_state}
+    end
+  end
+
+  # Reuse durable abandon CAS/publish path; never treat conflict as automatic absence.
+  defp commit_settlement_abandon(state, approval_id, interaction, resource_id, {:durable, entry}) do
+    case durable_apply_transition(state, approval_id, entry, {:abandon, :reconciliation_settled}) do
+      {:ok, next_state, _terminal} ->
+        {:ok, pending_approval_settled_receipt(resource_id), :settled, interaction, next_state}
+
+      {:already, next_state, _status} ->
+        classify_settlement_absence(next_state, approval_id, resource_id)
+
+      {:conflict, next_state, _status} ->
+        # adopt_conflicting_terminal only succeeds for non-pending store state.
+        classify_settlement_absence(next_state, approval_id, resource_id)
+
+      {:error, _reason, next_state} ->
+        # Conflict/stale/unavailable while store may still be pending — reproject.
+        case classify_settlement_absence(next_state, approval_id, resource_id) do
+          {:ok, _receipt, :already_absent, nil, _state} = absent ->
+            absent
+
+          {:error, :current_identity_unavailable} ->
+            {:error, :current_identity_unavailable}
+        end
+    end
+  end
+
+  defp classify_settlement_absence(state, approval_id, resource_id) do
+    case Map.get(state.entries, approval_id) do
+      nil ->
+        {:ok, pending_approval_already_absent_receipt(resource_id), :already_absent, nil, state}
+
+      %{status: status} when status != :pending ->
+        {:ok, pending_approval_already_absent_receipt(resource_id), :already_absent, nil, state}
+
+      %{status: :pending} ->
+        # Authority still holds a pending entry — not proof of absence.
+        {:error, :current_identity_unavailable}
+    end
+  end
+
+  defp interaction_kind(%Interaction{kind: kind}), do: kind
+  defp interaction_kind(%{kind: kind}), do: kind
+  defp interaction_kind(map) when is_map(map), do: Map.get(map, :kind) || Map.get(map, "kind")
+  defp interaction_kind(_), do: nil
+
+  # Only authoritative projectors — never invent kind/submitted_at defaults.
+  defp authoritative_pending_interaction(%{interaction: %Interaction{} = interaction}),
+    do: {:ok, interaction}
+
+  defp authoritative_pending_interaction(%{record: %Record{data: data}}) when is_map(data) do
+    case DurableLifecycleCore.project_interaction(data) do
+      {:ok, %Interaction{} = interaction} -> {:ok, interaction}
+      _ -> {:error, :current_identity_unavailable}
+    end
+  end
+
+  defp authoritative_pending_interaction(%{record: %{data: data}}) when is_map(data) do
+    case DurableLifecycleCore.project_interaction(data) do
+      {:ok, %Interaction{} = interaction} -> {:ok, interaction}
+      _ -> {:error, :current_identity_unavailable}
+    end
+  end
+
+  defp authoritative_pending_interaction(_entry),
+    do: {:error, :current_identity_unavailable}
+
+  defp pending_approval_settled_receipt(resource_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "pending_approval",
+      "resource_id" => resource_id,
+      "outcome" => "settled",
+      "active" => false,
+      "status" => "removed"
+    }
+  end
+
+  defp pending_approval_already_absent_receipt(resource_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "pending_approval",
+      "resource_id" => resource_id,
+      "outcome" => "already_absent",
+      "active" => false
+    }
   end
 
   defp durable_abandon(state, request_id, entry, reason) do
@@ -1825,10 +2051,20 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   defp hydrate(state) do
     case DurableStore.readiness() do
       {:error, :disabled} ->
-        {:ok, %{state | durable_status: {:error, :disabled}}}
+        {:ok,
+         %{
+           state
+           | durable_status: {:error, :disabled},
+             durable_inventory_complete?: true
+         }}
 
       {:error, reason} ->
-        {:ok, %{state | durable_status: {:error, reason}}}
+        {:ok,
+         %{
+           state
+           | durable_status: {:error, reason},
+             durable_inventory_complete?: false
+         }}
 
       {:ok, _details} ->
         case DurableStore.inventory() do
@@ -1838,7 +2074,7 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     end
   end
 
-  defp hydrate_keys([], state), do: {:ok, state}
+  defp hydrate_keys([], state), do: {:ok, %{state | durable_inventory_complete?: true}}
 
   defp hydrate_keys([request_id | rest], state) do
     case hydrate_key(state, request_id) do

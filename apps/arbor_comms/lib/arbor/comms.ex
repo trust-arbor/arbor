@@ -302,6 +302,20 @@ defmodule Arbor.Comms do
   end
 
   @doc """
+  Source-owned compare-and-settle for a pending approval interaction.
+
+  Settlement abandons the exact pending interaction after reprojecting its
+  closed identity. Never approves. Discovery miss is not treated as absence.
+  """
+  @spec compare_and_settle_pending_approval(map()) :: {:ok, map()} | {:error, term()}
+  def compare_and_settle_pending_approval(fields) when is_map(fields) do
+    InteractionRouter.compare_and_settle_pending_approval(fields)
+  end
+
+  def compare_and_settle_pending_approval(_fields),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  @doc """
   Look up a retained response from the interaction's authority node.
   """
   @spec get_interaction_response(String.t()) ::

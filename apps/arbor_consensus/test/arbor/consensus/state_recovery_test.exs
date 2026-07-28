@@ -32,6 +32,36 @@ defmodule Arbor.Consensus.StateRecoveryTest do
       assert state.interrupted == []
     end
 
+    test "replays proposal cancellation as terminal veto", %{table: table} do
+      {:ok, _} =
+        ETS.append(
+          "arbor:consensus",
+          create_persistence_event("proposal.submitted", %{
+            proposal_id: "prop_cancelled",
+            proposer: "agent_cancelled",
+            change_type: "authorization_request",
+            description: "cancel me",
+            target_layer: 1,
+            metadata: %{}
+          }),
+          name: table
+        )
+
+      {:ok, _} =
+        ETS.append(
+          "arbor:consensus",
+          create_persistence_event("proposal.cancelled", %{
+            proposal_id: "prop_cancelled",
+            reason: "reconciliation_settled"
+          }),
+          name: table
+        )
+
+      assert {:ok, state} = StateRecovery.rebuild_from_events({ETS, name: table})
+      assert state.proposals["prop_cancelled"].status == :vetoed
+      assert state.interrupted == []
+    end
+
     test "recovers proposal from ProposalSubmitted event", %{table: table} do
       # Emit a ProposalSubmitted event
       event =

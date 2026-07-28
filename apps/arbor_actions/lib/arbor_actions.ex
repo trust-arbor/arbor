@@ -81,6 +81,7 @@ defmodule Arbor.Actions do
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
   alias Arbor.Common.{SafePath, SensitiveData}
+  alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Coding.ReconciliationDecision
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
@@ -254,6 +255,7 @@ defmodule Arbor.Actions do
   * `arbor://coding/reconciliation/apply/live_workspace_lease/<workspace_id>`
   * `arbor://coding/reconciliation/apply/retained_workspace_record/<workspace_id>`
   * `arbor://coding/reconciliation/apply/acp_managed_session/<worker_session_id>`
+  * `arbor://coding/reconciliation/apply/pending_approval/<resource_id>`
 
   Reconciliation decision evidence is never bearer authority. This slice
   supports only:
@@ -262,6 +264,7 @@ defmodule Arbor.Actions do
   * `live_workspace_lease` + `settle` + `terminal_active_resource`
   * `retained_workspace_record` + `settle` + `retained_expired`
   * `acp_managed_session` + `settle` + `terminal_active_resource`
+  * `pending_approval` + `settle` + `terminal_active_resource`
   """
   @spec apply_coding_reconciliation_decision(AuthContext.t(), map() | keyword() | term()) ::
           {:ok, map()} | {:error, term()}
@@ -303,6 +306,9 @@ defmodule Arbor.Actions do
 
         "acp_managed_session" ->
           apply_acp_managed_session_settlement(settle_fields)
+
+        "pending_approval" ->
+          apply_pending_approval_settlement(settle_fields)
       end
     end
   rescue
@@ -319,6 +325,36 @@ defmodule Arbor.Actions do
       ai.acp_managed_compare_and_settle_session(settle_fields)
     else
       {:error, :reconciliation_ai_unavailable}
+    end
+  end
+
+  defp apply_pending_approval_settlement(settle_fields) when is_map(settle_fields) do
+    expected = Map.get(settle_fields, "expected_identity")
+    source = is_map(expected) && Map.get(expected, "source")
+
+    case source do
+      "consensus" ->
+        consensus = Config.consensus_module()
+
+        if is_atom(consensus) and Code.ensure_loaded?(consensus) and
+             function_exported?(consensus, :compare_and_settle_pending_approval, 1) do
+          consensus.compare_and_settle_pending_approval(settle_fields)
+        else
+          {:error, :reconciliation_consensus_unavailable}
+        end
+
+      "interaction" ->
+        comms = Config.comms_module()
+
+        if is_atom(comms) and Code.ensure_loaded?(comms) and
+             function_exported?(comms, :compare_and_settle_pending_approval, 1) do
+          comms.compare_and_settle_pending_approval(settle_fields)
+        else
+          {:error, :reconciliation_comms_unavailable}
+        end
+
+      _ ->
+        {:error, :invalid_reconciliation_settle_fields}
     end
   end
 
@@ -388,6 +424,13 @@ defmodule Arbor.Actions do
        }),
        do: :ok
 
+  defp require_supported_reconciliation_decision(%{
+         "resource_type" => "pending_approval",
+         "decision" => "settle",
+         "reason" => "terminal_active_resource"
+       }),
+       do: :ok
+
   defp require_supported_reconciliation_decision(decision_map) when is_map(decision_map) do
     {:error,
      {:unsupported_reconciliation_apply,
@@ -443,6 +486,12 @@ defmodule Arbor.Actions do
        }),
        do: require_canonical_acp_worker_id(resource_id)
 
+  defp require_canonical_reconciliation_resource_id(%{
+         "resource_type" => "pending_approval",
+         "resource_id" => resource_id
+       }),
+       do: require_canonical_pending_approval_resource_id(resource_id)
+
   defp require_canonical_reconciliation_resource_id(_decision),
     do: {:error, :invalid_reconciliation_resource_id}
 
@@ -483,6 +532,19 @@ defmodule Arbor.Actions do
   defp require_canonical_acp_worker_id(_resource_id),
     do: {:error, :invalid_acp_managed_session_id}
 
+  defp require_canonical_pending_approval_resource_id(resource_id)
+       when is_binary(resource_id) do
+    if PendingApprovalResourceId.valid?(resource_id) and
+         not String.contains?(resource_id, "/") do
+      :ok
+    else
+      {:error, :invalid_pending_approval_resource_id}
+    end
+  end
+
+  defp require_canonical_pending_approval_resource_id(_resource_id),
+    do: {:error, :invalid_pending_approval_resource_id}
+
   defp reconciliation_apply_uri(%{
          "resource_type" => "validation_resource",
          "resource_id" => resource_id
@@ -513,6 +575,14 @@ defmodule Arbor.Actions do
        })
        when is_binary(resource_id) do
     {:ok, @reconciliation_apply_uri_base <> "acp_managed_session/" <> resource_id}
+  end
+
+  defp reconciliation_apply_uri(%{
+         "resource_type" => "pending_approval",
+         "resource_id" => resource_id
+       })
+       when is_binary(resource_id) do
+    {:ok, @reconciliation_apply_uri_base <> "pending_approval/" <> resource_id}
   end
 
   defp reconciliation_apply_uri(_decision), do: {:error, :unsupported_reconciliation_apply}

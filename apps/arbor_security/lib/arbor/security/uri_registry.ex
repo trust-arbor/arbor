@@ -112,9 +112,9 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://agent/task/steer",
     "arbor://agent/task/adopt",
 
-    # Coding reconciliation read path. Source-owned CAS apply is registered
-    # for validation_resource only; global Orchestrator/Mix --apply stays
-    # disabled until every source resource kind has equivalent owner-side proof.
+    # Coding reconciliation read path and exact source-owned CAS apply URIs.
+    # Global Orchestrator/Mix --apply stays disabled until every resource kind
+    # has equivalent owner-side proof and the fault canaries converge.
     "arbor://coding/reconciliation/read",
     "arbor://coding/reconciliation/apply",
 

@@ -26,6 +26,7 @@ defmodule Arbor.Consensus.Coordinator do
 
   alias Arbor.Consensus.{Config, EventEmitter, EventStore, StateRecovery}
   alias Arbor.Consensus.Coordinator.{TopicRouting, Voting}
+  alias Arbor.Contracts.Coding.PendingApprovalIdentity
   alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
   alias Arbor.Signals
 
@@ -44,6 +45,7 @@ defmodule Arbor.Consensus.Coordinator do
     pending_fingerprints: %{},
     proposals_by_agent: %{},
     last_event_position: 0,
+    recovery_complete?: false,
     # Waiter support for await/2 (Phase 2)
     waiters: %{},
     # Track pending evaluations from persistent agents
@@ -68,6 +70,7 @@ defmodule Arbor.Consensus.Coordinator do
           pending_fingerprints: map(),
           proposals_by_agent: %{String.t() => [String.t()]},
           last_event_position: non_neg_integer(),
+          recovery_complete?: boolean(),
           # Map of proposal_id => [{pid, monitor_ref}]
           waiters: %{String.t() => [{pid(), reference()}]},
           # Pending evaluations from persistent agents
@@ -216,6 +219,23 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   @doc """
+  Source-owned compare-and-settle for a pending authorization-request approval.
+
+  Settlement is cancellation/veto only — never approval. Runs inside Coordinator
+  serialization. Returns JSON-clean receipts or rejects drift without mutation.
+  """
+  @spec compare_and_settle_pending_approval(map(), GenServer.server()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_pending_approval(fields, server \\ __MODULE__)
+
+  def compare_and_settle_pending_approval(fields, server) when is_map(fields) do
+    GenServer.call(server, {:compare_and_settle_pending_approval, fields})
+  end
+
+  def compare_and_settle_pending_approval(_fields, _server),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  @doc """
   Get coordinator statistics.
   """
   @spec stats(GenServer.server()) :: map()
@@ -238,6 +258,8 @@ defmodule Arbor.Consensus.Coordinator do
 
     * `{:ok, decision}` - The decision was rendered
     * `{:error, :not_found}` - Proposal doesn't exist
+    * `{:error, :cancelled}` - Proposal was cancelled or reconciliation-settled
+    * `{:error, :deadlock}` - Proposal terminated without a decision
     * `{:error, :timeout}` - Timed out waiting for decision
     * `{:error, :coordinator_down}` - Coordinator crashed while waiting
   """
@@ -261,6 +283,14 @@ defmodule Arbor.Consensus.Coordinator do
           {:consensus_result, ^proposal_id, result} ->
             Process.demonitor(coord_ref, [:flush])
             {:ok, result}
+
+          {:consensus_cancelled, ^proposal_id} ->
+            Process.demonitor(coord_ref, [:flush])
+            {:error, :cancelled}
+
+          {:consensus_deadlocked, ^proposal_id} ->
+            Process.demonitor(coord_ref, [:flush])
+            {:error, :deadlock}
 
           {:DOWN, ^coord_ref, :process, _pid, _reason} ->
             {:error, :coordinator_down}
@@ -487,29 +517,24 @@ defmodule Arbor.Consensus.Coordinator do
       nil ->
         {:reply, {:error, :not_found}, state}
 
-      %{status: status} when status in [:approved, :rejected] ->
+      %{status: status} when status in [:approved, :rejected, :vetoed, :deadlock] ->
         {:reply, {:error, :already_decided}, state}
 
       proposal ->
-        # Kill active council if running
-        state = kill_active_council(state, proposal_id)
+        case apply_cancel_transition(state, proposal, :cancelled) do
+          {:ok, next_state} -> {:reply, :ok, next_state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+    end
+  end
 
-        proposal = Proposal.update_status(proposal, :vetoed)
-        fingerprint = compute_fingerprint(proposal)
+  def handle_call({:compare_and_settle_pending_approval, fields}, _from, state) do
+    case settle_pending_approval(state, fields) do
+      {:ok, receipt, next_state} ->
+        {:reply, {:ok, receipt}, next_state}
 
-        state = %{
-          state
-          | proposals: Map.put(state.proposals, proposal_id, proposal),
-            proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal),
-            pending_fingerprints: Map.delete(state.pending_fingerprints, fingerprint)
-        }
-
-        record_event(state, :proposal_cancelled, %{
-          proposal_id: proposal_id,
-          agent_id: proposal.proposer
-        })
-
-        {:reply, :ok, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -661,6 +686,12 @@ defmodule Arbor.Consensus.Coordinator do
       nil ->
         {:reply, {:error, :not_found}, state}
 
+      %{status: :vetoed} ->
+        {:reply, {:error, :cancelled}, state}
+
+      %{status: :deadlock} ->
+        {:reply, {:error, :deadlock}, state}
+
       _proposal ->
         # Check if decision already exists
         case Map.get(state.decisions, proposal_id) do
@@ -689,30 +720,36 @@ defmodule Arbor.Consensus.Coordinator do
 
     state = %{state | active_councils: Map.delete(state.active_councils, proposal_id)}
 
-    case result do
-      {:ok, evaluations} ->
-        # Recalculate quorum from topic for this proposal
-        quorum = TopicRouting.get_proposal_quorum(state, proposal_id)
-        state = Voting.process_evaluations(state, proposal_id, evaluations, quorum)
-        {:noreply, state}
+    if active_proposal?(state, proposal_id) do
+      case result do
+        {:ok, evaluations} ->
+          # Recalculate quorum from topic for this proposal
+          quorum = TopicRouting.get_proposal_quorum(state, proposal_id)
+          state = Voting.process_evaluations(state, proposal_id, evaluations, quorum)
+          {:noreply, state}
 
-      {:error, reason} ->
-        Logger.error("Council failed for proposal #{proposal_id}: #{inspect(reason)}")
+        {:error, reason} ->
+          Logger.error("Council failed for proposal #{proposal_id}: #{inspect(reason)}")
 
-        state = update_proposal_status(state, proposal_id, :deadlock)
+          state = update_proposal_status(state, proposal_id, :deadlock)
+          state = notify_deadlocked_waiters(state, proposal_id)
 
-        # Emit to durable event log
-        EventEmitter.proposal_deadlocked(proposal_id, :council_failed, inspect(reason))
+          # Emit to durable event log
+          EventEmitter.proposal_deadlocked(proposal_id, :council_failed, inspect(reason))
 
-        # Emit signal for real-time observability
-        emit_coordinator_error(proposal_id, reason)
+          # Emit signal for real-time observability
+          emit_coordinator_error(proposal_id, reason)
 
-        record_event(state, :proposal_timeout, %{
-          proposal_id: proposal_id,
-          data: %{reason: inspect(reason)}
-        })
+          record_event(state, :proposal_timeout, %{
+            proposal_id: proposal_id,
+            data: %{reason: inspect(reason)}
+          })
 
-        {:noreply, state}
+          {:noreply, state}
+      end
+    else
+      Logger.debug("Ignoring late council result for terminal proposal #{proposal_id}")
+      {:noreply, state}
     end
   end
 
@@ -880,6 +917,152 @@ defmodule Arbor.Consensus.Coordinator do
   defp authorization_principal_id(proposal) do
     metadata = Map.get(proposal, :metadata, %{}) || %{}
     Map.get(metadata, :principal_id) || Map.get(metadata, "principal_id") || proposal.proposer
+  end
+
+  defp settle_pending_approval(state, fields) when is_map(fields) do
+    with {:ok, resource_id, expected} <-
+           PendingApprovalIdentity.normalize_settle_fields(fields),
+         true <- expected["source"] == "consensus",
+         :ok <- ensure_reconciliation_source_complete(state),
+         approval_id <- expected["approval_id"] do
+      case Map.get(state.proposals, approval_id) do
+        nil ->
+          {:ok, pending_approval_already_absent_receipt(resource_id), state}
+
+        %Proposal{status: status} = proposal when status in [:pending, :evaluating] ->
+          settle_live_pending_approval(state, proposal, resource_id, expected)
+
+        %Proposal{} ->
+          # Terminal or non-pending — Coordinator proves absence without mutation.
+          {:ok, pending_approval_already_absent_receipt(resource_id), state}
+      end
+    else
+      false -> {:error, :invalid_reconciliation_settle_fields}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp settle_pending_approval(_state, _fields),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  defp settle_live_pending_approval(state, proposal, resource_id, expected) do
+    with :ok <- ensure_authorization_request(proposal),
+         {:ok, current} <- PendingApprovalIdentity.from_consensus_proposal(proposal),
+         :ok <- reject_duplicate_pending_identity(state, current) do
+      if current == expected do
+        case apply_cancel_transition(state, proposal, :reconciliation_settled) do
+          {:ok, next_state} ->
+            {:ok, pending_approval_settled_receipt(resource_id), next_state}
+
+          {:error, _reason} ->
+            {:error, :reconciliation_persistence_unavailable}
+        end
+      else
+        {:error,
+         {:reconciliation_identity_conflict,
+          %{"resource_id" => resource_id, "current_identity" => current}}}
+      end
+    else
+      {:error, :not_authorization_request} ->
+        {:error, :not_authorization_request}
+
+      {:error, :duplicate_identity} ->
+        {:error, :duplicate_identity}
+
+      {:error, _} ->
+        {:error, :current_identity_unavailable}
+    end
+  end
+
+  defp reject_duplicate_pending_identity(state, current) do
+    matches =
+      state.proposals
+      |> Map.values()
+      |> Enum.filter(fn
+        %Proposal{status: status} = proposal
+        when status in [:pending, :evaluating] ->
+          authorization_request_topic?(proposal) and
+            match?({:ok, ^current}, PendingApprovalIdentity.from_consensus_proposal(proposal))
+
+        _ ->
+          false
+      end)
+
+    if length(matches) == 1, do: :ok, else: {:error, :duplicate_identity}
+  end
+
+  defp authorization_request_topic?(%Proposal{topic: topic})
+       when topic in [:authorization_request, "authorization_request"],
+       do: true
+
+  defp authorization_request_topic?(_), do: false
+
+  defp apply_cancel_transition(state, proposal, reason) do
+    case EventEmitter.proposal_cancelled(proposal.id, reason) do
+      :ok ->
+        proposal_id = proposal.id
+        state = kill_active_council(state, proposal_id)
+        proposal = Proposal.update_status(proposal, :vetoed)
+        fingerprint = compute_fingerprint(proposal)
+
+        state = %{
+          state
+          | proposals: Map.put(state.proposals, proposal_id, proposal),
+            proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal),
+            pending_fingerprints: Map.delete(state.pending_fingerprints, fingerprint),
+            pending_evaluations: Map.delete(state.pending_evaluations, proposal_id)
+        }
+
+        state = notify_cancelled_waiters(state, proposal_id)
+
+        record_event(state, :proposal_cancelled, %{
+          proposal_id: proposal_id,
+          agent_id: proposal.proposer
+        })
+
+        {:ok, state}
+
+      {:error, _reason} ->
+        {:error, :persistence_unavailable}
+
+      _other ->
+        {:error, :persistence_unavailable}
+    end
+  rescue
+    _ -> {:error, :persistence_unavailable}
+  catch
+    _, _ -> {:error, :persistence_unavailable}
+  end
+
+  defp ensure_reconciliation_source_complete(%{recovery_complete?: true}), do: :ok
+  defp ensure_reconciliation_source_complete(_state), do: {:error, :current_identity_unavailable}
+
+  defp active_proposal?(state, proposal_id) do
+    match?(
+      %Proposal{status: status} when status in [:pending, :evaluating],
+      Map.get(state.proposals, proposal_id)
+    )
+  end
+
+  defp pending_approval_settled_receipt(resource_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "pending_approval",
+      "resource_id" => resource_id,
+      "outcome" => "settled",
+      "active" => false,
+      "status" => "removed"
+    }
+  end
+
+  defp pending_approval_already_absent_receipt(resource_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "pending_approval",
+      "resource_id" => resource_id,
+      "outcome" => "already_absent",
+      "active" => false
+    }
   end
 
   defp ensure_authorization_request(%Proposal{topic: topic})
@@ -1206,6 +1389,36 @@ defmodule Arbor.Consensus.Coordinator do
     end
   end
 
+  defp notify_cancelled_waiters(state, proposal_id) do
+    case Map.get(state.waiters, proposal_id) do
+      nil ->
+        state
+
+      waiters ->
+        Enum.each(waiters, fn {pid, ref} ->
+          Process.demonitor(ref, [:flush])
+          send(pid, {:consensus_cancelled, proposal_id})
+        end)
+
+        %{state | waiters: Map.delete(state.waiters, proposal_id)}
+    end
+  end
+
+  defp notify_deadlocked_waiters(state, proposal_id) do
+    case Map.get(state.waiters, proposal_id) do
+      nil ->
+        state
+
+      waiters ->
+        Enum.each(waiters, fn {pid, ref} ->
+          Process.demonitor(ref, [:flush])
+          send(pid, {:consensus_deadlocked, proposal_id})
+        end)
+
+        %{state | waiters: Map.delete(state.waiters, proposal_id)}
+    end
+  end
+
   # ============================================================================
   # Event Recording & Signals
   # ============================================================================
@@ -1252,7 +1465,7 @@ defmodule Arbor.Consensus.Coordinator do
     case Config.event_log() do
       nil ->
         Logger.debug("Coordinator: no event_log configured, starting fresh")
-        state
+        %{state | recovery_complete?: true}
 
       event_log_config ->
         do_recover_from_events(state, event_log_config)
@@ -1278,6 +1491,7 @@ defmodule Arbor.Consensus.Coordinator do
 
         # Handle interrupted evaluations
         state = handle_interrupted_evaluations(state, recovered.interrupted)
+        state = %{state | recovery_complete?: true}
 
         if Config.emit_recovery_events?() do
           emit_recovery_completed(state, recovered)
@@ -1286,9 +1500,9 @@ defmodule Arbor.Consensus.Coordinator do
         state
 
       {:error, reason} ->
-        Logger.error("Coordinator: recovery failed: #{inspect(reason)}, starting fresh")
+        Logger.error("Coordinator: recovery failed: #{inspect(reason)}, remaining degraded")
         emit_coordinator_error(nil, {:recovery_failed, reason})
-        state
+        %{state | recovery_complete?: false}
     end
   end
 

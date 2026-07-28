@@ -8,13 +8,13 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
   """
 
   alias Arbor.Agent.Orchestration.PendingApproval
+  alias Arbor.Contracts.Coding.PendingApprovalIdentity
   alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Security.CapabilityUri
 
   @schema_version 1
   @max_id_bytes 256
   @max_resource_bytes 256
-  @task_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
   @statuses ~w(pending evaluating)
 
   @type entry ::
@@ -139,7 +139,6 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
 
   defp project_approval(source, %PendingApproval{} = approval, task_id) do
     with {:ok, approval_id} <- required_string(approval.id, @max_id_bytes),
-         {:ok, task_id} <- optional_task_id(task_id),
          {:ok, agent_id} <- optional_source_id(approval.agent_id),
          {:ok, principal_id} <- optional_source_id(approval.principal_id),
          {:ok, approver_id} <- optional_source_id(approval.approver_id),
@@ -148,21 +147,24 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
          {:ok, status} <- status_string(approval.status),
          {:ok, created_at} <- optional_timestamp(approval.created_at),
          {:ok, source_name} <- source_string(source),
-         {:ok, resource_id} <- PendingApprovalResourceId.resource_id(source_name, approval_id) do
-      {:ok,
-       %{
-         "resource_id" => resource_id,
-         "approval_id" => approval_id,
-         "source" => source_name,
-         "task_id" => task_id,
-         "agent_id" => agent_id,
-         "principal_id" => principal_id,
-         "approver_id" => approver_id,
-         "resource_uri" => resource_uri,
-         "action" => action,
-         "status" => status,
-         "created_at" => created_at
-       }}
+         {:ok, resource_id} <- PendingApprovalResourceId.resource_id(source_name, approval_id),
+         {:ok, identity} <-
+           PendingApprovalIdentity.normalize(%{
+             "resource_type" => PendingApprovalIdentity.resource_type(),
+             "resource_id" => resource_id,
+             "approval_id" => approval_id,
+             "source" => source_name,
+             "task_id" => task_id,
+             "agent_id" => agent_id,
+             "principal_id" => principal_id,
+             "approver_id" => approver_id,
+             "resource_uri" => resource_uri,
+             "action" => action,
+             "status" => status,
+             "created_at" => created_at
+           }) do
+      # Inventory rows omit resource_type (read-model schema unchanged).
+      {:ok, Map.drop(identity, ["resource_type"])}
     else
       _ -> :malformed
     end
@@ -260,17 +262,6 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
   end
 
   defp optional_resource_uri(_resource_uri), do: :error
-
-  defp optional_task_id(nil), do: {:ok, nil}
-
-  defp optional_task_id(task_id)
-       when is_binary(task_id) and byte_size(task_id) <= @max_id_bytes do
-    if String.valid?(task_id) and Regex.match?(@task_id_pattern, task_id),
-      do: {:ok, task_id},
-      else: :error
-  end
-
-  defp optional_task_id(_task_id), do: :error
 
   defp status_string(status) when is_atom(status), do: status_string(Atom.to_string(status))
 

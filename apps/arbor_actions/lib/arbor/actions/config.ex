@@ -176,6 +176,28 @@ defmodule Arbor.Actions.Config do
   end
 
   @doc """
+  Public Consensus facade used by pending-approval reconciliation settlement.
+
+  Production defaults to `Arbor.Consensus`. Tests may configure a trusted named
+  module via `:consensus_module`. Never accepted from action parameters.
+  """
+  @spec consensus_module() :: module()
+  def consensus_module do
+    Application.get_env(:arbor_actions, :consensus_module, Arbor.Consensus)
+  end
+
+  @doc """
+  Public Comms facade used by pending-approval reconciliation settlement.
+
+  Production defaults to `Arbor.Comms`. Tests may configure a trusted named
+  module via `:comms_module`. Never accepted from action parameters.
+  """
+  @spec comms_module() :: module()
+  def comms_module do
+    Application.get_env(:arbor_actions, :comms_module, Arbor.Comms)
+  end
+
+  @doc """
   Workspace lease registry GenServer name/server used by coding facades.
 
   Production defaults to `Arbor.Actions.Coding.WorkspaceLeaseRegistry`.

@@ -1323,7 +1323,8 @@ defmodule Arbor.Agent.Orchestration do
   defp inventory_backend_shape?(entry, :consensus) do
     is_binary(value(entry, :id)) and value(entry, :id) != "" and
       is_binary(value(entry, :proposer)) and value(entry, :proposer) != "" and
-      is_map(value(entry, :metadata, %{})) and is_map(value(entry, :context, %{}))
+      is_map(value(entry, :metadata, %{})) and is_map(value(entry, :context, %{})) and
+      value(entry, :status) in [:pending, "pending", :evaluating, "evaluating"]
   end
 
   defp inventory_backend_shape?(entry, :interaction) do

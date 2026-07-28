@@ -8,6 +8,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
   alias Arbor.Comms.InteractionRegistry.DurableStore
   alias Arbor.Comms.InteractionRouter
   alias Arbor.Comms.PresenceTracker
+  alias Arbor.Contracts.Coding.PendingApprovalIdentity
   alias Arbor.Contracts.Comms.Interaction
   alias Arbor.Contracts.Persistence.Record
   alias __MODULE__.Backend
@@ -1351,6 +1352,47 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
              )
   end
 
+  test "security regression: partial hydration cannot prove mirrored approval absence", %{
+    path: path
+  } do
+    request_id = "irq_a_partial_hydration_approval"
+
+    interaction =
+      build_interaction(
+        interaction_attrs("approval hydrated before malformed record",
+          request_id: request_id,
+          agent_id: "agent_partial_hydration",
+          user_id: "user_partial_hydration",
+          resource_uri: "arbor://shell/exec",
+          metadata: %{
+            principal_id: "agent_partial_hydration",
+            action: "execute",
+            task_id: "task_partial_hydration"
+          }
+        )
+      )
+
+    assert {:ok, :inserted, %Interaction{} = stored, _receipt} =
+             InteractionRegistry.admit_durable(interaction, now_ms() + 30_000)
+
+    assert {:ok, expected} = PendingApprovalIdentity.from_interaction(stored)
+
+    malformed_id = "irq_z_partial_hydration_malformed"
+    :ok = Backend.put_raw(malformed_id, Record.new(malformed_id, %{"bad" => true}), path)
+    restart_authority()
+
+    fields = %{
+      "resource_id" => expected["resource_id"],
+      "expected_identity" => expected
+    }
+
+    assert {:error, :current_identity_unavailable} =
+             Arbor.Comms.compare_and_settle_pending_approval(fields)
+
+    assert {:ok, %Record{} = record} = DurableStore.get(request_id)
+    assert {:ok, %{"status" => "pending"}} = DurableLifecycleCore.decode(record.data)
+  end
+
   test "security regression: exact durable waiter returns response persisted before authority restart" do
     request_id = "irq_durable_missed_broadcast"
 
@@ -1810,6 +1852,52 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     assert {:ok, %{"status" => "expired"}} = DurableLifecycleCore.decode(record.data)
   end
 
+  test "security regression: pending durable CAS conflict is not proof of approval absence" do
+    request_id = "irq_durable_reconciliation_conflict"
+
+    interaction =
+      build_interaction(
+        interaction_attrs("durable reconciliation conflict",
+          request_id: request_id,
+          agent_id: "agent_durable_reconciliation",
+          user_id: "user_durable_reconciliation",
+          resource_uri: "arbor://shell/exec",
+          metadata: %{
+            principal_id: "agent_durable_reconciliation",
+            action: "execute",
+            task_id: "task_durable_reconciliation"
+          }
+        )
+      )
+
+    assert {:ok, :inserted, %Interaction{} = stored, _receipt} =
+             InteractionRegistry.admit_durable(interaction, now_ms() + 30_000)
+
+    assert {:ok, expected} = PendingApprovalIdentity.from_interaction(stored)
+
+    :sys.replace_state(Authority, fn state ->
+      %{durability: :node_restart, record: %Record{} = record} =
+        Map.fetch!(state.entries, request_id)
+
+      put_in(
+        state.entries[request_id].record,
+        %{record | revision: record.revision + 999}
+      )
+    end)
+
+    fields = %{
+      "resource_id" => expected["resource_id"],
+      "expected_identity" => expected
+    }
+
+    assert {:error, :current_identity_unavailable} =
+             Arbor.Comms.compare_and_settle_pending_approval(fields)
+
+    assert {:ok, %Record{} = current_record} = DurableStore.get(request_id)
+    assert {:ok, %{"status" => "pending"}} = DurableLifecycleCore.decode(current_record.data)
+    assert {:ok, %Interaction{request_id: ^request_id}} = InteractionRegistry.get(request_id)
+  end
+
   test "legacy timeout waiter consumes durable terminal notifications" do
     request_id = "irq_legacy_timeout_mailbox"
     agent_id = "agent_legacy_timeout_mailbox"
@@ -2169,7 +2257,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
 
     def list(_opts) do
       Agent.get(__MODULE__, fn state ->
-        keys = state |> Map.keys() |> Enum.filter(&is_binary/1)
+        keys = state |> Map.keys() |> Enum.filter(&is_binary/1) |> Enum.sort()
         {:ok, keys}
       end)
     end

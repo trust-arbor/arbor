@@ -191,6 +191,14 @@ defmodule Arbor.Consensus.EventEmitterTest do
       own = events_for(events, "proposal.deadlocked", :proposal_id, pid)
       assert length(own) == 1
     end
+
+    test "proposal_cancelled/3", %{table: table, pid: pid} do
+      assert :ok = EventEmitter.proposal_cancelled(pid, :reconciliation_settled)
+
+      {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
+      own = events_for(events, "proposal.cancelled", :proposal_id, pid)
+      assert length(own) == 1
+    end
   end
 
   # Select events of `type` whose `data[key]` equals `value`. Filtering on a

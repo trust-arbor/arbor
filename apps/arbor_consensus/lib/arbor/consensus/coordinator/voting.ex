@@ -197,6 +197,10 @@ defmodule Arbor.Consensus.Coordinator.Voting do
         Logger.warning("Received evaluations for unknown proposal #{proposal_id}")
         state
 
+      %Proposal{status: status} when status not in [:pending, :evaluating] ->
+        Logger.debug("Ignoring evaluations for terminal proposal #{proposal_id}")
+        state
+
       proposal ->
         record_evaluation_events(state, proposal_id, evaluations)
         render_and_apply_decision(state, proposal_id, proposal, evaluations, quorum)
@@ -399,7 +403,10 @@ defmodule Arbor.Consensus.Coordinator.Voting do
 
       {:error, reason} ->
         Logger.error("Failed to render decision for #{proposal_id}: #{inspect(reason)}")
-        update_proposal_status(state, proposal_id, :deadlock)
+
+        state
+        |> update_proposal_status(proposal_id, :deadlock)
+        |> notify_deadlocked_waiters(proposal_id)
     end
   end
 
@@ -561,6 +568,21 @@ defmodule Arbor.Consensus.Coordinator.Voting do
         end)
 
         # Remove all waiters for this proposal
+        %{state | waiters: Map.delete(state.waiters, proposal_id)}
+    end
+  end
+
+  defp notify_deadlocked_waiters(state, proposal_id) do
+    case Map.get(state.waiters, proposal_id) do
+      nil ->
+        state
+
+      waiters ->
+        Enum.each(waiters, fn {pid, ref} ->
+          Process.demonitor(ref, [:flush])
+          send(pid, {:consensus_deadlocked, proposal_id})
+        end)
+
         %{state | waiters: Map.delete(state.waiters, proposal_id)}
     end
   end

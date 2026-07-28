@@ -131,6 +131,17 @@ defmodule Arbor.Contracts.Consensus.EventsTest do
       assert Events.ProposalDeadlocked.event_type() == "proposal.deadlocked"
     end
 
+    test "ProposalCancelled" do
+      event =
+        Events.ProposalCancelled.new(%{
+          proposal_id: "prop_1",
+          reason: :reconciliation_settled
+        })
+
+      assert event.reason == :reconciliation_settled
+      assert Events.ProposalCancelled.event_type() == "proposal.cancelled"
+    end
+
     test "RecoveryStarted" do
       event =
         Events.RecoveryStarted.new(%{
@@ -158,12 +169,13 @@ defmodule Arbor.Contracts.Consensus.EventsTest do
   end
 
   describe "all_event_types/0" do
-    test "returns all 10 event type strings" do
+    test "returns all 11 event type strings" do
       types = Events.all_event_types()
-      assert length(types) == 10
+      assert length(types) == 11
       assert "coordinator.started" in types
       assert "proposal.submitted" in types
       assert "decision.rendered" in types
+      assert "proposal.cancelled" in types
       assert "recovery.completed" in types
     end
   end
@@ -173,6 +185,7 @@ defmodule Arbor.Contracts.Consensus.EventsTest do
       assert Events.type_to_module("coordinator.started") == Events.CoordinatorStarted
       assert Events.type_to_module("proposal.submitted") == Events.ProposalSubmitted
       assert Events.type_to_module("decision.rendered") == Events.DecisionRendered
+      assert Events.type_to_module("proposal.cancelled") == Events.ProposalCancelled
     end
 
     test "returns nil for unknown type" do

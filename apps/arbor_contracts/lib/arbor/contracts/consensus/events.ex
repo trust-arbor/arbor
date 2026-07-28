@@ -53,10 +53,10 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :coordinator_id, String.t(), enforce: true
-      field :config, map(), default: %{}
-      field :recovered_from, non_neg_integer() | nil
-      field :timestamp, DateTime.t(), enforce: true
+      field(:coordinator_id, String.t(), enforce: true)
+      field(:config, map(), default: %{})
+      field(:recovered_from, non_neg_integer() | nil)
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -80,14 +80,14 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :proposal_id, String.t(), enforce: true
-      field :proposer, String.t(), enforce: true
-      field :change_type, atom(), enforce: true
-      field :description, String.t(), enforce: true
-      field :target_layer, integer()
-      field :target_module, String.t()
-      field :metadata, map(), default: %{}
-      field :timestamp, DateTime.t(), enforce: true
+      field(:proposal_id, String.t(), enforce: true)
+      field(:proposer, String.t(), enforce: true)
+      field(:change_type, atom(), enforce: true)
+      field(:description, String.t(), enforce: true)
+      field(:target_layer, integer())
+      field(:target_module, String.t())
+      field(:metadata, map(), default: %{})
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -115,11 +115,11 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :proposal_id, String.t(), enforce: true
-      field :perspectives, [atom()], enforce: true
-      field :council_size, pos_integer(), enforce: true
-      field :required_quorum, pos_integer(), enforce: true
-      field :timestamp, DateTime.t(), enforce: true
+      field(:proposal_id, String.t(), enforce: true)
+      field(:perspectives, [atom()], enforce: true)
+      field(:council_size, pos_integer(), enforce: true)
+      field(:required_quorum, pos_integer(), enforce: true)
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -146,17 +146,17 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :proposal_id, String.t(), enforce: true
-      field :evaluation_id, String.t(), enforce: true
-      field :perspective, atom(), enforce: true
-      field :vote, atom(), enforce: true
-      field :confidence, float(), enforce: true
-      field :risk_score, float(), default: 0.0
-      field :benefit_score, float(), default: 0.0
-      field :concerns, [String.t()], default: []
-      field :recommendations, [String.t()], default: []
-      field :reasoning, String.t()
-      field :timestamp, DateTime.t(), enforce: true
+      field(:proposal_id, String.t(), enforce: true)
+      field(:evaluation_id, String.t(), enforce: true)
+      field(:perspective, atom(), enforce: true)
+      field(:vote, atom(), enforce: true)
+      field(:confidence, float(), enforce: true)
+      field(:risk_score, float(), default: 0.0)
+      field(:benefit_score, float(), default: 0.0)
+      field(:concerns, [String.t()], default: [])
+      field(:recommendations, [String.t()], default: [])
+      field(:reasoning, String.t())
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -183,10 +183,10 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :proposal_id, String.t(), enforce: true
-      field :perspective, atom(), enforce: true
-      field :reason, String.t(), enforce: true
-      field :timestamp, DateTime.t(), enforce: true
+      field(:proposal_id, String.t(), enforce: true)
+      field(:perspective, atom(), enforce: true)
+      field(:reason, String.t(), enforce: true)
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -210,17 +210,17 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :proposal_id, String.t(), enforce: true
-      field :decision_id, String.t(), enforce: true
-      field :decision, atom(), enforce: true
-      field :approve_count, non_neg_integer(), enforce: true
-      field :reject_count, non_neg_integer(), enforce: true
-      field :abstain_count, non_neg_integer(), enforce: true
-      field :required_quorum, pos_integer(), enforce: true
-      field :quorum_met, boolean(), enforce: true
-      field :primary_concerns, [String.t()], default: []
-      field :average_confidence, float(), default: 0.0
-      field :timestamp, DateTime.t(), enforce: true
+      field(:proposal_id, String.t(), enforce: true)
+      field(:decision_id, String.t(), enforce: true)
+      field(:decision, atom(), enforce: true)
+      field(:approve_count, non_neg_integer(), enforce: true)
+      field(:reject_count, non_neg_integer(), enforce: true)
+      field(:abstain_count, non_neg_integer(), enforce: true)
+      field(:required_quorum, pos_integer(), enforce: true)
+      field(:quorum_met, boolean(), enforce: true)
+      field(:primary_concerns, [String.t()], default: [])
+      field(:average_confidence, float(), default: 0.0)
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -247,10 +247,10 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :proposal_id, String.t(), enforce: true
-      field :result, atom(), enforce: true
-      field :output, term()
-      field :timestamp, DateTime.t(), enforce: true
+      field(:proposal_id, String.t(), enforce: true)
+      field(:result, atom(), enforce: true)
+      field(:output, term())
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -270,10 +270,10 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :proposal_id, String.t(), enforce: true
-      field :reason, atom(), enforce: true
-      field :details, String.t()
-      field :timestamp, DateTime.t(), enforce: true
+      field(:proposal_id, String.t(), enforce: true)
+      field(:reason, atom(), enforce: true)
+      field(:details, String.t())
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -288,6 +288,27 @@ defmodule Arbor.Contracts.Consensus.Events do
     def event_type, do: "proposal.deadlocked"
   end
 
+  defmodule ProposalCancelled do
+    @moduledoc "Emitted before a proposal cancellation becomes visible."
+    use TypedStruct
+
+    typedstruct do
+      field(:proposal_id, String.t(), enforce: true)
+      field(:reason, atom(), enforce: true)
+      field(:timestamp, DateTime.t(), enforce: true)
+    end
+
+    def new(attrs) do
+      %__MODULE__{
+        proposal_id: Map.fetch!(attrs, :proposal_id),
+        reason: Map.fetch!(attrs, :reason),
+        timestamp: Map.get(attrs, :timestamp, DateTime.utc_now())
+      }
+    end
+
+    def event_type, do: "proposal.cancelled"
+  end
+
   # ============================================================================
   # Recovery Events
   # ============================================================================
@@ -297,9 +318,9 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :coordinator_id, String.t(), enforce: true
-      field :from_position, non_neg_integer(), enforce: true
-      field :timestamp, DateTime.t(), enforce: true
+      field(:coordinator_id, String.t(), enforce: true)
+      field(:from_position, non_neg_integer(), enforce: true)
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -318,12 +339,12 @@ defmodule Arbor.Contracts.Consensus.Events do
     use TypedStruct
 
     typedstruct do
-      field :coordinator_id, String.t(), enforce: true
-      field :proposals_recovered, non_neg_integer(), enforce: true
-      field :decisions_recovered, non_neg_integer(), enforce: true
-      field :interrupted_count, non_neg_integer(), enforce: true
-      field :events_replayed, non_neg_integer(), enforce: true
-      field :timestamp, DateTime.t(), enforce: true
+      field(:coordinator_id, String.t(), enforce: true)
+      field(:proposals_recovered, non_neg_integer(), enforce: true)
+      field(:decisions_recovered, non_neg_integer(), enforce: true)
+      field(:interrupted_count, non_neg_integer(), enforce: true)
+      field(:events_replayed, non_neg_integer(), enforce: true)
+      field(:timestamp, DateTime.t(), enforce: true)
     end
 
     def new(attrs) do
@@ -406,6 +427,7 @@ defmodule Arbor.Contracts.Consensus.Events do
     "decision.rendered" => DecisionRendered,
     "proposal.executed" => ProposalExecuted,
     "proposal.deadlocked" => ProposalDeadlocked,
+    "proposal.cancelled" => ProposalCancelled,
     "recovery.started" => RecoveryStarted,
     "recovery.completed" => RecoveryCompleted
   }

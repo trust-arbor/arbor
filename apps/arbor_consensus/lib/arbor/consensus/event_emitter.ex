@@ -334,6 +334,15 @@ defmodule Arbor.Consensus.EventEmitter do
     |> emit(Keyword.put(opts, :correlation_id, proposal_id))
   end
 
+  @doc "Durably emit a ProposalCancelled event before publishing cancellation."
+  def proposal_cancelled(proposal_id, reason, opts \\ []) do
+    Events.ProposalCancelled.new(%{
+      proposal_id: proposal_id,
+      reason: reason
+    })
+    |> emit(Keyword.put(opts, :correlation_id, proposal_id))
+  end
+
   @doc "Emit a RecoveryStarted event."
   def recovery_started(coordinator_id, from_position, opts \\ []) do
     Events.RecoveryStarted.new(%{

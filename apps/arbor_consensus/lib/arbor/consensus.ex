@@ -129,6 +129,26 @@ defmodule Arbor.Consensus do
   defdelegate cancel(proposal_id, server \\ Coordinator), to: Coordinator
 
   @doc """
+  Source-owned compare-and-settle for a pending authorization-request approval.
+
+  Settlement cancels/vetoes the exact pending proposal after reprojecting its
+  closed identity. Never approves. Returns JSON-clean `settled` or
+  `already_absent` receipts.
+  """
+  @spec compare_and_settle_pending_approval(map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_pending_approval(fields, opts \\ [])
+
+  def compare_and_settle_pending_approval(fields, opts)
+      when is_map(fields) and is_list(opts) do
+    server = Keyword.get(opts, :server, Coordinator)
+    Coordinator.compare_and_settle_pending_approval(fields, server)
+  end
+
+  def compare_and_settle_pending_approval(_fields, _opts),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  @doc """
   Force-approve a proposal (human override).
   """
   @spec force_approve(String.t(), String.t(), GenServer.server()) :: :ok | {:error, term()}

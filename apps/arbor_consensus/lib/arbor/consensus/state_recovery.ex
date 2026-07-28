@@ -43,7 +43,7 @@ defmodule Arbor.Consensus.StateRecovery do
           proposer: String.t(),
           topic: atom(),
           description: String.t(),
-          status: :submitted | :evaluating | :decided | :executed | :deadlocked,
+          status: :submitted | :evaluating | :decided | :executed | :deadlocked | :vetoed,
           submitted_at: DateTime.t(),
           perspectives: [atom()],
           completed_evaluations: %{atom() => map()},
@@ -271,6 +271,12 @@ defmodule Arbor.Consensus.StateRecovery do
   defp do_apply_event(%Events.ProposalDeadlocked{} = event, state) do
     update_proposal(state, event.proposal_id, fn proposal ->
       %{proposal | status: :deadlocked}
+    end)
+  end
+
+  defp do_apply_event(%Events.ProposalCancelled{} = event, state) do
+    update_proposal(state, event.proposal_id, fn proposal ->
+      %{proposal | status: :vetoed}
     end)
   end
 

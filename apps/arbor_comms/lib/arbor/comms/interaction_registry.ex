@@ -13,6 +13,7 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   alias Arbor.Comms.InteractionRegistry.{Authority, Dispatcher, DurableStore, Routing}
   alias Arbor.Comms.InteractionRegistry.Supervisor, as: RegistrySupervisor
+  alias Arbor.Contracts.Coding.PendingApprovalIdentity
   alias Arbor.Contracts.Comms.Interaction
 
   @topic "interactions"
@@ -192,6 +193,51 @@ defmodule Arbor.Comms.InteractionRegistry do
       when is_binary(request_id) and (is_atom(reason) or is_binary(reason)) do
     with_authority(request_id, :abandon, [request_id, reason])
   end
+
+  @doc """
+  Source-owned compare-and-settle for a pending approval interaction.
+
+  Discovery `:not_found`, ambiguous authority, or unavailable authority are
+  **not** proof of absence — they return `:current_identity_unavailable`.
+  `already_absent` is emitted only when the uniquely located authority
+  itself observes the request as terminal or absent.
+  """
+  @spec compare_and_settle_pending_approval(map()) ::
+          {:ok, map(), :settled | :already_absent, Interaction.t() | nil} | {:error, term()}
+  def compare_and_settle_pending_approval(fields) when is_map(fields) do
+    with {:ok, _resource_id, expected_identity} <-
+           PendingApprovalIdentity.normalize_settle_fields(fields),
+         true <- expected_identity["source"] == "interaction",
+         approval_id <- expected_identity["approval_id"] do
+      case authority_for(approval_id) do
+        {:ok, authority_node} ->
+          case route_call(authority_node, :compare_and_settle_pending_approval, [fields]) do
+            # Routed node down / authority process missing — not proof of absence.
+            {:error, :authority_unavailable} ->
+              {:error, :current_identity_unavailable}
+
+            other ->
+              other
+          end
+
+        :not_found ->
+          # Tracker lag or authority outage — never invent already_absent.
+          {:error, :current_identity_unavailable}
+
+        {:error, :ambiguous_authority} ->
+          {:error, :current_identity_unavailable}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      false -> {:error, :invalid_reconciliation_settle_fields}
+      {:error, _reason} -> {:error, :invalid_reconciliation_settle_fields}
+    end
+  end
+
+  def compare_and_settle_pending_approval(_fields),
+    do: {:error, :invalid_reconciliation_settle_fields}
 
   @doc false
   @spec capture_timeout_authority(String.t(), non_neg_integer()) ::
