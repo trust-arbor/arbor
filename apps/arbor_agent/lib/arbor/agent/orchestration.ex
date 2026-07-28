@@ -775,7 +775,7 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_or_generate_task_id(opts) do
     case opt(opts, :task_id) do
       id when is_binary(id) -> normalize_task_id(id)
-      nil -> {:ok, "task_" <> Integer.to_string(System.unique_integer([:positive]))}
+      nil -> {:ok, Arbor.Identifiers.generate_id("task_")}
       _ -> {:error, :invalid_task_id}
     end
   end

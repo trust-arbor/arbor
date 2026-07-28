@@ -2893,7 +2893,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp task_id(opts) do
     Keyword.get(opts, :task_id) ||
-      "task_" <> Integer.to_string(System.unique_integer([:positive]))
+      Arbor.Identifiers.generate_id("task_")
   end
 
   defp metadata(opts) do
@@ -2908,6 +2908,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   # ---------------------------------------------------------------------------
   # Executor selection + JSON-clean boundary
   # ---------------------------------------------------------------------------
+
+  defp prepare_dispatch(_task, _opts, %{tasks: tasks}, task_id)
+       when is_map_key(tasks, task_id),
+       do: {:error, :task_id_already_exists}
 
   defp prepare_dispatch(task, opts, state, task_id) do
     with {:ok, runner, context_mode} <- resolve_executor(task, opts, state) do

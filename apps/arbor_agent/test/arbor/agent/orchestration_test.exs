@@ -573,6 +573,22 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   describe "dispatch/3" do
+    test "security regression: generated task ids use restart-stable random identity" do
+      opts = [
+        caller_id: "human_1",
+        task_store: FakeTaskStore,
+        security_module: FakeSecurity,
+        audit_module: FakeAudit
+      ]
+
+      assert {:ok, first_id} = Orchestration.dispatch("agent_1", "first task", opts)
+      assert {:ok, second_id} = Orchestration.dispatch("agent_1", "second task", opts)
+
+      assert first_id =~ ~r/\Atask_[0-9a-f]{32}\z/
+      assert second_id =~ ~r/\Atask_[0-9a-f]{32}\z/
+      refute first_id == second_id
+    end
+
     test "dispatches a task asynchronously and records an audit event" do
       assert {:ok, "task_1"} =
                Orchestration.dispatch("agent_1", "write a patch",

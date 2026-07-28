@@ -606,6 +606,35 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_receive {:revoke_adoption_capability, "cap_task_adopt_1"}
   end
 
+  test "security regression: direct dispatch generates restart-stable random task ids", %{
+    store: store
+  } do
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work", name: store, test_pid: self())
+
+    assert task_id =~ ~r/\Atask_[0-9a-f]{32}\z/
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "done"}}})
+  end
+
+  test "security regression: duplicate task ids cannot replace a live task record", %{
+    store: store
+  } do
+    opts = [name: store, task_id: "task_duplicate", test_pid: self()]
+
+    assert {:ok, "task_duplicate"} = TaskStore.dispatch("agent_1", "first", opts)
+    assert_receive {:runner_started, runner_pid, "agent_1", "first", _opts}
+
+    assert {:error, :task_id_already_exists} =
+             TaskStore.dispatch("agent_2", "replacement", opts)
+
+    assert {:ok, status} = TaskStore.status("task_duplicate", name: store)
+    assert status.agent_id == "agent_1"
+    refute_receive {:runner_started, _pid, "agent_2", "replacement", _opts}, 50
+
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "done"}}})
+  end
+
   test "done status projects the exact outcome from the normalized coding result", %{store: store} do
     outcome = task_outcome()
 
