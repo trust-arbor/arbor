@@ -231,6 +231,18 @@ Catches: invalid edge condition syntax, multiple terminal nodes, unknown handler
 
 Read this when authoring or changing DOT graphs, Engine execution, action bindings, context flow, or handler contracts.
 
+<!-- applied-learning: dot-comment-stripping-must-be-quote-aware -->
+<a id="applied-learning-dot-comment-stripping-must-be-quote-aware"></a>
+**DOT comment stripping must be quote-aware.** Compiler-generated attributes
+legitimately embed JSON, URLs, and capability URIs. A regex that removes `//`
+or `/* ... */` without tracking double-quoted strings truncates values such as
+`https://...` and `arbor://...`, then makes a valid generated graph fail strict
+canonical round-trip validation. Preserve comment-marker-like text inside
+quoted values, honor escaped quotes and backslashes, retain comment newlines
+for diagnostics, and fail closed on an unterminated block comment. Regress both
+the parser and a real compiler packet containing URI-shaped text (found
+2026-07-28 while replaying the first Phase F reconciliation dispatch).
+
 <!-- applied-learning: a-jido-action-schema-is-not-automatic-runtime-validation-for-direct-arbor-execution -->
 <a id="applied-learning-a-jido-action-schema-is-not-automatic-runtime-validation-for-direct-arbor-execution"></a>
 **A Jido action schema is not automatic runtime validation for direct Arbor execution.**

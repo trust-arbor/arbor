@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 551,
+  "entry_count": 552,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6707,8 +6707,21 @@
       "source_incident": "found 2026-07-28 when a valid 14,324-byte Grok design parsed successfully but design-checkpoint Open rejected its packet-composed description as too large).",
       "content_sha256": "a1544afaf741070b863b52a2c603cc3b7b30f36d8421c993b2cc96037f7234f9",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 552,
+      "source_kind": "post-migration",
+      "slug": "dot-comment-stripping-must-be-quote-aware",
+      "title": "DOT comment stripping must be quote-aware.",
+      "topic": "dot-pipelines",
+      "destination": ".claude/skills/dot-pipeline-authoring.md",
+      "anchor": "applied-learning-dot-comment-stripping-must-be-quote-aware",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while replaying the first Phase F reconciliation dispatch).",
+      "content_sha256": "6bad734e5b1f5f1011049fb13d8377db780c0c783832d1bcda3a78ca4e8bfa0c",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 90
+  "post_migration_entry_count": 91
 }
